@@ -4,6 +4,7 @@
 >
 > 参考来源：
 > - `docs/主代理框架PRD.md`
+> - `docs/prd/06-NL2SQL-MVP设计.md`
 > - `configs/nl2sql/routing_rules.yaml`
 > - `configs/nl2sql/schema_metadata.yaml`
 > - `configs/nl2sql/sql_guard_rules.yaml`
