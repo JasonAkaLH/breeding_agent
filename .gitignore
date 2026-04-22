@@ -1,5 +1,6 @@
 # Local tooling
 .omx/
+.codex/
 .DS_Store
 .idea/
 .vscode/
