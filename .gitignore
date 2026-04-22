@@ -1,30 +1,15 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.pyd
-*.egg-info/
-.eggs/
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Environment
-.env
-
-# IDE / OS
+# Local tooling
+.omx/
 .DS_Store
 .idea/
 .vscode/
-.omx/
 
-# Native build artifacts
-build/
-dist/
-cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
+# Python cache / env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
