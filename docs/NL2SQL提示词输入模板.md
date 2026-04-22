@@ -3,7 +3,7 @@
 > 适用范围：本模板用于 `nl2sql.sql_generate` 阶段的提示词输入拼装，不覆盖路由识别、SQL 执行或结果汇总阶段。
 >
 > 参考来源：
-> - `docs/主代理框架PRD-草案-v5.md`
+> - `docs/主代理框架PRD.md`
 > - `configs/nl2sql/routing_rules.yaml`
 > - `configs/nl2sql/schema_metadata.yaml`
 > - `configs/nl2sql/sql_guard_rules.yaml`
