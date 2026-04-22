@@ -1,0 +1,135 @@
+version: 1
+rule_sets:
+- rule_set_id: strict_readonly_mysql_guard_v1
+  description: Strict read-only SQL guard for the NL2SQL capability. Fail closed on
+    uncertainty and block any write-capable or high-risk SQL.
+  applies_to_sql_policy_profiles:
+  - strict_readonly_mysql
+  fail_closed: true
+  normalization:
+    trim_whitespace: true
+    strip_trailing_semicolon: true
+    collapse_internal_whitespace: true
+    remove_sql_comments_for_detection: true
+    case_insensitive_detection: true
+  parsing:
+    require_single_statement: true
+    reject_on_empty_sql: true
+    reject_on_parse_error: true
+    reject_on_unrecognized_statement: true
+  statement_roots:
+    allow:
+    - select
+    - with
+    deny:
+    - insert
+    - update
+    - delete
+    - replace
+    - merge
+    - create
+    - alter
+    - drop
+    - truncate
+    - rename
+    - call
+    - do
+    - handler
+    - load
+    - grant
+    - revoke
+    - set
+    - use
+    - begin
+    - start
+    - commit
+    - rollback
+    - savepoint
+    - lock
+    - unlock
+    - analyze
+    - optimize
+    - repair
+    - checksum
+    - prepare
+    - execute
+    - deallocate
+  readonly_constraints:
+    allow_cte_only_if_final_statement_is_select: true
+    deny_multi_statement_execution: true
+    deny_select_into_outfile: true
+    deny_select_into_dumpfile: true
+    deny_select_into_user_variables: true
+    deny_for_update: true
+    deny_lock_in_share_mode: true
+    deny_union_with_write_like_statement: true
+  identifier_policies:
+    require_table_whitelist_from_route: true
+    deny_system_schemas:
+    - mysql
+    - information_schema
+    - performance_schema
+    - sys
+    deny_unqualified_cross_schema_access: true
+  function_policies:
+    deny_functions:
+    - sleep
+    - benchmark
+    - load_file
+    - get_lock
+    - release_lock
+    - is_free_lock
+    - is_used_lock
+    - uuid_short
+  pattern_rules:
+    deny_substrings:
+    - into outfile
+    - into dumpfile
+    - into @
+    - for update
+    - lock in share mode
+    - load data
+    - load xml
+    deny_regex:
+    - (?i)\b(select)\b.*\binto\b\s+@
+    - (?i)\bwith\b[\s\S]*\b(update|insert|delete|replace)\b
+    - (?i);\s*\S+
+  shape_limits:
+    max_limit: 200
+    require_limit_for_non_aggregate_query: true
+    max_joins: 6
+    max_selected_columns: 50
+    max_group_by_columns: 10
+    max_order_by_columns: 10
+  execution_contract:
+    require_guard_pass_token: true
+    require_readonly_db_credentials: true
+    deny_execution_without_route_context: true
+    deny_execution_without_schema_profile: true
+  error_policies:
+    on_violation: block
+    on_uncertain_classification: block
+    on_missing_whitelist_context: block
+    on_guard_internal_error: block
+  audit:
+    emit_event_types:
+    - nl2sql.sql_guard_passed
+    - nl2sql.sql_guard_blocked
+    - nl2sql.write_blocked
+    log_sql_fingerprint: true
+    log_sql_text_on_block: true
+    log_block_reason: true
+    log_route_context: true
+  block_reason_codes:
+  - empty_sql
+  - parse_error
+  - multiple_statements
+  - statement_root_denied
+  - statement_root_not_allowed
+  - write_pattern_detected
+  - risky_function_detected
+  - system_schema_access_denied
+  - table_not_in_route_whitelist
+  - limit_missing
+  - query_shape_exceeded
+  - readonly_contract_missing

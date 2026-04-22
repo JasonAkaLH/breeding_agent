@@ -1,0 +1,132 @@
+version: 1
+default_route: clarify
+routes:
+- route_id: approval_variety_db
+  display_name: 审定品种库
+  enabled: true
+  description: 用于查询审定品种、品种公告、申请审定、品种特征、产量表现、适种区域等信息。
+  intent_keywords:
+  - 审定品种
+  - 审定
+  - 品种
+  - 品种审定
+  - 品种审定公告
+  - 申请审定
+  semantic_hints:
+  - 查询某个品种的审定信息
+  - 查询某作物品种的特征特性
+  - 查询某品种的产量表现、适种区域、育种者、申请者
+  supported_crops:
+  - corn
+  - rice
+  - cotton
+  - wheat
+  - soybean
+  crop_aliases:
+    corn:
+    - 玉米
+    rice:
+    - 水稻
+    cotton:
+    - 棉花
+    wheat:
+    - 小麦
+    soybean:
+    - 大豆
+  crop_table_mapping:
+    corn:
+    - corn_varieties
+    rice:
+    - rice_varieties
+    cotton:
+    - cotton_varieties
+    wheat:
+    - wheat_varieties
+    soybean:
+    - soybean_varieties
+  allowed_tables:
+  - corn_varieties
+  - rice_varieties
+  - cotton_varieties
+  - wheat_varieties
+  - soybean_varieties
+  schema_profile_id: approval_variety_profile
+  sql_policy_profile: strict_readonly_mysql
+  ambiguity_strategy: infer_crop_first_then_clarify
+  examples:
+  - 查询玉米品种先玉335的审定信息
+  - 近五年水稻审定品种有哪些
+  - 某个品种的育种者和适种区域是什么
+- route_id: genotype_db
+  display_name: 基因型数据库
+  enabled: true
+  description: 用于查询品种的基因型、QTN、变异位点、籼粳成分等信息。
+  intent_keywords:
+  - 基因
+  - 基因组
+  - 基因型
+  - 基因型分析
+  - 基因型测序
+  - 基因型测序数据
+  - QTN
+  - 变异
+  - 变异位点
+  - 粳稻
+  - 籼稻
+  - 粳籼稻
+  - 籼粳稻
+  - 粳型
+  - 籼型
+  semantic_hints:
+  - 查询某个品种的基因信息
+  - 查询某个QTN位点对应的基因信息
+  - 查询品种的籼粳成分比例
+  - 查询某品种在某个位点上的基因型
+  allowed_tables:
+  - variety
+  - variety_genotype
+  - qtn
+  - rice_comp
+  schema_profile_id: genotype_profile
+  sql_policy_profile: strict_readonly_mysql
+  ambiguity_strategy: infer_gene_or_variety_then_clarify
+  examples:
+  - 查询品种XX的基因型信息
+  - 查询QTN12对应的基因名称
+  - 查询某品种的籼粳成分比例
+clarification_rules:
+- condition: multiple_routes_match_with_similar_confidence
+  action: ask_user_for_clarification
+- condition: approval_route_selected_but_crop_missing
+  action: ask_user_for_crop
+- condition: request_outside_supported_scope
+  action: reject_with_supported_scope_message
+sql_policy_profiles:
+- profile_id: strict_readonly_mysql
+  capability_contract: read_only_query_only
+  allow_statement_types:
+  - SELECT
+  - WITH_SELECT
+  require_guard_before_execution: true
+  require_single_statement: true
+  deny_if_guard_uncertain: true
+  require_readonly_db_credentials: true
+  allow_write_operations: false
+  audit_blocked_sql: true
+  deny_patterns:
+  - INSERT
+  - UPDATE
+  - DELETE
+  - REPLACE
+  - CREATE
+  - ALTER
+  - DROP
+  - TRUNCATE
+  - LOCK
+  - INTO OUTFILE
+  - LOAD DATA
+  - MULTI_STATEMENT
+  max_limit: 200
+  require_limit_for_non_aggregate_query: true
+  guard_rule_set_id: strict_readonly_mysql_guard_v1
+  deny_on_missing_guard_rule_set: true

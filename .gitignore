@@ -4,12 +4,71 @@
 .idea/
 .vscode/
 
-# Python cache / env
+# Python: bytecode / cache
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Python: virtual environments
 .venv/
 venv/
+env/
+.python-version
 .env
+
+# Python: packaging / build
+build/
+dist/
+site/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# Python: test / lint / typecheck / coverage
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
+# Python: notebooks
+.ipynb_checkpoints/
+
+# C++: build systems
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+build.ninja
+.ninja_deps
+.ninja_log
+
+# C++: compiled objects / libraries / binaries
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+
+# C++: debug / profiling artifacts
+*.dSYM/
+*.gcda
+*.gcno
+*.gcov
+*.prof
+*.profraw
+*.profdata
