@@ -9,9 +9,7 @@ class LLMClient:
             timeout=timeout,
         )
 
-    async def generate_text(self, prompt: str) -> str:
-        response = await self.client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content
+    async def generate_text(self, kwargs: dict) -> str:
+        stream = await self.client.chat.completions.create(**kwargs)
+        for chunk in stream:
+            yield chunk.choices[0].delta.content
