@@ -367,6 +367,12 @@ class SQLiteStateRepository:
         row = self._session.get(ArtifactRow, artifact_id)
         return None if row is None else _row_to_artifact(row)
 
+    def list_artifacts_for_task(self, task_id: str) -> list[Artifact]:
+        rows = self._session.scalars(
+            select(ArtifactRow).where(ArtifactRow.task_id == task_id).order_by(ArtifactRow.created_at, ArtifactRow.artifact_id)
+        ).all()
+        return [_row_to_artifact(row) for row in rows]
+
 
 class SQLiteCollaborationRepository:
     def __init__(self, session: Session) -> None:
@@ -622,6 +628,12 @@ class SQLiteStorage(StoragePort):
     async def save_message(self, message: Message) -> Message:
         return await self._run(lambda state, collab: state.save_message(message))
 
+    async def get_message(self, message_id: str) -> Message | None:
+        return await self._run(lambda state, collab: state.get_message(message_id))
+
+    async def list_messages_for_conversation(self, conversation_id: str) -> list[Message]:
+        return await self._run(lambda state, collab: state.list_messages_for_conversation(conversation_id))
+
     async def save_task(self, task: Task) -> Task:
         return await self._run(lambda state, collab: state.save_task(task))
 
@@ -648,6 +660,12 @@ class SQLiteStorage(StoragePort):
 
     async def save_artifact(self, artifact: Artifact) -> Artifact:
         return await self._run(lambda state, collab: state.save_artifact(artifact))
+
+    async def get_artifact(self, artifact_id: str) -> Artifact | None:
+        return await self._run(lambda state, collab: state.get_artifact(artifact_id))
+
+    async def list_artifacts_for_task(self, task_id: str) -> list[Artifact]:
+        return await self._run(lambda state, collab: state.list_artifacts_for_task(task_id))
 
     async def append_event(self, event: EventRecord) -> EventRecord:
         return await self._run(lambda state, collab: collab.save_event_record(event))

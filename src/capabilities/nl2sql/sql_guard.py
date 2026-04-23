@@ -33,7 +33,15 @@ class NL2SQLSQLGuardCapability(CapabilityContract):
             event = self._make_event(
                 request,
                 event_type="nl2sql.sql_guard_blocked",
-                payload={"code": guard_error.code, "message": guard_error.message},
+                payload={
+                    "code": guard_error.code,
+                    "message": guard_error.message,
+                    "block_reason": guard_error.code,
+                    "route_context": {
+                        "route_id": upstream.get("route_id"),
+                        "schema_profile_id": upstream.get("schema_profile_id"),
+                    },
+                },
             )
             return CapabilityExecutionResult(
                 capability_id=request.capability_id,

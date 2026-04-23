@@ -15,4 +15,7 @@ conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*
 conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/nl2sql -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
 ```

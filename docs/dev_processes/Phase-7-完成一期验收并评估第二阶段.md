@@ -1,5 +1,7 @@
 # Phase 7：完成一期验收并评估第二阶段
 
+> 状态：已完成（2026-04-23）
+
 ## 目标
 在对外 API 已稳定后，完成一期端到端验收，收集运行证据，并输出是否进入第二阶段的评估结论。
 
@@ -81,12 +83,13 @@
 
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-python -m pytest tests/e2e tests/observability -q
+conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
 ```
 
 ## 验收清单
-- [ ] e2e 验收已覆盖主链路与关键失败路径
-- [ ] observability 验收已存在
-- [ ] 已形成一期完成度结论
-- [ ] 已形成二期评估输入
-- [ ] 未越界实现二期
+- [x] e2e 验收已覆盖主链路与关键失败路径
+- [x] observability 验收已存在
+- [x] 已形成一期完成度结论
+- [x] 已形成二期评估输入
+- [x] 未越界实现二期

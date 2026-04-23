@@ -60,6 +60,17 @@
 - 新增 `docs/LLM接入阶段建议图.svg`，把 LLM 接入时机建议画成阶段流程图，明确“先做 NL2SQL 内部 LLM，再做主代理 / 通用子代理 LLM”的推荐顺序。
 - 新增 `docs/NL2SQL子代理结构图.png` 与 `docs/LLM接入阶段建议图.png`，将两张 SVG 文档图转换为 PNG 版本，便于直接预览与嵌入其他文档或外部材料。
 - 更新 `AGENTS.md`：新增规则，要求在开始分析、设计、编码或文档修改前先查看 `CHANGELOG.md` 最近相关条目，先了解此前已完成工作再继续推进。
+- 新增 `.omx/plans/phase6-20260423-fastapi-sse-implementation-plan.md`，整理 Phase 6 的 FastAPI / SSE / cancel / audit 实施步骤、共享 seam 缺口、测试清单，并给出"先 solo / ralph 冻结共享 seam，再视情况切 3-lane 小 team"的协作建议。
+- 启动并完成 Phase 6 开发：新增 `src/api/`，落地 FastAPI app、DTO、消息提交/任务查询/SSE/取消/任务图/产物/能力目录接口，以及进程内事件 broker。
+- 新增 `src/integrations/audit_logger.py`，补齐 JSONL 审计输出，并把 blocked SQL、关键状态变化与取消收敛过程纳入最小可观察性范围。
+- 为 Phase 6 补齐共享 seam：扩展 `StoragePort` 与 SQLite storage 的 message/artifact 查询能力，扩展 capability registry 列表查询，补齐 orchestration 的 DAG edge/root node 持久化、capability event live fan-out 与 late result discard 语义，并让 cancellation service 输出前端可见取消事件。
+- 新增 `tests/api/` 回归测试，覆盖消息提交、会话串行冲突、任务查询/图/产物、前端事件回放+live 流、取消接口与能力目录接口。
+- 正式落地 Phase 6 最小测试命令：采用 `conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'`，并同步更新 `README.md`、`AGENTS.md` 与 Phase 6 文档。
+- 新增 `.omx/plans/phase7-20260423-acceptance-and-phase2-evaluation-plan.md`，整理 Phase 7 的 e2e / observability / interrupt-resume 验收、一期收口报告与第二阶段评估输入的实施步骤，并给出"前半程先 solo 冻结 seam，后半程可切 3-lane 小 team"的协作建议。
+- 启动并完成 Phase 7 开发：新增 `tests/e2e/` 与 `tests/observability/`，落地 happy path、guard blocked、interrupt/resume、cancel late result ignored 与 JSONL audit 验收路径。
+- 为 Phase 7 补齐 acceptance seam：扩展 `build_api_runtime()` 的 deterministic 注入能力，补齐 interrupt answer + resume 的最小恢复闭环，并增强 SQL guard 审计字段以支持 observability 验收。
+- 新增 `docs/一期验收报告.md` 与 `docs/第二阶段评估输入.md`，把一期收口证据与二期候选主题拆成两份独立文档，避免验收结论与下一阶段讨论混线。
+- 正式落地 Phase 7 最小测试命令：采用 `conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'` 与 `conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'`，并同步更新 `README.md`、`AGENTS.md` 与 Phase 7 文档。
 
 ### 2026-04-22 — 初始化主代理框架设计基线并建立仓库级设计资产
 

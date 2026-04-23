@@ -22,6 +22,9 @@ conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*
 conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/nl2sql -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
 ```
 
 如果某次变更引入了新工具，请在同一个 PR 中同步更新 `README.md` 与本文件。未来可能出现的命令示例：

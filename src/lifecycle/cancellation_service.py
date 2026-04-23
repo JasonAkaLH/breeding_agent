@@ -4,8 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from src.core.contracts import AuditSink, EventSink, StoragePort
-from src.core.enums import MailboxDeliveryStatus
-from src.core.models import MailboxDelivery
+from src.core.enums import EventVisibility, MailboxDeliveryStatus
+from src.core.models import EventRecord, MailboxDelivery
 
 from . import task_state_machine
 
@@ -26,6 +26,34 @@ class CancellationService:
     def _utcnow_naive() -> datetime:
         return datetime.now(timezone.utc).replace(tzinfo=None)
 
+    async def _record_event(self, event: EventRecord) -> None:
+        await self._storage.append_event(event)
+        if self._event_sink is not None:
+            await self._event_sink.publish(event)
+
+    def _make_event(
+        self,
+        *,
+        task_id: str,
+        conversation_id: str,
+        event_type: str,
+        node_id: str | None = None,
+        payload: dict | None = None,
+        visibility: EventVisibility = EventVisibility.FRONTEND,
+        now: datetime | None = None,
+    ) -> EventRecord:
+        suffix = int((now or self._utcnow_naive()).timestamp() * 1_000_000)
+        return EventRecord(
+            event_id=f"evt-{task_id}-{event_type}-{suffix}",
+            conversation_id=conversation_id,
+            task_id=task_id,
+            node_id=node_id,
+            event_type=event_type,
+            payload=payload or {},
+            visibility=visibility,
+            created_at=now or self._utcnow_naive(),
+        )
+
     async def cancel_task_context(self, task_id: str, *, now: datetime | None = None):
         current_time = now or self._utcnow_naive()
         task = await self._storage.get_task(task_id)
@@ -34,12 +62,31 @@ class CancellationService:
 
         cancelling_task = task_state_machine.begin_task_cancellation(task, now=current_time)
         await self._storage.save_task(cancelling_task)
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                event_type="task.cancellation_requested",
+                payload={"status": str(cancelling_task.status)},
+                now=current_time,
+            )
+        )
 
         nodes = await self._storage.list_task_nodes_for_task(task_id)
         for node in nodes:
             updated = task_state_machine.cancel_node(node)
             if updated != node:
                 await self._storage.save_task_node(updated)
+                await self._record_event(
+                    self._make_event(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        node_id=node.node_id,
+                        event_type="node.cancelled" if str(updated.status) == "cancelled" else "node.blocked_by_cancellation",
+                        payload={"status": str(updated.status), "capability_id": node.capability_id},
+                        now=current_time,
+                    )
+                )
 
         interrupts = await self._storage.list_interrupts_for_task(task_id)
         for interrupt in interrupts:
@@ -73,6 +120,15 @@ class CancellationService:
 
         cancelled_task = task_state_machine.finalize_task_cancellation(cancelling_task, now=current_time)
         saved_task = await self._storage.save_task(cancelled_task)
+        await self._record_event(
+            self._make_event(
+                task_id=saved_task.task_id,
+                conversation_id=saved_task.conversation_id,
+                event_type="task.cancelled",
+                payload={"status": str(saved_task.status)},
+                now=current_time,
+            )
+        )
         if self._audit_sink is not None:
             await self._audit_sink.record(
                 "task.context_terminated",

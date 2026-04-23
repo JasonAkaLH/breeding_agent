@@ -13,6 +13,9 @@ class CapabilityRegistry:
     def get(self, capability_id: str) -> CapabilityDescriptor | None:
         return self._capabilities.get(capability_id)
 
+    def list(self) -> list[CapabilityDescriptor]:
+        return list(self._capabilities.values())
+
     def require(self, capability_id: str) -> CapabilityDescriptor:
         descriptor = self.get(capability_id)
         if descriptor is None or not descriptor.enabled:

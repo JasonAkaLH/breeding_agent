@@ -1,5 +1,7 @@
 # Phase 6：接入 FastAPI / SSE 对外接口
 
+> 状态：已完成（2026-04-23）
+
 ## 目标
 在主框架内核与 NL2SQL capability 闭环已经打通后，接入对外 API、SSE 事件流、取消入口与审计输出，让系统形成真正可调用的后端服务面。
 
@@ -81,12 +83,12 @@
 
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-python -m pytest tests/api -q
+conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 ```
 
 ## 验收清单
-- [ ] `src/api/` 已存在
-- [ ] SSE 事件流已存在
-- [ ] cancel 接口已能驱动真实取消语义
-- [ ] API 集成测试已存在
-- [ ] 审计输出已存在
+- [x] `src/api/` 已存在
+- [x] SSE 事件流已存在
+- [x] cancel 接口已能驱动真实取消语义
+- [x] API 集成测试已存在
+- [x] 审计输出已存在

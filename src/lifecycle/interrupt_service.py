@@ -57,6 +57,14 @@ class InterruptService:
         await self._storage.save_interrupt_answer(accepted_answer)
         await self._storage.save_task_node(updated_node)
         saved_interrupt = await self._storage.save_interrupt(updated_interrupt)
+        if self._audit_sink is not None:
+            await self._audit_sink.record(
+                "lifecycle.interrupt_answered",
+                {"interrupt_id": saved_interrupt.interrupt_id, "node_id": updated_node.node_id},
+                conversation_id=saved_interrupt.conversation_id,
+                task_id=saved_interrupt.task_id,
+                node_id=saved_interrupt.node_id,
+            )
         return saved_interrupt
 
     async def begin_resume(self, resume_token: str) -> TaskNode:

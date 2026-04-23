@@ -6,7 +6,7 @@ from typing import Any
 
 from src.core.contracts import CapabilityExecutionRequest, EventSink, ExecutorPort, StoragePort
 from src.core.enums import EventVisibility, NodeStatus, TaskStatus
-from src.core.models import EventRecord, Task, TaskNode
+from src.core.models import EventRecord, Task, TaskEdge, TaskNode
 
 from .backpressure import BackpressureGuard
 from .completion_policy import CompletionPolicy, CompletionStatus
@@ -42,7 +42,16 @@ class OrchestrationService:
     def _utcnow_naive() -> datetime:
         return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    def _make_event(self, *, task_id: str, conversation_id: str, event_type: str, node_id: str | None = None, payload: dict[str, Any] | None = None) -> EventRecord:
+    def _make_event(
+        self,
+        *,
+        task_id: str,
+        conversation_id: str,
+        event_type: str,
+        node_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        visibility: EventVisibility = EventVisibility.FRONTEND,
+    ) -> EventRecord:
         self._event_counter += 1
         return EventRecord(
             event_id=f"evt-{task_id}-{self._event_counter}",
@@ -51,7 +60,7 @@ class OrchestrationService:
             node_id=node_id,
             event_type=event_type,
             payload=payload or {},
-            visibility=EventVisibility.INTERNAL,
+            visibility=visibility,
             created_at=self._utcnow_naive(),
         )
 
@@ -61,30 +70,55 @@ class OrchestrationService:
             await self._event_sink.publish(event)
 
     async def _initialize_task(self, request: OrchestrationRequest, plan: WorkflowPlan) -> Task:
-        planning_task = Task(
-            task_id=request.task_id,
-            conversation_id=request.conversation_id,
-            root_message_id=request.root_message_id,
-            status=TaskStatus.PLANNING,
-            requested_capability_id=request.requested_capability_id,
-            summary=request.user_message,
-            created_at=self._utcnow_naive(),
-            updated_at=self._utcnow_naive(),
+        now = self._utcnow_naive()
+        root_node_id = next((node.node_id for node in plan.nodes if not node.depends_on), None)
+        existing_task = await self._storage.get_task(request.task_id)
+        existing_nodes = {
+            node.node_id: node
+            for node in await self._storage.list_task_nodes_for_task(plan.task_id)
+        }
+        planning_task = (
+            replace(
+                existing_task,
+                status=TaskStatus.PLANNING,
+                requested_capability_id=request.requested_capability_id,
+                root_node_id=root_node_id,
+                summary=request.user_message,
+                updated_at=now,
+            )
+            if existing_task is not None
+            else Task(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                root_message_id=request.root_message_id,
+                status=TaskStatus.PLANNING,
+                requested_capability_id=request.requested_capability_id,
+                root_node_id=root_node_id,
+                summary=request.user_message,
+                created_at=now,
+                updated_at=now,
+            )
         )
         saved = await self._storage.save_task(planning_task)
         for node in plan.nodes:
-            await self._storage.save_task_node(
-                TaskNode(
-                    node_id=node.node_id,
-                    task_id=plan.task_id,
-                    capability_id=node.capability_id,
-                    status=NodeStatus.PENDING,
-                    criticality=node.criticality,
-                    retry_policy=dict(node.retry_policy),
-                    timeout_policy=dict(node.timeout_policy),
-                    resource_class=node.resource_class,
+            if node.node_id not in existing_nodes:
+                await self._storage.save_task_node(
+                    TaskNode(
+                        node_id=node.node_id,
+                        task_id=plan.task_id,
+                        capability_id=node.capability_id,
+                        status=NodeStatus.PENDING,
+                        criticality=node.criticality,
+                        retry_policy=dict(node.retry_policy),
+                        timeout_policy=dict(node.timeout_policy),
+                        resource_class=node.resource_class,
+                    )
                 )
-            )
+            for dependency in node.depends_on:
+                await self._storage.save_task_edge(
+                    plan.task_id,
+                    TaskEdge(from_node_id=dependency, to_node_id=node.node_id),
+                )
         running = replace(saved, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive())
         running = await self._storage.save_task(running)
         await self._record_event(
@@ -92,7 +126,11 @@ class OrchestrationService:
                 task_id=request.task_id,
                 conversation_id=request.conversation_id,
                 event_type="task.graph_created",
-                payload={"node_count": len(plan.nodes)},
+                payload={
+                    "node_count": len(plan.nodes),
+                    "edge_count": sum(len(node.depends_on) for node in plan.nodes),
+                    "root_node_id": root_node_id,
+                },
             )
         )
         return running
@@ -135,19 +173,34 @@ class OrchestrationService:
             )
         )
 
+        latest_task = await self._storage.get_task(request.task_id)
+        latest_node = await self._storage.get_task_node(task_node.node_id) or running
+        if latest_task is not None and latest_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    node_id=task_node.node_id,
+                    event_type="task.late_result_discarded",
+                    payload={"capability_id": node_plan.capability_id},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            return latest_node, {}
+
         for artifact in result.artifacts:
             await self._storage.save_artifact(artifact)
         for event in result.events:
-            await self._storage.append_event(event)
+            await self._record_event(event)
 
         now = self._utcnow_naive()
         if result.interrupt is not None:
             await self._storage.save_interrupt(result.interrupt)
-            updated = replace(running, status=NodeStatus.WAITING_FOR_INPUT)
+            updated = replace(latest_node, status=NodeStatus.WAITING_FOR_INPUT)
             return await self._storage.save_task_node(updated), dict(result.output_payload)
 
         if result.error is not None:
-            failed = replace(running, status=NodeStatus.FAILED, finished_at=now)
+            failed = replace(latest_node, status=NodeStatus.FAILED, finished_at=now)
             failed = await self._storage.save_task_node(failed)
             await self._record_event(
                 self._make_event(
@@ -161,7 +214,7 @@ class OrchestrationService:
             return failed, dict(result.output_payload)
 
         completed = replace(
-            running,
+            latest_node,
             status=NodeStatus.COMPLETED,
             finished_at=now,
             output_refs=tuple(artifact.artifact_id for artifact in result.artifacts),
@@ -183,17 +236,37 @@ class OrchestrationService:
         for node in plan.nodes:
             self._capability_registry.require(node.capability_id)
 
+        existing_task = await self._storage.get_task(request.task_id)
+        if existing_task is not None and existing_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+            return OrchestrationRunResult(task=existing_task, nodes=(), completion_status=existing_task.status.value)
+
         task = await self._initialize_task(request, plan)
         replan_count = 0
         node_outputs: dict[str, dict[str, Any]] = {}
 
         while True:
+            current_task = await self._storage.get_task(task.task_id)
+            if current_task is not None and current_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+                return OrchestrationRunResult(
+                    task=current_task,
+                    nodes=tuple(await self._storage.list_task_nodes_for_task(plan.task_id)),
+                    completion_status=current_task.status.value,
+                )
             nodes = {node.node_id: node for node in await self._storage.list_task_nodes_for_task(plan.task_id)}
             progress_made = False
             completed_ids = {node_id for node_id, node in nodes.items() if node.status == NodeStatus.COMPLETED}
 
             for node_plan in plan.nodes:
-                node = nodes[node_plan.node_id]
+                refreshed_task = await self._storage.get_task(task.task_id)
+                if refreshed_task is not None and refreshed_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+                    return OrchestrationRunResult(
+                        task=refreshed_task,
+                        nodes=tuple(await self._storage.list_task_nodes_for_task(plan.task_id)),
+                        completion_status=refreshed_task.status.value,
+                    )
+
+                node = await self._storage.get_task_node(node_plan.node_id) or nodes[node_plan.node_id]
+                nodes[node.node_id] = node
                 if node.status in {
                     NodeStatus.COMPLETED,
                     NodeStatus.FAILED,
@@ -210,7 +283,12 @@ class OrchestrationService:
                         nodes[node.node_id] = updated
                     continue
 
-                if node.status in {NodeStatus.PENDING, NodeStatus.WAITING_FOR_DEPENDENCY}:
+                if node.status in {
+                    NodeStatus.PENDING,
+                    NodeStatus.WAITING_FOR_DEPENDENCY,
+                    NodeStatus.READY_TO_RESUME,
+                    NodeStatus.RESUMING,
+                }:
                     node = await self._storage.save_task_node(replace(node, status=NodeStatus.READY))
                     nodes[node.node_id] = node
 
