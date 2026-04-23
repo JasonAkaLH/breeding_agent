@@ -1,5 +1,7 @@
 # Phase 4：打通编排调度与最小运行闭环
 
+> 状态：已完成（2026-04-23）
+
 ## 目标
 在 core / storage / lifecycle 已稳定后，建立主代理的**通用编排内核**，让任务能够完成“理解 → 编排 → 分发 → 检查 → 收敛/重编排”的闭环，并且这套能力可以兼容后续新增 capability，而不是只服务于 NL2SQL。
 
@@ -75,13 +77,13 @@
 
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-python -m pytest tests/orchestration -q
+conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 ```
 
 ## 验收清单
-- [ ] orchestration 目录已存在
-- [ ] registry / scheduler 已存在
-- [ ] 通用 workflow / task plan 标准已存在
-- [ ] completion policy 已存在
-- [ ] 编排层未耦合 NL2SQL 业务细节
-- [ ] mock/fake capability flow 已能证明主代理编排闭环可运行
+- [x] orchestration 目录已存在
+- [x] registry / scheduler 已存在
+- [x] 通用 workflow / task plan 标准已存在
+- [x] completion policy 已存在
+- [x] 编排层未耦合 NL2SQL 业务细节
+- [x] mock/fake capability flow 已能证明主代理编排闭环可运行

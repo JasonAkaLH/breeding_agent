@@ -12,7 +12,17 @@
 未形成明确设计前，不要提前提交脚手架、生成物或占位实现。
 
 ## 构建、测试与开发命令
-仓库目前**没有**正式确定的构建和测试工具链，不要自行假定标准命令。
+仓库目前**没有**完全正式确定的全项目构建和测试工具链，不要自行假定超出当前阶段的标准命令。
+
+当前已落地的最小测试命令：
+
+```bash
+conda run -n multi_agent python -m unittest discover -s tests/core -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s tests/capabilities/nl2sql -p 'test_*.py'
+```
 
 如果某次变更引入了新工具，请在同一个 PR 中同步更新 `README.md` 与本文件。未来可能出现的命令示例：
 
@@ -23,7 +33,7 @@ cmake -S . -B build
 cmake --build build
 ```
 
-以上仅为示例，不代表当前仓库标准。
+除上述最小测试命令外，其余仍仅为示例，不代表当前仓库标准。
 
 ## 开发环境
 本项目后续统一在 Conda 环境 `multi_agent` 中开发，当前确认的 Python 版本为 `3.13.13`。

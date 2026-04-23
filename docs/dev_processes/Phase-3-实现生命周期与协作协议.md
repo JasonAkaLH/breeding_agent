@@ -1,5 +1,7 @@
 # Phase 3：实现生命周期与协作协议
 
+> 状态：已完成（2026-04-23）
+
 ## 目标
 优先把运行时最难返工的正确性问题做实：mailbox、interrupt/resume、cancel、conversation 串行约束，以及任务上下文终止语义。
 
@@ -75,12 +77,12 @@
 
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-python -m pytest tests/lifecycle -q
+conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'
 ```
 
 ## 验收清单
-- [ ] mailbox service 已存在
-- [ ] interrupt / resume 已存在
-- [ ] cancel 已具备 Task Context Termination 语义
-- [ ] conversation 串行保护已存在
-- [ ] 生命周期测试已覆盖关键边界
+- [x] mailbox service 已存在
+- [x] interrupt / resume 已存在
+- [x] cancel 已具备 Task Context Termination 语义
+- [x] conversation 串行保护已存在
+- [x] 生命周期测试已覆盖关键边界

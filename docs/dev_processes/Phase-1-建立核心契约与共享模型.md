@@ -1,5 +1,7 @@
 # Phase 1：建立核心契约与共享模型
 
+> 状态：已完成（2026-04-23）
+
 ## 目标
 先把系统的共享语言固定下来，建立后续 storage / lifecycle / orchestration / api / capabilities 共同依赖的一套核心模型与 contract，避免每层各写一套 Task、Node、Event 语义。
 
@@ -93,12 +95,12 @@
 
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-python -m pytest tests/core -q
+conda run -n multi_agent python -m unittest discover -s tests/core -p 'test_*.py'
 ```
 
 ## 验收清单
-- [ ] `src/core/` 已建立
-- [ ] 共享核心对象已集中定义
-- [ ] 共享状态枚举已集中定义
-- [ ] storage / capability / event 等基础 contract 已明确
-- [ ] 核心模型测试已就绪
+- [x] `src/core/` 已建立
+- [x] 共享核心对象已集中定义
+- [x] 共享状态枚举已集中定义
+- [x] storage / capability / event 等基础 contract 已明确
+- [x] 核心模型测试已就绪

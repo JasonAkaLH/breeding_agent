@@ -1,0 +1,707 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from src.core.contracts import StoragePort
+from src.core.models import (
+    Artifact,
+    Checkpoint,
+    Conversation,
+    EventRecord,
+    Interrupt,
+    InterruptAnswer,
+    MailboxDelivery,
+    MailboxMessage,
+    Message,
+    Task,
+    TaskEdge,
+    TaskNode,
+)
+
+from .base import build_task_edge_id
+from .models import (
+    ArtifactRow,
+    CheckpointRow,
+    ConversationRow,
+    EventRecordRow,
+    InterruptAnswerRow,
+    InterruptRow,
+    MailboxDeliveryRow,
+    MailboxMessageRow,
+    MessageRow,
+    TaskEdgeRow,
+    TaskNodeRow,
+    TaskRow,
+)
+
+
+def _row_to_conversation(row: ConversationRow) -> Conversation:
+    return Conversation(
+        conversation_id=row.conversation_id,
+        account_id=row.account_id,
+        status=row.status,
+        current_task_id=row.current_task_id,
+        title=row.title,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_message(row: MessageRow) -> Message:
+    return Message(
+        message_id=row.message_id,
+        conversation_id=row.conversation_id,
+        role=row.role,
+        content=row.content,
+        task_id=row.task_id,
+        stream_status=row.stream_status,
+        created_at=row.created_at,
+    )
+
+
+def _row_to_task(row: TaskRow) -> Task:
+    return Task(
+        task_id=row.task_id,
+        conversation_id=row.conversation_id,
+        root_message_id=row.root_message_id,
+        status=row.status,
+        routing_mode=row.routing_mode,
+        requested_capability_id=row.requested_capability_id,
+        root_node_id=row.root_node_id,
+        summary=row.summary,
+        cancel_requested_at=row.cancel_requested_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_task_node(row: TaskNodeRow) -> TaskNode:
+    return TaskNode(
+        node_id=row.node_id,
+        task_id=row.task_id,
+        capability_id=row.capability_id,
+        assigned_instance_id=row.assigned_instance_id,
+        status=row.status,
+        criticality=row.criticality,
+        dependency_type=row.dependency_type,
+        retry_policy=row.retry_policy or {},
+        timeout_policy=row.timeout_policy or {},
+        resource_class=row.resource_class,
+        input_refs=tuple(row.input_refs or ()),
+        output_refs=tuple(row.output_refs or ()),
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+    )
+
+
+def _row_to_task_edge(row: TaskEdgeRow) -> TaskEdge:
+    return TaskEdge(from_node_id=row.from_node_id, to_node_id=row.to_node_id, edge_type=row.edge_type, condition=row.condition)
+
+
+def _row_to_artifact(row: ArtifactRow) -> Artifact:
+    return Artifact(
+        artifact_id=row.artifact_id,
+        task_id=row.task_id,
+        producer_node_id=row.producer_node_id,
+        artifact_type=row.artifact_type,
+        storage_ref=row.storage_ref,
+        summary=row.summary,
+        is_complete=bool(row.is_complete),
+        created_at=row.created_at,
+    )
+
+
+def _row_to_event_record(row: EventRecordRow) -> EventRecord:
+    return EventRecord(
+        event_id=row.event_id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        agent_id=row.agent_id,
+        event_type=row.event_type,
+        payload=row.payload or {},
+        visibility=row.visibility,
+        created_at=row.created_at,
+    )
+
+
+def _row_to_mailbox_message(row: MailboxMessageRow) -> MailboxMessage:
+    return MailboxMessage(
+        message_id=row.message_id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        parent_message_id=row.parent_message_id,
+        correlation_id=row.correlation_id,
+        from_agent=row.from_agent,
+        to_agent=row.to_agent,
+        to_role=row.to_role,
+        channel=row.channel,
+        message_type=row.message_type,
+        ack_policy=row.ack_policy,
+        priority=row.priority,
+        payload=row.payload or {},
+        payload_schema_version=row.payload_schema_version,
+        created_at=row.created_at,
+        resolved_at=row.resolved_at,
+    )
+
+
+def _row_to_mailbox_delivery(row: MailboxDeliveryRow) -> MailboxDelivery:
+    return MailboxDelivery(
+        delivery_id=row.delivery_id,
+        message_id=row.message_id,
+        recipient_agent=row.recipient_agent,
+        recipient_role=row.recipient_role,
+        status=row.status,
+        attempt_count=row.attempt_count,
+        max_attempts=row.max_attempts,
+        ttl_seconds=row.ttl_seconds,
+        expires_at=row.expires_at,
+        delivered_at=row.delivered_at,
+        acknowledged_at=row.acknowledged_at,
+        resolved_at=row.resolved_at,
+        next_retry_at=row.next_retry_at,
+        last_error_code=row.last_error_code,
+        last_error_message=row.last_error_message,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_interrupt(row: InterruptRow) -> Interrupt:
+    return Interrupt(
+        interrupt_id=row.interrupt_id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        source_agent=row.source_agent,
+        source_message_id=row.source_message_id,
+        question=row.question,
+        reason_code=row.reason_code,
+        required_fields=row.required_fields or {},
+        status=row.status,
+        expires_at=row.expires_at,
+        created_at=row.created_at,
+        answered_at=row.answered_at,
+        cancelled_at=row.cancelled_at,
+    )
+
+
+def _row_to_interrupt_answer(row: InterruptAnswerRow) -> InterruptAnswer:
+    return InterruptAnswer(
+        interrupt_answer_id=row.interrupt_answer_id,
+        interrupt_id=row.interrupt_id,
+        answer_payload=row.answer_payload or {},
+        source_message_id=row.source_message_id,
+        accepted=bool(row.accepted),
+        created_at=row.created_at,
+        accepted_at=row.accepted_at,
+    )
+
+
+def _row_to_checkpoint(row: CheckpointRow) -> Checkpoint:
+    return Checkpoint(
+        checkpoint_id=row.checkpoint_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        agent_id=row.agent_id,
+        snapshot_ref=row.snapshot_ref,
+        snapshot_kind=row.snapshot_kind,
+        resume_token=row.resume_token,
+        source_message_id=row.source_message_id,
+        created_at=row.created_at,
+        invalidated_at=row.invalidated_at,
+    )
+
+
+class SQLiteStateRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def save_conversation(self, conversation: Conversation) -> Conversation:
+        row = ConversationRow(
+            conversation_id=conversation.conversation_id,
+            account_id=conversation.account_id,
+            status=conversation.status,
+            current_task_id=conversation.current_task_id,
+            title=conversation.title,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_conversation(merged)
+
+    def get_conversation(self, conversation_id: str) -> Conversation | None:
+        row = self._session.get(ConversationRow, conversation_id)
+        return None if row is None else _row_to_conversation(row)
+
+    def save_message(self, message: Message) -> Message:
+        row = MessageRow(
+            message_id=message.message_id,
+            conversation_id=message.conversation_id,
+            role=message.role,
+            content=message.content,
+            task_id=message.task_id,
+            stream_status=message.stream_status,
+            created_at=message.created_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_message(merged)
+
+    def get_message(self, message_id: str) -> Message | None:
+        row = self._session.get(MessageRow, message_id)
+        return None if row is None else _row_to_message(row)
+
+    def list_messages_for_conversation(self, conversation_id: str) -> list[Message]:
+        rows = self._session.scalars(
+            select(MessageRow).where(MessageRow.conversation_id == conversation_id).order_by(MessageRow.created_at, MessageRow.message_id)
+        ).all()
+        return [_row_to_message(row) for row in rows]
+
+    def save_task(self, task: Task) -> Task:
+        row = TaskRow(
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            root_message_id=task.root_message_id,
+            status=task.status,
+            routing_mode=task.routing_mode,
+            requested_capability_id=task.requested_capability_id,
+            root_node_id=task.root_node_id,
+            summary=task.summary,
+            cancel_requested_at=task.cancel_requested_at,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_task(merged)
+
+    def get_task(self, task_id: str) -> Task | None:
+        row = self._session.get(TaskRow, task_id)
+        return None if row is None else _row_to_task(row)
+
+    def get_active_task_for_conversation(self, conversation_id: str) -> Task | None:
+        row = self._session.scalar(
+            select(TaskRow)
+            .where(
+                TaskRow.conversation_id == conversation_id,
+                TaskRow.status.in_(("accepted", "planning", "running", "cancelling")),
+            )
+            .order_by(TaskRow.created_at.desc(), TaskRow.task_id.desc())
+        )
+        return None if row is None else _row_to_task(row)
+
+    def save_task_node(self, node: TaskNode) -> TaskNode:
+        row = TaskNodeRow(
+            node_id=node.node_id,
+            task_id=node.task_id,
+            capability_id=node.capability_id,
+            assigned_instance_id=node.assigned_instance_id,
+            status=node.status,
+            criticality=node.criticality,
+            dependency_type=node.dependency_type,
+            retry_policy=dict(node.retry_policy),
+            timeout_policy=dict(node.timeout_policy),
+            resource_class=node.resource_class,
+            input_refs=list(node.input_refs),
+            output_refs=list(node.output_refs),
+            started_at=node.started_at,
+            finished_at=node.finished_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_task_node(merged)
+
+    def get_task_node(self, node_id: str) -> TaskNode | None:
+        row = self._session.get(TaskNodeRow, node_id)
+        return None if row is None else _row_to_task_node(row)
+
+    def list_task_nodes_for_task(self, task_id: str) -> list[TaskNode]:
+        rows = self._session.scalars(
+            select(TaskNodeRow).where(TaskNodeRow.task_id == task_id).order_by(TaskNodeRow.node_id)
+        ).all()
+        return [_row_to_task_node(row) for row in rows]
+
+    def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
+        row = TaskEdgeRow(
+            edge_id=build_task_edge_id(task_id, edge.from_node_id, edge.to_node_id),
+            task_id=task_id,
+            from_node_id=edge.from_node_id,
+            to_node_id=edge.to_node_id,
+            edge_type=edge.edge_type,
+            condition=edge.condition,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_task_edge(merged)
+
+    def list_task_edges(self, task_id: str) -> list[TaskEdge]:
+        rows = self._session.scalars(
+            select(TaskEdgeRow).where(TaskEdgeRow.task_id == task_id).order_by(TaskEdgeRow.from_node_id, TaskEdgeRow.to_node_id)
+        ).all()
+        return [_row_to_task_edge(row) for row in rows]
+
+    def save_artifact(self, artifact: Artifact) -> Artifact:
+        row = ArtifactRow(
+            artifact_id=artifact.artifact_id,
+            task_id=artifact.task_id,
+            producer_node_id=artifact.producer_node_id,
+            artifact_type=artifact.artifact_type,
+            storage_ref=artifact.storage_ref,
+            summary=artifact.summary,
+            is_complete=artifact.is_complete,
+            created_at=artifact.created_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_artifact(merged)
+
+    def get_artifact(self, artifact_id: str) -> Artifact | None:
+        row = self._session.get(ArtifactRow, artifact_id)
+        return None if row is None else _row_to_artifact(row)
+
+
+class SQLiteCollaborationRepository:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def save_event_record(self, event: EventRecord) -> EventRecord:
+        row = EventRecordRow(
+            event_id=event.event_id,
+            conversation_id=event.conversation_id,
+            task_id=event.task_id,
+            node_id=event.node_id,
+            agent_id=event.agent_id,
+            event_type=event.event_type,
+            payload=dict(event.payload),
+            visibility=event.visibility,
+            created_at=event.created_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_event_record(merged)
+
+    def get_event_record(self, event_id: str) -> EventRecord | None:
+        row = self._session.get(EventRecordRow, event_id)
+        return None if row is None else _row_to_event_record(row)
+
+    def list_events_for_task(self, task_id: str) -> list[EventRecord]:
+        rows = self._session.scalars(
+            select(EventRecordRow).where(EventRecordRow.task_id == task_id).order_by(EventRecordRow.created_at, EventRecordRow.event_id)
+        ).all()
+        return [_row_to_event_record(row) for row in rows]
+
+    def save_mailbox_message(self, message: MailboxMessage) -> MailboxMessage:
+        row = MailboxMessageRow(
+            message_id=message.message_id,
+            conversation_id=message.conversation_id,
+            task_id=message.task_id,
+            node_id=message.node_id,
+            parent_message_id=message.parent_message_id,
+            correlation_id=message.correlation_id,
+            from_agent=message.from_agent,
+            to_agent=message.to_agent,
+            to_role=message.to_role,
+            channel=message.channel,
+            message_type=message.message_type,
+            ack_policy=message.ack_policy,
+            priority=message.priority,
+            payload=dict(message.payload),
+            payload_schema_version=message.payload_schema_version,
+            created_at=message.created_at,
+            resolved_at=message.resolved_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_mailbox_message(merged)
+
+    def get_mailbox_message(self, message_id: str) -> MailboxMessage | None:
+        row = self._session.get(MailboxMessageRow, message_id)
+        return None if row is None else _row_to_mailbox_message(row)
+
+    def list_mailbox_messages_for_task(self, task_id: str) -> list[MailboxMessage]:
+        rows = self._session.scalars(
+            select(MailboxMessageRow).where(MailboxMessageRow.task_id == task_id).order_by(
+                MailboxMessageRow.created_at, MailboxMessageRow.message_id
+            )
+        ).all()
+        return [_row_to_mailbox_message(row) for row in rows]
+
+    def save_mailbox_delivery(self, delivery: MailboxDelivery) -> MailboxDelivery:
+        existing = self._session.scalar(
+            select(MailboxDeliveryRow).where(
+                MailboxDeliveryRow.message_id == delivery.message_id,
+                MailboxDeliveryRow.recipient_agent == delivery.recipient_agent,
+            )
+        )
+        if existing is None:
+            row = MailboxDeliveryRow(
+                delivery_id=delivery.delivery_id,
+                message_id=delivery.message_id,
+                recipient_agent=delivery.recipient_agent,
+                recipient_role=delivery.recipient_role,
+                status=delivery.status,
+                attempt_count=delivery.attempt_count,
+                max_attempts=delivery.max_attempts,
+                ttl_seconds=delivery.ttl_seconds,
+                expires_at=delivery.expires_at,
+                delivered_at=delivery.delivered_at,
+                acknowledged_at=delivery.acknowledged_at,
+                resolved_at=delivery.resolved_at,
+                next_retry_at=delivery.next_retry_at,
+                last_error_code=delivery.last_error_code,
+                last_error_message=delivery.last_error_message,
+                created_at=delivery.created_at,
+                updated_at=delivery.updated_at,
+            )
+            self._session.add(row)
+            self._session.flush()
+            return _row_to_mailbox_delivery(row)
+
+        existing.recipient_role = delivery.recipient_role
+        existing.status = delivery.status
+        existing.attempt_count = delivery.attempt_count
+        existing.max_attempts = delivery.max_attempts
+        existing.ttl_seconds = delivery.ttl_seconds
+        existing.expires_at = delivery.expires_at
+        existing.delivered_at = delivery.delivered_at
+        existing.acknowledged_at = delivery.acknowledged_at
+        existing.resolved_at = delivery.resolved_at
+        existing.next_retry_at = delivery.next_retry_at
+        existing.last_error_code = delivery.last_error_code
+        existing.last_error_message = delivery.last_error_message
+        existing.created_at = delivery.created_at
+        existing.updated_at = delivery.updated_at
+        self._session.flush()
+        return _row_to_mailbox_delivery(existing)
+
+    def get_mailbox_delivery(self, delivery_id: str) -> MailboxDelivery | None:
+        row = self._session.get(MailboxDeliveryRow, delivery_id)
+        return None if row is None else _row_to_mailbox_delivery(row)
+
+    def list_mailbox_deliveries_for_message(self, message_id: str) -> list[MailboxDelivery]:
+        rows = self._session.scalars(
+            select(MailboxDeliveryRow).where(MailboxDeliveryRow.message_id == message_id).order_by(
+                MailboxDeliveryRow.created_at, MailboxDeliveryRow.delivery_id
+            )
+        ).all()
+        return [_row_to_mailbox_delivery(row) for row in rows]
+
+    def save_interrupt(self, interrupt: Interrupt) -> Interrupt:
+        row = InterruptRow(
+            interrupt_id=interrupt.interrupt_id,
+            conversation_id=interrupt.conversation_id,
+            task_id=interrupt.task_id,
+            node_id=interrupt.node_id,
+            source_agent=interrupt.source_agent,
+            source_message_id=interrupt.source_message_id,
+            question=interrupt.question,
+            reason_code=interrupt.reason_code,
+            required_fields=dict(interrupt.required_fields),
+            status=interrupt.status,
+            expires_at=interrupt.expires_at,
+            created_at=interrupt.created_at,
+            answered_at=interrupt.answered_at,
+            cancelled_at=interrupt.cancelled_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_interrupt(merged)
+
+    def get_interrupt(self, interrupt_id: str) -> Interrupt | None:
+        row = self._session.get(InterruptRow, interrupt_id)
+        return None if row is None else _row_to_interrupt(row)
+
+    def get_interrupt_for_node(self, task_id: str, node_id: str) -> Interrupt | None:
+        row = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.task_id == task_id, InterruptRow.node_id == node_id)
+            .order_by(InterruptRow.created_at.desc(), InterruptRow.interrupt_id.desc())
+        )
+        return None if row is None else _row_to_interrupt(row)
+
+    def list_interrupts_for_task(self, task_id: str) -> list[Interrupt]:
+        rows = self._session.scalars(
+            select(InterruptRow).where(InterruptRow.task_id == task_id).order_by(InterruptRow.created_at, InterruptRow.interrupt_id)
+        ).all()
+        return [_row_to_interrupt(row) for row in rows]
+
+    def save_interrupt_answer(self, interrupt_answer: InterruptAnswer) -> InterruptAnswer:
+        row = InterruptAnswerRow(
+            interrupt_answer_id=interrupt_answer.interrupt_answer_id,
+            interrupt_id=interrupt_answer.interrupt_id,
+            answer_payload=dict(interrupt_answer.answer_payload),
+            source_message_id=interrupt_answer.source_message_id,
+            accepted=interrupt_answer.accepted,
+            created_at=interrupt_answer.created_at,
+            accepted_at=interrupt_answer.accepted_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_interrupt_answer(merged)
+
+    def get_interrupt_answer(self, interrupt_answer_id: str) -> InterruptAnswer | None:
+        row = self._session.get(InterruptAnswerRow, interrupt_answer_id)
+        return None if row is None else _row_to_interrupt_answer(row)
+
+    def list_interrupt_answers(self, interrupt_id: str) -> list[InterruptAnswer]:
+        rows = self._session.scalars(
+            select(InterruptAnswerRow).where(InterruptAnswerRow.interrupt_id == interrupt_id).order_by(
+                InterruptAnswerRow.created_at, InterruptAnswerRow.interrupt_answer_id
+            )
+        ).all()
+        return [_row_to_interrupt_answer(row) for row in rows]
+
+    def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        row = CheckpointRow(
+            checkpoint_id=checkpoint.checkpoint_id,
+            task_id=checkpoint.task_id,
+            node_id=checkpoint.node_id,
+            agent_id=checkpoint.agent_id,
+            snapshot_ref=checkpoint.snapshot_ref,
+            snapshot_kind=checkpoint.snapshot_kind,
+            resume_token=checkpoint.resume_token,
+            source_message_id=checkpoint.source_message_id,
+            created_at=checkpoint.created_at,
+            invalidated_at=checkpoint.invalidated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_checkpoint(merged)
+
+    def get_checkpoint(self, checkpoint_id: str) -> Checkpoint | None:
+        row = self._session.get(CheckpointRow, checkpoint_id)
+        return None if row is None else _row_to_checkpoint(row)
+
+    def get_checkpoint_by_resume_token(self, resume_token: str) -> Checkpoint | None:
+        row = self._session.scalar(
+            select(CheckpointRow).where(CheckpointRow.resume_token == resume_token).order_by(
+                CheckpointRow.created_at.desc(), CheckpointRow.checkpoint_id.desc()
+            )
+        )
+        return None if row is None else _row_to_checkpoint(row)
+
+    def list_checkpoints_for_task(self, task_id: str) -> list[Checkpoint]:
+        rows = self._session.scalars(
+            select(CheckpointRow).where(CheckpointRow.task_id == task_id).order_by(CheckpointRow.created_at, CheckpointRow.checkpoint_id)
+        ).all()
+        return [_row_to_checkpoint(row) for row in rows]
+
+
+class SQLiteStorage(StoragePort):
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    async def _run(
+        self,
+        callback: Callable[[SQLiteStateRepository, SQLiteCollaborationRepository], object],
+    ) -> object:
+        def _sync() -> object:
+            with self._session_factory() as session:
+                state_repo = SQLiteStateRepository(session)
+                collab_repo = SQLiteCollaborationRepository(session)
+                result = callback(state_repo, collab_repo)
+                session.commit()
+                return result
+
+        return await asyncio.to_thread(_sync)
+
+    async def save_conversation(self, conversation: Conversation) -> Conversation:
+        return await self._run(lambda state, collab: state.save_conversation(conversation))
+
+    async def get_conversation(self, conversation_id: str) -> Conversation | None:
+        return await self._run(lambda state, collab: state.get_conversation(conversation_id))
+
+    async def save_message(self, message: Message) -> Message:
+        return await self._run(lambda state, collab: state.save_message(message))
+
+    async def save_task(self, task: Task) -> Task:
+        return await self._run(lambda state, collab: state.save_task(task))
+
+    async def get_task(self, task_id: str) -> Task | None:
+        return await self._run(lambda state, collab: state.get_task(task_id))
+
+    async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None:
+        return await self._run(lambda state, collab: state.get_active_task_for_conversation(conversation_id))
+
+    async def save_task_node(self, node: TaskNode) -> TaskNode:
+        return await self._run(lambda state, collab: state.save_task_node(node))
+
+    async def get_task_node(self, node_id: str) -> TaskNode | None:
+        return await self._run(lambda state, collab: state.get_task_node(node_id))
+
+    async def list_task_nodes_for_task(self, task_id: str) -> list[TaskNode]:
+        return await self._run(lambda state, collab: state.list_task_nodes_for_task(task_id))
+
+    async def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
+        return await self._run(lambda state, collab: state.save_task_edge(task_id, edge))
+
+    async def list_task_edges(self, task_id: str) -> list[TaskEdge]:
+        return await self._run(lambda state, collab: state.list_task_edges(task_id))
+
+    async def save_artifact(self, artifact: Artifact) -> Artifact:
+        return await self._run(lambda state, collab: state.save_artifact(artifact))
+
+    async def append_event(self, event: EventRecord) -> EventRecord:
+        return await self._run(lambda state, collab: collab.save_event_record(event))
+
+    async def list_events_for_task(self, task_id: str) -> list[EventRecord]:
+        return await self._run(lambda state, collab: collab.list_events_for_task(task_id))
+
+    async def save_mailbox_message(self, message: MailboxMessage) -> MailboxMessage:
+        return await self._run(lambda state, collab: collab.save_mailbox_message(message))
+
+    async def get_mailbox_message(self, message_id: str) -> MailboxMessage | None:
+        return await self._run(lambda state, collab: collab.get_mailbox_message(message_id))
+
+    async def save_mailbox_delivery(self, delivery: MailboxDelivery) -> MailboxDelivery:
+        return await self._run(lambda state, collab: collab.save_mailbox_delivery(delivery))
+
+    async def get_mailbox_delivery(self, delivery_id: str) -> MailboxDelivery | None:
+        return await self._run(lambda state, collab: collab.get_mailbox_delivery(delivery_id))
+
+    async def list_mailbox_messages_for_task(self, task_id: str) -> list[MailboxMessage]:
+        return await self._run(lambda state, collab: collab.list_mailbox_messages_for_task(task_id))
+
+    async def list_mailbox_deliveries_for_message(self, message_id: str) -> list[MailboxDelivery]:
+        return await self._run(lambda state, collab: collab.list_mailbox_deliveries_for_message(message_id))
+
+    async def save_interrupt(self, interrupt: Interrupt) -> Interrupt:
+        return await self._run(lambda state, collab: collab.save_interrupt(interrupt))
+
+    async def get_interrupt(self, interrupt_id: str) -> Interrupt | None:
+        return await self._run(lambda state, collab: collab.get_interrupt(interrupt_id))
+
+    async def get_interrupt_for_node(self, task_id: str, node_id: str) -> Interrupt | None:
+        return await self._run(lambda state, collab: collab.get_interrupt_for_node(task_id, node_id))
+
+    async def list_interrupts_for_task(self, task_id: str) -> list[Interrupt]:
+        return await self._run(lambda state, collab: collab.list_interrupts_for_task(task_id))
+
+    async def save_interrupt_answer(self, interrupt_answer: InterruptAnswer) -> InterruptAnswer:
+        return await self._run(lambda state, collab: collab.save_interrupt_answer(interrupt_answer))
+
+    async def get_interrupt_answer(self, interrupt_answer_id: str) -> InterruptAnswer | None:
+        return await self._run(lambda state, collab: collab.get_interrupt_answer(interrupt_answer_id))
+
+    async def list_interrupt_answers(self, interrupt_id: str) -> list[InterruptAnswer]:
+        return await self._run(lambda state, collab: collab.list_interrupt_answers(interrupt_id))
+
+    async def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        return await self._run(lambda state, collab: collab.save_checkpoint(checkpoint))
+
+    async def get_checkpoint(self, checkpoint_id: str) -> Checkpoint | None:
+        return await self._run(lambda state, collab: collab.get_checkpoint(checkpoint_id))
+
+    async def get_checkpoint_by_resume_token(self, resume_token: str) -> Checkpoint | None:
+        return await self._run(lambda state, collab: collab.get_checkpoint_by_resume_token(resume_token))
+
+    async def list_checkpoints_for_task(self, task_id: str) -> list[Checkpoint]:
+        return await self._run(lambda state, collab: collab.list_checkpoints_for_task(task_id))

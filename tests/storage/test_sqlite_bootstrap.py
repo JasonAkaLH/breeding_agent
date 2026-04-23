@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import asyncio
+
+from sqlalchemy import inspect
+
+from src.core.models import Conversation
+from src.core.contracts import StoragePort as CoreStoragePort
+from src.storage.interfaces import StoragePort
+from src.storage.sqlite import SQLiteStorage
+from tests.storage.support import SQLiteStorageTestCase
+
+
+class SQLiteBootstrapTest(SQLiteStorageTestCase):
+    def test_storage_interface_reexports_canonical_protocol(self) -> None:
+        self.assertIs(StoragePort, CoreStoragePort)
+
+    def test_bootstrap_creates_phase2_core_tables(self) -> None:
+        table_names = set(inspect(self.engine).get_table_names())
+        self.assertTrue(
+            {
+                "conversation",
+                "message",
+                "task",
+                "task_node",
+                "task_edge",
+                "artifact",
+                "event_record",
+                "mailbox_message",
+                "mailbox_delivery",
+                "interrupt",
+                "interrupt_answer",
+                "checkpoint",
+            }.issubset(table_names)
+        )
+
+    def test_sqlite_storage_implements_storage_port(self) -> None:
+        self.assertIsInstance(SQLiteStorage(self.session_factory), StoragePort)
+
+    def test_sqlite_storage_async_facade_round_trip(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        conversation = Conversation(conversation_id="conv-async", account_id="acc-async")
+
+        saved = asyncio.run(storage.save_conversation(conversation))
+        loaded = asyncio.run(storage.get_conversation("conv-async"))
+
+        self.assertEqual(saved, conversation)
+        self.assertEqual(loaded, conversation)

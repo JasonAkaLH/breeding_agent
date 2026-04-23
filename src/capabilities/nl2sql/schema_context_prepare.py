@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult
+from src.core.models import Interrupt
+from src.nl2sql.models import SchemaContextRequest
+from src.nl2sql.schema_context_builder import SchemaContextBuilder
+
+from .helpers import find_dependency_output, load_yaml, make_artifact, repo_root
+
+
+class NL2SQLSchemaContextPrepareCapability(CapabilityContract):
+    capability_id = "nl2sql.schema_context_prepare"
+    version = "1"
+    description = "Build a trimmed schema context from routing metadata and schema configuration."
+
+    def __init__(self, *, routing_rules_path: str | None = None, schema_metadata_path: str | None = None) -> None:
+        routing_path = routing_rules_path or str(repo_root() / "configs/nl2sql/routing_rules.yaml")
+        metadata_path = schema_metadata_path or str(repo_root() / "configs/nl2sql/schema_metadata.yaml")
+        self._routing_rules = load_yaml(routing_path)
+        self._schema_metadata = load_yaml(metadata_path)
+        self._builder = SchemaContextBuilder(self._routing_rules, self._schema_metadata)
+
+    async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
+        upstream = find_dependency_output(request, ("route_id", "schema_profile_id", "user_question"))
+        schema_request = SchemaContextRequest(
+            route_id=str(upstream["route_id"]),
+            schema_profile_id=str(upstream["schema_profile_id"]),
+            user_question=str(upstream["user_question"]),
+            hints={"crop": upstream.get("inferred_crop")} if upstream.get("inferred_crop") else None,
+        )
+        result = await self._builder.build_context(schema_request)
+        if result.ok:
+            output = {
+                "route_id": result.route_id,
+                "schema_profile_id": result.schema_profile_id,
+                "user_question": upstream["user_question"],
+                "sql_policy_profile": upstream.get("sql_policy_profile"),
+                "allowed_tables": list(upstream.get("allowed_tables", [])),
+                "selected_tables": list(result.selected_tables),
+                "selected_columns": {table: list(columns) for table, columns in result.selected_columns.items()},
+                "join_hints": [
+                    {
+                        "left_table": hint.left_table,
+                        "left_column": hint.left_column,
+                        "right_table": hint.right_table,
+                        "right_column": hint.right_column,
+                        "reason": hint.reason,
+                    }
+                    for hint in result.join_hints
+                ],
+                "context_summary": result.context_summary,
+                "metadata": dict(result.metadata),
+            }
+            artifact = make_artifact(
+                name="schema_context_snapshot",
+                task_id=request.task_id,
+                node_id=request.node_id,
+                payload=output,
+                summary=f"schema context prepared with {len(result.selected_tables)} tables",
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload=output,
+                artifacts=(artifact,),
+            )
+
+        if result.failure and result.failure.code == "crop_not_resolved":
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                interrupt=Interrupt(
+                    interrupt_id=f"{request.node_id}:interrupt",
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    node_id=request.node_id,
+                    source_agent=self.capability_id,
+                    source_message_id=f"{request.node_id}:clarification",
+                    question="请补充作物类型，系统才能继续裁剪审定品种库的 schema 上下文。",
+                    reason_code="crop_not_resolved",
+                    required_fields={"crop": {"options": ["corn", "rice", "cotton", "wheat", "soybean"]}},
+                ),
+            )
+
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            error=CapabilityExecutionError(
+                code=result.failure.code if result.failure else "schema_context_prepare_failed",
+                message=result.failure.message if result.failure else "schema context prepare failed",
+                retriable=result.failure.retriable if result.failure else False,
+                metadata=dict(result.failure.metadata) if result.failure else {},
+            ),
+        )

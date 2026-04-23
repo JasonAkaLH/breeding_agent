@@ -1,5 +1,7 @@
 # Phase 5：接入 NL2SQL MVP 能力链路
 
+> 状态：已完成（2026-04-23）
+
 ## 目标
 把一期的首个真实 capability 做通：从意图识别、schema context、SQL 生成、guard、只读执行到结果汇总，形成主框架上的第一条业务闭环；同时明确 **NL2SQL 要适配 Phase 4 已定义的编排标准**，而不是反向修改主代理内核。
 
@@ -80,13 +82,13 @@
 
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-python -m pytest tests/capabilities/nl2sql -q
+conda run -n multi_agent python -m unittest discover -s tests/capabilities/nl2sql -p 'test_*.py'
 ```
 
 ## 验收清单
-- [ ] `src/capabilities/nl2sql/` 已存在
-- [ ] NL2SQL workflow definition 已按 Phase 4 标准接入
-- [ ] 标准 NL2SQL 链路已存在
-- [ ] guard 阻断路径已存在
-- [ ] 只读执行器无绕过入口
-- [ ] NL2SQL 专项测试已存在
+- [x] `src/capabilities/nl2sql/` 已存在
+- [x] NL2SQL workflow definition 已按 Phase 4 标准接入
+- [x] 标准 NL2SQL 链路已存在
+- [x] guard 阻断路径已存在
+- [x] 只读执行器无绕过入口
+- [x] NL2SQL 专项测试已存在

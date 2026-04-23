@@ -1,5 +1,7 @@
 # Phase 2：落地 SQLite 状态存储与仓储抽象
 
+> 状态：已完成（2026-04-23）
+
 ## 目标
 在不绑定 PostgreSQL 细节的前提下，先落地一套能承载一期任务状态链路的 SQLite 状态存储实现，让状态机有真正的真相源，而不是只有内存对象。
 
@@ -90,15 +92,15 @@
 
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-python -m pytest tests/storage -q
+conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'
 ```
 
 ## 验收清单
-- [ ] storage interface 已存在
-- [ ] SQLite 模型与仓储已存在
-- [ ] 核心对象可 round-trip
-- [ ] 恢复判断必需字段已采用独立字段 / 独立列
-- [ ] JSON / refs / summary 字段与恢复判断字段的边界已明确
-- [ ] 会话延续型记忆最小字段集可稳定读写
-- [ ] mailbox / interrupt / checkpoint 已可持久化
-- [ ] PostgreSQL 同构迁移预留已明确
+- [x] storage interface 已存在
+- [x] SQLite 模型与仓储已存在
+- [x] 核心对象可 round-trip
+- [x] 恢复判断必需字段已采用独立字段 / 独立列
+- [x] JSON / refs / summary 字段与恢复判断字段的边界已明确
+- [x] 会话延续型记忆最小字段集可稳定读写
+- [x] mailbox / interrupt / checkpoint 已可持久化
+- [x] PostgreSQL 同构迁移预留已明确
