@@ -2,7 +2,7 @@
 
 - 状态：提案
 - 日期：2026-04-23
-- 适用范围：主代理、通用子代理、NL2SQL capability 的 LLM 接入时机建议
+- 适用范围：主代理、通用子代理、SQLQuery（原 SQLQuery）capability 的 LLM 接入时机建议
 
 ---
 
@@ -15,11 +15,11 @@
 - 状态存储
 - 生命周期
 - 通用编排内核
-- 首个真实 capability（NL2SQL MVP）
+- 首个真实 capability（SQLQuery，原 SQLQuery MVP）
 
 在这个基础上，LLM 接入建议分成两类处理：
 
-### A. NL2SQL 内部的 LLM 接入
+### A. SQLQuery 内部的 LLM 接入
 
 建议放在：
 
@@ -27,7 +27,7 @@
 
 也就是：
 - 不并入当前已完成的 Phase 5 主交付
-- 单独作为 NL2SQL capability 增强专题推进
+- 单独作为 SQLQuery capability 增强专题推进
 
 ### B. 主代理 / 通用子代理的 LLM 接入
 
@@ -51,15 +51,16 @@
 - 通用 orchestration 标准
 - 生命周期与取消语义
 - SQLite 状态真相源
-- NL2SQL capability 闭环
-- 可复用的 `llm_client.py`
+- SQLQuery（原 SQLQuery）capability 闭环
+- 可复用的 `src/integrations/llm_client.py`
 
-但目前真正接入 LLM 的部分还没有落地：
+Phase 5.5 首轮后，SQLQuery 内部已经具备可注入的 LLM seam；Phase 8 首轮后，主代理也已经接入非 thinking streaming LLM seam。默认自动化测试仍不会访问真实 provider：
 
-- 主代理未接入 LLM
+- 主代理已通过 `main_agent.respond` 接入 LLM seam，普通消息默认进入主代理
 - 通用子代理未接入 LLM
-- NL2SQL 的 `sql_generate` 默认仍是启发式实现
-- NL2SQL 的 `result_summarize` 默认仍是模板/规则式实现
+- SQLQuery 的 `sql_generate` 已支持注入 `llm_text_generator` 走结构化 LLM 输出，未注入时仍回退启发式实现
+- SQLQuery 的 `result_summarize` 已支持注入 `llm_text_generator` 走结构化 LLM 摘要，未注入或失败时仍回退模板/规则式实现
+- 真实 provider 的 runtime 绑定与手工 smoke 验证仍需后续显式补齐
 
 ---
 
@@ -111,7 +112,7 @@ Phase 7 的任务是：
 
 | 能力类型 | 推荐接入阶段 | 原因 |
 |---|---|---|
-| NL2SQL 内部 `sql_generate` / `result_summarize` 的 LLM 化 | Phase 5.5 / NL2SQL 增强专题 | 它仍然属于首个 capability 的深化，不需要等待整个主代理 LLM 化 |
+| SQLQuery 内部 `sql_generate` / `result_summarize` 的 LLM 化 | Phase 5.5 / SQLQuery 增强专题 | 它仍然属于首个 capability 的深化，不需要等待整个主代理 LLM 化 |
 | 主代理任务理解 / 路线选择的 LLM 化 | Phase 7 之后的新专题 | 属于主框架行为升级，影响编排内核，不应混入一期收口阶段 |
 | 通用子代理 / worker 型能力的 LLM 化 | Phase 7 之后的新专题 | 会影响 capability 执行范式与整体资源调度，不适合一期尾声混入 |
 
@@ -140,32 +141,34 @@ Phase 7 的任务是：
 
 都作为**非 LLM 主导版本**先验收收口。
 
-### Step 3：启动 NL2SQL LLM 增强专题
+### Step 3：启动 SQLQuery LLM 增强专题
 
 在一期验收已经稳定之后，优先升级：
 
 - `sql_generate`
 - `result_summarize`
 
-让 NL2SQL 从“启发式 MVP”升级到“LLM 主路径版本”。
+让 SQLQuery 从“启发式 MVP”升级到“LLM 主路径版本”。
 
 ### Step 4：再启动主代理 / 通用子代理 LLM 专题
 
-在 capability 内部 LLM 已跑稳之后，再考虑升级：
+在 SQLQuery capability 内部 LLM 已跑稳之后，再升级：
 
-- 主代理任务理解
-- 路由判断
+- 主代理任务理解与普通对话输出
+- 路由判断与后续多 capability 自动选择
 - 更泛化的子代理执行能力
+
+> 当前 Phase 8 首轮已经完成主代理普通对话输出的 LLM 接入；通用子代理 LLM 化与更复杂的自动路由仍保留为后续专题。
 
 ---
 
-## 6. 为什么要先做 NL2SQL 的 LLM，再做主代理 / 通用子代理的 LLM
+## 6. 为什么要先做 SQLQuery 的 LLM，再做主代理 / 通用子代理的 LLM
 
 原因很简单：
 
 ### 6.1 风险更可控
 
-NL2SQL 的 LLM 只影响：
+SQLQuery 的 LLM 只影响：
 
 - SQL 生成
 - 结果总结
@@ -195,12 +198,12 @@ NL2SQL 的 LLM 只影响：
 
 ## 7. 推荐输出物
 
-### 7.1 NL2SQL LLM 增强专题
+### 7.1 SQLQuery LLM 增强专题
 
 建议输出：
 
-- `docs/NL2SQL-LLM版本改造方案.md`（已存在）
-- Phase 5.5 对应的开发过程文档
+- `docs/SQLQuery-LLM版本改造方案.md`（已存在）
+- `docs/dev_processes/Phase-5.5-SQLQuery-LLM增强专题.md`（Phase 5.5 讨论与开发过程入口）
 - 新增 LLM 版 capability 测试与回归测试
 
 ### 7.2 主代理 / 通用子代理 LLM 专题
@@ -218,11 +221,10 @@ NL2SQL 的 LLM 只影响：
 如果按当前项目阶段来安排：
 
 > **先做完 Phase 6 和 Phase 7，完成一期非 LLM 主导版本的收口；**  
-> **然后优先启动 NL2SQL 的 LLM 增强专题；**  
+> **然后优先启动 SQLQuery 的 LLM 增强专题；**
 > **最后再启动主代理和通用子代理的 LLM 接入专题。**
 
 换句话说：
 
-- **NL2SQL 的 LLM 接入**：建议最先做，但放在一期收口之后
-- **主代理 / 通用子代理的 LLM 接入**：建议更晚做，单独立项
-
+- **SQLQuery 的 LLM 接入**：建议最先做，但放在一期收口之后
+- **主代理 / 通用子代理的 LLM 接入**：主代理普通对话输出已在 Phase 8 首轮接入；通用子代理 LLM 化与复杂自动路由建议继续单独立项

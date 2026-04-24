@@ -1,0 +1,1 @@
+"""SQLQuery capability tests package."""

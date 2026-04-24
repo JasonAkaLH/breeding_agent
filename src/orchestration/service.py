@@ -114,6 +114,17 @@ class OrchestrationService:
                         resource_class=node.resource_class,
                     )
                 )
+            else:
+                await self._storage.save_task_node(
+                    replace(
+                        existing_nodes[node.node_id],
+                        status=NodeStatus.PENDING,
+                        assigned_instance_id=None,
+                        output_refs=(),
+                        started_at=None,
+                        finished_at=None,
+                    )
+                )
             for dependency in node.depends_on:
                 await self._storage.save_task_edge(
                     plan.task_id,
@@ -195,9 +206,10 @@ class OrchestrationService:
 
         now = self._utcnow_naive()
         if result.interrupt is not None:
-            await self._storage.save_interrupt(result.interrupt)
             updated = replace(latest_node, status=NodeStatus.WAITING_FOR_INPUT)
-            return await self._storage.save_task_node(updated), dict(result.output_payload)
+            saved_node = await self._storage.save_task_node(updated)
+            await self._storage.save_interrupt(result.interrupt)
+            return saved_node, dict(result.output_payload)
 
         if result.error is not None:
             failed = replace(latest_node, status=NodeStatus.FAILED, finished_at=now)

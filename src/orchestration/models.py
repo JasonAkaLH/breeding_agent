@@ -26,6 +26,7 @@ class CapabilityDescriptor:
     description: str
     version: str = "1"
     enabled: bool = True
+    public: bool = True
 
 
 @dataclass(slots=True, frozen=True)

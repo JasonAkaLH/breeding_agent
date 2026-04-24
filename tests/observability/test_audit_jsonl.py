@@ -9,14 +9,14 @@ class AuditJsonlObservabilityTest(E2EAPITestCase):
         await self.reconfigure_runtime(
             sql_generator=lambda context: "INSERT INTO variety(id) VALUES (1)",
         )
-        blocked_response = await self.submit_message(conversation_id="conv-blocked", content="查询品种先玉335的基因型信息")
+        blocked_response = await self.submit_message(conversation_id="conv-blocked", content="查询品种龙粳33的基因型信息")
         blocked_task_id = blocked_response.json()["task_id"]
         blocked_terminal = await self.wait_for_terminal_task(blocked_task_id)
         self.assertEqual(blocked_terminal["status"], "failed")
 
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
-        cancel_response = await self.submit_message(conversation_id="conv-cancel", content="查询品种先玉335的基因型信息")
+        cancel_response = await self.submit_message(conversation_id="conv-cancel", content="查询品种龙粳33的基因型信息")
         cancel_task_id = cancel_response.json()["task_id"]
 
         await self.wait_for_node_status(cancel_task_id, node_suffix=":sql_execute_readonly", status="running")
@@ -32,7 +32,7 @@ class AuditJsonlObservabilityTest(E2EAPITestCase):
             self.assertIn("task_id", record)
             self.assertIn("payload", record)
 
-        blocked_records = [record for record in records if record["event_type"] == "nl2sql.sql_guard_blocked"]
+        blocked_records = [record for record in records if record["event_type"] == "sql_query.sql_guard_blocked"]
         self.assertTrue(blocked_records)
         self.assertIn("block_reason", blocked_records[-1]["payload"])
         self.assertIn("route_context", blocked_records[-1]["payload"])

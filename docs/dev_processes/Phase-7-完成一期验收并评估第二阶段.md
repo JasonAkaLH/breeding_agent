@@ -7,12 +7,12 @@
 
 ## 推荐 Owner
 - 主 Owner：测试负责人 / 验收负责人
-- 协作 Owner：后端接口负责人、NL2SQL 负责人、架构负责人
+- 协作 Owner：后端接口负责人、SQLQuery 负责人、架构负责人
 
 ## 输入
 - `docs/dev_processes/Phase-6-接入FastAPI-SSE对外接口.md`
 - `docs/prd/05-API与核心数据模型.md`
-- `docs/prd/06-NL2SQL-MVP设计.md`
+- `docs/prd/06-SQLQuery-MVP设计.md`
 - Phase 0 的一期范围与验收口径
 
 ## 输出
@@ -32,7 +32,7 @@
   - 状态可查询
   - 事件可订阅
   - 任务可取消
-  - NL2SQL 只读链路可运行
+  - SQLQuery 只读链路可运行
   - 危险 SQL 可阻断
 - 整理剩余风险与未做项：
   - PostgreSQL 正式化

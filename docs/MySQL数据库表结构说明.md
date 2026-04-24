@@ -1,4 +1,4 @@
-# NL2SQL Capability相关数据库结构说明
+# SQLQuery Capability相关数据库结构说明
 
 ## 在本项目的数据库功能
 

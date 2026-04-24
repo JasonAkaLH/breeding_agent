@@ -110,7 +110,7 @@ class CoreContractShapeTest(unittest.TestCase):
 class CoreContractBoundaryTest(unittest.TestCase):
     def test_core_contracts_do_not_reference_capability_specific_terms(self) -> None:
         source = inspect.getsource(contracts).lower()
-        for forbidden in ("nl2sql", "sql_guard", "schema_context"):
+        for forbidden in ("sql_query", "sql_guard", "schema_context"):
             self.assertNotIn(forbidden, source)
 
     def test_core_contracts_do_not_import_api_or_storage_frameworks(self) -> None:

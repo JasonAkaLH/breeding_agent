@@ -22,7 +22,7 @@ class TaskQueryAPITest(APITestCase):
         graph_payload = graph_response.json()
         self.assertEqual(graph_payload["task_id"], task_id)
         self.assertEqual(len(graph_payload["nodes"]), 6)
-        self.assertEqual(len(graph_payload["edges"]), 6)
+        self.assertEqual(len(graph_payload["edges"]), 7)
 
         artifacts_response = await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")
         self.assertEqual(artifacts_response.status_code, 200)

@@ -24,6 +24,6 @@ async def list_capabilities(request: Request) -> CapabilityListResponse:
                 version=descriptor.version,
                 status="active" if descriptor.enabled else "disabled",
             )
-            for descriptor in runtime.capability_registry.list()
+            for descriptor in runtime.capability_registry.list(public_only=True)
         ]
     )

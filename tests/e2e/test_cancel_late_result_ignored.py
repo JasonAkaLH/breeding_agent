@@ -9,7 +9,7 @@ class CancelLateResultE2ETest(E2EAPITestCase):
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
 
-        response = await self.submit_message(content="查询品种先玉335的基因型信息")
+        response = await self.submit_message(content="查询品种龙粳33的基因型信息")
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 

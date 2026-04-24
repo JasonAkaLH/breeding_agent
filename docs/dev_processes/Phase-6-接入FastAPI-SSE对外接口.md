@@ -3,17 +3,17 @@
 > 状态：已完成（2026-04-23）
 
 ## 目标
-在主框架内核与 NL2SQL capability 闭环已经打通后，接入对外 API、SSE 事件流、取消入口与审计输出，让系统形成真正可调用的后端服务面。
+在主框架内核与 SQLQuery capability 闭环已经打通后，接入对外 API、SSE 事件流、取消入口与审计输出，让系统形成真正可调用的后端服务面。
 
 ## 推荐 Owner
 - 主 Owner：后端接口负责人 / API 负责人
-- 协作 Owner：编排负责人、生命周期负责人、NL2SQL 负责人
+- 协作 Owner：编排负责人、生命周期负责人、SQLQuery 负责人
 
 ## 输入
-- `docs/dev_processes/Phase-5-接入NL2SQL-MVP能力链路.md`
+- `docs/dev_processes/Phase-5-接入SQLQuery-MVP能力链路.md`
 - `docs/prd/05-API与核心数据模型.md`
 - `docs/prd/03-协作协议与任务生命周期.md`
-- `docs/prd/06-NL2SQL-MVP设计.md`
+- `docs/prd/06-SQLQuery-MVP设计.md`
 
 ## 输出
 - `src/api/` 目录

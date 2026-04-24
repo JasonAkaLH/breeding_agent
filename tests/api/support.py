@@ -21,7 +21,7 @@ def blocking_mysql_adapter() -> tuple[MySQLReadonlyAdapter, threading.Event]:
             raise TimeoutError(f"Timed out waiting to release blocking SQL runner for {sql!r}.")
         return ReadonlyQueryResult(
             columns=("variety_name",),
-            rows=({"variety_name": "先玉335"},),
+            rows=({"variety_name": "龙粳33"},),
             row_count=1,
         )
 
@@ -48,11 +48,14 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mysql_adapter: MySQLReadonlyAdapter | None = None,
         sql_generator=None,
         summarizer=None,
+        llm_text_generator=None,
+        main_agent_stream_generator=None,
+        skill_roots=(),
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
             runner=lambda sql: ReadonlyQueryResult(
                 columns=("variety_name",),
-                rows=({"variety_name": "先玉335"},),
+                rows=({"variety_name": "龙粳33"},),
                 row_count=1,
             )
         )
@@ -62,6 +65,9 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mysql_adapter=adapter,
             sql_generator=sql_generator,
             summarizer=summarizer,
+            llm_text_generator=llm_text_generator,
+            main_agent_stream_generator=main_agent_stream_generator,
+            skill_roots=skill_roots,
         )
 
     async def _bind_client(self) -> None:
@@ -75,6 +81,9 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mysql_adapter: MySQLReadonlyAdapter | None = None,
         sql_generator=None,
         summarizer=None,
+        llm_text_generator=None,
+        main_agent_stream_generator=None,
+        skill_roots=(),
     ) -> None:
         await self.client.aclose()
         await self.runtime.shutdown()
@@ -82,6 +91,9 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mysql_adapter=mysql_adapter,
             sql_generator=sql_generator,
             summarizer=summarizer,
+            llm_text_generator=llm_text_generator,
+            main_agent_stream_generator=main_agent_stream_generator,
+            skill_roots=skill_roots,
         )
         await self._bind_client()
 
@@ -91,6 +103,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         conversation_id: str = "conv-1",
         account_id: str = "acc-1",
         content: str = "查询某个品种的基因型信息",
+        capability_id: str | None = "sql_query.query",
     ) -> httpx.Response:
         return await self.client.post(
             f"/api/v1/conversations/{conversation_id}/messages",
@@ -98,7 +111,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 "account_id": account_id,
                 "content": content,
                 "routing_mode": "auto",
-                "capability_id": None,
+                "capability_id": capability_id,
                 "metadata": {},
             },
         )
@@ -112,7 +125,14 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             if payload["status"] in {"completed", "failed", "cancelled"}:
                 return payload
             if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError(f"Task {task_id} did not reach a terminal state within {timeout} seconds.")
+                nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+                interrupts = await self.runtime.list_interrupts(task_id)
+                raise AssertionError(
+                    f"Task {task_id} did not reach a terminal state within {timeout} seconds. "
+                    f"latest={payload!r}, "
+                    f"nodes={[(node.node_id, str(node.status), node.capability_id) for node in nodes]!r}, "
+                    f"interrupts={interrupts!r}"
+                )
             await asyncio.sleep(0.02)
 
     async def wait_for_condition(self, predicate, *, timeout: float = 5.0, interval: float = 0.02) -> None:

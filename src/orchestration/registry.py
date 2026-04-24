@@ -13,8 +13,11 @@ class CapabilityRegistry:
     def get(self, capability_id: str) -> CapabilityDescriptor | None:
         return self._capabilities.get(capability_id)
 
-    def list(self) -> list[CapabilityDescriptor]:
-        return list(self._capabilities.values())
+    def list(self, *, public_only: bool = False) -> list[CapabilityDescriptor]:
+        descriptors = list(self._capabilities.values())
+        if public_only:
+            return [descriptor for descriptor in descriptors if descriptor.public]
+        return descriptors
 
     def require(self, capability_id: str) -> CapabilityDescriptor:
         descriptor = self.get(capability_id)

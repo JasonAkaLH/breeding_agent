@@ -97,3 +97,41 @@ class SQLiteInterruptRepositoryTest(SQLiteStorageTestCase):
 
         self.assertEqual(loaded_interrupt, interrupt)
         self.assertEqual(loaded_checkpoint, checkpoint)
+
+    def test_late_open_interrupt_save_does_not_downgrade_answered_interrupt(self) -> None:
+        opened = Interrupt(
+            interrupt_id="interrupt-race-1",
+            conversation_id="conv-1",
+            task_id="task-1",
+            node_id="node-race-1",
+            source_agent="agent-1",
+            source_message_id="mail-1",
+            question="Which crop?",
+            reason_code="missing_crop",
+            status=InterruptStatus.OPEN,
+        )
+        answered = Interrupt(
+            interrupt_id=opened.interrupt_id,
+            conversation_id=opened.conversation_id,
+            task_id=opened.task_id,
+            node_id=opened.node_id,
+            source_agent=opened.source_agent,
+            source_message_id=opened.source_message_id,
+            question=opened.question,
+            reason_code=opened.reason_code,
+            status=InterruptStatus.ANSWERED,
+            answered_at=datetime(2026, 4, 23, 12, 2, 0),
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteCollaborationRepository(session)
+            repo.save_interrupt(opened)
+            repo.save_interrupt(answered)
+            saved = repo.save_interrupt(opened)
+            session.commit()
+
+        self.assertEqual(saved.status, InterruptStatus.ANSWERED)
+        with self.session_factory() as session:
+            repo = SQLiteCollaborationRepository(session)
+            loaded = repo.get_interrupt(opened.interrupt_id)
+        self.assertEqual(loaded.status, InterruptStatus.ANSWERED)

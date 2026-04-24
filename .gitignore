@@ -5,6 +5,12 @@
 .idea/
 .vscode/
 
+# Local config
+/config.yaml
+
+# Local report drafts
+/本周工作周报.md
+
 # Python: bytecode / cache
 __pycache__/
 *.py[cod]

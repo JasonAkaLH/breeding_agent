@@ -4,14 +4,29 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 from uuid import uuid4
 
 from sqlalchemy import Engine
 
-from src.capabilities.nl2sql import NL2SQL_CAPABILITY_DESCRIPTORS, NL2SQLExecutor, NL2SQLWorkflowProvider, build_local_nl2sql_instance
+from src.capabilities.main_agent import (
+    MAIN_AGENT_CAPABILITY_DESCRIPTORS,
+    MainAgentExecutor,
+    MainAgentWorkflowProvider,
+    StreamGenerator,
+    build_local_main_agent_instance,
+)
+from src.capabilities.sql_query import (
+    SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS,
+    SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS,
+    SQLQueryExecutor,
+    SQLQueryWorkflowProvider,
+    build_local_sql_query_instance,
+)
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
+from src.integrations.codex_skills import SkillCatalog
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
@@ -19,9 +34,11 @@ from src.lifecycle.interrupt_service import InterruptService
 from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.models import OrchestrationRequest
+from src.orchestration.composite_executor import CompositeExecutor
 from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
 from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
+from src.orchestration.workflow_router import WorkflowRouter
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
 
 from .dto import SubmitMessageRequest
@@ -40,7 +57,7 @@ class ApiRuntime:
         cancellation_service: CancellationService,
         interrupt_service: InterruptService,
         orchestration_service: OrchestrationService,
-        workflow_provider: NL2SQLWorkflowProvider,
+        workflow_provider: WorkflowRouter,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -311,9 +328,10 @@ class ApiRuntime:
     def _ensure_supported_capability(self, capability_id: str | None) -> None:
         if capability_id is None:
             return
-        if capability_id == "nl2sql":
+        if capability_id in {"main_agent", "sql_query"}:
             return
-        if any(descriptor.capability_id == capability_id for descriptor in self.capability_registry.list()):
+        descriptor = self.capability_registry.get(capability_id)
+        if descriptor is not None and descriptor.public:
             return
         raise ValueError(f"Unsupported capability_id: {capability_id}")
 
@@ -346,20 +364,39 @@ def build_api_runtime(
     mysql_adapter: MySQLReadonlyAdapter | None = None,
     sql_generator=None,
     summarizer=None,
+    llm_text_generator=None,
+    main_agent_stream_generator: StreamGenerator | None = None,
+    skill_roots: Iterable[str | Path] | None = None,
+    skill_catalog: SkillCatalog | None = None,
 ) -> ApiRuntime:
     engine = create_sqlite_engine(database_path)
     bootstrap_sqlite_database(engine)
     storage = SQLiteStorage(create_sqlite_session_factory(engine))
 
     capability_registry = CapabilityRegistry()
-    for descriptor in NL2SQL_CAPABILITY_DESCRIPTORS:
+    for descriptor in MAIN_AGENT_CAPABILITY_DESCRIPTORS:
+        capability_registry.register(descriptor)
+    for descriptor in SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS:
+        capability_registry.register(descriptor)
+    for descriptor in SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS:
         capability_registry.register(descriptor)
 
     instance_registry = InstanceRegistry()
-    instance_registry.register(build_local_nl2sql_instance())
+    instance_registry.register(build_local_main_agent_instance())
+    instance_registry.register(build_local_sql_query_instance())
 
     audit_sink = JsonlAuditSink(audit_log_path)
     event_broker = InMemoryEventBroker(audit_sink=audit_sink)
+
+    async def record_live_event(event: EventRecord) -> None:
+        await storage.append_event(event)
+        await event_broker.publish(event)
+
+    resolved_skill_catalog = skill_catalog
+    if resolved_skill_catalog is None:
+        roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
+        resolved_skill_catalog = SkillCatalog.from_roots(roots)
+
     cancellation_service = CancellationService(storage, event_sink=event_broker, audit_sink=audit_sink)
     interrupt_service = InterruptService(storage, event_sink=event_broker, audit_sink=audit_sink)
     orchestration_service = OrchestrationService(
@@ -367,7 +404,21 @@ def build_api_runtime(
         capability_registry=capability_registry,
         instance_registry=instance_registry,
         scheduler=Scheduler(instance_registry),
-        executor=NL2SQLExecutor(mysql_adapter=mysql_adapter, sql_generator=sql_generator, summarizer=summarizer),
+        executor=CompositeExecutor(
+            [
+                MainAgentExecutor(
+                    stream_generator=main_agent_stream_generator,
+                    skill_catalog=resolved_skill_catalog,
+                    live_event_recorder=record_live_event,
+                ),
+                SQLQueryExecutor(
+                    mysql_adapter=mysql_adapter,
+                    sql_generator=sql_generator,
+                    summarizer=summarizer,
+                    llm_text_generator=llm_text_generator,
+                ),
+            ]
+        ),
         completion_policy=CompletionPolicy(),
         backpressure=BackpressureGuard(max_active_tasks=10),
         event_sink=event_broker,
@@ -381,5 +432,16 @@ def build_api_runtime(
         cancellation_service=cancellation_service,
         interrupt_service=interrupt_service,
         orchestration_service=orchestration_service,
-        workflow_provider=NL2SQLWorkflowProvider(),
+        workflow_provider=WorkflowRouter(
+            default_provider=MainAgentWorkflowProvider(),
+            main_agent_provider=MainAgentWorkflowProvider(),
+            sql_query_provider=SQLQueryWorkflowProvider(),
+        ),
+    )
+
+
+def _default_skill_roots() -> tuple[Path, ...]:
+    return (
+        Path.cwd() / ".codex" / "skills",
+        Path.home() / ".codex" / "skills",
     )

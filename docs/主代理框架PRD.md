@@ -7,7 +7,7 @@
 - **说明**：本文件为总览入口，具体设计已按专题拆分到 `docs/prd/` 目录。
 
 ## 1. 项目背景
-本项目面向内部付费用户，目标是构建一个办公助手后端。当前优先建设的是主代理框架，而不是具体功能 Agent 本身；后续文档 RAG、NL2SQL、数据分析、农业生物信息分析等能力将在该框架之上接入。
+本项目面向内部付费用户，目标是构建一个办公助手后端。当前优先建设的是主代理框架，而不是具体功能 Agent 本身；后续文档 RAG、SQLQuery、数据分析、农业生物信息分析等能力将在该框架之上接入。
 
 本框架不依赖 LangChain、LangGraph、AutoGen 等现成 Agent 框架，采用 Python 为主、异步优先的服务端架构；性能热点未来可下沉到 C++，但不作为一期前提。
 
@@ -24,7 +24,7 @@
 - 记忆系统（以会话延续型记忆为主）
 - 实时事件流
 - 用户主动中断任务
-- 首个可验收业务样例绑定为 **NL2SQL 只读查询链路**
+- 首个可验收业务样例绑定为 **SQLQuery 只读查询链路**
 
 ### 2.2 一期不做但必须预留接口
 - 人工审批
@@ -59,7 +59,7 @@
 | 协作协议与任务生命周期 | `docs/prd/03-协作协议与任务生命周期.md` | mailbox、interrupt/resume、取消、状态机 |
 | 状态存储与迁移策略 | `docs/prd/04-状态存储与迁移策略.md` | SQLite / PostgreSQL、mailbox DDL、迁移 |
 | API与核心数据模型 | `docs/prd/05-API与核心数据模型.md` | API、Conversation/Task/Node 等对象模型 |
-| NL2SQL-MVP设计 | `docs/prd/06-NL2SQL-MVP设计.md` | NL2SQL 路由、SQL Guard、Schema Context Builder、MVP 验收 |
+| SQLQuery-MVP设计 | `docs/prd/06-SQLQuery-MVP设计.md` | SQLQuery 路由、SQL Guard、Schema Context Builder、MVP 验收 |
 
 ## 5. 当前已定的关键决策摘要
 ### 5.1 主框架共性决策
@@ -69,7 +69,7 @@
 - 同一 `conversation_id` 内任务串行执行
 - 主代理采用受规则、状态机与完成判定约束的编排型闭环，而不是自由试错式纯 ReAct
 - 任务优先级采用“两层模型”：控制类动作独立最高优先级；普通任务按来源驱动排序，并允许少量结构化权重作为同类内排序依据
-- 主框架与 capability 是明确上下级关系：主框架只管拆解、编排、分发；NL2SQL 等 capability 只管各自执行
+- 主框架与 capability 是明确上下级关系：主框架只管拆解、编排、分发；SQLQuery 等 capability 只管各自执行
 
 ### 5.2 协作与生命周期决策
 - 结构化 mailbox 采用统一信封 + channel + typed payload 模型
@@ -83,21 +83,21 @@
 - PostgreSQL 存结构化状态与索引，不直接存大对象正文
 - PostgreSQL DDL 采用 ORM Model + migration 生成；一期索引策略为基础索引 + 少量关键增强索引
 
-### 5.4 NL2SQL 决策
-- NL2SQL 是一期首个 MVP 样例
+### 5.4 SQLQuery 决策
+- SQLQuery 是一期首个 MVP 样例
 - 只允许只读查询
 - 当前 MySQL 执行账号为 `chatu:chatu123`，已确认只读
 - 外部 LLM 迟到结果不回写主任务，仅审计可见
 
 ## 6. 相关配套文档
 - 数据库结构说明：`docs/MySQL数据库表结构说明.md`
-- NL2SQL prompt 输入模板：`docs/NL2SQL提示词输入模板.md`
+- SQLQuery prompt 输入模板：`docs/SQLQuery提示词输入模板.md`
 - PRD 解耦方案：`docs/PRD解耦重构方案.md`
 
 ## 7. 使用建议
 - 做全局规划时先读本文件
 - 做局部设计或开发计划时优先读取对应专题文档
-- 需要做 NL2SQL 实现或提示词设计时，配合 `docs/prd/06-NL2SQL-MVP设计.md` 与 `docs/NL2SQL提示词输入模板.md` 一起阅读
+- 需要做 SQLQuery 实现或提示词设计时，配合 `docs/prd/06-SQLQuery-MVP设计.md` 与 `docs/SQLQuery提示词输入模板.md` 一起阅读
 
 ## 8. 后续专题设计与演进项
 以下事项不阻碍当前 PRD 作为正式基线，但建议在后续专题设计中继续细化：

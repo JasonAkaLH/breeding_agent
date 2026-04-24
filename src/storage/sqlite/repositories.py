@@ -501,6 +501,10 @@ class SQLiteCollaborationRepository:
         return [_row_to_mailbox_delivery(row) for row in rows]
 
     def save_interrupt(self, interrupt: Interrupt) -> Interrupt:
+        existing = self._session.get(InterruptRow, interrupt.interrupt_id)
+        incoming_status = str(interrupt.status)
+        if existing is not None and str(existing.status) in {"answered", "cancelled", "expired"} and incoming_status == "open":
+            return _row_to_interrupt(existing)
         row = InterruptRow(
             interrupt_id=interrupt.interrupt_id,
             conversation_id=interrupt.conversation_id,

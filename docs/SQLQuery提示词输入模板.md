@@ -1,0 +1,370 @@
+# SQLQuery Prompt 输入模板
+
+> 适用范围：本模板用于 `sql_query.sql_generate` 阶段的提示词输入拼装，不覆盖路由识别、SQL 执行或结果汇总阶段。
+>
+> 参考来源：
+> - `docs/主代理框架PRD.md`
+> - `docs/prd/06-SQLQuery-MVP设计.md`
+> - `configs/sql_query/routing_rules.yaml`
+> - `configs/sql_query/schema_metadata.yaml`
+> - `configs/sql_query/sql_guard_rules.yaml`
+> - `docs/MySQL数据库表结构说明.md`
+
+## 1. Prompt 目标
+
+这个 prompt 的目标不是“让模型自由写 SQL”，而是让模型在**最小必要上下文**下生成一条**可被后续 guard 严格校验的只读 SQL 草案**，或者在信息不足时明确澄清，或者在超出能力边界时拒答。
+
+核心目标如下：
+
+1. **路由感知**：明确当前任务属于哪条 SQLQuery 路线。
+2. **最小上下文**：只注入与当前问题直接相关的 schema 子集，避免把整库 schema 原样塞给模型。
+3. **只读优先**：生成结果必须服从只读约束，不能尝试写入、DDL、导出、锁表等操作。
+4. **可审计**：输出必须结构化，便于后续 guard、执行器和审计日志消费。
+5. **可澄清 / 可拒答**：当路由不清晰、范围超出或约束冲突时，优先澄清或拒答，而不是猜测。
+
+---
+
+## 2. 输入块结构
+
+建议按“强约束在前、弱约束在后”的顺序拼装 prompt。推荐块顺序如下：
+
+1. **任务元信息**
+   - 节点名：`sql_query.sql_generate`
+   - 任务类型：只读 SQL 生成
+   - 会话 / 任务标识：`conversation_id`、`task_id`
+
+2. **路由块**
+   - `route_id`
+   - `display_name`
+   - `route_description`
+   - `supported_scope`
+   - `ambiguity_strategy`
+   - `allowed_tables`
+
+3. **Schema Context 块**
+   - `schema_profile_id`
+   - `selected_tables`
+   - `selected_columns`
+   - `join_hints`
+   - `business_constraints`
+   - `context_summary`
+
+4. **SQL Guard 块**
+   - SQL policy profile
+   - 允许 / 禁止的语句类型
+   - 单语句与只读约束
+   - 表白名单约束
+   - 形状限制（limit、join 数量、列数等）
+
+5. **用户问题块**
+   - 用户原始问题
+   - 可选的意图摘要
+   - 可选的结构化槽位结果
+
+6. **输出格式块**
+   - 明确要求模型只输出结构化结果
+   - 明确三种模式：`answer`、`clarify`、`reject`
+
+### 2.1 推荐模板示意
+
+```text
+【任务元信息】
+node_name: sql_query.sql_generate
+conversation_id: {{conversation_id}}
+task_id: {{task_id}}
+
+【路由块】
+route_id: {{route_id}}
+display_name: {{display_name}}
+route_description: {{route_description}}
+supported_scope: {{supported_scope}}
+ambiguity_strategy: {{ambiguity_strategy}}
+allowed_tables: {{allowed_tables}}
+
+【Schema Context】
+schema_profile_id: {{schema_profile_id}}
+selected_tables: {{selected_tables}}
+selected_columns: {{selected_columns}}
+join_hints: {{join_hints}}
+business_constraints: {{business_constraints}}
+context_summary: {{context_summary}}
+
+【SQL Guard】
+sql_policy_profile: strict_readonly_mysql
+allowed_statement_types: SELECT, WITH ... SELECT
+single_statement_only: true
+readonly_only: true
+deny_system_schemas: true
+deny_multi_statement: true
+require_limit_for_non_aggregate_query: true
+max_limit: 200
+max_joins: 6
+
+【用户问题】
+{{user_question}}
+
+【输出要求】
+只输出 JSON，不要输出 Markdown，不要输出解释性自然语言。
+```
+
+---
+
+## 3. route / schema context / SQL guard 约束如何注入
+
+### 3.1 route 注入
+
+route 层只做“**业务域定界**”，不直接给模型整库信息。
+
+注入来源：`configs/sql_query/routing_rules.yaml`
+
+建议注入字段：
+
+| 字段 | 作用 | 说明 |
+|---|---|---|
+| `route_id` | 路由主键 | 例如 `approval_variety_db`、`genotype_db` |
+| `display_name` | 人类可读名称 | 例如“审定品种库”“基因型数据库” |
+| `description` | 路由语义 | 说明这条路线能查什么 |
+| `allowed_tables` | 业务白名单 | 只允许该路线内表进入上下文 |
+| `ambiguity_strategy` | 歧义策略 | 指示何时先澄清 |
+| `examples` | 典型样例 | 帮助模型理解路由边界 |
+
+注入原则：
+- `default_route = clarify` 的含义要保留在 prompt 中；
+- 若多个 route 置信度接近，**不要强行生成 SQL**；
+- 路由信息是硬约束，不是建议项；
+- 路由一旦确定，后续 schema 只能在该 route 范围内裁剪。
+
+### 3.2 schema context 注入
+
+schema 层只做“**必要字段裁剪**”，不注入全库 schema。
+
+注入来源：`configs/sql_query/schema_metadata.yaml`
+
+建议注入字段：
+
+| 字段 | 作用 | 说明 |
+|---|---|---|
+| `schema_profile_id` | 路线对应 schema profile | 例如 `approval_variety_profile`、`genotype_profile` |
+| `selected_tables` | 当前问题相关表 | 由 context builder 选出 |
+| `selected_columns` | 当前问题相关字段 | 只保留 `expose_to_llm: true` 且有用的字段 |
+| `join_hints` | 显式连接关系 | 仅注入白名单 join，不让模型猜 |
+| `business_constraints` | 业务限制 | 例如作物范围、路线范围、只读要求 |
+| `context_summary` | 压缩摘要 | 让模型快速理解可用数据 |
+
+注入原则：
+- 只保留 `expose_to_llm: true` 的字段；
+- 主键、自增 ID 等若对查询无帮助，可不默认暴露；
+- 多表 join 只注入显式关系，不允许模型自行虚构关联；
+- 审定品种库路线优先单表；基因型数据库路线仅在确有必要时才组合多表；
+- 如果 route 未确定或表无法匹配，**先澄清，不生成 SQL**。
+
+### 3.3 SQL guard 注入
+
+SQL guard 层是“**最终硬约束**”，优先级高于用户问题和模型偏好。
+
+注入来源：
+- `configs/sql_query/sql_guard_rules.yaml`
+- `configs/sql_query/routing_rules.yaml` 中的 `sql_policy_profile`
+
+建议注入字段：
+
+| 字段 | 作用 | 说明 |
+|---|---|---|
+| `allowed_statement_types` | 允许的语句类型 | 仅 `SELECT`、只读 `WITH ... SELECT` |
+| `single_statement_only` | 单语句约束 | 禁止多语句 |
+| `readonly_only` | 只读约束 | 禁止 DML / DDL / 锁表 / 导入导出 |
+| `deny_system_schemas` | 系统库屏蔽 | 禁止 `mysql`、`information_schema` 等 |
+| `require_limit_for_non_aggregate_query` | LIMIT 约束 | 非聚合查询必须显式 LIMIT |
+| `max_limit` | 最大返回量 | 当前为 200 |
+| `max_joins` | 复杂度上限 | 当前为 6 |
+| `deny_patterns` / `deny_functions` | 风险拦截 | 如 `OUTFILE`、`LOAD DATA`、`sleep()` 等 |
+| `execution_contract` | 执行前提 | 必须有 route context、schema profile、guard pass token |
+
+注入原则：
+- guard 规则要写成“必须遵守”的语句，而不是建议；
+- 如果 guard 规则和用户需求冲突，**guard 胜出**；
+- 如果模型无法确定某条 SQL 是否安全，应该转入 `clarify` 或 `reject`；
+- 不要把 guard YAML 原文整块灌给模型，只注入执行所需子集。
+
+---
+
+## 4. 结果输出格式要求
+
+这个阶段的输出应当是**机器可解析的结构化 JSON**，而不是自然语言长段解释。推荐只保留三种模式：
+
+| `mode` | 触发条件 | 必填字段 |
+|---|---|---|
+| `answer` | 已经能生成满足约束的只读 SQL | `sql`、`route_id`、`schema_profile_id`、`tables_used` |
+| `clarify` | 信息不足，但仍在支持范围内 | `clarifying_question`、`missing_info` |
+| `reject` | 请求超出范围或触发硬性拒绝条件 | `reject_reason`、`supported_scope_hint` |
+
+### 4.1 推荐 JSON 结构
+
+```json
+{
+  "mode": "answer",
+  "route_id": "genotype_db",
+  "schema_profile_id": "genotype_profile",
+  "sql": "SELECT ...",
+  "tables_used": ["variety", "variety_genotype", "qtn"],
+  "columns_used": ["variety.variety_name", "qtn.qtn_seq", "qtn.gene_name", "variety_genotype.genotype"],
+  "join_hints_used": [
+    "variety_genotype.variety_id = variety.variety_id",
+    "variety_genotype.qtn_id = qtn.qtn_id"
+  ],
+  "missing_info": null,
+  "clarifying_question": null,
+  "reject_reason": null
+}
+```
+
+### 4.2 输出约束
+
+- `answer` 模式下，`sql` 必须是**单条只读 SQL**；
+- 不要输出 Markdown 代码块；
+- 不要输出额外解释文本；
+- `clarify` / `reject` 时，`sql` 必须为空或 `null`；
+- `reject` 必须给出明确、简短、可审计的拒答原因；
+- `clarify` 只能问一个最关键的问题，避免一次抛出多个问题。
+
+---
+
+## 5. 澄清与拒答策略
+
+### 5.1 何时澄清
+
+以下情况优先澄清，不直接生成 SQL：
+
+1. **路由歧义**
+   - 审定品种库与基因型数据库都可能匹配；
+   - 两条 route 置信度接近。
+
+2. **审定品种库作物缺失**
+   - 已判断为 `approval_variety_db`；
+   - 但问题里没有明确玉米 / 水稻 / 棉花 / 小麦 / 大豆中的任一种。
+
+3. **基因型路线的目标对象不清**
+   - 品种名、QTN 位点、基因名三者之一缺失；
+   - 无法确定应优先查哪张表或怎么 join。
+
+4. **schema 信息不足**
+   - 目标表能确定，但字段选择还缺关键上下文；
+   - 允许一次补充上下文后再生成。
+
+澄清时的要求：
+- 只问一个问题；
+- 问题要尽量可直接回答；
+- 不要把“为什么要问”写得太长；
+- 不要同时问多个维度。
+
+### 5.2 何时拒答
+
+以下情况应直接拒答，不进入 SQL 生成：
+
+- 请求超出当前支持范围；
+- 请求写入、更新、删除、建表、改表、导出文件；
+- 请求访问系统 schema 或 route 白名单外表；
+- 请求绕过 guard、关闭校验、放宽只读限制；
+- 用户要求“无视限制直接执行”；
+- 模型无法确认安全性，且澄清也无法消除风险。
+
+拒答时的要求：
+- 明确说明当前 SQLQuery 只支持只读查询；
+- 给出支持范围提示；
+- 不输出任何可执行 SQL。
+
+---
+
+## 6. 审定品种库与基因型数据库两条路线示例
+
+### 6.1 审定品种库路线示例
+
+**用户问题**
+
+> 近五年水稻审定品种有哪些？
+
+**建议注入**
+
+- `route_id`: `approval_variety_db`
+- `schema_profile_id`: `approval_variety_profile`
+- `allowed_tables`: `rice_varieties`
+- `route_description`: 用于查询审定品种、品种公告、申请审定、品种特征、产量表现、适种区域等信息
+- `business_constraints`:
+  - 当前只支持五种作物：玉米、水稻、棉花、小麦、大豆
+  - 作物已明确，可直接进入水稻子域
+- `selected_columns`（示例）：
+  - `year`
+  - `crop_name`
+  - `variety_name`
+  - `approval_num`
+  - `applicant`
+  - `breeder`
+  - `suitable_area`
+
+**模板关注点**
+
+- 不要把五张审定表都一起塞给模型；
+- 既然用户明确说了“水稻”，优先只用 `rice_varieties`；
+- 如果用户只说“审定品种有哪些”但没给作物，应先澄清“你想查哪一类作物的审定品种？”。
+
+**期望输出**
+
+- `mode = answer`
+- SQL 为单表只读查询；
+- 若需时间过滤，必须显式体现“近五年”的年份条件；
+- 若结果不是聚合统计，SQL 必须带 `LIMIT`。
+
+### 6.2 基因型数据库路线示例
+
+**用户问题**
+
+> 查询品种 XX 在 QTN12 位点上的基因型。
+
+**建议注入**
+
+- `route_id`: `genotype_db`
+- `schema_profile_id`: `genotype_profile`
+- `allowed_tables`: `variety`, `variety_genotype`, `qtn`, `rice_comp`
+- `route_description`: 用于查询品种的基因型、QTN、变异位点、籼粳成分等信息
+- `business_constraints`:
+  - 只允许查与品种、QTN、基因型、籼粳成分相关的数据
+  - join 关系必须使用白名单显式关系
+- `selected_tables`（示例）：
+  - `variety`
+  - `variety_genotype`
+  - `qtn`
+- `selected_columns`（示例）：
+  - `variety.variety_name`
+  - `qtn.qtn_seq`
+  - `qtn.gene_name`
+  - `variety_genotype.genotype`
+  - `variety_genotype.phenotype`
+- `join_hints`：
+  - `variety_genotype.variety_id = variety.variety_id`
+  - `variety_genotype.qtn_id = qtn.qtn_id`
+
+**模板关注点**
+
+- 不要把 `rice_comp` 默认拉进来，除非用户问的是籼粳成分比例；
+- 如果“XX”不是已知品种名，先澄清品种名称；
+- 如果用户没有明确 QTN 还是基因名，也不要盲目猜 join；
+- 只要问题明确到“某品种在某 QTN 位点上的基因型”，优先组合 `variety + variety_genotype + qtn`。
+
+**期望输出**
+
+- `mode = answer`
+- SQL 为多表只读查询，但仍必须满足单语句、只读、无系统库访问；
+- 结果字段应优先包含品种名、位点标识、基因名、基因型信息；
+- 如涉及非聚合明细查询，必须显式 LIMIT。
+
+---
+
+## 7. 结论
+
+这份输入模板的核心原则只有三条：
+
+1. **先路由，再裁剪 schema，再注入 guard**；
+2. **只读、单语句、白名单优先，不能靠模型自觉**；
+3. **信息不足就澄清，风险不明就拒答**。
+
+只要 prompt 按这个顺序拼装，后续的 SQL 生成、guard 校验和执行层就能各司其职，不会把职责混在一起。
