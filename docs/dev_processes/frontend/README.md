@@ -9,8 +9,8 @@
 | Phase 0 | 冻结 v1 范围、选型与验收边界 | 前端边界、目录约定、验收命令 | 已完成 |
 | Phase 1 | 建立 Vite React 工程骨架 | `frontend/` 工程、测试/构建脚本、Vite proxy | 已完成 |
 | Phase 2 | API/SSE/状态模型契约层 | TypeScript DTO、API client、SSE event reducer、artifact parser | 已完成 |
-| Phase 3 | 业务对话台 UI 主路径 | 页面布局、模式选择、streaming 气泡、状态条、取消 | 已完成 |
-| Phase 4 | SQLQuery 结果卡片与降级 | 摘要、简表预览、artifact 降级、隐藏技术细节 | 已完成 |
+| Phase 3 | 业务对话台 UI 主路径 | 页面布局、自动规划模式展示、streaming 气泡、状态条、取消 | 已完成 |
+| Phase 4 | SQLQuery 结果卡片与降级 | 主代理回答、简表预览、artifact 降级、隐藏技术细节 | 已完成 |
 | Phase 5 | 全栈联调与人工验证脚本 | `scripts/run_fullstack_dev.py`、验收说明、回归证据 | 已完成 |
 
 ## 执行顺序

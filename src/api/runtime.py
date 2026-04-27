@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -12,6 +14,7 @@ from sqlalchemy import Engine
 
 from src.capabilities.main_agent import (
     MAIN_AGENT_CAPABILITY_DESCRIPTORS,
+    MAIN_AGENT_PLANNER_PAYLOAD_POLICIES,
     MainAgentExecutor,
     MainAgentWorkflowProvider,
     StreamGenerator,
@@ -20,6 +23,7 @@ from src.capabilities.main_agent import (
 from src.capabilities.sql_query import (
     SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS,
     SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS,
+    SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES,
     SQLQueryExecutor,
     SQLQueryWorkflowProvider,
     build_local_sql_query_instance,
@@ -35,7 +39,11 @@ from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.interrupt_service import InterruptService
 from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
-from src.orchestration.models import OrchestrationRequest
+from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
+from src.orchestration.llm_workflow_provider import LLMWorkflowProvider
+from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowPlan
+from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
+from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.composite_executor import CompositeExecutor
 from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
 from src.orchestration.scheduler import Scheduler
@@ -180,7 +188,9 @@ class ApiRuntime:
 
     async def _run_execution(self, request: OrchestrationRequest, *, active_task_count: int) -> None:
         try:
-            plan = self.workflow_provider.build_plan(request)
+            plan_result = self.workflow_provider.build_plan(request)
+            plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
+            await self._record_plan_built(request, plan)
             await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
         except Exception as exc:
             await self._mark_task_failed(request, exc)
@@ -203,6 +213,24 @@ class ApiRuntime:
                 payload={"code": "execution_crash", "message": str(exc)},
             )
         )
+
+    async def _record_plan_built(self, request: OrchestrationRequest, plan: WorkflowPlan) -> None:
+        await self._record_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="workflow.plan_built",
+                payload={
+                    "node_count": len(plan.nodes),
+                    "metadata": self._json_safe_mapping(plan.metadata),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+
+    @staticmethod
+    def _json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+        return json.loads(json.dumps(dict(value), ensure_ascii=False, default=str))
 
     async def _clear_conversation_current_task(self, conversation_id: str, task_id: str) -> None:
         conversation = await self.storage.get_conversation(conversation_id)
@@ -369,8 +397,19 @@ def build_api_runtime(
     audit_log_path: str | Path,
     mysql_adapter: MySQLReadonlyAdapter | None = None,
     sql_generator=None,
-    summarizer=None,
     llm_text_generator=None,
+    sql_query_llm_config: Mapping[str, Any] | None = None,
+    sql_query_llm_config_path: str | Path | None = None,
+    sql_query_llm_client_factory: Callable[..., Any] | None = None,
+    sql_query_reasoning_effort: ReasoningEffort = "minimal",
+    enable_sql_query_llm: bool = True,
+    planner_text_generator: PlannerTextGenerator | None = None,
+    planner_llm_config: Mapping[str, Any] | None = None,
+    planner_llm_config_path: str | Path | None = None,
+    planner_llm_client_factory: Callable[..., Any] | None = None,
+    planner_reasoning_effort: ReasoningEffort = "minimal",
+    enable_llm_planner: bool = True,
+    planner_payload_policies: Mapping[str, CapabilityPayloadPolicy] | None = None,
     main_agent_stream_generator: StreamGenerator | None = None,
     main_agent_llm_config: Mapping[str, Any] | None = None,
     main_agent_llm_config_path: str | Path | None = None,
@@ -384,12 +423,17 @@ def build_api_runtime(
     storage = SQLiteStorage(create_sqlite_session_factory(engine))
 
     capability_registry = CapabilityRegistry()
-    for descriptor in MAIN_AGENT_CAPABILITY_DESCRIPTORS:
-        capability_registry.register(descriptor)
-    for descriptor in SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS:
-        capability_registry.register(descriptor)
-    for descriptor in SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS:
-        capability_registry.register(descriptor)
+    _register_capability_descriptors(
+        capability_registry,
+        MAIN_AGENT_CAPABILITY_DESCRIPTORS,
+        planner_payload_policies=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES,
+    )
+    _register_capability_descriptors(
+        capability_registry,
+        SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS,
+        planner_payload_policies=SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES,
+    )
+    _register_capability_descriptors(capability_registry, SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS)
 
     instance_registry = InstanceRegistry()
     instance_registry.register(build_local_main_agent_instance())
@@ -415,6 +459,14 @@ def build_api_runtime(
         main_agent_llm_client_factory=main_agent_llm_client_factory,
         main_agent_reasoning_effort=main_agent_reasoning_effort,
     )
+    resolved_sql_query_text_generator = _resolve_sql_query_text_generator(
+        llm_text_generator=llm_text_generator,
+        sql_query_llm_config=sql_query_llm_config,
+        sql_query_llm_config_path=sql_query_llm_config_path,
+        sql_query_llm_client_factory=sql_query_llm_client_factory,
+        sql_query_reasoning_effort=sql_query_reasoning_effort,
+        enable_sql_query_llm=enable_sql_query_llm,
+    )
 
     cancellation_service = CancellationService(storage, event_sink=event_broker, audit_sink=audit_sink)
     interrupt_service = InterruptService(storage, event_sink=event_broker, audit_sink=audit_sink)
@@ -428,14 +480,14 @@ def build_api_runtime(
                 MainAgentExecutor(
                     stream_generator=resolved_main_agent_stream_generator,
                     stream_metadata=main_agent_stream_metadata,
+                    default_reasoning_effort=main_agent_reasoning_effort,
                     skill_catalog=resolved_skill_catalog,
                     live_event_recorder=record_live_event,
                 ),
                 SQLQueryExecutor(
                     mysql_adapter=resolved_mysql_adapter,
                     sql_generator=sql_generator,
-                    summarizer=summarizer,
-                    llm_text_generator=llm_text_generator,
+                    llm_text_generator=resolved_sql_query_text_generator,
                 ),
             ]
         ),
@@ -443,6 +495,28 @@ def build_api_runtime(
         backpressure=BackpressureGuard(max_active_tasks=10),
         event_sink=event_broker,
     )
+    main_agent_workflow_provider = MainAgentWorkflowProvider()
+    sql_query_workflow_provider = SQLQueryWorkflowProvider()
+    auto_workflow_provider = AutoWorkflowProvider(
+        main_agent_provider=main_agent_workflow_provider,
+        macro_providers={"sql_query.query": sql_query_workflow_provider},
+    )
+    resolved_planner_text_generator = _resolve_planner_text_generator(
+        planner_text_generator=planner_text_generator,
+        planner_llm_config=planner_llm_config,
+        planner_llm_config_path=planner_llm_config_path,
+        planner_llm_client_factory=planner_llm_client_factory,
+        planner_reasoning_effort=planner_reasoning_effort,
+        enable_llm_planner=enable_llm_planner,
+    )
+    default_workflow_provider = LLMWorkflowProvider(
+        capability_registry=capability_registry,
+        fallback_provider=auto_workflow_provider,
+        macro_providers={"sql_query.query": sql_query_workflow_provider},
+        text_generator=resolved_planner_text_generator,
+        payload_policies=planner_payload_policies,
+    )
+
     return ApiRuntime(
         engine=engine,
         storage=storage,
@@ -453,12 +527,106 @@ def build_api_runtime(
         interrupt_service=interrupt_service,
         orchestration_service=orchestration_service,
         workflow_provider=WorkflowRouter(
-            default_provider=MainAgentWorkflowProvider(),
-            main_agent_provider=MainAgentWorkflowProvider(),
-            sql_query_provider=SQLQueryWorkflowProvider(),
+            default_provider=default_workflow_provider,
+            main_agent_provider=main_agent_workflow_provider,
+            sql_query_provider=sql_query_workflow_provider,
         ),
         mysql_adapter=resolved_mysql_adapter,
     )
+
+
+def _resolve_sql_query_text_generator(
+    *,
+    llm_text_generator,
+    sql_query_llm_config: Mapping[str, Any] | None,
+    sql_query_llm_config_path: str | Path | None,
+    sql_query_llm_client_factory: Callable[..., Any] | None,
+    sql_query_reasoning_effort: ReasoningEffort,
+    enable_sql_query_llm: bool,
+):
+    if llm_text_generator is not None:
+        return llm_text_generator
+    if not enable_sql_query_llm:
+        return None
+
+    factory = sql_query_llm_client_factory or LLMClient
+    kwargs: dict[str, Any] = {}
+    if sql_query_llm_config is not None:
+        kwargs["config"] = dict(sql_query_llm_config)
+    elif sql_query_llm_config_path is not None:
+        kwargs["config_path"] = sql_query_llm_config_path
+
+    client_ref: dict[str, Any] = {}
+
+    async def generate(prompt: str) -> str:
+        client = client_ref.get("client")
+        if client is None:
+            client = factory(**kwargs)
+            client_ref["client"] = client
+        generate_text = getattr(client, "generate_text", None)
+        if not callable(generate_text):
+            raise TypeError("SQLQuery LLM client must provide generate_text(prompt, ...).")
+        result = generate_text(
+            prompt,
+            thinking=False,
+            reasoning_effort=sql_query_reasoning_effort,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return str(result or "")
+
+    return generate
+
+
+def _register_capability_descriptors(
+    capability_registry: CapabilityRegistry,
+    descriptors: Iterable[CapabilityDescriptor],
+    *,
+    planner_payload_policies: Mapping[str, CapabilityPayloadPolicy] | None = None,
+) -> None:
+    policies = dict(planner_payload_policies or {})
+    for descriptor in descriptors:
+        capability_registry.register(
+            descriptor,
+            planner_payload_policy=policies.get(descriptor.capability_id),
+        )
+
+
+def _resolve_planner_text_generator(
+    *,
+    planner_text_generator: PlannerTextGenerator | None,
+    planner_llm_config: Mapping[str, Any] | None,
+    planner_llm_config_path: str | Path | None,
+    planner_llm_client_factory: Callable[..., Any] | None,
+    planner_reasoning_effort: ReasoningEffort,
+    enable_llm_planner: bool,
+) -> PlannerTextGenerator | None:
+    if planner_text_generator is not None:
+        return planner_text_generator
+    if not enable_llm_planner:
+        return None
+
+    factory = planner_llm_client_factory or LLMClient
+    kwargs: dict[str, Any] = {}
+    if planner_llm_config is not None:
+        kwargs["config"] = dict(planner_llm_config)
+    elif planner_llm_config_path is not None:
+        kwargs["config_path"] = planner_llm_config_path
+
+    client_ref: dict[str, Any] = {}
+
+    async def generate(prompt: str) -> str:
+        client = client_ref.get("client")
+        if client is None:
+            client = factory(**kwargs)
+            client_ref["client"] = client
+        return await client.generate_text(
+            prompt,
+            thinking=False,
+            reasoning_effort=planner_reasoning_effort,
+        )
+
+    return generate
 
 
 def _resolve_main_agent_stream_binding(
@@ -492,11 +660,11 @@ def _resolve_main_agent_stream_binding(
 
     client = factory(**kwargs)
 
-    async def stream(prompt: str):
-        async for chunk in client.stream_text(prompt, reasoning_effort=main_agent_reasoning_effort):
-            yield chunk
+    stream_generator = getattr(client, "generate_text_with_thinking", None)
+    if not callable(stream_generator):
+        stream_generator = client.stream_text
 
-    return stream, _safe_llm_client_metadata(
+    return stream_generator, _safe_llm_client_metadata(
         client,
         config_source=config_source,
         reasoning_effort=main_agent_reasoning_effort,

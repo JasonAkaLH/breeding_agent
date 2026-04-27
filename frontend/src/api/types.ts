@@ -1,4 +1,5 @@
 export type ChatMode = 'chat' | 'sql_query';
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
 export interface SubmitMessageRequest {
   account_id: string;
@@ -21,12 +22,19 @@ export interface TaskSummaryResponse {
   conversation_id: string;
   status: string;
   root_node_id: string | null;
+  summary: string | null;
+  requested_capability_id: string | null;
   active_node_count: number;
   completed_node_count: number;
   failed_node_count: number;
   cancel_requested: boolean;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface TaskListResponse {
+  conversation_id: string;
+  tasks: TaskSummaryResponse[];
 }
 
 export interface TaskNodeResponse {
@@ -66,6 +74,29 @@ export interface ArtifactResponse {
 export interface TaskArtifactsResponse {
   task_id: string;
   artifacts: ArtifactResponse[];
+}
+
+export interface InterruptResponse {
+  interrupt_id: string;
+  conversation_id: string;
+  task_id: string;
+  node_id: string;
+  question: string;
+  reason_code: string;
+  required_fields: Record<string, unknown>;
+  status: string;
+}
+
+export interface TaskInterruptsResponse {
+  task_id: string;
+  interrupts: InterruptResponse[];
+}
+
+export interface AnswerInterruptResponse {
+  interrupt_id: string;
+  status: string;
+  node_id: string;
+  answer_payload: Record<string, unknown>;
 }
 
 export interface CancelTaskResponse {

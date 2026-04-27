@@ -25,12 +25,12 @@
 - `sql_query.sql_generate`：基于自然语言与 schema 生成 SQL 草案
 - `sql_query.sql_guard`：校验 SQL 是否只读、是否单语句、是否命中禁用模式
 - `sql_query.sql_execute_readonly`：执行只读 SQL 并返回结构化结果
-- `sql_query.result_summarize`：将 SQL 结果整理为用户可读回复
+- `sql_query.result_filtering`：对 SQL LIKE 召回的候选结果做二次筛选并返回筛选后的表格
 
 其中：
 - `sql_query.sql_guard`、`sql_query.sql_execute_readonly` 建议为**专用任务型 Agent / 执行器**
 - `sql_query.sql_generate` 可由外部 LLM 支撑
-- `sql_query.result_summarize` 可由外部 LLM 或轻量 summarizer 执行
+- `sql_query.result_filtering` 可由外部 LLM 判断候选行是否符合用户需求，失败时保守保留候选表格
 
 ### 10.5.2 首阶段标准 DAG
 建议一期标准链路默认生成如下主干 DAG：
@@ -64,9 +64,9 @@
    - criticality：`required`
    - 依赖：D
 
-6. **节点 F：结果汇总**
-   - capability：`sql_query.result_summarize`
-   - 作用：将查询结果转换为用户可读答复
+6. **节点 F：结果筛选**
+   - capability：`sql_query.result_filtering`
+   - 作用：结合用户问题筛选 SQL 查询返回的候选表格行
    - criticality：`required`
    - 依赖：E
 
@@ -86,7 +86,7 @@
 | C SQL 生成 | required | 1 次 | 30s | 外部 LLM 超时可重试一次 |
 | D SQL Guard | required | 0 次 | 5s | 校验失败不直接重试执行，优先进入一次修复回路 |
 | E SQL 执行 | required | 0-1 次 | 60s | 只对可判定的瞬时数据库错误允许有限重试 |
-| F 结果汇总 | required | 1 次 | 20s | 汇总失败可回退为原始表格摘要 |
+| F 结果筛选 | required | 1 次 | 20s | 筛选失败可回退为未筛选候选表格 |
 
 ### 10.5.5 SQL 安全边界（首阶段建议）
 一期 SQLQuery MVP 建议采用严格白名单策略：
@@ -141,7 +141,7 @@ SQLQuery 链路建议至少沉淀以下 artifact：
 - `generated_sql`：生成后的 SQL 文本
 - `guard_report`：SQL 校验结果
 - `query_result_preview`：结果预览
-- `result_summary`：面向用户的最终汇总文本
+- `filtered_query_result`：经结果筛选后的最终表格
 
 ### 10.5.7 SQLQuery 专项事件建议
 除通用事件外，一期建议补充以下专项事件：
@@ -152,7 +152,7 @@ SQLQuery 链路建议至少沉淀以下 artifact：
 - `sql_query.sql_guard_blocked`
 - `sql_query.write_blocked`
 - `sql_query.query_executed`
-- `sql_query.result_summarized`
+- `sql_query.result_filtered`
 
 ### 10.5.8 SQLQuery 失败边界建议
 一期建议按以下边界处理失败：
@@ -161,7 +161,7 @@ SQLQuery 链路建议至少沉淀以下 artifact：
 - **疑似写入 / DDL / 高风险语句**：直接阻断，不进入执行阶段，不允许自动放行
 - **数据库瞬时连接错误**：允许有限重试
 - **SQL 执行语义错误**：记录审计并终止当前任务
-- **结果汇总失败**：允许降级输出结构化原始结果摘要
+- **结果筛选失败**：允许降级输出原始候选表格，并保留 fallback 标记
 
 ## 10.6 Schema Context Builder 规则草案
 ### 10.6.1 目标
@@ -442,7 +442,7 @@ columns:
    - 任务理解 / 路由节点
    - Schema / 查询上下文准备节点
    - SQL 生成与安全校验节点
-   - SQL 执行与结果汇总节点
+   - SQL 执行与结果筛选节点
 5. 通过外部 LLM 生成 SQL，并通过数据库访问适配层访问 MySQL
 6. 一期只允许执行只读 SQL；对非只读语句必须在校验阶段拦截
 7. 将生成 SQL、校验结果、执行摘要、节点状态、任务状态、关键产物、最终消息持久化

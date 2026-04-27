@@ -22,11 +22,17 @@ class SQLQuerySchemaContextPrepareCapability(CapabilityContract):
 
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         upstream = find_dependency_output(request, ("route_id", "schema_profile_id", "user_question"))
+        route_id = str(upstream["route_id"])
+        allowed_tables = list(upstream.get("allowed_tables", []))
+        max_tables = max(4, len(allowed_tables)) if route_id == "variety_overview" else 4
+        max_columns_per_table = 16 if route_id == "approval_variety_db" else 8
         schema_request = SchemaContextRequest(
-            route_id=str(upstream["route_id"]),
+            route_id=route_id,
             schema_profile_id=str(upstream["schema_profile_id"]),
             user_question=str(upstream["user_question"]),
             hints={"crop": upstream.get("inferred_crop")} if upstream.get("inferred_crop") else None,
+            max_tables=max_tables,
+            max_columns_per_table=max_columns_per_table,
         )
         result = await self._builder.build_context(schema_request)
         if result.ok:

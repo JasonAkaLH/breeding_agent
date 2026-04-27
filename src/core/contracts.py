@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 
+from .enums import TaskStatus
 from .models import (
     Artifact,
     Checkpoint,
@@ -72,6 +73,8 @@ class StoragePort(Protocol):
     async def get_task(self, task_id: str) -> Task | None: ...
 
     async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None: ...
+
+    async def list_tasks_for_conversation(self, conversation_id: str, statuses: Iterable[TaskStatus] | None = None) -> list[Task]: ...
 
     async def save_task_node(self, node: TaskNode) -> TaskNode: ...
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
+
 from src.orchestration.models import OrchestrationRequest, WorkflowPlan
 
 
@@ -9,7 +11,7 @@ class WorkflowRouter:
         self._main_agent_provider = main_agent_provider
         self._sql_query_provider = sql_query_provider
 
-    def build_plan(self, request: OrchestrationRequest) -> WorkflowPlan:
+    def build_plan(self, request: OrchestrationRequest) -> WorkflowPlan | Awaitable[WorkflowPlan]:
         capability_id = request.requested_capability_id
         if capability_id is None:
             return self._default_provider.build_plan(request)

@@ -133,6 +133,34 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
         self.assertTrue(call["stream"])
 
+    def test_stream_text_can_enable_thinking_for_main_agent_output(self) -> None:
+        client = self.make_client()
+        fake_completions = _FakeCompletions(
+            [
+                _chunk(reasoning="reasoning should stay hidden"),
+                _chunk(answer="answer"),
+            ]
+        )
+        client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+        async def collect() -> list[str]:
+            return [
+                chunk
+                async for chunk in client.stream_text(
+                    "prompt",
+                    reasoning_effort="high",
+                    thinking=True,
+                )
+            ]
+
+        chunks = asyncio.run(collect())
+
+        self.assertEqual(chunks, ["answer"])
+        call = fake_completions.calls[0]
+        self.assertEqual(call["reasoning_effort"], "high")
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertTrue(call["stream"])
+
     def test_generate_text_uses_non_streaming_completion_for_structured_tasks(self) -> None:
         client = self.make_client()
         fake_completions = _FakeCompletions(response=_completion('{"mode":"answer"}'))

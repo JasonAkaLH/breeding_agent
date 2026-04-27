@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, Iterable
 
-from .models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from .models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 
 
 PLANNER_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
@@ -39,24 +39,80 @@ class PlannerOutputError(ValueError):
 TextGenerator = Callable[[str], str | Awaitable[str]]
 
 
-def build_planner_prompt(request: OrchestrationRequest) -> str:
+def build_planner_prompt(
+    request: OrchestrationRequest,
+    *,
+    public_capabilities: Iterable[CapabilityDescriptor] | None = None,
+    planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
+) -> str:
     schema = json.dumps(PLANNER_OUTPUT_JSON_SCHEMA, ensure_ascii=False, indent=2)
+    capability_block = _format_public_capabilities(
+        public_capabilities,
+        planner_payload_allowlist=planner_payload_allowlist,
+    )
     return (
         "You are a bounded high-level workflow planner. "
-        "Return JSON only. You may use public capabilities such as sql_query.query and main_agent.respond. "
-        "Never emit SQLQuery internal capabilities like sql_query.sql_generate or sql_query.sql_execute_readonly.\n\n"
+        "Return JSON only. Choose the smallest useful acyclic DAG. "
+        "Use only public capabilities listed below. "
+        "Never emit SQLQuery internal capabilities or low-level implementation nodes. "
+        "For database/data questions, prefer sql_query.query followed by main_agent.respond depending on it, "
+        "so the final answer is conversational. For ordinary questions, use main_agent.respond only.\n\n"
+        f"Public capabilities:\n{capability_block}\n\n"
         f"User message: {request.user_message}\n\n"
         f"Output JSON schema:\n{schema}"
     )
 
 
-async def build_plan_from_llm_output(request: OrchestrationRequest, *, text_generator: TextGenerator) -> WorkflowPlan:
-    raw_output = text_generator(build_planner_prompt(request))
+async def build_plan_from_llm_output(
+    request: OrchestrationRequest,
+    *,
+    text_generator: TextGenerator,
+    public_capabilities: Iterable[CapabilityDescriptor] | None = None,
+    planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
+) -> WorkflowPlan:
+    raw_output = text_generator(
+        build_planner_prompt(
+            request,
+            public_capabilities=public_capabilities,
+            planner_payload_allowlist=planner_payload_allowlist,
+        )
+    )
     if inspect.isawaitable(raw_output):
         raw_output = await raw_output
     if not isinstance(raw_output, str):
         raise PlannerOutputError("Planner text generator must return a string.")
     return parse_planner_output(raw_output, task_id=request.task_id)
+
+
+def _format_public_capabilities(
+    public_capabilities: Iterable[CapabilityDescriptor] | None,
+    *,
+    planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
+) -> str:
+    capabilities = tuple(public_capabilities or ())
+    allowlist = {
+        capability_id: tuple(fields)
+        for capability_id, fields in dict(planner_payload_allowlist or {}).items()
+    }
+    if not capabilities:
+        return (
+            "- main_agent.respond: Default LLM-backed main-agent response. "
+            "Planner input_payload allowed fields: none; system fills trusted fields.\n"
+            "- sql_query.query: Safely answer a natural-language data question through SQLQuery. "
+            "Planner input_payload allowed fields: none; system fills trusted fields."
+        )
+    return "\n".join(
+        f"- {descriptor.capability_id}: {descriptor.name} — {descriptor.description} "
+        f"Planner input_payload allowed fields: {_format_payload_fields(allowlist.get(descriptor.capability_id, ()))}."
+        for descriptor in capabilities
+    )
+
+
+def _format_payload_fields(fields: Iterable[str]) -> str:
+    field_tuple = tuple(fields)
+    if not field_tuple:
+        return "none; system fills trusted fields"
+    return ", ".join(field_tuple)
 
 
 def _reject_unknown_keys(payload: dict[str, Any], allowed_keys: set[str], context: str) -> None:

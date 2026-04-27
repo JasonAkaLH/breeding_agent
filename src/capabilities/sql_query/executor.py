@@ -5,7 +5,7 @@ from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.orchestration.models import ExecutionInstance, InstanceState
 
 from .intent_route import SQLQueryIntentRouteCapability
-from .result_summarize import SQLQueryResultSummarizeCapability
+from .result_filtering import SQLQueryResultFilteringCapability
 from .schema_context_prepare import SQLQuerySchemaContextPrepareCapability
 from .sql_execute_readonly import SQLQuerySQLExecuteReadonlyCapability
 from .sql_generate import SQLQuerySQLGenerateCapability
@@ -18,7 +18,6 @@ class SQLQueryExecutor(ExecutorPort):
         self,
         *,
         sql_generator=None,
-        summarizer=None,
         llm_text_generator=None,
         mysql_adapter: MySQLReadonlyAdapter | None = None,
     ) -> None:
@@ -31,8 +30,7 @@ class SQLQueryExecutor(ExecutorPort):
             ),
             "sql_query.sql_guard": SQLQuerySQLGuardCapability(),
             "sql_query.sql_execute_readonly": SQLQuerySQLExecuteReadonlyCapability(adapter=mysql_adapter),
-            "sql_query.result_summarize": SQLQueryResultSummarizeCapability(
-                summarizer=summarizer,
+            "sql_query.result_filtering": SQLQueryResultFilteringCapability(
                 llm_text_generator=llm_text_generator,
             ),
         }

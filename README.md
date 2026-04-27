@@ -1,6 +1,6 @@
 # multi_agent_framework
 
-本仓库当前已进入前后端联调阶段：一期“主代理最小内核 + SQLQuery 只读 MVP + FastAPI/SSE/cancel/query API”已完成，后续又补齐了 SQLQuery LLM 增强、主代理 Skill 兼容层、主代理真实 LLM runtime 绑定与 smoke 验证；前端 v1 业务对话台已基于现有 API/SSE/artifacts 落地。
+本仓库当前已进入前后端联调阶段：一期“主代理最小内核 + SQLQuery 只读 MVP + FastAPI/SSE/cancel/query API”已完成，后续又补齐了 SQLQuery LLM 增强、主代理 Skill 兼容层、主代理真实 LLM runtime 绑定、默认 LLM Planner 自动规划与 smoke 验证；前端 v1 业务对话台已基于现有 API/SSE/artifacts 落地。
 
 ## 当前目录结构
 
@@ -12,14 +12,14 @@
 | `configs/sql_query/` | SQLQuery 路由规则、schema metadata 与 SQL Guard 规则配置。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/dev_processes/` | 开发流程文档总目录；后端 Phase 文档在 `docs/dev_processes/backend/`，前端 Phase 文档在 `docs/dev_processes/frontend/`。 |
-| `docs/` 其他文件 | LLM 接入建议、SQLQuery prompt 模板、一期验收报告、架构图与阶段性说明。 |
+| `docs/` 其他文件 | Capability 接入指南、LLM 接入建议、SQLQuery prompt 模板、一期验收报告、架构图与阶段性说明。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |
 | `src/lifecycle/` | task / node / mailbox / interrupt / cancel / conversation guard 生命周期规则。 |
-| `src/orchestration/` | capability registry、scheduler、workflow plan、router、validator、expander 与编排服务。 |
+| `src/orchestration/` | capability registry、scheduler、workflow plan、LLM planner、router、validator、expander 与编排服务。 |
 | `src/capabilities/main_agent/` | `main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。 |
-| `src/capabilities/sql_query/` | SQLQuery public macro 与内部六节点只读查询 workflow。 |
+| `src/capabilities/sql_query/` | SQLQuery public macro 与内部六节点只读查询 workflow；尾节点通过 LLM/降级路径筛选 LIKE 召回的候选表格，同时保留原始表格 preview。 |
 | `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层。 |
 | `src/sql_query/` | SQLQuery schema context builder 与领域模型；供 capability 层复用。 |
 | `scripts/` | 显式手工 smoke / 维护脚本，包含主代理真实 LLM smoke 与全栈开发启动脚本。 |
@@ -64,4 +64,4 @@ npm run build
 python scripts/run_fullstack_dev.py
 ```
 
-如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
+真实 runtime 会使用本地 `config.yaml` 装配主代理、LLM Planner 与 SQLQuery 内部 `sql_generate` / `result_filtering` 的 LLM 调用，并访问真实只读 MySQL 适配器；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。

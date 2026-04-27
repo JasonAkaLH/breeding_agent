@@ -107,10 +107,11 @@ class LLMClient:
         prompt: str,
         *,
         reasoning_effort: ReasoningEffort = "minimal",
+        thinking: bool = False,
     ) -> AsyncIterator[str]:
         async for event in self.generate_text_with_thinking(
             prompt,
-            thinking=False,
+            thinking=thinking,
             reasoning_effort=reasoning_effort,
         ):
             answer = event.get("answer")

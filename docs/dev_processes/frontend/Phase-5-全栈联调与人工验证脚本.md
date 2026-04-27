@@ -33,8 +33,8 @@ conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 
 1. `python scripts/run_fullstack_dev.py`
 2. 打开 `http://127.0.0.1:5173`
-3. 普通对话模式提交问题并观察 streaming。
-4. 数据库查询模式提交 SQLQuery 问题并观察摘要 + 简表。
+3. 在自动规划模式提交普通问题并观察 streaming。
+4. 不切换模式，直接提交 SQLQuery 类数据库问题并观察主代理整合回答 + 简表预览。
 5. 运行中点击取消并观察状态。
 6. 确认默认界面不展示 SQL / DAG / schema / audit。
 

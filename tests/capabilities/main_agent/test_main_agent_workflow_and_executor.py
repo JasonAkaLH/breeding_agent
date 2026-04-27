@@ -5,6 +5,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.capabilities.main_agent import MainAgentExecutor, MainAgentWorkflowProvider
 from src.core.contracts import CapabilityExecutionRequest
@@ -57,12 +58,110 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output_payload["response_text"], "hello world")
         self.assertEqual(result.output_payload["response_source"], "llm")
         self.assertEqual(result.artifacts[0].artifact_type.value, "text")
+        self.assertIn("第一性原理", seen_prompts[0])
+        self.assertIn("不要假定用户每次都知道自己要什么", seen_prompts[0])
         self.assertIn("a.txt", seen_prompts[0])
         self.assertNotIn("secret", seen_prompts[0])
         self.assertEqual(
             [event.event_type for event in result.events if event.event_type == "main_agent.output_delta"],
             ["main_agent.output_delta", "main_agent.output_delta"],
         )
+
+    async def test_executor_injects_dependency_outputs_into_prompt(self) -> None:
+        seen_prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            seen_prompts.append(prompt)
+            yield "这是整理后的答案"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "龙粳18详细信息"},
+                dependency_outputs={
+                    "task-1:query_data:sql_execute_readonly": {
+                        "columns": ["variety_name", "approval_num"],
+                        "rows": [{"variety_name": "龙粳18", "approval_num": "黑审稻"}],
+                        "route_id": "approval_variety_db",
+                        "row_count": 1,
+                        "preview_row_count": 1,
+                        "truncated": False,
+                    }
+                },
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_text"], "这是整理后的答案")
+        self.assertIn("上游能力结果上下文", seen_prompts[0])
+        self.assertIn("approval_variety_db", seen_prompts[0])
+        self.assertIn("columns", seen_prompts[0])
+        self.assertIn("rows", seen_prompts[0])
+        self.assertIn("龙粳18", seen_prompts[0])
+
+    async def test_executor_streams_reasoning_content_as_separate_frontend_events(self) -> None:
+        async def streamer(prompt: str, *, reasoning_effort: str = "minimal", thinking: bool = False):
+            yield {"reasoning": "先分析问题。", "answer": None}
+            yield {"answer": "最终回答", "reasoning": None}
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "请深度思考"},
+                metadata={"deep_thinking": True},
+            )
+        )
+
+        reasoning_events = [event for event in result.events if event.event_type == "main_agent.reasoning_delta"]
+        answer_events = [event for event in result.events if event.event_type == "main_agent.output_delta"]
+
+        self.assertEqual(result.output_payload["response_text"], "最终回答")
+        self.assertEqual(result.artifacts[0].storage_ref, "最终回答")
+        self.assertEqual([event.payload["delta"] for event in reasoning_events], ["先分析问题。"])
+        self.assertEqual([event.payload["delta"] for event in answer_events], ["最终回答"])
+
+    async def test_default_llm_binding_uses_thinking_stream_for_reasoning_content(self) -> None:
+        class FakeLLMClient:
+            def safe_metadata(self, *, config_source: str | None = None, reasoning_effort: str | None = None) -> dict:
+                return {
+                    "provider": "openai_compatible",
+                    "model": "fake-model",
+                    "config_source": config_source,
+                    "reasoning_effort": reasoning_effort,
+                }
+
+            async def generate_text_with_thinking(
+                self,
+                prompt: str,
+                thinking: bool = False,
+                reasoning_effort: str = "high",
+            ):
+                yield {"reasoning": "默认绑定思考", "answer": None}
+                yield {"answer": "默认绑定回答", "reasoning": None}
+
+        with patch("src.capabilities.main_agent.executor.LLMClient", return_value=FakeLLMClient()):
+            executor = MainAgentExecutor(skill_catalog=SkillCatalog(()))
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "请深度思考"},
+                    metadata={"deep_thinking": True},
+                )
+            )
+
+        reasoning_events = [event for event in result.events if event.event_type == "main_agent.reasoning_delta"]
+        self.assertEqual([event.payload["delta"] for event in reasoning_events], ["默认绑定思考"])
+        self.assertEqual(result.output_payload["response_text"], "默认绑定回答")
 
     async def test_executor_records_safe_llm_metadata_on_success(self) -> None:
         async def streamer(prompt: str):
@@ -95,6 +194,42 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
         self.assertEqual(llm_event.payload["config_source"], "injected_config")
         self.assertNotIn("api_key", llm_event.payload)
+
+    async def test_executor_applies_request_level_thinking_and_reasoning_effort_separately(self) -> None:
+        seen_reasoning_efforts: list[str] = []
+        seen_thinking_flags: list[bool] = []
+
+        async def streamer(prompt: str, *, reasoning_effort: str = "minimal", thinking: bool = False):
+            seen_reasoning_efforts.append(reasoning_effort)
+            seen_thinking_flags.append(thinking)
+            yield "deep answer"
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={
+                "provider": "injected_stream",
+                "model": "test-model",
+                "reasoning_effort": "minimal",
+            },
+            skill_catalog=SkillCatalog(()),
+        )
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "请深入分析"},
+                metadata={"deep_thinking": True, "main_agent_reasoning_effort": "medium"},
+            )
+        )
+
+        self.assertEqual(seen_reasoning_efforts, ["medium"])
+        self.assertEqual(seen_thinking_flags, [True])
+        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["reasoning_effort"], "medium")
+        self.assertTrue(llm_event.payload["thinking_enabled"])
 
     async def test_executor_records_safe_llm_metadata_on_provider_failure(self) -> None:
         async def broken_streamer(prompt: str):

@@ -67,16 +67,13 @@ def sql_runner(_sql):
     )
 
 
-def summarize(payload):
-    return f"开发验证查询完成，共返回 {{payload.get('row_count', 0)}} 行结果。"
-
-
 runtime = build_api_runtime(
     database_path=Path({str(database_path)!r}),
     audit_log_path=Path({str(audit_log_path)!r}),
     mysql_adapter=MySQLReadonlyAdapter(runner=sql_runner),
-    summarizer=summarize,
     main_agent_stream_generator=main_agent_stream,
+    enable_llm_planner=False,
+    enable_sql_query_llm=False,
     skill_roots=[],
 )
 app = create_app(runtime=runtime)

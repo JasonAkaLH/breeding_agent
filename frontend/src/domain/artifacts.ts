@@ -18,9 +18,9 @@ export function parseSqlQueryArtifacts(artifacts: ArtifactResponse[]): SqlQueryD
   const warnings: string[] = [];
   const sourceArtifactIds: string[] = [];
   const summaryArtifact = artifacts.find(isSummaryArtifact);
-  const previewArtifact = artifacts.find(isPreviewArtifact);
+  const previewArtifact = artifacts.find(isFilteredPreviewArtifact) ?? artifacts.find(isPreviewArtifact);
 
-  let summary = '查询已完成，但摘要不可用。';
+  let summary = '查询已完成，但结果不可用。';
   if (summaryArtifact) {
     sourceArtifactIds.push(summaryArtifact.artifact_id);
     const parsed = parseStorageRef(summaryArtifact, warnings);
@@ -33,13 +33,17 @@ export function parseSqlQueryArtifacts(artifacts: ArtifactResponse[]): SqlQueryD
     const parsed = parseStorageRef(previewArtifact, warnings);
     const columns = arrayOfStrings(parsed?.columns);
     const rows = arrayOfRecords(parsed?.rows);
-    if (columns.length > 0 && rows.length > 0) {
+    if (columns.length > 0) {
+      const rowCount = numberField(parsed, 'row_count');
       table = {
         columns,
         rows: rows.map((row) => pickColumns(row, columns)),
-        rowCount: numberField(parsed, 'row_count'),
+        rowCount,
         truncated: booleanField(parsed, 'truncated'),
       };
+      if (!summaryArtifact) {
+        summary = typeof rowCount === 'number' ? `查询已完成，共返回 ${rowCount} 行结果。` : '查询已完成，已返回表格结果。';
+      }
     }
   }
 
@@ -53,11 +57,15 @@ export function parseAssistantTextArtifact(artifacts: ArtifactResponse[]): strin
 }
 
 function isSummaryArtifact(artifact: ArtifactResponse): boolean {
-  return artifact.artifact_type === 'summary' || artifact.artifact_id.includes('result_summary') || artifact.producer_node_id.includes('result_summarize');
+  return artifact.artifact_type === 'summary';
+}
+
+function isFilteredPreviewArtifact(artifact: ArtifactResponse): boolean {
+  return artifact.artifact_id.includes('filtered_query_result') || artifact.producer_node_id.includes('result_filtering');
 }
 
 function isPreviewArtifact(artifact: ArtifactResponse): boolean {
-  return artifact.artifact_id.includes('query_result_preview') || artifact.producer_node_id.includes('sql_execute_readonly');
+  return isFilteredPreviewArtifact(artifact) || artifact.artifact_id.includes('query_result_preview') || artifact.producer_node_id.includes('sql_execute_readonly');
 }
 
 function parseStorageRef(artifact: ArtifactResponse, warnings: string[]): Record<string, unknown> | null {

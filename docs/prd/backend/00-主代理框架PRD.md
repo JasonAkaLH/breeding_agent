@@ -109,7 +109,7 @@
 - SQLQuery 是一期首个 MVP 样例，外部只暴露 `sql_query.query` 宏能力；`sql_query.*` 内部节点不作为外部请求入口。
 - SQLQuery 只允许只读查询；MySQL 只读执行必须通过 SQL Guard 通过令牌后才能执行。
 - 当前 MySQL 执行账号为 `chatu:chatu123`，已确认只读；仍保留 SQL Guard 作为第二层保护。
-- SQLQuery 的 SQL 生成与结果摘要可以接入 LLM，但必须保留确定性 fallback、结构化输出校验和审计事件。
+- SQLQuery 的 SQL 生成与结果筛选默认可接入 LLM；当前默认 workflow 尾节点为 `sql_query.result_filtering`，负责从 `LIKE` 召回候选中筛掉不符合用户真实需求的行，并把筛选后的表格交给主代理整合。
 
 ### 5.5 主代理与 LLM Runtime 决策
 

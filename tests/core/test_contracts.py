@@ -67,6 +67,7 @@ class CoreContractShapeTest(unittest.TestCase):
             "save_task",
             "get_task",
             "get_active_task_for_conversation",
+            "list_tasks_for_conversation",
             "save_task_node",
             "get_task_node",
             "list_task_nodes_for_task",

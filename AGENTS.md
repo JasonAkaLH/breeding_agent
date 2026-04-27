@@ -8,9 +8,9 @@
 - `src/core/`：跨模块共享 contract、模型、枚举与基础错误；不得放 capability 专属业务语义。
 - `src/storage/`：状态存储抽象与 SQLite 实现；后续 PostgreSQL 应保持逻辑同构迁移。
 - `src/lifecycle/`：task / node / mailbox / interrupt / cancel / conversation guard 生命周期规则。
-- `src/orchestration/`：capability registry、scheduler、workflow plan、router、validator、expander 与编排服务。
+- `src/orchestration/`：capability registry、scheduler、workflow plan、LLM planner、router、validator、expander 与编排服务。
 - `src/capabilities/main_agent/`：`main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。
-- `src/capabilities/sql_query/`：SQLQuery public macro 与内部六节点只读查询 workflow。
+- `src/capabilities/sql_query/`：SQLQuery public macro 与内部六节点只读查询 workflow；尾节点通过 LLM / 降级路径筛选 LIKE 召回的候选表格，同时保留原始表格 preview。
 - `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层等外部适配。
 - `src/sql_query/`：SQLQuery schema context builder 与领域模型；作为 capability 层复用资产保留。
 - `configs/sql_query/`：SQLQuery routing rules、schema metadata、SQL Guard rules。
@@ -54,7 +54,7 @@ npm test -- --run
 npm run build
 ```
 
-全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime；需要 UI-only 验证时可加 `--fake-backend`）：
+全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime，会使用本地 `config.yaml` 装配主代理、LLM Planner 与 SQLQuery 内部 LLM；需要 UI-only 验证时可加 `--fake-backend`）：
 
 ```bash
 python scripts/run_fullstack_dev.py

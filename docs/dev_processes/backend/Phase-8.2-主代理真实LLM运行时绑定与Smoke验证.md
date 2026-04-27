@@ -29,8 +29,8 @@ Phase 8.1 又补齐了 LLM Planner 的前置契约：
 
 - `src/integrations/llm_client.py` 提供 OpenAI-compatible `LLMClient`，支持 YAML 配置、非 streaming `generate_text()` 与非 thinking streaming `stream_text()`。
 - `src/capabilities/main_agent/executor.py` 已能消费 `StreamGenerator` 并产生 `main_agent.output_delta` / `main_agent.output_final` 前端事件。
-- `src/api/runtime.py` 已能注入 `main_agent_stream_generator` 与 SQLQuery `llm_text_generator`，测试默认用 fake generator，不访问真实 provider。
-- SQLQuery 的 `sql_generate` / `result_summarize` 支持 `llm_text_generator` 注入；未注入时分别回退启发式 SQL 生成与确定性摘要。
+- `src/api/runtime.py` 已能注入 `main_agent_stream_generator` 与 SQLQuery `llm_text_generator`，测试默认用 fake generator 或显式关闭真实 provider。
+- SQLQuery 的 `sql_generate` / `result_filtering` 支持 `llm_text_generator` 注入；真实 API runtime 默认可从 `config.yaml` 创建 SQLQuery 文本生成器，fake / 测试路径可显式关闭，失败时分别回退确定性 SQL 生成与候选表格保守筛选。
 - 本地 `config.yaml` 已被 `.gitignore` 忽略，真实 provider smoke 必须由开发者显式触发，不进入默认 unittest。
 
 ## 3. 目标
@@ -132,7 +132,7 @@ conda run -n multi_agent python scripts/smoke_main_agent_llm.py --config config.
 - [x] 主代理成功事件包含 safe provider metadata。
 - [x] 主代理 provider 失败事件可解释，且不记录 prompt 正文或 secret。
 - [x] `scripts/smoke_main_agent_llm.py` 可用本地 `config.yaml` 做显式真实 provider smoke。
-- [x] SQLQuery 显式请求仍走 `sql_query.query` 固定六节点 workflow。
+- [x] SQLQuery 显式请求仍走 `sql_query.query` 固定六节点 workflow，尾节点为 `sql_query.result_filtering`。
 - [x] Phase 8.1 Planner 前置契约测试继续通过。
 
 ## 8. 本阶段完成记录

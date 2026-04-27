@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, markWaitingInputRequired } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -24,6 +24,19 @@ describe('applyTaskEvent', () => {
     state = applyTaskEvent(state, event('node.started', { capability_id: 'sql_query.sql_execute_readonly' }, 'node-1'));
     expect(state.phase).toBe('running');
     expect(state.statusText).toContain('检索数据库');
+    expect(state.currentActivityText).toBe('正在执行 SQLQuery：正在检索数据库');
+    expect(state.currentCapabilityLabel).toBe('SQLQuery');
+
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'sql_query.result_filtering' }, 'node-filter'));
+    expect(state.statusText).toContain('筛选查询结果');
+  });
+
+  it('uses generic capability ids for future capabilities in activity text', () => {
+    const state = applyTaskEvent(createInitialTaskEventState(), event('node.started', { capability_id: 'report.generate' }, 'node-report'));
+
+    expect(state.phase).toBe('running');
+    expect(state.currentActivityText).toBe('正在执行 report.generate：正在处理');
+    expect(state.currentCapabilityLabel).toBe('report.generate');
   });
 
   it('appends main-agent deltas once by event id', () => {
@@ -35,10 +48,27 @@ describe('applyTaskEvent', () => {
     expect(state.assistantText).toBe('你好');
   });
 
+  it('appends main-agent reasoning deltas separately once by event id', () => {
+    let state = createInitialTaskEventState();
+    const delta = event('main_agent.reasoning_delta', { delta: '先分析', ordinal: 1 }, 'evt-reasoning-1');
+    state = applyTaskEvent(state, delta);
+    state = applyTaskEvent(state, delta);
+    expect(state.phase).toBe('streaming');
+    expect(state.reasoningText).toBe('先分析');
+    expect(state.assistantText).toBe('');
+  });
+
   it('moves to artifact loading when the task completes', () => {
     const state = applyTaskEvent(createInitialTaskEventState(), event('task.completed'));
     expect(state.phase).toBe('loading_artifacts');
     expect(state.statusText).toContain('整理结果');
+  });
+
+  it('marks waiting-input tasks as a resumable clarification state', () => {
+    const state = markWaitingInputRequired(createInitialTaskEventState());
+    expect(state.phase).toBe('waiting_for_input');
+    expect(state.statusText).toContain('等待补充信息');
+    expect(state.errorMessage).toContain('下一条回复会继续当前任务');
   });
 
   it('maps cancellation and guard failures to friendly states', () => {

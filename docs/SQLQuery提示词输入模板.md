@@ -1,6 +1,6 @@
 # SQLQuery Prompt 输入模板
 
-> 适用范围：本模板用于 `sql_query.sql_generate` 阶段的提示词输入拼装，不覆盖路由识别、SQL 执行或结果汇总阶段。
+> 适用范围：本模板用于 `sql_query.sql_generate` 阶段的提示词输入拼装，不覆盖路由识别、SQL 执行或 `result_filtering` 候选结果筛选阶段。
 >
 > 参考来源：
 > - `docs/prd/backend/00-主代理框架PRD.md`

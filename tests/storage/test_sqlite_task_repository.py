@@ -85,3 +85,48 @@ class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
             loaded = repo.get_active_task_for_conversation("conv-1")
 
         self.assertEqual(loaded, active)
+
+    def test_list_tasks_for_conversation_can_filter_unfinished_statuses(self) -> None:
+        accepted = Task(
+            task_id="task-accepted",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.ACCEPTED,
+            created_at=datetime(2026, 4, 23, 11, 0, 0),
+        )
+        running = Task(
+            task_id="task-running",
+            conversation_id="conv-1",
+            root_message_id="msg-2",
+            status=TaskStatus.RUNNING,
+            created_at=datetime(2026, 4, 23, 11, 1, 0),
+        )
+        completed = Task(
+            task_id="task-completed",
+            conversation_id="conv-1",
+            root_message_id="msg-3",
+            status=TaskStatus.COMPLETED,
+            created_at=datetime(2026, 4, 23, 11, 2, 0),
+        )
+        other_conversation = Task(
+            task_id="task-other",
+            conversation_id="conv-2",
+            root_message_id="msg-4",
+            status=TaskStatus.RUNNING,
+            created_at=datetime(2026, 4, 23, 11, 3, 0),
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            for task in [accepted, running, completed, other_conversation]:
+                repo.save_task(task)
+            session.commit()
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            loaded = repo.list_tasks_for_conversation(
+                "conv-1",
+                statuses={TaskStatus.ACCEPTED, TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.CANCELLING},
+            )
+
+        self.assertEqual([task.task_id for task in loaded], ["task-running", "task-accepted"])

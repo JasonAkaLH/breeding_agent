@@ -157,7 +157,7 @@ Smoke 验收重点：
 - audit 事件包含 `main_agent.llm_call`；
 - `prompt_recorded=false`；
 - 不泄漏 API key、完整 prompt、base_url 等敏感信息；
-- SQLQuery 显式请求仍走 `sql_query.query` 固定六节点 workflow。
+- SQLQuery 显式请求仍走 `sql_query.query` 固定六节点 workflow，尾节点为 `sql_query.result_filtering`。
 
 ## 10. 对 API 与前端的影响
 

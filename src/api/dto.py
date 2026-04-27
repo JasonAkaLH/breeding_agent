@@ -29,12 +29,19 @@ class TaskSummaryResponse(BaseModel):
     conversation_id: str
     status: str
     root_node_id: str | None
+    summary: str | None
+    requested_capability_id: str | None
     active_node_count: int
     completed_node_count: int
     failed_node_count: int
     cancel_requested: bool
     created_at: datetime | None
     updated_at: datetime | None
+
+
+class TaskListResponse(BaseModel):
+    conversation_id: str
+    tasks: list[TaskSummaryResponse]
 
 
 class TaskNodeResponse(BaseModel):
@@ -80,6 +87,33 @@ class CancelTaskResponse(BaseModel):
     task_id: str
     status: str
     accepted: bool
+
+
+class InterruptResponse(BaseModel):
+    interrupt_id: str
+    conversation_id: str
+    task_id: str
+    node_id: str
+    question: str
+    reason_code: str
+    required_fields: dict[str, Any]
+    status: str
+
+
+class TaskInterruptsResponse(BaseModel):
+    task_id: str
+    interrupts: list[InterruptResponse]
+
+
+class AnswerInterruptRequest(BaseModel):
+    answer_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnswerInterruptResponse(BaseModel):
+    interrupt_id: str
+    status: str
+    node_id: str
+    answer_payload: dict[str, Any]
 
 
 class CapabilityResponse(BaseModel):

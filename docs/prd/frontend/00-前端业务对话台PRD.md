@@ -2,16 +2,16 @@
 
 - **项目**：multi_agent_framework
 - **范围**：前端 / 业务用户对话台
-- **文档状态**：草案（基于当前后端 Phase 8.2 实现事实）
+- **文档状态**：草案（基于当前后端 Phase 8.2 与自动规划首轮实现事实）
 - **日期**：2026-04-27
 - **上游依据**：`docs/prd/backend/00-主代理框架PRD.md`、`docs/prd/backend/05-API与核心数据模型.md`、`docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`、`docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md`
 - **访谈记录**：`.omx/interviews/frontend-prd-20260427T072200Z.md`
 
 ## 1. 背景
 
-当前后端已经具备主代理普通对话、SQLQuery 只读查询、FastAPI 接入、SSE 事件流、任务查询、取消、任务图、产物查询和 capability 目录等基础能力。前端尚未开始实现，因此第一版前端 PRD 应先贴合当前后端真实能力，避免把尚未开放的后端能力误写成 v1 必须项。
+当前后端已经具备主代理普通对话、SQLQuery 只读查询、FastAPI 接入、SSE 事件流、任务查询、取消、任务图、产物查询、capability 目录和默认自动规划等基础能力。前端 v1 应贴合当前后端真实能力，避免把 capability 选择责任交给业务用户。
 
-前端 v1 的产品定位是 **内部业务用户对话台**：让用户以对话方式向主代理或 SQLQuery 提问，并获得清晰、顺畅、可理解的回答。它不是研发/运维调试控制台。
+前端 v1 的产品定位是 **内部业务用户对话台**：让用户以自然语言提问，由主代理自动判断是否需要调用 SQLQuery 等能力，并获得清晰、顺畅、可理解的回答。它不是研发/运维调试控制台。
 
 ## 2. 目标与非目标
 
@@ -19,7 +19,7 @@
 
 1. 提供一个业务用户可理解的对话入口。
 2. 支持普通主代理对话的 streaming 回复展示。
-3. 支持 SQLQuery 查询模式，并展示“自然语言摘要 + 简表预览”。
+3. 支持主代理自动调用 SQLQuery 查询能力，并展示“主代理回答 + 表格预览”。
 4. 基于 SSE 展示任务执行状态，但默认不暴露内部 DAG / 节点 / SQL / 审计日志细节。
 5. 支持取消当前任务。
 6. 基于当前已实现 API 完成 v1，不要求后端新增接口作为 v1 前置条件。
@@ -43,10 +43,10 @@
 ### 3.2 核心场景
 
 1. **普通对话**：用户输入一般问题，前端提交到主代理，实时展示 streaming 回复。
-2. **数据库查询**：用户选择 SQLQuery 查询模式，输入品种、基因型、审定信息等查询问题，前端展示任务进度，完成后显示摘要和结果表预览。
+2. **数据库查询**：用户直接输入品种、基因型、审定信息等查询问题，后端自动规划 SQLQuery + 主代理整合路径，前端展示任务进度，完成后显示最终回答与结果预览。
 3. **任务执行中**：用户看到“已提交 / 正在分析 / 正在生成答案 / 已完成”等业务化状态。
 4. **任务取消**：用户对当前长任务点击取消，前端展示取消中和最终取消结果。
-5. **失败或不支持**：前端展示可理解的失败说明，引导用户调整问题或切换模式。
+5. **失败或不支持**：前端展示可理解的失败说明，引导用户调整问题或停止/重试任务。
 
 ## 4. 当前后端能力基线
 
@@ -59,7 +59,7 @@
 | 订阅事件 | `GET /api/v1/tasks/{task_id}/events` | SSE replay + live 事件流。 |
 | 取消任务 | `POST /api/v1/tasks/{task_id}/cancel` | 请求取消当前任务。 |
 | 查询任务图 | `GET /api/v1/tasks/{task_id}/graph` | v1 默认不用作主展示，可保留为隐藏诊断数据。 |
-| 查询产物 | `GET /api/v1/tasks/{task_id}/artifacts` | 获取主代理最终文本、SQLQuery 摘要、结果预览。 |
+| 查询产物 | `GET /api/v1/tasks/{task_id}/artifacts` | 获取主代理最终文本与 SQLQuery 表格结果预览。 |
 | 查询能力目录 | `GET /api/v1/capabilities` | 确认当前 public capability：主代理、SQLQuery。 |
 
 ### 4.2 提交消息契约
@@ -71,7 +71,7 @@
   "account_id": "acc-1",
   "content": "查询品种龙粳33的基因型信息",
   "routing_mode": "auto",
-  "capability_id": "sql_query.query",
+  "capability_id": null,
   "client_message_id": "optional-client-id",
   "metadata": {}
 }
@@ -90,8 +90,8 @@
 
 前端 v1 的路由策略：
 
-- 普通对话模式：`capability_id = null`，由后端进入 `main_agent.respond`。
-- 数据库查询模式：`capability_id = "sql_query.query"`。
+- 默认自动规划：`capability_id = null`，由后端自动判断单主代理或 `SQLQuery -> 主代理整合`。
+- 前端不提供“普通对话 / SQLQuery”手动模式选择；显式 `sql_query.query` 仅作为后端兼容/调试入口保留。
 - `sql_query.*` 内部 capability 不允许出现在前端可选项中。
 - `account_id` v1 可用配置值或本地默认值传入，不做登录/账号管理。
 
@@ -128,7 +128,7 @@ SSE event 的 `data` JSON 包含：
 | `main_agent.output_final` | 结束主代理 streaming 气泡。 |
 | `sql_query.sql_guard_passed` | 默认不单独展示，可用于内部状态推进。 |
 | `sql_query.sql_guard_blocked` | 展示“当前查询不符合只读/安全边界”，不展示原始 SQL。 |
-| `task.interrupt_answered` | 当前无前端答复入口，仅作为已有任务恢复事件展示。 |
+| `task.interrupt_answered` | 展示补充信息已提交，并继续订阅原任务。 |
 
 Audit-only 事件（如 `main_agent.llm_call`、`sql_query.llm_call`、`skill.*`、fallback 审计）不进入 v1 默认 UI。
 
@@ -148,26 +148,27 @@ v1 采用单页业务对话台：
    - 任务状态提示条。
 3. **输入区**
    - 多行文本输入。
-   - 模式选择：`普通对话` / `数据库查询（SQLQuery）`。
+   - 当前模式展示：`自动规划`。
    - 提交按钮。
    - 当前任务运行时显示取消按钮。
 4. **轻量结果/产物区**
    - 默认嵌入在回答卡片内，不做独立调试面板。
-   - 可显示本次任务的最终摘要和结果表预览。
+   - 可显示本次任务的主代理最终回答和结果表预览。
 
-### 5.2 模式选择
+### 5.2 自动规划
 
-由于当前后端不会把 `capability_id=None` 的消息自动路由到 SQLQuery，前端 v1 必须提供明确模式选择：
+当前后端会把 `capability_id=None` 的消息交给自动规划入口，前端 v1 不再提供手动模式选择：
 
-- 默认模式：普通对话。
-- 用户选择“数据库查询（SQLQuery）”后，提交时传 `capability_id="sql_query.query"`。
-- 前端可做轻量提示：当输入包含“查询、品种、基因型、审定”等词时，提示“这可能适合使用数据库查询模式”。该提示不改变后端契约。
+- 默认显示：`当前模式：自动规划`。
+- 提交时始终传 `capability_id=null`。
+- 前端可做轻量提示：当输入包含“查询、品种、基因型、审定”等词时，提示“主代理会自动判断是否需要调用 SQLQuery”。该提示不改变后端契约。
+- 后端若自动选择 SQLQuery，执行图为 SQLQuery 固定六节点 + 主代理整合节点；SQLQuery 末端返回筛选后的表格并保留原始表格预览，前端只展示业务化状态与最终结果，不展示 DAG 细节。
 
 ## 6. 核心交互流程
 
 ### 6.1 普通主代理对话
 
-1. 用户在普通对话模式输入问题。
+1. 用户直接输入问题。
 2. 前端生成或复用 `conversation_id`。
 3. 调用消息提交 API，`capability_id=null`。
 4. 收到 `task_id` 后立即订阅 SSE。
@@ -175,21 +176,25 @@ v1 采用单页业务对话台：
 6. 收到 `main_agent.output_final` 或 `task.completed` 后结束 loading。
 7. 如 SSE 中断，前端可用 `GET /api/v1/tasks/{task_id}` 查询最终状态；已完成时可拉取 artifacts 兜底展示。
 
-### 6.2 SQLQuery 查询
+### 6.2 自动 SQLQuery 查询
 
-1. 用户选择数据库查询模式。
-2. 前端提交消息，`capability_id="sql_query.query"`。
-3. SSE 展示业务化进度：
+1. 用户直接输入数据库/品种/审定/基因型类问题。
+2. 前端提交消息，`capability_id=null`。
+3. 后端自动规划为 `SQLQuery -> 主代理整合`。
+4. SSE 展示业务化进度：
    - 已提交；
    - 正在理解查询意图；
    - 正在检索数据库；
-   - 正在整理结果。
-4. 收到 `task.completed` 后调用 `GET /api/v1/tasks/{task_id}/artifacts`。
-5. 前端从 artifacts 中优先提取：
-   - `result_summary`：用于自然语言摘要；
-   - `query_result_preview`：用于表格预览；
+   - 正在筛选查询结果；
+   - 正在整理回答。
+5. 收到 `task.completed` 后调用 `GET /api/v1/tasks/{task_id}/artifacts`。
+6. 前端从 artifacts 中优先提取：
+   - 主代理最终文本：作为 assistant 最终回答；
+   - `filtered_query_result`：优先用于筛选后的表格预览；
+   - `query_result_preview`：仅在没有筛选结果时作为原始表格预览降级；
+   - 主代理最终文本负责最终自然语言整合；
    - 若无法解析结构化内容，则使用 artifact `summary` 字段降级展示。
-6. 默认不展示 `generated_sql`、`guard_report` 等技术 artifact。
+7. 默认不展示 `generated_sql`、`guard_report` 等技术 artifact。
 
 ### 6.3 取消任务
 
@@ -204,14 +209,14 @@ v1 采用单页业务对话台：
 - `409 ConversationBusyError`：提示“当前会话已有任务运行中，请等待完成或取消后再继续”。
 - `task.failed` / `node.failed`：显示“本次任务未完成”，并根据 payload code 映射业务提示。
 - `sql_query.sql_guard_blocked`：提示“该查询不符合当前只读查询安全边界，请改用查询类问题”。
-- interrupt 相关等待：当前无 API 可供前端读取 interrupt 详情或提交答复；v1 可在任务长时间未完成时调用任务图接口，若发现节点状态为 `waiting_for_input`，展示“任务需要补充信息；当前前端版本暂不支持继续该任务，请重新提交更完整的问题”。
+- interrupt 相关等待：前端通过任务图与 interrupt API 发现 `waiting_for_input` 后展示补充信息卡片；用户下一条输入应作为 interrupt answer 继续原任务，而不是提交新任务或要求重新提问。
 
 ## 7. SQLQuery 结果卡片
 
 ### 7.1 默认内容
 
-1. 查询摘要：来自 `result_summary` artifact 的 `summary`。
-2. 简表预览：来自 `query_result_preview` artifact 的 `columns` 和 `rows`。
+1. 查询完成提示：优先基于筛选后表格的 `row_count` 生成中性提示；主代理最终文本负责最终自然语言回答。
+2. 简表预览：优先来自 `filtered_query_result` artifact 的 `columns` 和 `rows`；找不到时降级使用 `query_result_preview`。
 3. 结果规模：如可解析 `row_count`，展示“共 N 行”。
 4. 截断提示：如可解析到截断信息，展示“仅展示预览”。当前 query_result_preview 未必包含截断字段，前端不得假定一定存在。
 
@@ -226,8 +231,8 @@ v1 采用单页业务对话台：
 
 ### 7.3 降级策略
 
-- 找不到 `result_summary`：显示“查询已完成，但摘要不可用”，并尝试展示其他 summary artifact。
-- 找不到可解析表格：只展示自然语言摘要。
+- 找不到 `filtered_query_result` 但可解析原始表格：按原始表格 `row_count` 显示“查询已完成，共返回 N 行结果”。
+- 找不到可解析表格：只展示主代理最终回答或 artifact summary 降级文本。
 - artifacts API 失败：展示任务完成状态和“结果加载失败，可重试加载结果”。
 
 ## 8. 状态模型（前端视角）
@@ -239,12 +244,12 @@ v1 采用单页业务对话台：
 | accepted | `task.accepted` / 202 response | 已提交。 |
 | streaming | `main_agent.output_delta` | 追加回答。 |
 | running | `task.graph_created`、`node.started` | 正在处理。 |
-| loading_artifacts | `task.completed` 后 | 正在整理结果。 |
+| loading_artifacts | `task.completed` 后 | 正在整理回答。 |
 | completed | `task.completed` + 展示完成 | 可继续提问。 |
 | cancelling | cancel response / cancellation event | 取消中。 |
 | cancelled | `task.cancelled` | 已取消。 |
 | failed | `task.failed` / `node.failed` | 失败提示。 |
-| waiting_input_unsupported | 任务长期运行且任务图存在 `waiting_for_input` 节点 | 提示当前版本暂不支持继续。 |
+| waiting_for_input | 任务图存在 `waiting_for_input` 节点且发现 open interrupt | 展示补充信息卡片，下一条输入继续原任务。 |
 
 ## 9. 数据与本地持久化
 
@@ -259,21 +264,21 @@ v1 后端没有服务端会话列表和历史检索 API，因此前端只做最�
 
 ### 10.1 功能验收
 
-1. 用户能在普通对话模式提交消息，并看到 streaming 回复。
-2. 用户能在数据库查询模式提交 SQLQuery 问题，并在任务完成后看到摘要和简表预览。
+1. 用户能在自动规划模式提交普通消息，并看到 streaming 回复。
+2. 用户能不切换模式直接提交数据库类问题，并在任务完成后看到主代理整合后的回答；必要时可看到摘要和简表预览。
 3. 用户能看到任务执行中的业务化状态变化。
 4. 用户能取消当前任务，并看到取消状态。
 5. 用户连续提交同一会话任务时，如后端返回 409，前端能给出明确提示。
 6. 前端不会向后端提交 internal SQLQuery capability id。
 7. 前端默认不展示 DAG、SQL、schema、审计日志。
-8. artifacts 不可解析时，前端能降级展示 summary 或错误提示。
+8. artifacts 不可解析时，前端能降级展示主代理回答、artifact summary 或错误提示。
 
 ### 10.2 体验验收
 
 1. 首要体验是“问答闭环顺畅”：输入、提交、等待、回答完成的路径清晰。
 2. 错误提示面向业务用户，不出现堆栈、内部异常文本或 provider secret。
 3. SQLQuery 卡片让用户看到“答案 + 结果预览”，但不把用户带入调试视角。
-4. 当前版本不支持继续 interrupt 时，提示应明确且不伪装成可继续。
+4. 当前任务需要补充信息时，前端应把用户下一条输入作为 interrupt answer 继续原任务，而不是要求重新提交更完整的问题。
 
 ## 11. 后续增强（非 v1 阻塞）
 
@@ -314,7 +319,7 @@ v1 后端没有服务端会话列表和历史检索 API，因此前端只做最�
 | HTTP 请求 | `fetch` 封装 | v1 API 数量有限，先不引入重型 request 层。 |
 | 状态管理 | React 本地状态 + 自定义 hooks | 对话流、当前任务、SSE 生命周期先用组件状态和 hooks 承载；避免过早引入 Redux。 |
 | 服务端状态缓存 | 暂不强制；复杂化后再评估 TanStack Query | v1 没有服务端历史列表和复杂缓存一致性需求。 |
-| 单元 / 组件测试 | Vitest + React Testing Library | 覆盖模式选择、SSE event reducer、artifact 解析和错误状态展示。 |
+| 单元 / 组件测试 | Vitest + React Testing Library | 覆盖自动规划输入区、SSE event reducer、artifact 解析和错误状态展示。 |
 | E2E | Playwright | 覆盖普通对话、SQLQuery、取消、失败降级等浏览器级主路径。 |
 
 推荐组合：
@@ -367,5 +372,5 @@ React + TypeScript + Vite + Ant Design + EventSource/SSE
 - runtime 装配与路由：`src/api/runtime.py`
 - 主代理 capability：`src/capabilities/main_agent/`
 - SQLQuery workflow：`src/capabilities/sql_query/workflow.py`
-- SQLQuery 结果与产物：`src/capabilities/sql_query/result_summarize.py`、`src/capabilities/sql_query/sql_execute_readonly.py`
+- SQLQuery 结果与产物：`src/capabilities/sql_query/sql_execute_readonly.py`（表格 preview）、`src/capabilities/sql_query/result_filtering.py`（结果筛选）
 - 后端 API PRD：`docs/prd/backend/05-API与核心数据模型.md`

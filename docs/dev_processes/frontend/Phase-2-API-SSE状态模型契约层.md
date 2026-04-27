@@ -15,7 +15,7 @@
 ## 关键规则
 
 - 普通对话提交 `capability_id: null`。
-- 数据库查询提交 `capability_id: "sql_query.query"`。
+- 数据库查询也提交 `capability_id: null`，由后端自动规划是否调用 SQLQuery；显式 `sql_query.query` 仅保留为兼容/调试入口。
 - UI 不允许提交 `sql_query.intent_route` 等 internal capability。
 - `main_agent.output_delta` 只追加 delta；最终兜底可从 text artifact 的 `storage_ref` 恢复。
 - SQLQuery 表格只使用 `columns` / `rows` / `row_count` / `truncated`，不得展示 `sql` 或 `guard_pass_token`。
@@ -23,7 +23,7 @@
 ## 验收标准
 
 - reducer 单测覆盖 accepted、streaming、completed、failed、cancelled、guard blocked。
-- artifact parser 单测覆盖完整 JSON、summary 降级、坏 JSON 降级、隐藏 SQL 字段。
+- artifact parser 单测覆盖表格 JSON、中性完成提示、summary 降级、坏 JSON 降级、隐藏 SQL 字段。
 
 ## 完成记录
 

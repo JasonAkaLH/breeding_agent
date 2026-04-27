@@ -6,6 +6,7 @@
 
 - 后端开发流程索引：`docs/dev_processes/backend/README.md`
 - 后端 Phase 文档：`docs/dev_processes/backend/Phase-*.md`
+- Capability 接入指南：`docs/Capability接入指南.md`
 
 ## 前端
 

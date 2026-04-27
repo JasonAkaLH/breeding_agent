@@ -39,7 +39,7 @@ class SQLQueryPublicContractTest(unittest.TestCase):
         self.assertEqual(plan.metadata["public_capability_id"], "sql_query.query")
         self.assertEqual(len(plan.nodes), 6)
         self.assertEqual(plan.nodes[0].capability_id, "sql_query.intent_route")
-        self.assertEqual(plan.nodes[-1].capability_id, "sql_query.result_summarize")
+        self.assertEqual(plan.nodes[-1].capability_id, "sql_query.result_filtering")
 
 
 if __name__ == "__main__":

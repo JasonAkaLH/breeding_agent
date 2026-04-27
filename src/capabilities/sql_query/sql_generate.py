@@ -16,6 +16,31 @@ from .helpers import find_dependency_output, make_artifact, make_audit_event, no
 from .llm_utils import LLMOutputError, TextGenerator, call_text_generator, parse_json_object, string_list
 from .prompt_builders import build_sql_generation_prompt
 
+_APPROVAL_DETAIL_COLUMNS = (
+    "year",
+    "approval_num",
+    "crop_name",
+    "variety_name",
+    "applicant",
+    "breeder",
+    "variety_source",
+    "characteristics",
+    "yield_performance",
+    "cultivation_tips",
+    "suitable_area",
+    "approval_opinion",
+)
+
+_APPROVAL_LIST_COLUMNS = (
+    "year",
+    "approval_num",
+    "crop_name",
+    "variety_name",
+    "applicant",
+    "breeder",
+    "suitable_area",
+)
+
 
 class SQLQuerySQLGenerateCapability(CapabilityContract):
     capability_id = "sql_query.sql_generate"
@@ -105,6 +130,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             raise LLMOutputError("validation_failed", "LLM answer mode requires columns_used.")
         self._validate_columns_used(context, columns_used)
         self._validate_sql_column_references(context, sql, tables_used=tables_used)
+        self._validate_variety_name_matching_policy(sql)
         column_types_used = self._validate_column_types_used(context, llm_payload.get("column_types_used"), columns_used)
 
         output = {
@@ -418,6 +444,11 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         join_hints = list(context.get("join_hints", []))
         user_question = normalize_text(context.get("user_question", ""))
 
+        if context.get("route_id") == "variety_overview":
+            return self._generate_variety_overview_sql(context)
+        if context.get("route_id") == "approval_variety_db":
+            return self._generate_approval_variety_sql(context)
+
         base_table = selected_tables[0]
         projected_columns: list[str] = []
         for table in selected_tables[:2]:
@@ -446,5 +477,212 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             )
             joined_tables.add(right_table)
 
+        term = self._extract_variety_search_term(user_question)
+        safe_term = self._safe_search_literal(term) if term else None
+        where_columns = tuple(
+            f"{table}.variety_name"
+            for table in joined_tables
+            if "variety_name" in {str(column) for column in selected_columns.get(table, [])}
+        )
+        sql += self._where_search_term(safe_term, where_columns)
         sql += " LIMIT 50"
         return sql
+
+    def _generate_approval_variety_sql(self, context: dict[str, Any]) -> str:
+        selected_tables = [str(table) for table in context.get("selected_tables", []) if str(table).endswith("_varieties")]
+        selected_columns = dict(context.get("selected_columns", {}))
+        user_question = str(context.get("user_question") or "")
+        normalized_question = normalize_text(user_question)
+        if not selected_tables:
+            return "SELECT COUNT(*) AS total FROM rice_varieties LIMIT 50"
+
+        base_table = selected_tables[0]
+        if any(keyword in normalized_question for keyword in ("多少", "数量", "count", "几条")):
+            return f"SELECT COUNT(*) AS total FROM {base_table} LIMIT 50"
+
+        detail_requested = any(
+            keyword in normalized_question
+            for keyword in ("详细", "详情", "所有信息", "全部信息", "完整", "具体", "介绍", "信息")
+        )
+        preferred_columns = _APPROVAL_DETAIL_COLUMNS if detail_requested else _APPROVAL_LIST_COLUMNS
+        available_columns = {str(column) for column in selected_columns.get(base_table, [])}
+        projected = [column for column in preferred_columns if column in available_columns]
+        if not projected:
+            projected = [str(column) for column in selected_columns.get(base_table, [])[:8]]
+        if not projected:
+            projected = ["*"]
+
+        term = self._extract_variety_search_term(user_question)
+        safe_term = self._safe_search_literal(term) if term else None
+        where = self._where_search_term(safe_term, (f"{base_table}.variety_name",))
+        projection = ", ".join(f"{base_table}.{column}" for column in projected) if projected != ["*"] else "*"
+        return f"SELECT {projection} FROM {base_table}{where} LIMIT 50"
+
+    def _generate_variety_overview_sql(self, context: dict[str, Any]) -> str:
+        allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
+        selected_tables = {str(table) for table in context.get("selected_tables", [])}
+        table_scope = allowed_tables or selected_tables
+        term = self._extract_variety_search_term(str(context.get("user_question") or ""))
+        safe_term = self._safe_search_literal(term) if term else None
+
+        approval_tables = self._overview_approval_tables(
+            table_scope,
+            user_question=str(context.get("user_question") or ""),
+            term=term,
+        )
+        selects: list[str] = []
+        for table in approval_tables:
+            if table == "rice_varieties" and {"variety", "rice_comp"}.issubset(table_scope):
+                where = self._where_search_term(
+                    safe_term,
+                    ("rice_varieties.variety_name",),
+                )
+                selects.append(
+                    "SELECT 'approval_variety_db' AS source_library, "
+                    "rice_varieties.crop_name, rice_varieties.variety_name, rice_varieties.approval_num, "
+                    "rice_varieties.year, rice_varieties.applicant, rice_varieties.breeder, "
+                    "variety.variety_id AS genotype_variety_id, "
+                    "rice_comp.all_indica_comp, rice_comp.all_japonica_comp, rice_comp.indica_japonica_mix_comp "
+                    "FROM rice_varieties "
+                    "LEFT JOIN variety ON rice_varieties.ref_var_id = variety.variety_id "
+                    "LEFT JOIN rice_comp ON variety.variety_id = rice_comp.variety_id"
+                    f"{where}"
+                )
+                continue
+
+            where = self._where_search_term(safe_term, (f"{table}.variety_name",))
+            selects.append(
+                "SELECT 'approval_variety_db' AS source_library, "
+                f"{table}.crop_name, {table}.variety_name, {table}.approval_num, "
+                f"{table}.year, {table}.applicant, {table}.breeder, "
+                "NULL AS genotype_variety_id, "
+                "NULL AS all_indica_comp, NULL AS all_japonica_comp, NULL AS indica_japonica_mix_comp "
+                f"FROM {table}"
+                f"{where}"
+            )
+
+        if "variety" in table_scope:
+            has_rice_comp = "rice_comp" in table_scope
+            where_columns = ["variety.variety_name"]
+            where = self._where_search_term(safe_term, tuple(where_columns))
+            rice_comp_projection = (
+                "rice_comp.all_indica_comp, rice_comp.all_japonica_comp, rice_comp.indica_japonica_mix_comp"
+                if has_rice_comp
+                else "NULL AS all_indica_comp, NULL AS all_japonica_comp, NULL AS indica_japonica_mix_comp"
+            )
+            rice_comp_join = " LEFT JOIN rice_comp ON variety.variety_id = rice_comp.variety_id" if has_rice_comp else ""
+            selects.append(
+                "SELECT 'genotype_db' AS source_library, "
+                "NULL AS crop_name, variety.variety_name, NULL AS approval_num, "
+                "NULL AS year, NULL AS applicant, NULL AS breeder, "
+                "variety.variety_id AS genotype_variety_id, "
+                f"{rice_comp_projection} "
+                "FROM variety"
+                f"{rice_comp_join}"
+                f"{where}"
+            )
+
+        if not selects:
+            return "SELECT COUNT(*) AS total FROM variety LIMIT 50"
+        return " UNION ALL ".join(selects) + " LIMIT 50"
+
+    def _extract_variety_search_term(self, user_question: str) -> str | None:
+        normalized = str(user_question or "").replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        cleaned = normalized
+        for keyword in ("请", "帮我", "给我", "再", "查询", "查一下", "查查", "看一下", "看看", "了解一下", "品种", "信息", "的"):
+            cleaned = cleaned.replace(keyword, " ")
+
+        numbered_match = re.search(r"[\u4e00-\u9fffA-Za-z]{1,16}\d+[A-Za-z0-9\u4e00-\u9fff_-]*", cleaned)
+        if numbered_match:
+            term = self._normalize_variety_search_term(numbered_match.group(0))
+            if self._is_meaningful_variety_search_term(term):
+                return term
+
+        explicit_match = re.search(
+            r"(?:品种名称|品种名|名字|名称)[^，。；,;?？]{0,10}(?:带|包含|含有|包括)['\"]?([^'\"，。；,;?？\s]{1,24})",
+            normalized,
+        )
+        if explicit_match:
+            term = self._normalize_variety_search_term(explicit_match.group(1))
+            if self._is_meaningful_variety_search_term(term):
+                return term
+
+        series_text = normalized
+        for keyword in (
+            "请",
+            "帮我",
+            "给我",
+            "再",
+            "查询",
+            "查一下",
+            "查查",
+            "看一下",
+            "看看",
+            "了解一下",
+            "都有什么",
+            "有什么",
+            "有哪些",
+            "什么",
+            "品种",
+            "信息",
+            "的",
+        ):
+            series_text = series_text.replace(keyword, " ")
+        series_match = re.search(r"([^\s，。；,;?？'\"、]{1,16})系列", series_text)
+        if series_match:
+            term = self._normalize_variety_search_term(series_match.group(1))
+            if self._is_meaningful_variety_search_term(term):
+                return term
+
+        return None
+
+    def _normalize_variety_search_term(self, term: str) -> str:
+        value = str(term or "").strip().strip(" \"'`，。；,;?？、")
+        value = re.split(r"(?:系列|的|是|为|都|有|包括|包含|含有)", value, maxsplit=1)[0]
+        for phrase in ("请", "帮我", "给我", "再", "查询", "查一下", "查查", "看一下", "看看", "了解一下"):
+            value = value.replace(phrase, "")
+        return value.strip().strip(" \"'`，。；,;?？、")
+
+    def _is_meaningful_variety_search_term(self, term: str) -> bool:
+        if not term:
+            return False
+        if term in {"系列", "品种", "信息", "名字", "名称", "什么", "哪些"}:
+            return False
+        return bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]", term))
+
+    def _safe_search_literal(self, term: str) -> str:
+        safe = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_-]", "", term)
+        return safe[:80]
+
+    def _overview_approval_tables(self, table_scope: set[str], *, user_question: str, term: str | None) -> list[str]:
+        text = f"{user_question} {term or ''}"
+        crop_specific_tables = (
+            ("rice_varieties", ("水稻", "粳", "籼", "稻")),
+            ("corn_varieties", ("玉米",)),
+            ("cotton_varieties", ("棉花", "棉")),
+            ("wheat_varieties", ("小麦", "麦")),
+            ("soybean_varieties", ("大豆", "豆")),
+        )
+        for table_name, hints in crop_specific_tables:
+            if table_name in table_scope and any(hint in text for hint in hints):
+                return [table_name]
+        return [
+            table
+            for table in ("corn_varieties", "rice_varieties", "cotton_varieties", "wheat_varieties", "soybean_varieties")
+            if table in table_scope
+        ]
+
+    def _where_search_term(self, safe_term: str | None, columns: tuple[str, ...]) -> str:
+        if not safe_term:
+            return ""
+        clauses = [f"{column} LIKE '%{safe_term}%'" for column in columns]
+        return " WHERE " + " OR ".join(clauses)
+
+    def _validate_variety_name_matching_policy(self, sql: str) -> None:
+        left_strict_equal = r"(?:`?[A-Za-z_][\w]*`?\.)?`?variety_name`?\s*=\s*(?:'[^']*'|\"[^\"]*\"|`?[A-Za-z_][\w]*`?(?:\.`?[A-Za-z_][\w]*`?)?)"
+        right_strict_equal = r"(?:'[^']*'|\"[^\"]*\")\s*=\s*(?:`?[A-Za-z_][\w]*`?\.)?`?variety_name`?"
+        if re.search(left_strict_equal, sql, flags=re.I) or re.search(right_strict_equal, sql, flags=re.I):
+            raise LLMOutputError(
+                "validation_failed",
+                "SQL must use LIKE instead of strict equality when filtering variety_name.",
+            )

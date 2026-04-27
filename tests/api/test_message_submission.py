@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.core.enums import NodeStatus
+
 from tests.api.support import APITestCase, blocking_mysql_adapter
 
 
@@ -24,3 +26,29 @@ class MessageSubmissionAPITest(APITestCase):
         release.set()
         terminal = await self.wait_for_terminal_task(first_payload["task_id"])
         self.assertEqual(terminal["status"], "cancelled")
+
+    async def test_waiting_input_task_can_be_answered_and_resumed(self) -> None:
+        first = await self.submit_message(content="查询近五年审定品种有哪些", capability_id="sql_query.query")
+        self.assertEqual(first.status_code, 202)
+        first_payload = first.json()
+
+        async def has_waiting_input_node() -> bool:
+            nodes = await self.runtime.storage.list_task_nodes_for_task(first_payload["task_id"])
+            return any(node.status == NodeStatus.WAITING_FOR_INPUT for node in nodes)
+
+        await self.wait_for_condition(has_waiting_input_node)
+
+        interrupts = await self.client.get(f"/api/v1/tasks/{first_payload['task_id']}/interrupts")
+        self.assertEqual(interrupts.status_code, 200)
+        open_interrupt = interrupts.json()["interrupts"][0]
+        self.assertEqual(open_interrupt["status"], "open")
+
+        answer = await self.client.post(
+            f"/api/v1/tasks/{first_payload['task_id']}/interrupts/{open_interrupt['interrupt_id']}/answer",
+            json={"answer_payload": {"crop": "水稻"}},
+        )
+        self.assertEqual(answer.status_code, 202)
+        self.assertEqual(answer.json()["status"], "answered")
+
+        terminal = await self.wait_for_terminal_task(first_payload["task_id"])
+        self.assertEqual(terminal["status"], "completed")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from src.core.enums import NodeCriticality
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 
 
 SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS = (
@@ -12,6 +12,12 @@ SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS = (
         public=True,
     ),
 )
+
+SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES = {
+    "sql_query.query": CapabilityPayloadPolicy(
+        system_payload_factory=lambda request: {"user_question": request.user_message},
+    ),
+}
 
 
 SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS = (
@@ -46,9 +52,9 @@ SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS = (
         public=False,
     ),
     CapabilityDescriptor(
-        capability_id="sql_query.result_summarize",
-        name="result_summarize",
-        description="Summarize readonly SQL result for end user.",
+        capability_id="sql_query.result_filtering",
+        name="result_filtering",
+        description="Filter broad readonly SQL result candidates into the rows that match the user need.",
         public=False,
     ),
 )
@@ -62,7 +68,7 @@ class SQLQueryWorkflowProvider:
         node_generate = f"{task_id}:sql_generate"
         node_guard = f"{task_id}:sql_guard"
         node_execute = f"{task_id}:sql_execute_readonly"
-        node_summary = f"{task_id}:result_summarize"
+        node_filtering = f"{task_id}:result_filtering"
 
         nodes = (
             WorkflowNodePlan(
@@ -101,10 +107,9 @@ class SQLQueryWorkflowProvider:
                 timeout_policy={"seconds": 60},
             ),
             WorkflowNodePlan(
-                node_id=node_summary,
-                capability_id="sql_query.result_summarize",
+                node_id=node_filtering,
+                capability_id="sql_query.result_filtering",
                 depends_on=(node_execute, node_generate),
-                criticality=NodeCriticality.REQUIRED,
                 retry_policy={"max_attempts": 1},
                 timeout_policy={"seconds": 20},
             ),

@@ -10,6 +10,56 @@
 
 ## [Unreleased]
 
+### 2026-04-27 — 强化宽泛问题的第一性原理处理
+
+- 主代理 Prompt 新增“第一性原理理解用户需求”约束：不假定用户知道自己要什么、该选哪个 capability 或该提供哪些参数，优先推断真实目标并给出可验证的初步答案/下一步。
+- SQLQuery SQL 生成 Prompt 新增 `first_principles_need_inference` 策略，明确宽泛但仍在支持范围内的问题应优先生成概览查询，而不是直接要求用户补充库名或路径。
+- 新增 SQLQuery `variety_overview` 路由与 schema profile，用于“查一下龙粳33”这类只给品种名的宽泛问题，同步覆盖审定品种库与基因型/籼粳成分信息。
+- SQLQuery intent route 会将宽泛品种名查询路由到综合概览，不再在“审定品种库/基因型数据库”之间抛出冷冰冰的手动选择中断。
+- SQLQuery deterministic fallback 可生成单条只读 `UNION ALL` 概览 SQL；对“龙粳/籼/稻”等水稻品种线索优先缩窄到水稻审定表 + 基因型相关表，避免跨全作物表慢扫。
+- 用本地真实后端 API 验证“查一下龙粳33”可完成：任务 6 个 SQLQuery 节点全部 completed，返回 2 行，分别覆盖 `approval_variety_db` 与 `genotype_db`。
+- 补充 SQLQuery intent / schema context / SQL generate / prompt builder 与主代理 Prompt 回归测试。
+- 修复等待补充信息任务锁住会话的问题：新增 `GET /api/v1/tasks/{task_id}/interrupts` 与 `POST /api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer`，前端检测到 `waiting_for_input` 后展示澄清问题，并把下一次输入作为 interrupt answer 继续原任务。
+- 补全 `waiting_for_input` 前端追问 UI：助手消息展示“需要补充信息”卡片、字段与可选示例，输入区显示“下一条消息会继续当前任务”的补充模式状态条，并保留显式“取消当前任务”按钮。
+- 加固 interrupt 竞态：当前端已看到节点 `waiting_for_input` 但后端 open interrupt 尚未可见时，继续保持任务锁定和轮询，避免把下一条用户输入误当成新任务提交。
+- 新增当前会话未完成任务列表：后端提供会话任务列表接口，前端展示未完成任务数量、任务摘要、状态、活动节点数，并提供逐项“停止任务”按钮供用户主动终止任务。
+- 未完成任务列表默认折叠隐藏，只在标题栏保留数量、展开/收起和刷新入口，避免占用主对话区域。
+- SQLQuery 结果表格增加横向滚动与气泡内宽度约束，避免宽表列数较多时撑出助手消息框。
+- SQLQuery intent route 新增显式库名 / route_id 优先匹配：当用户补充“审定品种库”或“基因型数据库”时优先采用该路由，再回退到宽泛品种概览或 keyword 打分。
+- `routing_rules.yaml` 补齐审定品种库 / 基因型数据库的库名关键词，并为审定品种库水稻 crop alias 增加“稻 / 粳 / 粳稻 / 籼稻”，使“龙粳18 + 审定品种库”这类补充信息可直接推断为水稻。
+- 审定品种库单品种查询默认升级为业务详情输出：schema 裁剪保留申请者、育种者、品种来源、特征特性、产量表现、栽培要点、适种区域与审定意见等核心字段；确定性 SQL fallback 也会按详情/列表场景选择字段。
+- SQLQuery 默认产品链路恢复内部 `result_summarize` 尾节点：SQLQuery 子代理可先生成可复用结果摘要，同时 `sql_execute_readonly` 继续提供表格 preview。
+- SQLQuery 尾节点从 `result_summarize` 重命名并改造为 `result_filtering`：SQL 生成阶段继续用 `LIKE` 召回候选品种，尾节点通过 LLM 输出 `keep_row_indexes` 筛选真正符合用户需求的行，最终返回 `filtered_query_result` 表格；无 LLM 或 LLM 失败时保守保留候选表格并记录 fallback。
+- 收紧 SQLQuery 单品种编号筛选规则：当用户查询“龙粳18”这类明确编号品种时，`result_filtering` 会只保留规范化等于“龙粳18”或“龙粳18号”的行，并剔除“龙粳1836 / 龙粳1823”等编号后继续追加数字的其他品种；该规则在无 LLM 或 LLM 误保留时也会作为后过滤生效。
+- 修复 interrupt 反复追问时复用同一 `interrupt_id` 可能导致节点停在 `waiting_for_input` 但无 open interrupt 的问题；interrupt id 现在带 reason/input 指纹，避免“无限转圈”式悬挂。
+- 排查并取消本地人工验证会话中遗留的 `task-7ff47608987d`：该任务停在 `sql_query.intent_route` 的 `waiting_for_input`，旧前端未支持 interrupt answer，导致后续普通提交被 ConversationSerialGuard 以 409 busy 拒绝。
+- 新增默认自动规划 provider：用户不再需要显式选择 capability；数据库/品种/审定/基因型类问题会自动展开为 `SQLQuery` 六节点宏能力，再交给 `main_agent.respond` 结合上游结果生成自然语言最终回答，普通问题仍保持单主代理路径。
+- SQLQuery 默认运行链路保留末端 `result_summarize` 节点，内部 DAG 回到 intent route、schema context、SQL generate、SQL guard、readonly execute、result summarize 六节点；主代理接收 SQLQuery 上游摘要结果做最终对话式整合。
+- SQLQuery SQL 生成新增品种名 LIKE 匹配约束：LLM prompt 明确禁止 `variety_name = ...`，LLM 若返回严格等值条件会触发 fallback；确定性 fallback 统一使用 `variety_name LIKE '%关键词%'`。
+- 主代理 Prompt 新增“上游能力结果上下文”注入，只暴露 SQLQuery 摘要、路由、行数等安全字段，让主代理可基于 capability 结果整合回答，而不是重新猜测或忽略已完成节点。
+- 前端业务对话台移除“普通对话 / SQLQuery”手动模式选择，展示为“当前模式：自动规划”，数据库类输入仅提示主代理会自动判断是否调用 SQLQuery；自动 SQLQuery 路径仍会在主代理最终回答下展示折叠的结果卡片，未完成任务列表中的空 capability 也显示为“自动规划”。
+- 完成完整 LLM Planner runtime 接入：默认自动规划入口先尝试 LLM 生成 public-only 高层 DAG，再经过 public validator、macro expander 与 internal validator 后执行；planner 输出非法、引用 internal capability 或 provider 不可用时自动 fallback 到确定性 `AutoWorkflowProvider`。
+- Planner prompt 现在注入当前 public capability 清单并明确数据库问题优先规划 `sql_query.query -> main_agent.respond`；系统会强制用真实用户问题覆盖当前 public capability 的 `user_message` / `user_question`，并在 SQL-only 或未连线主代理计划中自动追加/重连主代理 finalizer，确保主代理接收上游结果上下文。
+- 新增正式的 per-capability planner payload allowlist：`CapabilityPayloadPolicy` / `PlannerPayloadPolicy` 默认 fail-closed，策略随 capability 注册进入 `CapabilityRegistry`，LLM Planner prompt 会展示每个 public capability 允许的 payload 字段；只有 capability 明确声明的字段才会从 LLM planner payload 进入执行图，系统生成字段始终覆盖 planner 字段。当前 `main_agent.respond` 与 `sql_query.query` 均只是首批注册策略，由各自 capability 模块声明真实用户输入注入规则。
+- `build_api_runtime` 新增 planner 注入 seam（fake text generator / LLM config / factory / reasoning effort / enable 开关），`ApiRuntime` 支持异步 workflow provider，并新增 `workflow.plan_built` audit-only 事件记录 planner route、fallback 状态与原因。
+- 补充 LLM Planner orchestration 与 API 集成测试，覆盖成功展开、单主代理、payload 覆盖保护、capability registry payload policy、未来 capability 自定义 allowlist、自动 finalizer、未连线主代理重连、provider 异常 fallback、internal capability fallback 与非法 JSON fallback。
+- 新增 `docs/Capability接入指南.md`，明确后续新增 capability 时在 `src/capabilities/<name>/`、`src/api/runtime.py`、planner payload allowlist、macro provider、AutoWorkflowProvider、测试与文档中分别要加入什么，避免把新能力逻辑写成 SQLQuery 式特判。
+- 前端对话框新增上游能力执行感知：根据 `node.started` / `node.completed` 事件在助手气泡内展示“正在执行 SQLQuery / 主代理 / 未来 capability”的当前步骤，避免长时间只显示等待回答。
+- 前端 Markdown 渲染补齐 GitHub 风格基础表格解析与横向滚动样式，使主代理返回的 Markdown 表格不再作为普通段落显示。
+- 补齐 SQLQuery 内部 LLM 默认装配：真实 API runtime 现在会用 `config.yaml` 创建 SQLQuery 文本生成器，并同时传给 `sql_query.sql_generate` 与 `sql_query.result_filtering`；显式注入的 `llm_text_generator` 仍保持最高优先级，fake backend 明确关闭真实 SQLQuery LLM。
+- SQLQuery SQL 生成 Prompt 与确定性 fallback 增加“X 系列 / 名字里带 X / 名称中包含 X”识别规则；例如“龙粳系列”会生成 `variety_name LIKE '%龙粳%'`，避免无 WHERE 条件只返回前 50 条无关数据。
+
+### 2026-04-27 — 新增主代理思考控制
+
+- 前端业务对话台在“当前模式”右侧新增“思考强度”下拉菜单（显示为“最底” / “低” / “中” / “高”，实际值为 `minimal` / `low` / `medium` / `high`，默认“中”）和“深度思考”开关。
+- 提交消息时通过 metadata 独立传递 `main_agent_reasoning_effort` 与 `deep_thinking`：前者控制 reasoning effort，后者控制 LLM 请求 `extra_body.thinking.type` 为 `enabled` 或 `disabled`。
+- 主代理执行器支持请求级 reasoning effort 与 thinking 开关覆盖，将 provider 返回的 `reasoning_content` 以 `main_agent.reasoning_delta` 前端事件输出，并在 LLM audit metadata 中记录实际档位和 thinking 状态。
+- 调整主代理 LLM runtime 绑定，使真实 LLM client 可通过 `generate_text_with_thinking()` 同时产出 answer / reasoning 内容；保留旧的一参 fake streamer 兼容。
+- 修复主代理 executor 默认 LLM fallback 仍调用 `stream_text()` 导致过滤 `reasoning_content` 的问题；已用真实 provider 探测确认字段位于 `choices[0].delta.reasoning_content` / `delta.model_extra.reasoning_content`，并用本地后端 API 验证可转发为 `main_agent.reasoning_delta`。
+- 前端对话气泡新增安全 Markdown 渲染，并在助手消息中以“思考内容”框展示深度思考返回的 reasoning 内容；开启深度思考但 provider 未返回 `reasoning_content` 时也会显示占位提示。
+- “思考内容”在正文开始并完成返回后默认折叠约 3 行，右上角提供展开/收起开关，内容文字统一使用灰色弱化展示。
+- 补充前端 API/UI、Markdown 渲染、LLM client、主代理 executor 与 API runtime 回归测试，并通过前端测试/build 与后端相关测试。
+
 ### 2026-04-27 — 完成前端业务对话台 v1 与全栈启动脚本
 
 - 基于 `docs/prd/frontend/00-前端业务对话台PRD.md` 新增 `docs/dev_processes/frontend/` Phase 0~5 开发过程文档，并补充 Ralph 执行版 PRD / Test Spec。

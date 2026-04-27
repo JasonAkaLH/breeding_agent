@@ -6,11 +6,16 @@ from sse_starlette.sse import EventSourceResponse
 from src.core.enums import NodeStatus, TaskStatus
 
 from ..dto import (
+    AnswerInterruptRequest,
+    AnswerInterruptResponse,
     ArtifactResponse,
     CancelTaskResponse,
+    InterruptResponse,
     TaskArtifactsResponse,
     TaskEdgeResponse,
     TaskGraphResponse,
+    TaskInterruptsResponse,
+    TaskListResponse,
     TaskNodeResponse,
     TaskSummaryResponse,
 )
@@ -18,6 +23,13 @@ from ..runtime import ApiRuntime
 from ..sse import encode_sse_event
 
 router = APIRouter()
+
+UNFINISHED_TASK_STATUSES = {
+    TaskStatus.ACCEPTED,
+    TaskStatus.PLANNING,
+    TaskStatus.RUNNING,
+    TaskStatus.CANCELLING,
+}
 
 
 def _runtime(request: Request) -> ApiRuntime:
@@ -48,18 +60,15 @@ def _count_failed_nodes(nodes) -> int:
     return sum(node.status in failed_statuses for node in nodes)
 
 
-@router.get("/api/v1/tasks/{task_id}", response_model=TaskSummaryResponse)
-async def get_task(task_id: str, request: Request) -> TaskSummaryResponse:
-    runtime = _runtime(request)
-    task = await runtime.storage.get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown task: {task_id}")
-    nodes = await runtime.storage.list_task_nodes_for_task(task_id)
+async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
+    nodes = await runtime.storage.list_task_nodes_for_task(task.task_id)
     return TaskSummaryResponse(
         task_id=task.task_id,
         conversation_id=task.conversation_id,
         status=str(task.status),
         root_node_id=task.root_node_id,
+        summary=task.summary,
+        requested_capability_id=task.requested_capability_id,
         active_node_count=_count_active_nodes(nodes),
         completed_node_count=sum(node.status == NodeStatus.COMPLETED for node in nodes),
         failed_node_count=_count_failed_nodes(nodes),
@@ -67,6 +76,30 @@ async def get_task(task_id: str, request: Request) -> TaskSummaryResponse:
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
+
+
+@router.get("/api/v1/conversations/{conversation_id}/tasks", response_model=TaskListResponse)
+async def list_conversation_tasks(conversation_id: str, request: Request, scope: str = "unfinished") -> TaskListResponse:
+    if scope not in {"unfinished", "all"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported task list scope: {scope}")
+    runtime = _runtime(request)
+    tasks = await runtime.storage.list_tasks_for_conversation(
+        conversation_id,
+        statuses=UNFINISHED_TASK_STATUSES if scope == "unfinished" else None,
+    )
+    return TaskListResponse(
+        conversation_id=conversation_id,
+        tasks=[await _build_task_summary(runtime, task) for task in tasks],
+    )
+
+
+@router.get("/api/v1/tasks/{task_id}", response_model=TaskSummaryResponse)
+async def get_task(task_id: str, request: Request) -> TaskSummaryResponse:
+    runtime = _runtime(request)
+    task = await runtime.storage.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown task: {task_id}")
+    return await _build_task_summary(runtime, task)
 
 
 @router.get("/api/v1/tasks/{task_id}/events")
@@ -91,6 +124,38 @@ async def cancel_task(task_id: str, request: Request) -> CancelTaskResponse:
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return CancelTaskResponse(task_id=task.task_id, status="cancelling", accepted=True)
+
+
+@router.get("/api/v1/tasks/{task_id}/interrupts", response_model=TaskInterruptsResponse)
+async def list_task_interrupts(task_id: str, request: Request) -> TaskInterruptsResponse:
+    runtime = _runtime(request)
+    task = await runtime.storage.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown task: {task_id}")
+    interrupts = await runtime.list_interrupts(task_id)
+    return TaskInterruptsResponse(
+        task_id=task_id,
+        interrupts=[InterruptResponse(**interrupt) for interrupt in interrupts],
+    )
+
+
+@router.post(
+    "/api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer",
+    response_model=AnswerInterruptResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def answer_task_interrupt(
+    task_id: str,
+    interrupt_id: str,
+    body: AnswerInterruptRequest,
+    request: Request,
+) -> AnswerInterruptResponse:
+    runtime = _runtime(request)
+    try:
+        result = await runtime.answer_interrupt(task_id, interrupt_id, body.answer_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return AnswerInterruptResponse(**result)
 
 
 @router.get("/api/v1/tasks/{task_id}/graph", response_model=TaskGraphResponse)

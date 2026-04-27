@@ -8,13 +8,13 @@
 
 ## 1. 背景
 
-`docs/prd/backend/06-SQLQuery-MVP设计.md` 定义了一期 SQLQuery 六节点只读链路，但实现已经进一步扩展到 LLM 驱动的 SQL 生成、LLM 结果摘要、真实 MySQL 只读适配器与 prompt schema 约束。因此需要把这些已经落地的能力补入正式 PRD，作为后续维护与前端设计的后端契约依据。
+`docs/prd/backend/06-SQLQuery-MVP设计.md` 定义了一期 SQLQuery 六节点只读链路；随后实现扩展到 LLM 驱动的 SQL 生成、LLM 结果筛选、真实 MySQL 只读适配器与 prompt schema 约束。当前默认产品链路保留六节点 DAG，尾节点 `sql_query.result_filtering` 在 SQLQuery 内部对 LIKE 召回的候选行做二次筛选并返回筛选后的表格，同时 `sql_execute_readonly` 保留原始表格 preview；本 PRD 记录这些能力的维护边界。
 
 ## 2. 目标
 
 SQLQuery LLM 增强的目标是：
 - 让 `sql_query.sql_generate` 可在裁剪后的 schema 上下文内调用 LLM 生成只读 SQL；
-- 让 `sql_query.result_summarize` 可在已执行结果上调用 LLM 生成中文摘要；
+- 让 `sql_query.result_filtering` 可在已执行结果上调用 LLM 判断候选行是否符合用户真实需求，并返回筛选后的表格；
 - 保留确定性 fallback，确保 provider 不可用、输出非法或未配置时仍有可测试的降级路径；
 - 强化 prompt schema，使 LLM 只能使用裁剪后的表、字段、字段类型与 join hints；
 - 保持审计可见，同时不记录 API key、完整 prompt、完整 rows 等敏感内容；
@@ -30,7 +30,7 @@ SQLQuery LLM 增强的目标是：
 
 ## 4. SQL 生成 LLM 契约
 
-`sql_query.sql_generate` 支持注入最小文本生成接口，并按照以下契约处理 LLM 输出：
+`sql_query.sql_generate` 支持注入最小文本生成接口；真实 API runtime 默认会在未显式注入 fake generator 时，从 `config.yaml` 创建 `LLMClient.generate_text()` 作为 SQLQuery 内部文本生成器，并按照以下契约处理 LLM 输出：
 
 ### 4.1 输入约束
 
@@ -65,11 +65,22 @@ LLM 必须返回 JSON object，`mode` 只能为：
 - `columns_used` 必须存在于裁剪后的 schema；
 - SQL 文本中引用的字段必须能映射到裁剪后的字段；
 - `column_types_used` 必须逐项匹配 schema 中的 `sql_type`；
+- 当按品种名称 / `variety_name` 过滤时，SQL 必须使用 `LIKE` 通配匹配，不得使用严格等值条件 `variety_name = ...`；
 - 后续仍必须通过 `sql_query.sql_guard`，LLM 自身不能绕过 guard。
 
-### 4.4 Fallback
+### 4.4 Runtime 装配
 
-当未配置 LLM、provider 失败、JSON 解析失败、输出模式非法或字段校验失败时，`sql_generate` 使用当前确定性 SQL 生成逻辑降级，并在输出中标记：
+`build_api_runtime()` 为 SQLQuery 提供独立 LLM 装配参数：
+- `llm_text_generator`：最高优先级，测试或特殊运行时可直接注入文本生成函数；
+- `sql_query_llm_config` / `sql_query_llm_config_path` / `sql_query_llm_client_factory`：用于真实 provider 或 fake client factory；
+- `sql_query_reasoning_effort`：传给结构化 SQLQuery 文本生成调用；
+- `enable_sql_query_llm`：可在 fake backend / 默认自动化测试中显式关闭真实 provider 访问。
+
+同一个 resolved text generator 会同时传给 `sql_query.sql_generate` 与 `sql_query.result_filtering`，确保 SQL 生成和候选结果筛选都先走 LLM 主路径，再按各自规则降级。
+
+### 4.5 Fallback
+
+当禁用/未配置 LLM、provider 失败、JSON 解析失败、输出模式非法或字段校验失败时，`sql_generate` 使用当前确定性 SQL 生成逻辑降级，并在输出中标记：
 - `generation_source`
 - `llm_mode`
 - `fallback_used`
@@ -77,40 +88,40 @@ LLM 必须返回 JSON object，`mode` 只能为：
 
 同时写入 audit-only 的 `sql_query.llm_fallback` 事件；成功调用写入 `sql_query.llm_call`。
 
-## 5. 结果摘要 LLM 契约
+## 5. 结果筛选与表格回传契约
 
-`sql_query.result_summarize` 只解释已经执行完成的 SQL 结果，不重新生成 SQL，也不要求补查数据库。
+当前默认 SQLQuery workflow 的尾节点是 `sql_query.result_filtering`。SQL 生成阶段使用 `LIKE` 匹配品种名是为了先召回候选行，避免差一个字、简称或后缀导致漏查；`result_filtering` 只负责在已执行结果上判断哪些候选行真正符合用户需求，不重新生成 SQL、不修改 SQL、不补查数据库、不生成自然语言总结。
 
 ### 5.1 输入约束
 
-结果摘要 prompt 只接收：
+结果筛选 prompt 只接收：
 - 用户问题与 route / schema profile 上下文；
-- 已执行 SQL 的摘要上下文；
+- 已执行 SQL 的上下文；
 - 结果列名；
-- 有限 `rows_preview`；
-- `row_count`、`preview_row_count`、`truncated`。
+- 有限 `candidate_rows`，每行带 0-based `row_index`；
+- `source_row_count`、`candidate_row_count`、`truncated`。
 
-默认只发送有限行预览，不能把完整结果集默认交给 LLM。
+默认只发送候选行预览，不能把完整结果集默认交给 LLM。`sql_execute_readonly` 同时保留原始 `query_result_preview` artifact，供排障和降级；前端展示应优先使用 `result_filtering` 生成的 `filtered_query_result` artifact。
 
 ### 5.2 输出约束
 
-LLM 必须返回 JSON object，稳定必填字段为：
-- `summary`
+`result_filtering` 的 LLM 输出只接受 JSON：
+- 必填 `keep_row_indexes`：从 `candidate_rows.row_index` 中选择要保留的行；
+- 可选 `filter_reason`：简短说明筛选依据。
 
-可选字段包括：
-- `highlights`
-- `caveats`
-- `row_count`
-- `preview_row_count`
-- `truncated`
+节点稳定输出筛选后的表格：
+- `columns`、`rows`、`row_count`、`preview_row_count`、`truncated`；
+- `source_row_count`、`candidate_row_count`、`removed_row_count`、`kept_row_indexes`；
+- `filter_source`、`filter_reason`、`fallback_used` / `fallback_reason`；
+- `route_id` / `schema_profile_id`。
 
-摘要必须使用中文，不得编造结果集中不存在的信息；当 `truncated=true` 时，应明确说明摘要基于预览行。
+不得编造候选集中不存在的行；如果候选行明显不是用户要查的品种/实体，应从结果表中移除；如果只是简称、别名、缺字或多字但仍可能对应用户需求，可以保守保留。
+
+对带数字编号的单品种查询采用更严格的业务规则：例如用户查询“龙粳18”时，只保留品种名规范化后等于“龙粳18”或“龙粳18号”的行；“龙粳1836”“龙粳1823”“龙粳1851”等在编号后继续追加数字的名称属于其他品种，必须剔除。该规则应作为 LLM prompt 约束和确定性后过滤同时存在，避免无 LLM 或 LLM 误判时污染结果表。
 
 ### 5.3 Fallback
 
-当无 LLM、provider 失败、JSON 非法、`summary` 为空或超出最大长度时，摘要节点回退确定性摘要，并写入 `sql_query.llm_fallback` audit 事件。
-
-0 行结果默认直接走确定性摘要，不必调用 LLM。
+当禁用/未配置 LLM 或 0 行结果时，节点走确定性路径并保留 SQL 返回的候选表格；当 provider 失败、JSON 非法或 `keep_row_indexes` 越界/类型非法时，节点回退为未筛选表格（再叠加确定性后过滤规则），并写入 `sql_query.llm_fallback` audit 事件。成功调用写入 `sql_query.llm_call`。
 
 ## 6. MySQL 只读适配器契约
 
@@ -141,13 +152,13 @@ SQLQuery LLM 增强必须输出以下审计事件：
 
 后端输出中应稳定保留：
 - SQL 生成来源、fallback 状态与原因；
-- 摘要来源、fallback 状态与原因；
+- 结果筛选来源、fallback 状态与原因；
 - 结果行数、预览行数、是否截断；
 - clarify / reject 的结构化原因。
 
 前端后续可基于这些字段展示：
 - “由 LLM 生成 / 由规则降级生成”；
-- “结果仅基于预览行摘要”；
+- “结果筛选仅基于候选行预览”；
 - “需要补充信息”；
 - “当前问题超出 SQLQuery 范围”。
 
@@ -155,7 +166,9 @@ SQLQuery LLM 增强必须输出以下审计事件：
 
 本专题的最小验收包括：
 - SQL 生成 LLM 主路径、clarify、reject、provider fallback、输出校验失败 fallback 测试通过；
-- 结果摘要 LLM 主路径、rows preview 限制、0 行确定性摘要、provider fallback 测试通过；
+- SQLQuery 内部 `result_filtering` 节点可生成稳定 `filtered_query_result` artifact；
+- `sql_execute_readonly` 继续生成 `query_result_preview` 表格 artifact；
+- 品种名称过滤使用 `LIKE`，LLM 严格等值输出会触发 fallback；
 - SQLQuery workflow 在 fake LLM 下可完成端到端测试；
 - `sql_query.llm_call` / `sql_query.llm_fallback` 不记录完整 prompt、完整 rows 或 secret；
 - 真实 MySQL 只读 adapter smoke 能查询到已验证样例（当前样例为“龙粳33”），且仍需 SQL Guard token。

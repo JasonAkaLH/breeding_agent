@@ -15,7 +15,7 @@
 - `sql_generate`
 - `sql_guard`
 - `sql_execute_readonly`
-- `result_summarize`
+- `result_filtering`
 
 其中：
 
@@ -27,10 +27,10 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
 
 1. `src/capabilities/sql_query/sql_generate.py`
    - 支持注入 `llm_text_generator` 走结构化 LLM 输出；
-   - 未显式注入 LLM 时仍使用规则拼接 SQL，保证默认回归不访问外部 provider。
-2. `src/capabilities/sql_query/result_summarize.py`
-   - 支持注入 `llm_text_generator` 走结构化 LLM 摘要；
-   - 未显式注入 LLM 或 LLM 失败时仍使用确定性模板摘要。
+   - 禁用/未配置 LLM 或 provider 失败时仍使用规则拼接 SQL，保证默认回归不访问外部 provider。
+2. `src/capabilities/sql_query/result_filtering.py`
+   - 支持注入 `llm_text_generator` 走结构化 LLM 候选行筛选；
+   - 禁用/未配置 LLM 或 LLM 失败时仍保守保留候选表格，并叠加确定性后过滤。
 
 同时，仓库里已经存在一个可复用的异步 LLM 客户端雏形：
 
@@ -41,7 +41,7 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
 因此，当前最合理的后续升级路线不是推翻 Phase 5，而是：
 
 > **保留现有 capability / orchestration / guard / readonly execution 结构，  
-> 只把 `sql_generate` 与 `result_summarize` 升级为真正的 LLM 驱动版本，并保留稳定降级路径。**
+> 只把 `sql_generate` 与 `result_filtering` 升级为真正的 LLM 驱动版本，并保留稳定降级路径。**
 
 ---
 
@@ -52,7 +52,7 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
 - `src/capabilities/sql_query/workflow.py`
   - 已定义标准 6 节点 workflow
 - `src/capabilities/sql_query/executor.py`
-  - 已提供 `sql_generator` / `summarizer` / `llm_text_generator` 注入位
+  - 已提供 `sql_generator` / `llm_text_generator` 注入位
 - `src/capabilities/sql_query/schema_context_prepare.py`
   - 已能产出 route / selected_tables / selected_columns / join_hints / context_summary
 - `src/capabilities/sql_query/sql_guard.py`
@@ -62,14 +62,14 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
 - `src/integrations/llm_client.py`
   - 已有异步 OpenAI-compatible client seam
 - `src/capabilities/sql_query/prompt_builders.py`
-  - 已承载 SQLQuery 专属 SQL 生成 prompt 与结果摘要 prompt 组装
+  - 已承载 SQLQuery 专属 SQL 生成 prompt 与候选结果筛选 prompt 组装
 - `src/capabilities/sql_query/llm_utils.py`
   - 已承载文本生成器兼容、JSON 提取与 JSON-safe preview 工具
 
 ### 2.2 当前能力短板
 
 #### SQL 生成
-未显式注入 `llm_text_generator` 时，`sql_generate` 的 fallback 行为是：
+禁用/未配置 SQLQuery LLM 或 provider 失败时，`sql_generate` 的 fallback 行为是：
 - 选择 1~2 张表
 - 从裁剪后的字段里拼接 `SELECT`
 - 用 join hint 拼接 `JOIN`
@@ -81,15 +81,15 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
 - 多维度聚合 / 分组问法
 - 用户口语化问题
 
-#### 结果总结
-未显式注入 `llm_text_generator` 或 LLM 摘要失败时，`result_summarize` 的 fallback 行为是：
+#### 结果筛选
+禁用/未配置 `llm_text_generator` 或 LLM 筛选失败时，`result_filtering` 的 fallback 行为是：
 - 读取 rows / columns / row_count
-- 输出固定模板摘要
+- 保守保留候选表格，并叠加单品种编号等确定性后过滤
 
 它的优点是稳定，但不适合：
-- 复杂结果解释
-- 业务重点归纳
-- 表格/聚合结果的自然语言分析
+- 复杂候选行语义判断
+- 需要在多个近似品种名中筛掉不匹配实体的场景
+- 需要结合用户原始问题判断行是否真正命中的场景
 
 ---
 
@@ -98,7 +98,7 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
 本方案的目标是：
 
 1. 将 `sql_generate` 升级为**LLM 主路径 + 规则降级路径**
-2. 将 `result_summarize` 升级为**LLM 主路径 + 结构化降级摘要**
+2. 将 `result_filtering` 升级为**LLM 主路径 + 结构化降级摘要**
 3. 保持以下边界不变：
    - orchestration 不理解 SQL 细节
    - `sql_guard` 仍然是强制前置节点
@@ -134,7 +134,7 @@ intent_route
   -> sql_generate (LLM)
   -> sql_guard
   -> sql_execute_readonly
-  -> result_summarize (LLM)
+  -> result_filtering (LLM)
 ```
 
 核心原则：
@@ -155,7 +155,7 @@ intent_route
 - `sql_generate.py`
   - 显式注入 `llm_text_generator` 时优先使用 LLM 生成
   - 保留启发式 fallback；未注入 LLM 时默认仍走 fallback，避免默认回归访问外部 provider
-- `result_summarize.py`
+- `result_filtering.py`
   - 显式注入 `llm_text_generator` 时优先使用 LLM 总结
   - 保留结构化 fallback；未注入 LLM 或 LLM 失败时仍走确定性摘要
 - `executor.py`
@@ -172,7 +172,7 @@ intent_route
 #### 缺点
 
 - 单文件职责会变得更重
-- `sql_generate.py` / `result_summarize.py` 需要同时管理 LLM 主路径和 fallback 路径
+- `sql_generate.py` / `result_filtering.py` 需要同时管理 LLM 主路径和 fallback 路径
 
 ---
 
@@ -232,7 +232,7 @@ intent_route
 #### 具体目标
 
 1. 明确 `sql_generator` 的调用签名
-2. 明确 `summarizer` 的调用签名
+2. 明确 SQLQuery LLM text generator 的 runtime 装配签名
 3. 让 `SQLQueryExecutor` 能在“测试模式 / 真实 LLM 模式”之间切换
 
 ---
@@ -274,15 +274,15 @@ intent_route
 
 ---
 
-### Step 3：改造 `result_summarize`
+### Step 3：改造 `result_filtering`
 
 #### 当前文件
 
-- `src/capabilities/sql_query/result_summarize.py`
+- `src/capabilities/sql_query/result_filtering.py`
 
 #### 改造目标
 
-让 `result_summarize`：
+让 `result_filtering`：
 
 1. 读取：
    - rows
@@ -310,7 +310,7 @@ intent_route
 内容至少包括：
 
 1. SQL 生成 prompt 模板
-2. 结果总结 prompt 模板
+2. 结果筛选 prompt 模板
 3. 系统约束说明
 4. 示例输入输出
 
@@ -324,18 +324,18 @@ intent_route
 
 在现有：
 - `tests/capabilities/sql_query/test_sql_generate_llm.py`
-- `tests/capabilities/sql_query/test_result_summarize.py`
-- `tests/capabilities/sql_query/test_result_summarize_llm.py`
+- `tests/capabilities/sql_query/test_result_filtering.py`
+- `tests/capabilities/sql_query/test_result_filtering_llm.py`
 
 基础上补：
 
 1. **LLM 正常返回时**
    - `sql_generate` 会产出 LLM 结果
-   - `result_summarize` 会产出自然语言总结
+   - `result_filtering` 会产出筛选后表格
 
 2. **LLM 超时/异常时**
    - `sql_generate` 会回退到启发式 SQL
-   - `result_summarize` 会回退到结构化摘要
+   - `result_filtering` 会回退到结构化筛选结果
 
 3. **Guard 仍然有效**
    - 即使 LLM 生成了危险 SQL，也必须被 `sql_guard` 阻断
@@ -365,11 +365,11 @@ intent_route
 
 #### 影响
 - 编造不存在的业务结论
-- 把行级结果总结成未经验证的推断
+- 把行级结果筛选成未经验证的推断
 
 #### 缓解
 - summary prompt 要求“只基于结果表述”
-- fallback 保留结构化摘要
+- fallback 保留结构化筛选结果
 - 对关键业务场景优先输出“数据事实 + 少量解释”
 
 ---
@@ -398,7 +398,7 @@ intent_route
 因为 SQL 生成是能力提升最大的部分。
 
 ### 第 2 步
-再把 `result_summarize` 改成：
+再把 `result_filtering` 改成：
 
 > **LLM 主路径 + 当前结构化 fallback**
 
@@ -411,10 +411,10 @@ intent_route
 
 完成改造后，至少应满足：
 
-1. `sql_generate` 在显式注入 LLM 文本生成器时走 LLM 主路径
+1. `sql_generate` 在真实 runtime 默认装配或显式注入 LLM 文本生成器时走 LLM 主路径
 2. `sql_generate` 在 LLM 失败时能降级
-3. `result_summarize` 在显式注入 LLM 文本生成器时走 LLM 主路径
-4. `result_summarize` 在 LLM 失败时能降级
+3. `result_filtering` 在真实 runtime 默认装配或显式注入 LLM 文本生成器时走 LLM 主路径
+4. `result_filtering` 在 LLM 失败时能降级
 5. `sql_guard` 仍然对 LLM 生成 SQL 生效
 6. `sql_execute_readonly` 仍然必须要求 `guard_pass_token`
 7. orchestration 层无需理解任何 SQL prompt 细节
@@ -427,12 +427,12 @@ intent_route
 如果只做第一轮最小改造，建议先改这些文件：
 
 - `src/capabilities/sql_query/sql_generate.py`
-- `src/capabilities/sql_query/result_summarize.py`
+- `src/capabilities/sql_query/result_filtering.py`
 - `src/capabilities/sql_query/executor.py`
 - `src/integrations/llm_client.py`
 - `tests/capabilities/sql_query/test_sql_generate_llm.py`
-- `tests/capabilities/sql_query/test_result_summarize.py`
-- `tests/capabilities/sql_query/test_result_summarize_llm.py`
+- `tests/capabilities/sql_query/test_result_filtering.py`
+- `tests/capabilities/sql_query/test_result_filtering_llm.py`
 - `tests/capabilities/sql_query/test_orchestration_flow.py`
 
 ---
@@ -446,4 +446,4 @@ intent_route
 下一步 LLM 版改造的正确路线不是推翻现有结构，而是：
 
 > **在保留 orchestration / guard / readonly execution 边界不变的前提下，  
-> 把 `sql_generate` 与 `result_summarize` 升级为 LLM 主路径，并保留稳定降级能力。**
+> 把 `sql_generate` 与 `result_filtering` 升级为 LLM 主路径，并保留稳定降级能力；真实 API runtime 默认绑定 `config.yaml` 的 LLMClient，自动化测试可显式关闭或注入 fake。**

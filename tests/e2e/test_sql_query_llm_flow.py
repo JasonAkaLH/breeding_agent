@@ -14,15 +14,15 @@ class SQLQueryLLMFlowE2ETest(E2EAPITestCase):
                         "mode": "answer",
                         "route_id": "genotype_db",
                         "schema_profile_id": "genotype_profile",
-                        "sql": "SELECT variety_name FROM variety LIMIT 20",
+                        "sql": "SELECT variety_name FROM variety WHERE variety_name LIKE '%龙粳33%' LIMIT 20",
                         "tables_used": ["variety"],
                         "columns_used": ["variety.variety_name"],
                         "column_types_used": {"variety.variety_name": "varchar(100)"},
                         "join_hints_used": [],
                     }
                 )
-            if "sql_query.result_summarize" in prompt:
-                return json.dumps({"summary": "查询返回 1 行，品种为龙粳33。"})
+            if "sql_query.result_filtering" in prompt:
+                return json.dumps({"keep_row_indexes": [0], "filter_reason": "保留龙粳33。"})
             raise AssertionError("unexpected prompt")
 
         await self.reconfigure_runtime(llm_text_generator=fake_llm)
@@ -34,7 +34,7 @@ class SQLQueryLLMFlowE2ETest(E2EAPITestCase):
         self.assertEqual(terminal["status"], "completed")
 
         records = self.find_audit_records("sql_query.llm_call")
-        self.assertGreaterEqual(len(records), 2)
+        self.assertEqual(len(records), 2)
         self.assertTrue(all(record["payload"].get("prompt_recorded") is False for record in records))
 
 

@@ -40,6 +40,9 @@ class SQLQuerySQLExecuteReadonlyTest(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(received, ["SELECT variety_name FROM variety LIMIT 20"])
         self.assertEqual(result.output_payload["row_count"], 1)
+        self.assertEqual(result.output_payload["preview_row_count"], 1)
+        self.assertFalse(result.output_payload["truncated"])
+        self.assertEqual(result.output_payload["rows"], [{"variety_name": "龙粳33"}])
 
     def test_transient_error_retries_once(self) -> None:
         calls = {"count": 0}

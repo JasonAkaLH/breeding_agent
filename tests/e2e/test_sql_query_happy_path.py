@@ -6,11 +6,7 @@ from tests.e2e.support import E2EAPITestCase
 
 
 class SQLQueryHappyPathE2ETest(E2EAPITestCase):
-    async def test_happy_path_runs_from_message_to_summary_and_sse_completion(self) -> None:
-        await self.reconfigure_runtime(
-            summarizer=lambda payload: f"验收摘要: {payload['row_count']} 行",
-        )
-
+    async def test_happy_path_runs_from_message_to_table_and_sse_completion(self) -> None:
         response = await self.submit_message(content="查询品种龙粳33的基因型信息")
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
@@ -33,5 +29,5 @@ class SQLQueryHappyPathE2ETest(E2EAPITestCase):
         artifacts_response = await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")
         self.assertEqual(artifacts_response.status_code, 200)
         artifacts = artifacts_response.json()["artifacts"]
-        self.assertTrue(any("result_summary" in artifact["artifact_id"] for artifact in artifacts))
-        self.assertTrue(any("验收摘要" in (artifact["summary"] or "") for artifact in artifacts))
+        self.assertTrue(any("query_result_preview" in artifact["artifact_id"] for artifact in artifacts))
+        self.assertTrue(any("filtered_query_result" in artifact["artifact_id"] for artifact in artifacts))

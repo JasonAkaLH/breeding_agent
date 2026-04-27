@@ -34,10 +34,10 @@ class WorkflowExpanderTest(unittest.TestCase):
             "sql_query.sql_generate",
             "sql_query.sql_guard",
             "sql_query.sql_execute_readonly",
-            "sql_query.result_summarize",
+            "sql_query.result_filtering",
         ])
         self.assertEqual(capability_ids[-1], "main_agent.respond")
-        self.assertIn("task-1:query_data:result_summarize", expanded.nodes[-1].depends_on)
+        self.assertIn("task-1:query_data:result_filtering", expanded.nodes[-1].depends_on)
         self.assertNotIn("query_data", expanded.nodes[-1].depends_on)
 
     def test_macro_roots_depend_on_high_level_dependencies(self) -> None:

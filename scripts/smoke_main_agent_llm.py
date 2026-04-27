@@ -53,6 +53,7 @@ async def _run(args: argparse.Namespace) -> int:
             audit_log_path=audit_log_path,
             main_agent_llm_config_path=config_path,
             main_agent_reasoning_effort=args.reasoning_effort,
+            enable_llm_planner=False,
             skill_roots=[],
         )
         try:

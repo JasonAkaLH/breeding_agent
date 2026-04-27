@@ -6,12 +6,13 @@ from typing import Any, Mapping
 from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
 from src.core.enums import EventVisibility
 from src.integrations.codex_skills import SkillCatalog, SkillScriptError, SkillScriptRunner, match_skills
-from src.integrations.llm_client import LLMClient
+from src.integrations.llm_client import LLMClient, ReasoningEffort
 
-from .helpers import LiveEventRecorder, StreamGenerator, iter_stream, make_event, make_text_artifact
-from .prompt_builder import build_artifact_context, build_main_agent_prompt
+from .helpers import LiveEventRecorder, StreamGenerator, iter_stream_events, make_event, make_text_artifact
+from .prompt_builder import build_artifact_context, build_dependency_context, build_main_agent_prompt
 from .workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS
 
+_REASONING_EFFORTS: set[str] = {"minimal", "low", "medium", "high"}
 _SENSITIVE_STREAM_METADATA_KEYS = {
     "api_key",
     "authorization",
@@ -36,12 +37,14 @@ class MainAgentRespondCapability(CapabilityContract):
         *,
         stream_generator: StreamGenerator | None = None,
         stream_metadata: Mapping[str, Any] | None = None,
+        default_reasoning_effort: ReasoningEffort = "minimal",
         skill_catalog: SkillCatalog | None = None,
         script_runner: SkillScriptRunner | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
     ) -> None:
         self._stream_generator = stream_generator
         self._stream_metadata = self._sanitize_stream_metadata(stream_metadata or {})
+        self._default_reasoning_effort = default_reasoning_effort
         self._skill_catalog = skill_catalog or SkillCatalog(())
         self._script_runner = script_runner or SkillScriptRunner()
         self._live_event_recorder = live_event_recorder
@@ -49,6 +52,7 @@ class MainAgentRespondCapability(CapabilityContract):
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         user_message = str(request.input_payload.get("user_message") or "")
         artifact_context = build_artifact_context(request.metadata)
+        dependency_context = build_dependency_context(request.dependency_outputs)
         skill_matches = match_skills(user_message, self._skill_catalog)
         script_results, script_events = await self._run_auto_scripts(request, user_message, artifact_context, skill_matches)
         prompt = build_main_agent_prompt(
@@ -56,9 +60,12 @@ class MainAgentRespondCapability(CapabilityContract):
             skill_matches=skill_matches,
             artifact_context=artifact_context,
             script_results=script_results,
+            dependency_context=dependency_context,
         )
 
         events = list(script_events)
+        reasoning_effort = self._resolve_reasoning_effort(request.metadata)
+        thinking_enabled = self._resolve_thinking_enabled(request.metadata)
         for match in skill_matches:
             events.append(
                 make_event(
@@ -82,19 +89,41 @@ class MainAgentRespondCapability(CapabilityContract):
         chunks: list[str] = []
         stream_metadata: dict[str, Any] = dict(self._stream_metadata)
         try:
-            stream_generator, stream_metadata = self._resolve_stream_binding()
-            ordinal = 0
-            async for chunk in iter_stream(stream_generator, prompt):
-                ordinal += 1
-                chunks.append(chunk)
-                delta_event = make_event(
-                    request,
-                    event_type="main_agent.output_delta",
-                    payload={"delta": chunk, "ordinal": ordinal},
-                    visibility=EventVisibility.FRONTEND,
-                    ordinal=ordinal,
-                )
-                await self._record_or_collect(delta_event, events)
+            stream_generator, stream_metadata = self._resolve_stream_binding(reasoning_effort=reasoning_effort)
+            stream_metadata["reasoning_effort"] = reasoning_effort
+            stream_metadata["thinking_enabled"] = thinking_enabled
+            answer_ordinal = 0
+            reasoning_ordinal = 0
+            async for stream_event in iter_stream_events(
+                stream_generator,
+                prompt,
+                reasoning_effort=reasoning_effort,
+                thinking=thinking_enabled,
+            ):
+                reasoning_delta = stream_event.get("reasoning")
+                if thinking_enabled and reasoning_delta:
+                    reasoning_ordinal += 1
+                    reasoning_event = make_event(
+                        request,
+                        event_type="main_agent.reasoning_delta",
+                        payload={"delta": reasoning_delta, "ordinal": reasoning_ordinal},
+                        visibility=EventVisibility.FRONTEND,
+                        ordinal=reasoning_ordinal,
+                    )
+                    await self._record_or_collect(reasoning_event, events)
+
+                answer_delta = stream_event.get("answer")
+                if answer_delta:
+                    answer_ordinal += 1
+                    chunks.append(answer_delta)
+                    delta_event = make_event(
+                        request,
+                        event_type="main_agent.output_delta",
+                        payload={"delta": answer_delta, "ordinal": answer_ordinal},
+                        visibility=EventVisibility.FRONTEND,
+                        ordinal=answer_ordinal,
+                    )
+                    await self._record_or_collect(delta_event, events)
         except Exception as exc:
             events.append(
                 make_event(
@@ -143,6 +172,7 @@ class MainAgentRespondCapability(CapabilityContract):
                     "duration_ms": duration_ms,
                     "matched_skill_count": len(skill_matches),
                     "uploaded_artifact_count": len(artifact_context),
+                    "dependency_context_count": len(dependency_context),
                 },
                 visibility=EventVisibility.AUDIT_ONLY,
             )
@@ -202,12 +232,34 @@ class MainAgentRespondCapability(CapabilityContract):
                 )
         return script_results, tuple(events)
 
-    def _resolve_stream_binding(self) -> tuple[StreamGenerator, dict[str, Any]]:
+    def _resolve_stream_binding(self, *, reasoning_effort: ReasoningEffort) -> tuple[StreamGenerator, dict[str, Any]]:
         if self._stream_generator is not None:
             return self._stream_generator, dict(self._stream_metadata)
         client = LLMClient()
-        metadata = client.safe_metadata(config_source="default_config_path", reasoning_effort="minimal")
-        return client.stream_text, self._sanitize_stream_metadata(metadata)
+        metadata = client.safe_metadata(config_source="default_config_path", reasoning_effort=reasoning_effort)
+        stream_generator = getattr(client, "generate_text_with_thinking", None)
+        if not callable(stream_generator):
+            stream_generator = client.stream_text
+        return stream_generator, self._sanitize_stream_metadata(metadata)
+
+    def _resolve_reasoning_effort(self, metadata: Mapping[str, Any]) -> ReasoningEffort:
+        explicit = metadata.get("main_agent_reasoning_effort")
+        if isinstance(explicit, str) and explicit in _REASONING_EFFORTS:
+            return explicit  # type: ignore[return-value]
+        return self._default_reasoning_effort
+
+    def _resolve_thinking_enabled(self, metadata: Mapping[str, Any]) -> bool:
+        if "main_agent_thinking_enabled" in metadata:
+            return self._is_truthy(metadata.get("main_agent_thinking_enabled"))
+        return self._is_truthy(metadata.get("deep_thinking"))
+
+    @staticmethod
+    def _is_truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return bool(value)
 
     @staticmethod
     def _sanitize_stream_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -234,6 +286,7 @@ class MainAgentExecutor(ExecutorPort):
         *,
         stream_generator: StreamGenerator | None = None,
         stream_metadata: Mapping[str, Any] | None = None,
+        default_reasoning_effort: ReasoningEffort = "minimal",
         skill_catalog: SkillCatalog | None = None,
         script_runner: SkillScriptRunner | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
@@ -242,6 +295,7 @@ class MainAgentExecutor(ExecutorPort):
             "main_agent.respond": MainAgentRespondCapability(
                 stream_generator=stream_generator,
                 stream_metadata=stream_metadata,
+                default_reasoning_effort=default_reasoning_effort,
                 skill_catalog=skill_catalog,
                 script_runner=script_runner,
                 live_event_recorder=live_event_recorder,

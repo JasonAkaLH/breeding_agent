@@ -51,11 +51,15 @@ class SQLQuerySQLExecuteReadonlyCapability(CapabilityContract):
             )
 
         output = {
+            "route_id": upstream.get("route_id"),
+            "schema_profile_id": upstream.get("schema_profile_id"),
             "sql": upstream["sql"],
             "guard_pass_token": guard_pass_token,
             "columns": list(query_result.columns),
             "rows": list(query_result.rows),
             "row_count": query_result.row_count,
+            "preview_row_count": len(query_result.rows),
+            "truncated": False,
         }
         artifact = make_artifact(
             name="query_result_preview",

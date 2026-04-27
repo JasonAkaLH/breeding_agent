@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.core.enums import NodeCriticality
 from src.orchestration.models import CapabilityDescriptor, ExecutionInstance, InstanceState, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 
 
 MAIN_AGENT_CAPABILITY_DESCRIPTORS = (
@@ -11,6 +12,12 @@ MAIN_AGENT_CAPABILITY_DESCRIPTORS = (
         description="Default LLM-backed main agent response with optional skill injection.",
     ),
 )
+
+MAIN_AGENT_PLANNER_PAYLOAD_POLICIES = {
+    "main_agent.respond": CapabilityPayloadPolicy(
+        system_payload_factory=lambda request: {"user_message": request.user_message},
+    ),
+}
 
 
 class MainAgentWorkflowProvider:

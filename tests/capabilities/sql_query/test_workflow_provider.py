@@ -19,5 +19,7 @@ class SQLQueryWorkflowProviderTest(unittest.TestCase):
         self.assertEqual(plan.nodes[2].depends_on, (plan.nodes[0].node_id, plan.nodes[1].node_id))
         self.assertEqual(plan.nodes[3].depends_on, (plan.nodes[2].node_id,))
         self.assertEqual(plan.nodes[4].depends_on, (plan.nodes[3].node_id,))
+        self.assertEqual(plan.nodes[4].capability_id, "sql_query.sql_execute_readonly")
         self.assertEqual(plan.nodes[5].depends_on, (plan.nodes[4].node_id, plan.nodes[2].node_id))
+        self.assertEqual(plan.nodes[5].capability_id, "sql_query.result_filtering")
         self.assertEqual(plan.max_replans, 1)

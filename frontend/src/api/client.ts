@@ -1,11 +1,15 @@
 import type {
   CancelTaskResponse,
+  AnswerInterruptResponse,
   CapabilityListResponse,
   ChatMode,
+  TaskInterruptsResponse,
   MessageAcceptedResponse,
+  ReasoningEffort,
   SubmitMessageRequest,
   TaskArtifactsResponse,
   TaskGraphResponse,
+  TaskListResponse,
   TaskSummaryResponse,
 } from './types';
 
@@ -20,6 +24,8 @@ export interface SubmitMessageInput {
   accountId: string;
   content: string;
   mode: ChatMode;
+  deepThinking?: boolean;
+  reasoningEffort?: ReasoningEffort;
   clientMessageId?: string;
   metadata?: Record<string, unknown>;
 }
@@ -28,10 +34,13 @@ export interface ApiClient {
   uiModes: UiModeOption[];
   listCapabilities(): Promise<CapabilityListResponse>;
   submitMessage(input: SubmitMessageInput): Promise<MessageAcceptedResponse>;
+  listConversationTasks(conversationId: string): Promise<TaskListResponse>;
   getTask(taskId: string): Promise<TaskSummaryResponse>;
   cancelTask(taskId: string): Promise<CancelTaskResponse>;
   getTaskArtifacts(taskId: string): Promise<TaskArtifactsResponse>;
   getTaskGraph(taskId: string): Promise<TaskGraphResponse>;
+  listInterrupts(taskId: string): Promise<TaskInterruptsResponse>;
+  answerInterrupt(taskId: string, interruptId: string, answerPayload: Record<string, unknown>): Promise<AnswerInterruptResponse>;
 }
 
 export class ApiError extends Error {
@@ -90,15 +99,27 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
         routing_mode: 'auto',
         capability_id: mode.capabilityId,
         client_message_id: input.clientMessageId ?? null,
-        metadata: input.metadata ?? {},
+        metadata: {
+          ...(input.metadata ?? {}),
+          deep_thinking: input.deepThinking ?? false,
+          main_agent_reasoning_effort: input.reasoningEffort ?? 'medium',
+        },
       };
       return request<MessageAcceptedResponse>(`/api/v1/conversations/${encodeURIComponent(input.conversationId)}/messages`, {
         method: 'POST',
         body: JSON.stringify(body),
       });
     },
+    listConversationTasks: (conversationId) => request<TaskListResponse>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/tasks?scope=unfinished`,
+    ),
     getTask: (taskId) => request<TaskSummaryResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
     cancelTask: (taskId) => request<CancelTaskResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),
+    listInterrupts: (taskId) => request<TaskInterruptsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/interrupts`),
+    answerInterrupt: (taskId, interruptId, answerPayload) => request<AnswerInterruptResponse>(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/interrupts/${encodeURIComponent(interruptId)}/answer`,
+      { method: 'POST', body: JSON.stringify({ answer_payload: answerPayload }) },
+    ),
     getTaskArtifacts: (taskId) => request<TaskArtifactsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts`),
     getTaskGraph: (taskId) => request<TaskGraphResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/graph`),
   };

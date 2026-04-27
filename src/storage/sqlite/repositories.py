@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.contracts import StoragePort
+from src.core.enums import TaskStatus
 from src.core.models import (
     Artifact,
     Checkpoint,
@@ -297,6 +298,17 @@ class SQLiteStateRepository:
             .order_by(TaskRow.created_at.desc(), TaskRow.task_id.desc())
         )
         return None if row is None else _row_to_task(row)
+
+    def list_tasks_for_conversation(
+        self,
+        conversation_id: str,
+        statuses: Iterable[TaskStatus] | None = None,
+    ) -> list[Task]:
+        query = select(TaskRow).where(TaskRow.conversation_id == conversation_id)
+        if statuses is not None:
+            query = query.where(TaskRow.status.in_([str(status) for status in statuses]))
+        rows = self._session.scalars(query.order_by(TaskRow.created_at.desc(), TaskRow.task_id.desc())).all()
+        return [_row_to_task(row) for row in rows]
 
     def save_task_node(self, node: TaskNode) -> TaskNode:
         row = TaskNodeRow(
@@ -646,6 +658,13 @@ class SQLiteStorage(StoragePort):
 
     async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None:
         return await self._run(lambda state, collab: state.get_active_task_for_conversation(conversation_id))
+
+    async def list_tasks_for_conversation(
+        self,
+        conversation_id: str,
+        statuses: Iterable[TaskStatus] | None = None,
+    ) -> list[Task]:
+        return await self._run(lambda state, collab: state.list_tasks_for_conversation(conversation_id, statuses=statuses))
 
     async def save_task_node(self, node: TaskNode) -> TaskNode:
         return await self._run(lambda state, collab: state.save_task_node(node))

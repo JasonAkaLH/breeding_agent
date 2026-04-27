@@ -12,6 +12,9 @@ _DEFAULT_COLUMN_NAMES = {
     "variety_name",
     "approval_num",
     "crop_name",
+    "applicant",
+    "breeder",
+    "variety_source",
     "qtn_seq",
     "gene_name",
     "genotype",
@@ -20,6 +23,24 @@ _DEFAULT_COLUMN_NAMES = {
     "suitable_area",
     "yield_performance",
     "characteristics",
+    "cultivation_tips",
+    "approval_opinion",
+}
+
+_APPROVAL_DETAIL_COLUMN_NAMES = {
+    "year",
+    "is_gmo",
+    "approval_num",
+    "crop_name",
+    "variety_name",
+    "applicant",
+    "breeder",
+    "variety_source",
+    "characteristics",
+    "yield_performance",
+    "cultivation_tips",
+    "approval_opinion",
+    "suitable_area",
 }
 
 _HINT_TABLE_KEYS = {"table", "tables", "table_name", "table_names", "selected_tables"}
@@ -252,6 +273,10 @@ class SchemaContextBuilder:
             route_notes.append(f"restricted by explicit table hints: {', '.join(explicit_tables)}")
             return explicit_tables, route_notes, None
 
+        if route.get("route_id") == "variety_overview":
+            route_notes.append("variety_overview broad first-principles lookup retained approval and genotype tables")
+            return list(candidate_tables), route_notes, None
+
         crop_mapping = route.get("crop_table_mapping")
         if not isinstance(crop_mapping, Mapping):
             return list(candidate_tables), route_notes, None
@@ -347,6 +372,10 @@ class SchemaContextBuilder:
         if route_id == "approval_variety_db" and len(candidate_tables) == 1:
             add(candidate_tables[0], "route/crop resolution narrowed to a single approval table")
 
+        if route_id == "variety_overview":
+            for table_name in candidate_tables:
+                add(table_name, "variety_overview seed: broad first-principles lookup keeps approval and genotype sources")
+
         if route_id == "genotype_db":
             if any(keyword in search_text for keyword in ("qtn", "位点", "gene", "基因")):
                 add("qtn", "genotype route seed: gene/QTN language detected")
@@ -433,6 +462,8 @@ class SchemaContextBuilder:
                 score += 35
             if column_name in _DEFAULT_COLUMN_NAMES:
                 score += 16
+            if "approval_variety_db" in table_meta.get("route_tags", []) and column_name in _APPROVAL_DETAIL_COLUMN_NAMES:
+                score += 24
             if table_name in normalized_hints.table_names and expose_to_llm is not False:
                 score += 8
 
