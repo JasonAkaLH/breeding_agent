@@ -38,6 +38,7 @@ class SQLQuerySchemaContextPrepareCapability(CapabilityContract):
                 "allowed_tables": list(upstream.get("allowed_tables", [])),
                 "selected_tables": list(result.selected_tables),
                 "selected_columns": {table: list(columns) for table, columns in result.selected_columns.items()},
+                "selected_column_details": self._selected_column_details(result.selected_columns),
                 "join_hints": [
                     {
                         "left_table": hint.left_table,
@@ -95,3 +96,22 @@ class SQLQuerySchemaContextPrepareCapability(CapabilityContract):
                 metadata=dict(result.failure.metadata) if result.failure else {},
             ),
         )
+
+
+    def _selected_column_details(self, selected_columns):
+        tables = self._schema_metadata.get("tables", {})
+        details = {}
+        for table, columns in dict(selected_columns).items():
+            table_meta = tables.get(table, {}) if isinstance(tables, dict) else {}
+            columns_meta = table_meta.get("columns", {}) if isinstance(table_meta, dict) else {}
+            details[table] = []
+            for column in list(columns):
+                column_meta = columns_meta.get(column, {}) if isinstance(columns_meta, dict) else {}
+                details[table].append(
+                    {
+                        "name": column,
+                        "sql_type": str(column_meta.get("sql_type", "")),
+                        "description": str(column_meta.get("description", "")),
+                    }
+                )
+        return details

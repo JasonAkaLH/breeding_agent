@@ -58,6 +58,7 @@ class ApiRuntime:
         interrupt_service: InterruptService,
         orchestration_service: OrchestrationService,
         workflow_provider: WorkflowRouter,
+        mysql_adapter: MySQLReadonlyAdapter | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -68,6 +69,7 @@ class ApiRuntime:
         self.interrupt_service = interrupt_service
         self.orchestration_service = orchestration_service
         self.workflow_provider = workflow_provider
+        self._mysql_adapter = mysql_adapter
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
@@ -323,6 +325,8 @@ class ApiRuntime:
                 for handle in pending:
                     handle.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+        if self._mysql_adapter is not None:
+            await self._mysql_adapter.aclose()
         await asyncio.to_thread(self._engine.dispose)
 
     def _ensure_supported_capability(self, capability_id: str | None) -> None:
@@ -397,6 +401,8 @@ def build_api_runtime(
         roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
         resolved_skill_catalog = SkillCatalog.from_roots(roots)
 
+    resolved_mysql_adapter = mysql_adapter or MySQLReadonlyAdapter()
+
     cancellation_service = CancellationService(storage, event_sink=event_broker, audit_sink=audit_sink)
     interrupt_service = InterruptService(storage, event_sink=event_broker, audit_sink=audit_sink)
     orchestration_service = OrchestrationService(
@@ -412,7 +418,7 @@ def build_api_runtime(
                     live_event_recorder=record_live_event,
                 ),
                 SQLQueryExecutor(
-                    mysql_adapter=mysql_adapter,
+                    mysql_adapter=resolved_mysql_adapter,
                     sql_generator=sql_generator,
                     summarizer=summarizer,
                     llm_text_generator=llm_text_generator,
@@ -437,6 +443,7 @@ def build_api_runtime(
             main_agent_provider=MainAgentWorkflowProvider(),
             sql_query_provider=SQLQueryWorkflowProvider(),
         ),
+        mysql_adapter=resolved_mysql_adapter,
     )
 
 

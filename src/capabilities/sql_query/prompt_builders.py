@@ -33,6 +33,7 @@ def build_sql_generation_prompt_payload(
                 str(table): list(columns)
                 for table, columns in dict(context.get("selected_columns", {})).items()
             },
+            "selected_column_details": json_ready(dict(context.get("selected_column_details", {}))),
             "join_hints": json_ready(list(context.get("join_hints", []))),
             "context_summary": context.get("context_summary"),
         },
@@ -48,7 +49,7 @@ def build_sql_generation_prompt_payload(
         "output_contract": {
             "format": "JSON object only",
             "mode": "answer | clarify | reject",
-            "answer_required_fields": ["mode", "route_id", "schema_profile_id", "sql", "tables_used", "columns_used"],
+            "answer_required_fields": ["mode", "route_id", "schema_profile_id", "sql", "tables_used", "columns_used", "column_types_used"],
             "clarify_required_fields": ["mode", "clarifying_question"],
             "reject_required_fields": ["mode", "reject_reason", "supported_scope_hint"],
         },
@@ -64,6 +65,8 @@ def build_sql_generation_prompt(
     payload = build_sql_generation_prompt_payload(context, task_meta=task_meta, guard_constraints=guard_constraints)
     return (
         "你是 SQLQuery 的 SQL 草案生成器。只能根据输入中裁剪后的 schema_context 生成只读 MySQL SQL。\n"
+        "字段名和字段类型必须严格来自 schema_context.selected_column_details；"
+        "column_types_used 必须逐项回填 schema 中的 sql_type。"
         "安全要求：readonly_only=true；只允许单条 SELECT 或 WITH...SELECT；非聚合查询必须包含 LIMIT；"
         "只能使用 allowed_tables / selected_tables 中的表；多表 JOIN 只能使用 join_hints。\n"
         "如果信息不足，返回 mode=clarify 且只问一个最关键问题；如果超出支持范围，返回 mode=reject。\n"

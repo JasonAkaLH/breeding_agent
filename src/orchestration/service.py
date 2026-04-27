@@ -13,6 +13,7 @@ from .completion_policy import CompletionPolicy, CompletionStatus
 from .models import OrchestrationRequest, OrchestrationRunResult, WorkflowNodePlan, WorkflowPlan
 from .registry import CapabilityRegistry, InstanceRegistry
 from .scheduler import Scheduler
+from .workflow_plan_validator import WorkflowPlanValidator
 
 
 class OrchestrationService:
@@ -245,6 +246,7 @@ class OrchestrationService:
 
     async def execute_request(self, request: OrchestrationRequest, plan: WorkflowPlan, *, active_task_count: int) -> OrchestrationRunResult:
         self._backpressure.ensure_can_accept(active_task_count=active_task_count)
+        WorkflowPlanValidator(self._capability_registry, public_only=False).validate(plan)
         for node in plan.nodes:
             self._capability_registry.require(node.capability_id)
 

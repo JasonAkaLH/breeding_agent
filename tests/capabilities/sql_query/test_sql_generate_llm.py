@@ -16,6 +16,12 @@ SCHEMA_CONTEXT = {
     "allowed_tables": ["variety"],
     "selected_tables": ["variety"],
     "selected_columns": {"variety": ["variety_id", "variety_name"]},
+    "selected_column_details": {
+        "variety": [
+            {"name": "variety_id", "sql_type": "int(11)", "description": "自增ID"},
+            {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+        ]
+    },
     "join_hints": [],
     "context_summary": "variety 表",
     "user_question": "查询品种龙粳33的基因型信息",
@@ -41,6 +47,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
                     "sql": "SELECT variety_name FROM variety LIMIT 20",
                     "tables_used": ["variety"],
                     "columns_used": ["variety.variety_name"],
+                    "column_types_used": {"variety.variety_name": "varchar(100)"},
                     "join_hints_used": [],
                 }
             )
@@ -56,7 +63,59 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
         self.assertEqual(result.output_payload["llm_mode"], "answer")
         self.assertFalse(result.output_payload["fallback_used"])
         self.assertEqual(result.output_payload["tables_used"], ["variety"])
+        self.assertEqual(result.output_payload["column_types_used"], {"variety.variety_name": "varchar(100)"})
         self.assertTrue(any(event.event_type == "sql_query.llm_call" for event in result.events))
+
+
+    def test_invalid_llm_column_name_falls_back_to_heuristic_generator(self) -> None:
+        async def llm_text_generator(_: str) -> str:
+            return json.dumps(
+                {
+                    "mode": "answer",
+                    "route_id": "genotype_db",
+                    "schema_profile_id": "genotype_profile",
+                    "sql": "SELECT fake_column FROM variety LIMIT 20",
+                    "tables_used": ["variety"],
+                    "columns_used": ["variety.fake_column"],
+                    "column_types_used": {"variety.fake_column": "varchar(100)"},
+                }
+            )
+
+        capability = SQLQuerySQLGenerateCapability(
+            llm_text_generator=llm_text_generator,
+            generator=lambda _: "SELECT variety_name FROM variety LIMIT 50",
+        )
+
+        result = asyncio.run(capability.execute(request_for_sql_generate()))
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload["generation_source"], "fallback")
+        self.assertEqual(result.output_payload["llm_mode"], "validation_failed")
+
+    def test_invalid_llm_column_type_falls_back_to_heuristic_generator(self) -> None:
+        async def llm_text_generator(_: str) -> str:
+            return json.dumps(
+                {
+                    "mode": "answer",
+                    "route_id": "genotype_db",
+                    "schema_profile_id": "genotype_profile",
+                    "sql": "SELECT variety_name FROM variety LIMIT 20",
+                    "tables_used": ["variety"],
+                    "columns_used": ["variety.variety_name"],
+                    "column_types_used": {"variety.variety_name": "text"},
+                }
+            )
+
+        capability = SQLQuerySQLGenerateCapability(
+            llm_text_generator=llm_text_generator,
+            generator=lambda _: "SELECT variety_name FROM variety LIMIT 50",
+        )
+
+        result = asyncio.run(capability.execute(request_for_sql_generate()))
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload["generation_source"], "fallback")
+        self.assertEqual(result.output_payload["llm_mode"], "validation_failed")
 
     def test_invalid_llm_output_falls_back_to_heuristic_generator(self) -> None:
         async def llm_text_generator(_: str) -> str:

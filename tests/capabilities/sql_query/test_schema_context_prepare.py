@@ -29,6 +29,13 @@ class SQLQuerySchemaContextPrepareTest(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertGreaterEqual(len(result.output_payload["selected_tables"]), 1)
         self.assertIn("context_summary", result.output_payload)
+        self.assertIn("selected_column_details", result.output_payload)
+        for table, columns in result.output_payload["selected_column_details"].items():
+            self.assertEqual(
+                [column["name"] for column in columns],
+                result.output_payload["selected_columns"][table],
+            )
+            self.assertTrue(all(column.get("sql_type") for column in columns))
 
     def test_route_profile_mismatch_returns_error(self) -> None:
         capability = SQLQuerySchemaContextPrepareCapability()

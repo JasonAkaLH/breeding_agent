@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from src.core.contracts import (
@@ -99,11 +100,19 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         if allowed_scope and not set(tables_used).issubset(allowed_scope):
             raise LLMOutputError("validation_failed", "LLM tables_used must be a subset of allowed tables.")
 
+        columns_used = string_list(llm_payload.get("columns_used"))
+        if not columns_used:
+            raise LLMOutputError("validation_failed", "LLM answer mode requires columns_used.")
+        self._validate_columns_used(context, columns_used)
+        self._validate_sql_column_references(context, sql, tables_used=tables_used)
+        column_types_used = self._validate_column_types_used(context, llm_payload.get("column_types_used"), columns_used)
+
         output = {
             **self._base_output(context),
             "sql": sql,
             "tables_used": tables_used,
-            "columns_used": string_list(llm_payload.get("columns_used")),
+            "columns_used": columns_used,
+            "column_types_used": column_types_used,
             "join_hints_used": string_list(llm_payload.get("join_hints_used")),
             "generation_source": "llm",
             "llm_mode": "answer",
@@ -250,6 +259,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 for table, columns in dict(context.get("selected_columns", {})).items()
                 for column in list(columns)
             ],
+            "column_types_used": self._column_types_for_selected_columns(context),
             "join_hints_used": [],
             "generation_source": "fallback",
             "llm_mode": llm_mode,
@@ -280,6 +290,117 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             artifacts=(artifact,),
             events=(event,),
         )
+
+
+    def _allowed_columns_by_table(self, context: dict[str, Any]) -> dict[str, set[str]]:
+        return {
+            str(table): {str(column) for column in list(columns)}
+            for table, columns in dict(context.get("selected_columns", {})).items()
+        }
+
+    def _column_types_for_selected_columns(self, context: dict[str, Any]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        details = dict(context.get("selected_column_details", {}))
+        for table, columns in details.items():
+            for column in list(columns):
+                if not isinstance(column, Mapping):
+                    continue
+                name = str(column.get("name") or "")
+                sql_type = str(column.get("sql_type") or "")
+                if name and sql_type:
+                    result[f"{table}.{name}"] = sql_type
+        return result
+
+    def _validate_columns_used(self, context: dict[str, Any], columns_used: list[str]) -> None:
+        allowed = self._allowed_columns_by_table(context)
+        for raw_column in columns_used:
+            table, column = self._resolve_column_reference(raw_column, allowed)
+            if table is None or column is None:
+                raise LLMOutputError("validation_failed", f"LLM column is not in selected schema: {raw_column}")
+
+    def _validate_column_types_used(
+        self,
+        context: dict[str, Any],
+        raw_column_types: Any,
+        columns_used: list[str],
+    ) -> dict[str, str]:
+        expected_types = self._column_types_for_selected_columns(context)
+        if not isinstance(raw_column_types, Mapping):
+            raise LLMOutputError("validation_failed", "LLM answer mode requires column_types_used mapping.")
+
+        normalized: dict[str, str] = {}
+        allowed = self._allowed_columns_by_table(context)
+        for raw_column in columns_used:
+            table, column = self._resolve_column_reference(raw_column, allowed)
+            if table is None or column is None:
+                raise LLMOutputError("validation_failed", f"LLM column is not in selected schema: {raw_column}")
+            canonical = f"{table}.{column}"
+            actual_type = raw_column_types.get(canonical)
+            if actual_type is None and raw_column in raw_column_types:
+                actual_type = raw_column_types.get(raw_column)
+            expected_type = expected_types.get(canonical)
+            if not expected_type:
+                raise LLMOutputError("validation_failed", f"No schema sql_type found for column: {canonical}")
+            if str(actual_type) != expected_type:
+                raise LLMOutputError("validation_failed", f"LLM sql_type does not match schema for column: {canonical}")
+            normalized[canonical] = expected_type
+        return normalized
+
+    def _resolve_column_reference(self, raw_column: str, allowed: dict[str, set[str]]) -> tuple[str | None, str | None]:
+        value = str(raw_column).strip().strip("`")
+        if "." in value:
+            table, column = value.split(".", 1)
+            table = table.strip("`")
+            column = column.strip("`")
+            if column in allowed.get(table, set()):
+                return table, column
+            return None, None
+
+        matches = [(table, value) for table, columns in allowed.items() if value in columns]
+        if len(matches) == 1:
+            return matches[0]
+        return None, None
+
+    def _validate_sql_column_references(self, context: dict[str, Any], sql: str, *, tables_used: list[str]) -> None:
+        allowed_all = self._allowed_columns_by_table(context)
+        used_scope = {str(table) for table in tables_used}
+        allowed = {table: columns for table, columns in allowed_all.items() if not used_scope or table in used_scope}
+        table_aliases = self._extract_table_aliases(sql)
+        for qualifier, column in re.findall(r"\b`?([A-Za-z_][\w]*)`?\.`?([A-Za-z_][\w]*)`?\b", sql):
+            table = table_aliases.get(qualifier, qualifier)
+            if table not in allowed or column not in allowed.get(table, set()):
+                raise LLMOutputError("validation_failed", f"SQL references column outside selected schema: {qualifier}.{column}")
+
+        for column in self._extract_unqualified_column_references(sql, table_aliases):
+            if self._resolve_column_reference(column, allowed) == (None, None):
+                raise LLMOutputError("validation_failed", f"SQL references column outside selected schema: {column}")
+
+    def _extract_table_aliases(self, sql: str) -> dict[str, str]:
+        aliases: dict[str, str] = {}
+        for table, alias in re.findall(
+            r"\b(?:from|join)\s+`?([A-Za-z_][\w]*)`?(?:\s+(?:as\s+)?`?([A-Za-z_][\w]*)`?)?",
+            sql,
+            flags=re.I,
+        ):
+            aliases[table] = table
+            if alias and alias.lower() not in {"on", "where", "join", "left", "right", "inner", "limit", "group", "order"}:
+                aliases[alias] = table
+        return aliases
+
+    def _extract_unqualified_column_references(self, sql: str, table_aliases: dict[str, str]) -> set[str]:
+        without_strings = re.sub(r"'[^']*'|\"[^\"]*\"", " ", sql)
+        without_qualified = re.sub(r"\b`?[A-Za-z_][\w]*`?\.`?[A-Za-z_][\w]*`?\b", " ", without_strings)
+        tokens = set(re.findall(r"\b[A-Za-z_][\w]*\b", without_qualified))
+        keywords = {
+            "select", "from", "join", "left", "right", "inner", "outer", "on", "where", "and", "or",
+            "limit", "order", "group", "by", "as", "like", "in", "is", "null", "not", "with", "distinct",
+            "count", "sum", "avg", "min", "max", "case", "when", "then", "else", "end", "desc", "asc",
+        }
+        return {
+            token.strip("`")
+            for token in tokens
+            if token.lower() not in keywords and token not in table_aliases
+        }
 
     def _validate_route_context(self, context: dict[str, Any], llm_payload: dict[str, Any]) -> None:
         expected_route = context.get("route_id")

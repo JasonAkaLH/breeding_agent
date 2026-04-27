@@ -1,6 +1,6 @@
 # Phase 8.1：SQLQuery 宏能力与 LLM 动态 DAG 规划
 
-> 状态：首轮实现完成（2026-04-24）  
+> 状态：文档计划项已完成（2026-04-27）；首轮 public SQLQuery 边界已完成（2026-04-24）
 > 定位：承接 Phase 8 的主代理 LLM 与 Skill 兼容层，进一步把数据库查询能力封装为对外单一的 SQLQuery 宏能力，并为后续 LLM Planner 生成受约束高层 DAG 打基础。
 
 ## 1. 背景
@@ -100,13 +100,15 @@ Phase 8.1 的 LLM Planner 后续只允许生成高层 DAG：
 ]
 ```
 
-后续实现 LLM Planner 前，必须先补：
+后续实现 LLM Planner 前，必须先补的前置项当前已补齐：
 
-1. public capability registry / allowlist；
-2. `WorkflowPlanValidator`：校验 capability 是否 public、节点是否 acyclic、依赖是否存在、输入是否符合契约；
-3. `WorkflowExpander`：将 `sql_query.query` 展开为内部 SQLQuery 固定子工作流；
-4. Planner 输出 JSON schema 与 fake LLM 测试；
-5. 对外能力目录默认隐藏 SQLQuery 内部节点。
+1. [x] public capability registry / allowlist；
+2. [x] `WorkflowPlanValidator`：校验 capability 是否 public、节点是否 acyclic、依赖是否存在、输入是否符合契约；
+3. [x] `WorkflowExpander`：将 `sql_query.query` 展开为内部 SQLQuery 固定子工作流；
+4. [x] Planner 输出 JSON schema 与 fake LLM 测试；
+5. [x] 对外能力目录默认隐藏 SQLQuery 内部节点。
+
+说明：以上是 LLM Planner 的前置契约与测试缝，不代表本阶段已经把完整 LLM Planner 接入运行时自动规划。
 
 ## 5. Phase 8.1 首版验收
 
@@ -128,6 +130,15 @@ Phase 8.1 的 LLM Planner 后续只允许生成高层 DAG：
 - `SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS` 保持内部节点注册，但 `public=False`，继续服务固定 SQLQuery workflow。
 - `SQLQueryWorkflowProvider` 承载 SQLQuery 固定 workflow。
 - workflow router 在请求入口只支持 `sql_query` / `sql_query.query`；`sql_query.*` 内部节点只能由 `SQLQueryWorkflowProvider` 展开后进入 scheduler / executor，不接受外部直接指定。
+
+## 6.1 前置规划契约补齐记录
+
+2026-04-27 已补齐完整 Phase 8.1 文档计划中的 LLM Planner 前置契约：
+
+- 新增 `WorkflowPlanValidator`，支持 public-only 校验，用于拒绝 LLM 高层 DAG 中的非 public capability，并校验重复节点、未知依赖、环形依赖与 JSON-serializable input payload。
+- `OrchestrationService` 在执行内部 workflow 前运行非 public-only plan 校验，确保实际执行图仍满足 DAG 与 capability 注册约束。
+- 新增 `WorkflowExpander`，可把高层 `sql_query.query` 宏节点展开为固定 SQLQuery 内部子工作流，并将上游 / 下游依赖改写到内部 root / tail 节点。
+- 新增 Planner 输出 JSON schema 与 fake LLM 输出解析测试，只定义高层 DAG 输出契约，不开放低层 SQLQuery 内部节点给 Planner。
 
 ## 7. 非目标
 

@@ -10,6 +10,25 @@
 
 ## [Unreleased]
 
+### 2026-04-27 — 补齐 MySQL 只读适配器依赖
+
+- 确认 `multi_agent` 环境中 `PyMySQL` 可用，并将 `PyMySQL==1.1.2` 写入 `requirements.txt`。
+- 完善 `MySQLReadonlyAdapter`：支持懒加载复用 SQLAlchemy engine、注入 `engine_factory` 测试 seam，并提供同步 / 异步关闭入口释放连接池。
+- 通过真实 MySQL smoke 查询与 SQLQuery workflow 验证 adapter 可查到“龙粳33”，并补充 adapter 集成测试覆盖 guard token、runner seam、engine 复用与 dispose。
+
+### 2026-04-27 — 收紧 SQLQuery Prompt Schema 约束
+
+- SQLQuery schema context 现在向 prompt 注入 `selected_column_details`，把 `schema_metadata.yaml` 中裁剪后的字段名、`sql_type` 与描述一起传给 LLM。
+- SQL 生成 prompt 要求 LLM 回填 `column_types_used`，并在 `sql_generate` 中校验 `columns_used`、`column_types_used` 与 SQL 字段引用必须匹配裁剪后的 schema。
+- 用真实只读库核对 `schema_metadata.yaml` 表/字段存在性并验证“龙粳33”可查到品种、籼粳成分与基因型数据；后续已补齐 `PyMySQL` 依赖与 `MySQLReadonlyAdapter` 真实连接 smoke。
+
+### 2026-04-27 — 补齐 Phase 8.1 LLM Planner 前置契约
+
+- 按 Phase 8.1 文档计划补齐 LLM Planner 前置契约：新增 `WorkflowPlanValidator`，校验 public capability、重复节点、未知依赖、环形依赖与 JSON-serializable input payload。
+- 新增 `WorkflowExpander`，将高层 `sql_query.query` 宏能力展开为 SQLQuery 固定内部子工作流，并正确改写上游 / 下游依赖。
+- 新增 Planner 输出 JSON schema、fake LLM 输出解析 seam 与回归测试，继续保持“不实现完整 LLM Planner、不开放 SQLQuery 内部节点给 Planner”的阶段边界。
+- 更新 Phase 8.1 文档状态与补齐记录，明确首轮 public SQLQuery 边界与本次 Planner 前置契约均已完成。
+
 ### 2026-04-24 — 启动 Phase 5.5 SQLQuery LLM 增强专题
 
 - 新增 Phase 8.1 设计稿 `docs/dev_processes/Phase-8.1-SQLQuery宏能力与LLM动态DAG规划.md`，明确 SQL 查询能力统一命名为 SQLQuery；对外只暴露 `sql_query.query` 宏能力，`sql_query.*` 作为内部固定子工作流节点，并为后续 LLM Planner 只生成高层 DAG 留出 validator / expander 边界。

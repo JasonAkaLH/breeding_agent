@@ -17,6 +17,7 @@ class SQLQueryLLMFlowE2ETest(E2EAPITestCase):
                         "sql": "SELECT variety_name FROM variety LIMIT 20",
                         "tables_used": ["variety"],
                         "columns_used": ["variety.variety_name"],
+                        "column_types_used": {"variety.variety_name": "varchar(100)"},
                         "join_hints_used": [],
                     }
                 )

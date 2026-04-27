@@ -18,6 +18,12 @@ class SQLQueryPromptBuildersTest(unittest.TestCase):
             "allowed_tables": ["variety"],
             "selected_tables": ["variety"],
             "selected_columns": {"variety": ["variety_id", "variety_name"]},
+            "selected_column_details": {
+                "variety": [
+                    {"name": "variety_id", "sql_type": "int(11)", "description": "自增ID"},
+                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+                ]
+            },
             "join_hints": [],
             "context_summary": "只包含暴露给 LLM 的字段",
             "metadata": {"all_columns": ["internal_secret_column"]},
@@ -28,6 +34,12 @@ class SQLQueryPromptBuildersTest(unittest.TestCase):
         prompt = build_sql_generation_prompt(context)
 
         self.assertEqual(payload["schema_context"]["selected_columns"], {"variety": ["variety_id", "variety_name"]})
+        self.assertEqual(
+            payload["schema_context"]["selected_column_details"]["variety"][1],
+            {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+        )
+        self.assertIn("column_types_used", payload["output_contract"]["answer_required_fields"])
+        self.assertIn("varchar(100)", prompt)
         self.assertNotIn("internal_secret_column", prompt)
         self.assertIn("readonly_only", prompt)
         self.assertIn("answer | clarify | reject", prompt)

@@ -65,9 +65,10 @@ class SQLQueryOrchestrationFlowTest(OrchestrationSQLiteTestCase):
                     "mode": "answer",
                     "route_id": "genotype_db",
                     "schema_profile_id": "genotype_profile",
-                    "sql": "INSERT INTO variety(id) VALUES (1)",
+                    "sql": "SELECT variety.variety_id FROM variety",
                     "tables_used": ["variety"],
                     "columns_used": ["variety.variety_id"],
+                    "column_types_used": {"variety.variety_id": "int(11)"},
                     "join_hints_used": [],
                 }
             )
