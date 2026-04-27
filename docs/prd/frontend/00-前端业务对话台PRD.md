@@ -288,7 +288,78 @@ v1 后端没有服务端会话列表和历史检索 API，因此前端只做最�
 5. CORS、部署配置、鉴权与账号体系。
 6. 面向研发/运维的独立调试台，而不是混入业务对话台默认体验。
 
-## 12. 代码依据
+## 12. 技术选型建议与约束（草案）
+
+本节用于约束 v1 前端实施方向，避免在未开始实现前过早引入重型框架或与当前后端事件模型不匹配的对话 SDK。技术选型在进入实现前仍应补充到 `docs/dev_processes/frontend/` 的实施文档中；本文先给出 PRD 级推荐口径。
+
+### 12.1 行业常见路线判断
+
+截至 2026-04-27，公开生态与主流工程实践中，前端对话类产品常见技术路线大致分为三类：
+
+1. **企业内部系统路线**：React + TypeScript + 企业级组件库（Ant Design / Arco Design / MUI / Fluent UI），适合管理台、业务查询、表格预览、状态提示和权限体系逐步增强。
+2. **AI 原生产品路线**：React + TypeScript + Tailwind CSS + shadcn/ui / Radix UI，适合高度定制的 ChatGPT / Claude 类对话体验和更强视觉品牌化。
+3. **全栈 React 路线**：Next.js + React + TypeScript，适合需要 SSR、BFF、复杂路由、边缘部署或与 Vercel AI SDK 深度绑定的产品。
+
+当前项目 v1 是内部业务对话台，核心是对接已有 FastAPI + SSE + artifacts 后端能力，而不是构建 SEO 页面或全栈 Web 应用。因此 v1 应优先选择轻量、清晰、与后端解耦的 SPA 路线。
+
+### 12.2 v1 推荐技术栈
+
+| 层级 | 推荐选择 | 说明 |
+|---|---|---|
+| 语言 | TypeScript | 前端 API DTO、SSE event、artifact 解析都需要明确类型；避免纯 JavaScript 带来的隐式契约漂移。 |
+| 前端框架 | React | 当前主流生态最稳妥；对话组件、表格、企业组件库和测试工具链成熟。 |
+| 构建工具 | Vite | v1 不需要 SSR / BFF；Vite SPA 足够轻量，便于独立部署或由后端静态托管。 |
+| UI 组件库 | Ant Design | 更贴近内部业务系统；表格、提示、按钮、表单、状态反馈能力成熟，适合 SQLQuery 简表预览。 |
+| 流式通信 | 浏览器 `EventSource` / SSE | 当前后端已经提供 `GET /api/v1/tasks/{task_id}/events`；v1 不新增 WebSocket 协议。 |
+| HTTP 请求 | `fetch` 封装 | v1 API 数量有限，先不引入重型 request 层。 |
+| 状态管理 | React 本地状态 + 自定义 hooks | 对话流、当前任务、SSE 生命周期先用组件状态和 hooks 承载；避免过早引入 Redux。 |
+| 服务端状态缓存 | 暂不强制；复杂化后再评估 TanStack Query | v1 没有服务端历史列表和复杂缓存一致性需求。 |
+| 单元 / 组件测试 | Vitest + React Testing Library | 覆盖模式选择、SSE event reducer、artifact 解析和错误状态展示。 |
+| E2E | Playwright | 覆盖普通对话、SQLQuery、取消、失败降级等浏览器级主路径。 |
+
+推荐组合：
+
+```text
+React + TypeScript + Vite + Ant Design + EventSource/SSE
+```
+
+### 12.3 备选方案与不选原因
+
+| 方案 | v1 结论 | 原因 |
+|---|---|---|
+| Next.js App Router | 暂不作为 v1 默认 | 当前没有 SSR、SEO、BFF 或全栈部署需求；引入会增加工程复杂度。 |
+| Tailwind CSS + shadcn/ui | 可作为 UI 风格备选 | 更适合高度定制 AI 产品；但 v1 有表格、状态、表单等内部系统需求，Ant Design 更省实现成本。 |
+| WebSocket | 暂不引入 | 后端已实现 SSE；v1 是服务端单向推送任务事件和文本增量，不需要双向实时协议。 |
+| Vercel AI SDK UI | 暂不作为核心依赖 | 当前后端不是 AI SDK 默认 stream protocol，而是自定义 task event + artifacts 模型；直接接入会产生协议适配成本。 |
+| AG-UI | 作为后续协议参考 | 方向上适合 Agent UI，但 v1 已有后端 SSE event schema，不应为 v1 重写协议层。 |
+| Redux / Zustand | 暂不强制 | v1 状态边界较小；只有在出现跨页面状态、复杂历史、全局偏好或调试台时再评估。 |
+
+### 12.4 前端实现边界
+
+1. v1 不因为选型引入新的后端前置要求；必须基于现有 API/SSE/artifacts 完成。
+2. 前端不得为了适配 UI SDK 而要求后端改变 `event_type`、artifact 类型或 SQLQuery public capability 边界。
+3. 如果未来选择 Next.js，应明确其职责是前端应用框架还是 BFF；不得把后端 orchestration 逻辑迁入前端服务层。
+4. 如果未来引入 AI 对话 SDK，应先定义兼容层，而不是让 UI 直接依赖第三方 stream protocol。
+5. 技术选型进入实现前，应在 `docs/dev_processes/frontend/` 补充：
+   - 工程目录结构；
+   - API client 与 SSE client 设计；
+   - event reducer / 状态机设计；
+   - artifact 解析与降级策略；
+   - 测试计划与验收命令。
+
+### 12.5 公开依据
+
+- Stack Overflow Developer Survey 2025：React、Next.js、TypeScript 等 Web 技术使用情况。<https://survey.stackoverflow.co/2025/technology/>
+- State of JS 2024：React / Vue / Angular / Svelte 等前端框架使用趋势。<https://2024.stateofjs.com/en-US/libraries/front-end-frameworks/>
+- React 官方文档：新 React 应用推荐使用社区主流 React 框架；不需要 SSR/BFF 时可采用 Vite 等工具路线。<https://react.dev/learn/start-a-new-react-project>
+- Vite 官方文档：现代前端构建工具与 SPA 工程入口参考。<https://vite.dev/guide/>
+- MDN Server-Sent Events 文档：SSE 适合服务端向浏览器单向持续推送事件。<https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events>
+- Ant Design 官方文档：企业级 React UI 组件库参考。<https://ant.design/docs/react/introduce/>
+- shadcn/ui 官方文档：现代可定制 UI 组件路线参考。<https://ui.shadcn.com/docs>
+- Vercel AI SDK UI 文档：AI stream UI SDK 参考。<https://ai-sdk.dev/docs/ai-sdk-ui/overview>
+- AG-UI 官方文档：Agent UI 事件协议参考。<https://docs.ag-ui.com/>
+
+## 13. 代码依据
 
 - API routes：`src/api/routes/conversations.py`、`src/api/routes/tasks.py`、`src/api/routes/capabilities.py`
 - DTO：`src/api/dto.py`

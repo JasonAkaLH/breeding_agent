@@ -3,7 +3,7 @@
 - **范围**：后端 / 编排层 / SQLQuery public capability
 - **文档状态**：正式版（补齐 Phase 8.1 实现事实）
 - **日期**：2026-04-27
-- **对应开发过程**：`docs/dev_processes/Phase-8.1-SQLQuery宏能力与LLM动态DAG规划.md`
+- **对应开发过程**：`docs/dev_processes/backend/Phase-8.1-SQLQuery宏能力与LLM动态DAG规划.md`
 
 ## 1. 背景
 

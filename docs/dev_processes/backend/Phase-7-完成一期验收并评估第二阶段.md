@@ -10,7 +10,7 @@
 - 协作 Owner：后端接口负责人、SQLQuery 负责人、架构负责人
 
 ## 输入
-- `docs/dev_processes/Phase-6-接入FastAPI-SSE对外接口.md`
+- `docs/dev_processes/backend/Phase-6-接入FastAPI-SSE对外接口.md`
 - `docs/prd/backend/05-API与核心数据模型.md`
 - `docs/prd/backend/06-SQLQuery-MVP设计.md`
 - Phase 0 的一期范围与验收口径

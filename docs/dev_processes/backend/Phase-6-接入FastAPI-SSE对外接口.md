@@ -10,7 +10,7 @@
 - 协作 Owner：编排负责人、生命周期负责人、SQLQuery 负责人
 
 ## 输入
-- `docs/dev_processes/Phase-5-接入SQLQuery-MVP能力链路.md`
+- `docs/dev_processes/backend/Phase-5-接入SQLQuery-MVP能力链路.md`
 - `docs/prd/backend/05-API与核心数据模型.md`
 - `docs/prd/backend/03-协作协议与任务生命周期.md`
 - `docs/prd/backend/06-SQLQuery-MVP设计.md`

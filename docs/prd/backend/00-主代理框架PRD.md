@@ -124,7 +124,7 @@
 - 前端 PRD 预留入口：`docs/prd/frontend/README.md`
 - 数据库结构说明：`docs/MySQL数据库表结构说明.md`
 - SQLQuery prompt 输入模板：`docs/SQLQuery提示词输入模板.md`
-- 开发流程索引：`docs/dev_processes/README.md`
+- 开发流程索引：`docs/dev_processes/backend/README.md`
 
 ## 7. 使用建议
 

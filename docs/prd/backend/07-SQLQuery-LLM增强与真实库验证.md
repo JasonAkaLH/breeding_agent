@@ -4,7 +4,7 @@
 - **文档状态**：正式版（补齐 Phase 5.5 及后续实现事实）
 - **日期**：2026-04-27
 - **上游基线**：`docs/prd/backend/06-SQLQuery-MVP设计.md`
-- **对应开发过程**：`docs/dev_processes/Phase-5.5-SQLQuery-LLM增强专题.md`
+- **对应开发过程**：`docs/dev_processes/backend/Phase-5.5-SQLQuery-LLM增强专题.md`
 
 ## 1. 背景
 

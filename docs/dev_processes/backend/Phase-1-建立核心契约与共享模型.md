@@ -10,7 +10,7 @@
 - 协作 Owner：存储负责人、编排负责人、API 负责人
 
 ## 输入
-- `docs/dev_processes/Phase-0-冻结一期范围与验收边界.md`
+- `docs/dev_processes/backend/Phase-0-冻结一期范围与验收边界.md`
 - `docs/prd/backend/02-编排模型与资源调度.md`
 - `docs/prd/backend/05-API与核心数据模型.md`
 - 当前 `src/sql_query/models.py`

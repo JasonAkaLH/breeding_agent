@@ -10,7 +10,7 @@
 - 协作 Owner：编排负责人、数据库接入负责人、测试负责人
 
 ## 输入
-- `docs/dev_processes/Phase-4-打通编排调度与最小运行闭环.md`
+- `docs/dev_processes/backend/Phase-4-打通编排调度与最小运行闭环.md`
 - `docs/prd/backend/06-SQLQuery-MVP设计.md`
 - `configs/sql_query/routing_rules.yaml`
 - `configs/sql_query/schema_metadata.yaml`

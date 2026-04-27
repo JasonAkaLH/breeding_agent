@@ -10,7 +10,7 @@
 - 协作 Owner：生命周期负责人、能力负责人
 
 ## 输入
-- `docs/dev_processes/Phase-3-实现生命周期与协作协议.md`
+- `docs/dev_processes/backend/Phase-3-实现生命周期与协作协议.md`
 - `docs/prd/backend/02-编排模型与资源调度.md`
 - `docs/prd/backend/05-API与核心数据模型.md`
 

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## 项目结构与模块组织
-当前仓库已进入后端实现阶段，不再是空白/最小占位仓库。一期主代理内核、SQLQuery MVP、API/SSE、状态存储与后续 LLM/Skill 增强均已有实际代码与测试。
+当前仓库已进入前后端联调阶段，不再是空白/最小占位仓库。一期主代理内核、SQLQuery MVP、API/SSE、状态存储、后续 LLM/Skill 增强以及前端 v1 业务对话台均已有实际代码与测试。
 
 当前主要目录职责如下：
 - `src/api/`：FastAPI app、DTO、SSE、runtime 装配与 API routes。
@@ -14,10 +14,11 @@
 - `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层等外部适配。
 - `src/sql_query/`：SQLQuery schema context builder 与领域模型；作为 capability 层复用资产保留。
 - `configs/sql_query/`：SQLQuery routing rules、schema metadata、SQL Guard rules。
-- `tests/`：按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
-- `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 预留在 `docs/prd/frontend/`。
-- `docs/dev_processes/`：Phase 0~8.2 的后端开发过程、验收边界与专题实施文档。
-- `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归。
+- `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、SQLQuery 结果卡片与 Vitest 测试。
+- `tests/`：后端按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
+- `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。
+- `docs/dev_processes/`：开发流程文档总目录；后端 Phase 文档在 `docs/dev_processes/backend/`，前端 Phase 文档在 `docs/dev_processes/frontend/`。
+- `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归；`run_fullstack_dev.py` 可拉起前后端用于人工验证。
 
 仍需遵守：不要提交空目录、空测试或占位实现；新增 `native/`、`cpp/` 或其他大型目录前必须有明确设计/评审依据。
 
@@ -43,6 +44,20 @@ conda run -n multi_agent python -m unittest discover -s tests/observability -p '
 
 ```bash
 conda run -n multi_agent python scripts/smoke_main_agent_llm.py --config config.yaml
+```
+
+前端 v1 最小验证命令：
+
+```bash
+cd frontend
+npm test -- --run
+npm run build
+```
+
+全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime；需要 UI-only 验证时可加 `--fake-backend`）：
+
+```bash
+python scripts/run_fullstack_dev.py
 ```
 
 如果某次变更引入了新工具，请在同一个 PR 中同步更新 `README.md` 与本文件。未来可能出现的命令示例：

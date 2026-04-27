@@ -4,8 +4,8 @@
 - **文档状态**：正式版（补齐 Phase 8 与 Phase 8.2 实现事实）
 - **日期**：2026-04-27
 - **对应开发过程**：
-  - `docs/dev_processes/Phase-8-Codex-Skill兼容层与上传文件上下文驱动的主代理技能选择机制.md`
-  - `docs/dev_processes/Phase-8.2-主代理真实LLM运行时绑定与Smoke验证.md`
+  - `docs/dev_processes/backend/Phase-8-Codex-Skill兼容层与上传文件上下文驱动的主代理技能选择机制.md`
+  - `docs/dev_processes/backend/Phase-8.2-主代理真实LLM运行时绑定与Smoke验证.md`
 
 ## 1. 背景
 

@@ -89,7 +89,7 @@
 ## 建议验收命令
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-rg -n "一期目标|一期不做|只读查询链路|主框架只负责任务拆解、编排、分发" docs/prd/backend/00-主代理框架PRD.md docs/prd/backend/*.md docs/dev_processes/Phase-0-冻结一期范围与验收边界.md
+rg -n "一期目标|一期不做|只读查询链路|主框架只负责任务拆解、编排、分发" docs/prd/backend/00-主代理框架PRD.md docs/prd/backend/*.md docs/dev_processes/backend/Phase-0-冻结一期范围与验收边界.md
 ```
 
 ## 验收清单

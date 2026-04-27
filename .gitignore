@@ -79,3 +79,11 @@ build.ninja
 *.prof
 *.profraw
 *.profdata
+
+# Frontend: local dependencies and build artifacts
+/frontend/node_modules/
+/frontend/dist/
+/frontend/coverage/
+
+# Local runtime data
+/runtime/

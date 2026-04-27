@@ -10,7 +10,7 @@
 - 协作 Owner：存储负责人、编排负责人、API 负责人
 
 ## 输入
-- `docs/dev_processes/Phase-2-落地SQLite状态存储与仓储抽象.md`
+- `docs/dev_processes/backend/Phase-2-落地SQLite状态存储与仓储抽象.md`
 - `docs/prd/backend/03-协作协议与任务生命周期.md`
 - `docs/prd/backend/04-状态存储与迁移策略.md`
 

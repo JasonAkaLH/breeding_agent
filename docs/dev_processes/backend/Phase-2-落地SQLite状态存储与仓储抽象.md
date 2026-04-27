@@ -10,7 +10,7 @@
 - 协作 Owner：生命周期负责人、编排负责人
 
 ## 输入
-- `docs/dev_processes/Phase-1-建立核心契约与共享模型.md`
+- `docs/dev_processes/backend/Phase-1-建立核心契约与共享模型.md`
 - `docs/prd/backend/04-状态存储与迁移策略.md`
 - `docs/prd/backend/05-API与核心数据模型.md`
 
@@ -22,7 +22,7 @@
 - 会话延续型记忆最小字段集的落库说明
 - PostgreSQL 同构迁移预留点说明
 - 从 SQLite 切换到 PostgreSQL 时的代码/配置/测试修改清单
-- 配套设计稿：`docs/dev_processes/Phase-2-SQLite状态存储表结构草案.md`
+- 配套设计稿：`docs/dev_processes/backend/Phase-2-SQLite状态存储表结构草案.md`
 
 ## 要做什么
 - 定义 storage interface，保证上层只面向接口编程。

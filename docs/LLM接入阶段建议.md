@@ -206,7 +206,7 @@ SQLQuery 的 LLM 只影响：
 
 - `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md`（正式 PRD）
 - `docs/SQLQuery-LLM版本改造方案.md`（已存在）
-- `docs/dev_processes/Phase-5.5-SQLQuery-LLM增强专题.md`（Phase 5.5 讨论与开发过程入口）
+- `docs/dev_processes/backend/Phase-5.5-SQLQuery-LLM增强专题.md`（Phase 5.5 讨论与开发过程入口）
 - 新增 LLM 版 capability 测试与回归测试
 
 ### 7.2 主代理 / 通用子代理 LLM 专题
@@ -215,7 +215,7 @@ SQLQuery 的 LLM 只影响：
 
 - `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`（主代理 Skill / LLM runtime 正式 PRD）
 - `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md`（高层 Planner 前置契约正式 PRD）
-- `docs/dev_processes/Phase-8.2-主代理真实LLM运行时绑定与Smoke验证.md`（主代理真实 provider runtime 绑定与 smoke）
+- `docs/dev_processes/backend/Phase-8.2-主代理真实LLM运行时绑定与Smoke验证.md`（主代理真实 provider runtime 绑定与 smoke）
 - 后续主代理 LLM Planner / 路由设计文档
 - 通用子代理 / worker 执行范式设计文档
 - 资源配额 / 延迟 / 成本 / 可观测性设计文档

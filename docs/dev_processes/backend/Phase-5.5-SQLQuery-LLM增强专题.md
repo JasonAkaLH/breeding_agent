@@ -474,7 +474,7 @@ Phase 5.5 通过的最低标准：
 - `docs/LLM接入阶段建议.md`：回答 LLM 接入先后顺序，本文档承接其中的 SQLQuery 内部 LLM 增强建议。
 - `docs/SQLQuery-LLM版本改造方案.md`：已有较完整改造方案，本文档作为 Phase 5.5 的开发过程与讨论沉淀入口。
 - `docs/SQLQuery提示词输入模板.md`：可作为 `sql_generate` prompt 设计输入。
-- `docs/dev_processes/Phase-5-接入SQLQuery-MVP能力链路.md`：Phase 5.5 必须复用并保护 Phase 5 已完成的 capability 边界。
+- `docs/dev_processes/backend/Phase-5-接入SQLQuery-MVP能力链路.md`：Phase 5.5 必须复用并保护 Phase 5 已完成的 capability 边界。
 - `docs/一期验收报告.md`：Phase 5.5 不修改一期验收结论，而是在一期之后作为增强专题推进。
 
 ## 9. 讨论记录
