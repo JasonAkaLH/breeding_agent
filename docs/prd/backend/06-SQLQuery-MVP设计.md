@@ -1,6 +1,6 @@
 # SQLQuery-MVP设计
 
-> 来源：从 `docs/主代理框架PRD.md` 拆分而来，承载 SQLQuery 的数据库接入前提、MVP 任务 DAG、Schema Context Builder 与验收闭环。
+> 来源：从 `docs/prd/backend/00-主代理框架PRD.md` 拆分而来，承载 SQLQuery 的数据库接入前提、MVP 任务 DAG、Schema Context Builder 与验收闭环。
 
 ## 10.4 当前已知数据库接入参考
 仓库当前已有 `src/mysql_engine.py`，其中提供了基于 SQLAlchemy `create_engine` + `QueuePool` 的 MySQL 访问示例，可作为一期 SQLQuery 数据源接入参考。

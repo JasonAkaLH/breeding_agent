@@ -1,6 +1,6 @@
 # SQLQuery LLM 版本改造方案
 
-- 状态：Phase 5.5 首轮实现已落地，真实 provider 运行绑定与手工 smoke 待后续补齐
+- 状态：Phase 5.5 首轮实现已落地；正式 PRD 已补齐到 `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md`；默认自动化测试仍不访问真实 provider
 - 日期：2026-04-23
 - 适用范围：在当前 Phase 5 已完成的 SQLQuery MVP 基础上，升级为真正使用 LLM 的版本
 
@@ -182,7 +182,8 @@ intent_route
 
 新增例如：
 
-- `src/integrations/llm_text_generation.py`
+- `src/integrations/llm_client.py`（已存在的 OpenAI-compatible client seam）
+- `src/capabilities/sql_query/llm_utils.py`（当前已落地的文本生成器兼容与 JSON 工具）
 - `src/capabilities/sql_query/prompt_builders.py`
 
 由 capability 节点只负责：
@@ -208,9 +209,9 @@ intent_route
 **先做 A，再按需要演进到 B。**
 
 原因：
-- 当前仓库仍处于 Phase 5 之后、Phase 6 之前
-- 最需要的是快速把 LLM 主路径做通
-- 不宜在此时引入过多新抽象
+- 该决策产生于 Phase 5.5 初期，当时最需要的是快速把 SQLQuery LLM 主路径做通
+- 当前实现已按方案 A 落地：SQLQuery 专属 prompt builder 与 LLM JSON 工具位于 `src/capabilities/sql_query/`
+- 后续若多个 capability 复用同类能力，再评估是否抽取通用 `src/integrations/` 文本生成抽象
 
 ---
 
@@ -303,7 +304,8 @@ intent_route
 
 建议新增文档或模板文件，例如：
 
-- `docs/SQLQuery-LLM提示词草案.md`
+- `docs/SQLQuery提示词输入模板.md`
+- `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md`
 
 内容至少包括：
 
@@ -321,8 +323,9 @@ intent_route
 #### 需要新增/扩展的测试
 
 在现有：
-- `tests/capabilities/sql_query/test_sql_generate.py`
+- `tests/capabilities/sql_query/test_sql_generate_llm.py`
 - `tests/capabilities/sql_query/test_result_summarize.py`
+- `tests/capabilities/sql_query/test_result_summarize_llm.py`
 
 基础上补：
 
@@ -427,8 +430,9 @@ intent_route
 - `src/capabilities/sql_query/result_summarize.py`
 - `src/capabilities/sql_query/executor.py`
 - `src/integrations/llm_client.py`
-- `tests/capabilities/sql_query/test_sql_generate.py`
+- `tests/capabilities/sql_query/test_sql_generate_llm.py`
 - `tests/capabilities/sql_query/test_result_summarize.py`
+- `tests/capabilities/sql_query/test_result_summarize_llm.py`
 - `tests/capabilities/sql_query/test_orchestration_flow.py`
 
 ---

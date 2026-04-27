@@ -10,13 +10,13 @@
 - 协作 Owner：后端主程、能力链路负责人、测试负责人
 
 ## 输入
-- `docs/主代理框架PRD.md`
-- `docs/prd/01-产品目标与范围.md`
-- `docs/prd/02-编排模型与资源调度.md`
-- `docs/prd/03-协作协议与任务生命周期.md`
-- `docs/prd/04-状态存储与迁移策略.md`
-- `docs/prd/05-API与核心数据模型.md`
-- `docs/prd/06-SQLQuery-MVP设计.md`
+- `docs/prd/backend/00-主代理框架PRD.md`
+- `docs/prd/backend/01-产品目标与范围.md`
+- `docs/prd/backend/02-编排模型与资源调度.md`
+- `docs/prd/backend/03-协作协议与任务生命周期.md`
+- `docs/prd/backend/04-状态存储与迁移策略.md`
+- `docs/prd/backend/05-API与核心数据模型.md`
+- `docs/prd/backend/06-SQLQuery-MVP设计.md`
 
 ## 输出
 - 一份被冻结的一期范围清单
@@ -69,7 +69,7 @@
 
 ## 边界条件
 ### 进入条件
-- `docs/主代理框架PRD.md` 与 `docs/prd/*.md` 已具备当前基线版本。
+- `docs/prd/backend/00-主代理框架PRD.md` 与 `docs/prd/backend/*.md` 已具备当前基线版本。
 
 ### 退出条件
 - 所有研发对“一期最小交付面”达成一致。
@@ -89,7 +89,7 @@
 ## 建议验收命令
 ```bash
 cd /Users/yinpeihai/Code_workspace/multi_agent_framework
-rg -n "一期目标|一期不做|只读查询链路|主框架只负责任务拆解、编排、分发" docs/主代理框架PRD.md docs/prd/*.md docs/dev_processes/Phase-0-冻结一期范围与验收边界.md
+rg -n "一期目标|一期不做|只读查询链路|主框架只负责任务拆解、编排、分发" docs/prd/backend/00-主代理框架PRD.md docs/prd/backend/*.md docs/dev_processes/Phase-0-冻结一期范围与验收边界.md
 ```
 
 ## 验收清单

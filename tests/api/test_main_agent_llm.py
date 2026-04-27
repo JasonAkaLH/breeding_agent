@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 
 from tests.api.support import APITestCase
 
@@ -92,6 +93,64 @@ triggers:
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
         self.assertIn("请使用汇报格式", prompts[0])
+
+    async def test_runtime_can_bind_main_agent_real_llm_factory_without_network(self) -> None:
+        factory_kwargs: list[dict] = []
+        prompts: list[str] = []
+        reasoning_efforts: list[str] = []
+
+        class FakeLLMClient:
+            def __init__(self, **kwargs) -> None:
+                factory_kwargs.append(kwargs)
+                self.model = kwargs["config"]["model"]
+
+            def safe_metadata(self, *, config_source: str | None = None, reasoning_effort: str | None = None) -> dict:
+                return {
+                    "provider": "openai_compatible",
+                    "model": self.model,
+                    "config_source": config_source,
+                    "reasoning_effort": reasoning_effort,
+                    "base_url_configured": True,
+                }
+
+            async def stream_text(self, prompt: str, *, reasoning_effort: str = "minimal") -> AsyncIterator[str]:
+                prompts.append(prompt)
+                reasoning_efforts.append(reasoning_effort)
+                yield "真实"
+                yield "LLM"
+
+        await self.reconfigure_runtime(
+            main_agent_llm_config={
+                "api_key": "secret-test-key",
+                "base_url": "https://example.test/v1",
+                "model": "fake-main-agent-model",
+            },
+            main_agent_llm_client_factory=FakeLLMClient,
+            main_agent_reasoning_effort="low",
+            skill_roots=[],
+        )
+
+        response = await self.submit_message(
+            conversation_id="conv-main-real-llm",
+            content="你好，主代理",
+            capability_id=None,
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        llm_event = next(event for event in events if event.event_type == "main_agent.llm_call")
+
+        self.assertEqual(factory_kwargs[0]["config"]["model"], "fake-main-agent-model")
+        self.assertEqual(reasoning_efforts, ["low"])
+        self.assertIn("你好，主代理", prompts[0])
+        self.assertEqual(llm_event.payload["model"], "fake-main-agent-model")
+        self.assertEqual(llm_event.payload["config_source"], "injected_config")
+        self.assertEqual(llm_event.payload["reasoning_effort"], "low")
+        self.assertNotIn("api_key", llm_event.payload)
+        self.assertNotIn("secret-test-key", str(llm_event.payload))
 
 
 if __name__ == "__main__":

@@ -50,6 +50,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         summarizer=None,
         llm_text_generator=None,
         main_agent_stream_generator=None,
+        main_agent_llm_config=None,
+        main_agent_llm_config_path=None,
+        main_agent_llm_client_factory=None,
+        main_agent_reasoning_effort="minimal",
         skill_roots=(),
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
@@ -67,6 +71,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             summarizer=summarizer,
             llm_text_generator=llm_text_generator,
             main_agent_stream_generator=main_agent_stream_generator,
+            main_agent_llm_config=main_agent_llm_config,
+            main_agent_llm_config_path=main_agent_llm_config_path,
+            main_agent_llm_client_factory=main_agent_llm_client_factory,
+            main_agent_reasoning_effort=main_agent_reasoning_effort,
             skill_roots=skill_roots,
         )
 
@@ -83,6 +91,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         summarizer=None,
         llm_text_generator=None,
         main_agent_stream_generator=None,
+        main_agent_llm_config=None,
+        main_agent_llm_config_path=None,
+        main_agent_llm_client_factory=None,
+        main_agent_reasoning_effort="minimal",
         skill_roots=(),
     ) -> None:
         await self.client.aclose()
@@ -93,6 +105,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             summarizer=summarizer,
             llm_text_generator=llm_text_generator,
             main_agent_stream_generator=main_agent_stream_generator,
+            main_agent_llm_config=main_agent_llm_config,
+            main_agent_llm_config_path=main_agent_llm_config_path,
+            main_agent_llm_client_factory=main_agent_llm_client_factory,
+            main_agent_reasoning_effort=main_agent_reasoning_effort,
             skill_roots=skill_roots,
         )
         await self._bind_client()

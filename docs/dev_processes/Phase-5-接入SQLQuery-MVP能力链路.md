@@ -11,7 +11,7 @@
 
 ## 输入
 - `docs/dev_processes/Phase-4-打通编排调度与最小运行闭环.md`
-- `docs/prd/06-SQLQuery-MVP设计.md`
+- `docs/prd/backend/06-SQLQuery-MVP设计.md`
 - `configs/sql_query/routing_rules.yaml`
 - `configs/sql_query/schema_metadata.yaml`
 - `configs/sql_query/sql_guard_rules.yaml`

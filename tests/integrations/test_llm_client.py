@@ -146,6 +146,19 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(call["reasoning_effort"], "minimal")
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
 
+    def test_safe_metadata_excludes_secrets_and_raw_endpoint(self) -> None:
+        client = self.make_client()
+
+        metadata = client.safe_metadata(config_source="injected_config", reasoning_effort="minimal")
+
+        self.assertEqual(metadata["provider"], "openai_compatible")
+        self.assertEqual(metadata["model"], "test-model")
+        self.assertEqual(metadata["reasoning_effort"], "minimal")
+        self.assertEqual(metadata["config_source"], "injected_config")
+        self.assertTrue(metadata["base_url_configured"])
+        self.assertNotIn("api_key", metadata)
+        self.assertNotIn("base_url", metadata)
+
 
 if __name__ == "__main__":
     unittest.main()

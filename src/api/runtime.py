@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 from uuid import uuid4
 
 from sqlalchemy import Engine
@@ -27,6 +28,7 @@ from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import SkillCatalog
+from src.integrations.llm_client import LLMClient, ReasoningEffort
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
@@ -370,6 +372,10 @@ def build_api_runtime(
     summarizer=None,
     llm_text_generator=None,
     main_agent_stream_generator: StreamGenerator | None = None,
+    main_agent_llm_config: Mapping[str, Any] | None = None,
+    main_agent_llm_config_path: str | Path | None = None,
+    main_agent_llm_client_factory: Callable[..., Any] | None = None,
+    main_agent_reasoning_effort: ReasoningEffort = "minimal",
     skill_roots: Iterable[str | Path] | None = None,
     skill_catalog: SkillCatalog | None = None,
 ) -> ApiRuntime:
@@ -402,6 +408,13 @@ def build_api_runtime(
         resolved_skill_catalog = SkillCatalog.from_roots(roots)
 
     resolved_mysql_adapter = mysql_adapter or MySQLReadonlyAdapter()
+    resolved_main_agent_stream_generator, main_agent_stream_metadata = _resolve_main_agent_stream_binding(
+        main_agent_stream_generator=main_agent_stream_generator,
+        main_agent_llm_config=main_agent_llm_config,
+        main_agent_llm_config_path=main_agent_llm_config_path,
+        main_agent_llm_client_factory=main_agent_llm_client_factory,
+        main_agent_reasoning_effort=main_agent_reasoning_effort,
+    )
 
     cancellation_service = CancellationService(storage, event_sink=event_broker, audit_sink=audit_sink)
     interrupt_service = InterruptService(storage, event_sink=event_broker, audit_sink=audit_sink)
@@ -413,7 +426,8 @@ def build_api_runtime(
         executor=CompositeExecutor(
             [
                 MainAgentExecutor(
-                    stream_generator=main_agent_stream_generator,
+                    stream_generator=resolved_main_agent_stream_generator,
+                    stream_metadata=main_agent_stream_metadata,
                     skill_catalog=resolved_skill_catalog,
                     live_event_recorder=record_live_event,
                 ),
@@ -445,6 +459,71 @@ def build_api_runtime(
         ),
         mysql_adapter=resolved_mysql_adapter,
     )
+
+
+def _resolve_main_agent_stream_binding(
+    *,
+    main_agent_stream_generator: StreamGenerator | None,
+    main_agent_llm_config: Mapping[str, Any] | None,
+    main_agent_llm_config_path: str | Path | None,
+    main_agent_llm_client_factory: Callable[..., Any] | None,
+    main_agent_reasoning_effort: ReasoningEffort,
+) -> tuple[StreamGenerator | None, dict[str, Any]]:
+    if main_agent_stream_generator is not None:
+        return main_agent_stream_generator, {
+            "provider": "injected_stream",
+            "config_source": "injected_stream",
+            "reasoning_effort": main_agent_reasoning_effort,
+        }
+
+    if main_agent_llm_config is None and main_agent_llm_config_path is None and main_agent_llm_client_factory is None:
+        return None, {}
+
+    factory = main_agent_llm_client_factory or LLMClient
+    kwargs: dict[str, Any] = {}
+    if main_agent_llm_config is not None:
+        kwargs["config"] = dict(main_agent_llm_config)
+        config_source = "injected_config"
+    elif main_agent_llm_config_path is not None:
+        kwargs["config_path"] = main_agent_llm_config_path
+        config_source = "config_path"
+    else:
+        config_source = "factory_default"
+
+    client = factory(**kwargs)
+
+    async def stream(prompt: str):
+        async for chunk in client.stream_text(prompt, reasoning_effort=main_agent_reasoning_effort):
+            yield chunk
+
+    return stream, _safe_llm_client_metadata(
+        client,
+        config_source=config_source,
+        reasoning_effort=main_agent_reasoning_effort,
+    )
+
+
+def _safe_llm_client_metadata(
+    client: Any,
+    *,
+    config_source: str,
+    reasoning_effort: ReasoningEffort,
+) -> dict[str, Any]:
+    safe_metadata = getattr(client, "safe_metadata", None)
+    if callable(safe_metadata):
+        metadata = safe_metadata(config_source=config_source, reasoning_effort=reasoning_effort)
+        if isinstance(metadata, Mapping):
+            return dict(metadata)
+
+    metadata: dict[str, Any] = {
+        "provider": "openai_compatible",
+        "config_source": config_source,
+        "reasoning_effort": reasoning_effort,
+    }
+    model = getattr(client, "model", None)
+    if model:
+        metadata["model"] = model
+    return metadata
 
 
 def _default_skill_roots() -> tuple[Path, ...]:

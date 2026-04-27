@@ -11,8 +11,8 @@
 
 ## 输入
 - `docs/dev_processes/Phase-3-实现生命周期与协作协议.md`
-- `docs/prd/02-编排模型与资源调度.md`
-- `docs/prd/05-API与核心数据模型.md`
+- `docs/prd/backend/02-编排模型与资源调度.md`
+- `docs/prd/backend/05-API与核心数据模型.md`
 
 ## 输出
 - `src/orchestration/` 目录

@@ -11,8 +11,8 @@
 
 ## 输入
 - `docs/dev_processes/Phase-1-建立核心契约与共享模型.md`
-- `docs/prd/04-状态存储与迁移策略.md`
-- `docs/prd/05-API与核心数据模型.md`
+- `docs/prd/backend/04-状态存储与迁移策略.md`
+- `docs/prd/backend/05-API与核心数据模型.md`
 
 ## 输出
 - `src/storage/interfaces.py`

@@ -3,9 +3,9 @@
 - 状态：草案 / 可进入实现
 - 适用阶段：Phase 2
 - 主要依据：
-  - `docs/prd/04-状态存储与迁移策略.md`
-  - `docs/prd/05-API与核心数据模型.md`
-  - `docs/prd/03-协作协议与任务生命周期.md`
+  - `docs/prd/backend/04-状态存储与迁移策略.md`
+  - `docs/prd/backend/05-API与核心数据模型.md`
+  - `docs/prd/backend/03-协作协议与任务生命周期.md`
   - `docs/dev_processes/Phase-2-落地SQLite状态存储与仓储抽象.md`
 
 ---

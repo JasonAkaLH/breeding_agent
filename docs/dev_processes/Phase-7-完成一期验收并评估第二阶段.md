@@ -11,8 +11,8 @@
 
 ## 输入
 - `docs/dev_processes/Phase-6-接入FastAPI-SSE对外接口.md`
-- `docs/prd/05-API与核心数据模型.md`
-- `docs/prd/06-SQLQuery-MVP设计.md`
+- `docs/prd/backend/05-API与核心数据模型.md`
+- `docs/prd/backend/06-SQLQuery-MVP设计.md`
 - Phase 0 的一期范围与验收口径
 
 ## 输出

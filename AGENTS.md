@@ -1,18 +1,28 @@
 # Repository Guidelines
 
 ## 项目结构与模块组织
-当前仓库刻意保持最小化。在架构未定之前，根目录原则上只保留轻量文件，如 `README.md`、`.gitignore`、`AGENTS.md`。
+当前仓库已进入后端实现阶段，不再是空白/最小占位仓库。一期主代理内核、SQLQuery MVP、API/SSE、状态存储与后续 LLM/Skill 增强均已有实际代码与测试。
 
-当项目正式进入实现阶段，再按职责补充目录：
-- `src/`：Python 主体代码
-- `tests/`：自动化测试
-- `docs/`：设计文档、ADR、接口说明
-- `native/` 或 `cpp/`：经评审批准后的 C++ 性能模块
+当前主要目录职责如下：
+- `src/api/`：FastAPI app、DTO、SSE、runtime 装配与 API routes。
+- `src/core/`：跨模块共享 contract、模型、枚举与基础错误；不得放 capability 专属业务语义。
+- `src/storage/`：状态存储抽象与 SQLite 实现；后续 PostgreSQL 应保持逻辑同构迁移。
+- `src/lifecycle/`：task / node / mailbox / interrupt / cancel / conversation guard 生命周期规则。
+- `src/orchestration/`：capability registry、scheduler、workflow plan、router、validator、expander 与编排服务。
+- `src/capabilities/main_agent/`：`main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。
+- `src/capabilities/sql_query/`：SQLQuery public macro 与内部六节点只读查询 workflow。
+- `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层等外部适配。
+- `src/sql_query/`：SQLQuery schema context builder 与领域模型；作为 capability 层复用资产保留。
+- `configs/sql_query/`：SQLQuery routing rules、schema metadata、SQL Guard rules。
+- `tests/`：按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
+- `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 预留在 `docs/prd/frontend/`。
+- `docs/dev_processes/`：Phase 0~8.2 的后端开发过程、验收边界与专题实施文档。
+- `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归。
 
-未形成明确设计前，不要提前提交脚手架、生成物或占位实现。
+仍需遵守：不要提交空目录、空测试或占位实现；新增 `native/`、`cpp/` 或其他大型目录前必须有明确设计/评审依据。
 
 ## 构建、测试与开发命令
-仓库目前**没有**完全正式确定的全项目构建和测试工具链，不要自行假定超出当前阶段的标准命令。
+仓库当前仍采用分层 `unittest` 作为正式回归入口，暂未引入统一的全项目 pytest / lint / build 命令；不要自行假定超出当前阶段的标准命令。
 
 当前已落地的最小测试命令：
 
@@ -29,6 +39,12 @@ conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
 ```
 
+显式手工 smoke（会访问本地 `config.yaml` 配置的真实 LLM provider，不属于默认回归）：
+
+```bash
+conda run -n multi_agent python scripts/smoke_main_agent_llm.py --config config.yaml
+```
+
 如果某次变更引入了新工具，请在同一个 PR 中同步更新 `README.md` 与本文件。未来可能出现的命令示例：
 
 ```bash
@@ -41,7 +57,7 @@ cmake --build build
 除上述最小测试命令外，其余仍仅为示例，不代表当前仓库标准。
 
 ## 开发环境
-本项目后续统一在 Conda 环境 `multi_agent` 中开发，当前确认的 Python 版本为 `3.13.13`。
+本项目统一在 Conda 环境 `multi_agent` 中开发，当前确认的 Python 版本为 `3.13.13`。
 
 常用命令示例：
 
@@ -75,7 +91,7 @@ python --version
 - C++ 模块需明确区分头文件与实现文件，风格以后续批准的首个原生模块规范为准。
 - Markdown 文档文件可使用中文命名。
 - 除 Markdown 文档外，其他文件与目录应使用英文命名；代码、配置、脚本、YAML/JSON 等文件不要使用中文文件名。
-- 优先小而清晰的模块，避免过早抽象。
+- 优先小而清晰的模块；避免无证据的提前泛化，也避免在已有稳定复用需求时继续复制粘贴。
 - 未经明确同意，不要引入 LangChain、LangGraph、AutoGen 等现成 Agent 框架。
 
 ## 测试规范
@@ -106,4 +122,4 @@ PR 至少应包含：
 - 已完成的验证
 
 ## 架构约束
-本仓库服务于自研、多 Agent、面向内部业务的框架建设。优先先写设计，再写实现；在架构未确认前，不要提前锁定运行时、部署方式、编排模型或工程骨架。
+本仓库服务于自研、多 Agent、面向内部业务的框架建设。当前后端主代理框架、SQLQuery、状态存储、API/SSE、主代理 Skill / LLM runtime 已形成实现基线；新增重大运行时、部署方式、编排模型或跨模块边界变更前，应先更新对应 PRD / dev_processes 设计与测试计划。

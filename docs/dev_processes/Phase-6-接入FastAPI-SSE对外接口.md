@@ -11,9 +11,9 @@
 
 ## 输入
 - `docs/dev_processes/Phase-5-接入SQLQuery-MVP能力链路.md`
-- `docs/prd/05-API与核心数据模型.md`
-- `docs/prd/03-协作协议与任务生命周期.md`
-- `docs/prd/06-SQLQuery-MVP设计.md`
+- `docs/prd/backend/05-API与核心数据模型.md`
+- `docs/prd/backend/03-协作协议与任务生命周期.md`
+- `docs/prd/backend/06-SQLQuery-MVP设计.md`
 
 ## 输出
 - `src/api/` 目录

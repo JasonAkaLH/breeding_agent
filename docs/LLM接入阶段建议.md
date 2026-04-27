@@ -54,13 +54,14 @@
 - SQLQuery（原 SQLQuery）capability 闭环
 - 可复用的 `src/integrations/llm_client.py`
 
-Phase 5.5 首轮后，SQLQuery 内部已经具备可注入的 LLM seam；Phase 8 首轮后，主代理也已经接入非 thinking streaming LLM seam。默认自动化测试仍不会访问真实 provider：
+Phase 5.5 首轮后，SQLQuery 内部已经具备可注入的 LLM seam；Phase 8 首轮后，主代理也已经接入非 thinking streaming LLM seam；Phase 8.2 进一步把主代理真实 provider 绑定收口到 runtime 显式装配与手工 smoke 验证。默认自动化测试仍不会访问真实 provider：
 
 - 主代理已通过 `main_agent.respond` 接入 LLM seam，普通消息默认进入主代理
+- 主代理真实 provider 绑定在 Phase 8.2 通过 `build_api_runtime()` 的显式 config / config path / client factory seam 完成，并提供 `scripts/smoke_main_agent_llm.py` 作为手工 smoke 入口
 - 通用子代理未接入 LLM
 - SQLQuery 的 `sql_generate` 已支持注入 `llm_text_generator` 走结构化 LLM 输出，未注入时仍回退启发式实现
 - SQLQuery 的 `result_summarize` 已支持注入 `llm_text_generator` 走结构化 LLM 摘要，未注入或失败时仍回退模板/规则式实现
-- 真实 provider 的 runtime 绑定与手工 smoke 验证仍需后续显式补齐
+- SQLQuery 默认 runtime 仍不自动访问真实 provider；若需要真实 SQLQuery LLM，需要显式传入 `llm_text_generator`
 
 ---
 
@@ -113,7 +114,8 @@ Phase 7 的任务是：
 | 能力类型 | 推荐接入阶段 | 原因 |
 |---|---|---|
 | SQLQuery 内部 `sql_generate` / `result_summarize` 的 LLM 化 | Phase 5.5 / SQLQuery 增强专题 | 它仍然属于首个 capability 的深化，不需要等待整个主代理 LLM 化 |
-| 主代理任务理解 / 路线选择的 LLM 化 | Phase 7 之后的新专题 | 属于主框架行为升级，影响编排内核，不应混入一期收口阶段 |
+| 主代理普通对话输出真实 provider 绑定 | Phase 8.2 / 主代理运行时收口专题 | Phase 8 已有 streaming seam，本阶段只补真实 provider 显式装配、safe metadata 与 smoke，不改变编排决策 |
+| 主代理任务理解 / 路线选择的 LLM 化 | Phase 8.3 或后续新专题 | 属于主框架行为升级，影响编排内核，不应混入 Phase 8.2 的 provider 绑定收口 |
 | 通用子代理 / worker 型能力的 LLM 化 | Phase 7 之后的新专题 | 会影响 capability 执行范式与整体资源调度，不适合一期尾声混入 |
 
 ---
@@ -158,7 +160,7 @@ Phase 7 的任务是：
 - 路由判断与后续多 capability 自动选择
 - 更泛化的子代理执行能力
 
-> 当前 Phase 8 首轮已经完成主代理普通对话输出的 LLM 接入；通用子代理 LLM 化与更复杂的自动路由仍保留为后续专题。
+> 当前 Phase 8 首轮已经完成主代理普通对话输出的 LLM seam；Phase 8.2 补齐主代理真实 provider runtime 绑定与 smoke；通用子代理 LLM 化与更复杂的自动路由仍保留为后续专题。
 
 ---
 
@@ -202,6 +204,7 @@ SQLQuery 的 LLM 只影响：
 
 建议输出：
 
+- `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md`（正式 PRD）
 - `docs/SQLQuery-LLM版本改造方案.md`（已存在）
 - `docs/dev_processes/Phase-5.5-SQLQuery-LLM增强专题.md`（Phase 5.5 讨论与开发过程入口）
 - 新增 LLM 版 capability 测试与回归测试
@@ -210,7 +213,10 @@ SQLQuery 的 LLM 只影响：
 
 建议后续单独新增：
 
-- 主代理 LLM 化设计文档
+- `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`（主代理 Skill / LLM runtime 正式 PRD）
+- `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md`（高层 Planner 前置契约正式 PRD）
+- `docs/dev_processes/Phase-8.2-主代理真实LLM运行时绑定与Smoke验证.md`（主代理真实 provider runtime 绑定与 smoke）
+- 后续主代理 LLM Planner / 路由设计文档
 - 通用子代理 / worker 执行范式设计文档
 - 资源配额 / 延迟 / 成本 / 可观测性设计文档
 
@@ -227,4 +233,4 @@ SQLQuery 的 LLM 只影响：
 换句话说：
 
 - **SQLQuery 的 LLM 接入**：建议最先做，但放在一期收口之后
-- **主代理 / 通用子代理的 LLM 接入**：主代理普通对话输出已在 Phase 8 首轮接入；通用子代理 LLM 化与复杂自动路由建议继续单独立项
+- **主代理 / 通用子代理的 LLM 接入**：主代理普通对话输出已在 Phase 8 首轮接入，主代理真实 provider runtime 绑定在 Phase 8.2 收口；通用子代理 LLM 化与复杂自动路由建议继续单独立项

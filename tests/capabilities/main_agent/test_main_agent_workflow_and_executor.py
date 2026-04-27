@@ -64,6 +64,76 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
             ["main_agent.output_delta", "main_agent.output_delta"],
         )
 
+    async def test_executor_records_safe_llm_metadata_on_success(self) -> None:
+        async def streamer(prompt: str):
+            yield "hello"
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={
+                "provider": "openai_compatible",
+                "model": "test-model",
+                "reasoning_effort": "minimal",
+                "config_source": "injected_config",
+                "api_key": "must-not-leak",
+            },
+            skill_catalog=SkillCatalog(()),
+        )
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "你好"},
+            )
+        )
+
+        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["model"], "test-model")
+        self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
+        self.assertEqual(llm_event.payload["config_source"], "injected_config")
+        self.assertNotIn("api_key", llm_event.payload)
+
+    async def test_executor_records_safe_llm_metadata_on_provider_failure(self) -> None:
+        async def broken_streamer(prompt: str):
+            raise RuntimeError(
+                "provider exploded api_key=secret-test-key "
+                "base_url=https://example.test/v1 prompt=不要把 prompt 泄露到 audit"
+            )
+            yield "unreachable"
+
+        executor = MainAgentExecutor(
+            stream_generator=broken_streamer,
+            stream_metadata={
+                "provider": "openai_compatible",
+                "model": "test-model",
+                "config_source": "injected_config",
+            },
+            skill_catalog=SkillCatalog(()),
+        )
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "不要把 prompt 泄露到 audit"},
+            )
+        )
+
+        fallback_event = next(event for event in result.events if event.event_type == "main_agent.llm_fallback")
+        self.assertEqual(result.error.code, "main_agent_llm_failed")
+        self.assertEqual(fallback_event.payload["model"], "test-model")
+        self.assertEqual(fallback_event.payload["diagnostic"], "RuntimeError")
+        self.assertNotIn("prompt", fallback_event.payload)
+        self.assertNotIn("api_key", fallback_event.payload)
+        self.assertNotIn("secret-test-key", str(fallback_event.payload))
+        self.assertNotIn("https://example.test/v1", str(fallback_event.payload))
+        self.assertNotIn("不要把 prompt 泄露到 audit", str(fallback_event.payload))
+
     async def test_prompt_includes_matched_skill_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_dir = Path(tmpdir) / "report"

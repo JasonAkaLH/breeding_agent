@@ -12,6 +12,19 @@ from .helpers import LiveEventRecorder, StreamGenerator, iter_stream, make_event
 from .prompt_builder import build_artifact_context, build_main_agent_prompt
 from .workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS
 
+_SENSITIVE_STREAM_METADATA_KEYS = {
+    "api_key",
+    "authorization",
+    "auth",
+    "token",
+    "secret",
+    "password",
+    "prompt",
+    "messages",
+    "base_url",
+    "url",
+}
+
 
 class MainAgentRespondCapability(CapabilityContract):
     capability_id = "main_agent.respond"
@@ -22,11 +35,13 @@ class MainAgentRespondCapability(CapabilityContract):
         self,
         *,
         stream_generator: StreamGenerator | None = None,
+        stream_metadata: Mapping[str, Any] | None = None,
         skill_catalog: SkillCatalog | None = None,
         script_runner: SkillScriptRunner | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
     ) -> None:
         self._stream_generator = stream_generator
+        self._stream_metadata = self._sanitize_stream_metadata(stream_metadata or {})
         self._skill_catalog = skill_catalog or SkillCatalog(())
         self._script_runner = script_runner or SkillScriptRunner()
         self._live_event_recorder = live_event_recorder
@@ -65,9 +80,11 @@ class MainAgentRespondCapability(CapabilityContract):
 
         started_at = time.monotonic()
         chunks: list[str] = []
+        stream_metadata: dict[str, Any] = dict(self._stream_metadata)
         try:
+            stream_generator, stream_metadata = self._resolve_stream_binding()
             ordinal = 0
-            async for chunk in iter_stream(self._resolve_stream_generator(), prompt):
+            async for chunk in iter_stream(stream_generator, prompt):
                 ordinal += 1
                 chunks.append(chunk)
                 delta_event = make_event(
@@ -83,7 +100,12 @@ class MainAgentRespondCapability(CapabilityContract):
                 make_event(
                     request,
                     event_type="main_agent.llm_fallback",
-                    payload={"fallback_reason": "provider_failed", "prompt_recorded": False, "diagnostic": str(exc)[:200]},
+                    payload={
+                        **stream_metadata,
+                        "fallback_reason": "provider_failed",
+                        "prompt_recorded": False,
+                        "diagnostic": self._safe_exception_diagnostic(exc),
+                    },
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
@@ -115,6 +137,7 @@ class MainAgentRespondCapability(CapabilityContract):
                 request,
                 event_type="main_agent.llm_call",
                 payload={
+                    **stream_metadata,
                     "status": "succeeded",
                     "prompt_recorded": False,
                     "duration_ms": duration_ms,
@@ -179,11 +202,24 @@ class MainAgentRespondCapability(CapabilityContract):
                 )
         return script_results, tuple(events)
 
-    def _resolve_stream_generator(self) -> StreamGenerator:
+    def _resolve_stream_binding(self) -> tuple[StreamGenerator, dict[str, Any]]:
         if self._stream_generator is not None:
-            return self._stream_generator
+            return self._stream_generator, dict(self._stream_metadata)
         client = LLMClient()
-        return client.stream_text
+        metadata = client.safe_metadata(config_source="default_config_path", reasoning_effort="minimal")
+        return client.stream_text, self._sanitize_stream_metadata(metadata)
+
+    @staticmethod
+    def _sanitize_stream_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            str(key): value
+            for key, value in metadata.items()
+            if str(key).lower() not in _SENSITIVE_STREAM_METADATA_KEYS
+        }
+
+    @staticmethod
+    def _safe_exception_diagnostic(exc: Exception) -> str:
+        return exc.__class__.__name__
 
     async def _record_or_collect(self, event, events: list) -> None:
         if self._live_event_recorder is None:
@@ -197,6 +233,7 @@ class MainAgentExecutor(ExecutorPort):
         self,
         *,
         stream_generator: StreamGenerator | None = None,
+        stream_metadata: Mapping[str, Any] | None = None,
         skill_catalog: SkillCatalog | None = None,
         script_runner: SkillScriptRunner | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
@@ -204,6 +241,7 @@ class MainAgentExecutor(ExecutorPort):
         self._capabilities: dict[str, CapabilityContract] = {
             "main_agent.respond": MainAgentRespondCapability(
                 stream_generator=stream_generator,
+                stream_metadata=stream_metadata,
                 skill_catalog=skill_catalog,
                 script_runner=script_runner,
                 live_event_recorder=live_event_recorder,

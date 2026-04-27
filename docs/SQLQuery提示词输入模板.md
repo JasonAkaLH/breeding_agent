@@ -3,8 +3,9 @@
 > 适用范围：本模板用于 `sql_query.sql_generate` 阶段的提示词输入拼装，不覆盖路由识别、SQL 执行或结果汇总阶段。
 >
 > 参考来源：
-> - `docs/主代理框架PRD.md`
-> - `docs/prd/06-SQLQuery-MVP设计.md`
+> - `docs/prd/backend/00-主代理框架PRD.md`
+> - `docs/prd/backend/06-SQLQuery-MVP设计.md`
+> - `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md`
 > - `configs/sql_query/routing_rules.yaml`
 > - `configs/sql_query/schema_metadata.yaml`
 > - `configs/sql_query/sql_guard_rules.yaml`

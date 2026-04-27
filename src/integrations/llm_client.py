@@ -43,6 +43,7 @@ class LLMClient:
         base_url = base_url or loaded_config.get("base_url")
         max_retries = max_retries if max_retries is not None else loaded_config.get("max_retries", 3)
         timeout = timeout if timeout is not None else loaded_config.get("timeout", 30)
+        self._base_url_configured = bool(base_url)
 
         missing = [
             name
@@ -62,6 +63,24 @@ class LLMClient:
             max_retries=int(max_retries),
             timeout=float(timeout),
         )
+
+    def safe_metadata(
+        self,
+        *,
+        config_source: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "provider": "openai_compatible",
+            "model": self.model,
+            "temperature": self.temperature,
+            "base_url_configured": self._base_url_configured,
+        }
+        if config_source:
+            metadata["config_source"] = config_source
+        if reasoning_effort:
+            metadata["reasoning_effort"] = reasoning_effort
+        return metadata
 
     async def generate_text(
         self,
