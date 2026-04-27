@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+### 2026-04-27 — 新增前端业务对话台 PRD 草案
+
+- 基于当前后端 FastAPI / SSE / capability / artifact 实现事实，新增 `docs/prd/frontend/00-前端业务对话台PRD.md`，明确前端 v1 定位为内部业务用户对话台，而非研发调试台。
+- 明确 v1 仅依赖现有 API：普通对话走 `main_agent.respond`，数据库查询走 `sql_query.query`，SQLQuery 默认展示自然语言摘要与简表预览。
+- 更新 `docs/prd/frontend/README.md` 与 `docs/prd/README.md`，将前端 PRD 状态从预留改为已开始，并记录 v1 非目标与后续后端 API 增强项。
+
 ### 2026-04-27 — 同步当前实现基线的文档、PRD 与 Agent 规则
 
 - 更新 `AGENTS.md`、`README.md`、`docs/一期核心模块边界.md`、`docs/一期开发计划.md` 与 `docs/SQLQuery-LLM版本改造方案.md`，移除“仓库仍保持最小化/架构未定”等过期表述，改为当前后端实现目录职责、PRD 入口、SQLQuery LLM 落点和后续维护口径。

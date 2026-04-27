@@ -7,7 +7,7 @@
 | 目录 | 范围 | 状态 |
 |---|---|---|
 | `docs/prd/backend/` | 后端主代理框架、SQLQuery、LLM runtime、编排与 API 契约 | 当前正式基线 |
-| `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | 预留，后续展开 |
+| `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | 已开始，v1 业务对话台 PRD 草案 |
 
 ## 后端 PRD 入口
 
@@ -18,6 +18,13 @@
 2. 对应专题 PRD 文件；
 3. `docs/dev_processes/README.md` 的阶段索引；
 4. `CHANGELOG.md` 的当天开发记录。
+
+
+## 前端 PRD 入口
+
+前端 v1 PRD 入口是：`docs/prd/frontend/00-前端业务对话台PRD.md`。
+
+当前前端 v1 严格基于已实现后端 API，定位为内部业务用户对话台；后续如补充调试台、权限、上传、历史中心，应新增或拆分专题 PRD。
 
 ## 与开发流程文档的关系
 
