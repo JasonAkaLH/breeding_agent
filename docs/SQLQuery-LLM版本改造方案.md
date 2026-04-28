@@ -55,6 +55,7 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
   - 已提供 `sql_generator` / `llm_text_generator` 注入位
 - `src/capabilities/sql_query/schema_context_prepare.py`
   - 已能产出 route / selected_tables / selected_columns / join_hints / context_summary
+  - 当前 `selected_columns` 表示 route / table 范围内允许暴露给 LLM 的字段集合，不再表示系统已按用户问题预先挑出的业务字段；SELECT / WHERE / ORDER BY 字段由 `sql_generate` 的 LLM 自行决定。
 - `src/capabilities/sql_query/sql_guard.py`
   - 已能执行只读安全校验并发放 `guard_pass_token`
 - `src/integrations/mysql_readonly.py`
@@ -71,11 +72,11 @@ Phase 5.5 首轮实现前，两处关键能力仍是**启发式 / stub-friendly*
 #### SQL 生成
 禁用/未配置 SQLQuery LLM 或 provider 失败时，`sql_generate` 的 fallback 行为是：
 - 选择 1~2 张表
-- 从裁剪后的字段里拼接 `SELECT`
+- 从 route-scoped 的 LLM 可见字段集合中拼接保底 `SELECT`
 - 用 join hint 拼接 `JOIN`
-- 默认补 `LIMIT 50`
+- 不再默认补 `LIMIT`，允许只读 SQL 查询全量匹配数据；只有用户明确要求条数 / 分页时才应生成 LIMIT
 
-这能跑通 MVP，但明显不适合：
+正常运行时的主路径已改为由 LLM 基于 `selected_column_details` 自行选择 SQL 投影字段、过滤字段和排序字段，并自行添加地域、品种名等限制条件；例如“适合河南种植”应由 LLM 选择 `suitable_area` 并生成 `suitable_area LIKE '%河南%'`。fallback 仅用于 LLM 未配置或 provider/输出不可用时的稳定降级，不能替代 LLM 主路径。它能跑通 MVP，但明显不适合：
 - 复杂条件理解
 - 隐式时间范围推理
 - 多维度聚合 / 分组问法
@@ -160,7 +161,7 @@ intent_route
   - 保留结构化 fallback；未注入 LLM 或 LLM 失败时仍走确定性摘要
 - `executor.py`
   - 提供 `llm_text_generator` 注入位
-  - 真实运行时可注入 `src/integrations/llm_client.py` 的 `generate_text`，该接口默认使用非 streaming completion，适合 SQL / 摘要这类结构化 JSON 生成；如后续主代理需要“不启用 thinking 但流式回传用户输出”，可使用 `stream_text()`；默认测试不自动启用真实 provider
+  - 真实运行时可注入 `src/integrations/llm_client.py` 的 `generate_text`，该接口默认使用非 streaming completion，适合 SQL raw text / 摘要结构化 JSON 生成；如后续主代理需要“不启用 thinking 但流式回传用户输出”，可使用 `stream_text()`；默认测试不自动启用真实 provider
 
 #### 优点
 
@@ -252,12 +253,14 @@ intent_route
    - `schema_profile_id`
    - `selected_tables`
    - `selected_columns`
+   - `selected_column_details`
+   - `schema_ddl` / `database_schema`
    - `join_hints`
    - `context_summary`
    - `sql_policy_profile`
    - `user_question`
-2. 基于这些输入构造 LLM prompt
-3. 让 LLM 生成 SQL 草案
+2. 基于这些输入构造 legacy `sql_query_agent` 风格的 LLM prompt：`schema_metadata.yaml` 仍是 schema 保存源，但 prompt 中主 schema 输入会渲染成 `## 以下是数据库结构` / `CREATE TABLE ... COMMENT ...` 的 DDL 片段；其中 `selected_columns` / `selected_column_details` 只限定“哪些字段可见、可用”，不由系统函数替模型预选业务字段
+3. 让 LLM 直接输出 raw SQL 草案，并由 LLM 自行选择 SELECT / WHERE / ORDER BY 字段、地域或品种等过滤条件；`sql_generate` 负责从 raw SQL / fenced SQL 中提取 SQL，并反推 `tables_used`、`columns_used`、`column_types_used`
 4. 若 LLM 调用失败 / 超时 / 输出为空：
    - 回退到当前启发式 SQL 生成逻辑
 
@@ -268,9 +271,10 @@ intent_route
 - prompt 中必须显式附带：
    - 只读限制
    - 单语句限制
-   - LIMIT 约束
+   - 不自动添加 LIMIT；仅用户明确要求条数 / 分页时才使用 LIMIT
    - 表白名单
    - 禁止系统 schema
+   - 只输出 SQL 查询语句，不输出 JSON、Markdown 或解释
 
 ---
 
@@ -351,7 +355,7 @@ intent_route
 
 #### 影响
 - 生成错误 SQL
-- 生成无 LIMIT SQL
+- 生成不符合只读 / 白名单约束的 SQL
 - 生成越权表访问
 
 #### 缓解
@@ -446,4 +450,4 @@ intent_route
 下一步 LLM 版改造的正确路线不是推翻现有结构，而是：
 
 > **在保留 orchestration / guard / readonly execution 边界不变的前提下，  
-> 把 `sql_generate` 与 `result_filtering` 升级为 LLM 主路径，并保留稳定降级能力；真实 API runtime 默认绑定 `config.yaml` 的 LLMClient，自动化测试可显式关闭或注入 fake。**
+> 把 `sql_generate` 与 `result_filtering` 升级为 LLM 主路径，并保留稳定降级能力；真实 API runtime 默认在启动期把 `config.yaml` bootstrap 到 `MAF_CONFIG_*` 环境变量后绑定 LLMClient，自动化测试可显式关闭或注入 fake。**

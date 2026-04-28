@@ -87,3 +87,16 @@ conda run -n multi_agent python -m unittest discover -s tests/orchestration -p '
 - [x] completion policy 已存在
 - [x] 编排层未耦合 SQLQuery 业务细节
 - [x] mock/fake capability flow 已能证明主代理编排闭环可运行
+
+## 2026-04-28 运行时重编排补充记录
+
+- Phase 4 原先已具备 `CompletionPolicy.REPLAN_AVAILABLE` 与预算字段，但执行服务只记录入口事件后失败返回。
+- 本次补齐运行时重编排执行闭环：新增 `RuntimeReplanner` seam、动态节点预算校验、pending 节点 orphan 语义以及图更新事件；SQLQuery 的多子查询拆分策略保留在 capability 包内，通过通用 decision 返回给编排层。
+- 编排层仍只面向 capability contract / public macro 工作；SQLQuery 多子查询拆分通过 `sql_query.query` public 宏能力表达，不把 SQL prompt、schema 或 guard 细节耦合进 orchestration。
+- 新增回归测试覆盖 required 失败修复、completed-but-unsatisfied 追加节点、预算拒绝、禁止原地修改既有节点 capability/dependencies、多作物 SQLQuery 运行时拆分、result satisfaction 契约以及 macro 预算继承。
+
+## 2026-04-28 主代理单 LLM 循环编排补充记录
+
+- 新增主代理共享 `SharedLLMRuntime`，默认自动模式下只创建一个主代理 LLM runtime 实例，由该实例派生 planner、runtime replan 与 final answer adapter；SQLQuery 内部 LLM 改为独立 runtime，保持非流式、`thinking=disabled`。
+- `deep_thinking` 与 `main_agent_reasoning_effort` 透传到编排阶段；planner 可通过 thinking 流输出 `main_agent.reasoning_delta(stage=orchestration_plan)`。
+- 新增 `MainAgentRuntimeReplanner`，将“观察结果 / 需要重排时修订 public DAG”的 LLM 决策放回主代理共享 runtime；编排服务继续负责图校验、预算与生命周期事件。

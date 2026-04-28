@@ -30,7 +30,7 @@ Phase 8.1 又补齐了 LLM Planner 的前置契约：
 - `src/integrations/llm_client.py` 提供 OpenAI-compatible `LLMClient`，支持 YAML 配置、非 streaming `generate_text()` 与非 thinking streaming `stream_text()`。
 - `src/capabilities/main_agent/executor.py` 已能消费 `StreamGenerator` 并产生 `main_agent.output_delta` / `main_agent.output_final` 前端事件。
 - `src/api/runtime.py` 已能注入 `main_agent_stream_generator` 与 SQLQuery `llm_text_generator`，测试默认用 fake generator 或显式关闭真实 provider。
-- SQLQuery 的 `sql_generate` / `result_filtering` 支持 `llm_text_generator` 注入；真实 API runtime 默认可从 `config.yaml` 创建 SQLQuery 文本生成器，fake / 测试路径可显式关闭，失败时分别回退确定性 SQL 生成与候选表格保守筛选。
+- SQLQuery 的 `sql_generate` / `result_filtering` 支持 `llm_text_generator` 注入；真实 API runtime 启动期会把 `config.yaml` bootstrap 到 `MAF_CONFIG_*` 环境变量，再从环境创建 SQLQuery 文本生成器，fake / 测试路径可显式关闭，失败时分别回退确定性 SQL 生成与候选表格保守筛选。
 - 本地 `config.yaml` 已被 `.gitignore` 忽略，真实 provider smoke 必须由开发者显式触发，不进入默认 unittest。
 
 ## 3. 目标
@@ -70,7 +70,7 @@ Phase 8.2 不做：
 `build_api_runtime()` 新增主代理真实 LLM 绑定参数：
 
 - `main_agent_llm_config`：测试或上层运行时显式注入配置；
-- `main_agent_llm_config_path`：显式指定本地配置文件路径；
+- `main_agent_llm_config_path`：显式指定启动期 bootstrap 的本地配置文件路径；
 - `main_agent_llm_client_factory`：测试 seam，可传入 fake client factory；
 - `main_agent_reasoning_effort`：主代理 streaming 输出默认 `minimal`，可显式覆盖。
 
@@ -144,6 +144,7 @@ conda run -n multi_agent python scripts/smoke_main_agent_llm.py --config config.
 - `MainAgentExecutor` / `MainAgentRespondCapability` 支持注入 stream metadata，并在 `main_agent.llm_call` / `main_agent.llm_fallback` 中记录 safe metadata；敏感 key 会被过滤，fallback diagnostic 只记录异常类型。
 - 新增 `scripts/smoke_main_agent_llm.py`，显式使用本地 `config.yaml` 跑通真实 provider smoke；脚本要求 task completed，并验证 `main_agent.output_delta`、`main_agent.output_final`、`main_agent.llm_call` 出现。
 - 已更新 `README.md`、`AGENTS.md`、`docs/LLM接入阶段建议.md` 与本目录索引。
+- 2026-04-28 补充配置读取约定：`config.yaml` 只在 `build_api_runtime()` / smoke 初始化时读取并写入 `MAF_CONFIG_*` 环境变量；`LLMClient()` 默认从环境读取，`*_config_path` 仅作为启动期 bootstrap seam，业务节点执行阶段不得重复读取 YAML；同一 runtime 的多个 `*_config_path` 必须指向同一文件，组件级差异配置应通过显式 `config` dict / factory 注入。
 
 验证结果：
 

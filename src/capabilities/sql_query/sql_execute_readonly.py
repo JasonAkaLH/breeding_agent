@@ -10,7 +10,7 @@ from .helpers import find_dependency_output, make_artifact
 class SQLQuerySQLExecuteReadonlyCapability(CapabilityContract):
     capability_id = "sql_query.sql_execute_readonly"
     version = "1"
-    description = "Execute readonly SQL behind a guard-pass contract and explicit async boundary."
+    description = "在 SQL Guard 通过后通过显式异步边界执行只读 SQL。"
 
     def __init__(self, *, adapter: MySQLReadonlyAdapter | None = None) -> None:
         self._adapter = adapter or MySQLReadonlyAdapter()

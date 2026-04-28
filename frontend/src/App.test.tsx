@@ -47,6 +47,20 @@ function makeEventSourceFactory(events: TaskEventEnvelope[]): EventSourceFactory
   };
 }
 
+function makeSequencedEventSourceFactory(eventBatches: TaskEventEnvelope[][]): EventSourceFactory {
+  let index = 0;
+  return (_url, handlers) => {
+    const events = eventBatches[Math.min(index, eventBatches.length - 1)] ?? [];
+    index += 1;
+    queueMicrotask(() => {
+      for (const item of events) {
+        handlers.onMessage(item);
+      }
+    });
+    return { close: vi.fn() };
+  };
+}
+
 describe('App', () => {
   it('submits normal chat and renders streaming answer', async () => {
     const api = makeApi();
@@ -223,6 +237,70 @@ describe('App', () => {
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { crop: '水稻' }));
     expect(screen.getByText('已收到补充信息，继续当前任务...')).toBeInTheDocument();
     expect(api.cancelTask).not.toHaveBeenCalled();
+  });
+
+  it('keeps the final assistant answer visible with capability results after interrupt resume', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:intent_route', capability_id: 'sql_query.intent_route', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'task-1:main_agent.respond', capability_id: 'main_agent.respond', status: 'pending', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const completedGraph = {
+      ...waitingGraph,
+      nodes: waitingGraph.nodes.map((node) => ({ ...node, status: 'completed' })),
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn()
+        .mockResolvedValueOnce(waitingGraph)
+        .mockResolvedValue(completedGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:intent_route',
+          question: '请选择查询范围。',
+          reason_code: 'route_not_resolved',
+          required_fields: { route_id: { options: ['approval_variety_db'] } },
+          status: 'open',
+        }],
+      })),
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [
+          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '最终主代理回答：没有找到符合条件的记录。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'filtered_query_result:1', producer_node_id: 'task-1:query_data:result_filtering', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [], row_count: 0, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
+        ],
+      })),
+    });
+    render(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [event('task.accepted')],
+        [
+          event('main_agent.output_delta', { delta: '流式主代理回答', ordinal: 1 }, 'delta-resumed-1'),
+          event('task.completed', {}, 'task-completed-resumed'),
+        ],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询适合宁夏种植的棉花' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '审定品种库' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { route_id: '审定品种库' }));
+    await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalled());
+    expect(await screen.findByText(/最终主代理回答/)).toBeInTheDocument();
+    expect(await screen.findByText('SQLQuery 查询结果')).toBeInTheDocument();
+    expect(screen.getByText('查询已完成，共返回 0 行结果。')).toBeInTheDocument();
   });
 
   it('keeps the task locked while waiting_for_input has no open interrupt yet', async () => {

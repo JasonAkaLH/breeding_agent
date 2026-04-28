@@ -29,6 +29,8 @@ class SQLQueryResultFilteringTest(unittest.TestCase):
         self.assertEqual(result.output_payload["row_count"], 1)
         self.assertEqual(result.output_payload["filter_source"], "deterministic")
         self.assertFalse(result.output_payload["fallback_used"])
+        self.assertEqual(result.output_payload["satisfaction"]["satisfied"], True)
+        self.assertEqual(result.output_payload["satisfaction"]["replan_recommended"], False)
         self.assertTrue(any("filtered_query_result" in artifact.artifact_id for artifact in result.artifacts))
 
     def test_without_llm_filters_numeric_suffix_variants_for_specific_variety(self) -> None:
@@ -37,7 +39,7 @@ class SQLQueryResultFilteringTest(unittest.TestCase):
             "sql_query.result_filtering",
             dependency_outputs={
                 "execute": {
-                    "sql": "SELECT variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳18%' LIMIT 50",
+                    "sql": "SELECT variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳18%'",
                     "columns": ["variety_name", "approval_num"],
                     "rows": [
                         {"variety_name": "龙粳18号", "approval_num": "黑审稻2007002"},
@@ -51,7 +53,7 @@ class SQLQueryResultFilteringTest(unittest.TestCase):
                     "user_question": "给我查一下龙粳18的信息",
                     "route_id": "variety_overview",
                     "schema_profile_id": "variety_overview_profile",
-                    "sql": "SELECT variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳18%' LIMIT 50",
+                    "sql": "SELECT variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳18%'",
                 },
             },
         )
@@ -90,6 +92,9 @@ class SQLQueryResultFilteringTest(unittest.TestCase):
         self.assertEqual(result.output_payload["row_count"], 0)
         self.assertEqual(result.output_payload["removed_row_count"], 0)
         self.assertEqual(result.output_payload["filter_source"], "deterministic")
+        self.assertEqual(result.output_payload["satisfaction"]["satisfied"], False)
+        self.assertEqual(result.output_payload["satisfaction"]["reason_code"], "empty_result")
+        self.assertEqual(result.output_payload["satisfaction"]["replan_recommended"], True)
 
 
 if __name__ == "__main__":

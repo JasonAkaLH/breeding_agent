@@ -23,3 +23,4 @@ class SQLQueryWorkflowProviderTest(unittest.TestCase):
         self.assertEqual(plan.nodes[5].depends_on, (plan.nodes[4].node_id, plan.nodes[2].node_id))
         self.assertEqual(plan.nodes[5].capability_id, "sql_query.result_filtering")
         self.assertEqual(plan.max_replans, 1)
+        self.assertEqual(plan.max_dynamic_nodes, 24)

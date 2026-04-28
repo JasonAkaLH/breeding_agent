@@ -3,8 +3,8 @@ import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Select
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
 import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { ArtifactResponse, CapabilityResponse, ChatMode, ReasoningEffort, TaskEventEnvelope, TaskGraphResponse, TaskSummaryResponse } from './api/types';
-import { parseAssistantTextArtifact, parseSqlQueryArtifacts, type SqlQueryDisplayModel } from './domain/artifacts';
+import type { CapabilityResponse, ChatMode, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse } from './api/types';
+import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { applyTaskEvent, createInitialTaskEventState, createSubmittingTaskState, isTaskActive, markTaskCompleted, markTaskFailed, markWaitingInputRequired, type TaskEventState } from './domain/taskEvents';
 import { SqlQueryResultCard } from './components/SqlQueryResultCard';
 import { MarkdownText } from './components/MarkdownText';
@@ -27,9 +27,12 @@ interface ConversationMessage {
   reasoningComplete?: boolean;
   reasoningContent?: string;
   activityText?: string;
-  result?: SqlQueryDisplayModel;
+  artifactDisplays?: CapabilityArtifactDisplay[];
+  finalContentLoaded?: boolean;
   interruptPrompt?: PendingInterrupt;
 }
+
+type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'artifactDisplays' | 'finalContentLoaded' | 'interruptPrompt'>>;
 
 interface PendingInterrupt {
   taskId: string;
@@ -85,6 +88,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [capabilities, setCapabilities] = useState<CapabilityResponse[]>([]);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const subscriptionRef = useRef<TaskEventSubscription | null>(null);
+  const taskPresentationModesRef = useRef<Map<string, ChatMode>>(new Map());
+  const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
 
   const refreshUnfinishedTasks = useCallback(async (showLoading = false) => {
     if (showLoading) setTaskListLoading(true);
@@ -170,7 +175,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           }));
           return false;
         }
-        const interruptionMode = inferModeFromGraph(graph);
+        const interruptionMode = taskPresentationModesRef.current.get(taskId) ?? mode;
         const pending: PendingInterrupt = {
           taskId,
           interruptId: openInterrupt.interrupt_id,
@@ -184,7 +189,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             content: '',
             interruptPrompt: pending,
             mode: interruptionMode,
-            result: undefined,
+            artifactDisplays: undefined,
+            finalContentLoaded: undefined,
           });
         }
         setTaskState((state) => markWaitingInputRequired(state));
@@ -218,7 +224,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mode,
       reasoningRequested: deepThinking,
     };
-    setMessages((current) => [...current, userMessage, assistantMessage]);
+    setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
     setCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState(createSubmittingTaskState());
@@ -232,8 +238,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         deepThinking,
         reasoningEffort,
       });
+      taskPresentationModesRef.current.set(accepted.task_id, mode);
       setCurrentTaskId(accepted.task_id);
-      subscribeToTask(accepted.task_id, assistantMessage.id, mode);
+      subscribeToTask(accepted.task_id, assistantMessage.id);
       void refreshUnfinishedTasks();
     } catch (error) {
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
@@ -250,7 +257,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mode: interrupt.mode,
       reasoningRequested: false,
     };
-    setMessages((current) => [...current, userMessage, assistantMessage]);
+    setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
     setCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState((state) => ({
@@ -264,9 +271,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
     try {
       await api.answerInterrupt(interrupt.taskId, interrupt.interruptId, buildInterruptAnswerPayload(interrupt, content));
+      taskPresentationModesRef.current.set(interrupt.taskId, interrupt.mode);
       setPendingInterrupt(null);
       setCurrentTaskId(interrupt.taskId);
-      subscribeToTask(interrupt.taskId, assistantMessage.id, interrupt.mode);
+      subscribeToTask(interrupt.taskId, assistantMessage.id);
       void refreshUnfinishedTasks();
     } catch (error) {
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
@@ -274,19 +282,19 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
   }
 
-  function subscribeToTask(taskId: string, assistantId: string, submittedMode: ChatMode) {
+  function subscribeToTask(taskId: string, assistantId: string) {
     subscriptionRef.current?.close();
     subscriptionRef.current = createEventSource(taskEventsUrl(taskId), {
-      onMessage: (event) => handleTaskEvent(event, taskId, assistantId, submittedMode),
-      onError: () => handleEventStreamError(taskId, assistantId, submittedMode),
+      onMessage: (event) => handleTaskEvent(event, taskId, assistantId),
+      onError: () => handleEventStreamError(taskId, assistantId),
     });
   }
 
-  function handleTaskEvent(event: TaskEventEnvelope, taskId: string, assistantId: string, submittedMode: ChatMode) {
+  function handleTaskEvent(event: TaskEventEnvelope, taskId: string, assistantId: string) {
     setTaskState((previous) => {
       const next = applyTaskEvent(previous, event);
       if (next.assistantText !== previous.assistantText) {
-        updateAssistantMessage(assistantId, { content: next.assistantText });
+        updateAssistantStreamingContent(assistantId, next.assistantText);
       }
       if (next.reasoningText !== previous.reasoningText) {
         updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
@@ -296,27 +304,29 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       if (['task.failed', 'node.failed', 'sql_query.sql_guard_blocked'].includes(event.event_type)) {
         subscriptionRef.current?.close();
+        taskPresentationModesRef.current.delete(taskId);
       }
       if (event.event_type === 'task.cancelled') {
         subscriptionRef.current?.close();
+        taskPresentationModesRef.current.delete(taskId);
         void refreshUnfinishedTasks();
       }
       return next;
     });
     if (event.event_type === 'task.completed') {
       updateAssistantMessage(assistantId, { reasoningComplete: true });
-      void loadArtifacts(taskId, assistantId, submittedMode);
+      void loadArtifacts(taskId, assistantId);
     } else if (event.event_type === 'task.failed') {
       void refreshUnfinishedTasks();
     }
   }
 
-  async function handleEventStreamError(taskId: string, assistantId: string, submittedMode: ChatMode) {
+  async function handleEventStreamError(taskId: string, assistantId: string) {
     setGlobalError('事件流暂时中断，正在尝试查询任务状态。');
     try {
       const task = await api.getTask(taskId);
       if (task.status === 'completed') {
-        await loadArtifacts(taskId, assistantId, submittedMode);
+        await loadArtifacts(taskId, assistantId);
       } else if (task.status === 'failed') {
         setTaskState((state) => markTaskFailed(state, '本次任务未完成，请调整问题后重试。'));
       } else if (task.status === 'cancelled') {
@@ -327,25 +337,23 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
   }
 
-  async function loadArtifacts(taskId: string, assistantId: string, submittedMode: ChatMode) {
+  async function loadArtifacts(taskId: string, assistantId: string) {
     try {
       const response = await api.getTaskArtifacts(taskId);
-      const sqlResult = parseSqlQueryArtifacts(response.artifacts);
-      const hasSqlResult = sqlResult.sourceArtifactIds.length > 0 || Boolean(sqlResult.table);
-      if (submittedMode === 'sql_query') {
-        updateAssistantMessage(assistantId, { content: sqlResult.summary, result: sqlResult });
-      } else {
-        const fallbackText = parseAssistantTextArtifact(response.artifacts);
-        if (fallbackText || hasSqlResult) {
-          updateAssistantMessage(assistantId, {
-            content: fallbackText ?? sqlResult.summary,
-            result: hasSqlResult ? sqlResult : undefined,
-          });
-        }
+      const artifactDisplays = parseCapabilityArtifactDisplays(response.artifacts);
+      const fallbackText = parseAssistantTextArtifact(response.artifacts);
+      const artifactSummary = summarizeCapabilityArtifactDisplays(artifactDisplays);
+      if (fallbackText || artifactDisplays.length > 0) {
+        updateAssistantMessage(assistantId, {
+          content: fallbackText ?? artifactSummary,
+          artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
+          finalContentLoaded: true,
+        });
       }
       updateAssistantMessage(assistantId, { activityText: undefined });
       setTaskState((state) => markTaskCompleted(state));
       setCurrentTaskId(null);
+      taskPresentationModesRef.current.delete(taskId);
       subscriptionRef.current?.close();
       void refreshUnfinishedTasks();
     } catch {
@@ -386,8 +394,48 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     await handleStopTask(currentTaskId);
   }
 
-  function updateAssistantMessage(messageId: string, patch: Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'result' | 'interruptPrompt'>>) {
-    setMessages((current) => current.map((message) => (message.id === messageId ? { ...message, ...patch } : message)));
+  function updateAssistantMessage(messageId: string, patch: AssistantMessagePatch) {
+    setMessages((current) => {
+      let found = false;
+      const next = current.map((message) => {
+        if (message.id !== messageId) return message;
+        found = true;
+        return { ...message, ...patch };
+      });
+      if (!found) {
+        pendingAssistantPatchesRef.current.set(messageId, {
+          ...(pendingAssistantPatchesRef.current.get(messageId) ?? {}),
+          ...patch,
+        });
+      }
+      return next;
+    });
+  }
+
+  function updateAssistantStreamingContent(messageId: string, content: string) {
+    setMessages((current) => {
+      let found = false;
+      const next = current.map((message) => {
+        if (message.id !== messageId) return message;
+        found = true;
+        if (message.finalContentLoaded) return message;
+        return { ...message, content };
+      });
+      if (!found) {
+        pendingAssistantPatchesRef.current.set(messageId, {
+          ...(pendingAssistantPatchesRef.current.get(messageId) ?? {}),
+          content,
+        });
+      }
+      return next;
+    });
+  }
+
+  function applyPendingAssistantPatch(message: ConversationMessage): ConversationMessage {
+    const patch = pendingAssistantPatchesRef.current.get(message.id);
+    if (!patch) return message;
+    pendingAssistantPatchesRef.current.delete(message.id);
+    return { ...message, ...patch };
   }
 
   const interactionLocked = active || Boolean(pendingInterrupt);
@@ -694,13 +742,9 @@ function interruptAnswerPlaceholder(interrupt: PendingInterrupt): string {
   return '请补充当前任务所需信息';
 }
 
-function inferModeFromGraph(graph: TaskGraphResponse): ChatMode {
-  return graph.nodes.some((node) => node.capability_id.startsWith('sql_query.')) ? 'sql_query' : 'chat';
-}
-
 function MessageBubble({ message }: { message: ConversationMessage }) {
   const className = message.role === 'user' ? 'message message-user' : 'message message-assistant';
-  const shouldShowContent = Boolean(message.content && (!message.result || message.mode !== 'sql_query'));
+  const shouldShowContent = Boolean(message.content);
   return (
     <div className={className}>
       <div className="message-meta">{message.role === 'user' ? '你' : message.mode === 'sql_query' ? 'SQLQuery' : '主代理'}</div>
@@ -710,10 +754,10 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
         ) : null}
         {message.interruptPrompt ? (
           <InterruptPromptCard interrupt={message.interruptPrompt} />
-        ) : shouldShowContent || message.result ? (
+        ) : shouldShowContent || message.artifactDisplays?.length ? (
           <>
             {shouldShowContent ? <MarkdownText content={message.content} /> : null}
-            {message.result ? <SqlQueryResultCard result={message.result} /> : null}
+            {message.artifactDisplays?.map((display) => <CapabilityArtifactPanel key={capabilityArtifactDisplayKey(display)} display={display} />)}
           </>
         ) : message.activityText ? (
           <ActivityNotice text={message.activityText} />
@@ -723,6 +767,20 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
       </div>
     </div>
   );
+}
+
+function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDisplay }) {
+  if (display.kind === 'sql_query') {
+    return <SqlQueryResultCard result={display.result} />;
+  }
+  return null;
+}
+
+function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): string {
+  if (display.kind === 'sql_query') {
+    return `${display.kind}:${display.result.sourceArtifactIds.join(',')}`;
+  }
+  return 'capability-artifact';
 }
 
 function ActivityNotice({ text }: { text: string }) {

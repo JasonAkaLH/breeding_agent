@@ -58,6 +58,12 @@ class WorkflowPlan:
     max_replans: int = 0
     max_dynamic_nodes: int = 0
 
+    def node_by_id(self, node_id: str) -> WorkflowNodePlan:
+        for node in self.nodes:
+            if node.node_id == node_id:
+                return node
+        raise KeyError(node_id)
+
 
 @dataclass(slots=True, frozen=True)
 class OrchestrationRequest:

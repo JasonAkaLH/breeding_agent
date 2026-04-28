@@ -14,7 +14,7 @@ class SQLQueryLLMFlowE2ETest(E2EAPITestCase):
                         "mode": "answer",
                         "route_id": "genotype_db",
                         "schema_profile_id": "genotype_profile",
-                        "sql": "SELECT variety_name FROM variety WHERE variety_name LIKE '%龙粳33%' LIMIT 20",
+                        "sql": "SELECT variety_name FROM variety WHERE variety_name LIKE '%龙粳33%'",
                         "tables_used": ["variety"],
                         "columns_used": ["variety.variety_name"],
                         "column_types_used": {"variety.variety_name": "varchar(100)"},

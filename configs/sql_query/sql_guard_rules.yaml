@@ -95,8 +95,6 @@ rule_sets:
     - (?i)\bwith\b[\s\S]*\b(update|insert|delete|replace)\b
     - (?i);\s*\S+
   shape_limits:
-    max_limit: 200
-    require_limit_for_non_aggregate_query: true
     max_joins: 6
     max_selected_columns: 50
     max_group_by_columns: 10

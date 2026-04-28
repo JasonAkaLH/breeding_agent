@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult
 from src.core.models import Interrupt
 from src.sql_query.models import SchemaContextRequest
+from src.sql_query.schema_ddl import render_mysql_schema_ddl
 from src.sql_query.schema_context_builder import SchemaContextBuilder
 
 from .helpers import find_dependency_output, load_yaml, make_artifact, repo_root
@@ -11,7 +12,7 @@ from .helpers import find_dependency_output, load_yaml, make_artifact, repo_root
 class SQLQuerySchemaContextPrepareCapability(CapabilityContract):
     capability_id = "sql_query.schema_context_prepare"
     version = "1"
-    description = "Build a trimmed schema context from routing metadata and schema configuration."
+    description = "根据路由元数据和 schema 配置构建 LLM 可见的路由级 schema 上下文。"
 
     def __init__(self, *, routing_rules_path: str | None = None, schema_metadata_path: str | None = None) -> None:
         routing_path = routing_rules_path or str(repo_root() / "configs/sql_query/routing_rules.yaml")
@@ -25,17 +26,16 @@ class SQLQuerySchemaContextPrepareCapability(CapabilityContract):
         route_id = str(upstream["route_id"])
         allowed_tables = list(upstream.get("allowed_tables", []))
         max_tables = max(4, len(allowed_tables)) if route_id == "variety_overview" else 4
-        max_columns_per_table = 16 if route_id == "approval_variety_db" else 8
         schema_request = SchemaContextRequest(
             route_id=route_id,
             schema_profile_id=str(upstream["schema_profile_id"]),
             user_question=str(upstream["user_question"]),
             hints={"crop": upstream.get("inferred_crop")} if upstream.get("inferred_crop") else None,
             max_tables=max_tables,
-            max_columns_per_table=max_columns_per_table,
         )
         result = await self._builder.build_context(schema_request)
         if result.ok:
+            selected_columns = {table: list(columns) for table, columns in result.selected_columns.items()}
             output = {
                 "route_id": result.route_id,
                 "schema_profile_id": result.schema_profile_id,
@@ -43,8 +43,13 @@ class SQLQuerySchemaContextPrepareCapability(CapabilityContract):
                 "sql_policy_profile": upstream.get("sql_policy_profile"),
                 "allowed_tables": list(upstream.get("allowed_tables", [])),
                 "selected_tables": list(result.selected_tables),
-                "selected_columns": {table: list(columns) for table, columns in result.selected_columns.items()},
+                "selected_columns": selected_columns,
                 "selected_column_details": self._selected_column_details(result.selected_columns),
+                "schema_ddl": render_mysql_schema_ddl(
+                    self._schema_metadata,
+                    result.selected_tables,
+                    selected_columns=selected_columns,
+                ),
                 "join_hints": [
                     {
                         "left_table": hint.left_table,

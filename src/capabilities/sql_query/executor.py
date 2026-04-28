@@ -20,6 +20,7 @@ class SQLQueryExecutor(ExecutorPort):
         sql_generator=None,
         llm_text_generator=None,
         mysql_adapter: MySQLReadonlyAdapter | None = None,
+        trim_max_tokens: int | None = None,
     ) -> None:
         self._capabilities: dict[str, CapabilityContract] = {
             "sql_query.intent_route": SQLQueryIntentRouteCapability(),
@@ -32,6 +33,7 @@ class SQLQueryExecutor(ExecutorPort):
             "sql_query.sql_execute_readonly": SQLQuerySQLExecuteReadonlyCapability(adapter=mysql_adapter),
             "sql_query.result_filtering": SQLQueryResultFilteringCapability(
                 llm_text_generator=llm_text_generator,
+                trim_max_tokens=trim_max_tokens,
             ),
         }
 

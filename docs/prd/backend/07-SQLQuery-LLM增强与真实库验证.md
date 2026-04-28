@@ -30,30 +30,35 @@ SQLQuery LLM 增强的目标是：
 
 ## 4. SQL 生成 LLM 契约
 
-`sql_query.sql_generate` 支持注入最小文本生成接口；真实 API runtime 默认会在未显式注入 fake generator 时，从 `config.yaml` 创建 `LLMClient.generate_text()` 作为 SQLQuery 内部文本生成器，并按照以下契约处理 LLM 输出：
+`sql_query.sql_generate` 支持注入最小文本生成接口；真实 API runtime 默认会在未显式注入 fake generator 时，启动期先把 `config.yaml` bootstrap 到 `MAF_CONFIG_*` 环境变量，再从环境创建 `LLMClient.generate_text()` 作为 SQLQuery 内部文本生成器，并按照以下契约处理 LLM 输出：
 
 ### 4.1 输入约束
 
-SQL 生成 prompt 只能使用来自 `schema_context_prepare` 的裁剪结果：
+SQL 生成 prompt 只能使用来自 `schema_context_prepare` 的 route-scoped schema：
 - `route_id`
 - `schema_profile_id`
 - `allowed_tables`
 - `selected_tables`
 - `selected_columns`
 - `selected_column_details`
+- `schema_ddl`（由 `schema_metadata.yaml` 按当前已裁剪表 / 字段渲染出的 MySQL DDL 风格结构片段）
 - `join_hints`
 - `user_question`
 - 只读 SQL Guard 约束
 
-其中 `selected_column_details` 必须包含裁剪字段的字段名、`sql_type` 与说明，作为 LLM 选择字段和回填字段类型的唯一依据。
+其中 `selected_column_details` 必须包含 route / table 范围内所有 LLM-visible 字段的字段名、`sql_type` 与说明；`schema_ddl` 是面向 SQL 生成 LLM 的主输入，按 legacy `sql_query_agent` 的方式拼成 `## 以下是数据库结构` / `CREATE TABLE ... COMMENT ...` 片段。系统仍保留 YAML 格式管理 schema，但 SQL 生成 prompt 不再把 JSON schema payload 作为主要上下文。
+
+`schema_context_prepare` 不再按自然语言问题用规则函数预先挑选业务字段；它只负责在已确定 route / crop / table 范围内暴露所有 `expose_to_llm: true` 的字段（以及必要 join 字段）。`sql_query.sql_generate` 的 LLM 必须自行从 `selected_column_details` 中选择 SELECT 投影字段、WHERE 过滤字段和排序字段；例如用户问“适合河南种植”时，应优先选择描述为“适种区域”的 `suitable_area` 并生成类似 `suitable_area LIKE '%河南%'` 的过滤条件。SQL Guard 仍负责最终只读、安全、表字段白名单校验。
 
 ### 4.2 输出模式
 
-LLM 必须返回 JSON object，`mode` 只能为：
+SQL 生成 prompt 采用 legacy `sql_query_agent` 风格：LLM 主路径只输出一条 SQL 查询语句，不输出 JSON、Markdown 或解释文本。`sql_generate` 会从原始输出或 ```sql fenced block 中提取 SQL，并基于上游 `selected_tables` / `selected_columns` 反推 `tables_used`、`columns_used` 与 `column_types_used`，再继续做字段白名单、LIKE 策略与下游 SQL Guard 校验。
+
+为兼容既有测试 seam 和旧 provider 输出，`sql_generate` 仍能接受历史 JSON object，`mode` 只能为：
 
 | mode | 含义 | 必填字段 |
 |---|---|---|
-| `answer` | 生成可进入 guard 的 SQL 草案 | `route_id`、`schema_profile_id`、`sql`、`tables_used`、`columns_used`、`column_types_used` |
+| `answer` | 生成可进入 guard 的 SQL 草案 | `route_id`、`schema_profile_id`、`sql`、`tables_used`、`columns_used` |
 | `clarify` | 当前信息不足，需要用户澄清 | `clarifying_question` |
 | `reject` | 超出当前 SQLQuery 支持范围 | `reject_reason`、`supported_scope_hint` |
 
@@ -61,18 +66,18 @@ LLM 必须返回 JSON object，`mode` 只能为：
 
 `mode=answer` 时必须校验：
 - `route_id` 与 `schema_profile_id` 与上游 context 一致；
-- `tables_used` 是允许表集合的子集；
-- `columns_used` 必须存在于裁剪后的 schema；
-- SQL 文本中引用的字段必须能映射到裁剪后的字段；
-- `column_types_used` 必须逐项匹配 schema 中的 `sql_type`；
+- `tables_used` 是当前注入 `schema_ddl` / `selected_tables` 表集合的子集；
+- `columns_used` 必须存在于 route-scoped LLM-visible schema；
+- SQL 文本中引用的字段必须能映射到 route-scoped LLM-visible 字段；
+- 如 LLM 输出 `column_types_used`，必须逐项匹配 schema 中的 `sql_type`；未输出时系统按 `columns_used` 从 schema 推导，避免因模型漏回填类型而丢弃已正确生成的 SQL；
 - 当按品种名称 / `variety_name` 过滤时，SQL 必须使用 `LIKE` 通配匹配，不得使用严格等值条件 `variety_name = ...`；
-- 后续仍必须通过 `sql_query.sql_guard`，LLM 自身不能绕过 guard。
+- 后续仍必须通过 `sql_query.sql_guard`，LLM 自身不能绕过 guard；Guard 表白名单优先使用 `selected_tables`（即当前 prompt 实际注入表），缺失时才回退 route `allowed_tables`。
 
 ### 4.4 Runtime 装配
 
 `build_api_runtime()` 为 SQLQuery 提供独立 LLM 装配参数：
 - `llm_text_generator`：最高优先级，测试或特殊运行时可直接注入文本生成函数；
-- `sql_query_llm_config` / `sql_query_llm_config_path` / `sql_query_llm_client_factory`：用于真实 provider 或 fake client factory；
+- `sql_query_llm_config` / `sql_query_llm_config_path` / `sql_query_llm_client_factory`：用于真实 provider 或 fake client factory；其中 `config_path` 只在 runtime 启动阶段 bootstrap 到 `MAF_CONFIG_*` 环境变量，运行期消费者从环境读取；同一 runtime 的多个 `*_config_path` 必须指向同一启动配置文件，组件级差异 provider 配置应通过显式 config dict / factory 注入；
 - `sql_query_reasoning_effort`：传给结构化 SQLQuery 文本生成调用；
 - `enable_sql_query_llm`：可在 fake backend / 默认自动化测试中显式关闭真实 provider 访问。
 
@@ -98,10 +103,12 @@ LLM 必须返回 JSON object，`mode` 只能为：
 - 用户问题与 route / schema profile 上下文；
 - 已执行 SQL 的上下文；
 - 结果列名；
-- 有限 `candidate_rows`，每行带 0-based `row_index`；
+- token 预算裁剪后的全部 `candidate_rows`，每行带 0-based `row_index`；
 - `source_row_count`、`candidate_row_count`、`truncated`。
 
-默认只发送候选行预览，不能把完整结果集默认交给 LLM。`sql_execute_readonly` 同时保留原始 `query_result_preview` artifact，供排障和降级；前端展示应优先使用 `result_filtering` 生成的 `filtered_query_result` artifact。
+默认不再叠加固定候选行数上限；进入 `result_filtering` LLM 的候选行数量由 `trim_max_tokens` 裁剪结果决定。`sql_execute_readonly` 同时保留原始 `query_result_preview` artifact，供排障和降级；前端展示应优先使用 `result_filtering` 生成的 `filtered_query_result` artifact。
+
+在把候选行放入 `result_filtering` LLM prompt 前，系统会按启动期由 `config.yaml` bootstrap 到 `MAF_CONFIG_*` 环境变量的 `trim_max_tokens` / 注入 config 中的 `trim_max_tokens` 对已执行结果做 token 预算裁剪：从 MySQL 返回行列表尾部视为最新数据开始，按“新到旧”逐行计算 JSON 行数据 token 并累计到 `full_token_num`；累计值不超过 `trim_max_tokens` 时 append 到与原始结构一致的候选行列表，首次超过时停止并丢弃更旧数据。prompt builder 会把裁剪后的全部 rows 转为 `candidate_rows`，不再按 `200` 行等固定数量二次截断。该裁剪只限制送入 LLM 的候选数据 payload；原始查询结果仍由 `sql_execute_readonly` 的 preview artifact 保留。
 
 ### 5.2 输出约束
 
@@ -112,8 +119,10 @@ LLM 必须返回 JSON object，`mode` 只能为：
 节点稳定输出筛选后的表格：
 - `columns`、`rows`、`row_count`、`preview_row_count`、`truncated`；
 - `source_row_count`、`candidate_row_count`、`removed_row_count`、`kept_row_indexes`；
+- `token_trim_applied`、`token_trim_max_tokens`、`token_trim_full_token_num`、`token_trimmed_token_num`、`token_trimmed_row_count`、`token_trim_removed_row_count`；
 - `filter_source`、`filter_reason`、`fallback_used` / `fallback_reason`；
-- `route_id` / `schema_profile_id`。
+- `route_id` / `schema_profile_id`；
+- `satisfaction`：机器可读的结果满足度，包含 `satisfied`、`reason_code`、`message` 与 `replan_recommended`，供 SQLQuery runtime replanner 判断是否需要把多子需求拆成多个 public `sql_query.query` 宏节点。
 
 不得编造候选集中不存在的行；如果候选行明显不是用户要查的品种/实体，应从结果表中移除；如果只是简称、别名、缺字或多字但仍可能对应用户需求，可以保守保留。
 

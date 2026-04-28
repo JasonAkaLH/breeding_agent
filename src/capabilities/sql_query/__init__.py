@@ -2,6 +2,7 @@ from .executor import SQLQueryExecutor, build_local_sql_query_instance
 from .intent_route import SQLQueryIntentRouteCapability
 from .plan_provider import SQLQueryWorkflowProvider
 from .result_filtering import SQLQueryResultFilteringCapability
+from .runtime_replanner import SQLQueryRuntimeReplanner
 from .schema_context_prepare import SQLQuerySchemaContextPrepareCapability
 from .sql_execute_readonly import SQLQuerySQLExecuteReadonlyCapability
 from .sql_generate import SQLQuerySQLGenerateCapability
@@ -19,6 +20,7 @@ __all__ = [
     "SQLQueryExecutor",
     "SQLQueryIntentRouteCapability",
     "SQLQueryResultFilteringCapability",
+    "SQLQueryRuntimeReplanner",
     "SQLQuerySQLExecuteReadonlyCapability",
     "SQLQuerySQLGenerateCapability",
     "SQLQuerySQLGuardCapability",

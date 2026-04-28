@@ -82,7 +82,8 @@ Planner 输出要求：
 - 依赖必须引用同一 plan 内已存在节点；
 - 节点 ID 不得重复。
 
-Runtime 已接入 planner prompt / output parser / fake LLM seam / 可选真实 LLM client。测试默认可关闭真实 planner，生产默认会尝试 planner 并在失败时安全回退。
+Runtime 已接入 planner prompt / output parser / fake LLM seam / 可选真实 LLM client。测试默认可关闭真实 planner，生产默认会尝试 planner 并在失败时安全回退。2026-04-28 起，默认生产路径中 planner、runtime replan advisor 与 main_agent finalizer 共享一个主代理 `SharedLLMRuntime`；SQLQuery 内部 text generator 使用独立 SQLQuery LLM runtime，非流式且 `thinking=disabled`，不复用主代理 LLM 实例。显式组件级 fake / override seam 仅作为测试和定制入口保留。
+LLM-facing Prompt 使用中文表达；JSON key、capability_id、node_id、SQL 字段名等机器契约保持英文 / 原始标识，避免破坏解析和执行边界。
 
 信任边界：
 - Planner 的 `input_payload` 只作为结构输入通过 parser；执行前必须经过 per-capability payload allowlist。

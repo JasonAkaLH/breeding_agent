@@ -11,7 +11,7 @@
 - `src/orchestration/`：capability registry、scheduler、workflow plan、LLM planner、router、validator、expander 与编排服务。
 - `src/capabilities/main_agent/`：`main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。
 - `src/capabilities/sql_query/`：SQLQuery public macro 与内部六节点只读查询 workflow；尾节点通过 LLM / 降级路径筛选 LIKE 召回的候选表格，同时保留原始表格 preview。
-- `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层等外部适配。
+- `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、LLM 上下文 token 计数等外部适配 / 运行时辅助能力。
 - `src/sql_query/`：SQLQuery schema context builder 与领域模型；作为 capability 层复用资产保留。
 - `configs/sql_query/`：SQLQuery routing rules、schema metadata、SQL Guard rules。
 - `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、SQLQuery 结果卡片与 Vitest 测试。
@@ -54,11 +54,14 @@ npm test -- --run
 npm run build
 ```
 
-全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime，会使用本地 `config.yaml` 装配主代理、LLM Planner 与 SQLQuery 内部 LLM；需要 UI-only 验证时可加 `--fake-backend`）：
+全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime，会在启动期使用本地 `config.yaml` bootstrap 出环境变量来装配主代理、LLM Planner 与 SQLQuery 内部 LLM；需要 UI-only 验证时可加 `--fake-backend`）：
 
 ```bash
 python scripts/run_fullstack_dev.py
 ```
+
+运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、SQLQuery 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 可用显式 `config` dict 注入覆盖，不要在业务节点执行阶段重复读取 `config.yaml`。
+同一个 runtime 中的 `*_config_path` 必须指向同一个启动配置文件；如确需为不同组件使用不同 provider，请使用显式 `config` dict 或 client factory 注入，避免多个 YAML 文件竞争同一环境变量命名空间。
 
 如果某次变更引入了新工具，请在同一个 PR 中同步更新 `README.md` 与本文件。未来可能出现的命令示例：
 

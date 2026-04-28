@@ -6,7 +6,11 @@ from typing import Any, Mapping
 from .llm_utils import json_ready
 
 
-DEFAULT_FILTER_CANDIDATE_ROWS = 200
+_CROP_TABLE_MAPPING_TEXT = """'玉米' -> corn_varieties;
+     '水稻' -> rice_varieties;
+     '棉花' -> cotton_varieties;
+     '大豆' -> soybean_varieties;
+     '小麦' -> wheat_varieties;"""
 
 
 def build_sql_generation_prompt_payload(
@@ -15,6 +19,7 @@ def build_sql_generation_prompt_payload(
     task_meta: Mapping[str, Any] | None = None,
     guard_constraints: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    database_schema = _database_schema(context)
     return {
         "task_meta": {
             "node_name": "sql_query.sql_generate",
@@ -35,19 +40,20 @@ def build_sql_generation_prompt_payload(
             "selected_column_details": json_ready(dict(context.get("selected_column_details", {}))),
             "join_hints": json_ready(list(context.get("join_hints", []))),
             "context_summary": context.get("context_summary"),
+            "database_schema": database_schema,
         },
         "guard_constraints": {
             "readonly_only": True,
             "single_statement_only": True,
-            "require_limit_for_non_aggregate_query": True,
-            "max_limit": 200,
+            "limit_policy": "不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT。",
+            "table_scope_policy": "只能引用 SQL 生成提示词中 database_schema 已注入的表。",
             "allowed_statement_types": ["SELECT", "WITH_SELECT"],
             **dict(guard_constraints or {}),
         },
         "first_principles_need_inference": {
             "principle": "不要假定用户知道该选择哪个库、哪张表或哪种技术路径；先从用户自然语言里的实体、业务目标和可用 schema 出发，推断最有帮助且安全的最小查询。",
             "default_behavior": "如果问题宽泛但仍在 SQLQuery 支持范围内，优先返回可验证的概览查询，而不是立刻要求用户补充库名/路径。",
-            "clarify_only_when": "只有在缺少实体或安全生成只读 SQL 不可能时，才使用 mode=clarify，并且只问一个最关键问题。",
+            "clarify_only_when": "只有在缺少实体或安全生成只读 SQL 不可能时，才应由上游路由 / schema 节点澄清，并且只问一个最关键问题。",
             "broad_variety_lookup": "当 route_id=variety_overview 时，应把它理解为品种综合概览：在 allowed_tables 内同时覆盖审定品种信息与基因型基础/籼粳成分信息；必要时可用 UNION ALL 保持单条只读语句。",
         },
         "variety_name_matching_policy": {
@@ -82,11 +88,9 @@ def build_sql_generation_prompt_payload(
         },
         "user_question": context.get("user_question"),
         "output_contract": {
-            "format": "JSON object only",
-            "mode": "answer | clarify | reject",
-            "answer_required_fields": ["mode", "route_id", "schema_profile_id", "sql", "tables_used", "columns_used", "column_types_used"],
-            "clarify_required_fields": ["mode", "clarifying_question"],
-            "reject_required_fields": ["mode", "reject_reason", "supported_scope_hint"],
+            "format": "仅 SQL",
+            "llm_output": "只输出 SQL 查询语句，不输出 JSON、Markdown 或解释。",
+            "sql_shape": "单条只读 SELECT 或 WITH...SELECT；不要自动添加 LIMIT。",
         },
     }
 
@@ -98,33 +102,196 @@ def build_sql_generation_prompt(
     guard_constraints: Mapping[str, Any] | None = None,
 ) -> str:
     payload = build_sql_generation_prompt_payload(context, task_meta=task_meta, guard_constraints=guard_constraints)
-    return (
-        "你是 SQLQuery 的 SQL 草案生成器。只能根据输入中裁剪后的 schema_context 生成只读 MySQL SQL。\n"
-        "你必须用第一性原理理解用户需求：不要假定用户知道该选择哪个库、哪张表或哪条技术路径；"
-        "先识别自然语言里的实体、用户真正想解决的业务问题、以及当前 schema 能安全回答的最小有用结果。\n"
-        "如果用户问题宽泛但仍可安全查询，优先生成概览型 SQL；不要因为用户没有说清库名/路径就直接 clarify。"
-        "当按品种名称或 variety_name 过滤时，必须使用 LIKE 通配匹配（建议 LIKE '%关键词%'），不得使用严格等值条件 variety_name = '关键词'。"
-        "当用户说“X系列”“名字里带X”或“名称中包含X”时，X 就是品种名 LIKE 关键词，应该生成 variety_name LIKE '%X%'。"
-        "当 route_id=approval_variety_db 且用户查单个品种或要求详细/全部信息时，默认生成业务详情查询，"
-        "优先包含审定编号、年份、作物、品种名、申请者、育种者、品种来源、特征特性、产量表现、栽培技术要点、适种区域、审定意见等字段；"
-        "当用户查列表时，优先返回年份、审定编号、品种名、申请者、育种者、适种区域等列表字段。"
-        "只有在缺少实体或安全生成只读 SQL 不可能时，才返回 mode=clarify。\n"
-        "字段名和字段类型必须严格来自 schema_context.selected_column_details；"
-        "column_types_used 必须逐项回填 schema 中的 sql_type。"
-        "安全要求：readonly_only=true；只允许单条 SELECT 或 WITH...SELECT；非聚合查询必须包含 LIMIT；"
-        "只能使用 allowed_tables / selected_tables 中的表；多表 JOIN 只能使用 join_hints。\n"
-        "如果信息不足，返回 mode=clarify 且只问一个最关键问题；如果超出支持范围，返回 mode=reject。\n"
-        "输出必须是 JSON，不要输出 Markdown，不要解释。mode 只能是 answer | clarify | reject。\n"
-        "输入如下：\n"
-        f"{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str)}"
-    )
+    route_id = str(context.get("route_id") or "")
+    if route_id == "genotype_db":
+        return _build_gene_sql_generation_prompt(payload)
+    if route_id == "approval_variety_db":
+        return _build_varieties_sql_generation_prompt(payload)
+    return _build_general_sql_generation_prompt(payload)
+
+
+def _build_varieties_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
+    query = str(payload.get("user_question") or "")
+    schema_context = dict(payload.get("schema_context", {}))
+    route_context = dict(payload.get("route_context", {}))
+    database_schema = str(schema_context.get("database_schema") or "")
+    return f"""
+    生成一个SQL查询来回答这个问题：{query}
+    当前节点：sql_query.sql_generate
+    当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
+    
+    ======================================================================================================================================================================
+    ## 以下是数据库结构
+    ```sql
+    {database_schema}
+    ```
+
+    ======================================================================================================================================================================
+    请注意，以下SQL查询语句中，表名和字段名都是小写的，请注意大小写。
+
+    ## 限制
+    - 你只能使用当前注入到 `database_schema` 中的表结构生成 SQL；不要引用未出现在 `database_schema` 里的表。
+    - 如果当前注入的是单个作物表，则只在该作物表范围内查询；如果当前注入了多个作物表，才允许做多表或跨作物查询。
+    - 作物与品种表的对应关系如下：
+     {_CROP_TABLE_MAPPING_TEXT}
+    - **注意！！如果用户的问题里没有明确作物，且当前注入了多个品种表，你可以在这些已注入的品种表范围内查询。**
+    - **注意！！在多表查询或者跨表查询时，应当注意每个表的字段总数以及字段名是不一样的，注意生成SQL语句时的逻辑。**
+    - **注意！！你需要输出字段的注释作为列名，而不是字段名！！！**
+    - 只能生成单条只读 SELECT 或 WITH...SELECT SQL，禁止生成写操作、DDL、多语句或跨库访问。
+    - 不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT。
+    ## 查询技巧
+    - SELECT 投影字段、WHERE 过滤字段和排序字段由你根据 `database_schema` 中的字段注释自行选择；不要依赖系统预先挑字段。
+    - 如果用户提到地区、省份、适合/适宜种植、适种区域，应优先使用注释为“适种区域”的字段做 LIKE 过滤，并把相关字段放入 SELECT。
+    - 在查询品种表的`applicant`和`breeder`字段时，尽量使用包含关系，即字段中是否包含所查询的值。而不是等于关系。
+    - 查询品种名称的时候，必须使用 LIKE 包含关系召回候选；同时要注意分辨名称很相近的品种，例如：“登海618”与“登海6188”，“东单1331”与“东单1331D”和“东单1331K”，等等；这些都是不同的品种，应注意区分！！！
+    - 当用户在询问某特定品种但没有给出属于什么作物时，只能在当前注入的品种表范围内生成 SQL；如果 `database_schema` 已经收敛到单个作物表，不要再跨到其他作物表。
+    - 如果用户查询中有多个品种分属不同作物，那你只要输出这些表中共同拥有的列；每个表特有的列不要查询。
+
+    **注意！！你只需要输出SQL语句，不要输出其他任何内容！！！**
+    以下SQL查询最能回答问题 {query}：
+    ```sql
+    """.strip()
+
+
+def _build_gene_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
+    query = str(payload.get("user_question") or "")
+    schema_context = dict(payload.get("schema_context", {}))
+    route_context = dict(payload.get("route_context", {}))
+    database_schema = str(schema_context.get("database_schema") or "")
+    join_hints = _format_join_hints(schema_context.get("join_hints"))
+    return f"""
+    生成一个SQL查询来回答这个问题：{query}
+    当前节点：sql_query.sql_generate
+    当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
+    
+    ======================================================================================================================================================================
+    ## 以下是数据库结构
+
+    {database_schema}
+
+    ======================================================================================================================================================================
+    ## 连接关系
+
+    {join_hints}
+
+    ## 查询技巧
+    - 多表查询时，你需要根据表的连接关系，生成SQL查询语句。
+    - SELECT 投影字段、WHERE 过滤字段和排序字段由你根据数据库结构中的字段注释自行选择。
+    
+    ## 限制
+    请注意，以下SQL查询语句中，表名和字段名都是小写的，请注意大小写。
+    请注意，查询rice_comp时，同样的variety_name可能有多条记录，当你输出时，需要带有variety_name和的variety_id值。
+    只能生成单条只读 SELECT 或 WITH...SELECT SQL，禁止生成写操作、DDL、多语句或跨库访问。
+    不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT。
+
+    ## 品种的搜索：
+    - 在搜索'variety'表的'variety_name'字段时，尽量使用包含关系（建议 LIKE '%关键词%'），即字段中是否包含所查询的值。而不是等于关系。
+    - 在搜索'variety_genotype'表的'variety_id'字段时，尽量使用等于关系，即字段中是否等于所查询的值。而不是包含关系。
+    - 在搜索'qtn'表的'qtn_id'字段时，尽量使用等于关系，即字段中是否等于所查询的值。而不是包含关系。
+
+    **注意！！你只需要输出SQL语句，不要输出其他任何内容！！！**
+    以下SQL查询最能回答问题 {query}：
+    ```sql
+    """.strip()
+
+
+def _build_general_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
+    query = str(payload.get("user_question") or "")
+    schema_context = dict(payload.get("schema_context", {}))
+    route_context = dict(payload.get("route_context", {}))
+    database_schema = str(schema_context.get("database_schema") or "")
+    join_hints = _format_join_hints(schema_context.get("join_hints"))
+    return f"""
+    生成一个SQL查询来回答这个问题：{query}
+    当前节点：sql_query.sql_generate
+    当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
+    
+    ======================================================================================================================================================================
+    ## 以下是数据库结构
+    ```sql
+    {database_schema}
+    ```
+
+    ======================================================================================================================================================================
+    ## 连接关系
+    {join_hints}
+
+    ## 限制
+    - 你只能使用当前注入到 `database_schema` 中的表结构生成 SQL；不要引用未出现在 `database_schema` 里的表。
+    - 只能生成单条只读 SELECT 或 WITH...SELECT SQL，禁止生成写操作、DDL、多语句或跨库访问。
+    - 不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT。
+    - SELECT 投影字段、WHERE 过滤字段和排序字段由你根据字段注释自行选择。
+    - 当按品种名称或 variety_name 过滤时，必须使用 LIKE 包含关系，不要使用严格等值。
+
+    **注意！！你只需要输出SQL语句，不要输出其他任何内容！！！**
+    以下SQL查询最能回答问题 {query}：
+    ```sql
+    """.strip()
+
+
+def _database_schema(context: Mapping[str, Any]) -> str:
+    explicit = context.get("schema_ddl") or context.get("ddl_schema_context") or context.get("database_schema")
+    if explicit:
+        return str(explicit).strip()
+    return _render_schema_from_column_details(context)
+
+
+def _render_schema_from_column_details(context: Mapping[str, Any]) -> str:
+    details = dict(context.get("selected_column_details", {}))
+    selected_columns = dict(context.get("selected_columns", {}))
+    selected_tables = [str(table) for table in list(context.get("selected_tables", []))]
+    blocks: list[str] = []
+    for table in selected_tables:
+        raw_columns = details.get(table) or [
+            {"name": column, "sql_type": "text", "description": ""}
+            for column in list(selected_columns.get(table, []))
+        ]
+        definitions: list[str] = []
+        for column in raw_columns:
+            if not isinstance(column, Mapping):
+                continue
+            name = str(column.get("name") or "")
+            if not name:
+                continue
+            sql_type = str(column.get("sql_type") or "text")
+            description = str(column.get("description") or "")
+            comment = f" COMMENT '{description}'" if description else ""
+            definitions.append(f"  `{name}` {sql_type} DEFAULT NULL{comment}")
+        if not definitions:
+            continue
+        blocks.append(
+            "\n".join(
+                [
+                    "-- ----------------------------",
+                    f"-- 表结构：{table}",
+                    "-- ----------------------------",
+                    f"CREATE TABLE `{table}`  (",
+                    ",\n".join(definitions),
+                    ");",
+                ]
+            )
+        )
+    return "\n\n".join(blocks).strip()
+
+
+def _format_join_hints(join_hints: Any) -> str:
+    lines: list[str] = []
+    for hint in list(join_hints or []):
+        if not isinstance(hint, Mapping):
+            continue
+        left_table = str(hint.get("left_table") or "")
+        left_column = str(hint.get("left_column") or "")
+        right_table = str(hint.get("right_table") or "")
+        right_column = str(hint.get("right_column") or "")
+        if left_table and left_column and right_table and right_column:
+            lines.append(f"-- {left_table}.{left_column} 可与 {right_table}.{right_column} 连接")
+    return "\n    ".join(lines) if lines else "-- 当前注入的表没有必须使用的跨表连接关系"
 
 
 def build_result_filtering_prompt_payload(
     execute_context: Mapping[str, Any],
     *,
     question_context: Mapping[str, Any] | None = None,
-    max_candidate_rows: int = DEFAULT_FILTER_CANDIDATE_ROWS,
 ) -> dict[str, Any]:
     rows = list(execute_context.get("rows", []))
     candidate_rows = [
@@ -132,7 +299,7 @@ def build_result_filtering_prompt_payload(
             "row_index": index,
             "values": json_ready(row),
         }
-        for index, row in enumerate(rows[:max_candidate_rows])
+        for index, row in enumerate(rows)
     ]
     row_count = int(execute_context.get("row_count", len(rows)))
     candidate_row_count = len(candidate_rows)
@@ -167,10 +334,10 @@ def build_result_filtering_prompt_payload(
             "empty_result_allowed": True,
         },
         "output_contract": {
-            "format": "JSON object only",
+            "format": "仅 JSON 对象",
             "required_fields": ["keep_row_indexes"],
             "optional_fields": ["filter_reason"],
-            "keep_row_indexes": "0-based row_index values from result_context.candidate_rows; do not return row objects.",
+            "keep_row_indexes": "来自 result_context.candidate_rows 的 0 起始 row_index 数组；不要返回完整行对象。",
         },
     }
 
@@ -179,12 +346,10 @@ def build_result_filtering_prompt(
     execute_context: Mapping[str, Any],
     *,
     question_context: Mapping[str, Any] | None = None,
-    max_candidate_rows: int = DEFAULT_FILTER_CANDIDATE_ROWS,
 ) -> str:
     payload = build_result_filtering_prompt_payload(
         execute_context,
         question_context=question_context,
-        max_candidate_rows=max_candidate_rows,
     )
     return (
         "你是 SQLQuery 的结果筛选器，不是摘要器。你只能筛选已经执行完成的 SQL 查询结果，最后由系统返回筛选后的表格。\n"

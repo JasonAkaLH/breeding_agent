@@ -207,8 +207,8 @@ Builder 输出建议至少包含：
 ### 10.6.6 三级裁剪：按字段暴露规则裁剪
 - 仅选择 `expose_to_llm: true` 的字段进入上下文
 - 主键、自增 ID 等对生成 SQL 无帮助的字段可不进入默认上下文
-- 大文本字段仅在用户问题与其直接相关时才加入上下文
-- 同一张表进入上下文的字段数应受 `max_columns_per_table` 限制
+- Phase 5.5+ 已将 SQL 投影字段、过滤字段和排序字段选择交给 `sql_generate` 的 LLM；`schema_context_prepare` 不再按用户问题预先裁剪业务字段，而是在 route / table 范围内暴露 LLM-visible 字段集合
+- 大文本字段是否暴露由 `schema_metadata.yaml` 的 `expose_to_llm` 控制；如后续需要重新引入字段数量预算，应保证不再退回“函数替 LLM 预选业务字段”的模式
 
 ### 10.6.7 Join Hint 规则
 - 仅在多表查询确有必要时注入 join hints
@@ -230,7 +230,7 @@ Builder 输出中应同时注入业务约束，而不只给表字段：
 Builder 在发给 LLM 的上下文中需要明确附带：
 - 仅允许只读 SQL
 - 仅允许单语句
-- 非聚合查询默认需要 LIMIT
+- 不自动添加 LIMIT；允许全量只读查询，只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT
 - 不允许访问路由白名单外的表
 - 不允许访问系统 schema
 

@@ -1354,7 +1354,6 @@ join_hints:
   description: 通过品种ID将审定品种水稻与基因型品种信息关联
 llm_context_rules:
   max_tables_per_request: 8
-  max_columns_per_table: 30
   prefer_route_scoped_schema: true
   include_join_hints: true
   include_column_description: true

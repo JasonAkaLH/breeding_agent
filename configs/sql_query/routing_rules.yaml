@@ -169,7 +169,5 @@ sql_policy_profiles:
   - INTO OUTFILE
   - LOAD DATA
   - MULTI_STATEMENT
-  max_limit: 200
-  require_limit_for_non_aggregate_query: true
   guard_rule_set_id: strict_readonly_mysql_guard_v1
   deny_on_missing_guard_rule_set: true

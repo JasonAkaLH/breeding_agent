@@ -5,6 +5,7 @@ import json
 import unittest
 
 from src.capabilities.sql_query.result_filtering import SQLQueryResultFilteringCapability
+from src.integrations.token_counter import get_num_of_tokens_from_messages
 
 from tests.capabilities.sql_query.support import make_request
 
@@ -13,7 +14,7 @@ GENERATE_OUTPUT = {
     "route_id": "variety_overview",
     "schema_profile_id": "variety_overview_profile",
     "user_question": "查一下龙粳33",
-    "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳33%' LIMIT 50",
+    "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳33%'",
     "generation_source": "llm",
 }
 
@@ -28,7 +29,7 @@ def request_for_filtering(*, rows: list[dict] | None = None, row_count: int | No
         "sql_query.result_filtering",
         dependency_outputs={
             "execute": {
-                "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳33%' LIMIT 50",
+                "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳33%'",
                 "columns": ["source_db", "variety_name"],
                 "rows": rows,
                 "row_count": len(rows) if row_count is None else row_count,
@@ -77,7 +78,7 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
                     "sql_query.result_filtering",
                     dependency_outputs={
                         "execute": {
-                            "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳18%' LIMIT 50",
+                            "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳18%'",
                             "columns": ["source_db", "variety_name"],
                             "rows": [
                                 {"source_db": "approval", "variety_name": "龙粳18号"},
@@ -90,7 +91,7 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
                             "route_id": "variety_overview",
                             "schema_profile_id": "variety_overview_profile",
                             "user_question": "查一下龙粳18",
-                            "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳18%' LIMIT 50",
+                            "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳18%'",
                         },
                     },
                 )
@@ -107,22 +108,67 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
         self.assertEqual(result.output_payload["kept_row_indexes"], [0, 2])
         self.assertTrue(result.output_payload["domain_filter_applied"])
 
-    def test_prompt_truncates_candidate_rows_when_configured(self) -> None:
+    def test_prompt_sends_all_trimmed_rows_without_hard_candidate_cap(self) -> None:
         captured_prompts: list[str] = []
 
         async def llm_text_generator(prompt: str) -> str:
             captured_prompts.append(prompt)
-            return json.dumps({"keep_row_indexes": [0]})
+            return json.dumps({"keep_row_indexes": [0, 200, 204]})
 
-        rows = [{"variety_name": f"row-{index}"} for index in range(1, 6)]
-        capability = SQLQueryResultFilteringCapability(llm_text_generator=llm_text_generator, max_candidate_rows=3)
+        rows = [{"variety_name": f"row-{index}"} for index in range(1, 206)]
+        capability = SQLQueryResultFilteringCapability(llm_text_generator=llm_text_generator)
 
-        result = asyncio.run(capability.execute(request_for_filtering(rows=rows, row_count=5)))
+        result = asyncio.run(capability.execute(request_for_filtering(rows=rows, row_count=205)))
 
-        self.assertEqual(result.output_payload["candidate_row_count"], 3)
+        self.assertEqual(result.output_payload["candidate_row_count"], 205)
+        self.assertFalse(result.output_payload["truncated"])
+        self.assertIn("row-205", captured_prompts[0])
+        self.assertEqual(
+            result.output_payload["rows"],
+            [
+                {"variety_name": "row-1"},
+                {"variety_name": "row-201"},
+                {"variety_name": "row-205"},
+            ],
+        )
+
+    def test_token_trim_keeps_latest_rows_before_llm_prompt(self) -> None:
+        captured_prompts: list[str] = []
+
+        async def llm_text_generator(prompt: str) -> str:
+            captured_prompts.append(prompt)
+            return json.dumps({"keep_row_indexes": [0, 1]})
+
+        rows = [
+            {"variety_name": "old-row", "detail": "older data " * 20},
+            {"variety_name": "middle-row", "detail": "middle data"},
+            {"variety_name": "new-row", "detail": "new data"},
+        ]
+        latest_two_token_budget = sum(
+            get_num_of_tokens_from_messages([json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)])
+            for row in rows[-2:]
+        )
+        capability = SQLQueryResultFilteringCapability(
+            llm_text_generator=llm_text_generator,
+            trim_max_tokens=latest_two_token_budget,
+        )
+
+        result = asyncio.run(capability.execute(request_for_filtering(rows=rows, row_count=3)))
+
+        self.assertIn("new-row", captured_prompts[0])
+        self.assertIn("middle-row", captured_prompts[0])
+        self.assertNotIn("old-row", captured_prompts[0])
+        self.assertEqual(
+            result.output_payload["rows"],
+            [
+                {"variety_name": "new-row", "detail": "new data"},
+                {"variety_name": "middle-row", "detail": "middle data"},
+            ],
+        )
+        self.assertTrue(result.output_payload["token_trim_applied"])
+        self.assertEqual(result.output_payload["token_trim_removed_row_count"], 1)
+        self.assertEqual(result.output_payload["candidate_row_count"], 2)
         self.assertTrue(result.output_payload["truncated"])
-        self.assertIn("row-3", captured_prompts[0])
-        self.assertNotIn("row-4", captured_prompts[0])
 
     def test_invalid_llm_indexes_fall_back_to_domain_filtered_table(self) -> None:
         async def llm_text_generator(_: str) -> str:

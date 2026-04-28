@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAssistantTextArtifact, parseSqlQueryArtifacts } from './artifacts';
+import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, parseSqlQueryArtifacts, summarizeCapabilityArtifactDisplays } from './artifacts';
 import type { ArtifactResponse } from '../api/types';
 
 function artifact(overrides: Partial<ArtifactResponse>): ArtifactResponse {
@@ -56,7 +56,13 @@ describe('parseSqlQueryArtifacts', () => {
 
   it('falls back to artifact summary when summary artifact storage_ref is invalid JSON', () => {
     const result = parseSqlQueryArtifacts([
-      artifact({ artifact_id: 'task-1:summary:abc', artifact_type: 'summary', storage_ref: '{bad', summary: '降级摘要' }),
+      artifact({
+        artifact_id: 'task-1:sql_query_result_summary:abc',
+        producer_node_id: 'task-1:sql_query.result_summarize',
+        artifact_type: 'summary',
+        storage_ref: '{bad',
+        summary: '降级摘要',
+      }),
     ]);
     expect(result.summary).toBe('降级摘要');
     expect(result.warnings[0]).toContain('解析');
@@ -108,5 +114,81 @@ describe('parseSqlQueryArtifacts', () => {
 describe('parseAssistantTextArtifact', () => {
   it('extracts the text artifact storage_ref', () => {
     expect(parseAssistantTextArtifact([artifact({ artifact_type: 'text', storage_ref: '最终回答', summary: '最终' })])).toBe('最终回答');
+  });
+
+  it('prefers the main agent text artifact over capability-owned text artifacts', () => {
+    expect(parseAssistantTextArtifact([
+      artifact({
+        artifact_id: 'weather_text:1',
+        producer_node_id: 'task-1:weather.respond',
+        artifact_type: 'text',
+        storage_ref: '天气能力文本',
+      }),
+      artifact({
+        artifact_id: 'main_agent_text:1',
+        producer_node_id: 'task-1:main_agent.respond',
+        artifact_type: 'text',
+        storage_ref: '主代理最终回答',
+      }),
+    ])).toBe('主代理最终回答');
+  });
+});
+
+describe('parseCapabilityArtifactDisplays', () => {
+  it('returns supplemental display models without consuming the assistant text artifact', () => {
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({ artifact_type: 'text', storage_ref: '最终回答', summary: '最终' }),
+      artifact({
+        artifact_id: 'task-1:filtered_query_result:def',
+        producer_node_id: 'task-1:result_filtering',
+        storage_ref: JSON.stringify({
+          columns: ['variety_name'],
+          rows: [],
+          row_count: 0,
+        }),
+      }),
+    ]);
+
+    expect(displays).toHaveLength(1);
+    expect(displays[0]).toMatchObject({ kind: 'sql_query' });
+    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('查询已完成，共返回 0 行结果。');
+  });
+
+  it('does not turn unrelated capability summaries into SQLQuery cards', () => {
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({
+        artifact_id: 'task-1:result_summary:abc',
+        producer_node_id: 'task-1:weather.respond',
+        artifact_type: 'summary',
+        storage_ref: JSON.stringify({ summary: '天气结果' }),
+        summary: '天气结果',
+      }),
+    ]);
+
+    expect(displays).toEqual([]);
+  });
+
+  it('does not let unrelated summaries contaminate SQLQuery display summaries', () => {
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({
+        artifact_id: 'weather-summary:1',
+        producer_node_id: 'task-1:weather.respond',
+        artifact_type: 'summary',
+        storage_ref: JSON.stringify({ summary: '天气结果' }),
+        summary: '天气结果',
+      }),
+      artifact({
+        artifact_id: 'task-1:filtered_query_result:def',
+        producer_node_id: 'task-1:result_filtering',
+        storage_ref: JSON.stringify({
+          columns: ['variety_name'],
+          rows: [],
+          row_count: 0,
+        }),
+      }),
+    ]);
+
+    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('查询已完成，共返回 0 行结果。');
+    expect(JSON.stringify(displays)).not.toContain('天气结果');
   });
 });

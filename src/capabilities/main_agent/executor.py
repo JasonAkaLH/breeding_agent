@@ -30,7 +30,7 @@ _SENSITIVE_STREAM_METADATA_KEYS = {
 class MainAgentRespondCapability(CapabilityContract):
     capability_id = "main_agent.respond"
     version = "1"
-    description = "Generate a main-agent response with optional Codex Skill-compatible prompt/script support."
+    description = "生成主代理回答，并可兼容 Codex Skill 的提示词 / 脚本支持。"
 
     def __init__(
         self,
@@ -236,7 +236,7 @@ class MainAgentRespondCapability(CapabilityContract):
         if self._stream_generator is not None:
             return self._stream_generator, dict(self._stream_metadata)
         client = LLMClient()
-        metadata = client.safe_metadata(config_source="default_config_path", reasoning_effort=reasoning_effort)
+        metadata = client.safe_metadata(config_source="environment", reasoning_effort=reasoning_effort)
         stream_generator = getattr(client, "generate_text_with_thinking", None)
         if not callable(stream_generator):
             stream_generator = client.stream_text

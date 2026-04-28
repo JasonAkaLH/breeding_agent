@@ -36,7 +36,7 @@ class PlannerOutputError(ValueError):
     """Raised when LLM planner output does not match the high-level DAG contract."""
 
 
-TextGenerator = Callable[[str], str | Awaitable[str]]
+TextGenerator = Callable[..., str | Awaitable[str]]
 
 
 def build_planner_prompt(
@@ -51,15 +51,15 @@ def build_planner_prompt(
         planner_payload_allowlist=planner_payload_allowlist,
     )
     return (
-        "You are a bounded high-level workflow planner. "
-        "Return JSON only. Choose the smallest useful acyclic DAG. "
-        "Use only public capabilities listed below. "
-        "Never emit SQLQuery internal capabilities or low-level implementation nodes. "
-        "For database/data questions, prefer sql_query.query followed by main_agent.respond depending on it, "
-        "so the final answer is conversational. For ordinary questions, use main_agent.respond only.\n\n"
-        f"Public capabilities:\n{capability_block}\n\n"
-        f"User message: {request.user_message}\n\n"
-        f"Output JSON schema:\n{schema}"
+        "你是一个受边界约束的高层工作流规划器。"
+        "只返回 JSON。请选择最小且有用的无环 DAG。"
+        "只能使用下面列出的 public capability。"
+        "禁止输出 SQLQuery 内部 capability 或低层实现节点。"
+        "对于数据库 / 数据查询问题，优先规划 sql_query.query，然后让 main_agent.respond 依赖它完成对话式最终回答；"
+        "对于普通问题，只使用 main_agent.respond。\n\n"
+        f"可用 public capability：\n{capability_block}\n\n"
+        f"用户问题：{request.user_message}\n\n"
+        f"输出 JSON Schema：\n{schema}"
     )
 
 
@@ -70,18 +70,31 @@ async def build_plan_from_llm_output(
     public_capabilities: Iterable[CapabilityDescriptor] | None = None,
     planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
 ) -> WorkflowPlan:
-    raw_output = text_generator(
-        build_planner_prompt(
-            request,
-            public_capabilities=public_capabilities,
-            planner_payload_allowlist=planner_payload_allowlist,
-        )
+    prompt = build_planner_prompt(
+        request,
+        public_capabilities=public_capabilities,
+        planner_payload_allowlist=planner_payload_allowlist,
     )
+    raw_output = _call_text_generator(text_generator, prompt, request=request)
     if inspect.isawaitable(raw_output):
         raw_output = await raw_output
     if not isinstance(raw_output, str):
         raise PlannerOutputError("Planner text generator must return a string.")
     return parse_planner_output(raw_output, task_id=request.task_id)
+
+
+def _call_text_generator(text_generator: TextGenerator, prompt: str, *, request: OrchestrationRequest):
+    try:
+        signature = inspect.signature(text_generator)
+    except (TypeError, ValueError):
+        return text_generator(prompt)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if accepts_kwargs or "request" in signature.parameters:
+        return text_generator(prompt, request=request)
+    return text_generator(prompt)
 
 
 def _format_public_capabilities(
@@ -96,14 +109,14 @@ def _format_public_capabilities(
     }
     if not capabilities:
         return (
-            "- main_agent.respond: Default LLM-backed main-agent response. "
-            "Planner input_payload allowed fields: none; system fills trusted fields.\n"
-            "- sql_query.query: Safely answer a natural-language data question through SQLQuery. "
-            "Planner input_payload allowed fields: none; system fills trusted fields."
+            "- main_agent.respond：默认主代理 LLM 回答能力。"
+            "规划器 input_payload 允许字段：无；系统会填充可信字段。\n"
+            "- sql_query.query：通过 SQLQuery 安全回答自然语言数据查询。"
+            "规划器 input_payload 允许字段：无；系统会填充可信字段。"
         )
     return "\n".join(
-        f"- {descriptor.capability_id}: {descriptor.name} — {descriptor.description} "
-        f"Planner input_payload allowed fields: {_format_payload_fields(allowlist.get(descriptor.capability_id, ()))}."
+        f"- {descriptor.capability_id}：{descriptor.name} — {descriptor.description} "
+        f"规划器 input_payload 允许字段：{_format_payload_fields(allowlist.get(descriptor.capability_id, ()))}。"
         for descriptor in capabilities
     )
 
@@ -111,7 +124,7 @@ def _format_public_capabilities(
 def _format_payload_fields(fields: Iterable[str]) -> str:
     field_tuple = tuple(fields)
     if not field_tuple:
-        return "none; system fills trusted fields"
+        return "无；系统会填充可信字段"
     return ", ".join(field_tuple)
 
 

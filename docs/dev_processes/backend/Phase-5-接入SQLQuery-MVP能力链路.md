@@ -37,7 +37,7 @@
   - `result_summarize`
 - 复用当前 routing/schema/guard 配置。
 - 将数据库访问封装到明确 async 边界中，避免直接阻塞事件循环。
-- 落地 guard pass token、表白名单、单语句限制、LIMIT 要求、危险 SQL 阻断与审计输出。
+- 落地 guard pass token、表白名单、单语句限制、危险 SQL 阻断与审计输出；当前 SQLQuery 不再默认要求或补充 LIMIT。
 - 支持结果汇总失败时降级为结构化结果摘要。
 
 ## 不做什么
@@ -63,7 +63,7 @@
 
 ### 退出条件
 - SQLQuery 标准链路可以跑通。
-- guard 能阻断写入、多语句、系统 schema、越权表访问和缺失 LIMIT。
+- guard 能阻断写入、多语句、系统 schema、越权表访问；不再因为非聚合查询缺失 LIMIT 而阻断全库只读查询。
 - 执行器没有绕过 guard 的直接入口。
 
 ## 风险

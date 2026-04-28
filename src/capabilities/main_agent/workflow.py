@@ -9,7 +9,7 @@ MAIN_AGENT_CAPABILITY_DESCRIPTORS = (
     CapabilityDescriptor(
         capability_id="main_agent.respond",
         name="main_agent.respond",
-        description="Default LLM-backed main agent response with optional skill injection.",
+        description="默认主代理 LLM 回答能力，可注入匹配到的 Skill 指令。",
     ),
 )
 

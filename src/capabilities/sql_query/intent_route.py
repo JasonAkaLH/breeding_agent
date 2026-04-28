@@ -14,7 +14,7 @@ from .helpers import load_yaml, make_artifact, normalize_text, repo_root
 class SQLQueryIntentRouteCapability(CapabilityContract):
     capability_id = "sql_query.intent_route"
     version = "1"
-    description = "Detect whether the request belongs to an SQLQuery route and collect minimal routing context."
+    description = "判断请求是否属于 SQLQuery 路由，并收集最小路由上下文。"
 
     def __init__(self, *, routing_rules_path: str | None = None) -> None:
         self._routing_rules_path = routing_rules_path or str(repo_root() / "configs/sql_query/routing_rules.yaml")

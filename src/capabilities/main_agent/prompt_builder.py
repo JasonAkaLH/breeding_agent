@@ -35,9 +35,9 @@ def build_main_agent_prompt(
         skill_blocks = []
         for match in skill_matches:
             skill_blocks.append(
-                f"## Skill: {match.manifest.name}\n"
-                f"Description: {match.manifest.description}\n"
-                f"Match reason: {match.reason}\n\n"
+                f"## Skill：{match.manifest.name}\n"
+                f"描述：{match.manifest.description}\n"
+                f"匹配原因：{match.reason}\n\n"
                 f"{match.manifest.body}"
             )
         parts.append("\n# 已匹配 Skill 指令\n" + "\n\n".join(skill_blocks))

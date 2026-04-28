@@ -60,6 +60,25 @@ class WorkflowExpanderTest(unittest.TestCase):
 
         self.assertEqual(intent_node.depends_on, ("prepare_context",))
 
+    def test_expanded_plan_inherits_macro_replan_budget(self) -> None:
+        request = OrchestrationRequest(
+            task_id="task-budget",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="查询龙粳33",
+        )
+        high_level = WorkflowPlan(
+            task_id="task-budget",
+            nodes=(WorkflowNodePlan(node_id="query_data", capability_id="sql_query.query"),),
+            max_replans=0,
+            max_dynamic_nodes=0,
+        )
+
+        expanded = WorkflowExpander({"sql_query.query": SQLQueryWorkflowProvider()}).expand(high_level, request=request)
+
+        self.assertGreaterEqual(expanded.max_replans, 1)
+        self.assertGreaterEqual(expanded.max_dynamic_nodes, 12)
+
 
 if __name__ == "__main__":
     unittest.main()

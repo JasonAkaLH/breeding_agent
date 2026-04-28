@@ -20,6 +20,13 @@ from .planner_contract import (
 )
 from .planner_payload_policy import CapabilityPayloadPolicy, PlannerPayloadPolicy
 from .registry import CapabilityRegistry, InstanceRegistry
+from .runtime_replanner import (
+    CompositeRuntimeReplanner,
+    NoopRuntimeReplanner,
+    RuntimeReplanContext,
+    RuntimeReplanDecision,
+    RuntimeReplanner,
+)
 from .scheduler import NoAvailableInstanceError, Scheduler
 from .service import OrchestrationService
 from .workflow_expander import WorkflowExpander, WorkflowExpansionError
@@ -36,11 +43,13 @@ __all__ = [
     "CapabilityRegistry",
     "CompletionPolicy",
     "CompositeExecutor",
+    "CompositeRuntimeReplanner",
     "CompletionStatus",
     "ExecutionInstance",
     "InstanceRegistry",
     "InstanceState",
     "NoAvailableInstanceError",
+    "NoopRuntimeReplanner",
     "OrchestrationRequest",
     "PLANNER_OUTPUT_JSON_SCHEMA",
     "OrchestrationRunResult",
@@ -53,6 +62,9 @@ __all__ = [
     "WorkflowPlanValidator",
     "Scheduler",
     "WorkflowRouter",
+    "RuntimeReplanContext",
+    "RuntimeReplanDecision",
+    "RuntimeReplanner",
     "build_plan_from_llm_output",
     "parse_planner_output",
     "WorkflowNodePlan",

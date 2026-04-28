@@ -45,7 +45,7 @@ _APPROVAL_LIST_COLUMNS = (
 class SQLQuerySQLGenerateCapability(CapabilityContract):
     capability_id = "sql_query.sql_generate"
     version = "1"
-    description = "Generate a readonly SQL candidate from SQLQuery route + schema context."
+    description = "根据 SQLQuery 路由和 schema 上下文生成只读 SQL 候选。"
 
     def __init__(
         self,
@@ -77,7 +77,10 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             )
 
         try:
-            llm_payload = parse_json_object(raw_output)
+            try:
+                llm_payload = parse_json_object(raw_output)
+            except LLMOutputError:
+                llm_payload = self._raw_sql_payload_from_output(raw_output, context)
             mode = str(llm_payload.get("mode", "")).strip().lower()
             if mode == "answer":
                 return self._answer_result(request, context, llm_payload)
@@ -119,7 +122,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         tables_used = string_list(llm_payload.get("tables_used"))
         allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
         selected_tables = {str(table) for table in context.get("selected_tables", [])}
-        allowed_scope = allowed_tables or selected_tables
+        allowed_scope = selected_tables or allowed_tables
         if not tables_used:
             raise LLMOutputError("validation_failed", "LLM answer mode requires tables_used.")
         if allowed_scope and not set(tables_used).issubset(allowed_scope):
@@ -142,6 +145,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "join_hints_used": string_list(llm_payload.get("join_hints_used")),
             "generation_source": "llm",
             "llm_mode": "answer",
+            "llm_output_format": str(llm_payload.get("_output_format") or "json"),
             "fallback_used": False,
             "fallback_reason": None,
         }
@@ -318,6 +322,103 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         )
 
 
+    def _raw_sql_payload_from_output(self, raw_output: str, context: dict[str, Any]) -> dict[str, Any]:
+        sql = self._extract_sql_from_text(raw_output)
+        tables_used = self._infer_tables_used_from_sql(context, sql)
+        columns_used = self._infer_columns_used_from_sql(context, sql, tables_used=tables_used)
+        return {
+            "mode": "answer",
+            "route_id": context.get("route_id"),
+            "schema_profile_id": context.get("schema_profile_id"),
+            "sql": sql,
+            "tables_used": tables_used,
+            "columns_used": columns_used,
+            "join_hints_used": [],
+            "_output_format": "raw_sql",
+        }
+
+    def _extract_sql_from_text(self, raw_output: str) -> str:
+        value = str(raw_output or "").strip()
+        if not value:
+            raise LLMOutputError("parse_failed", "LLM raw SQL output is empty.")
+
+        fenced = re.search(r"```(?:sql)?\s*([\s\S]*?)```", value, flags=re.I)
+        if fenced:
+            value = fenced.group(1).strip()
+        else:
+            open_fence = re.search(r"```(?:sql)?\s*([\s\S]*)", value, flags=re.I)
+            if open_fence:
+                value = open_fence.group(1).strip()
+
+        value = value.strip().strip("`").strip()
+        if value.endswith(";"):
+            value = value[:-1].strip()
+        if not re.match(r"^(select|with)\b", value, flags=re.I):
+            raise LLMOutputError("parse_failed", "LLM output is neither JSON nor a raw SELECT SQL statement.")
+        return value
+
+    def _infer_tables_used_from_sql(self, context: dict[str, Any], sql: str) -> list[str]:
+        selected_tables = {str(table) for table in context.get("selected_tables", [])}
+        allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
+        allowed_scope = selected_tables or allowed_tables
+        tables_used: list[str] = []
+        for table, _alias in re.findall(
+            r"\b(?:from|join)\s+`?([A-Za-z_][\w]*)`?(?:\s+(?:as\s+)?`?([A-Za-z_][\w]*)`?)?",
+            sql,
+            flags=re.I,
+        ):
+            normalized_table = str(table)
+            if allowed_scope and normalized_table not in allowed_scope:
+                tables_used.append(normalized_table)
+                continue
+            if normalized_table not in tables_used:
+                tables_used.append(normalized_table)
+        if not tables_used:
+            raise LLMOutputError("validation_failed", "Raw SQL output does not reference an allowed table.")
+        return tables_used
+
+    def _infer_columns_used_from_sql(
+        self,
+        context: dict[str, Any],
+        sql: str,
+        *,
+        tables_used: list[str],
+    ) -> list[str]:
+        allowed = self._allowed_columns_by_table(context)
+        table_aliases = self._extract_table_aliases(sql)
+        columns_used: list[str] = []
+
+        def append(table: str, column: str) -> None:
+            canonical = f"{table}.{column}"
+            if table in allowed and column in allowed[table] and canonical not in columns_used:
+                columns_used.append(canonical)
+
+        for qualifier, column in re.findall(r"\b`?([A-Za-z_][\w]*)`?\.`?([A-Za-z_][\w]*)`?\b", sql):
+            append(table_aliases.get(qualifier, qualifier), column)
+
+        used_scope = {str(table) for table in tables_used}
+        scoped_allowed = {table: columns for table, columns in allowed.items() if table in used_scope}
+        for column in self._extract_unqualified_column_references(sql, table_aliases):
+            table, resolved_column = self._resolve_column_reference(column, scoped_allowed)
+            if table is not None and resolved_column is not None:
+                append(table, resolved_column)
+
+        if not columns_used and re.search(r"\*", sql):
+            selected_columns = dict(context.get("selected_columns", {}))
+            for table in tables_used:
+                for column in list(selected_columns.get(table, [])):
+                    append(str(table), str(column))
+
+        if not columns_used:
+            selected_columns = dict(context.get("selected_columns", {}))
+            for table in tables_used:
+                for column in list(selected_columns.get(table, [])):
+                    append(str(table), str(column))
+
+        if not columns_used:
+            raise LLMOutputError("validation_failed", "Raw SQL output does not reference any selected columns.")
+        return columns_used
+
     def _allowed_columns_by_table(self, context: dict[str, Any]) -> dict[str, set[str]]:
         return {
             str(table): {str(column) for column in list(columns)}
@@ -351,11 +452,23 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         columns_used: list[str],
     ) -> dict[str, str]:
         expected_types = self._column_types_for_selected_columns(context)
-        if not isinstance(raw_column_types, Mapping):
-            raise LLMOutputError("validation_failed", "LLM answer mode requires column_types_used mapping.")
-
         normalized: dict[str, str] = {}
         allowed = self._allowed_columns_by_table(context)
+        if raw_column_types is None:
+            for raw_column in columns_used:
+                table, column = self._resolve_column_reference(raw_column, allowed)
+                if table is None or column is None:
+                    raise LLMOutputError("validation_failed", f"LLM column is not in selected schema: {raw_column}")
+                canonical = f"{table}.{column}"
+                expected_type = expected_types.get(canonical)
+                if not expected_type:
+                    raise LLMOutputError("validation_failed", f"No schema sql_type found for column: {canonical}")
+                normalized[canonical] = expected_type
+            return normalized
+
+        if not isinstance(raw_column_types, Mapping):
+            raise LLMOutputError("validation_failed", "LLM answer mode column_types_used must be a mapping when provided.")
+
         for raw_column in columns_used:
             table, column = self._resolve_column_reference(raw_column, allowed)
             if table is None or column is None:
@@ -416,7 +529,8 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
     def _extract_unqualified_column_references(self, sql: str, table_aliases: dict[str, str]) -> set[str]:
         without_strings = re.sub(r"'[^']*'|\"[^\"]*\"", " ", sql)
         without_qualified = re.sub(r"\b`?[A-Za-z_][\w]*`?\.`?[A-Za-z_][\w]*`?\b", " ", without_strings)
-        tokens = set(re.findall(r"\b[A-Za-z_][\w]*\b", without_qualified))
+        without_alias_names = re.sub(r"\bas\s+`?[A-Za-z_][\w]*`?", " ", without_qualified, flags=re.I)
+        tokens = set(re.findall(r"\b[A-Za-z_][\w]*\b", without_alias_names))
         keywords = {
             "select", "from", "join", "left", "right", "inner", "outer", "on", "where", "and", "or",
             "limit", "order", "group", "by", "as", "like", "in", "is", "null", "not", "with", "distinct",
@@ -485,7 +599,6 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             if "variety_name" in {str(column) for column in selected_columns.get(table, [])}
         )
         sql += self._where_search_term(safe_term, where_columns)
-        sql += " LIMIT 50"
         return sql
 
     def _generate_approval_variety_sql(self, context: dict[str, Any]) -> str:
@@ -494,11 +607,11 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         user_question = str(context.get("user_question") or "")
         normalized_question = normalize_text(user_question)
         if not selected_tables:
-            return "SELECT COUNT(*) AS total FROM rice_varieties LIMIT 50"
+            return "SELECT COUNT(*) AS total FROM rice_varieties"
 
         base_table = selected_tables[0]
         if any(keyword in normalized_question for keyword in ("多少", "数量", "count", "几条")):
-            return f"SELECT COUNT(*) AS total FROM {base_table} LIMIT 50"
+            return f"SELECT COUNT(*) AS total FROM {base_table}"
 
         detail_requested = any(
             keyword in normalized_question
@@ -516,7 +629,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         safe_term = self._safe_search_literal(term) if term else None
         where = self._where_search_term(safe_term, (f"{base_table}.variety_name",))
         projection = ", ".join(f"{base_table}.{column}" for column in projected) if projected != ["*"] else "*"
-        return f"SELECT {projection} FROM {base_table}{where} LIMIT 50"
+        return f"SELECT {projection} FROM {base_table}{where}"
 
     def _generate_variety_overview_sql(self, context: dict[str, Any]) -> str:
         allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
@@ -583,8 +696,8 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             )
 
         if not selects:
-            return "SELECT COUNT(*) AS total FROM variety LIMIT 50"
-        return " UNION ALL ".join(selects) + " LIMIT 50"
+            return "SELECT COUNT(*) AS total FROM variety"
+        return " UNION ALL ".join(selects)
 
     def _extract_variety_search_term(self, user_question: str) -> str | None:
         normalized = str(user_question or "").replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")

@@ -8,41 +8,6 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .models import FailureDetail, HintPayload, JoinHint, SchemaContextRequest, SchemaContextResult, TableSelection
 
-_DEFAULT_COLUMN_NAMES = {
-    "variety_name",
-    "approval_num",
-    "crop_name",
-    "applicant",
-    "breeder",
-    "variety_source",
-    "qtn_seq",
-    "gene_name",
-    "genotype",
-    "phenotype",
-    "year",
-    "suitable_area",
-    "yield_performance",
-    "characteristics",
-    "cultivation_tips",
-    "approval_opinion",
-}
-
-_APPROVAL_DETAIL_COLUMN_NAMES = {
-    "year",
-    "is_gmo",
-    "approval_num",
-    "crop_name",
-    "variety_name",
-    "applicant",
-    "breeder",
-    "variety_source",
-    "characteristics",
-    "yield_performance",
-    "cultivation_tips",
-    "approval_opinion",
-    "suitable_area",
-}
-
 _HINT_TABLE_KEYS = {"table", "tables", "table_name", "table_names", "selected_tables"}
 _HINT_COLUMN_KEYS = {"column", "columns", "column_name", "column_names", "selected_columns", "metrics", "dimensions"}
 _HINT_CROP_KEYS = {"crop", "crops", "crop_name", "crop_names"}
@@ -185,18 +150,12 @@ class SchemaContextBuilder:
         selected_columns: dict[str, tuple[str, ...]] = {}
         table_reason_index = {table: reasons for table, _, reasons in scored_tables}
         table_score_index = {table: score for table, score, _ in scored_tables}
-        max_columns = min(
-            request.max_columns_per_table,
-            int(self._llm_context_rules.get("max_columns_per_table", request.max_columns_per_table)),
-        )
         for table_name in selected_tables:
             table_meta = self._table_index[table_name]
             columns = self._select_columns(
                 table_name=table_name,
                 table_meta=table_meta,
                 selected_tables=selected_tables,
-                normalized_hints=normalized_hints,
-                max_columns=max_columns,
             )
             selected_columns[table_name] = tuple(columns)
             table_selections.append(
@@ -237,6 +196,7 @@ class SchemaContextBuilder:
                 "inferred_crop": inferred_crop,
                 "route_notes": tuple(route_notes),
                 "llm_context_rules": self._llm_context_rules,
+                "column_selection_strategy": "llm_visible_all_exposed_columns",
             },
         )
 
@@ -377,6 +337,8 @@ class SchemaContextBuilder:
                 add(table_name, "variety_overview seed: broad first-principles lookup keeps approval and genotype sources")
 
         if route_id == "genotype_db":
+            for table_name in candidate_tables:
+                add(table_name, "genotype route seed: xiaoao-style SQL prompt keeps the complete gene schema")
             if any(keyword in search_text for keyword in ("qtn", "位点", "gene", "基因")):
                 add("qtn", "genotype route seed: gene/QTN language detected")
             if any(keyword in search_text for keyword in ("基因型", "genotype", "表现型", "phenotype")):
@@ -416,14 +378,11 @@ class SchemaContextBuilder:
         table_name: str,
         table_meta: Mapping[str, Any],
         selected_tables: Sequence[str],
-        normalized_hints: _NormalizedHints,
-        max_columns: int,
     ) -> list[str]:
         columns_meta = table_meta.get("columns", {})
         if not isinstance(columns_meta, Mapping):
             return []
 
-        primary_keys = {str(column) for column in table_meta.get("primary_key", [])}
         join_columns = {
             str(fk.get("column"))
             for fk in table_meta.get("foreign_keys", [])
@@ -435,10 +394,8 @@ class SchemaContextBuilder:
             if str(fk.get("table_name")) in selected_tables
         }
 
-        column_scores: list[tuple[int, int, str]] = []
-        ordered_names = list(columns_meta.keys())
-        search_text = normalized_hints.search_text
-        for index, column_name in enumerate(ordered_names):
+        selected: list[str] = []
+        for column_name in columns_meta.keys():
             column_meta = columns_meta[column_name]
             if not isinstance(column_meta, Mapping):
                 continue
@@ -446,37 +403,8 @@ class SchemaContextBuilder:
             drop_hidden_columns = bool(self._llm_context_rules.get("drop_hidden_columns", True))
             if drop_hidden_columns and expose_to_llm is False and column_name not in join_columns and column_name not in reverse_join_columns:
                 continue
-
-            score = 0
-            normalized_name = self._normalize_text(column_name)
-            description = self._normalize_text(column_meta.get("description", ""))
-            if column_name in normalized_hints.column_names:
-                score += 80
-            if normalized_name and normalized_name in search_text:
-                score += 18
-            if description and description in search_text:
-                score += 14
-            if column_name in primary_keys and expose_to_llm is not False:
-                score += 30
-            if column_name in join_columns or column_name in reverse_join_columns:
-                score += 35
-            if column_name in _DEFAULT_COLUMN_NAMES:
-                score += 16
-            if "approval_variety_db" in table_meta.get("route_tags", []) and column_name in _APPROVAL_DETAIL_COLUMN_NAMES:
-                score += 24
-            if table_name in normalized_hints.table_names and expose_to_llm is not False:
-                score += 8
-
-            column_scores.append((score, -index, column_name))
-
-        ranked = [
-            column_name
-            for score, _, column_name in sorted(column_scores, key=lambda item: (-item[0], item[1], item[2]))
-            if score > 0
-        ]
-        if not ranked:
-            ranked = [column_name for _, _, column_name in sorted(column_scores, key=lambda item: (-item[0], item[1], item[2]))]
-        return ranked[:max_columns]
+            selected.append(str(column_name))
+        return selected
 
     def _build_join_hints(self, selected_tables: Sequence[str]) -> list[JoinHint]:
         if not bool(self._llm_context_rules.get("include_join_hints", True)):
@@ -549,7 +477,7 @@ class SchemaContextBuilder:
         notes = "; ".join(note_bits) if note_bits else "no extra route notes"
         return (
             f"Route {route.get('display_name', request.route_id)} / profile {profile.get('profile_id')} "
-            f"selected tables [{selected_table_summary}] and trimmed columns [{selected_column_summary}]. "
+            f"selected tables [{selected_table_summary}] and LLM-visible columns [{selected_column_summary}]. "
             f"Join hints: {join_summary}. Notes: {notes}."
         )
 

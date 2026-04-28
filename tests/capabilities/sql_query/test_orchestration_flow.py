@@ -65,7 +65,7 @@ class SQLQueryOrchestrationFlowTest(OrchestrationSQLiteTestCase):
                     "mode": "answer",
                     "route_id": "genotype_db",
                     "schema_profile_id": "genotype_profile",
-                    "sql": "SELECT variety.variety_id FROM variety",
+                    "sql": "SELECT variety.variety_id FROM variety; SELECT variety.variety_id FROM variety",
                     "tables_used": ["variety"],
                     "columns_used": ["variety.variety_id"],
                     "column_types_used": {"variety.variety_id": "int(11)"},

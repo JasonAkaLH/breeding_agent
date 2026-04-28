@@ -32,13 +32,13 @@ class SQLQuerySQLExecuteReadonlyTest(unittest.TestCase):
         capability = SQLQuerySQLExecuteReadonlyCapability(adapter=MySQLReadonlyAdapter(runner=runner))
         request = make_request(
             "sql_query.sql_execute_readonly",
-            dependency_outputs={"guard": {"sql": "SELECT variety_name FROM variety LIMIT 20", "guard_pass_token": "guard:ok"}},
+            dependency_outputs={"guard": {"sql": "SELECT variety_name FROM variety", "guard_pass_token": "guard:ok"}},
         )
 
         result = asyncio.run(capability.execute(request))
 
         self.assertIsNone(result.error)
-        self.assertEqual(received, ["SELECT variety_name FROM variety LIMIT 20"])
+        self.assertEqual(received, ["SELECT variety_name FROM variety"])
         self.assertEqual(result.output_payload["row_count"], 1)
         self.assertEqual(result.output_payload["preview_row_count"], 1)
         self.assertFalse(result.output_payload["truncated"])
@@ -56,7 +56,7 @@ class SQLQuerySQLExecuteReadonlyTest(unittest.TestCase):
         capability = SQLQuerySQLExecuteReadonlyCapability(adapter=MySQLReadonlyAdapter(runner=runner, transient_retries=1))
         request = make_request(
             "sql_query.sql_execute_readonly",
-            dependency_outputs={"guard": {"sql": "SELECT variety_name FROM variety LIMIT 20", "guard_pass_token": "guard:ok"}},
+            dependency_outputs={"guard": {"sql": "SELECT variety_name FROM variety", "guard_pass_token": "guard:ok"}},
         )
 
         result = asyncio.run(capability.execute(request))

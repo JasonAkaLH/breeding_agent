@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +13,7 @@ from .backpressure import BackpressureGuard
 from .completion_policy import CompletionPolicy, CompletionStatus
 from .models import OrchestrationRequest, OrchestrationRunResult, WorkflowNodePlan, WorkflowPlan
 from .registry import CapabilityRegistry, InstanceRegistry
+from .runtime_replanner import NoopRuntimeReplanner, RuntimeReplanContext, RuntimeReplanDecision, RuntimeReplanner
 from .scheduler import Scheduler
 from .workflow_plan_validator import WorkflowPlanValidator
 
@@ -28,6 +30,7 @@ class OrchestrationService:
         completion_policy: CompletionPolicy,
         backpressure: BackpressureGuard,
         event_sink: EventSink | None = None,
+        runtime_replanner: RuntimeReplanner | None = None,
     ) -> None:
         self._storage = storage
         self._capability_registry = capability_registry
@@ -37,7 +40,16 @@ class OrchestrationService:
         self._completion_policy = completion_policy
         self._backpressure = backpressure
         self._event_sink = event_sink
+        self._runtime_replanner = runtime_replanner or NoopRuntimeReplanner()
         self._event_counter = 0
+
+    _TERMINAL_NODE_STATUSES = {
+        NodeStatus.COMPLETED,
+        NodeStatus.FAILED,
+        NodeStatus.CANCELLED,
+        NodeStatus.BLOCKED_BY_CANCELLATION,
+        NodeStatus.ORPHANED,
+    }
 
     @staticmethod
     def _utcnow_naive() -> datetime:
@@ -146,6 +158,221 @@ class OrchestrationService:
             )
         )
         return running
+
+    async def _apply_runtime_replan(
+        self,
+        *,
+        request: OrchestrationRequest,
+        current_plan: WorkflowPlan,
+        decision: RuntimeReplanDecision,
+        current_nodes: dict[str, TaskNode],
+        replan_count: int,
+        dynamic_node_count: int,
+    ) -> tuple[WorkflowPlan, int] | None:
+        revised_plan = decision.plan
+        try:
+            WorkflowPlanValidator(self._capability_registry, public_only=False).validate(revised_plan)
+            for node in revised_plan.nodes:
+                self._capability_registry.require(node.capability_id)
+            current_plan_by_id = {node.node_id: node for node in current_plan.nodes}
+            current_nodes_by_id = {
+                **{
+                    node.node_id: node
+                    for node in await self._storage.list_task_nodes_for_task(current_plan.task_id)
+                },
+                **current_nodes,
+            }
+            for node in revised_plan.nodes:
+                previous = current_plan_by_id.get(node.node_id)
+                stored = current_nodes_by_id.get(node.node_id)
+                if (
+                    previous is not None
+                    and stored is not None
+                    and (previous.capability_id != node.capability_id or previous.depends_on != node.depends_on)
+                ):
+                    raise ValueError("Runtime replan must replace existing node ids instead of mutating capability or dependencies.")
+        except Exception as exc:
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    event_type="task.replan_rejected",
+                    payload={
+                        "reason": "invalid_runtime_plan",
+                        "decision_reason": decision.reason,
+                        "error_type": type(exc).__name__,
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
+            return None
+
+        previous_plan_node_ids = {node.node_id for node in current_plan.nodes}
+        revised_node_ids = {node.node_id for node in revised_plan.nodes}
+        added_node_ids = revised_node_ids - previous_plan_node_ids
+        next_dynamic_node_count = dynamic_node_count + len(added_node_ids)
+        if next_dynamic_node_count > current_plan.max_dynamic_nodes:
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    event_type="task.replan_rejected",
+                    payload={
+                        "reason": "dynamic_node_budget_exceeded",
+                        "requested_added_node_count": len(added_node_ids),
+                        "dynamic_node_count": dynamic_node_count,
+                        "max_dynamic_nodes": current_plan.max_dynamic_nodes,
+                        "decision_reason": decision.reason,
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
+            return None
+
+        await self._record_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="task.replan_started",
+                payload={
+                    "replan_index": replan_count + 1,
+                    "reason": decision.reason,
+                    "metadata": self._json_safe_mapping(decision.metadata),
+                },
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+
+        latest_nodes = {
+            node.node_id: node
+            for node in await self._storage.list_task_nodes_for_task(revised_plan.task_id)
+        }
+        latest_nodes.update(current_nodes)
+        for node_plan in revised_plan.nodes:
+            existing = latest_nodes.get(node_plan.node_id)
+            if existing is None:
+                saved = await self._storage.save_task_node(
+                    TaskNode(
+                        node_id=node_plan.node_id,
+                        task_id=revised_plan.task_id,
+                        capability_id=node_plan.capability_id,
+                        status=NodeStatus.PENDING,
+                        criticality=node_plan.criticality,
+                        retry_policy=dict(node_plan.retry_policy),
+                        timeout_policy=dict(node_plan.timeout_policy),
+                        resource_class=node_plan.resource_class,
+                    )
+                )
+                latest_nodes[node_plan.node_id] = saved
+            elif existing.status not in self._TERMINAL_NODE_STATUSES:
+                latest_nodes[node_plan.node_id] = await self._storage.save_task_node(
+                    replace(
+                        existing,
+                        capability_id=node_plan.capability_id,
+                        criticality=node_plan.criticality,
+                        retry_policy=dict(node_plan.retry_policy),
+                        timeout_policy=dict(node_plan.timeout_policy),
+                        resource_class=node_plan.resource_class,
+                    )
+                )
+
+            for dependency in node_plan.depends_on:
+                await self._storage.save_task_edge(
+                    revised_plan.task_id,
+                    TaskEdge(from_node_id=dependency, to_node_id=node_plan.node_id),
+                )
+
+        orphaned_node_ids: list[str] = []
+        for node_id in previous_plan_node_ids - revised_node_ids:
+            node = latest_nodes.get(node_id)
+            if node is not None and node.status not in self._TERMINAL_NODE_STATUSES:
+                await self._storage.save_task_node(replace(node, status=NodeStatus.ORPHANED))
+                orphaned_node_ids.append(node_id)
+
+        await self._record_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="task.graph_updated",
+                payload={
+                    "replan_index": replan_count + 1,
+                    "node_count": len(revised_plan.nodes),
+                    "edge_count": sum(len(node.depends_on) for node in revised_plan.nodes),
+                    "added_node_ids": tuple(sorted(added_node_ids)),
+                    "orphaned_node_ids": tuple(sorted(orphaned_node_ids)),
+                    "reason": decision.reason,
+                },
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+        await self._record_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="task.replanned",
+                payload={
+                    "replan_index": replan_count + 1,
+                    "reason": decision.reason,
+                    "added_node_count": len(added_node_ids),
+                    "dynamic_node_count": next_dynamic_node_count,
+                    "max_dynamic_nodes": current_plan.max_dynamic_nodes,
+                    "metadata": self._json_safe_mapping(decision.metadata),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+        return revised_plan, next_dynamic_node_count
+
+    @staticmethod
+    def _json_safe_mapping(value: Any) -> dict[str, Any]:
+        import json
+
+        if not isinstance(value, dict):
+            value = dict(value or {})
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+    async def _build_runtime_replan_decision(
+        self,
+        *,
+        request: OrchestrationRequest,
+        plan: WorkflowPlan,
+        nodes: dict[str, TaskNode],
+        node_outputs: dict[str, dict[str, Any]],
+        completion: CompletionStatus,
+        replan_count: int,
+        dynamic_node_count: int,
+        unresolved_interrupt: bool,
+    ) -> RuntimeReplanDecision | None:
+        try:
+            decision = self._runtime_replanner.build_replan(
+                RuntimeReplanContext(
+                    request=request,
+                    plan=plan,
+                    nodes=nodes,
+                    node_outputs=node_outputs,
+                    completion_status=completion,
+                    replan_count=replan_count,
+                    dynamic_node_count=dynamic_node_count,
+                    unresolved_interrupt=unresolved_interrupt,
+                )
+            )
+            if inspect.isawaitable(decision):
+                decision = await decision
+            return decision
+        except Exception as exc:
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    event_type="task.replan_rejected",
+                    payload={
+                        "reason": "runtime_replanner_error",
+                        "error_type": type(exc).__name__,
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
+            return None
 
     async def _execute_node(
         self,
@@ -256,6 +483,9 @@ class OrchestrationService:
 
         task = await self._initialize_task(request, plan)
         replan_count = 0
+        dynamic_node_count = 0
+        max_replans = plan.max_replans
+        max_dynamic_nodes = plan.max_dynamic_nodes
         node_outputs: dict[str, dict[str, Any]] = {}
 
         while True:
@@ -268,6 +498,7 @@ class OrchestrationService:
                 )
             nodes = {node.node_id: node for node in await self._storage.list_task_nodes_for_task(plan.task_id)}
             progress_made = False
+            runtime_replanned = False
             completed_ids = {node_id for node_id, node in nodes.items() if node.status == NodeStatus.COMPLETED}
 
             for node_plan in plan.nodes:
@@ -318,6 +549,68 @@ class OrchestrationService:
                     progress_made = True
                     if updated.status == NodeStatus.COMPLETED:
                         completed_ids.add(updated.node_id)
+                        decision = await self._build_runtime_replan_decision(
+                            request=request,
+                            plan=plan,
+                            nodes=nodes,
+                            node_outputs=node_outputs,
+                            completion=CompletionStatus.RUNNING,
+                            replan_count=replan_count,
+                            dynamic_node_count=dynamic_node_count,
+                            unresolved_interrupt=False,
+                        )
+                        if decision is not None:
+                            if replan_count >= max_replans:
+                                await self._record_event(
+                                    self._make_event(
+                                        task_id=task.task_id,
+                                        conversation_id=task.conversation_id,
+                                        event_type="task.replan_rejected",
+                                        payload={
+                                            "reason": "replan_budget_exhausted",
+                                            "replan_count": replan_count,
+                                            "max_replans": max_replans,
+                                            "decision_reason": decision.reason,
+                                        },
+                                    )
+                                )
+                                task = await self._storage.save_task(replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive()))
+                                await self._record_event(
+                                    self._make_event(task_id=task.task_id, conversation_id=task.conversation_id, event_type="task.failed")
+                                )
+                                return OrchestrationRunResult(
+                                    task=task,
+                                    nodes=tuple(await self._storage.list_task_nodes_for_task(plan.task_id)),
+                                    completion_status=CompletionStatus.FAILED.value,
+                                )
+                            applied = await self._apply_runtime_replan(
+                                request=request,
+                                current_plan=plan,
+                                decision=decision,
+                                current_nodes=nodes,
+                                replan_count=replan_count,
+                                dynamic_node_count=dynamic_node_count,
+                            )
+                            if applied is None:
+                                task = await self._storage.save_task(replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive()))
+                                await self._record_event(
+                                    self._make_event(task_id=task.task_id, conversation_id=task.conversation_id, event_type="task.failed")
+                                )
+                                return OrchestrationRunResult(
+                                    task=task,
+                                    nodes=tuple(await self._storage.list_task_nodes_for_task(plan.task_id)),
+                                    completion_status=CompletionStatus.FAILED.value,
+                                )
+                            plan, dynamic_node_count = applied
+                            replan_count += 1
+                            max_replans = min(max_replans, plan.max_replans)
+                            max_dynamic_nodes = min(max_dynamic_nodes, plan.max_dynamic_nodes)
+                            task = await self._storage.save_task(replace(task, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive()))
+                            runtime_replanned = True
+                            break
+
+            if runtime_replanned:
+                continue
 
             unresolved_interrupt = any(interrupt.status == "open" for interrupt in await self._storage.list_interrupts_for_task(plan.task_id))
             completion = self._completion_policy.evaluate(
@@ -328,6 +621,58 @@ class OrchestrationService:
             )
 
             if completion == CompletionStatus.COMPLETED:
+                decision = await self._build_runtime_replan_decision(
+                    request=request,
+                    plan=plan,
+                    nodes=nodes,
+                    node_outputs=node_outputs,
+                    completion=completion,
+                    replan_count=replan_count,
+                    dynamic_node_count=dynamic_node_count,
+                    unresolved_interrupt=unresolved_interrupt,
+                )
+                if decision is not None:
+                    if replan_count >= max_replans:
+                        await self._record_event(
+                            self._make_event(
+                                task_id=task.task_id,
+                                conversation_id=task.conversation_id,
+                                event_type="task.replan_rejected",
+                                payload={
+                                    "reason": "replan_budget_exhausted",
+                                    "replan_count": replan_count,
+                                    "max_replans": max_replans,
+                                    "decision_reason": decision.reason,
+                                },
+                            )
+                        )
+                        task = await self._storage.save_task(replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive()))
+                        await self._record_event(
+                            self._make_event(task_id=task.task_id, conversation_id=task.conversation_id, event_type="task.failed")
+                        )
+                        return OrchestrationRunResult(task=task, nodes=tuple(nodes.values()), completion_status=CompletionStatus.FAILED.value)
+
+                    applied = await self._apply_runtime_replan(
+                        request=request,
+                        current_plan=plan,
+                        decision=decision,
+                        current_nodes=nodes,
+                        replan_count=replan_count,
+                        dynamic_node_count=dynamic_node_count,
+                    )
+                    if applied is None:
+                        task = await self._storage.save_task(replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive()))
+                        await self._record_event(
+                            self._make_event(task_id=task.task_id, conversation_id=task.conversation_id, event_type="task.failed")
+                        )
+                        return OrchestrationRunResult(task=task, nodes=tuple(await self._storage.list_task_nodes_for_task(plan.task_id)), completion_status=CompletionStatus.FAILED.value)
+                    plan, dynamic_node_count = applied
+                    replan_count += 1
+                    max_replans = min(max_replans, plan.max_replans)
+                    max_dynamic_nodes = min(max_dynamic_nodes, plan.max_dynamic_nodes)
+                    task = await self._storage.save_task(replace(task, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive()))
+                    continue
+
                 task = await self._storage.save_task(replace(task, status=TaskStatus.COMPLETED, updated_at=self._utcnow_naive()))
                 await self._record_event(
                     self._make_event(task_id=task.task_id, conversation_id=task.conversation_id, event_type="task.completed")
@@ -342,12 +687,46 @@ class OrchestrationService:
                 return OrchestrationRunResult(task=task, nodes=tuple(nodes.values()), completion_status=completion.value)
 
             if completion == CompletionStatus.REPLAN_AVAILABLE:
+                decision = None
+                if replan_count < max_replans:
+                    decision = await self._build_runtime_replan_decision(
+                        request=request,
+                        plan=plan,
+                        nodes=nodes,
+                        node_outputs=node_outputs,
+                        completion=completion,
+                        replan_count=replan_count,
+                        dynamic_node_count=dynamic_node_count,
+                        unresolved_interrupt=unresolved_interrupt,
+                    )
+                if decision is not None:
+                    applied = await self._apply_runtime_replan(
+                        request=request,
+                        current_plan=plan,
+                        decision=decision,
+                        current_nodes=nodes,
+                        replan_count=replan_count,
+                        dynamic_node_count=dynamic_node_count,
+                    )
+                    if applied is not None:
+                        plan, dynamic_node_count = applied
+                        replan_count += 1
+                        max_replans = min(max_replans, plan.max_replans)
+                        max_dynamic_nodes = min(max_dynamic_nodes, plan.max_dynamic_nodes)
+                        task = await self._storage.save_task(replace(task, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive()))
+                        continue
+
                 task = await self._storage.save_task(replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive()))
                 await self._record_event(
                     self._make_event(
                         task_id=task.task_id,
                         conversation_id=task.conversation_id,
                         event_type="task.replan_available",
+                        payload={
+                            "replan_count": replan_count,
+                            "max_replans": max_replans,
+                            "max_dynamic_nodes": max_dynamic_nodes,
+                        },
                     )
                 )
                 return OrchestrationRunResult(task=task, nodes=tuple(nodes.values()), completion_status=completion.value)

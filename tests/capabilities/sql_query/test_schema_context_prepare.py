@@ -30,6 +30,14 @@ class SQLQuerySchemaContextPrepareTest(unittest.TestCase):
         self.assertGreaterEqual(len(result.output_payload["selected_tables"]), 1)
         self.assertIn("context_summary", result.output_payload)
         self.assertIn("selected_column_details", result.output_payload)
+        self.assertIn("schema_ddl", result.output_payload)
+        self.assertIn("CREATE TABLE `variety`", result.output_payload["schema_ddl"])
+        self.assertIn("表结构：variety", result.output_payload["schema_ddl"])
+        self.assertIn("COMMENT '品种名称'", result.output_payload["schema_ddl"])
+        self.assertEqual(
+            set(result.output_payload["selected_tables"]),
+            {"variety", "variety_genotype", "qtn", "rice_comp"},
+        )
         for table, columns in result.output_payload["selected_column_details"].items():
             self.assertEqual(
                 [column["name"] for column in columns],
@@ -96,6 +104,8 @@ class SQLQuerySchemaContextPrepareTest(unittest.TestCase):
 
         self.assertIsNone(result.error)
         self.assertEqual(result.output_payload["selected_tables"], ["rice_varieties"])
+        self.assertIn("CREATE TABLE `rice_varieties`", result.output_payload["schema_ddl"])
+        self.assertNotIn("CREATE TABLE `corn_varieties`", result.output_payload["schema_ddl"])
         selected = result.output_payload["selected_columns"]["rice_varieties"]
         for column in [
             "variety_name",
@@ -111,6 +121,41 @@ class SQLQuerySchemaContextPrepareTest(unittest.TestCase):
             "suitable_area",
         ]:
             self.assertIn(column, selected)
+
+    def test_approval_schema_exposes_all_llm_visible_columns_for_llm_selection(self) -> None:
+        capability = SQLQuerySchemaContextPrepareCapability()
+        request = make_request(
+            "sql_query.schema_context_prepare",
+            dependency_outputs={
+                "intent": {
+                    "route_id": "approval_variety_db",
+                    "schema_profile_id": "approval_variety_profile",
+                    "sql_policy_profile": "strict_readonly_mysql",
+                    "allowed_tables": [
+                        "corn_varieties",
+                        "rice_varieties",
+                        "cotton_varieties",
+                        "wheat_varieties",
+                        "soybean_varieties",
+                    ],
+                    "user_question": "给我查一下适合河南种植的水稻",
+                    "inferred_crop": "rice",
+                }
+            },
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.error)
+        selected = result.output_payload["selected_columns"]["rice_varieties"]
+        self.assertIn("suitable_area", selected)
+        self.assertIn("plant_height", selected)
+        self.assertIn("cold_resistance_shell_rate", selected)
+        self.assertNotIn("id", selected)
+        self.assertEqual(
+            result.output_payload["metadata"]["column_selection_strategy"],
+            "llm_visible_all_exposed_columns",
+        )
 
     def test_route_profile_mismatch_returns_error(self) -> None:
         capability = SQLQuerySchemaContextPrepareCapability()

@@ -14,7 +14,7 @@ from .helpers import find_dependency_output, load_yaml, make_artifact, normalize
 class SQLQuerySQLGuardCapability(CapabilityContract):
     capability_id = "sql_query.sql_guard"
     version = "1"
-    description = "Validate that generated SQL is strictly readonly and allowed under the active route policy."
+    description = "校验生成 SQL 是否严格只读且符合当前路由策略。"
 
     def __init__(self, *, routing_rules_path: str | None = None, guard_rules_path: str | None = None) -> None:
         routing_path = routing_rules_path or str(repo_root() / "configs/sql_query/routing_rules.yaml")
@@ -27,7 +27,11 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
         upstream = find_dependency_output(request, ("sql", "route_id"))
         sql = str(upstream["sql"])
         normalized = self._normalize_sql(sql)
-        allowed_tables = set(upstream.get("allowed_tables") or self._route_allowed_tables(str(upstream["route_id"])))
+        allowed_tables = set(
+            upstream.get("selected_tables")
+            or upstream.get("allowed_tables")
+            or self._route_allowed_tables(str(upstream["route_id"]))
+        )
         guard_error = self._validate_sql(normalized, allowed_tables=allowed_tables)
         if guard_error is not None:
             event = self._make_event(
@@ -116,15 +120,6 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
                 candidate_table = table
             if allowed_tables and candidate_table not in {name.lower() for name in allowed_tables}:
                 return self._guard_error("table_not_in_route_whitelist", f"Table {candidate_table} is not allowed for this route.", retriable=False)
-
-        limit_match = re.search(r"\blimit\s+(\d+)", lowered)
-        if limit_match is None:
-            return self._guard_error("limit_missing", "Non-aggregate readonly query requires LIMIT.", retriable=False)
-
-        limit_value = int(limit_match.group(1))
-        max_limit = int(self._rule_set["shape_limits"]["max_limit"])
-        if limit_value > max_limit:
-            return self._guard_error("query_shape_exceeded", f"LIMIT {limit_value} exceeds max_limit {max_limit}.", retriable=False)
 
         return None
 

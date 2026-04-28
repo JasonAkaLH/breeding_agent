@@ -24,6 +24,9 @@ class WorkflowExpander:
         ordered_nodes = self._topological_nodes(plan)
         expanded_nodes: list[WorkflowNodePlan] = []
         expanded_tail_ids_by_original: dict[str, tuple[str, ...]] = {}
+        expanded_macro_nodes: dict[str, dict[str, object]] = {}
+        max_replans = plan.max_replans
+        max_dynamic_nodes = plan.max_dynamic_nodes
 
         for node in ordered_nodes:
             high_level_dependencies = tuple(
@@ -48,6 +51,8 @@ class WorkflowExpander:
                     metadata=dict(request.metadata),
                 )
             )
+            max_replans = max(max_replans, macro_plan.max_replans)
+            max_dynamic_nodes = max(max_dynamic_nodes, macro_plan.max_dynamic_nodes)
             macro_nodes = tuple(macro_plan.nodes)
             if not macro_nodes:
                 raise WorkflowExpansionError(f"Macro capability produced no nodes: {node.capability_id}")
@@ -83,6 +88,11 @@ class WorkflowExpander:
                     )
                 )
             expanded_tail_ids_by_original[node.node_id] = macro_tails
+            expanded_macro_nodes[node.node_id] = {
+                "capability_id": node.capability_id,
+                "root_node_ids": tuple(sorted(macro_roots)),
+                "tail_node_ids": macro_tails,
+            }
 
         return WorkflowPlan(
             task_id=plan.task_id,
@@ -91,9 +101,10 @@ class WorkflowExpander:
                 **dict(plan.metadata),
                 "expanded": True,
                 "macro_capabilities": tuple(sorted(self._macro_providers)),
+                "expanded_macro_nodes": expanded_macro_nodes,
             },
-            max_replans=plan.max_replans,
-            max_dynamic_nodes=plan.max_dynamic_nodes,
+            max_replans=max_replans,
+            max_dynamic_nodes=max_dynamic_nodes,
         )
 
     @staticmethod

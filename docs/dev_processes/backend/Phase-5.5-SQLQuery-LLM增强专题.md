@@ -38,9 +38,9 @@
 
 Phase 5.5 首轮后已落地的部分：
 
-- `sql_query.sql_generate` 支持显式注入 `llm_text_generator` 作为 LLM 主路径；真实 API runtime 默认可从 `config.yaml` 创建 SQLQuery 文本生成器，禁用/未配置或 LLM 失败时回退确定性 SQL 生成；
+- `sql_query.sql_generate` 支持显式注入 `llm_text_generator` 作为 LLM 主路径；真实 API runtime 默认在启动期把 `config.yaml` 写入 `MAF_CONFIG_*` 环境变量，再从环境创建 SQLQuery 文本生成器，禁用/未配置或 LLM 失败时回退确定性 SQL 生成；
 - `sql_query.result_filtering` 支持显式注入同一个 `llm_text_generator` 作为 LLM 结果筛选主路径，禁用/未配置或 LLM 失败时回退候选表格保守筛选，并叠加单品种编号等确定性后过滤；
-- `src/integrations/llm_client.py` 的 `generate_text()` 默认使用非 streaming completion，适合作为 SQLQuery 结构化 JSON 生成 seam；`stream_text()` 提供非 thinking + streaming 文本输出模式，预留给主代理流式回传用户输出；`generate_text_with_thinking()` 保留 thinking / reasoning chunk 输出，供需要逐步展示思考与回答的场景使用；
+- `src/integrations/llm_client.py` 的 `generate_text()` 默认使用非 streaming completion，适合作为 SQLQuery raw SQL / 结构化 JSON 生成 seam；`stream_text()` 提供非 thinking + streaming 文本输出模式，预留给主代理流式回传用户输出；`generate_text_with_thinking()` 保留 thinking / reasoning chunk 输出，供需要逐步展示思考与回答的场景使用；
 - `sql_query.result_filtering` 已额外依赖 `sql_query.sql_generate` 输出，避免 DB 执行节点透传筛选层上下文；
 - 自动化测试全部使用 fake LLM / fake stream，不访问真实 provider。
 
@@ -96,7 +96,7 @@ sql_generate -> sql_guard -> sql_execute_readonly
 
 ### 5.2 安全性不交给 LLM 保证
 
-prompt 中可以声明只读、单语句、白名单、LIMIT 等要求，但最终安全判定必须由 `sql_guard` 执行。
+prompt 中可以声明只读、单语句、表白名单以及“不要自动添加 LIMIT；仅在用户明确要求条数/分页时使用 LIMIT”等要求，但最终安全判定必须由 `sql_guard` 执行。
 
 ### 5.3 LLM 失败必须可降级
 
@@ -109,19 +109,11 @@ prompt 中可以声明只读、单语句、白名单、LIMIT 等要求，但最�
 - 输出无法提取 SQL 或摘要；
 - 输出被 guard 阻断后需要保留可解释失败信息。
 
-### 5.4 LLM 输出必须结构化
+### 5.4 LLM 输出必须可校验
 
-`sql_generate` 不应直接信任自由文本输出。建议结构至少包含：
+`sql_generate` 不应直接信任任意自由文本输出。当前 SQL 生成 prompt 已调整为 legacy `sql_query_agent` 风格，主路径要求模型只输出 raw SQL；系统会提取裸 SQL / ```sql fenced block，并基于 route-scoped schema 反推 `tables_used`、`columns_used`、`column_types_used` 后再进入 SQL Guard。历史 JSON 输出仅作为兼容格式保留。
 
-```json
-{
-  "mode": "answer | clarify | reject",
-  "sql": "SELECT ... LIMIT ...",
-  "reason": "生成依据或拒绝原因",
-  "supported_scope_hint": "拒答时的支持范围提示",
-  "clarification_question": "需要澄清时的问题"
-}
-```
+前置路由、作物缺失、范围外请求等澄清 / 拒答仍优先由 `intent_route` / `schema_context_prepare` 等节点处理，避免把不确定性留到 SQL 生成 prompt 里。
 
 `result_filtering` 也应避免把原始模型输出无约束透传给前端，至少需要有保留行索引、行数上下文与 fallback 标记。
 
@@ -176,7 +168,7 @@ src/capabilities/sql_query/
 - 何时 fallback 到当前启发式生成；
 - guard blocked 时如何把原因反馈给任务状态、artifact 与 audit。
 
-#### Step 2 初步结论：`sql_generate` 采用结构化 JSON 契约，`answer` 进 guard，`clarify` 进 interrupt，`reject` 进非重试失败
+#### Step 2 当前结论：`sql_generate` 主路径采用 raw SQL 契约，兼容旧 JSON 契约
 
 `sql_generate` 的 LLM 化不改变现有 workflow 拓扑。它仍位于：
 
@@ -204,6 +196,8 @@ intent_route -> schema_context_prepare -> sql_generate -> sql_guard -> sql_execu
   "schema_context": {
     "selected_tables": ["..."],
     "selected_columns": {"table": ["column"]},
+    "selected_column_details": {"table": [{"name": "...", "sql_type": "...", "description": "..."}]},
+    "schema_ddl": "CREATE TABLE ... COMMENT ...",
     "join_hints": [
       {"left_table": "...", "left_column": "...", "right_table": "...", "right_column": "...", "reason": "..."}
     ],
@@ -212,8 +206,7 @@ intent_route -> schema_context_prepare -> sql_generate -> sql_guard -> sql_execu
   "guard_constraints": {
     "readonly_only": true,
     "single_statement_only": true,
-    "require_limit_for_non_aggregate_query": true,
-    "max_limit": 200,
+    "limit_policy": "不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT",
     "allowed_statement_types": ["SELECT", "WITH_SELECT"]
   },
   "user_question": "..."
@@ -222,36 +215,23 @@ intent_route -> schema_context_prepare -> sql_generate -> sql_guard -> sql_execu
 
 输入约束：
 
-- `selected_columns` 必须继续只来自 `schema_context_prepare` 裁剪后的结果，不在 LLM 节点重新扩表或扩字段。
-- `allowed_tables` 是硬白名单；LLM 输出引用的表必须是其子集。
+- `selected_columns` / `selected_column_details` 必须继续只来自 `schema_context_prepare` 给出的 route-scoped schema；`schema_context_prepare` 不按问题规则预选业务字段，只暴露该 route / table 范围内允许给 LLM 的字段，SELECT / WHERE / ORDER BY 字段由 `sql_generate` 的 LLM 自行选择。
+- `schema_ddl` 是从 `schema_metadata.yaml` 渲染出的 DDL 风格 prompt 片段，用于复刻 legacy `sql_query_agent` 的 `database_schema` 拼接方式；系统不重新读取数据库 schema。
+- `selected_tables` 是当前注入 `schema_ddl` 的硬表范围；LLM 输出引用的表必须是其子集。
 - `join_hints` 是唯一允许的多表连接依据；模型不得自行发明 join。
 - SQL guard 规则只注入执行必要摘要，不把 `configs/sql_query/sql_guard_rules.yaml` 原文整块灌入 prompt。
 - prompt 中允许包含用户问题和裁剪后的业务 schema，但默认不进入普通审计日志。
 
-**建议输出契约**：
+**当前输出契约**：
 
-```json
-{
-  "mode": "answer | clarify | reject",
-  "route_id": "...",
-  "schema_profile_id": "...",
-  "sql": "SELECT ... LIMIT ...",
-  "tables_used": ["..."],
-  "columns_used": ["table.column"],
-  "join_hints_used": ["left_table.left_column = right_table.right_column"],
-  "missing_info": null,
-  "clarifying_question": null,
-  "reject_reason": null,
-  "supported_scope_hint": null
-}
-```
+SQL 生成 prompt 主路径复刻 legacy `sql_query_agent`：模型只输出 raw SQL（裸 SQL 或单个 ```sql fenced block），不输出 JSON / Markdown 解释。`sql_generate` 会提取 SQL，并从 SQL 文本与上游 schema 反推 `tables_used`、`columns_used`、`column_types_used` 后写入 artifact。历史 JSON `mode=answer|clarify|reject` 仍作为兼容输入保留，方便测试 seam 和旧 provider 输出平滑过渡。
 
 节点处理规则：
 
-1. `mode = answer`：
+1. raw SQL / `mode = answer`：
    - 要求 `sql` 非空；
    - 要求 `route_id` / `schema_profile_id` 与上游上下文一致；
-   - 要求 `tables_used` 是 `allowed_tables` / `selected_tables` 子集；
+   - 要求 `tables_used` 是 `selected_tables` 子集；
    - 通过本节点结构校验后，输出 `sql` 给下游 `sql_guard`；
    - 即使结构校验通过，SQL 仍必须经过 `sql_guard`，不能在本节点直接执行。
 2. `mode = clarify`：
@@ -261,7 +241,7 @@ intent_route -> schema_context_prepare -> sql_generate -> sql_guard -> sql_execu
    - 本节点返回非重试型 `CapabilityExecutionError`；
    - `sql` 必须为空；
    - 不进入 `sql_guard`。
-4. provider 调用失败、超时、空输出、非法 JSON、缺少必填字段、`answer` 结构校验失败：
+4. provider 调用失败、超时、空输出、raw SQL 提取失败、非法 JSON、缺少必填字段、`answer` 结构校验失败：
    - 回退到当前启发式 SQL 生成逻辑；
    - output payload 标记 `generation_source = "fallback"` 与 `fallback_reason`；
    - fallback 生成的 SQL 仍必须进入 `sql_guard`。
@@ -325,7 +305,7 @@ intent_route -> schema_context_prepare -> sql_generate -> sql_guard -> sql_execu
     "user_question": "...",
     "route_id": "...",
     "schema_profile_id": "...",
-    "sql": "SELECT ... LIMIT ..."
+    "sql": "SELECT ..."
   },
   "result_context": {
     "columns": ["..."],
@@ -348,10 +328,11 @@ intent_route -> schema_context_prepare -> sql_generate -> sql_guard -> sql_execu
 
 输入约束：
 
-- 默认不把完整 rows 全量发送给 LLM；只发送有限 `candidate_rows`。
-- `candidate_rows` 的默认上限由 prompt builder 控制；如果后续需要可配置，但不得超过 SQL guard 的 `max_limit`。
+- 默认不再按固定行数截断 `candidate_rows`；SQL 执行可返回全量只读结果，送入 LLM 的候选行只受 `trim_max_tokens` token 预算保护。
+- 在 prompt builder 前先按 `trim_max_tokens` 做 token 预算裁剪：从 MySQL 返回行列表尾部视为最新数据开始，新到旧逐行计算 JSON 行数据 token，累计 `full_token_num`，未超过预算则 append 到 trimmed rows，首次超过预算即停止，避免大结果集直接撑爆 `result_filtering` LLM 上下文。
+- prompt builder 会把 token trim 后的全部 rows 转成 `candidate_rows` 交给 LLM；不得再叠加 `200` 行之类的固定候选行硬上限。
 - `row_count = 0` 时可以直接走确定性筛选，不必调用 LLM。
-- `truncated = true` 时，下游必须知道筛选仅基于候选行预览。
+- `truncated = true` 时，下游必须知道筛选仅基于 token trim 后的候选行。
 - prompt / 审计默认不记录完整 rows；artifact 可以保留最终筛选表格与必要 metadata。
 - 模型不得根据 SQL 字段名或业务常识补造未出现在结果集里的结论。
 
@@ -377,6 +358,7 @@ intent_route -> schema_context_prepare -> sql_generate -> sql_guard -> sql_execu
 
 - `columns` / `rows` / `row_count` / `preview_row_count` / `truncated`；
 - `source_row_count` / `candidate_row_count` / `removed_row_count` / `kept_row_indexes`；
+- `token_trim_applied` / `token_trim_max_tokens` / `token_trim_full_token_num` / `token_trimmed_token_num` / `token_trimmed_row_count` / `token_trim_removed_row_count`；
 - `filter_source`: `llm | deterministic | fallback`;
 - `filter_reason`;
 - `fallback_used` / `fallback_reason`;
@@ -480,18 +462,17 @@ Phase 5.5 通过的最低标准：
 
 ### 2026-04-24：LLM seam 初步放置结论
 
-- 执行层面已将根目录 `llm_client.py` 移动为 `src/integrations/llm_client.py`，并通过 `src/integrations/__init__.py` 导出 `LLMClient`、`ReasoningEffort` 与 `load_config`。
+- 执行层面已将根目录 `llm_client.py` 移动为 `src/integrations/llm_client.py`，并通过 `src/integrations/__init__.py` 导出 `LLMClient`、`ReasoningEffort`、`bootstrap_config_env` 与环境读取版 `load_config`；`config.yaml` 只作为启动期 bootstrap 源，不应在节点执行阶段重复读取。
 - 已将当前 LLM client 入口放在 `src/integrations/llm_client.py`，根目录不再保留长期入口。
 - 倾向不把 provider / model / prompt / token 等细节放进 `src/core/`，避免核心契约提前被 LLM 专题污染。
 - 倾向让 SQLQuery 通过最小文本生成接口调用 LLM，并把 SQLQuery prompt 组装保留在 `src/capabilities/sql_query/` 内部。
 - 倾向默认审计 LLM 调用 metadata 和 fallback reason，不默认记录完整 prompt。
 
-### 2026-04-24：`sql_generate` LLM 输入 / 输出契约初步结论
+### 2026-04-24：`sql_generate` LLM 输入 / 输出契约初步结论（已被 2026-04-28 raw SQL Prompt 调整覆盖）
 
-- 确认 `sql_generate` 的 LLM 输入以 `schema_context_prepare` 输出为主，只补充任务元信息、guard 摘要与输出格式要求，不重新扩表或读取全库 schema。
-- 确认 LLM 输出采用 `mode = answer | clarify | reject` 的结构化 JSON 契约，与 `docs/SQLQuery提示词输入模板.md` 保持一致。
-- 确认 `answer` 只表示生成 SQL 草案成功，仍必须进入 `sql_guard`；`clarify` 返回 interrupt；`reject` 返回非重试失败。
-- 确认 provider / parse / schema 校验失败时 fallback 到当前启发式生成，但 guard blocked 不在第一版里静默 fallback。
+- 原结论确认 `sql_generate` 的 LLM 输入以 `schema_context_prepare` 输出为主，只补充任务元信息、guard 摘要与输出格式要求，不重新扩表或读取全库 schema。
+- 2026-04-28 起，SQL 生成 prompt 改为 legacy `sql_query_agent` DDL 拼接方式：`schema_context_prepare` 输出 `schema_ddl`，模型主路径只输出 raw SQL，`sql_generate` 反推表字段使用信息；旧 `mode = answer | clarify | reject` JSON 契约仅保留为兼容输入。
+- 确认生成 SQL 草案成功后仍必须进入 `sql_guard`；provider / parse / schema 校验失败时 fallback 到当前启发式生成，但 guard blocked 不静默 fallback。
 
 ### 2026-04-24：`result_filtering` LLM 输入 / 输出契约初步结论
 
@@ -515,6 +496,6 @@ Phase 5.5 通过的最低标准：
 - `sql_query.sql_generate` 已支持注入 `llm_text_generator`：`answer` 产出 SQL 草案，`clarify` 返回 interrupt，`reject` 返回非重试错误，provider / parse / validation 失败回退当前启发式生成。
 - `sql_query.result_filtering` 已支持注入 `llm_text_generator`：LLM 筛选成功时输出 `filter_source=llm`，0 行结果直接走确定性筛选，provider / parse / validation 失败回退保守筛选。
 - `sql_query.result_filtering` 已额外依赖 `sql_query.sql_generate` 输出，获取用户问题、route、schema profile 与 SQL 生成来源；`sql_execute_readonly` 不承担筛选层上下文透传职责。
-- API runtime / 测试 runtime 增加 `llm_text_generator` 注入 seam；2026-04-27 后真实 API runtime 默认可从 `config.yaml` 装配 SQLQuery LLM，默认自动化测试仍通过 fake / disable seam 避免访问真实 provider。
+- API runtime / 测试 runtime 增加 `llm_text_generator` 注入 seam；2026-04-27 后真实 API runtime 默认可装配 SQLQuery LLM，2026-04-28 后配置读取收口为启动期 `config.yaml` -> `MAF_CONFIG_*` 环境变量 bootstrap，默认自动化测试仍通过 fake / disable seam 避免访问真实 provider。
 - LLM 调用与 fallback 通过 `sql_query.llm_call` / `sql_query.llm_fallback` audit-only event 记录 metadata，默认不记录完整 prompt、完整 rows 或 API key。
 - 已补充 fake LLM happy path e2e、LLM fallback observability、LLM SQL 草案仍进入 `sql_guard` 的 orchestration 测试。

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.integrations.llm_client import LLMClient, load_config
+from src.integrations.llm_client import CONFIG_ENV_PREFIX, LLMClient, bootstrap_config_env, load_config
 
 
 class _FakeStream:
@@ -48,6 +50,21 @@ def _completion(answer: str | None) -> object:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=answer))])
 
 
+@contextmanager
+def _isolated_config_env():
+    saved = {key: value for key, value in os.environ.items() if key.startswith(CONFIG_ENV_PREFIX)}
+    for key in list(os.environ):
+        if key.startswith(CONFIG_ENV_PREFIX):
+            del os.environ[key]
+    try:
+        yield
+    finally:
+        for key in list(os.environ):
+            if key.startswith(CONFIG_ENV_PREFIX):
+                del os.environ[key]
+        os.environ.update(saved)
+
+
 class LLMClientTest(unittest.TestCase):
     def make_client(self) -> LLMClient:
         return LLMClient(
@@ -67,7 +84,163 @@ class LLMClientTest(unittest.TestCase):
             path.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "must be a mapping"):
-                load_config(path)
+                bootstrap_config_env(path, override=True)
+
+    def test_bootstrap_config_env_loads_yaml_once_for_default_client(self) -> None:
+        with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.yaml"
+            path.write_text(
+                "\n".join(
+                    [
+                        "api_key: test-key",
+                        "base_url: https://example.test/v1",
+                        "model_edition: env-model",
+                        "temperature: 0",
+                        "max_retries: 0",
+                        "timeout: 1",
+                        "trim_max_tokens: 123",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            bootstrap_config_env(path, override=True)
+            self.assertEqual(os.environ["MAF_CONFIG_MODEL_EDITION"], "env-model")
+            self.assertEqual(load_config()["trim_max_tokens"], 123)
+
+            path.unlink()
+            client = LLMClient()
+
+        self.assertEqual(client.model, "env-model")
+
+    def test_explicit_config_overrides_bootstrapped_environment(self) -> None:
+        with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.yaml"
+            path.write_text(
+                "\n".join(
+                    [
+                        "api_key: env-key",
+                        "base_url: https://env.example.test/v1",
+                        "model: env-model",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            bootstrap_config_env(path, override=True)
+
+            client = LLMClient(
+                config={
+                    "api_key": "injected-key",
+                    "base_url": "https://injected.example.test/v1",
+                    "model": "injected-model",
+                    "temperature": 0,
+                    "max_retries": 0,
+                    "timeout": 1,
+                }
+            )
+
+        self.assertEqual(client.model, "injected-model")
+
+    def test_bootstrap_config_env_clears_stale_values_when_source_changes(self) -> None:
+        with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
+            first_path = Path(tmpdir) / "first.yaml"
+            first_path.write_text(
+                "\n".join(
+                    [
+                        "api_key: first-key",
+                        "base_url: https://first.example.test/v1",
+                        "model: first-model",
+                        "trim_max_tokens: 123",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            second_path = Path(tmpdir) / "second.yaml"
+            second_path.write_text(
+                "\n".join(
+                    [
+                        "api_key: second-key",
+                        "base_url: https://second.example.test/v1",
+                        "model: second-model",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            bootstrap_config_env(first_path, override=True)
+            self.assertEqual(load_config()["trim_max_tokens"], 123)
+
+            bootstrap_config_env(second_path, override=True)
+            loaded_config = load_config()
+            client = LLMClient()
+
+        self.assertEqual(loaded_config["model"], "second-model")
+        self.assertNotIn("trim_max_tokens", loaded_config)
+        self.assertEqual(client.model, "second-model")
+
+    def test_llm_client_config_path_switches_to_requested_file(self) -> None:
+        with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
+            first_path = Path(tmpdir) / "first.yaml"
+            first_path.write_text(
+                "\n".join(
+                    [
+                        "api_key: first-key",
+                        "base_url: https://first.example.test/v1",
+                        "model: first-model",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            second_path = Path(tmpdir) / "second.yaml"
+            second_path.write_text(
+                "\n".join(
+                    [
+                        "api_key: second-key",
+                        "base_url: https://second.example.test/v1",
+                        "model: second-model",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            first_client = LLMClient(config_path=first_path)
+            second_client = LLMClient(config_path=second_path)
+
+        self.assertEqual(first_client.model, "first-model")
+        self.assertEqual(second_client.model, "second-model")
+
+    def test_llm_client_config_path_overrides_rewritten_same_source(self) -> None:
+        with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.yaml"
+            path.write_text(
+                "\n".join(
+                    [
+                        "api_key: first-key",
+                        "base_url: https://first.example.test/v1",
+                        "model: first-model",
+                        "trim_max_tokens: 123",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            first_client = LLMClient(config_path=path)
+
+            path.write_text(
+                "\n".join(
+                    [
+                        "api_key: second-key",
+                        "base_url: https://second.example.test/v1",
+                        "model: second-model",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            second_client = LLMClient(config_path=path)
+            loaded_config = load_config()
+
+        self.assertEqual(first_client.model, "first-model")
+        self.assertEqual(second_client.model, "second-model")
+        self.assertNotIn("trim_max_tokens", loaded_config)
 
     def test_streaming_extracts_reasoning_and_answer_chunks(self) -> None:
         client = self.make_client()

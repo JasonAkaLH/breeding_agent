@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from src.core.contracts import CapabilityContract, CapabilityExecutionRequest, CapabilityExecutionResult
+from src.integrations.token_counter import get_num_of_tokens_from_text
 
 from .helpers import find_dependency_output, make_artifact, make_audit_event
 from .llm_utils import LLMOutputError, TextGenerator, call_text_generator, json_ready, parse_json_object
 from .prompt_builders import (
-    DEFAULT_FILTER_CANDIDATE_ROWS,
     build_result_filtering_prompt,
     build_result_filtering_prompt_payload,
 )
@@ -22,19 +24,29 @@ _VARIETY_LIKE_PATTERN = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class _TokenTrimResult:
+    rows: list[dict[str, Any]]
+    applied: bool
+    trim_max_tokens: int | None
+    full_token_num: int | None
+    trimmed_token_num: int | None
+    removed_row_count: int
+
+
 class SQLQueryResultFilteringCapability(CapabilityContract):
     capability_id = "sql_query.result_filtering"
     version = "1"
-    description = "Filter broad LIKE-based SQLQuery candidate rows into the table rows that match the user need."
+    description = "从 LIKE 宽召回的 SQLQuery 候选行中筛选符合用户需求的表格行。"
 
     def __init__(
         self,
         *,
         llm_text_generator: TextGenerator | None = None,
-        max_candidate_rows: int = DEFAULT_FILTER_CANDIDATE_ROWS,
+        trim_max_tokens: int | None = None,
     ) -> None:
         self._llm_text_generator = llm_text_generator
-        self._max_candidate_rows = max_candidate_rows
+        self._trim_max_tokens = trim_max_tokens if trim_max_tokens is not None and trim_max_tokens >= 0 else None
 
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         upstream = find_dependency_output(request, ("rows", "columns", "row_count"))
@@ -42,20 +54,29 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             request,
             ("user_question", "route_id", "schema_profile_id"),
         )
+        raw_rows = self._normalize_rows(upstream.get("rows", []))
+        raw_source_row_count = self._int_or_default(upstream.get("row_count"), len(raw_rows))
+        llm_enabled = raw_source_row_count > 0 and self._llm_text_generator is not None
+        token_trim = self._trim_rows_for_llm(raw_rows) if llm_enabled else self._no_token_trim(raw_rows)
+        source_rows = token_trim.rows
+        filter_upstream = dict(upstream)
+        filter_upstream["rows"] = source_rows
+        filter_upstream["row_count"] = raw_source_row_count
+        if token_trim.applied:
+            filter_upstream["truncated"] = True
+
         prompt_payload = build_result_filtering_prompt_payload(
-            upstream,
+            filter_upstream,
             question_context=question_context,
-            max_candidate_rows=self._max_candidate_rows,
         )
-        source_rows = self._normalize_rows(upstream.get("rows", []))
         columns = [str(column) for column in list(upstream.get("columns", []))]
         source_row_count = int(prompt_payload["result_context"]["source_row_count"])
-        source_preview_row_count = len(source_rows)
+        source_preview_row_count = len(raw_rows)
         candidate_row_count = int(prompt_payload["result_context"]["candidate_row_count"])
         truncated = bool(prompt_payload["result_context"]["truncated"] or upstream.get("truncated", False))
         domain_keep_indexes, domain_filter_reason = self._specific_variety_keep_indexes(
             rows=source_rows,
-            upstream=upstream,
+            upstream=filter_upstream,
             question_context=question_context,
         )
         domain_filter_applied = domain_keep_indexes is not None
@@ -80,13 +101,13 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 filter_reason=domain_filter_reason or ("未配置 LLM 筛选器，保留 SQL 查询返回的候选表格。" if source_row_count else "查询未返回候选行。"),
                 domain_filter_applied=domain_filter_applied,
                 domain_filter_reason=domain_filter_reason,
+                token_trim=token_trim,
                 events=(),
             )
 
         prompt = build_result_filtering_prompt(
-            upstream,
+            filter_upstream,
             question_context=question_context,
-            max_candidate_rows=self._max_candidate_rows,
         )
         try:
             raw_output = await call_text_generator(self._llm_text_generator, prompt)
@@ -112,6 +133,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
                 domain_filter_applied=domain_filter_applied,
                 domain_filter_reason=domain_filter_reason,
+                token_trim=token_trim,
             )
         except Exception as exc:
             kept_row_indexes = domain_keep_indexes if domain_keep_indexes is not None else list(range(len(source_rows)))
@@ -131,6 +153,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
                 domain_filter_applied=domain_filter_applied,
                 domain_filter_reason=domain_filter_reason,
+                token_trim=token_trim,
             )
 
         event = make_audit_event(
@@ -148,6 +171,8 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 "filtered_row_count": len(filtered_rows),
                 "removed_row_count": max(source_row_count - len(filtered_rows), 0),
                 "truncated": truncated,
+                "token_trim_applied": token_trim.applied,
+                "token_trim_removed_row_count": token_trim.removed_row_count,
             },
         )
         return self._success_result(
@@ -167,6 +192,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             filter_reason=domain_filter_reason or self._string_or_none(llm_payload.get("filter_reason")),
             domain_filter_applied=domain_filter_applied,
             domain_filter_reason=domain_filter_reason,
+            token_trim=token_trim,
             events=(event,),
         )
 
@@ -189,9 +215,14 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
         filter_reason: str | None = None,
         domain_filter_applied: bool = False,
         domain_filter_reason: str | None = None,
+        token_trim: _TokenTrimResult | None = None,
         events=(),
     ) -> CapabilityExecutionResult:
         filtered_row_count = len(rows)
+        token_trim_payload = self._token_trim_payload(
+            token_trim or self._no_token_trim(rows),
+            fallback_row_count=source_preview_row_count,
+        )
         output = {
             "columns": columns,
             "rows": rows,
@@ -211,7 +242,13 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             "fallback_reason": fallback_reason,
             "route_id": route_id,
             "schema_profile_id": schema_profile_id,
+            "satisfaction": self._satisfaction_payload(
+                filtered_row_count=filtered_row_count,
+                source_row_count=source_row_count,
+                filter_reason=filter_reason,
+            ),
         }
+        output.update(token_trim_payload)
         artifact = make_artifact(
             name="filtered_query_result",
             task_id=request.task_id,
@@ -227,6 +264,34 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             artifacts=(artifact,),
             events=tuple(events),
         )
+
+    @staticmethod
+    def _satisfaction_payload(
+        *,
+        filtered_row_count: int,
+        source_row_count: int,
+        filter_reason: str | None,
+    ) -> dict[str, Any]:
+        if filtered_row_count > 0:
+            return {
+                "satisfied": True,
+                "reason_code": "matched_rows_found",
+                "message": filter_reason or "筛选后存在符合当前查询条件的结果行。",
+                "replan_recommended": False,
+            }
+        if source_row_count <= 0:
+            return {
+                "satisfied": False,
+                "reason_code": "empty_result",
+                "message": filter_reason or "SQL 查询未返回候选行。",
+                "replan_recommended": True,
+            }
+        return {
+            "satisfied": False,
+            "reason_code": "no_relevant_rows_after_filtering",
+            "message": filter_reason or "候选行经筛选后没有符合用户需求的结果。",
+            "replan_recommended": True,
+        }
 
     def _fallback_result(
         self,
@@ -245,6 +310,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
         schema_profile_id: Any = None,
         domain_filter_applied: bool = False,
         domain_filter_reason: str | None = None,
+        token_trim: _TokenTrimResult | None = None,
     ) -> CapabilityExecutionResult:
         event_payload = {
             "node_name": self.capability_id,
@@ -256,6 +322,9 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             "filtered_row_count": len(rows),
             "truncated": truncated,
         }
+        if token_trim is not None:
+            event_payload["token_trim_applied"] = token_trim.applied
+            event_payload["token_trim_removed_row_count"] = token_trim.removed_row_count
         if diagnostic:
             event_payload["diagnostic"] = diagnostic[:300]
         event = make_audit_event(request, event_type="sql_query.llm_fallback", payload=event_payload)
@@ -276,8 +345,72 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             filter_reason=domain_filter_reason or "LLM 筛选失败，保守保留 SQL 查询返回的候选表格。",
             domain_filter_applied=domain_filter_applied,
             domain_filter_reason=domain_filter_reason,
+            token_trim=token_trim,
             events=(event,),
         )
+
+    def _trim_rows_for_llm(self, rows: list[dict[str, Any]]) -> _TokenTrimResult:
+        if self._trim_max_tokens is None:
+            return self._no_token_trim(rows)
+
+        full_token_num = 0
+        trimmed_token_num = 0
+        trimmed_rows: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            row_token_num = self._row_token_num(row)
+            full_token_num += row_token_num
+            if full_token_num <= self._trim_max_tokens:
+                trimmed_rows.append(row)
+                trimmed_token_num = full_token_num
+                continue
+            return _TokenTrimResult(
+                rows=trimmed_rows,
+                applied=True,
+                trim_max_tokens=self._trim_max_tokens,
+                full_token_num=full_token_num,
+                trimmed_token_num=trimmed_token_num,
+                removed_row_count=len(rows) - len(trimmed_rows),
+            )
+
+        return _TokenTrimResult(
+            rows=rows,
+            applied=False,
+            trim_max_tokens=self._trim_max_tokens,
+            full_token_num=full_token_num,
+            trimmed_token_num=trimmed_token_num,
+            removed_row_count=0,
+        )
+
+    @staticmethod
+    def _no_token_trim(rows: list[dict[str, Any]]) -> _TokenTrimResult:
+        return _TokenTrimResult(
+            rows=rows,
+            applied=False,
+            trim_max_tokens=None,
+            full_token_num=None,
+            trimmed_token_num=None,
+            removed_row_count=0,
+        )
+
+    @staticmethod
+    def _row_token_num(row: Mapping[str, Any]) -> int:
+        row_text = json.dumps(json_ready(dict(row)), ensure_ascii=False, sort_keys=True, default=str)
+        return get_num_of_tokens_from_text(row_text)
+
+    @staticmethod
+    def _token_trim_payload(
+        token_trim: _TokenTrimResult,
+        *,
+        fallback_row_count: int,
+    ) -> dict[str, Any]:
+        return {
+            "token_trim_applied": token_trim.applied,
+            "token_trim_max_tokens": token_trim.trim_max_tokens,
+            "token_trim_full_token_num": token_trim.full_token_num,
+            "token_trimmed_token_num": token_trim.trimmed_token_num,
+            "token_trimmed_row_count": len(token_trim.rows) if token_trim.trim_max_tokens is not None else fallback_row_count,
+            "token_trim_removed_row_count": token_trim.removed_row_count,
+        }
 
     def _parse_keep_row_indexes(self, payload: Mapping[str, Any], *, candidate_row_count: int) -> list[int]:
         raw_indexes = payload.get("keep_row_indexes")
@@ -390,6 +523,13 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             if isinstance(ready, dict):
                 normalized.append(ready)
         return normalized
+
+    @staticmethod
+    def _int_or_default(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _string_or_none(value: Any) -> str | None:

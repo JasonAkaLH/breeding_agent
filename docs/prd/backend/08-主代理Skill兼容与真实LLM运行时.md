@@ -107,11 +107,11 @@ Skill 中声明的脚本仅允许按后端约束执行：
 主代理 streaming LLM 绑定优先级：
 1. 测试或调用方注入 `main_agent_stream_generator`；
 2. `main_agent_llm_config` 注入配置；
-3. `main_agent_llm_config_path` 指向配置文件；
+3. `main_agent_llm_config_path` 指向启动期 bootstrap 配置文件，并写入 `MAF_CONFIG_*` 环境变量；
 4. `main_agent_llm_client_factory` 注入 client factory；
-5. capability 内部按默认 `LLMClient` 配置解析 provider。
+5. capability 内部按默认 `LLMClient` 从环境变量解析 provider。
 
-服务化部署建议显式传入 config / config path / factory，避免依赖本机隐式配置；自动化测试必须使用 fake / injected stream，不访问真实 provider。
+服务化部署建议显式传入 config / config path / factory，避免依赖本机隐式配置；`config_path` 只允许在 runtime 启动阶段读取，业务节点执行阶段不得重复读取 YAML。同一 runtime 若同时配置多个 `*_config_path`，它们必须指向同一个启动配置文件；组件级差异 provider 配置应使用显式 config dict / factory。自动化测试必须使用 fake / injected stream，不访问真实 provider。
 
 支持的 runtime 参数包括：
 - `main_agent_stream_generator`

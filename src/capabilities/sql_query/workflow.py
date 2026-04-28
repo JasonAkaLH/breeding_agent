@@ -8,7 +8,7 @@ SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS = (
     CapabilityDescriptor(
         capability_id="sql_query.query",
         name="SQLQuery",
-        description="Safely answer a natural-language data question through the fixed SQLQuery workflow.",
+        description="通过固定 SQLQuery 工作流安全回答自然语言数据查询。",
         public=True,
     ),
 )
@@ -24,37 +24,37 @@ SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS = (
     CapabilityDescriptor(
         capability_id="sql_query.intent_route",
         name="intent_route",
-        description="Resolve route for SQLQuery.",
+        description="解析 SQLQuery 路由。",
         public=False,
     ),
     CapabilityDescriptor(
         capability_id="sql_query.schema_context_prepare",
         name="schema_context_prepare",
-        description="Build schema context for SQLQuery generation.",
+        description="为 SQLQuery 生成准备 schema 上下文。",
         public=False,
     ),
     CapabilityDescriptor(
         capability_id="sql_query.sql_generate",
         name="sql_generate",
-        description="Generate candidate SQL.",
+        description="生成候选 SQL。",
         public=False,
     ),
     CapabilityDescriptor(
         capability_id="sql_query.sql_guard",
         name="sql_guard",
-        description="Validate readonly SQL guard.",
+        description="校验只读 SQL 安全规则。",
         public=False,
     ),
     CapabilityDescriptor(
         capability_id="sql_query.sql_execute_readonly",
         name="sql_execute_readonly",
-        description="Execute readonly SQL via adapter.",
+        description="通过适配器执行只读 SQL。",
         public=False,
     ),
     CapabilityDescriptor(
         capability_id="sql_query.result_filtering",
         name="result_filtering",
-        description="Filter broad readonly SQL result candidates into the rows that match the user need.",
+        description="从宽召回的只读 SQL 结果候选中筛选真正符合用户需求的行。",
         public=False,
     ),
 )
@@ -122,5 +122,5 @@ class SQLQueryWorkflowProvider:
                 "public_capability_id": "sql_query.query",
             },
             max_replans=1,
-            max_dynamic_nodes=3,
+            max_dynamic_nodes=24,
         )

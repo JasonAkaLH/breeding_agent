@@ -224,7 +224,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("account_id", plan.nodes[0].input_payload)
         self.assertEqual(plan.nodes[-1].capability_id, "main_agent.respond")
         self.assertIn("report.generate", prompts[0])
-        self.assertIn("Planner input_payload allowed fields: format, max_sections.", prompts[0])
+        self.assertIn("规划器 input_payload 允许字段：format, max_sections。", prompts[0])
 
     async def test_provider_payload_policy_override_can_extend_registered_capability(self) -> None:
         self.registry.register(

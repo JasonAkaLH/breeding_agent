@@ -14,7 +14,6 @@ class SchemaContextRequest:
     user_question: str
     hints: HintPayload = None
     max_tables: int = 4
-    max_columns_per_table: int = 8
 
 
 @dataclass(slots=True, frozen=True)

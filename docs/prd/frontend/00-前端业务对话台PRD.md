@@ -194,7 +194,8 @@ v1 采用单页业务对话台：
    - `query_result_preview`：仅在没有筛选结果时作为原始表格预览降级；
    - 主代理最终文本负责最终自然语言整合；
    - 若无法解析结构化内容，则使用 artifact `summary` 字段降级展示。
-7. 默认不展示 `generated_sql`、`guard_report` 等技术 artifact。
+7. 前端不得根据任务图中出现了某个 capability 节点就改变 assistant 气泡的最终展示模式；主代理 text artifact 始终是最终自然语言回答，SQLQuery 或后续其他 capability 的结构化结果只能作为补充卡片追加展示。
+8. 默认不展示 `generated_sql`、`guard_report` 等技术 artifact。
 
 ### 6.3 取消任务
 
@@ -234,6 +235,13 @@ v1 采用单页业务对话台：
 - 找不到 `filtered_query_result` 但可解析原始表格：按原始表格 `row_count` 显示“查询已完成，共返回 N 行结果”。
 - 找不到可解析表格：只展示主代理最终回答或 artifact summary 降级文本。
 - artifacts API 失败：展示任务完成状态和“结果加载失败，可重试加载结果”。
+- 当前端已经加载到最终 text artifact 或补充结果 artifact 后，后到达或批处理乱序的 streaming delta 不得覆盖最终回答；无最终 artifact 时则保留 streaming 内容作为降级回答。
+
+### 7.4 多 capability 展示边界
+
+- SQLQuery 表格卡片是首个结构化 artifact renderer，不代表 assistant 消息模式只能属于 SQLQuery。
+- 后续新增 capability 时，应在“artifact 解析 / renderer 注册”层增加补充展示模型，而不是在任务恢复、消息气泡或 text artifact 展示逻辑中写 capability 特判。
+- 即使某个 capability 暂无专用 renderer，前端也应至少保留主代理最终 text artifact，避免结构化结果解析失败导致最终回答消失。
 
 ## 8. 状态模型（前端视角）
 

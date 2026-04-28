@@ -31,3 +31,4 @@
 ## 完成记录
 
 - 2026-04-27：本 Phase 已按 PRD v1 完成首轮实现，并通过前端单测/构建或对应脚本验证纳入最终回归。
+- 2026-04-28：修复 interrupt 恢复后 SQLQuery 补充卡片覆盖主代理最终回答的问题；前端现在以通用 capability artifact display 作为补充展示入口，主代理 text artifact 始终优先作为最终回答，SQLQuery 表格只作为 renderer 注册的补充结果。

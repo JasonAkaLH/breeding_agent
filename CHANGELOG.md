@@ -10,6 +10,26 @@
 
 ## [Unreleased]
 
+### 2026-04-28 — 补充 tiktoken 依赖与 Token 计数工具
+
+- 主代理编排内核新增运行时受控重编排闭环：`OrchestrationService` 可在节点执行结果或完成判定后调用 `RuntimeReplanner`，在 `max_replans` / `max_dynamic_nodes` 预算内校验 revised DAG、追加新节点、orphan 未执行旧节点并继续调度；新增 `task.replan_started`、`task.graph_updated`、`task.replanned`、`task.replan_rejected` 事件，避免 `REPLAN_AVAILABLE` 只记录后直接失败。
+- 新增 SQLQuery capability 内部 `SQLQueryRuntimeReplanner` 与 `result_filtering.satisfaction` 输出契约：当单个 SQLQuery 宏能力的节点结果明确建议重排，且用户问题包含多作物 / 多地区并列查询时，会在运行时拆成多个 `sql_query.query` public 宏节点并由 `main_agent.respond` 汇总；编排层只负责通用 revised DAG 校验、预算与调度，不承载 SQL/schema/农业领域规则。
+- 主代理 LLM runtime 收口为单实例共享：默认自动模式下，planner 高层 DAG、运行时观察/重排 advisor 与 `main_agent.respond` 最终总结通过同一个主代理 `SharedLLMRuntime` 调用；SQLQuery 内部 `sql_generate` / `result_filtering` 使用独立 SQLQuery LLM runtime，固定非流式、`thinking=disabled`，不复用主代理 LLM 实例。显式组件级 fake / override seam 保留。
+- 主代理编排、运行时重排、主代理 Skill 注入说明与 SQLQuery SQL 生成 / 结果筛选的 LLM-facing Prompt 统一改写为中文表达；保留 JSON / SQL 字段名等机器契约，降低中文模型理解英文系统提示的偏差。
+- `deep_thinking` / `main_agent_reasoning_effort` 现在会作用于主代理编排阶段；planner 使用同一 runtime 的 thinking 流收集推理片段，并通过 `main_agent.reasoning_delta`（`stage=orchestration_plan`）在前端可见事件中展示。
+- 新增 `MainAgentRuntimeReplanner`：当节点输出的 `satisfaction` 明确未满足且仍有预算时，主代理可用同一 LLM runtime 观察当前结果并返回 public-only revised DAG；编排层继续负责 capability registry、macro expansion、DAG/预算校验和 graph update 事件。
+- `MainAgentRuntimeReplanner` 的 observation prompt 增加 allowlist sanitizer 与 token budget：只传满足度、行数、route/schema、截断状态、少量 capped row sample / summary，过滤 SQL、guard token、schema DDL、完整 rows 等 capability 内部或高成本字段。
+
+- 调整 LLM 配置读取方式：`build_api_runtime()` 在启动期将 `config.yaml` bootstrap 到 `MAF_CONFIG_*` 进程环境变量，`LLMClient`、SQLQuery `trim_max_tokens`、Planner / 主代理 / SQLQuery LLM runtime 后续均从环境读取，不再在客户端构造或节点执行阶段重复读取配置文件；显式注入 `config` dict 仍作为测试和定制 runtime seam 保留，切换配置源时会清理旧环境值，且同一 runtime 的多个 `*_config_path` 必须指向同一启动配置文件。
+- 在 `multi_agent` Conda 环境中安装 `tiktoken==0.12.0`，并将其运行依赖 `regex==2026.4.4` 同步写入 `requirements.txt`。
+- 将根目录临时 `get_token_num.py` 归入 `src/integrations/token_counter.py`，作为系统运行时可复用的上下文 token 数量估算辅助工具，并补充集成层回归测试。
+- SQLQuery `result_filtering` 在调用 LLM 前会按 `trim_max_tokens` 从最新行开始裁剪候选数据 token 预算，避免 MySQL 原始结果过大撑爆筛选 prompt，并在输出 / audit metadata 中记录 token trim 结果。
+- SQLQuery schema context 不再用规则函数预先挑选业务字段，而是在 route / table 范围内暴露全部 LLM 可见字段；`sql_generate` 由 LLM 自行选择 SELECT / WHERE 字段并添加过滤条件，`column_types_used` 缺省时由系统从 schema 推导，避免漏回填类型导致正确 SQL 被 fallback 覆盖。
+- SQLQuery SQL 生成与 SQL Guard 不再默认补充或强制要求 `LIMIT`，允许只读查询返回全量匹配数据；prompt 仅要求在用户明确提出前 N 条、限制条数或分页时才生成 `LIMIT`。
+- SQLQuery `result_filtering` 移除固定 `200` 行候选行硬上限；进入筛选 LLM 的 `candidate_rows` 现在完全由 `trim_max_tokens` 裁剪结果决定，不再在 token trim 后二次按行数截断。
+- SQLQuery SQL 生成 Prompt 复刻 legacy `xiaoao_agent/sub_agents/sql_query_agent` 的 DDL 拼接方式：`schema_metadata.yaml` 仍作为表结构保存源，`schema_context_prepare` 会按当前 selected tables / columns 渲染 `schema_ddl`，审定品种库按作物收敛注入表结构，基因型数据库保留完整 gene schema；`sql_generate` 主路径接受 raw SQL / fenced SQL 输出并反推表字段使用情况，同时保留旧 JSON 输出兼容，`sql_guard` 表白名单优先收窄到当前 selected tables。
+- 修复前端在 SQLQuery 暂停 / 补充信息恢复后最终回答消失的问题：前端不再根据任务图中的 `sql_query.*` 节点把恢复后的助手消息强制改成 SQLQuery 模式，而是始终优先展示主代理 text artifact，并把 SQLQuery 表格作为能力补充结果卡片；同时新增通用 capability artifact display 入口，避免后续新增 capability 时复现“能力结果覆盖/隐藏主代理回答”的问题。
+
 ### 2026-04-27 — 强化宽泛问题的第一性原理处理
 
 - 主代理 Prompt 新增“第一性原理理解用户需求”约束：不假定用户知道自己要什么、该选哪个 capability 或该提供哪些参数，优先推断真实目标并给出可验证的初步答案/下一步。

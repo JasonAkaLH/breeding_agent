@@ -54,14 +54,14 @@
 - SQLQuery（原 SQLQuery）capability 闭环
 - 可复用的 `src/integrations/llm_client.py`
 
-Phase 5.5 首轮后，SQLQuery 内部已经具备可注入的 LLM seam；Phase 8 首轮后，主代理也已经接入非 thinking streaming LLM seam；Phase 8.2 进一步把主代理真实 provider 绑定收口到 runtime 显式装配与手工 smoke 验证；2026-04-27 后，真实 API runtime 也会默认把 `config.yaml` 的 `LLMClient.generate_text()` 绑定到 SQLQuery 内部 `sql_generate` / `result_filtering`。默认自动化测试仍不会访问真实 provider：
+Phase 5.5 首轮后，SQLQuery 内部已经具备可注入的 LLM seam；Phase 8 首轮后，主代理也已经接入非 thinking streaming LLM seam；Phase 8.2 进一步把主代理真实 provider 绑定收口到 runtime 显式装配与手工 smoke 验证；2026-04-27 后，真实 API runtime 也会默认把 `LLMClient.generate_text()` 绑定到 SQLQuery 内部 `sql_generate` / `result_filtering`；2026-04-28 后，`config.yaml` 只作为启动期 bootstrap 源写入 `MAF_CONFIG_*` 环境变量，运行期消费者从环境读取。默认自动化测试仍不会访问真实 provider：
 
 - 主代理已通过 `main_agent.respond` 接入 LLM seam，普通消息默认进入主代理
 - 主代理真实 provider 绑定在 Phase 8.2 通过 `build_api_runtime()` 的显式 config / config path / client factory seam 完成，并提供 `scripts/smoke_main_agent_llm.py` 作为手工 smoke 入口
 - 通用子代理未接入 LLM
-- SQLQuery 的 `sql_generate` 已支持注入 `llm_text_generator` 走结构化 LLM 输出；真实 API runtime 默认会从 `config.yaml` 创建文本生成器，fake / unittest 路径可显式关闭或注入 fake
-- SQLQuery 的 `result_filtering` 已支持注入同一个 `llm_text_generator` 走结构化 LLM 结果筛选，未配置、禁用或失败时仍保守保留候选表格 / 后过滤结果
-- `build_api_runtime()` 提供 `sql_query_llm_config`、`sql_query_llm_config_path`、`sql_query_llm_client_factory`、`sql_query_reasoning_effort` 与 `enable_sql_query_llm`，使真实运行、手工验证与自动化测试路径可明确区分
+- SQLQuery 的 `sql_generate` 已支持注入 `llm_text_generator` 走结构化 LLM 输出；真实 API runtime 启动时会先把 `config.yaml` bootstrap 到环境变量，再从环境创建文本生成器，fake / unittest 路径可显式关闭或注入 fake
+- SQLQuery 的 `result_filtering` 已支持注入同一个 `llm_text_generator` 走结构化 LLM 结果筛选；调用前会按 `trim_max_tokens` 从最新行开始裁剪候选数据 token 预算，未配置、禁用或失败时仍保守保留候选表格 / 后过滤结果
+- `build_api_runtime()` 提供 `sql_query_llm_config`、`sql_query_llm_config_path`、`sql_query_llm_client_factory`、`sql_query_reasoning_effort` 与 `enable_sql_query_llm`，其中 `*_config_path` 是启动期 bootstrap seam，运行期不重复读取 YAML；同一个 runtime 的多个 `*_config_path` 必须解析到同一个文件，如需组件级不同 provider 应使用显式 `config` dict / factory；真实运行、手工验证与自动化测试路径可明确区分
 
 ---
 

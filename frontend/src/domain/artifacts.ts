@@ -14,11 +14,31 @@ export interface SqlQueryDisplayModel {
   sourceArtifactIds: string[];
 }
 
+export type CapabilityArtifactDisplay =
+  | {
+      kind: 'sql_query';
+      result: SqlQueryDisplayModel;
+    };
+
+export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): CapabilityArtifactDisplay[] {
+  const sqlResult = parseSqlQueryArtifacts(artifacts);
+  const hasSqlResult = Boolean(sqlResult.table) || sqlResult.sourceArtifactIds.length > 0;
+  return hasSqlResult ? [{ kind: 'sql_query', result: sqlResult }] : [];
+}
+
+export function summarizeCapabilityArtifactDisplays(displays: CapabilityArtifactDisplay[]): string {
+  const first = displays[0];
+  if (!first) return '';
+  if (first.kind === 'sql_query') return first.result.summary;
+  return '';
+}
+
 export function parseSqlQueryArtifacts(artifacts: ArtifactResponse[]): SqlQueryDisplayModel {
   const warnings: string[] = [];
   const sourceArtifactIds: string[] = [];
-  const summaryArtifact = artifacts.find(isSummaryArtifact);
-  const previewArtifact = artifacts.find(isFilteredPreviewArtifact) ?? artifacts.find(isPreviewArtifact);
+  const sqlArtifacts = artifacts.filter(isSqlQueryDisplayArtifact);
+  const summaryArtifact = sqlArtifacts.find(isSummaryArtifact);
+  const previewArtifact = sqlArtifacts.find(isFilteredPreviewArtifact) ?? sqlArtifacts.find(isPreviewArtifact);
 
   let summary = '查询已完成，但结果不可用。';
   if (summaryArtifact) {
@@ -51,7 +71,8 @@ export function parseSqlQueryArtifacts(artifacts: ArtifactResponse[]): SqlQueryD
 }
 
 export function parseAssistantTextArtifact(artifacts: ArtifactResponse[]): string | null {
-  const textArtifact = artifacts.find((artifact) => artifact.artifact_type === 'text');
+  const textArtifacts = artifacts.filter((artifact) => artifact.artifact_type === 'text');
+  const textArtifact = textArtifacts.find(isMainAgentTextArtifact) ?? textArtifacts[0];
   if (!textArtifact) return null;
   return textArtifact.storage_ref || textArtifact.summary || null;
 }
@@ -66,6 +87,20 @@ function isFilteredPreviewArtifact(artifact: ArtifactResponse): boolean {
 
 function isPreviewArtifact(artifact: ArtifactResponse): boolean {
   return isFilteredPreviewArtifact(artifact) || artifact.artifact_id.includes('query_result_preview') || artifact.producer_node_id.includes('sql_execute_readonly');
+}
+
+function isSqlQueryDisplayArtifact(artifact: ArtifactResponse): boolean {
+  return (
+    isPreviewArtifact(artifact)
+    || artifact.artifact_id.includes('sql_query')
+    || artifact.producer_node_id.includes('sql_query')
+  );
+}
+
+function isMainAgentTextArtifact(artifact: ArtifactResponse): boolean {
+  return artifact.producer_node_id.includes('main_agent.respond')
+    || artifact.artifact_id.includes('main_agent_response')
+    || artifact.artifact_id.includes('main_agent_text');
 }
 
 function parseStorageRef(artifact: ArtifactResponse, warnings: string[]): Record<string, unknown> | null {

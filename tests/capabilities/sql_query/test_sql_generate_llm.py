@@ -139,12 +139,13 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
     def test_uses_llm_answer_when_structured_output_is_valid(self) -> None:
         async def llm_text_generator(prompt: str) -> str:
             self.assertIn("genotype_db", prompt)
+            self.assertIn("生成一个SQL查询来回答这个问题", prompt)
             return json.dumps(
                 {
                     "mode": "answer",
                     "route_id": "genotype_db",
                     "schema_profile_id": "genotype_profile",
-                    "sql": "SELECT variety_name FROM variety LIMIT 20",
+                    "sql": "SELECT variety_name FROM variety",
                     "tables_used": ["variety"],
                     "columns_used": ["variety.variety_name"],
                     "column_types_used": {"variety.variety_name": "varchar(100)"},
@@ -158,13 +159,108 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
 
         self.assertIsNone(result.error)
         self.assertIsNone(result.interrupt)
-        self.assertEqual(result.output_payload["sql"], "SELECT variety_name FROM variety LIMIT 20")
+        self.assertEqual(result.output_payload["sql"], "SELECT variety_name FROM variety")
         self.assertEqual(result.output_payload["generation_source"], "llm")
         self.assertEqual(result.output_payload["llm_mode"], "answer")
         self.assertFalse(result.output_payload["fallback_used"])
         self.assertEqual(result.output_payload["tables_used"], ["variety"])
         self.assertEqual(result.output_payload["column_types_used"], {"variety.variety_name": "varchar(100)"})
         self.assertTrue(any(event.event_type == "sql_query.llm_call" for event in result.events))
+
+    def test_accepts_xiaoao_style_raw_sql_output_and_infers_schema_usage(self) -> None:
+        async def llm_text_generator(prompt: str) -> str:
+            self.assertIn("你只需要输出SQL语句", prompt)
+            self.assertNotIn('"mode"', prompt)
+            return (
+                "```sql\n"
+                "SELECT rice_varieties.year AS '年份', "
+                "rice_varieties.variety_name AS '品种名称', "
+                "rice_varieties.suitable_area AS '适种区域' "
+                "FROM rice_varieties "
+                "WHERE rice_varieties.suitable_area LIKE '%河南%'\n"
+                "```"
+            )
+
+        capability = SQLQuerySQLGenerateCapability(llm_text_generator=llm_text_generator)
+
+        result = asyncio.run(
+            capability.execute(
+                request_for_approval_detail_sql_generate_with_question(
+                    "给我查一下适合河南种植的水稻"
+                )
+            )
+        )
+
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.output_payload["generation_source"], "llm")
+        self.assertEqual(result.output_payload["llm_mode"], "answer")
+        self.assertFalse(result.output_payload["fallback_used"])
+        self.assertEqual(result.output_payload["tables_used"], ["rice_varieties"])
+        self.assertEqual(
+            result.output_payload["columns_used"],
+            [
+                "rice_varieties.year",
+                "rice_varieties.variety_name",
+                "rice_varieties.suitable_area",
+            ],
+        )
+        self.assertEqual(
+            result.output_payload["column_types_used"],
+            {
+                "rice_varieties.year": "int(11)",
+                "rice_varieties.variety_name": "varchar(100)",
+                "rice_varieties.suitable_area": "text",
+            },
+        )
+        self.assertIn("suitable_area LIKE '%河南%'", result.output_payload["sql"])
+        self.assertNotIn("```", result.output_payload["sql"])
+
+    def test_llm_selects_projection_and_where_columns_without_required_type_echo(self) -> None:
+        async def llm_text_generator(prompt: str) -> str:
+            self.assertIn("suitable_area", prompt)
+            return json.dumps(
+                {
+                    "mode": "answer",
+                    "route_id": "approval_variety_db",
+                    "schema_profile_id": "approval_variety_profile",
+                    "sql": (
+                        "SELECT rice_varieties.year, rice_varieties.variety_name, rice_varieties.suitable_area "
+                        "FROM rice_varieties "
+                        "WHERE rice_varieties.suitable_area LIKE '%河南%'"
+                    ),
+                    "tables_used": ["rice_varieties"],
+                    "columns_used": [
+                        "rice_varieties.year",
+                        "rice_varieties.variety_name",
+                        "rice_varieties.suitable_area",
+                    ],
+                    "join_hints_used": [],
+                },
+                ensure_ascii=False,
+            )
+
+        capability = SQLQuerySQLGenerateCapability(llm_text_generator=llm_text_generator)
+
+        result = asyncio.run(
+            capability.execute(
+                request_for_approval_detail_sql_generate_with_question(
+                    "给我查一下适合河南种植的水稻"
+                )
+            )
+        )
+
+        self.assertEqual(result.output_payload["generation_source"], "llm")
+        self.assertFalse(result.output_payload["fallback_used"])
+        self.assertIn("suitable_area LIKE '%河南%'", result.output_payload["sql"])
+        self.assertEqual(
+            result.output_payload["column_types_used"],
+            {
+                "rice_varieties.year": "int(11)",
+                "rice_varieties.variety_name": "varchar(100)",
+                "rice_varieties.suitable_area": "text",
+            },
+        )
 
     def test_fallback_generates_like_filter_for_named_variety_series(self) -> None:
         capability = SQLQuerySQLGenerateCapability()
@@ -200,7 +296,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
                     "mode": "answer",
                     "route_id": "genotype_db",
                     "schema_profile_id": "genotype_profile",
-                    "sql": "SELECT fake_column FROM variety LIMIT 20",
+                    "sql": "SELECT fake_column FROM variety",
                     "tables_used": ["variety"],
                     "columns_used": ["variety.fake_column"],
                     "column_types_used": {"variety.fake_column": "varchar(100)"},
@@ -209,7 +305,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
 
         capability = SQLQuerySQLGenerateCapability(
             llm_text_generator=llm_text_generator,
-            generator=lambda _: "SELECT variety_name FROM variety LIMIT 50",
+            generator=lambda _: "SELECT variety_name FROM variety",
         )
 
         result = asyncio.run(capability.execute(request_for_sql_generate()))
@@ -225,7 +321,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
                     "mode": "answer",
                     "route_id": "genotype_db",
                     "schema_profile_id": "genotype_profile",
-                    "sql": "SELECT variety_name FROM variety LIMIT 20",
+                    "sql": "SELECT variety_name FROM variety",
                     "tables_used": ["variety"],
                     "columns_used": ["variety.variety_name"],
                     "column_types_used": {"variety.variety_name": "text"},
@@ -234,7 +330,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
 
         capability = SQLQuerySQLGenerateCapability(
             llm_text_generator=llm_text_generator,
-            generator=lambda _: "SELECT variety_name FROM variety LIMIT 50",
+            generator=lambda _: "SELECT variety_name FROM variety",
         )
 
         result = asyncio.run(capability.execute(request_for_sql_generate()))
@@ -249,13 +345,13 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
 
         capability = SQLQuerySQLGenerateCapability(
             llm_text_generator=llm_text_generator,
-            generator=lambda _: "SELECT variety_name FROM variety LIMIT 50",
+            generator=lambda _: "SELECT variety_name FROM variety",
         )
 
         result = asyncio.run(capability.execute(request_for_sql_generate()))
 
         self.assertIsNone(result.error)
-        self.assertEqual(result.output_payload["sql"], "SELECT variety_name FROM variety LIMIT 50")
+        self.assertEqual(result.output_payload["sql"], "SELECT variety_name FROM variety")
         self.assertEqual(result.output_payload["generation_source"], "fallback")
         self.assertEqual(result.output_payload["llm_mode"], "parse_failed")
         self.assertTrue(result.output_payload["fallback_used"])
@@ -269,7 +365,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
                     "mode": "answer",
                     "route_id": "genotype_db",
                     "schema_profile_id": "genotype_profile",
-                    "sql": "SELECT variety_name FROM variety WHERE variety_name = '龙粳33' LIMIT 20",
+                    "sql": "SELECT variety_name FROM variety WHERE variety_name = '龙粳33'",
                     "tables_used": ["variety"],
                     "columns_used": ["variety.variety_name"],
                     "column_types_used": {"variety.variety_name": "varchar(100)"},
@@ -311,7 +407,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
         self.assertIn("龙粳33", sql)
         self.assertIn("LIKE '%龙粳33%'", sql)
         self.assertNotIn("variety_name = '龙粳33'", sql)
-        self.assertIn("LIMIT 50", sql)
+        self.assertNotIn("LIMIT", sql)
 
     def test_fallback_generates_rich_approval_detail_sql_for_single_variety(self) -> None:
         capability = SQLQuerySQLGenerateCapability()
@@ -331,6 +427,7 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
         self.assertIn("rice_varieties.suitable_area", sql)
         self.assertIn("rice_varieties.variety_name LIKE '%龙粳18%'", sql)
         self.assertNotIn("rice_varieties.variety_name =", sql)
+        self.assertNotIn("LIMIT", sql)
 
     def test_llm_clarify_returns_interrupt_without_sql(self) -> None:
         async def llm_text_generator(_: str) -> str:
