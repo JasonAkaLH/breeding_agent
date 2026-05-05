@@ -475,7 +475,7 @@ tables:
         expose_to_llm: false
       ref_var_id:
         sql_type: int(11)
-        description: 品种ID，外键，指向variety表
+        description: 品种ID，外键，指向variety表；该关联用于补充基因型品种信息，按品种名查询审定信息时不要把它作为唯一召回条件
         expose_to_llm: true
       year:
         sql_type: int(11)
@@ -1351,7 +1351,7 @@ join_hints:
   left_column: ref_var_id
   right_table: variety
   right_column: variety_id
-  description: 通过品种ID将审定品种水稻与基因型品种信息关联
+  description: 弱关联/辅助富化关系；查询审定品种记录应优先使用 rice_varieties.variety_name LIKE，不能把 ref_var_id = variety.variety_id 作为唯一召回条件
 llm_context_rules:
   max_tables_per_request: 8
   prefer_route_scoped_schema: true

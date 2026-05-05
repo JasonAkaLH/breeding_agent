@@ -2,6 +2,45 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError, createApiClient } from './client';
 
 describe('createApiClient', () => {
+  it('uses cookie credentials for auth and business requests', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' } }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.me();
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/me', expect.objectContaining({ credentials: 'same-origin' }));
+  });
+
+  it('logs in with username password and captcha fields', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' } }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.login({ username: 'alice', password: 'secret', captchaId: 'cap-1', captchaCode: '1234' });
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/login', expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).toEqual({
+      username: 'alice',
+      password: 'secret',
+      captcha_id: 'cap-1',
+      captcha_code: '1234',
+    });
+  });
+
+  it('registers with username password and captcha fields', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'charlie' } }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.register({ username: 'charlie', password: 'charlie1', captchaId: 'cap-1', captchaCode: '1234' });
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/register', expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).toEqual({
+      username: 'charlie',
+      password: 'charlie1',
+      captcha_id: 'cap-1',
+      captcha_code: '1234',
+    });
+  });
+
   it('submits normal chat with capability_id null', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
@@ -81,6 +120,52 @@ describe('createApiClient', () => {
     await api.listConversationTasks('conv-1');
 
     expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/tasks?scope=unfinished', expect.any(Object));
+  });
+
+  it('lists conversations and conversation messages for history restore', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversations: [] }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.listConversations();
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations', expect.any(Object));
+
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ conversation_id: 'conv-1', messages: [] }), { status: 200 }));
+    await api.listConversationMessages('conv-1');
+    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/conversations/conv-1/messages', expect.any(Object));
+  });
+
+  it('deletes a conversation by conversation id', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      conversation_id: 'conv-1',
+      deleted: true,
+      cancelled_task_ids: [],
+      deleted_counts: { conversation: 1 },
+    }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.deleteConversation('conv-1');
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('renames a conversation by conversation id', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      conversation_id: 'conv-1',
+      account_id: 'alice',
+      status: 'active',
+      current_task_id: null,
+      title: '新会话名称',
+      created_at: null,
+      updated_at: null,
+    }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.renameConversation('conv-1', '新会话名称');
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ title: '新会话名称' }),
+    }));
   });
 
   it('exposes only public UI modes', () => {

@@ -110,6 +110,54 @@ class SQLQueryPromptBuildersTest(unittest.TestCase):
         self.assertIn("不要自动添加 LIMIT", prompt)
         self.assertIn("只需要输出SQL语句", prompt)
 
+    def test_overview_prompt_requires_independent_variety_name_recall(self) -> None:
+        context = {
+            "route_id": "variety_overview",
+            "schema_profile_id": "variety_overview_profile",
+            "allowed_tables": ["rice_varieties", "variety", "rice_comp"],
+            "selected_tables": ["rice_varieties", "variety", "rice_comp"],
+            "selected_columns": {
+                "rice_varieties": ["ref_var_id", "year", "approval_num", "variety_name"],
+                "variety": ["variety_id", "variety_name"],
+                "rice_comp": ["variety_id", "variety_name", "all_japonica_comp"],
+            },
+            "selected_column_details": {
+                "rice_varieties": [
+                    {"name": "ref_var_id", "sql_type": "int(11)", "description": "品种ID，外键，指向variety表"},
+                    {"name": "year", "sql_type": "int(11)", "description": "年份"},
+                    {"name": "approval_num", "sql_type": "varchar(100)", "description": "审定编号"},
+                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+                ],
+                "variety": [
+                    {"name": "variety_id", "sql_type": "int(11)", "description": "自增ID"},
+                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+                ],
+                "rice_comp": [
+                    {"name": "variety_id", "sql_type": "int(11)", "description": "品种ID"},
+                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+                    {"name": "all_japonica_comp", "sql_type": "decimal(12,8)", "description": "总粳稻成分"},
+                ],
+            },
+            "join_hints": [
+                {
+                    "left_table": "rice_varieties",
+                    "left_column": "ref_var_id",
+                    "right_table": "variety",
+                    "right_column": "variety_id",
+                    "description": "弱关联，仅用于补充基因型品种信息",
+                }
+            ],
+            "user_question": "查一下龙粳33的品种信息",
+        }
+
+        prompt = build_sql_generation_prompt(context)
+
+        self.assertIn("品种综合概览", prompt)
+        self.assertIn("独立召回", prompt)
+        self.assertIn("*_varieties.variety_name LIKE", prompt)
+        self.assertIn("ref_var_id", prompt)
+        self.assertIn("不能作为唯一召回条件", prompt)
+
     def test_result_filtering_prompt_uses_all_rows_after_token_trim(self) -> None:
         execute_context = {
             "sql": "SELECT variety_name FROM variety WHERE variety_name LIKE '%龙粳33%'",

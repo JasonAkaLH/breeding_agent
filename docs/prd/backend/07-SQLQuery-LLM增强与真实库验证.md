@@ -78,7 +78,7 @@ SQL 生成 prompt 采用 legacy `sql_query_agent` 风格：LLM 主路径只输�
 `build_api_runtime()` 为 SQLQuery 提供独立 LLM 装配参数：
 - `llm_text_generator`：最高优先级，测试或特殊运行时可直接注入文本生成函数；
 - `sql_query_llm_config` / `sql_query_llm_config_path` / `sql_query_llm_client_factory`：用于真实 provider 或 fake client factory；其中 `config_path` 只在 runtime 启动阶段 bootstrap 到 `MAF_CONFIG_*` 环境变量，运行期消费者从环境读取；同一 runtime 的多个 `*_config_path` 必须指向同一启动配置文件，组件级差异 provider 配置应通过显式 config dict / factory 注入；
-- `sql_query_reasoning_effort`：传给结构化 SQLQuery 文本生成调用；
+- SQLQuery 默认跟随主代理通用 `deep_thinking` / `main_agent_thinking_enabled` 与 `main_agent_reasoning_effort` 设置，保持非流式调用且只消费最终 answer；`sql_query_reasoning_effort` 仅作为兼容覆盖入口；
 - `enable_sql_query_llm`：可在 fake backend / 默认自动化测试中显式关闭真实 provider 访问。
 
 同一个 resolved text generator 会同时传给 `sql_query.sql_generate` 与 `sql_query.result_filtering`，确保 SQL 生成和候选结果筛选都先走 LLM 主路径，再按各自规则降级。

@@ -201,6 +201,7 @@ def _build_general_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
     route_context = dict(payload.get("route_context", {}))
     database_schema = str(schema_context.get("database_schema") or "")
     join_hints = _format_join_hints(schema_context.get("join_hints"))
+    overview_recall_guidance = _overview_recall_guidance(str(route_context.get("route_id") or ""))
     return f"""
     生成一个SQL查询来回答这个问题：{query}
     当前节点：sql_query.sql_generate
@@ -215,6 +216,8 @@ def _build_general_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
     ======================================================================================================================================================================
     ## 连接关系
     {join_hints}
+
+    {overview_recall_guidance}
 
     ## 限制
     - 你只能使用当前注入到 `database_schema` 中的表结构生成 SQL；不要引用未出现在 `database_schema` 里的表。
@@ -284,8 +287,21 @@ def _format_join_hints(join_hints: Any) -> str:
         right_table = str(hint.get("right_table") or "")
         right_column = str(hint.get("right_column") or "")
         if left_table and left_column and right_table and right_column:
-            lines.append(f"-- {left_table}.{left_column} 可与 {right_table}.{right_column} 连接")
+            reason = str(hint.get("reason") or hint.get("description") or "").strip()
+            suffix = f"；说明：{reason}" if reason else ""
+            lines.append(f"-- {left_table}.{left_column} 可与 {right_table}.{right_column} 连接{suffix}")
     return "\n    ".join(lines) if lines else "-- 当前注入的表没有必须使用的跨表连接关系"
+
+
+def _overview_recall_guidance(route_id: str) -> str:
+    if route_id != "variety_overview":
+        return ""
+    return """
+    ## 品种综合概览召回策略
+    - 品种综合概览要做“独立召回再合并”：审定品种信息从已注入的 *_varieties 表按各自 `*_varieties.variety_name LIKE '%关键词%'` 召回；基因型/籼粳成分从 `variety.variety_name LIKE '%关键词%'` 再按 `variety.variety_id` 连接 `rice_comp` 召回。
+    - `ref_var_id` / `variety_id` 连接只能作为补充富化关系，不能作为唯一召回条件；不要先用 `variety.variety_name` 找到品种后，再只靠 `ref_var_id = variety_id` 去取审定字段。
+    - 如果同时需要审定库和基因型库信息，优先用 UNION ALL 或等价的单条只读 SELECT/CTE 表达两个独立来源，并保留来源标识，避免某一侧 ID 关联缺失导致另一侧字段全部为 NULL。
+    """.strip()
 
 
 def build_result_filtering_prompt_payload(

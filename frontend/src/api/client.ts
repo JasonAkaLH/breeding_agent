@@ -1,8 +1,15 @@
 import type {
   CancelTaskResponse,
   AnswerInterruptResponse,
+  AuthUserResponse,
   CapabilityListResponse,
+  CaptchaChallengeResponse,
   ChatMode,
+  ConversationListResponse,
+  ConversationMessagesResponse,
+  ConversationSummaryResponse,
+  DeleteConversationResponse,
+  LogoutResponse,
   TaskInterruptsResponse,
   MessageAcceptedResponse,
   ReasoningEffort,
@@ -21,7 +28,7 @@ export interface UiModeOption {
 
 export interface SubmitMessageInput {
   conversationId: string;
-  accountId: string;
+  accountId?: string;
   content: string;
   mode: ChatMode;
   deepThinking?: boolean;
@@ -32,8 +39,17 @@ export interface SubmitMessageInput {
 
 export interface ApiClient {
   uiModes: UiModeOption[];
+  createCaptcha(): Promise<CaptchaChallengeResponse>;
+  login(input: { username: string; password: string; captchaId: string; captchaCode: string }): Promise<AuthUserResponse>;
+  register(input: { username: string; password: string; captchaId: string; captchaCode: string }): Promise<AuthUserResponse>;
+  logout(): Promise<LogoutResponse>;
+  me(): Promise<AuthUserResponse>;
   listCapabilities(): Promise<CapabilityListResponse>;
   submitMessage(input: SubmitMessageInput): Promise<MessageAcceptedResponse>;
+  listConversations(): Promise<ConversationListResponse>;
+  listConversationMessages(conversationId: string): Promise<ConversationMessagesResponse>;
+  deleteConversation(conversationId: string): Promise<DeleteConversationResponse>;
+  renameConversation(conversationId: string, title: string): Promise<ConversationSummaryResponse>;
   listConversationTasks(conversationId: string): Promise<TaskListResponse>;
   getTask(taskId: string): Promise<TaskSummaryResponse>;
   cancelTask(taskId: string): Promise<CancelTaskResponse>;
@@ -74,6 +90,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetcher(`${baseUrl}${path}`, {
       ...init,
+      credentials: init?.credentials ?? 'same-origin',
       headers: {
         'Content-Type': 'application/json',
         ...(init?.headers ?? {}),
@@ -87,6 +104,27 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
 
   return {
     uiModes: UI_MODES,
+    createCaptcha: () => request<CaptchaChallengeResponse>('/api/v1/auth/captcha', { method: 'POST' }),
+    login: (input) => request<AuthUserResponse>('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: input.username,
+        password: input.password,
+        captcha_id: input.captchaId,
+        captcha_code: input.captchaCode,
+      }),
+    }),
+    register: (input) => request<AuthUserResponse>('/api/v1/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: input.username,
+        password: input.password,
+        captcha_id: input.captchaId,
+        captcha_code: input.captchaCode,
+      }),
+    }),
+    logout: () => request<LogoutResponse>('/api/v1/auth/logout', { method: 'POST' }),
+    me: () => request<AuthUserResponse>('/api/v1/auth/me'),
     listCapabilities: () => request<CapabilityListResponse>('/api/v1/capabilities'),
     submitMessage: (input) => {
       const mode = UI_MODES.find((candidate) => candidate.key === input.mode);
@@ -94,7 +132,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
         throw new ApiError(0, null, '当前对话模式不可用，请刷新后重试。');
       }
       const body: SubmitMessageRequest = {
-        account_id: input.accountId,
+        account_id: input.accountId ?? 'session-user',
         content: input.content,
         routing_mode: 'auto',
         capability_id: mode.capabilityId,
@@ -110,6 +148,18 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
         body: JSON.stringify(body),
       });
     },
+    listConversations: () => request<ConversationListResponse>('/api/v1/conversations'),
+    listConversationMessages: (conversationId) => request<ConversationMessagesResponse>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+    ),
+    deleteConversation: (conversationId) => request<DeleteConversationResponse>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}`,
+      { method: 'DELETE' },
+    ),
+    renameConversation: (conversationId, title) => request<ConversationSummaryResponse>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}`,
+      { method: 'PATCH', body: JSON.stringify({ title }) },
+    ),
     listConversationTasks: (conversationId) => request<TaskListResponse>(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/tasks?scope=unfinished`,
     ),
@@ -136,11 +186,14 @@ async function toApiError(response: Response): Promise<ApiError> {
 }
 
 function friendlyErrorMessage(status: number): string {
+  if (status === 401) {
+    return '登录已失效，请重新登录。';
+  }
   if (status === 409) {
     return '当前会话已有任务运行中，请等待完成或取消后再继续。';
   }
   if (status === 400) {
-    return '当前模式不可用，请刷新能力目录后重试。';
+    return '请求参数不正确，请检查后重试。';
   }
   if (status === 404) {
     return '任务不存在或已过期，请重新提交问题。';

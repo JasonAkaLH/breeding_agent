@@ -25,7 +25,7 @@ class SQLQuerySchemaContextPrepareCapability(CapabilityContract):
         upstream = find_dependency_output(request, ("route_id", "schema_profile_id", "user_question"))
         route_id = str(upstream["route_id"])
         allowed_tables = list(upstream.get("allowed_tables", []))
-        max_tables = max(4, len(allowed_tables)) if route_id == "variety_overview" else 4
+        max_tables = max(4, len(allowed_tables)) if route_id == "variety_overview" or upstream.get("no_crop_broad_query") else 4
         schema_request = SchemaContextRequest(
             route_id=route_id,
             schema_profile_id=str(upstream["schema_profile_id"]),

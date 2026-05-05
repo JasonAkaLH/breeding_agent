@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Select, Space, Spin, Switch, Tag, Typography, theme } from 'antd';
+import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
 import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { CapabilityResponse, ChatMode, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse } from './api/types';
+import type { CapabilityResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { applyTaskEvent, createInitialTaskEventState, createSubmittingTaskState, isTaskActive, markTaskCompleted, markTaskFailed, markWaitingInputRequired, type TaskEventState } from './domain/taskEvents';
 import { SqlQueryResultCard } from './components/SqlQueryResultCard';
@@ -42,8 +42,7 @@ interface PendingInterrupt {
   mode: ChatMode;
 }
 
-const DEFAULT_ACCOUNT_ID = 'web-user';
-const CONVERSATION_STORAGE_KEY = 'maf.frontend.conversation_id';
+const CONVERSATION_STORAGE_KEY_PREFIX = 'maf.frontend.conversation_id';
 const WAITING_INPUT_CHECK_DELAY_MS = 8_000;
 const INTERRUPT_FIELD_LABELS: Record<string, string> = {
   crop: '作物类型',
@@ -71,7 +70,8 @@ const REASONING_EFFORT_OPTIONS: { label: string; value: ReasoningEffort }[] = [
 function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING_INPUT_CHECK_DELAY_MS }: AppProps) {
   const api = useMemo(() => apiClient ?? createApiClient(), [apiClient]);
   const createEventSource = useMemo(() => eventSourceFactory ?? createBrowserEventSourceFactory(), [eventSourceFactory]);
-  const [conversationId] = useState(() => loadOrCreateConversationId());
+  const [authUser, setAuthUser] = useState<UserResponse | null | undefined>(undefined);
+  const [conversationId, setConversationId] = useState('');
   const mode: ChatMode = 'chat';
   const [deepThinking, setDeepThinking] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('medium');
@@ -84,26 +84,61 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [unfinishedTasks, setUnfinishedTasks] = useState<TaskSummaryResponse[]>([]);
   const [taskListLoading, setTaskListLoading] = useState(false);
   const [taskListExpanded, setTaskListExpanded] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState<ConversationSummaryResponse[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [stoppingTaskIds, setStoppingTaskIds] = useState<Set<string>>(() => new Set());
+  const [deletingConversationIds, setDeletingConversationIds] = useState<Set<string>>(() => new Set());
+  const [renamingConversationIds, setRenamingConversationIds] = useState<Set<string>>(() => new Set());
   const [capabilities, setCapabilities] = useState<CapabilityResponse[]>([]);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const subscriptionRef = useRef<TaskEventSubscription | null>(null);
   const taskPresentationModesRef = useRef<Map<string, ChatMode>>(new Map());
   const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
 
-  const refreshUnfinishedTasks = useCallback(async (showLoading = false) => {
+  useEffect(() => {
+    let mounted = true;
+    api.me()
+      .then((result) => {
+        if (!mounted) return;
+        setAuthUser(result.user);
+        setConversationId(loadOrCreateConversationId(result.user.username));
+      })
+      .catch(() => {
+        if (mounted) setAuthUser(null);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [api]);
+
+  const refreshUnfinishedTasks = useCallback(async (showLoading = false, targetConversationId = conversationId) => {
+    if (!authUser || !targetConversationId) return;
     if (showLoading) setTaskListLoading(true);
     try {
-      const result = await api.listConversationTasks(conversationId);
+      const result = await api.listConversationTasks(targetConversationId);
       setUnfinishedTasks(result.tasks);
     } catch {
       if (showLoading) setGlobalError('未完成任务列表刷新失败，请稍后重试。');
     } finally {
       if (showLoading) setTaskListLoading(false);
     }
-  }, [api, conversationId]);
+  }, [api, authUser, conversationId]);
+
+  const refreshConversationHistory = useCallback(async () => {
+    if (!authUser) return;
+    setHistoryLoading(true);
+    try {
+      const result = await api.listConversations();
+      setConversationHistory(result.conversations);
+    } catch {
+      setGlobalError('历史会话加载失败，请稍后重试。');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [api, authUser]);
 
   useEffect(() => {
+    if (!authUser) return;
     let mounted = true;
     api.listCapabilities()
       .then((result) => {
@@ -116,9 +151,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mounted = false;
       subscriptionRef.current?.close();
     };
-  }, [api]);
+  }, [api, authUser]);
 
   useEffect(() => {
+    if (!authUser || !conversationId) return;
     void refreshUnfinishedTasks();
     const interval = window.setInterval(() => {
       void refreshUnfinishedTasks();
@@ -128,8 +164,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     };
   }, [refreshUnfinishedTasks]);
 
+  useEffect(() => {
+    if (!authUser) return;
+    void refreshConversationHistory();
+  }, [authUser, refreshConversationHistory]);
+
   const active = isTaskActive(taskState.phase);
-  const sqlHint = /查询|品种|基因型|审定|数据库/.test(input);
 
   useEffect(() => {
     if (!currentTaskId || !active || taskState.phase === 'cancelling') return;
@@ -208,9 +248,143 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     return false;
   }
 
+  async function handleLogin(user: UserResponse) {
+    setAuthUser(user);
+    const nextConversationId = loadOrCreateConversationId(user.username);
+    setConversationId(nextConversationId);
+    setMessages([]);
+    setTaskState(createInitialTaskEventState());
+    setCurrentTaskId(null);
+    setPendingInterrupt(null);
+    try {
+      const result = await api.listConversations();
+      setConversationHistory(result.conversations);
+    } catch {
+      setGlobalError('历史会话加载失败，请稍后重试。');
+    }
+  }
+
+  async function handleLogout() {
+    await api.logout().catch(() => undefined);
+    subscriptionRef.current?.close();
+    setAuthUser(null);
+    setConversationId('');
+    setMessages([]);
+    setConversationHistory([]);
+    setUnfinishedTasks([]);
+    setCurrentTaskId(null);
+    setCurrentAssistantId(null);
+    setPendingInterrupt(null);
+    setTaskState(createInitialTaskEventState());
+    setDeletingConversationIds(new Set());
+    setRenamingConversationIds(new Set());
+  }
+
+  function resetConversationWorkspace(nextConversationId: string) {
+    setConversationId(nextConversationId);
+    setMessages([]);
+    setInput('');
+    setCurrentTaskId(null);
+    setCurrentAssistantId(null);
+    setPendingInterrupt(null);
+    setTaskState(createInitialTaskEventState());
+    setUnfinishedTasks([]);
+    taskPresentationModesRef.current.clear();
+    pendingAssistantPatchesRef.current.clear();
+  }
+
+  async function handleNewConversation() {
+    if (!authUser || active) return;
+    const next = createConversationId();
+    saveConversationId(authUser.username, next);
+    resetConversationWorkspace(next);
+  }
+
+  async function handleSelectConversation(nextConversationId: string) {
+    if (!authUser || active) return;
+    saveConversationId(authUser.username, nextConversationId);
+    if (nextConversationId !== conversationId) {
+      setConversationId(nextConversationId);
+    }
+    setTaskState(createInitialTaskEventState());
+    setCurrentTaskId(null);
+    setCurrentAssistantId(null);
+    setPendingInterrupt(null);
+    subscriptionRef.current?.close();
+    try {
+      const result = await api.listConversationMessages(nextConversationId);
+      setMessages(result.messages.map(messageFromHistory).filter((message): message is ConversationMessage => message !== null));
+      void refreshUnfinishedTasks(false, nextConversationId);
+    } catch {
+      setGlobalError('历史消息加载失败，请稍后重试。');
+    }
+  }
+
+  async function handleDeleteConversation(targetConversationId: string) {
+    if (!authUser || deletingConversationIds.has(targetConversationId)) return;
+    const conversation = conversationHistory.find((item) => item.conversation_id === targetConversationId);
+    const title = conversation?.title?.trim() || targetConversationId.slice(0, 18);
+    if (!window.confirm(`确定删除历史会话“${title}”吗？如果该会话有正在进行中的任务，系统会自动停止后再删除。`)) {
+      return;
+    }
+    setGlobalError(null);
+    setDeletingConversationIds((current) => new Set(current).add(targetConversationId));
+    try {
+      const result = await api.deleteConversation(targetConversationId);
+      setConversationHistory((current) => current.filter((item) => item.conversation_id !== targetConversationId));
+      if (targetConversationId === conversationId) {
+        subscriptionRef.current?.close();
+        subscriptionRef.current = null;
+        const next = createConversationId();
+        saveConversationId(authUser.username, next);
+        resetConversationWorkspace(next);
+      }
+      setGlobalError(result.cancelled_task_ids.length > 0
+        ? '历史会话已删除，相关未完成任务已自动停止。'
+        : '历史会话已删除。');
+    } catch (error) {
+      setGlobalError(friendlyError(error));
+    } finally {
+      setDeletingConversationIds((current) => {
+        const next = new Set(current);
+        next.delete(targetConversationId);
+        return next;
+      });
+    }
+  }
+
+  async function handleRenameConversation(targetConversationId: string) {
+    if (!authUser || renamingConversationIds.has(targetConversationId)) return;
+    const conversation = conversationHistory.find((item) => item.conversation_id === targetConversationId);
+    const currentTitle = conversation?.title?.trim() || targetConversationId.slice(0, 18);
+    const nextTitle = window.prompt('请输入新的会话名称', currentTitle);
+    if (nextTitle === null) return;
+    const trimmedTitle = nextTitle.trim();
+    if (!trimmedTitle) {
+      setGlobalError('会话名称不能为空。');
+      return;
+    }
+    setGlobalError(null);
+    setRenamingConversationIds((current) => new Set(current).add(targetConversationId));
+    try {
+      const renamed = await api.renameConversation(targetConversationId, trimmedTitle);
+      setConversationHistory((current) => current.map((item) => (
+        item.conversation_id === targetConversationId ? renamed : item
+      )));
+    } catch (error) {
+      setGlobalError(friendlyError(error));
+    } finally {
+      setRenamingConversationIds((current) => {
+        const next = new Set(current);
+        next.delete(targetConversationId);
+        return next;
+      });
+    }
+  }
+
   async function handleSubmit() {
     const content = input.trim();
-    if (!content || active) return;
+    if (!authUser || !conversationId || !content || active) return;
     setGlobalError(null);
     if (pendingInterrupt) {
       await handleInterruptAnswer(content, pendingInterrupt);
@@ -232,7 +406,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       const accepted = await api.submitMessage({
         conversationId,
-        accountId: DEFAULT_ACCOUNT_ID,
         content,
         mode,
         deepThinking,
@@ -356,6 +529,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       taskPresentationModesRef.current.delete(taskId);
       subscriptionRef.current?.close();
       void refreshUnfinishedTasks();
+      void refreshConversationHistory();
     } catch {
       setTaskState((state) => markTaskCompleted(state, '任务已完成，但结果加载失败'));
       setGlobalError('结果加载失败，可稍后重试。');
@@ -441,6 +615,27 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const interactionLocked = active || Boolean(pendingInterrupt);
   const inputPlaceholder = pendingInterrupt ? interruptAnswerPlaceholder(pendingInterrupt) : '请输入你的问题，主代理会自动选择能力并规划执行。';
 
+  if (authUser === undefined) {
+    return (
+      <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
+        <Layout className="app-shell auth-shell">
+          <Space direction="vertical" align="center">
+            <Spin />
+            <Typography.Text type="secondary">正在检查登录状态...</Typography.Text>
+          </Space>
+        </Layout>
+      </ConfigProvider>
+    );
+  }
+
+  if (authUser === null) {
+    return (
+      <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
+        <LoginPage api={api} onLogin={handleLogin} />
+      </ConfigProvider>
+    );
+  }
+
   return (
     <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
       <Layout className="app-shell">
@@ -453,11 +648,27 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             <Space wrap>
               <CapabilityBadge capabilityId="main_agent.respond" label="主代理" capabilities={capabilities} />
               <CapabilityBadge capabilityId="sql_query.query" label="SQLQuery" capabilities={capabilities} />
+              <TaskStatusDropdown state={taskState} />
+              <Tag color="green">user: {authUser.username}</Tag>
               <Tag color="geekblue">conversation: {conversationId.slice(0, 12)}</Tag>
+              <Button size="small" onClick={handleLogout}>退出登录</Button>
             </Space>
           </Flex>
         </Layout.Header>
         <Layout.Content className="app-content">
+          <ConversationHistoryPanel
+            conversations={conversationHistory}
+            activeConversationId={conversationId}
+            loading={historyLoading}
+            interactionLocked={interactionLocked}
+            onRefresh={refreshConversationHistory}
+            onNewConversation={handleNewConversation}
+            onSelectConversation={handleSelectConversation}
+            onDeleteConversation={handleDeleteConversation}
+            onRenameConversation={handleRenameConversation}
+            deletingConversationIds={deletingConversationIds}
+            renamingConversationIds={renamingConversationIds}
+          />
           {globalError ? <Alert className="top-alert" type="warning" showIcon closable onClose={() => setGlobalError(null)} message={globalError} /> : null}
           <Card className="conversation-card" styles={{ body: { padding: 0 } }}>
             <div className="conversation-list" aria-label="对话内容">
@@ -467,7 +678,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
               ) : null}
             </div>
           </Card>
-          <TaskStatusBanner state={taskState} />
           <TaskListPanel
             tasks={unfinishedTasks}
             loading={taskListLoading}
@@ -478,7 +688,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             onStop={(taskId) => void handleStopTask(taskId)}
           />
           <Card className="composer-card">
-            {sqlHint ? <Alert className="mode-hint" type="info" showIcon message="主代理会自动判断是否需要调用 SQLQuery，无需手动切换模式。" /> : null}
             <Space direction="vertical" size="middle" className="composer-space">
               {pendingInterrupt ? <InterruptInputBanner interrupt={pendingInterrupt} onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
               <Input.TextArea
@@ -550,11 +759,235 @@ function CapabilityBadge({ capabilityId, label, capabilities }: { capabilityId: 
   return <Badge status={active ? 'success' : 'default'} text={`${label}${active ? '可用' : '未确认'}`} />;
 }
 
+function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (user: UserResponse) => void | Promise<void> }) {
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [captchaCode, setCaptchaCode] = useState('');
+  const [captchaId, setCaptchaId] = useState('');
+  const [captchaSvg, setCaptchaSvg] = useState('');
+  const [loadingCaptcha, setLoadingCaptcha] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshCaptcha = useCallback(async () => {
+    setLoadingCaptcha(true);
+    try {
+      const challenge = await api.createCaptcha();
+      setCaptchaId(challenge.captcha_id);
+      setCaptchaSvg(challenge.image_svg);
+      setCaptchaCode('');
+    } catch {
+      setError('验证码加载失败，请刷新重试。');
+    } finally {
+      setLoadingCaptcha(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refreshCaptcha();
+  }, [refreshCaptcha]);
+
+  const trimmedUsername = username.trim();
+  const passwordHasLetterAndDigit = /[A-Za-z]/.test(password) && /\d/.test(password);
+  const passwordPolicyOk = password.length >= 8 && passwordHasLetterAndDigit;
+  const registerPasswordMismatch = authMode === 'register' && confirmPassword.length > 0 && password !== confirmPassword;
+  const canSubmit = authMode === 'login'
+    ? Boolean(trimmedUsername && password && captchaCode.length === 4 && captchaId)
+    : Boolean(trimmedUsername && passwordPolicyOk && password === confirmPassword && captchaCode.length === 4 && captchaId);
+
+  function switchAuthMode(nextMode: 'login' | 'register') {
+    setAuthMode(nextMode);
+    setPassword('');
+    setConfirmPassword('');
+    setCaptchaCode('');
+    setError(null);
+  }
+
+  async function submitAuth() {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = authMode === 'login' ? await api.login({
+        username: trimmedUsername,
+        password,
+        captchaId,
+        captchaCode,
+      }) : await api.register({
+        username: trimmedUsername,
+        password,
+        captchaId,
+        captchaCode,
+      });
+      await onLogin(result.user);
+    } catch {
+      setError(authMode === 'login' ? '登录失败，请检查用户名、密码和验证码。' : '创建用户失败，请检查用户名、密码规则和验证码。');
+      void refreshCaptcha();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Layout className="app-shell auth-shell">
+      <Card className="login-card" title={authMode === 'login' ? '登录业务对话台' : '创建业务对话台用户'}>
+        <Space direction="vertical" size="middle" className="login-form">
+          {error ? <Alert type="error" showIcon message={error} /> : null}
+          <Input
+            aria-label="用户名"
+            placeholder="用户名"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
+          />
+          <Input.Password
+            aria-label="密码"
+            placeholder="密码"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+          />
+          {authMode === 'register' ? (
+            <>
+              <Input.Password
+                aria-label="确认密码"
+                placeholder="确认密码"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                onPressEnter={() => void submitAuth()}
+                autoComplete="new-password"
+              />
+              <Typography.Text type={passwordPolicyOk ? 'success' : 'secondary'}>
+                密码至少 8 位，并且必须同时包含字母和数字。
+              </Typography.Text>
+              {registerPasswordMismatch ? <Typography.Text type="danger">两次输入的密码不一致。</Typography.Text> : null}
+            </>
+          ) : null}
+          <Space align="center" className="captcha-row">
+            <Input
+              aria-label="4位验证码"
+              placeholder="4位验证码"
+              value={captchaCode}
+              maxLength={4}
+              onChange={(event) => setCaptchaCode(event.target.value.replace(/\D/g, '').slice(0, 4))}
+              onPressEnter={() => void submitAuth()}
+            />
+            <div className="captcha-image" aria-label="验证码图片" dangerouslySetInnerHTML={{ __html: captchaSvg }} />
+            <Button onClick={() => void refreshCaptcha()} loading={loadingCaptcha}>刷新</Button>
+          </Space>
+          <Button
+            type="primary"
+            block
+            onClick={() => void submitAuth()}
+            loading={submitting}
+            disabled={!canSubmit}
+          >
+            {authMode === 'login' ? '登录' : '创建用户并登录'}
+          </Button>
+          {authMode === 'login' ? (
+            <Button type="link" block onClick={() => switchAuthMode('register')}>创建新用户</Button>
+          ) : (
+            <Button type="link" block onClick={() => switchAuthMode('login')}>返回登录</Button>
+          )}
+        </Space>
+      </Card>
+    </Layout>
+  );
+}
+
+function ConversationHistoryPanel({
+  conversations,
+  activeConversationId,
+  loading,
+  interactionLocked,
+  deletingConversationIds,
+  renamingConversationIds,
+  onRefresh,
+  onNewConversation,
+  onSelectConversation,
+  onDeleteConversation,
+  onRenameConversation,
+}: {
+  conversations: ConversationSummaryResponse[];
+  activeConversationId: string;
+  loading: boolean;
+  interactionLocked: boolean;
+  deletingConversationIds: Set<string>;
+  renamingConversationIds: Set<string>;
+  onRefresh: () => void;
+  onNewConversation: () => void;
+  onSelectConversation: (conversationId: string) => void;
+  onDeleteConversation: (conversationId: string) => void;
+  onRenameConversation: (conversationId: string) => void;
+}) {
+  return (
+    <Card
+      className="history-card"
+      title={(
+        <Space size="small">
+          <span>历史会话</span>
+          <Tag>{conversations.length}</Tag>
+        </Space>
+      )}
+      extra={(
+        <Space size="small">
+          <Button size="small" onClick={onRefresh} loading={loading}>刷新</Button>
+          <Button size="small" type="primary" onClick={onNewConversation} disabled={interactionLocked}>新建对话</Button>
+        </Space>
+      )}
+    >
+      {conversations.length === 0 ? (
+        <Typography.Text type="secondary">暂无历史会话。当前对话发送消息后会自动归档到你的用户名下。</Typography.Text>
+      ) : (
+        <Space direction="vertical" size="small" className="history-list">
+          {conversations.map((conversation) => {
+            const title = conversation.title?.trim() || conversation.conversation_id.slice(0, 18);
+            return (
+              <div key={conversation.conversation_id} className="history-row">
+                <Button
+                  block
+                  className="history-item"
+                  type={conversation.conversation_id === activeConversationId ? 'primary' : 'default'}
+                  disabled={interactionLocked}
+                  onClick={() => onSelectConversation(conversation.conversation_id)}
+                >
+                  {title}
+                </Button>
+                <Button
+                  size="small"
+                  aria-label={`重命名历史会话 ${title}`}
+                  loading={renamingConversationIds.has(conversation.conversation_id)}
+                  disabled={loading}
+                  onClick={() => onRenameConversation(conversation.conversation_id)}
+                >
+                  重命名
+                </Button>
+                <Button
+                  danger
+                  size="small"
+                  aria-label={`删除历史会话 ${title}`}
+                  loading={deletingConversationIds.has(conversation.conversation_id)}
+                  disabled={loading}
+                  onClick={() => onDeleteConversation(conversation.conversation_id)}
+                >
+                  删除
+                </Button>
+              </div>
+            );
+          })}
+        </Space>
+      )}
+    </Card>
+  );
+}
+
 function EmptyWelcome() {
   return (
     <div className="empty-welcome">
       <Typography.Title level={4}>开始一次业务问答</Typography.Title>
-      <Typography.Paragraph type="secondary">直接描述你的问题即可；主代理会自动判断是否需要调用 SQLQuery 等能力并组织结果。</Typography.Paragraph>
+      <Typography.Paragraph type="secondary">直接描述你的问题即可。</Typography.Paragraph>
     </div>
   );
 }
@@ -819,17 +1252,99 @@ function ReasoningBox({ content, complete }: { content: string; complete?: boole
   );
 }
 
-function TaskStatusBanner({ state }: { state: TaskEventState }) {
-  const type = state.phase === 'failed' ? 'error' : state.phase === 'cancelled' ? 'warning' : state.phase === 'completed' ? 'success' : 'info';
-  return <Alert className="task-status" type={type} showIcon message={state.statusText} description={state.errorMessage ?? undefined} />;
+function TaskStatusDropdown({ state }: { state: TaskEventState }) {
+  const type = taskStatusAlertType(state);
+  return (
+    <Popover
+      trigger="click"
+      placement="bottomRight"
+      title="任务进程"
+      content={(
+        <div className="task-status-popover">
+          <Alert
+            className="task-status-detail"
+            type={type}
+            showIcon
+            message={state.statusText}
+            description={state.errorMessage ?? undefined}
+          />
+          {state.currentActivityText ? <Typography.Text type="secondary">{state.currentActivityText}</Typography.Text> : null}
+        </div>
+      )}
+    >
+      <Button size="small" aria-label="任务进程">
+        <Space size="small">
+          <Badge status={taskStatusBadgeStatus(state)} />
+          <span>任务进程</span>
+          <Tag color={taskStatusTagColor(state)}>{taskStatusPhaseLabel(state)}</Tag>
+        </Space>
+      </Button>
+    </Popover>
+  );
 }
 
-function loadOrCreateConversationId(): string {
-  const existing = localStorage.getItem(CONVERSATION_STORAGE_KEY);
+function taskStatusAlertType(state: TaskEventState): 'success' | 'info' | 'warning' | 'error' {
+  if (state.phase === 'failed') return 'error';
+  if (state.phase === 'cancelled') return 'warning';
+  if (state.phase === 'completed') return 'success';
+  return 'info';
+}
+
+function taskStatusBadgeStatus(state: TaskEventState): 'success' | 'processing' | 'default' | 'error' | 'warning' {
+  if (state.phase === 'failed') return 'error';
+  if (state.phase === 'cancelled' || state.phase === 'cancelling' || state.phase === 'waiting_for_input') return 'warning';
+  if (isTaskActive(state.phase)) return 'processing';
+  if (state.phase === 'completed') return 'success';
+  return 'default';
+}
+
+function taskStatusTagColor(state: TaskEventState): string {
+  if (state.phase === 'failed') return 'red';
+  if (state.phase === 'cancelled' || state.phase === 'cancelling' || state.phase === 'waiting_for_input') return 'orange';
+  if (isTaskActive(state.phase)) return 'processing';
+  if (state.phase === 'completed') return 'green';
+  return 'default';
+}
+
+function taskStatusPhaseLabel(state: TaskEventState): string {
+  if (state.phase === 'idle') return '空闲';
+  if (state.phase === 'completed') return '完成';
+  if (state.phase === 'failed') return '失败';
+  if (state.phase === 'cancelled') return '已取消';
+  if (state.phase === 'waiting_for_input') return '待补充';
+  if (state.phase === 'cancelling') return '停止中';
+  return '运行中';
+}
+
+function messageFromHistory(message: MessageResponse): ConversationMessage | null {
+  if (message.role !== 'user' && message.role !== 'assistant') return null;
+  return {
+    id: message.message_id,
+    role: message.role,
+    content: message.content,
+    mode: 'chat',
+    finalContentLoaded: message.role === 'assistant',
+  };
+}
+
+function conversationStorageKey(username: string): string {
+  return `${CONVERSATION_STORAGE_KEY_PREFIX}.${username}`;
+}
+
+function loadOrCreateConversationId(username: string): string {
+  const existing = localStorage.getItem(conversationStorageKey(username));
   if (existing) return existing;
-  const created = `conv-web-${crypto.randomUUID?.() ?? Math.random().toString(16).slice(2)}`;
-  localStorage.setItem(CONVERSATION_STORAGE_KEY, created);
+  const created = createConversationId();
+  saveConversationId(username, created);
   return created;
+}
+
+function saveConversationId(username: string, conversationId: string): void {
+  localStorage.setItem(conversationStorageKey(username), conversationId);
+}
+
+function createConversationId(): string {
+  return `conv-web-${crypto.randomUUID?.() ?? Math.random().toString(16).slice(2)}`;
 }
 
 function makeClientId(prefix: string): string {

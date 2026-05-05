@@ -26,7 +26,7 @@ export function parseTaskEventData(data: string): TaskEventEnvelope | null {
 
 export function createBrowserEventSourceFactory(): EventSourceFactory {
   return (url, handlers) => {
-    const source = new EventSource(url);
+    const source = new EventSource(url, { withCredentials: true });
     source.onmessage = (event) => {
       const parsed = parseTaskEventData(event.data);
       if (parsed) {

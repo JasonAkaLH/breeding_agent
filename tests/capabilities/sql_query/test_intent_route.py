@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 
 from src.capabilities.sql_query.intent_route import SQLQueryIntentRouteCapability
@@ -78,11 +79,126 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
         self.assertEqual(result.output_payload["route_id"], "genotype_db")
         self.assertEqual(result.output_payload["route_resolution_strategy"], "explicit_route_alias")
 
-    def test_approval_route_without_crop_triggers_interrupt(self) -> None:
+    def test_approval_route_without_crop_uses_broad_approval_query(self) -> None:
         capability = SQLQueryIntentRouteCapability()
         request = make_request("sql_query.intent_route", input_payload={"user_question": "查询近五年审定品种有哪些"})
 
         result = asyncio.run(capability.execute(request))
 
-        self.assertIsNotNone(result.interrupt)
-        self.assertEqual(result.interrupt.reason_code, "crop_not_resolved")
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.output_payload["route_id"], "approval_variety_db")
+        self.assertIsNone(result.output_payload["inferred_crop"])
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "no_crop_approval_broad")
+        self.assertTrue(result.output_payload["no_crop_broad_query"])
+        self.assertEqual(
+            set(result.output_payload["allowed_tables"]),
+            {"corn_varieties", "rice_varieties", "cotton_varieties", "wheat_varieties", "soybean_varieties"},
+        )
+        self.assertTrue(result.output_payload["candidate_routes"])
+
+    def test_composite_approval_and_genotype_question_marks_decomposition(self) -> None:
+        capability = SQLQueryIntentRouteCapability()
+        request = make_request(
+            "sql_query.intent_route",
+            input_payload={"user_question": "龙粳33的审定信息和基因型信息都查一下"},
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.interrupt)
+        self.assertTrue(result.output_payload["needs_decomposition"])
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "composite_multi_route")
+        self.assertEqual(
+            [subtask["route_hint"] for subtask in result.output_payload["subquestions"]],
+            ["approval_variety_db", "genotype_db"],
+        )
+
+    def test_variety_info_and_gene_info_question_marks_decomposition(self) -> None:
+        capability = SQLQueryIntentRouteCapability()
+        request = make_request(
+            "sql_query.intent_route",
+            input_payload={"user_question": "你给我查一下龙粳33的品种信息和基因信息"},
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.interrupt)
+        self.assertTrue(result.output_payload["needs_decomposition"])
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "composite_multi_route")
+        self.assertEqual(
+            [subtask["route_hint"] for subtask in result.output_payload["subquestions"]],
+            ["approval_variety_db", "genotype_db"],
+        )
+
+    def test_route_hint_can_select_public_macro_subtask_route(self) -> None:
+        capability = SQLQueryIntentRouteCapability()
+        request = make_request(
+            "sql_query.intent_route",
+            input_payload={
+                "user_question": "查询龙粳33的基因型信息",
+                "route_hint": "genotype_db",
+                "subtask_label": "基因型信息",
+                "parent_question": "龙粳33的审定信息和基因型信息都查一下",
+            },
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.output_payload["route_id"], "genotype_db")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "route_hint")
+        self.assertEqual(result.output_payload["subtask_label"], "基因型信息")
+        self.assertEqual(result.output_payload["parent_question"], "龙粳33的审定信息和基因型信息都查一下")
+
+    def test_valid_llm_semantic_router_can_select_supported_route(self) -> None:
+        prompts: list[str] = []
+
+        async def semantic_router(prompt: str) -> str:
+            prompts.append(prompt)
+            return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
+
+        capability = SQLQueryIntentRouteCapability(semantic_text_generator=semantic_router)
+        request = make_request("sql_query.intent_route", input_payload={"user_question": "帮我看看这个材料的分型信息"})
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.output_payload["route_id"], "genotype_db")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "llm_semantic")
+        self.assertTrue(result.output_payload["llm_router_used"])
+        self.assertIn("route_id", prompts[0])
+
+    def test_semantic_router_receives_capability_request_when_supported(self) -> None:
+        seen_metadata: list[dict] = []
+
+        async def semantic_router(prompt: str, *, request) -> str:
+            seen_metadata.append(dict(request.metadata))
+            return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
+
+        capability = SQLQueryIntentRouteCapability(semantic_text_generator=semantic_router)
+        request = make_request(
+            "sql_query.intent_route",
+            input_payload={"user_question": "帮我看看这个材料的分型信息"},
+            metadata={"deep_thinking": True, "main_agent_reasoning_effort": "medium"},
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.output_payload["route_id"], "genotype_db")
+        self.assertEqual(seen_metadata, [{"deep_thinking": True, "main_agent_reasoning_effort": "medium"}])
+
+    def test_invalid_llm_semantic_router_output_falls_back_to_deterministic_route(self) -> None:
+        def semantic_router(_prompt: str) -> str:
+            return json.dumps({"intent": "database", "route_id": "evil_db"}, ensure_ascii=False)
+
+        capability = SQLQueryIntentRouteCapability(semantic_text_generator=semantic_router)
+        request = make_request("sql_query.intent_route", input_payload={"user_question": "查询某个品种的基因型信息"})
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.output_payload["route_id"], "genotype_db")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "keyword_score")
+        self.assertFalse(result.output_payload["llm_router_used"])
+        self.assertEqual(result.output_payload["llm_router_fallback_reason"], "unsupported_route_id")

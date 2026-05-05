@@ -1,6 +1,24 @@
 export type ChatMode = 'chat' | 'sql_query';
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
+export interface CaptchaChallengeResponse {
+  captcha_id: string;
+  image_svg: string;
+  expires_in_seconds: number;
+}
+
+export interface UserResponse {
+  username: string;
+}
+
+export interface AuthUserResponse {
+  user: UserResponse;
+}
+
+export interface LogoutResponse {
+  logged_out: boolean;
+}
+
 export interface SubmitMessageRequest {
   account_id: string;
   content: string;
@@ -35,6 +53,46 @@ export interface TaskSummaryResponse {
 export interface TaskListResponse {
   conversation_id: string;
   tasks: TaskSummaryResponse[];
+}
+
+export interface ConversationSummaryResponse {
+  conversation_id: string;
+  account_id: string;
+  status: string;
+  current_task_id: string | null;
+  title: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ConversationListResponse {
+  conversations: ConversationSummaryResponse[];
+}
+
+export interface RenameConversationRequest {
+  title: string;
+}
+
+export interface MessageResponse {
+  message_id: string;
+  conversation_id: string;
+  role: 'user' | 'assistant' | 'system' | string;
+  content: string;
+  task_id: string | null;
+  stream_status: string | null;
+  created_at: string | null;
+}
+
+export interface ConversationMessagesResponse {
+  conversation_id: string;
+  messages: MessageResponse[];
+}
+
+export interface DeleteConversationResponse {
+  conversation_id: string;
+  deleted: boolean;
+  cancelled_task_ids: string[];
+  deleted_counts: Record<string, number>;
 }
 
 export interface TaskNodeResponse {

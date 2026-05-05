@@ -61,7 +61,7 @@ Phase 5.5 首轮后，SQLQuery 内部已经具备可注入的 LLM seam；Phase 8
 - 通用子代理未接入 LLM
 - SQLQuery 的 `sql_generate` 已支持注入 `llm_text_generator` 走结构化 LLM 输出；真实 API runtime 启动时会先把 `config.yaml` bootstrap 到环境变量，再从环境创建文本生成器，fake / unittest 路径可显式关闭或注入 fake
 - SQLQuery 的 `result_filtering` 已支持注入同一个 `llm_text_generator` 走结构化 LLM 结果筛选；调用前会按 `trim_max_tokens` 从最新行开始裁剪候选数据 token 预算，未配置、禁用或失败时仍保守保留候选表格 / 后过滤结果
-- `build_api_runtime()` 提供 `sql_query_llm_config`、`sql_query_llm_config_path`、`sql_query_llm_client_factory`、`sql_query_reasoning_effort` 与 `enable_sql_query_llm`，其中 `*_config_path` 是启动期 bootstrap seam，运行期不重复读取 YAML；同一个 runtime 的多个 `*_config_path` 必须解析到同一个文件，如需组件级不同 provider 应使用显式 `config` dict / factory；真实运行、手工验证与自动化测试路径可明确区分
+- `build_api_runtime()` 提供 `sql_query_llm_config`、`sql_query_llm_config_path`、`sql_query_llm_client_factory` 与 `enable_sql_query_llm`，SQLQuery 默认跟随主代理通用 thinking / `main_agent_reasoning_effort` 设置，`sql_query_reasoning_effort` 仅作为兼容覆盖入口；其中 `*_config_path` 是启动期 bootstrap seam，运行期不重复读取 YAML；同一个 runtime 的多个 `*_config_path` 必须解析到同一个文件，如需组件级不同 provider 应使用显式 `config` dict / factory；真实运行、手工验证与自动化测试路径可明确区分
 
 ---
 

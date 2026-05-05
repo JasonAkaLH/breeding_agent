@@ -122,6 +122,42 @@ class SQLQuerySchemaContextPrepareTest(unittest.TestCase):
         ]:
             self.assertIn(column, selected)
 
+    def test_approval_without_crop_builds_broad_context_across_all_approval_tables(self) -> None:
+        capability = SQLQuerySchemaContextPrepareCapability()
+        request = make_request(
+            "sql_query.schema_context_prepare",
+            dependency_outputs={
+                "intent": {
+                    "route_id": "approval_variety_db",
+                    "schema_profile_id": "approval_variety_profile",
+                    "sql_policy_profile": "strict_readonly_mysql",
+                    "allowed_tables": [
+                        "corn_varieties",
+                        "rice_varieties",
+                        "cotton_varieties",
+                        "wheat_varieties",
+                        "soybean_varieties",
+                    ],
+                    "user_question": "查询近五年审定品种有哪些",
+                    "inferred_crop": None,
+                    "no_crop_broad_query": True,
+                    "route_resolution_strategy": "no_crop_approval_broad",
+                }
+            },
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(
+            set(result.output_payload["selected_tables"]),
+            {"corn_varieties", "rice_varieties", "cotton_varieties", "wheat_varieties", "soybean_varieties"},
+        )
+        metadata = result.output_payload["metadata"]
+        self.assertTrue(metadata["no_crop_broad_query"])
+        self.assertIn("all approval crop tables", metadata["route_notes"][0])
+
     def test_approval_schema_exposes_all_llm_visible_columns_for_llm_selection(self) -> None:
         capability = SQLQuerySchemaContextPrepareCapability()
         request = make_request(

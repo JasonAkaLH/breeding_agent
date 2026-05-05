@@ -41,6 +41,21 @@ _APPROVAL_LIST_COLUMNS = (
     "suitable_area",
 )
 
+_OVERVIEW_APPROVAL_FIELDS = (
+    ("crop_name", ("crop_name",)),
+    ("variety_name", ("variety_name",)),
+    ("approval_num", ("approval_num",)),
+    ("year", ("year",)),
+    ("applicant", ("applicant",)),
+    ("breeder", ("breeder",)),
+    ("variety_source", ("variety_source",)),
+    ("characteristics", ("characteristics", "chars")),
+    ("yield_performance", ("yield_performance", "yield_perf")),
+    ("cultivation_tips", ("cultivation_tips", "cult_tips")),
+    ("suitable_area", ("suitable_area", "suit_area")),
+    ("approval_opinion", ("approval_opinion", "appr_opin")),
+)
+
 
 class SQLQuerySQLGenerateCapability(CapabilityContract):
     capability_id = "sql_query.sql_generate"
@@ -66,7 +81,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             task_meta={"conversation_id": request.conversation_id, "task_id": request.task_id},
         )
         try:
-            raw_output = await call_text_generator(self._llm_text_generator, prompt)
+            raw_output = await call_text_generator(self._llm_text_generator, prompt, request=request)
         except Exception as exc:
             return self._fallback_result(
                 request,
@@ -134,6 +149,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         self._validate_columns_used(context, columns_used)
         self._validate_sql_column_references(context, sql, tables_used=tables_used)
         self._validate_variety_name_matching_policy(sql)
+        self._validate_variety_overview_recall_policy(context, sql, tables_used=tables_used)
         column_types_used = self._validate_column_types_used(context, llm_payload.get("column_types_used"), columns_used)
 
         output = {
@@ -635,6 +651,10 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
         selected_tables = {str(table) for table in context.get("selected_tables", [])}
         table_scope = allowed_tables or selected_tables
+        selected_columns = {
+            str(table): {str(column) for column in list(columns)}
+            for table, columns in dict(context.get("selected_columns", {})).items()
+        }
         term = self._extract_variety_search_term(str(context.get("user_question") or ""))
         safe_term = self._safe_search_literal(term) if term else None
 
@@ -645,29 +665,11 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         )
         selects: list[str] = []
         for table in approval_tables:
-            if table == "rice_varieties" and {"variety", "rice_comp"}.issubset(table_scope):
-                where = self._where_search_term(
-                    safe_term,
-                    ("rice_varieties.variety_name",),
-                )
-                selects.append(
-                    "SELECT 'approval_variety_db' AS source_library, "
-                    "rice_varieties.crop_name, rice_varieties.variety_name, rice_varieties.approval_num, "
-                    "rice_varieties.year, rice_varieties.applicant, rice_varieties.breeder, "
-                    "variety.variety_id AS genotype_variety_id, "
-                    "rice_comp.all_indica_comp, rice_comp.all_japonica_comp, rice_comp.indica_japonica_mix_comp "
-                    "FROM rice_varieties "
-                    "LEFT JOIN variety ON rice_varieties.ref_var_id = variety.variety_id "
-                    "LEFT JOIN rice_comp ON variety.variety_id = rice_comp.variety_id"
-                    f"{where}"
-                )
-                continue
-
+            approval_projection = self._overview_approval_projection(table, selected_columns.get(table, set()))
             where = self._where_search_term(safe_term, (f"{table}.variety_name",))
             selects.append(
                 "SELECT 'approval_variety_db' AS source_library, "
-                f"{table}.crop_name, {table}.variety_name, {table}.approval_num, "
-                f"{table}.year, {table}.applicant, {table}.breeder, "
+                f"{approval_projection}, "
                 "NULL AS genotype_variety_id, "
                 "NULL AS all_indica_comp, NULL AS all_japonica_comp, NULL AS indica_japonica_mix_comp "
                 f"FROM {table}"
@@ -688,6 +690,8 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 "SELECT 'genotype_db' AS source_library, "
                 "NULL AS crop_name, variety.variety_name, NULL AS approval_num, "
                 "NULL AS year, NULL AS applicant, NULL AS breeder, "
+                "NULL AS variety_source, NULL AS characteristics, NULL AS yield_performance, "
+                "NULL AS cultivation_tips, NULL AS suitable_area, NULL AS approval_opinion, "
                 "variety.variety_id AS genotype_variety_id, "
                 f"{rice_comp_projection} "
                 "FROM variety"
@@ -698,6 +702,18 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         if not selects:
             return "SELECT COUNT(*) AS total FROM variety"
         return " UNION ALL ".join(selects)
+
+    def _overview_approval_projection(self, table: str, available_columns: set[str]) -> str:
+        expressions: list[str] = []
+        for output_name, candidate_columns in _OVERVIEW_APPROVAL_FIELDS:
+            column = next((candidate for candidate in candidate_columns if candidate in available_columns), None)
+            if column is None:
+                expressions.append(f"NULL AS {output_name}")
+            elif column == output_name:
+                expressions.append(f"{table}.{column}")
+            else:
+                expressions.append(f"{table}.{column} AS {output_name}")
+        return ", ".join(expressions)
 
     def _extract_variety_search_term(self, user_question: str) -> str | None:
         normalized = str(user_question or "").replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
@@ -799,3 +815,54 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 "validation_failed",
                 "SQL must use LIKE instead of strict equality when filtering variety_name.",
             )
+
+    def _validate_variety_overview_recall_policy(
+        self,
+        context: dict[str, Any],
+        sql: str,
+        *,
+        tables_used: list[str],
+    ) -> None:
+        if context.get("route_id") != "variety_overview":
+            return
+        term = self._extract_variety_search_term(str(context.get("user_question") or ""))
+        if not term:
+            return
+        approval_tables = [table for table in tables_used if str(table).endswith("_varieties")]
+        if not approval_tables:
+            return
+
+        aliases_by_table = self._aliases_by_table(sql)
+        missing_direct_recall = [
+            table
+            for table in approval_tables
+            if not self._has_qualified_variety_name_like(sql, aliases_by_table.get(table, {table}))
+        ]
+        if not missing_direct_recall:
+            return
+
+        raise LLMOutputError(
+            "validation_failed",
+            (
+                "variety_overview SQL must independently recall approval rows through each "
+                "*_varieties.variety_name LIKE predicate; ref_var_id/variety_id joins cannot be the only "
+                f"approval recall path for: {', '.join(missing_direct_recall)}."
+            ),
+        )
+
+    def _aliases_by_table(self, sql: str) -> dict[str, set[str]]:
+        aliases = self._extract_table_aliases(sql)
+        result: dict[str, set[str]] = {}
+        for alias, table in aliases.items():
+            result.setdefault(table, set()).add(alias)
+            result.setdefault(table, set()).add(table)
+        return result
+
+    def _has_qualified_variety_name_like(self, sql: str, qualifiers: set[str]) -> bool:
+        for qualifier in qualifiers:
+            if not qualifier:
+                continue
+            pattern = rf"\b`?{re.escape(qualifier)}`?\.`?variety_name`?\s+like\s+(?:'[^']*'|\"[^\"]*\")"
+            if re.search(pattern, sql, flags=re.I):
+                return True
+        return False

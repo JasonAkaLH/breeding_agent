@@ -34,7 +34,6 @@ body {
 }
 
 .top-alert,
-.task-status,
 .task-list-card,
 .composer-card,
 .conversation-card {
@@ -247,6 +246,17 @@ body {
   color: #6b7280;
 }
 
+.task-status-popover {
+  display: flex;
+  width: min(360px, calc(100vw - 48px));
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-status-detail {
+  margin: 0;
+}
+
 .activity-notice {
   display: flex;
   align-items: center;
@@ -285,10 +295,6 @@ body {
 
 .composer-space {
   width: 100%;
-}
-
-.mode-hint {
-  margin-bottom: 12px;
 }
 
 .interrupt-input-banner {
@@ -368,4 +374,66 @@ body {
 
 .result-warning {
   margin-top: 12px;
+}
+
+.auth-shell {
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: #f3f6fb;
+}
+
+.login-card {
+  width: min(420px, 100%);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
+}
+
+.login-form,
+.history-list {
+  width: 100%;
+}
+
+.captcha-row {
+  width: 100%;
+}
+
+.captcha-row .ant-input {
+  width: 128px;
+}
+
+.captcha-image {
+  display: flex;
+  min-width: 96px;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid #d9e2f2;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.history-card {
+  margin-bottom: 16px;
+}
+
+.history-card .ant-card-head {
+  min-height: 44px;
+}
+
+.history-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-item {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
 }

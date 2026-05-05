@@ -173,6 +173,42 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("恶意替换", str(plan.nodes[0].input_payload))
         self.assertNotIn("恶意替换", str(plan.nodes[-1].input_payload))
 
+    async def test_sql_query_payload_policy_allows_safe_route_and_subtask_hints(self) -> None:
+        def planner(_prompt: str) -> str:
+            return json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "node_id": "query_genotype_info",
+                            "capability_id": "sql_query.query",
+                            "input_payload": {
+                                "user_question": "恶意替换查询",
+                                "route_hint": "genotype_db",
+                                "subtask_label": "基因型信息",
+                                "parent_question": "龙粳33的审定信息和基因型信息都查一下",
+                                "allowed_tables": ["should_not_pass"],
+                            },
+                        }
+                    ]
+                }
+            )
+
+        plan = await self.make_provider(planner).build_plan(
+            OrchestrationRequest(
+                task_id="task-sql-hints",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="龙粳33的审定信息和基因型信息都查一下",
+            )
+        )
+
+        intent_node = plan.node_by_id("task-sql-hints:query_genotype_info:intent_route")
+        self.assertEqual(intent_node.input_payload["user_question"], "龙粳33的审定信息和基因型信息都查一下")
+        self.assertEqual(intent_node.input_payload["route_hint"], "genotype_db")
+        self.assertEqual(intent_node.input_payload["subtask_label"], "基因型信息")
+        self.assertEqual(intent_node.input_payload["parent_question"], "龙粳33的审定信息和基因型信息都查一下")
+        self.assertNotIn("allowed_tables", intent_node.input_payload)
+
     async def test_custom_payload_allowlist_preserves_only_allowed_planner_fields(self) -> None:
         self.registry.register(
             CapabilityDescriptor(

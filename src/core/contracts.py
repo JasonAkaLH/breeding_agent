@@ -6,8 +6,11 @@ from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 from .enums import TaskStatus
 from .models import (
     Artifact,
+    AuthSession,
+    AuthUser,
     Checkpoint,
     Conversation,
+    CaptchaChallenge,
     EventRecord,
     Interrupt,
     InterruptAnswer,
@@ -58,9 +61,25 @@ class CapabilityExecutionResult:
 
 @runtime_checkable
 class StoragePort(Protocol):
+    async def save_auth_user(self, user: AuthUser) -> AuthUser: ...
+
+    async def get_auth_user(self, username: str) -> AuthUser | None: ...
+
+    async def save_captcha_challenge(self, challenge: CaptchaChallenge) -> CaptchaChallenge: ...
+
+    async def get_captcha_challenge(self, captcha_id: str) -> CaptchaChallenge | None: ...
+
+    async def save_auth_session(self, session: AuthSession) -> AuthSession: ...
+
+    async def get_auth_session(self, session_id: str) -> AuthSession | None: ...
+
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None: ...
+
+    async def list_conversations_for_account(self, account_id: str) -> list[Conversation]: ...
+
+    async def delete_conversation(self, conversation_id: str) -> dict[str, int]: ...
 
     async def save_message(self, message: Message) -> Message: ...
 

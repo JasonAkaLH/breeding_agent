@@ -48,7 +48,10 @@ class WorkflowExpander:
                     root_message_id=request.root_message_id,
                     user_message=self._resolve_macro_user_message(node, request),
                     requested_capability_id=node.capability_id,
-                    metadata=dict(request.metadata),
+                    metadata={
+                        **dict(request.metadata),
+                        "macro_input_payload": dict(node.input_payload),
+                    },
                 )
             )
             max_replans = max(max_replans, macro_plan.max_replans)

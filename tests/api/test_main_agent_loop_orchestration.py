@@ -54,7 +54,6 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
                 self.calls.append({"prompt": prompt, "thinking": thinking, "reasoning_effort": reasoning_effort})
-                assert thinking is False
                 if "sql_query.sql_generate" in prompt:
                     return json.dumps(
                         {
@@ -112,7 +111,8 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
             ["sql_generate" if "sql_query.sql_generate" in call["prompt"] else "result_filtering" for call in sql_calls],
             ["sql_generate", "result_filtering"],
         )
-        self.assertTrue(all(call["thinking"] is False for call in sql_calls))
+        self.assertTrue(all(call["thinking"] is True for call in sql_calls))
+        self.assertTrue(all(call["reasoning_effort"] == "high" for call in sql_calls))
 
     async def test_default_auto_flow_separates_main_agent_and_sqlquery_llm_instances(self) -> None:
         call_log: list[str] = []
@@ -166,7 +166,6 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
                 self.calls.append({"method": "generate_text", "prompt": prompt, "thinking": thinking, "reasoning_effort": reasoning_effort})
-                assert thinking is False
                 if "sql_query.sql_generate" in prompt:
                     call_log.append("sql:sql_generate")
                     return json.dumps(
@@ -187,7 +186,7 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
                 raise AssertionError(f"unexpected SQLQuery prompt: {prompt[:200]}")
 
             async def generate_text_with_thinking(self, *args: Any, **kwargs: Any):
-                raise AssertionError("SQLQuery internal LLM must be non-streaming and thinking disabled")
+                raise AssertionError("SQLQuery internal LLM must be non-streaming")
 
             async def stream_text(self, *args: Any, **kwargs: Any):
                 raise AssertionError("SQLQuery internal LLM must be non-streaming")
@@ -202,7 +201,6 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
             main_agent_llm_client_factory=FakeMainAgentLLM,
             sql_query_llm_config={"api_key": "test", "base_url": "http://example.test", "model": "fake-sql-query"},
             sql_query_llm_client_factory=FakeSQLQueryLLM,
-            sql_query_reasoning_effort="low",
             enable_llm_planner=True,
             enable_sql_query_llm=True,
             skill_roots=[],
@@ -241,8 +239,8 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
         self.assertEqual(main_prompt_kinds, ["plan", "answer"])
         self.assertEqual(sql_prompt_kinds, ["sql_generate", "result_filtering"])
         self.assertEqual(call_log, ["main:plan", "sql:sql_generate", "sql:result_filtering", "main:answer"])
-        self.assertTrue(all(call["thinking"] is False for call in sql_client.calls))
-        self.assertTrue(all(call["reasoning_effort"] == "low" for call in sql_client.calls))
+        self.assertTrue(all(call["thinking"] is True for call in sql_client.calls))
+        self.assertTrue(all(call["reasoning_effort"] == "high" for call in sql_client.calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         planner_reasoning = [
@@ -326,7 +324,6 @@ class MainAgentLoopRuntimeReplanAPITest(APITestCase):
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
                 self.calls.append({"method": "generate_text", "prompt": prompt, "thinking": thinking, "reasoning_effort": reasoning_effort})
-                assert thinking is False
                 if "sql_query.sql_generate" in prompt:
                     call_log.append("sql:sql_generate")
                     return json.dumps(
@@ -347,7 +344,7 @@ class MainAgentLoopRuntimeReplanAPITest(APITestCase):
                 raise AssertionError(f"unexpected SQLQuery prompt: {prompt[:200]}")
 
             async def generate_text_with_thinking(self, *args: Any, **kwargs: Any):
-                raise AssertionError("SQLQuery internal LLM must be non-streaming and thinking disabled")
+                raise AssertionError("SQLQuery internal LLM must be non-streaming")
 
             async def stream_text(self, *args: Any, **kwargs: Any):
                 raise AssertionError("SQLQuery internal LLM must be non-streaming")
@@ -367,7 +364,6 @@ class MainAgentLoopRuntimeReplanAPITest(APITestCase):
             main_agent_llm_client_factory=FakeMainAgentLLM,
             sql_query_llm_config={"api_key": "test", "base_url": "http://example.test", "model": "fake-sql-query"},
             sql_query_llm_client_factory=FakeSQLQueryLLM,
-            sql_query_reasoning_effort="low",
             enable_llm_planner=True,
             enable_sql_query_llm=True,
             skill_roots=[],
@@ -408,8 +404,8 @@ class MainAgentLoopRuntimeReplanAPITest(APITestCase):
         self.assertEqual(main_prompt_kinds, ["plan", "replan", "answer"])
         self.assertEqual(sql_prompt_kinds, ["sql_generate", "sql_generate", "result_filtering"])
         self.assertEqual(call_log, ["main:plan", "sql:sql_generate", "main:replan", "sql:sql_generate", "sql:result_filtering", "main:answer"])
-        self.assertTrue(all(call["thinking"] is False for call in sql_client.calls))
-        self.assertTrue(all(call["reasoning_effort"] == "low" for call in sql_client.calls))
+        self.assertTrue(all(call["thinking"] is True for call in sql_client.calls))
+        self.assertTrue(all(call["reasoning_effort"] == "high" for call in sql_client.calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertTrue(any(event.event_type == "task.replanned" and event.payload.get("metadata", {}).get("replan_source") == "main_agent_llm_runtime" for event in events))

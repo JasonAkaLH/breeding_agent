@@ -38,6 +38,60 @@ class AutoWorkflowProviderTest(unittest.TestCase):
         self.assertEqual(plan.metadata["auto_strategy"], "deterministic_sql_query_then_main_agent")
         self.assertIn("task-1:query_data:result_filtering", plan.nodes[-1].depends_on)
 
+    def test_composite_database_question_builds_parallel_sqlquery_branches_then_main_agent(self) -> None:
+        provider = AutoWorkflowProvider(
+            main_agent_provider=MainAgentWorkflowProvider(),
+            macro_providers={"sql_query.query": SQLQueryWorkflowProvider()},
+        )
+
+        plan = provider.build_plan(
+            OrchestrationRequest(
+                task_id="task-composite",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="龙粳33的审定信息和基因型信息都查一下",
+            )
+        )
+
+        intent_nodes = [node for node in plan.nodes if node.capability_id == "sql_query.intent_route"]
+        self.assertEqual(len(intent_nodes), 2)
+        self.assertEqual(
+            [node.input_payload["route_hint"] for node in intent_nodes],
+            ["approval_variety_db", "genotype_db"],
+        )
+        self.assertEqual(
+            [node.input_payload["subtask_label"] for node in intent_nodes],
+            ["审定信息", "基因型信息"],
+        )
+        self.assertEqual(plan.nodes[-1].capability_id, "main_agent.respond")
+        self.assertIn("task-composite:query_approval_info:result_filtering", plan.nodes[-1].depends_on)
+        self.assertIn("task-composite:query_genotype_info:result_filtering", plan.nodes[-1].depends_on)
+        self.assertEqual(plan.metadata["auto_strategy"], "deterministic_sql_query_decomposed_then_main_agent")
+        self.assertEqual(plan.metadata["decomposition_count"], 2)
+
+    def test_variety_info_and_gene_info_question_builds_parallel_sqlquery_branches(self) -> None:
+        provider = AutoWorkflowProvider(
+            main_agent_provider=MainAgentWorkflowProvider(),
+            macro_providers={"sql_query.query": SQLQueryWorkflowProvider()},
+        )
+
+        plan = provider.build_plan(
+            OrchestrationRequest(
+                task_id="task-variety-gene",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="你给我查一下龙粳33的品种信息和基因信息",
+            )
+        )
+
+        intent_nodes = [node for node in plan.nodes if node.capability_id == "sql_query.intent_route"]
+        self.assertEqual(len(intent_nodes), 2)
+        self.assertEqual(
+            [node.input_payload["route_hint"] for node in intent_nodes],
+            ["approval_variety_db", "genotype_db"],
+        )
+        self.assertEqual(plan.metadata["auto_strategy"], "deterministic_sql_query_decomposed_then_main_agent")
+
     def test_plain_chat_falls_back_to_main_agent_only(self) -> None:
         provider = AutoWorkflowProvider(
             main_agent_provider=MainAgentWorkflowProvider(),

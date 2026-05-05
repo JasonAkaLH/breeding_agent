@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { ApiClient } from './api/client';
@@ -11,9 +12,31 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       { key: 'chat', label: '普通对话', capabilityId: null },
       { key: 'sql_query', label: '数据库查询（SQLQuery）', capabilityId: 'sql_query.query' },
     ],
+    createCaptcha: vi.fn(async () => ({ captcha_id: 'cap-1', image_svg: '<svg><text>1234</text></svg>', expires_in_seconds: 300 })),
+    login: vi.fn(async () => ({ user: { username: 'alice' } })),
+    register: vi.fn(async () => ({ user: { username: 'charlie' } })),
+    logout: vi.fn(async () => ({ logged_out: true })),
+    me: vi.fn(async () => ({ user: { username: 'alice' } })),
     listCapabilities: vi.fn(async () => ({ capabilities: [{ capability_id: 'sql_query.query', name: 'SQLQuery', description: 'SQL', version: '1', status: 'active' }] })),
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
     cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+    listConversations: vi.fn(async () => ({ conversations: [] })),
+    listConversationMessages: vi.fn(async () => ({ conversation_id: 'conv-test', messages: [] })),
+    deleteConversation: vi.fn(async () => ({
+      conversation_id: 'conv-test',
+      deleted: true,
+      cancelled_task_ids: [],
+      deleted_counts: { conversation: 1 },
+    })),
+    renameConversation: vi.fn(async (conversationId, title) => ({
+      conversation_id: conversationId,
+      account_id: 'alice',
+      status: 'active',
+      current_task_id: null,
+      title,
+      created_at: null,
+      updated_at: null,
+    })),
     listConversationTasks: vi.fn(async () => ({ conversation_id: 'conv-test', tasks: [] })),
     listInterrupts: vi.fn(async () => ({ task_id: 'task-1', interrupts: [] })),
     answerInterrupt: vi.fn(async () => ({ interrupt_id: 'interrupt-1', status: 'answered', node_id: 'node-1', answer_payload: {} })),
@@ -22,6 +45,11 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     getTaskGraph: vi.fn(),
     ...overrides,
   };
+}
+
+async function renderAuthed(ui: ReactElement) {
+  render(ui);
+  await screen.findByText('业务对话台');
 }
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type): TaskEventEnvelope {
@@ -62,9 +90,281 @@ function makeSequencedEventSourceFactory(eventBatches: TaskEventEnvelope[][]): E
 }
 
 describe('App', () => {
+  it('shows login page when no session exists and logs in with captcha', async () => {
+    const api = makeApi({
+      me: vi.fn(async () => {
+        throw new Error('unauthenticated');
+      }),
+    });
+    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(await screen.findByText('登录业务对话台')).toBeInTheDocument();
+    expect(api.createCaptcha).toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'alice-password' } });
+    fireEvent.change(screen.getByLabelText('4位验证码'), { target: { value: '1234' } });
+    fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
+
+    await waitFor(() => expect(api.login).toHaveBeenCalledWith({
+      username: 'alice',
+      password: 'alice-password',
+      captchaId: 'cap-1',
+      captchaCode: '1234',
+    }));
+    expect(await screen.findByText('业务对话台')).toBeInTheDocument();
+    expect(screen.getByText('user: alice')).toBeInTheDocument();
+  });
+
+  it('creates a new user from the login page with a letter and digit password', async () => {
+    const api = makeApi({
+      me: vi.fn(async () => {
+        throw new Error('unauthenticated');
+      }),
+      register: vi.fn(async () => ({ user: { username: 'charlie' } })),
+    });
+    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(await screen.findByText('登录业务对话台')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '创建新用户' }));
+    expect(screen.getByText('创建业务对话台用户')).toBeInTheDocument();
+    expect(screen.getByText('密码至少 8 位，并且必须同时包含字母和数字。')).toBeInTheDocument();
+
+    const submitButton = screen.getByRole('button', { name: '创建用户并登录' });
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'charlie' } });
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'letters-only' } });
+    fireEvent.change(screen.getByLabelText('确认密码'), { target: { value: 'letters-only' } });
+    fireEvent.change(screen.getByLabelText('4位验证码'), { target: { value: '1234' } });
+    expect(submitButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'charlie1' } });
+    fireEvent.change(screen.getByLabelText('确认密码'), { target: { value: 'charlie1' } });
+    fireEvent.click(submitButton);
+
+    await waitFor(() => expect(api.register).toHaveBeenCalledWith({
+      username: 'charlie',
+      password: 'charlie1',
+      captchaId: 'cap-1',
+      captchaCode: '1234',
+    }));
+    expect(await screen.findByText('业务对话台')).toBeInTheDocument();
+    expect(screen.getByText('user: charlie')).toBeInTheDocument();
+  });
+
+  it('keeps task progress collapsed in the header until the user opens it', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(screen.getByRole('button', { name: /任务进程/ })).toBeInTheDocument();
+    expect(screen.queryByText('准备就绪')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /任务进程/ }));
+
+    expect(await screen.findByText('准备就绪')).toBeInTheDocument();
+  });
+
+  it('loads historical messages for the selected user-owned conversation', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+          { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: '以前的回答', task_id: 'task-history', stream_status: 'complete', created_at: null },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
+    expect(await screen.findByText('以前的问题')).toBeInTheDocument();
+    expect(await screen.findByText('以前的回答')).toBeInTheDocument();
+  });
+
+  it('reloads the active historical conversation and continues with the same conversation id', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+          { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: '以前的回答', task_id: 'task-history', stream_status: 'complete', created_at: null },
+        ],
+      })),
+      submitMessage: vi.fn(async () => ({ conversation_id: 'conv-history', message_id: 'msg-follow-up', task_id: 'task-follow-up', status: 'accepted' })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    expect(screen.getByText('conversation: conv-history')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
+    expect(await screen.findByText('以前的问题')).toBeInTheDocument();
+    expect(await screen.findByText('以前的回答')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '继续问一个问题' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: 'conv-history',
+      content: '继续问一个问题',
+    })));
+  });
+
+  it('deletes a historical conversation after confirmation and removes it from the list', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      deleteConversation: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        deleted: true,
+        cancelled_task_ids: [],
+        deleted_counts: { conversation: 1, message: 2, task: 1 },
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '删除历史会话 历史问题' }));
+
+    await waitFor(() => expect(api.deleteConversation).toHaveBeenCalledWith('conv-history'));
+    expect(screen.queryByRole('button', { name: '历史问题' })).not.toBeInTheDocument();
+    expect(await screen.findByText(/历史会话已删除/)).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it('renames a historical conversation and updates the visible title', async () => {
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('新的会话名称');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '旧会话名称',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      renameConversation: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        account_id: 'alice',
+        status: 'active',
+        current_task_id: null,
+        title: '新的会话名称',
+        created_at: null,
+        updated_at: null,
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '重命名历史会话 旧会话名称' }));
+
+    await waitFor(() => expect(api.renameConversation).toHaveBeenCalledWith('conv-history', '新的会话名称'));
+    expect(await screen.findByRole('button', { name: '新的会话名称' })).toBeInTheDocument();
+    prompt.mockRestore();
+  });
+
+  it('does not call rename API when the user cancels conversation rename', async () => {
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue(null);
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '旧会话名称',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '重命名历史会话 旧会话名称' }));
+
+    expect(api.renameConversation).not.toHaveBeenCalled();
+    prompt.mockRestore();
+  });
+
+  it('switches to a new empty conversation after deleting the current conversation', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+        ],
+      })),
+      deleteConversation: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        deleted: true,
+        cancelled_task_ids: ['task-running'],
+        deleted_counts: { conversation: 1, message: 1, task: 1 },
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(screen.getByText('conversation: conv-history')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+    expect(await screen.findByText('以前的问题')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '删除历史会话 历史问题' }));
+
+    await waitFor(() => expect(api.deleteConversation).toHaveBeenCalledWith('conv-history'));
+    expect(screen.queryByText('以前的问题')).not.toBeInTheDocument();
+    expect(screen.getByText('开始一次业务问答')).toBeInTheDocument();
+    expect(screen.queryByText('conversation: conv-history')).not.toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
   it('submits normal chat and renders streaming answer', async () => {
     const api = makeApi();
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
       event('main_agent.reasoning_delta', { delta: '先分析。', ordinal: 1 }, 'reasoning-1'),
       event('main_agent.output_delta', { delta: '**你好**，', ordinal: 1 }, 'delta-1'),
@@ -90,7 +390,7 @@ describe('App', () => {
 
   it('submits deep thinking flag from the switch next to current mode', async () => {
     const api = makeApi();
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByLabelText('深度思考'));
@@ -106,7 +406,7 @@ describe('App', () => {
 
   it('shows a reasoning box placeholder when deep thinking is enabled but no reasoning content arrives', async () => {
     const api = makeApi();
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('main_agent.output_delta', { delta: '最终回答', ordinal: 1 }, 'delta-1'),
       event('task.completed'),
     ])} />);
@@ -130,11 +430,12 @@ describe('App', () => {
         ],
       })),
     });
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     expect(screen.queryByLabelText('对话模式')).not.toBeInTheDocument();
     expect(screen.getByText('当前模式：自动规划')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
+    expect(screen.queryByText('主代理会自动判断是否需要调用 SQLQuery，无需手动切换模式。')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'chat' })));
@@ -147,7 +448,7 @@ describe('App', () => {
 
   it('shows the upstream capability currently being executed inside the assistant bubble', async () => {
     const api = makeApi();
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
       event('node.started', { capability_id: 'sql_query.intent_route' }, 'sql-intent-started'),
       event('node.started', { capability_id: 'sql_query.sql_execute_readonly' }, 'sql-execute-started'),
@@ -167,7 +468,7 @@ describe('App', () => {
         throw error;
       }),
     });
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '你好' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -217,7 +518,7 @@ describe('App', () => {
         updated_at: null,
       })),
     });
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} waitingInputCheckDelayMs={1} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} waitingInputCheckDelayMs={1} />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询基因型' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -277,7 +578,7 @@ describe('App', () => {
         ],
       })),
     });
-    render(<App
+    await renderAuthed(<App
       apiClient={api}
       eventSourceFactory={makeSequencedEventSourceFactory([
         [event('task.accepted')],
@@ -327,7 +628,7 @@ describe('App', () => {
         updated_at: null,
       })),
     });
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} waitingInputCheckDelayMs={1} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} waitingInputCheckDelayMs={1} />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询基因型' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -369,7 +670,7 @@ describe('App', () => {
       cancelTask: vi.fn(async () => ({ task_id: 'task-running', status: 'cancelling', accepted: true })),
     });
 
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     expect(await screen.findByText('未完成任务')).toBeInTheDocument();
     expect(screen.queryByText('查询龙粳33')).not.toBeInTheDocument();

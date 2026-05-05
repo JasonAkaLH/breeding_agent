@@ -110,7 +110,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             question_context=question_context,
         )
         try:
-            raw_output = await call_text_generator(self._llm_text_generator, prompt)
+            raw_output = await call_text_generator(self._llm_text_generator, prompt, request=request)
             llm_payload = parse_json_object(raw_output)
             kept_row_indexes = self._parse_keep_row_indexes(llm_payload, candidate_row_count=candidate_row_count)
             kept_row_indexes = self._apply_domain_keep_indexes(kept_row_indexes, domain_keep_indexes=domain_keep_indexes)

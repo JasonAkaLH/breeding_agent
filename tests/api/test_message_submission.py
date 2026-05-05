@@ -21,6 +21,11 @@ class MessageSubmissionAPITest(APITestCase):
         second = await self.submit_message(content="再来一条消息")
         self.assertEqual(second.status_code, 409)
 
+        async def task_running() -> bool:
+            task = await self.runtime.storage.get_task(first_payload["task_id"])
+            return task is not None and str(task.status) == "running"
+
+        await self.wait_for_condition(task_running)
         cancel_response = await self.client.post(f"/api/v1/tasks/{first_payload['task_id']}/cancel")
         self.assertEqual(cancel_response.status_code, 202)
         release.set()
@@ -28,7 +33,7 @@ class MessageSubmissionAPITest(APITestCase):
         self.assertEqual(terminal["status"], "cancelled")
 
     async def test_waiting_input_task_can_be_answered_and_resumed(self) -> None:
-        first = await self.submit_message(content="查询近五年审定品种有哪些", capability_id="sql_query.query")
+        first = await self.submit_message(content="帮我查询一下", capability_id="sql_query.query")
         self.assertEqual(first.status_code, 202)
         first_payload = first.json()
 
@@ -38,14 +43,23 @@ class MessageSubmissionAPITest(APITestCase):
 
         await self.wait_for_condition(has_waiting_input_node)
 
+        async def has_open_interrupt() -> bool:
+            response = await self.client.get(f"/api/v1/tasks/{first_payload['task_id']}/interrupts")
+            return response.status_code == 200 and any(
+                interrupt["status"] == "open" for interrupt in response.json()["interrupts"]
+            )
+
+        await self.wait_for_condition(has_open_interrupt)
+
         interrupts = await self.client.get(f"/api/v1/tasks/{first_payload['task_id']}/interrupts")
         self.assertEqual(interrupts.status_code, 200)
         open_interrupt = interrupts.json()["interrupts"][0]
         self.assertEqual(open_interrupt["status"], "open")
+        self.assertEqual(open_interrupt["reason_code"], "route_not_resolved")
 
         answer = await self.client.post(
             f"/api/v1/tasks/{first_payload['task_id']}/interrupts/{open_interrupt['interrupt_id']}/answer",
-            json={"answer_payload": {"crop": "水稻"}},
+            json={"answer_payload": {"route_id": "approval_variety_db"}},
         )
         self.assertEqual(answer.status_code, 202)
         self.assertEqual(answer.json()["status"], "answered")

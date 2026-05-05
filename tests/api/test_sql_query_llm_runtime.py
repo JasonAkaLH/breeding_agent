@@ -84,7 +84,7 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
             mysql_adapter=MySQLReadonlyAdapter(runner=sql_runner),
             sql_query_llm_config={"api_key": "test", "base_url": "http://example.test", "model": "fake-sql"},
             sql_query_llm_client_factory=FakeSQLQueryLLMClient,
-            sql_query_reasoning_effort="low",
+            main_agent_reasoning_effort="low",
             enable_sql_query_llm=True,
             skill_roots=[],
         )
@@ -119,6 +119,89 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
         ]
         self.assertIn("sql_query.sql_generate", llm_call_nodes)
         self.assertIn("sql_query.result_filtering", llm_call_nodes)
+
+    async def test_sqlquery_llm_uses_request_thinking_settings_and_ignores_reasoning_content(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class FakeSQLQueryLLMClient:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = dict(kwargs)
+
+            async def generate_text(
+                self,
+                prompt: str,
+                *,
+                thinking: bool = False,
+                reasoning_effort: str = "minimal",
+            ) -> dict[str, str]:
+                calls.append(
+                    {
+                        "prompt": prompt,
+                        "thinking": thinking,
+                        "reasoning_effort": reasoning_effort,
+                    }
+                )
+                if "sql_query.sql_generate" in prompt:
+                    return {
+                        "reasoning_content": "这里的推理内容不能进入 SQL 解析。",
+                        "answer": json.dumps(
+                            {
+                                "mode": "answer",
+                                "route_id": "genotype_db",
+                                "schema_profile_id": "genotype_profile",
+                                "sql": "SELECT variety_name FROM variety WHERE variety_name LIKE '%龙粳33%'",
+                                "tables_used": ["variety"],
+                                "columns_used": ["variety.variety_name"],
+                                "column_types_used": {"variety.variety_name": "varchar(100)"},
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                if "sql_query.result_filtering" in prompt:
+                    return {
+                        "reasoning_content": "这里的推理内容不能进入筛选 JSON。",
+                        "answer": json.dumps({"keep_row_indexes": [0], "filter_reason": "只保留龙粳33。"}, ensure_ascii=False),
+                    }
+                raise AssertionError("unexpected SQLQuery prompt")
+
+        def sql_runner(_sql: str) -> ReadonlyQueryResult:
+            return ReadonlyQueryResult(
+                columns=("variety_name",),
+                rows=(
+                    {"variety_name": "龙粳33"},
+                    {"variety_name": "龙粳331"},
+                ),
+                row_count=2,
+            )
+
+        await self.reconfigure_runtime(
+            mysql_adapter=MySQLReadonlyAdapter(runner=sql_runner),
+            sql_query_llm_config={"api_key": "test", "base_url": "http://example.test", "model": "fake-sql"},
+            sql_query_llm_client_factory=FakeSQLQueryLLMClient,
+            main_agent_reasoning_effort="low",
+            enable_sql_query_llm=True,
+            skill_roots=[],
+        )
+
+        response = await self.submit_message(
+            conversation_id="conv-sqlquery-llm-request-thinking",
+            content="查询品种龙粳33的基因型信息",
+            capability_id="sql_query.query",
+            metadata={"deep_thinking": True, "main_agent_reasoning_effort": "medium"},
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual([call["reasoning_effort"] for call in calls], ["medium", "medium"])
+        self.assertEqual([call["thinking"] for call in calls], [True, True])
+
+        artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
+        generated = next(artifact for artifact in artifacts if "generated_sql" in artifact.artifact_id)
+        generated_payload = json.loads(generated.storage_ref)
+        self.assertEqual(generated_payload["generation_source"], "llm")
+        self.assertNotIn("reasoning_content", generated.storage_ref)
 
     async def test_sqlquery_result_filtering_uses_configured_trim_max_tokens(self) -> None:
         calls: list[dict[str, Any]] = []

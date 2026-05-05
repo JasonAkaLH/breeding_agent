@@ -79,7 +79,13 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     case 'task.accepted':
       return { ...withEvent, phase: 'accepted', statusText: '任务已提交', currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, errorMessage: null };
     case 'task.graph_created':
-      return { ...withEvent, phase: 'running', statusText: '正在规划/准备执行', currentActivityText: '正在规划并准备执行能力', errorMessage: null };
+      return {
+        ...withEvent,
+        phase: 'running',
+        statusText: '正在规划/准备执行',
+        currentActivityText: '正在规划并准备执行能力',
+        errorMessage: null,
+      };
     case 'node.started': {
       const activity = nodeActivity(event.payload.capability_id);
       return {

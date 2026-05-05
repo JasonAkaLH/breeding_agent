@@ -37,6 +37,37 @@ class Conversation:
 
 
 @dataclass(slots=True, frozen=True)
+class AuthUser:
+    username: str
+    password_hash: str
+    password_salt: str
+    password_scheme: str
+    status: str = "active"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    last_login_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class CaptchaChallenge:
+    captcha_id: str
+    code_hash: str
+    expires_at: datetime
+    attempt_count: int = 0
+    consumed_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AuthSession:
+    session_id: str
+    username: str
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class Message:
     message_id: str
     conversation_id: str

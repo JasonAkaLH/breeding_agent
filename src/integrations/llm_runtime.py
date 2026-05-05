@@ -16,7 +16,8 @@ class SharedLLMRuntime:
     instance across phases inside the same owner domain (for example the main
     agent's plan/observe/replan/final-answer loop). Separate capability-internal
     domains such as SQLQuery should create their own runtime instance so their
-    non-streaming, thinking-disabled LLM calls stay independent.
+    non-streaming LLM calls stay independent while sharing request-level
+    reasoning configuration when desired.
     """
 
     def __init__(
@@ -99,7 +100,7 @@ class SharedLLMRuntime:
         result = generate_text(prompt, thinking=thinking, reasoning_effort=reasoning_effort)
         if inspect.isawaitable(result):
             result = await result
-        return str(result or "")
+        return _coerce_text_result(result)
 
     async def stream_events(
         self,
@@ -140,6 +141,18 @@ async def _iter_stream_like(value: Any) -> AsyncIterator[Any]:
         return
     for item in value:
         yield item
+
+
+def _coerce_text_result(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        for key in ("answer", "content", "delta", "text"):
+            candidate = value.get(key)
+            if candidate is not None:
+                return str(candidate or "")
+        return ""
+    return str(value or "")
 
 
 def _coerce_stream_event(value: Any) -> dict[str, str | None] | None:

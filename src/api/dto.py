@@ -15,6 +15,38 @@ class SubmitMessageRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CaptchaChallengeResponse(BaseModel):
+    captcha_id: str
+    image_svg: str
+    expires_in_seconds: int
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    captcha_id: str
+    captcha_code: str
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    captcha_id: str
+    captcha_code: str
+
+
+class UserResponse(BaseModel):
+    username: str
+
+
+class AuthUserResponse(BaseModel):
+    user: UserResponse
+
+
+class LogoutResponse(BaseModel):
+    logged_out: bool
+
+
 class MessageAcceptedResponse(BaseModel):
     conversation_id: str
     message_id: str
@@ -42,6 +74,46 @@ class TaskSummaryResponse(BaseModel):
 class TaskListResponse(BaseModel):
     conversation_id: str
     tasks: list[TaskSummaryResponse]
+
+
+class ConversationSummaryResponse(BaseModel):
+    conversation_id: str
+    account_id: str
+    status: str
+    current_task_id: str | None
+    title: str | None
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+class ConversationListResponse(BaseModel):
+    conversations: list[ConversationSummaryResponse]
+
+
+class RenameConversationRequest(BaseModel):
+    title: str
+
+
+class DeleteConversationResponse(BaseModel):
+    conversation_id: str
+    deleted: bool
+    cancelled_task_ids: list[str] = Field(default_factory=list)
+    deleted_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class MessageResponse(BaseModel):
+    message_id: str
+    conversation_id: str
+    role: str
+    content: str
+    task_id: str | None
+    stream_status: str | None
+    created_at: datetime | None
+
+
+class ConversationMessagesResponse(BaseModel):
+    conversation_id: str
+    messages: list[MessageResponse]
 
 
 class TaskNodeResponse(BaseModel):

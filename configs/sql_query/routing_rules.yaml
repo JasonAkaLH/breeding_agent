@@ -91,7 +91,8 @@ routes:
   - soybean_varieties
   schema_profile_id: approval_variety_profile
   sql_policy_profile: strict_readonly_mysql
-  ambiguity_strategy: infer_crop_first_then_clarify
+  supports_no_crop_broad_query: true
+  ambiguity_strategy: infer_crop_or_use_broad_approval_tables
   examples:
   - 查询玉米品种先玉335的审定信息
   - 近五年水稻审定品种有哪些
@@ -141,7 +142,7 @@ clarification_rules:
 - condition: multiple_routes_match_with_similar_confidence
   action: ask_user_for_clarification
 - condition: approval_route_selected_but_crop_missing
-  action: ask_user_for_crop
+  action: use_broad_approval_tables
 - condition: request_outside_supported_scope
   action: reject_with_supported_scope_message
 sql_policy_profiles:

@@ -15,6 +15,7 @@ SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS = (
 
 SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES = {
     "sql_query.query": CapabilityPayloadPolicy(
+        planner_allowed_fields=("route_hint", "subtask_label", "parent_question"),
         system_payload_factory=lambda request: {"user_question": request.user_message},
     ),
 }
@@ -70,11 +71,19 @@ class SQLQueryWorkflowProvider:
         node_execute = f"{task_id}:sql_execute_readonly"
         node_filtering = f"{task_id}:result_filtering"
 
+        macro_input_payload = request.metadata.get("macro_input_payload", {})
+        safe_hints = {}
+        if isinstance(macro_input_payload, dict):
+            for key in ("route_hint", "subtask_label", "parent_question"):
+                value = macro_input_payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    safe_hints[key] = value.strip()
+
         nodes = (
             WorkflowNodePlan(
                 node_id=node_intent,
                 capability_id="sql_query.intent_route",
-                input_payload={"user_question": request.user_message},
+                input_payload={"user_question": request.user_message, **safe_hints},
                 retry_policy={"max_attempts": 1},
                 timeout_policy={"seconds": 10},
             ),

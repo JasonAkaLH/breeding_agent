@@ -22,6 +22,49 @@ class ConversationRow(SQLiteBase):
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class AuthUserRow(SQLiteBase):
+    __tablename__ = "auth_user"
+    __table_args__ = (Index("idx_auth_user_status_updated", "status", "updated_at"),)
+
+    username: Mapped[str] = mapped_column(Text, primary_key=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    password_salt: Mapped[str] = mapped_column(Text, nullable=False)
+    password_scheme: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    last_login_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class CaptchaChallengeRow(SQLiteBase):
+    __tablename__ = "auth_captcha_challenge"
+    __table_args__ = (
+        Index("idx_auth_captcha_expires", "expires_at"),
+        Index("idx_auth_captcha_consumed", "consumed_at"),
+    )
+
+    captcha_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    consumed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class AuthSessionRow(SQLiteBase):
+    __tablename__ = "auth_session"
+    __table_args__ = (
+        Index("idx_auth_session_username_expires", "username", "expires_at"),
+        Index("idx_auth_session_revoked", "revoked_at"),
+    )
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    revoked_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class MessageRow(SQLiteBase):
     __tablename__ = "message"
     __table_args__ = (

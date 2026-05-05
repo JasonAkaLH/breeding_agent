@@ -10,6 +10,48 @@
 
 ## [Unreleased]
 
+### 2026-05-05 — 调整 SQLQuery LLM 设置与复合查询拆分
+
+- 修复“品种信息 + 基因信息”类复合数据库问题未拆分的路由判断：当问题同时包含明确的品种信息表达和基因/基因型意图时，AutoWorkflow 与 SQLQuery intent route 会拆成审定品种库与基因型库两个 SQLQuery 分支，再由主代理汇总。
+- SQLQuery 内部 LLM 调用继续使用独立 runtime、非流式执行，但默认跟随主代理通用 `deep_thinking` / `main_agent_thinking_enabled` 与 `main_agent_reasoning_effort` 设置；保留显式 `sql_query_reasoning_effort` 作为兼容覆盖入口。
+- SQLQuery `sql_generate` 与 `result_filtering` 只消费 LLM 的最终 answer 文本，忽略非流式返回结构中的 `reasoning_content` / `reasoning`，避免推理内容进入 SQL/JSON 业务解析。
+- 补充复合路由、自动工作流、SQLQuery LLM thinking/reasoning 透传与 reasoning 内容忽略测试，并完成 SQLQuery、API、orchestration、e2e 回归。
+
+### 2026-05-05 — 新增历史会话命名与重命名
+
+- 复用现有 `Conversation.title` 作为“对话名称”存储位置：每轮用户消息提交后都会检查当前会话是否已有标题；若标题为空，则收集该会话下所有用户消息，异步调用主代理 LLM runtime 生成短标题；标题生成固定 `thinking=False`、`reasoning_effort="minimal"`，失败不会影响消息提交或任务执行，并会在后续仍无标题的轮次继续重试。
+- 新增会话重命名 API：`PATCH /api/v1/conversations/{conversation_id}`，按当前登录用户校验 conversation 归属，标题会做去空白、非空与 60 字符上限校验。
+- 前端历史会话列表新增“重命名”按钮，用户输入新名称后调用后端持久化并即时更新历史栏显示；取消或空名称不会发起重命名请求。
+- 补充后端会话标题自动生成、失败后按全部用户消息重试、重命名隔离测试与前端 API / 历史栏重命名测试，并完成 API、storage、e2e、前端 Vitest 与 build 回归。
+
+### 2026-05-05 — 加固 SQLQuery 品种综合概览召回
+
+- SQLQuery `variety_overview` SQL 生成 Prompt 新增“独立召回再合并”约束：宽泛品种概览需要从 `*_varieties.variety_name LIKE` 独立召回审定信息，并从 `variety.variety_name LIKE` + `rice_comp` 独立召回基因型/籼粳成分；`ref_var_id` / `variety_id` 仅作为辅助关系，不能作为唯一召回条件。
+- SQLQuery SQL 生成增加 `variety_overview` LLM 输出校验：当 LLM 对审定表没有各自 `variety_name LIKE` 召回而试图依赖 ID join 时，会触发 deterministic fallback，避免再次出现“只查到基因型成分、审定字段全空”的回答。
+- `variety_overview` deterministic fallback 改为审定库行与基因型库行 `UNION ALL` 独立返回，并补充审定品种详情字段（品种来源、特征特性、产量表现、栽培要点、适种区域、审定意见）；不再把审定行通过不可靠 `ref_var_id` join 混入基因型成分。
+- `schema_metadata.yaml` 将 `rice_varieties.ref_var_id -> variety.variety_id` 标注为弱关联/辅助富化关系，Prompt 中的 join hint 会携带说明，降低 LLM 误用连接关系的概率。
+- 补充 Prompt 与 SQL 生成回归测试，并用真实 MySQL smoke 验证“查一下龙粳33的品种信息”现在返回审定库记录（`黑审稻2012007`、2012、申请者、品种来源）和独立基因型成分记录（粳稻成分 `90.33519600`）。
+
+### 2026-05-04 — 新增登录权限系统与用户隔离历史基础
+
+- 后端新增数据库用户、PBKDF2 密码哈希、4 位动态验证码、HttpOnly Cookie Session 登录/退出/me 接口，并将消息提交、任务查询、SSE、取消、graph、artifact、interrupt 等业务接口改为登录后访问。
+- 新增 `POST /api/v1/auth/register` 创建用户路径，注册时强制用户名规范与密码策略（至少 8 位且必须同时包含字母和数字），重复用户名返回 409，注册成功后自动写入 session cookie。
+- 所有会话/任务资源改为以后端 session 解析出的 `username` 做归属校验，提交消息时不再信任前端 `account_id`；补齐按当前用户过滤的历史会话与历史消息 API，并在任务完成后持久化助手文本消息用于历史恢复。
+- 前端新增登录/创建用户切换页、验证码刷新、登录态恢复/退出、用户名展示、历史会话列表与历史消息加载；SSE 使用 cookie 登录态，API client 默认携带 `same-origin` credentials。
+- 修复前端点击历史会话的续聊语义：即使点击的是当前已恢复的 active conversation，也会重新加载该历史消息到对话框，并在后续发送时继续使用该历史 `conversation_id`。
+- 新增用户历史会话删除能力：前端历史列表提供删除入口，后端 `DELETE /api/v1/conversations/{conversation_id}` 校验当前登录用户归属；若该会话仍有未完成任务会自动取消运行中任务并终止 runtime handle，然后硬删除该 conversation 下的消息、任务、节点、边、产物、事件、中断、checkpoint 与 mailbox 业务记录，保留认证表和 append-only audit 日志。
+- 移除前端输入数据库类关键词时出现的 SQLQuery 路由提示栏，并精简空对话欢迎语，避免对用户展示内部路由选择建议。
+- 移除对话区下方常驻任务进程状态栏，将“准备就绪 / 正在准备数据库查询 / 任务已完成”等任务进程状态收纳到顶部栏“任务进程”点击展开浮层中。
+- 更新 `AGENTS.md` 开发准则：明确当前项目不再追求“最小糊上”的临时实现，后续代码需按长期交付标准保证稳健、可维护、无冗余且逻辑闭环。
+- 补充 auth storage/API 多用户隔离测试与前端登录/历史测试，并完成后端分层 unittest、前端 Vitest 与 build 回归。
+- 整改 SQLQuery 数据库路由：新增配置驱动的 `QueryUnderstandingService` 统一 AutoWorkflow 与 SQLQuery intent route 判断，并为 intent route 预留受校验的可选 LLM 语义路由 seam；审定品种查询缺作物时改为多作物审定表宽查，审定信息 + 基因型信息复合问题会自动拆成两个 public `sql_query.query` 分支后由主代理汇总，并把 route candidate / subtask / no-crop broad / LLM router fallback 元数据写入 intent/schema 输出。
+
+### 2026-04-30 — 完成前后端本地联调启动验证
+
+- 使用 `scripts/run_fullstack_dev.py --frontend-port 3000 --backend-port 8000` 拉起真实后端与 Vite 前端，确认前端固定运行在 `http://127.0.0.1:3000/`，并通过 Vite proxy 转发 `/api` 到后端 `http://127.0.0.1:8000`。
+- 验证 `GET /`、前端代理路径 `GET /api/v1/capabilities` 与后端直连 `GET /api/v1/capabilities` 均返回 `200 OK`，能力列表包含 `main_agent.respond` 与 `sql_query.query`。
+- 工作结束时已停止本地全栈开发进程，并确认 3000 / 8000 端口无监听进程残留。
+
 ### 2026-04-28 — 补充 tiktoken 依赖与 Token 计数工具
 
 - 主代理编排内核新增运行时受控重编排闭环：`OrchestrationService` 可在节点执行结果或完成判定后调用 `RuntimeReplanner`，在 `max_replans` / `max_dynamic_nodes` 预算内校验 revised DAG、追加新节点、orphan 未执行旧节点并继续调度；新增 `task.replan_started`、`task.graph_updated`、`task.replanned`、`task.replan_rejected` 事件，避免 `REPLAN_AVAILABLE` 只记录后直接失败。

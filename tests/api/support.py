@@ -51,7 +51,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         sql_query_llm_config=None,
         sql_query_llm_config_path=None,
         sql_query_llm_client_factory=None,
-        sql_query_reasoning_effort="minimal",
+        sql_query_reasoning_effort=None,
         enable_sql_query_llm: bool | None = None,
         planner_text_generator=None,
         planner_llm_config=None,
@@ -65,7 +65,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         main_agent_llm_config_path=None,
         main_agent_llm_client_factory=None,
         main_agent_reasoning_effort="minimal",
+        conversation_title_generator=None,
+        enable_conversation_title_llm: bool | None = None,
         skill_roots=(),
+        auth_captcha_code_generator=lambda: "1234",
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
             runner=lambda sql: ReadonlyQueryResult(
@@ -87,6 +90,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 sql_query_llm_client_factory,
             )
         )
+        conversation_title_configured = conversation_title_generator is not None
         return build_api_runtime(
             database_path=self.workspace / "phase6-api.sqlite3",
             audit_log_path=self.workspace / "audit.jsonl",
@@ -110,13 +114,38 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             main_agent_llm_config_path=main_agent_llm_config_path,
             main_agent_llm_client_factory=main_agent_llm_client_factory,
             main_agent_reasoning_effort=main_agent_reasoning_effort,
+            conversation_title_generator=conversation_title_generator,
+            enable_conversation_title_llm=conversation_title_configured if enable_conversation_title_llm is None else enable_conversation_title_llm,
             skill_roots=skill_roots,
+            auth_captcha_code_generator=auth_captcha_code_generator,
         )
 
     async def _bind_client(self) -> None:
         self.app = create_app(runtime=self.runtime)
         self.transport = httpx.ASGITransport(app=self.app)
         self.client = httpx.AsyncClient(transport=self.transport, base_url="http://testserver")
+        await self.runtime.create_user("acc-1", "password1")
+        await self.login("acc-1", "password1")
+
+    async def login(self, username: str, password: str) -> httpx.Response:
+        captcha = await self.client.post("/api/v1/auth/captcha")
+        captcha.raise_for_status()
+        response = await self.client.post(
+            "/api/v1/auth/login",
+            json={
+                "username": username,
+                "password": password,
+                "captcha_id": captcha.json()["captcha_id"],
+                "captcha_code": "1234",
+            },
+        )
+        response.raise_for_status()
+        return response
+
+    async def logout(self) -> httpx.Response:
+        response = await self.client.post("/api/v1/auth/logout")
+        self.client.cookies.clear()
+        return response
 
     async def reconfigure_runtime(
         self,
@@ -127,7 +156,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         sql_query_llm_config=None,
         sql_query_llm_config_path=None,
         sql_query_llm_client_factory=None,
-        sql_query_reasoning_effort="minimal",
+        sql_query_reasoning_effort=None,
         enable_sql_query_llm: bool | None = None,
         planner_text_generator=None,
         planner_llm_config=None,
@@ -141,7 +170,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         main_agent_llm_config_path=None,
         main_agent_llm_client_factory=None,
         main_agent_reasoning_effort="minimal",
+        conversation_title_generator=None,
+        enable_conversation_title_llm: bool | None = None,
         skill_roots=(),
+        auth_captcha_code_generator=lambda: "1234",
     ) -> None:
         await self.client.aclose()
         await self.runtime.shutdown()
@@ -166,7 +198,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             main_agent_llm_config_path=main_agent_llm_config_path,
             main_agent_llm_client_factory=main_agent_llm_client_factory,
             main_agent_reasoning_effort=main_agent_reasoning_effort,
+            conversation_title_generator=conversation_title_generator,
+            enable_conversation_title_llm=enable_conversation_title_llm,
             skill_roots=skill_roots,
+            auth_captcha_code_generator=auth_captcha_code_generator,
         )
         await self._bind_client()
 
@@ -177,6 +212,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         account_id: str = "acc-1",
         content: str = "查询某个品种的基因型信息",
         capability_id: str | None = "sql_query.query",
+        metadata: dict | None = None,
     ) -> httpx.Response:
         return await self.client.post(
             f"/api/v1/conversations/{conversation_id}/messages",
@@ -185,7 +221,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 "content": content,
                 "routing_mode": "auto",
                 "capability_id": capability_id,
-                "metadata": {},
+                "metadata": dict(metadata or {}),
             },
         )
 

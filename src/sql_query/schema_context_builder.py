@@ -195,6 +195,11 @@ class SchemaContextBuilder:
                 "route_description": route.get("description"),
                 "inferred_crop": inferred_crop,
                 "route_notes": tuple(route_notes),
+                "no_crop_broad_query": bool(
+                    route.get("route_id") == "approval_variety_db"
+                    and not inferred_crop
+                    and route.get("supports_no_crop_broad_query", False)
+                ),
                 "llm_context_rules": self._llm_context_rules,
                 "column_selection_strategy": "llm_visible_all_exposed_columns",
             },
@@ -251,6 +256,10 @@ class SchemaContextBuilder:
             if crop_tables:
                 route_notes.append(f"restricted to crop={inferred_crop}")
                 return crop_tables, route_notes, None
+
+        if route.get("supports_no_crop_broad_query", False):
+            route_notes.append("no crop resolved; retained all approval crop tables for a broad query")
+            return list(candidate_tables), route_notes, None
 
         if len(candidate_tables) == 1:
             return list(candidate_tables), route_notes, None
@@ -331,6 +340,10 @@ class SchemaContextBuilder:
 
         if route_id == "approval_variety_db" and len(candidate_tables) == 1:
             add(candidate_tables[0], "route/crop resolution narrowed to a single approval table")
+
+        if route_id == "approval_variety_db" and len(candidate_tables) > 1:
+            for table_name in candidate_tables:
+                add(table_name, "approval broad route seed: all approval crop tables retained")
 
         if route_id == "variety_overview":
             for table_name in candidate_tables:

@@ -409,6 +409,90 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
         self.assertNotIn("variety_name = '龙粳33'", sql)
         self.assertNotIn("LIMIT", sql)
 
+    def test_llm_overview_sql_cannot_use_id_join_as_only_approval_recall(self) -> None:
+        async def llm_text_generator(_: str) -> str:
+            return json.dumps(
+                {
+                    "mode": "answer",
+                    "route_id": "variety_overview",
+                    "schema_profile_id": "variety_overview_profile",
+                    "sql": (
+                        "SELECT v.variety_name, rv.year, rv.approval_num, rc.all_japonica_comp "
+                        "FROM variety v "
+                        "LEFT JOIN rice_varieties rv ON v.variety_id = rv.ref_var_id "
+                        "LEFT JOIN rice_comp rc ON v.variety_id = rc.variety_id "
+                        "WHERE v.variety_name LIKE '%龙粳33%'"
+                    ),
+                    "tables_used": ["variety", "rice_varieties", "rice_comp"],
+                    "columns_used": [
+                        "variety.variety_name",
+                        "variety.variety_id",
+                        "rice_varieties.ref_var_id",
+                        "rice_varieties.year",
+                        "rice_varieties.approval_num",
+                        "rice_comp.variety_id",
+                        "rice_comp.all_japonica_comp",
+                    ],
+                    "column_types_used": {
+                        "variety.variety_name": "varchar(100)",
+                        "variety.variety_id": "int(11)",
+                        "rice_varieties.ref_var_id": "int(11)",
+                        "rice_varieties.year": "int(11)",
+                        "rice_varieties.approval_num": "varchar(100)",
+                        "rice_comp.variety_id": "int(11)",
+                        "rice_comp.all_japonica_comp": "decimal(12,8)",
+                    },
+                },
+                ensure_ascii=False,
+            )
+
+        context = {
+            **OVERVIEW_SCHEMA_CONTEXT,
+            "selected_column_details": {
+                "variety": [
+                    {"name": "variety_id", "sql_type": "int(11)", "description": "自增ID"},
+                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+                ],
+                "rice_varieties": [
+                    {"name": "ref_var_id", "sql_type": "int(11)", "description": "品种ID，外键，指向variety表"},
+                    {"name": "year", "sql_type": "int(11)", "description": "年份"},
+                    {"name": "approval_num", "sql_type": "varchar(100)", "description": "审定编号"},
+                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+                    {"name": "crop_name", "sql_type": "varchar(20)", "description": "作物名称"},
+                    {"name": "applicant", "sql_type": "varchar(200)", "description": "申请者"},
+                    {"name": "breeder", "sql_type": "varchar(200)", "description": "育种者"},
+                ],
+                "rice_comp": [
+                    {"name": "variety_id", "sql_type": "int(11)", "description": "品种ID"},
+                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
+                    {"name": "all_japonica_comp", "sql_type": "decimal(12,8)", "description": "总粳稻成分"},
+                    {"name": "all_indica_comp", "sql_type": "decimal(12,8)", "description": "总籼稻成分"},
+                    {"name": "indica_japonica_mix_comp", "sql_type": "decimal(12,8)", "description": "籼粳混合成分"},
+                ],
+            },
+        }
+        capability = SQLQuerySQLGenerateCapability(llm_text_generator=llm_text_generator)
+
+        result = asyncio.run(
+            capability.execute(
+                make_request(
+                    "sql_query.sql_generate",
+                    dependency_outputs={"schema": context},
+                )
+            )
+        )
+
+        sql = result.output_payload["sql"]
+        self.assertEqual(result.output_payload["generation_source"], "fallback")
+        self.assertEqual(result.output_payload["llm_mode"], "validation_failed")
+        self.assertIn("UNION ALL", sql)
+        self.assertIn("FROM rice_varieties", sql)
+        self.assertIn("rice_varieties.variety_name LIKE '%龙粳33%'", sql)
+        self.assertIn("FROM variety", sql)
+        self.assertIn("rice_comp", sql)
+        self.assertNotIn("FROM variety v LEFT JOIN rice_varieties", " ".join(sql.split()))
+        self.assertNotIn("rice_varieties.ref_var_id = variety.variety_id", sql)
+
     def test_fallback_generates_rich_approval_detail_sql_for_single_variety(self) -> None:
         capability = SQLQuerySQLGenerateCapability()
 

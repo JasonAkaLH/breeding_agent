@@ -12,6 +12,15 @@ from uuid import uuid4
 
 from sqlalchemy import Engine
 
+from src.auth import (
+    CaptchaService,
+    DuplicateUsernameError,
+    PasswordHasher,
+    SessionService,
+    normalize_username,
+    validate_password_policy,
+    validate_username,
+)
 from src.capabilities.main_agent import (
     MAIN_AGENT_CAPABILITY_DESCRIPTORS,
     MAIN_AGENT_PLANNER_PAYLOAD_POLICIES,
@@ -30,8 +39,9 @@ from src.capabilities.sql_query import (
     SQLQueryWorkflowProvider,
     build_local_sql_query_instance,
 )
-from src.core.enums import EventVisibility, MessageRole, TaskStatus
-from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, Task
+from src.core.contracts import CapabilityExecutionRequest
+from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
+from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import SkillCatalog
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
@@ -55,8 +65,24 @@ from src.orchestration.service import OrchestrationService
 from src.orchestration.workflow_router import WorkflowRouter
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
 
+from .conversation_titles import (
+    ConversationTitleGenerator,
+    build_conversation_title_prompt,
+    build_conversation_title_source,
+    call_title_generator,
+    normalize_generated_conversation_title,
+    validate_conversation_title,
+)
 from .dto import SubmitMessageRequest
 from .sse import InMemoryEventBroker, is_frontend_event
+
+
+UNFINISHED_TASK_STATUSES = {
+    TaskStatus.ACCEPTED,
+    TaskStatus.PLANNING,
+    TaskStatus.RUNNING,
+    TaskStatus.CANCELLING,
+}
 
 
 class ApiRuntime:
@@ -73,6 +99,10 @@ class ApiRuntime:
         orchestration_service: OrchestrationService,
         workflow_provider: WorkflowRouter,
         mysql_adapter: MySQLReadonlyAdapter | None = None,
+        password_hasher: PasswordHasher | None = None,
+        captcha_service: CaptchaService | None = None,
+        session_service: SessionService | None = None,
+        conversation_title_generator: ConversationTitleGenerator | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -84,8 +114,13 @@ class ApiRuntime:
         self.orchestration_service = orchestration_service
         self.workflow_provider = workflow_provider
         self._mysql_adapter = mysql_adapter
+        self.password_hasher = password_hasher or PasswordHasher()
+        self.captcha_service = captcha_service
+        self.session_service = session_service
+        self._conversation_title_generator = conversation_title_generator
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._running_title_tasks: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -121,25 +156,100 @@ class ApiRuntime:
         await self.storage.append_event(event)
         await self.event_broker.publish(event)
 
-    async def submit_message(self, conversation_id: str, request: SubmitMessageRequest) -> tuple[Message, Task]:
+    async def create_user(self, username: str, password: str, *, status: str = "active") -> AuthUser:
+        username = validate_username(username)
+        validate_password_policy(password)
+        now = self._utcnow_naive()
+        password_hash, password_salt, password_scheme = self.password_hasher.hash_password(password)
+        existing = await self.storage.get_auth_user(username)
+        user = AuthUser(
+            username=username,
+            password_hash=password_hash,
+            password_salt=password_salt,
+            password_scheme=password_scheme,
+            status=status,
+            created_at=existing.created_at if existing is not None else now,
+            updated_at=now,
+            last_login_at=existing.last_login_at if existing is not None else None,
+        )
+        return await self.storage.save_auth_user(user)
+
+    async def register_user(self, username: str, password: str, captcha_id: str, captcha_code: str):
+        if self.captcha_service is None or self.session_service is None:
+            raise RuntimeError("Authentication services are not configured.")
+        username = validate_username(username)
+        validate_password_policy(password)
+        if await self.storage.get_auth_user(username) is not None:
+            raise DuplicateUsernameError(f"Username already exists: {username}")
+        if not await self.captcha_service.verify(captcha_id, captcha_code):
+            return None
+        now = self._utcnow_naive()
+        user = await self.create_user(username, password)
+        await self.storage.save_auth_user(replace(user, last_login_at=now, updated_at=now))
+        return await self.session_service.create_session(username)
+
+    async def create_captcha_challenge(self):
+        if self.captcha_service is None:
+            raise RuntimeError("Captcha service is not configured.")
+        return await self.captcha_service.create_challenge()
+
+    async def login(self, username: str, password: str, captcha_id: str, captcha_code: str):
+        if self.captcha_service is None or self.session_service is None:
+            raise RuntimeError("Authentication services are not configured.")
+        captcha_ok = await self.captcha_service.verify(captcha_id, captcha_code)
+        username = normalize_username(username)
+        user = await self.storage.get_auth_user(username)
+        if user is None or user.status != "active" or not self.password_hasher.verify_password(password, user) or not captcha_ok:
+            return None
+        now = self._utcnow_naive()
+        await self.storage.save_auth_user(replace(user, last_login_at=now, updated_at=now))
+        return await self.session_service.create_session(username)
+
+    async def get_session_user(self, session_id: str) -> AuthUser | None:
+        if self.session_service is None:
+            return None
+        return await self.session_service.get_active_user(session_id)
+
+    async def revoke_session(self, session_id: str) -> None:
+        if self.session_service is None:
+            return
+        await self.session_service.revoke_session(session_id)
+
+    async def submit_message(
+        self,
+        conversation_id: str,
+        request: SubmitMessageRequest,
+        *,
+        authenticated_account_id: str | None = None,
+    ) -> tuple[Message, Task]:
+        existing_conversation = await self.storage.get_conversation(conversation_id)
+        if (
+            authenticated_account_id is not None
+            and existing_conversation is not None
+            and existing_conversation.account_id != authenticated_account_id
+        ):
+            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
         await self._conversation_guard.ensure_conversation_available(conversation_id)
         self._ensure_supported_capability(request.capability_id)
 
         now = self._utcnow_naive()
         message_id = request.client_message_id or self._make_id("msg")
         task_id = self._make_id("task")
+        account_id = authenticated_account_id or request.account_id
 
-        conversation = await self.storage.get_conversation(conversation_id)
+        conversation = existing_conversation
         if conversation is None:
             conversation = Conversation(
                 conversation_id=conversation_id,
-                account_id=request.account_id,
+                account_id=account_id,
                 current_task_id=task_id,
                 created_at=now,
                 updated_at=now,
             )
         else:
-            conversation = replace(conversation, account_id=request.account_id, current_task_id=task_id, updated_at=now)
+            if authenticated_account_id is not None and conversation.account_id != authenticated_account_id:
+                raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+            conversation = replace(conversation, account_id=account_id, current_task_id=task_id, updated_at=now)
         await self.storage.save_conversation(conversation)
 
         message = Message(
@@ -151,6 +261,7 @@ class ApiRuntime:
             created_at=now,
         )
         await self.storage.save_message(message)
+        await self._maybe_schedule_conversation_title_generation(conversation_id)
 
         task = Task(
             task_id=task_id,
@@ -184,6 +295,64 @@ class ApiRuntime:
         await self._schedule_execution(orchestration_request)
         return message, task
 
+    async def _maybe_schedule_conversation_title_generation(self, conversation_id: str) -> None:
+        if self._conversation_title_generator is None:
+            return
+        conversation = await self.storage.get_conversation(conversation_id)
+        if conversation is None or (conversation.title or "").strip():
+            return
+        messages = await self.storage.list_messages_for_conversation(conversation_id)
+        user_messages = [
+            message.content
+            for message in messages
+            if message.role == MessageRole.USER and message.content.strip()
+        ]
+        if not user_messages:
+            return
+        title_source = build_conversation_title_source(user_messages)
+        if not title_source:
+            return
+        expected_user_message_count = len(user_messages)
+        task = asyncio.create_task(
+            self._generate_and_store_conversation_title(
+                conversation_id,
+                title_source,
+                expected_user_message_count=expected_user_message_count,
+            )
+        )
+        self._running_title_tasks.add(task)
+        task.add_done_callback(self._running_title_tasks.discard)
+
+    async def _generate_and_store_conversation_title(
+        self,
+        conversation_id: str,
+        title_source: str,
+        *,
+        expected_user_message_count: int,
+    ) -> None:
+        try:
+            raw_title = await call_title_generator(self._conversation_title_generator, title_source)
+            title = normalize_generated_conversation_title(raw_title)
+        except Exception:
+            return
+        if title is None:
+            return
+        async with self._lock:
+            conversation = await self.storage.get_conversation(conversation_id)
+            if conversation is None:
+                return
+            if (conversation.title or "").strip():
+                return
+            messages = await self.storage.list_messages_for_conversation(conversation_id)
+            current_user_message_count = sum(
+                1 for message in messages if message.role == MessageRole.USER and message.content.strip()
+            )
+            if current_user_message_count != expected_user_message_count:
+                return
+            await self.storage.save_conversation(
+                replace(conversation, title=title, updated_at=self._utcnow_naive())
+            )
+
     async def _schedule_execution(self, request: OrchestrationRequest) -> None:
         async with self._lock:
             active_task_count = len(self._running_tasks)
@@ -195,7 +364,9 @@ class ApiRuntime:
             plan_result = self.workflow_provider.build_plan(request)
             plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
             await self._record_plan_built(request, plan)
-            await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
+            result = await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
+            if result.completion_status == str(TaskStatus.COMPLETED):
+                await self._persist_assistant_history_message(request.task_id, request.conversation_id)
         except Exception as exc:
             await self._mark_task_failed(request, exc)
         finally:
@@ -215,6 +386,38 @@ class ApiRuntime:
                 conversation_id=request.conversation_id,
                 event_type="task.failed",
                 payload={"code": "execution_crash", "message": str(exc)},
+            )
+        )
+
+    async def sync_assistant_history_messages(self, conversation_id: str) -> None:
+        tasks = await self.storage.list_tasks_for_conversation(conversation_id, statuses={TaskStatus.COMPLETED})
+        for task in tasks:
+            await self._persist_assistant_history_message(task.task_id, task.conversation_id)
+
+    async def _persist_assistant_history_message(self, task_id: str, conversation_id: str) -> None:
+        message_id = f"{task_id}:assistant"
+        if await self.storage.get_message(message_id) is not None:
+            return
+        artifacts = await self.storage.list_artifacts_for_task(task_id)
+        text_artifact = next(
+            (
+                artifact
+                for artifact in artifacts
+                if str(artifact.artifact_type) == str(ArtifactType.TEXT) and artifact.storage_ref.strip()
+            ),
+            None,
+        )
+        if text_artifact is None:
+            return
+        await self.storage.save_message(
+            Message(
+                message_id=message_id,
+                conversation_id=conversation_id,
+                role=MessageRole.ASSISTANT,
+                content=text_artifact.storage_ref,
+                task_id=task_id,
+                stream_status="complete",
+                created_at=self._utcnow_naive(),
             )
         )
 
@@ -253,6 +456,43 @@ class ApiRuntime:
         task = await self.cancellation_service.cancel_task_context(task_id)
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
         return task
+
+    async def delete_conversation(self, conversation_id: str, *, account_id: str | None = None) -> dict[str, object]:
+        conversation = await self.storage.get_conversation(conversation_id)
+        if conversation is None:
+            raise ValueError(f"Unknown conversation: {conversation_id}")
+        if account_id is not None and conversation.account_id != account_id:
+            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+
+        unfinished_tasks = await self.storage.list_tasks_for_conversation(
+            conversation_id,
+            statuses=UNFINISHED_TASK_STATUSES,
+        )
+        cancelled_task_ids: list[str] = []
+        for task in unfinished_tasks:
+            await self.cancel_task(task.task_id)
+            cancelled_task_ids.append(task.task_id)
+        for task_id in cancelled_task_ids:
+            await self._cancel_existing_execution(task_id)
+
+        deleted_counts = await self.storage.delete_conversation(conversation_id)
+        return {
+            "conversation_id": conversation_id,
+            "deleted": deleted_counts.get("conversation", 0) > 0,
+            "cancelled_task_ids": cancelled_task_ids,
+            "deleted_counts": deleted_counts,
+        }
+
+    async def rename_conversation(self, conversation_id: str, title: str, *, account_id: str | None = None) -> Conversation:
+        normalized_title = validate_conversation_title(title)
+        async with self._lock:
+            conversation = await self.storage.get_conversation(conversation_id)
+            if conversation is None:
+                raise ValueError(f"Unknown conversation: {conversation_id}")
+            if account_id is not None and conversation.account_id != account_id:
+                raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+            updated = replace(conversation, title=normalized_title, updated_at=self._utcnow_naive())
+            return await self.storage.save_conversation(updated)
 
     async def list_interrupts(self, task_id: str) -> list[dict[str, object]]:
         interrupts = await self.storage.list_interrupts_for_task(task_id)
@@ -351,7 +591,7 @@ class ApiRuntime:
             subscription.close()
 
     async def shutdown(self) -> None:
-        pending = list(self._running_tasks.values())
+        pending = [*self._running_tasks.values(), *self._running_title_tasks]
         if pending:
             try:
                 await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2)
@@ -394,6 +634,18 @@ class ApiRuntime:
             if self._running_tasks.get(task_id) is handle:
                 self._running_tasks.pop(task_id, None)
 
+    async def _cancel_existing_execution(self, task_id: str) -> None:
+        async with self._lock:
+            handle = self._running_tasks.get(task_id)
+        if handle is None:
+            return
+        if not handle.done():
+            handle.cancel()
+        await asyncio.gather(handle, return_exceptions=True)
+        async with self._lock:
+            if self._running_tasks.get(task_id) is handle:
+                self._running_tasks.pop(task_id, None)
+
 
 def build_api_runtime(
     *,
@@ -405,7 +657,7 @@ def build_api_runtime(
     sql_query_llm_config: Mapping[str, Any] | None = None,
     sql_query_llm_config_path: str | Path | None = None,
     sql_query_llm_client_factory: Callable[..., Any] | None = None,
-    sql_query_reasoning_effort: ReasoningEffort = "minimal",
+    sql_query_reasoning_effort: ReasoningEffort | None = None,
     sql_query_trim_max_tokens: int | None = None,
     enable_sql_query_llm: bool = True,
     planner_text_generator: PlannerTextGenerator | None = None,
@@ -420,9 +672,14 @@ def build_api_runtime(
     main_agent_llm_config_path: str | Path | None = None,
     main_agent_llm_client_factory: Callable[..., Any] | None = None,
     main_agent_reasoning_effort: ReasoningEffort = "minimal",
+    conversation_title_generator: ConversationTitleGenerator | None = None,
+    enable_conversation_title_llm: bool = True,
     skill_roots: Iterable[str | Path] | None = None,
     skill_catalog: SkillCatalog | None = None,
     runtime_replanner: RuntimeReplanner | None = None,
+    auth_captcha_code_generator: Callable[[], str] | None = None,
+    auth_captcha_ttl_seconds: int = 300,
+    auth_session_ttl_seconds: int = 28_800,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
         llm_text_generator=llm_text_generator,
@@ -439,11 +696,24 @@ def build_api_runtime(
         main_agent_llm_config=main_agent_llm_config,
         main_agent_llm_config_path=main_agent_llm_config_path,
         main_agent_llm_client_factory=main_agent_llm_client_factory,
+        enable_conversation_title_llm=enable_conversation_title_llm,
     )
 
     engine = create_sqlite_engine(database_path)
     bootstrap_sqlite_database(engine)
     storage = SQLiteStorage(create_sqlite_session_factory(engine))
+    password_hasher = PasswordHasher()
+    captcha_service = CaptchaService(
+        storage,
+        now_fn=ApiRuntime._utcnow_naive,
+        code_generator=auth_captcha_code_generator,
+        ttl_seconds=auth_captcha_ttl_seconds,
+    )
+    session_service = SessionService(
+        storage,
+        now_fn=ApiRuntime._utcnow_naive,
+        ttl_seconds=auth_session_ttl_seconds,
+    )
 
     capability_registry = CapabilityRegistry()
     _register_capability_descriptors(
@@ -484,6 +754,11 @@ def build_api_runtime(
     )
 
     resolved_mysql_adapter = mysql_adapter or MySQLReadonlyAdapter()
+    resolved_conversation_title_generator = _resolve_conversation_title_generator(
+        conversation_title_generator=conversation_title_generator,
+        main_agent_llm_runtime=main_agent_llm_runtime,
+        enable_conversation_title_llm=enable_conversation_title_llm,
+    )
     resolved_main_agent_stream_generator, main_agent_stream_metadata = _resolve_main_agent_stream_binding(
         main_agent_stream_generator=main_agent_stream_generator,
         main_agent_llm_runtime=main_agent_llm_runtime,
@@ -494,6 +769,7 @@ def build_api_runtime(
         sql_query_llm_config=sql_query_llm_config,
         sql_query_llm_client_factory=sql_query_llm_client_factory,
         sql_query_reasoning_effort=sql_query_reasoning_effort,
+        main_agent_reasoning_effort=main_agent_reasoning_effort,
         enable_sql_query_llm=enable_sql_query_llm,
     )
     resolved_sql_query_trim_max_tokens = _resolve_sql_query_trim_max_tokens(
@@ -580,6 +856,10 @@ def build_api_runtime(
             sql_query_provider=sql_query_workflow_provider,
         ),
         mysql_adapter=resolved_mysql_adapter,
+        password_hasher=password_hasher,
+        captcha_service=captcha_service,
+        session_service=session_service,
+        conversation_title_generator=resolved_conversation_title_generator,
     )
 
 
@@ -599,6 +879,7 @@ def _bootstrap_runtime_config_env(
     main_agent_llm_config: Mapping[str, Any] | None,
     main_agent_llm_config_path: str | Path | None,
     main_agent_llm_client_factory: Callable[..., Any] | None,
+    enable_conversation_title_llm: bool,
 ) -> None:
     explicit_paths: list[str | Path] = []
     should_bootstrap_default = False
@@ -616,6 +897,12 @@ def _bootstrap_runtime_config_env(
             should_bootstrap_default = True
 
     if main_agent_stream_generator is None and main_agent_llm_config is None:
+        if main_agent_llm_config_path is not None:
+            explicit_paths.append(main_agent_llm_config_path)
+        elif main_agent_llm_client_factory is None:
+            should_bootstrap_default = True
+
+    if enable_conversation_title_llm and main_agent_llm_config is None:
         if main_agent_llm_config_path is not None:
             explicit_paths.append(main_agent_llm_config_path)
         elif main_agent_llm_client_factory is None:
@@ -673,7 +960,8 @@ def _resolve_sql_query_text_generator(
     llm_text_generator,
     sql_query_llm_config: Mapping[str, Any] | None,
     sql_query_llm_client_factory: Callable[..., Any] | None,
-    sql_query_reasoning_effort: ReasoningEffort,
+    sql_query_reasoning_effort: ReasoningEffort | None,
+    main_agent_reasoning_effort: ReasoningEffort,
     enable_sql_query_llm: bool,
 ):
     if llm_text_generator is not None:
@@ -692,11 +980,37 @@ def _resolve_sql_query_text_generator(
         config_source=config_source,
     )
 
-    async def generate(prompt: str) -> str:
+    default_reasoning_effort = sql_query_reasoning_effort or main_agent_reasoning_effort
+
+    async def generate(prompt: str, *, request: CapabilityExecutionRequest | None = None) -> str:
+        metadata = dict(request.metadata) if request is not None else {}
+        thinking = _resolve_request_thinking_enabled(metadata)
+        reasoning_effort = _resolve_request_reasoning_effort(metadata, fallback=default_reasoning_effort)
         return await sql_query_runtime.generate_text(
             prompt,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+        )
+
+    return generate
+
+
+def _resolve_conversation_title_generator(
+    *,
+    conversation_title_generator: ConversationTitleGenerator | None,
+    main_agent_llm_runtime: SharedLLMRuntime,
+    enable_conversation_title_llm: bool,
+) -> ConversationTitleGenerator | None:
+    if conversation_title_generator is not None:
+        return conversation_title_generator
+    if not enable_conversation_title_llm:
+        return None
+
+    async def generate(title_source: str) -> str:
+        return await main_agent_llm_runtime.generate_text(
+            build_conversation_title_prompt(title_source),
             thinking=False,
-            reasoning_effort=sql_query_reasoning_effort,
+            reasoning_effort="minimal",
         )
 
     return generate

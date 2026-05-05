@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 
-TextGenerator = Callable[[str], str | Awaitable[str]]
+TextGenerator = Callable[..., str | Awaitable[str]]
 
 
 class LLMOutputError(ValueError):
@@ -16,11 +16,39 @@ class LLMOutputError(ValueError):
         self.reason = reason
 
 
-async def call_text_generator(generator: TextGenerator, prompt: str) -> str:
-    result = generator(prompt)
+async def call_text_generator(generator: TextGenerator, prompt: str, **options: Any) -> str:
+    accepted_options = _accepted_options(generator, options)
+    result = generator(prompt, **accepted_options)
     if inspect.isawaitable(result):
         result = await result
-    return str(result or "")
+    return _coerce_text_result(result)
+
+
+def _accepted_options(generator: TextGenerator, options: Mapping[str, Any]) -> dict[str, Any]:
+    if not options:
+        return {}
+    try:
+        signature = inspect.signature(generator)
+    except (TypeError, ValueError):
+        return {}
+    accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+    return {
+        key: value
+        for key, value in options.items()
+        if value is not None and (accepts_kwargs or key in signature.parameters)
+    }
+
+
+def _coerce_text_result(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        for key in ("answer", "content", "delta", "text"):
+            candidate = value.get(key)
+            if candidate is not None:
+                return str(candidate or "")
+        return ""
+    return str(value or "")
 
 
 def parse_json_object(text: str) -> dict[str, Any]:

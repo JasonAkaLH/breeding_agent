@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.contracts import StoragePort
 from src.core.enums import TaskStatus
 from src.core.models import (
     Artifact,
+    AuthSession,
+    AuthUser,
+    CaptchaChallenge,
     Checkpoint,
     Conversation,
     EventRecord,
@@ -26,6 +29,9 @@ from src.core.models import (
 from .base import build_task_edge_id
 from .models import (
     ArtifactRow,
+    AuthSessionRow,
+    AuthUserRow,
+    CaptchaChallengeRow,
     CheckpointRow,
     ConversationRow,
     EventRecordRow,
@@ -49,6 +55,40 @@ def _row_to_conversation(row: ConversationRow) -> Conversation:
         title=row.title,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _row_to_auth_user(row: AuthUserRow) -> AuthUser:
+    return AuthUser(
+        username=row.username,
+        password_hash=row.password_hash,
+        password_salt=row.password_salt,
+        password_scheme=row.password_scheme,
+        status=row.status,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        last_login_at=row.last_login_at,
+    )
+
+
+def _row_to_captcha_challenge(row: CaptchaChallengeRow) -> CaptchaChallenge:
+    return CaptchaChallenge(
+        captcha_id=row.captcha_id,
+        code_hash=row.code_hash,
+        expires_at=row.expires_at,
+        attempt_count=row.attempt_count,
+        consumed_at=row.consumed_at,
+        created_at=row.created_at,
+    )
+
+
+def _row_to_auth_session(row: AuthSessionRow) -> AuthSession:
+    return AuthSession(
+        session_id=row.session_id,
+        username=row.username,
+        expires_at=row.expires_at,
+        revoked_at=row.revoked_at,
+        created_at=row.created_at,
     )
 
 
@@ -224,6 +264,58 @@ class SQLiteStateRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def save_auth_user(self, user: AuthUser) -> AuthUser:
+        row = AuthUserRow(
+            username=user.username,
+            password_hash=user.password_hash,
+            password_salt=user.password_salt,
+            password_scheme=user.password_scheme,
+            status=user.status,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+            last_login_at=user.last_login_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_auth_user(merged)
+
+    def get_auth_user(self, username: str) -> AuthUser | None:
+        row = self._session.get(AuthUserRow, username)
+        return None if row is None else _row_to_auth_user(row)
+
+    def save_captcha_challenge(self, challenge: CaptchaChallenge) -> CaptchaChallenge:
+        row = CaptchaChallengeRow(
+            captcha_id=challenge.captcha_id,
+            code_hash=challenge.code_hash,
+            expires_at=challenge.expires_at,
+            attempt_count=challenge.attempt_count,
+            consumed_at=challenge.consumed_at,
+            created_at=challenge.created_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_captcha_challenge(merged)
+
+    def get_captcha_challenge(self, captcha_id: str) -> CaptchaChallenge | None:
+        row = self._session.get(CaptchaChallengeRow, captcha_id)
+        return None if row is None else _row_to_captcha_challenge(row)
+
+    def save_auth_session(self, session: AuthSession) -> AuthSession:
+        row = AuthSessionRow(
+            session_id=session.session_id,
+            username=session.username,
+            expires_at=session.expires_at,
+            revoked_at=session.revoked_at,
+            created_at=session.created_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_auth_session(merged)
+
+    def get_auth_session(self, session_id: str) -> AuthSession | None:
+        row = self._session.get(AuthSessionRow, session_id)
+        return None if row is None else _row_to_auth_session(row)
+
     def save_conversation(self, conversation: Conversation) -> Conversation:
         row = ConversationRow(
             conversation_id=conversation.conversation_id,
@@ -241,6 +333,78 @@ class SQLiteStateRepository:
     def get_conversation(self, conversation_id: str) -> Conversation | None:
         row = self._session.get(ConversationRow, conversation_id)
         return None if row is None else _row_to_conversation(row)
+
+    def list_conversations_for_account(self, account_id: str) -> list[Conversation]:
+        rows = self._session.scalars(
+            select(ConversationRow)
+            .where(ConversationRow.account_id == account_id)
+            .order_by(ConversationRow.updated_at.desc(), ConversationRow.conversation_id.desc())
+        ).all()
+        return [_row_to_conversation(row) for row in rows]
+
+    def delete_conversation(self, conversation_id: str) -> dict[str, int]:
+        task_ids = list(
+            self._session.scalars(select(TaskRow.task_id).where(TaskRow.conversation_id == conversation_id)).all()
+        )
+        mailbox_conditions = [MailboxMessageRow.conversation_id == conversation_id]
+        event_conditions = [EventRecordRow.conversation_id == conversation_id]
+        interrupt_conditions = [InterruptRow.conversation_id == conversation_id]
+        message_conditions = [MessageRow.conversation_id == conversation_id]
+        if task_ids:
+            mailbox_conditions.append(MailboxMessageRow.task_id.in_(task_ids))
+            event_conditions.append(EventRecordRow.task_id.in_(task_ids))
+            interrupt_conditions.append(InterruptRow.task_id.in_(task_ids))
+            message_conditions.append(MessageRow.task_id.in_(task_ids))
+
+        mailbox_message_ids = list(
+            self._session.scalars(
+                select(MailboxMessageRow.message_id).where(or_(*mailbox_conditions))
+            ).all()
+        )
+        interrupt_ids = list(
+            self._session.scalars(
+                select(InterruptRow.interrupt_id).where(or_(*interrupt_conditions))
+            ).all()
+        )
+
+        deleted_counts: dict[str, int] = {
+            "mailbox_delivery": 0,
+            "interrupt_answer": 0,
+            "checkpoint": 0,
+            "interrupt": 0,
+            "mailbox_message": 0,
+            "event_record": 0,
+            "artifact": 0,
+            "task_edge": 0,
+            "task_node": 0,
+            "message": 0,
+            "task": 0,
+            "conversation": 0,
+        }
+
+        def _delete(name: str, statement) -> None:
+            result = self._session.execute(statement)
+            rowcount = result.rowcount if result.rowcount is not None and result.rowcount > 0 else 0
+            deleted_counts[name] = int(rowcount)
+
+        if mailbox_message_ids:
+            _delete("mailbox_delivery", delete(MailboxDeliveryRow).where(MailboxDeliveryRow.message_id.in_(mailbox_message_ids)))
+        if interrupt_ids:
+            _delete("interrupt_answer", delete(InterruptAnswerRow).where(InterruptAnswerRow.interrupt_id.in_(interrupt_ids)))
+        if task_ids:
+            _delete("checkpoint", delete(CheckpointRow).where(CheckpointRow.task_id.in_(task_ids)))
+        _delete("interrupt", delete(InterruptRow).where(or_(*interrupt_conditions)))
+        _delete("mailbox_message", delete(MailboxMessageRow).where(or_(*mailbox_conditions)))
+        _delete("event_record", delete(EventRecordRow).where(or_(*event_conditions)))
+        if task_ids:
+            _delete("artifact", delete(ArtifactRow).where(ArtifactRow.task_id.in_(task_ids)))
+            _delete("task_edge", delete(TaskEdgeRow).where(TaskEdgeRow.task_id.in_(task_ids)))
+            _delete("task_node", delete(TaskNodeRow).where(TaskNodeRow.task_id.in_(task_ids)))
+        _delete("message", delete(MessageRow).where(or_(*message_conditions)))
+        _delete("task", delete(TaskRow).where(TaskRow.conversation_id == conversation_id))
+        _delete("conversation", delete(ConversationRow).where(ConversationRow.conversation_id == conversation_id))
+        self._session.flush()
+        return deleted_counts
 
     def save_message(self, message: Message) -> Message:
         row = MessageRow(
@@ -635,11 +799,35 @@ class SQLiteStorage(StoragePort):
 
         return await asyncio.to_thread(_sync)
 
+    async def save_auth_user(self, user: AuthUser) -> AuthUser:
+        return await self._run(lambda state, collab: state.save_auth_user(user))
+
+    async def get_auth_user(self, username: str) -> AuthUser | None:
+        return await self._run(lambda state, collab: state.get_auth_user(username))
+
+    async def save_captcha_challenge(self, challenge: CaptchaChallenge) -> CaptchaChallenge:
+        return await self._run(lambda state, collab: state.save_captcha_challenge(challenge))
+
+    async def get_captcha_challenge(self, captcha_id: str) -> CaptchaChallenge | None:
+        return await self._run(lambda state, collab: state.get_captcha_challenge(captcha_id))
+
+    async def save_auth_session(self, session: AuthSession) -> AuthSession:
+        return await self._run(lambda state, collab: state.save_auth_session(session))
+
+    async def get_auth_session(self, session_id: str) -> AuthSession | None:
+        return await self._run(lambda state, collab: state.get_auth_session(session_id))
+
     async def save_conversation(self, conversation: Conversation) -> Conversation:
         return await self._run(lambda state, collab: state.save_conversation(conversation))
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None:
         return await self._run(lambda state, collab: state.get_conversation(conversation_id))
+
+    async def list_conversations_for_account(self, account_id: str) -> list[Conversation]:
+        return await self._run(lambda state, collab: state.list_conversations_for_account(account_id))
+
+    async def delete_conversation(self, conversation_id: str) -> dict[str, int]:
+        return await self._run(lambda state, collab: state.delete_conversation(conversation_id))
 
     async def save_message(self, message: Message) -> Message:
         return await self._run(lambda state, collab: state.save_message(message))
