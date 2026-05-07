@@ -75,6 +75,7 @@ from .conversation_titles import (
 )
 from .dto import SubmitMessageRequest
 from .sse import InMemoryEventBroker, is_frontend_event
+from .upload_store import InMemoryUploadStore, UploadedFileRecord, UploadValidationError
 
 
 UNFINISHED_TASK_STATUSES = {
@@ -103,6 +104,7 @@ class ApiRuntime:
         captcha_service: CaptchaService | None = None,
         session_service: SessionService | None = None,
         conversation_title_generator: ConversationTitleGenerator | None = None,
+        upload_store: InMemoryUploadStore | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -118,6 +120,7 @@ class ApiRuntime:
         self.captcha_service = captcha_service
         self.session_service = session_service
         self._conversation_title_generator = conversation_title_generator
+        self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
@@ -232,6 +235,11 @@ class ApiRuntime:
         await self._conversation_guard.ensure_conversation_available(conversation_id)
         self._ensure_supported_capability(request.capability_id)
 
+        upload_context = await self.resolve_uploads_for_message(
+            conversation_id,
+            authenticated_account_id or request.account_id,
+            request.metadata.get("upload_ids") or (),
+        )
         now = self._utcnow_naive()
         message_id = request.client_message_id or self._make_id("msg")
         task_id = self._make_id("task")
@@ -284,16 +292,111 @@ class ApiRuntime:
             )
         )
 
+        metadata = dict(request.metadata)
+        if upload_context["uploaded_artifacts"]:
+            metadata["uploaded_artifacts"] = [
+                *self._metadata_list(metadata.get("uploaded_artifacts")),
+                *upload_context["uploaded_artifacts"],
+            ]
+            metadata["skill_artifacts"] = [
+                *self._metadata_list(metadata.get("skill_artifacts")),
+                *upload_context["skill_artifacts"],
+            ]
+
         orchestration_request = OrchestrationRequest(
             task_id=task_id,
             conversation_id=conversation_id,
             root_message_id=message_id,
             user_message=request.content,
             requested_capability_id=request.capability_id,
-            metadata=dict(request.metadata),
+            metadata=metadata,
         )
         await self._schedule_execution(orchestration_request)
         return message, task
+
+    @staticmethod
+    def _metadata_list(value: Any) -> list[Any]:
+        return list(value) if isinstance(value, list | tuple) else []
+
+    async def save_upload(
+        self,
+        *,
+        conversation_id: str,
+        account_id: str,
+        filename: str,
+        content_type: str | None,
+        content: bytes,
+    ) -> UploadedFileRecord:
+        existing_conversation = await self.storage.get_conversation(conversation_id)
+        now = self._utcnow_naive()
+        if existing_conversation is not None:
+            if existing_conversation.account_id != account_id:
+                raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+        record = self.upload_store.save(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            filename=filename,
+            content_type=content_type,
+            content=content,
+        )
+        if existing_conversation is None:
+            await self.storage.save_conversation(
+                Conversation(
+                    conversation_id=conversation_id,
+                    account_id=account_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        return record
+
+    async def list_uploads(self, conversation_id: str, account_id: str) -> list[UploadedFileRecord]:
+        existing_conversation = await self.storage.get_conversation(conversation_id)
+        if existing_conversation is not None and existing_conversation.account_id != account_id:
+            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+        return self.upload_store.list_for_conversation(account_id=account_id, conversation_id=conversation_id)
+
+    async def delete_upload(self, conversation_id: str, account_id: str, upload_id: str) -> bool:
+        existing_conversation = await self.storage.get_conversation(conversation_id)
+        if existing_conversation is not None and existing_conversation.account_id != account_id:
+            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+        return self.upload_store.delete(upload_id=upload_id, account_id=account_id, conversation_id=conversation_id)
+
+    async def resolve_uploads_for_message(
+        self,
+        conversation_id: str,
+        account_id: str,
+        upload_ids,
+    ) -> dict[str, Any]:
+        if upload_ids is None:
+            upload_ids = ()
+        if isinstance(upload_ids, str):
+            upload_ids = [upload_ids]
+        if not isinstance(upload_ids, list | tuple):
+            raise UploadValidationError("metadata.upload_ids must be a list")
+        uploaded_artifacts: list[dict[str, Any]] = []
+        skill_artifacts: list[dict[str, Any]] = []
+        missing_upload_ids: list[str] = []
+        for upload_id in upload_ids:
+            upload_id_text = str(upload_id).strip()
+            if not upload_id_text:
+                continue
+            try:
+                record = self.upload_store.get_for_message(
+                    upload_id=upload_id_text,
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                )
+            except UploadValidationError:
+                missing_upload_ids.append(upload_id_text)
+                continue
+            uploaded_artifacts.append(record.to_summary())
+            skill_artifacts.append(record.to_skill_artifact())
+        return {
+            "uploaded_artifacts": uploaded_artifacts,
+            "skill_artifacts": skill_artifacts,
+            "missing_upload_ids": missing_upload_ids,
+        }
 
     async def _maybe_schedule_conversation_title_generation(self, conversation_id: str) -> None:
         if self._conversation_title_generator is None:
@@ -680,6 +783,7 @@ def build_api_runtime(
     auth_captcha_code_generator: Callable[[], str] | None = None,
     auth_captcha_ttl_seconds: int = 300,
     auth_session_ttl_seconds: int = 28_800,
+    upload_store: InMemoryUploadStore | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
         llm_text_generator=llm_text_generator,
@@ -860,6 +964,7 @@ def build_api_runtime(
         captcha_service=captcha_service,
         session_service=session_service,
         conversation_title_generator=resolved_conversation_title_generator,
+        upload_store=upload_store,
     )
 
 
@@ -1156,6 +1261,6 @@ def _resolve_main_agent_stream_binding(
 
 def _default_skill_roots() -> tuple[Path, ...]:
     return (
-        Path.cwd() / ".codex" / "skills",
+        Path.cwd() / "skill",
         Path.home() / ".codex" / "skills",
     )

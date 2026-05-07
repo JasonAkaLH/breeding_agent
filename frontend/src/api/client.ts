@@ -9,6 +9,7 @@ import type {
   ConversationMessagesResponse,
   ConversationSummaryResponse,
   DeleteConversationResponse,
+  DeleteUploadResponse,
   LogoutResponse,
   TaskInterruptsResponse,
   MessageAcceptedResponse,
@@ -18,6 +19,8 @@ import type {
   TaskGraphResponse,
   TaskListResponse,
   TaskSummaryResponse,
+  UploadFileResponse,
+  UploadListResponse,
 } from './types';
 
 export interface UiModeOption {
@@ -45,6 +48,9 @@ export interface ApiClient {
   logout(): Promise<LogoutResponse>;
   me(): Promise<AuthUserResponse>;
   listCapabilities(): Promise<CapabilityListResponse>;
+  listConversationUploads(conversationId: string): Promise<UploadListResponse>;
+  deleteConversationUpload(conversationId: string, uploadId: string): Promise<DeleteUploadResponse>;
+  uploadConversationFile(conversationId: string, file: File): Promise<UploadFileResponse>;
   submitMessage(input: SubmitMessageInput): Promise<MessageAcceptedResponse>;
   listConversations(): Promise<ConversationListResponse>;
   listConversationMessages(conversationId: string): Promise<ConversationMessagesResponse>;
@@ -126,6 +132,26 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     logout: () => request<LogoutResponse>('/api/v1/auth/logout', { method: 'POST' }),
     me: () => request<AuthUserResponse>('/api/v1/auth/me'),
     listCapabilities: () => request<CapabilityListResponse>('/api/v1/capabilities'),
+    listConversationUploads: (conversationId) => request<UploadListResponse>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads`,
+    ),
+    deleteConversationUpload: (conversationId, uploadId) => request<DeleteUploadResponse>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads/${encodeURIComponent(uploadId)}`,
+      { method: 'DELETE' },
+    ),
+    uploadConversationFile: async (conversationId, file) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await fetcher(`${baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: formData,
+      });
+      if (!response.ok) {
+        throw await toApiError(response);
+      }
+      return (await response.json()) as UploadFileResponse;
+    },
     submitMessage: (input) => {
       const mode = UI_MODES.find((candidate) => candidate.key === input.mode);
       if (!mode) {

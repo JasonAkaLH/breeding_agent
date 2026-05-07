@@ -87,3 +87,4 @@
 
 - `docs/dev_processes/backend/Phase-2-SQLite状态存储表结构草案.md`：将 Phase 2 的状态存储规则翻译成 SQLite 表结构、索引、独立列/JSON 字段映射与迁移关注点。
 - `docs/Capability接入指南.md`：说明后续新增 capability 时在 capability 模块、runtime、planner payload allowlist、macro provider、fallback、测试与文档中分别要加入什么。
+- Codex Skill 构建指南：`Codex-Skill构建指南.md`

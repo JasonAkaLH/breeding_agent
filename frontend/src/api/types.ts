@@ -35,6 +35,34 @@ export interface MessageAcceptedResponse {
   status: 'accepted' | string;
 }
 
+export interface UploadPreviewResponse {
+  row_count?: number | null;
+  columns: string[];
+  shape?: string | null;
+}
+
+export interface UploadFileResponse {
+  upload_id: string;
+  conversation_id: string;
+  filename: string;
+  content_type: string;
+  file_type: 'json' | 'csv' | string;
+  size_bytes: number;
+  sha256: string;
+  expires_at: string;
+  preview: UploadPreviewResponse;
+}
+
+export interface UploadListResponse {
+  conversation_id: string;
+  uploads: UploadFileResponse[];
+}
+
+export interface DeleteUploadResponse {
+  upload_id: string;
+  deleted: boolean;
+}
+
 export interface TaskSummaryResponse {
   task_id: string;
   conversation_id: string;

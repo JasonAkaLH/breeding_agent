@@ -123,7 +123,7 @@ Phase 8 首版不做：
 
 | 类型 | 来源 | Phase 8 是否读取 | 说明 |
 |---|---|---:|---|
-| Skill 定义文件 | 后端部署环境中的 `~/.codex/skills/**/SKILL.md` 或项目级 `.codex/skills/**/SKILL.md` | 是 | 视为系统配置 / 能力注册表，不是用户上传文件 |
+| Skill 定义文件 | 后端部署环境中的 `~/.codex/skills/**/SKILL.md` 或项目根目录 `skill/**/SKILL.md` | 是 | 视为系统配置 / 能力注册表，不是用户上传文件 |
 | Skill 包内脚本 / schema | 与 `SKILL.md` 同目录或子目录内的声明式资源 | 是（受控） | 只有被 manifest 声明、路径校验通过、runtime 白名单允许的脚本可执行 |
 | 用户文件 | Web 前端上传到后端 | 不直接按路径读取 | 只通过后端 artifact / upload 服务转成 `ArtifactRef` 与内容摘要 |
 
@@ -350,7 +350,7 @@ class SkillScriptEntrypoint:
     env_allowlist: tuple[str, ...] = ()
 ```
 
-脚本 runtime 固定为 `runtime="python"`，并使用后端统一运行环境执行，避免引入 Node / Bash / 任意 shell 的跨平台与安全复杂度。脚本作者不需要在 skill 内处理环境依赖探测、安装或降级；后续面向用户的“skill 构建指南”会明确后端运行的 Python 版本与可用 package 列表，skill 脚本只能基于该清单编写。
+脚本 runtime 固定为 `runtime="python"`，并使用后端统一运行环境执行，避免引入 Node / Bash / 任意 shell 的跨平台与安全复杂度。脚本作者不需要在 skill 内处理环境依赖探测、安装或降级；`Codex-Skill构建指南.md` 已明确当前后端脚本运行边界、依赖口径与可用输入输出形态，skill 脚本只能基于该清单编写。
 
 
 ## 9. 运行流程
@@ -359,7 +359,7 @@ class SkillScriptEntrypoint:
 
 1. 读取允许的 skill 根目录：
    - 用户级：`~/.codex/skills`
-   - 项目级：`<repo>/.codex/skills`（若存在）
+   - 项目级：`<repo>/skill`（若存在）
    - 系统级 / 插件缓存目录是否纳入，需后续单独开关控制
 2. 查找 `*/SKILL.md`。
 3. 解析 frontmatter 与 body。
@@ -565,7 +565,7 @@ skill-name/
 
 1. 只支持 Python runtime；
 2. 不在执行时安装依赖，也不解析 skill 包内的 `requirements.txt` / `pyproject.toml`；
-3. 依赖可用性由后续“skill 构建指南”固定说明：包括后端 Python 版本与 package 列表；
+3. 依赖可用性由 `Codex-Skill构建指南.md` 固定说明：包括后端正式依赖、部署环境口径与脚本运行边界；
 4. 使用 `asyncio.create_subprocess_exec()`，不使用 shell 拼接命令；
 5. `cwd` 设置为隔离工作目录，而不是仓库根目录或 skill 源目录；
 6. 脚本文件从 skill 包复制或只读映射到工作目录；
@@ -580,13 +580,13 @@ skill-name/
 
 Phase 8 明确不把“脚本依赖管理”作为 runtime 要解决的问题。
 
-后续会单独提供面向用户的 **skill 构建指南**，其中写明：
+`Codex-Skill构建指南.md` 已提供面向用户的 **Skill 构建指南**，其中写明：
 
 - skill 包内脚本只能使用 Python 编写；
-- 后端运行的 Python 版本；
+- 后端部署运行环境口径；
 - 后端已安装且允许使用的 package 列表；
 - 不支持 skill 包在运行时声明、下载、安装或升级额外依赖；
-- 不要求 skill 脚本自行探测环境、兼容多 Python 版本或处理缺包降级。
+- 不要求 skill 脚本自行探测环境、兼容多运行环境或处理缺包降级。
 
 因此，`SkillScriptRunner` 的职责只包括：
 
@@ -595,7 +595,7 @@ Phase 8 明确不把“脚本依赖管理”作为 runtime 要解决的问题。
 - 收集并校验 JSON 输出；
 - 处理 timeout、退出码、stdout/stderr 上限与审计。
 
-如果某个 skill 需要新增依赖，应先更新后端统一运行环境与 skill 构建指南，再允许该 skill 上线；不能由单个 skill 包在执行时临时安装。
+如果某个 skill 需要新增依赖，应先更新后端统一运行环境与 `Codex-Skill构建指南.md`，再允许该 skill 上线；不能由单个 skill 包在执行时临时安装。
 
 ### 11.5 脚本输入形态
 
@@ -719,7 +719,7 @@ Phase 8 明确不把“脚本依赖管理”作为 runtime 要解决的问题。
 
 ### 13.2 Skill body 与包内脚本都是半可信配置
 
-即使 skill 来自本地 `.codex/skills`，也不能把 Markdown 代码块自动当命令执行。只有 `scripts` 扩展字段显式声明、路径校验通过、runtime 白名单允许的包内脚本可以交给 `SkillScriptRunner`。脚本执行结果仍然需要 output contract 校验，不能绕过 artifact boundary、audit 或 task lifecycle。
+即使 skill 来自项目根目录 `skill/` 或用户级 `~/.codex/skills`，也不能把 Markdown 代码块自动当命令执行。只有 `scripts` 扩展字段显式声明、路径校验通过、runtime 白名单允许的包内脚本可以交给 `SkillScriptRunner`。脚本执行结果仍然需要 output contract 校验，不能绕过 artifact boundary、audit 或 task lifecycle。
 
 ### 13.3 审计策略
 
@@ -1008,7 +1008,7 @@ Phase 8 首版完成必须满足：
 这些问题不阻塞设计稿落地，但会影响 Phase 8 实施范围：
 
 1. Web 上传服务是否已经有正式对象存储 / 临时文件存储方案？若没有，Phase 8 首版先只接受 metadata 中的 artifact ref 与 preview。
-2. 是否需要把 `.codex/plugins/cache/**/skills/**/SKILL.md` 纳入 catalog？建议首版不纳入，只读取用户级与项目级 skill。
+2. 是否需要把 `.codex/plugins/cache/**/skills/**/SKILL.md` 纳入 catalog？建议首版不纳入，只读取用户级与项目根目录 `skill/` 下的项目级 skill；构建新 Skill 时遵循 `Codex-Skill构建指南.md`。
 3. 主代理是否需要一次选择多个 skill？建议首版只选 0 或 1 个，避免多 skill 指令冲突。
 4. 是否要把 skill catalog 暴露成 API？建议可提供只读 `/api/v1/skills`，但不作为首版必须项。
 5. 上传文件内容提取器由哪个阶段负责？建议另立上传 / artifact extraction 子专题，Phase 8 只定义 `ArtifactRef` seam。

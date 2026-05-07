@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
 import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { CapabilityResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UserResponse } from './api/types';
+import type { CapabilityResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { applyTaskEvent, createInitialTaskEventState, createSubmittingTaskState, isTaskActive, markTaskCompleted, markTaskFailed, markWaitingInputRequired, type TaskEventState } from './domain/taskEvents';
 import { SqlQueryResultCard } from './components/SqlQueryResultCard';
@@ -76,6 +76,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [deepThinking, setDeepThinking] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('medium');
   const [input, setInput] = useState('');
+  const [pendingUploads, setPendingUploads] = useState<UploadFileResponse[]>([]);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [draggingUpload, setDraggingUpload] = useState(false);
+  const [deletingUploadIds, setDeletingUploadIds] = useState<Set<string>>(() => new Set());
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [taskState, setTaskState] = useState<TaskEventState>(createInitialTaskEventState());
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
@@ -92,6 +96,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [capabilities, setCapabilities] = useState<CapabilityResponse[]>([]);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const subscriptionRef = useRef<TaskEventSubscription | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const taskPresentationModesRef = useRef<Map<string, ChatMode>>(new Map());
   const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
 
@@ -168,6 +173,20 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (!authUser) return;
     void refreshConversationHistory();
   }, [authUser, refreshConversationHistory]);
+
+  const refreshConversationUploads = useCallback(async (targetConversationId = conversationId) => {
+    if (!authUser || !targetConversationId) return;
+    try {
+      const result = await api.listConversationUploads(targetConversationId);
+      setPendingUploads(result.uploads);
+    } catch {
+      setPendingUploads([]);
+    }
+  }, [api, authUser, conversationId]);
+
+  useEffect(() => {
+    void refreshConversationUploads();
+  }, [refreshConversationUploads]);
 
   const active = isTaskActive(taskState.phase);
 
@@ -253,6 +272,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const nextConversationId = loadOrCreateConversationId(user.username);
     setConversationId(nextConversationId);
     setMessages([]);
+    setPendingUploads([]);
     setTaskState(createInitialTaskEventState());
     setCurrentTaskId(null);
     setPendingInterrupt(null);
@@ -271,6 +291,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setConversationId('');
     setMessages([]);
     setConversationHistory([]);
+    setPendingUploads([]);
     setUnfinishedTasks([]);
     setCurrentTaskId(null);
     setCurrentAssistantId(null);
@@ -284,6 +305,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setConversationId(nextConversationId);
     setMessages([]);
     setInput('');
+    setPendingUploads([]);
     setCurrentTaskId(null);
     setCurrentAssistantId(null);
     setPendingInterrupt(null);
@@ -410,6 +432,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         mode,
         deepThinking,
         reasoningEffort,
+        metadata: pendingUploads.length > 0 ? { upload_ids: pendingUploads.map((upload) => upload.upload_id) } : undefined,
       });
       taskPresentationModesRef.current.set(accepted.task_id, mode);
       setCurrentTaskId(accepted.task_id);
@@ -419,6 +442,56 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
       setGlobalError(friendlyError(error));
     }
+  }
+
+  async function handleUploadFile(file: File | undefined) {
+    if (!authUser || !conversationId || !file || interactionLocked || uploadingFile) return;
+    setGlobalError(null);
+    setUploadingFile(true);
+    try {
+      const uploaded = await api.uploadConversationFile(conversationId, file);
+      setPendingUploads((current) => [...current, uploaded]);
+    } catch (error) {
+      setGlobalError(friendlyError(error));
+    } finally {
+      setUploadingFile(false);
+      if (uploadInputRef.current) {
+        uploadInputRef.current.value = '';
+      }
+    }
+  }
+
+  async function handleDeleteUpload(upload: UploadFileResponse) {
+    if (!conversationId || deletingUploadIds.has(upload.upload_id)) return;
+    setDeletingUploadIds((current) => new Set(current).add(upload.upload_id));
+    try {
+      await api.deleteConversationUpload(conversationId, upload.upload_id);
+      setPendingUploads((current) => current.filter((item) => item.upload_id !== upload.upload_id));
+    } catch (error) {
+      setGlobalError(friendlyError(error));
+    } finally {
+      setDeletingUploadIds((current) => {
+        const next = new Set(current);
+        next.delete(upload.upload_id);
+        return next;
+      });
+    }
+  }
+
+  function handleUploadDragOver(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (!interactionLocked && !uploadingFile) setDraggingUpload(true);
+  }
+
+  function handleUploadDragLeave(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDraggingUpload(false);
+  }
+
+  function handleUploadDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDraggingUpload(false);
+    void handleUploadFile(event.dataTransfer.files?.[0]);
   }
 
   async function handleInterruptAnswer(content: string, interrupt: PendingInterrupt) {
@@ -642,8 +715,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         <Layout.Header className="app-header">
           <Flex justify="space-between" align="center" gap="middle">
             <div>
-              <Typography.Title level={3} className="app-title">业务对话台</Typography.Title>
-              <Typography.Text type="secondary">内部业务用户入口 · FastAPI/SSE</Typography.Text>
+              <Typography.Title level={3} className="app-title">小奥Agent</Typography.Title>
+              <Typography.Text type="secondary">AI育种助手</Typography.Text>
             </div>
             <Space wrap>
               <CapabilityBadge capabilityId="main_agent.respond" label="主代理" capabilities={capabilities} />
@@ -690,6 +763,42 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           <Card className="composer-card">
             <Space direction="vertical" size="middle" className="composer-space">
               {pendingInterrupt ? <InterruptInputBanner interrupt={pendingInterrupt} onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
+              <div
+                className={`upload-drop-zone${draggingUpload ? ' upload-drop-zone-active' : ''}`}
+                role="button"
+                tabIndex={0}
+                aria-label="拖拽上传 JSON 或 CSV 文件"
+                onClick={() => uploadInputRef.current?.click()}
+                onDragOver={handleUploadDragOver}
+                onDragLeave={handleUploadDragLeave}
+                onDrop={handleUploadDrop}
+              >
+                <Typography.Text type="secondary">
+                  拖拽 JSON/CSV 文件到这里，或点击上传文件
+                </Typography.Text>
+              </div>
+              {pendingUploads.length > 0 ? (
+                <Space size={[8, 8]} wrap aria-label="暂存区文件列表">
+                  {pendingUploads.map((upload) => (
+                    <Tag key={upload.upload_id} className="upload-file-tag">
+                      {upload.filename}
+                      {typeof upload.preview.row_count === 'number' ? ` · ${upload.preview.row_count} 行` : ''}
+                      {upload.preview.columns.length > 0 ? ` · ${upload.preview.columns.slice(0, 3).join('/')}` : ''}
+                      <Button
+                        type="link"
+                        danger
+                        size="small"
+                        aria-label={`删除文件 ${upload.filename}`}
+                        loading={deletingUploadIds.has(upload.upload_id)}
+                        disabled={interactionLocked}
+                        onClick={() => void handleDeleteUpload(upload)}
+                      >
+                        删除
+                      </Button>
+                    </Tag>
+                  ))}
+                </Space>
+              ) : null}
               <Input.TextArea
                 aria-label="请输入问题"
                 value={input}
@@ -732,6 +841,23 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   </Space>
                 </Space>
                 <Space>
+                  <Button
+                    aria-label="选择 JSON 或 CSV 文件"
+                    onClick={() => uploadInputRef.current?.click()}
+                    disabled={interactionLocked || uploadingFile}
+                    loading={uploadingFile}
+                  >
+                    上传文件
+                  </Button>
+                  <input
+                    ref={uploadInputRef}
+                    className="file-input-hidden"
+                    aria-label="上传 JSON 或 CSV 文件"
+                    type="file"
+                    accept=".json,.csv,application/json,text/csv"
+                    disabled={interactionLocked || uploadingFile}
+                    onChange={(event) => void handleUploadFile(event.target.files?.[0])}
+                  />
                   {active && currentTaskId ? (
                     <Button
                       danger
@@ -742,7 +868,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       取消任务
                     </Button>
                   ) : null}
-                  <Button type="primary" aria-label="发送" onClick={handleSubmit} disabled={!input.trim() || active}>发送</Button>
+                  <Button type="primary" aria-label="发送" onClick={handleSubmit} disabled={!input.trim() || active || uploadingFile}>发送</Button>
                 </Space>
               </Flex>
             </Space>
@@ -832,7 +958,7 @@ function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (user: UserRespo
 
   return (
     <Layout className="app-shell auth-shell">
-      <Card className="login-card" title={authMode === 'login' ? '登录业务对话台' : '创建业务对话台用户'}>
+      <Card className="login-card" title={authMode === 'login' ? '登录小奥Agent' : '创建小奥Agent用户'}>
         <Space direction="vertical" size="middle" className="login-form">
           {error ? <Alert type="error" showIcon message={error} /> : null}
           <Input

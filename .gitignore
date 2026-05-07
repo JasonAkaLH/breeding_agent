@@ -1,6 +1,7 @@
 # Local tooling
 .omx/
 .codex/
+/skill/
 .DS_Store
 .idea/
 .vscode/

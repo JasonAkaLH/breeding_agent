@@ -12,7 +12,8 @@
 | `configs/sql_query/` | SQLQuery 路由规则、schema metadata 与 SQL Guard 规则配置。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/dev_processes/` | 开发流程文档总目录；后端 Phase 文档在 `docs/dev_processes/backend/`，前端 Phase 文档在 `docs/dev_processes/frontend/`。 |
-| `docs/` 其他文件 | Capability 接入指南、LLM 接入建议、SQLQuery prompt 模板、一期验收报告、架构图与阶段性说明。 |
+| `docs/` 其他文件 | Capability 接入指南、Codex Skill 构建指南、LLM 接入建议、SQLQuery prompt 模板、一期验收报告、架构图与阶段性说明。 |
+| `skill/` | 项目级 Codex Skill 目录；后端默认扫描 `skill/**/SKILL.md`，具体构建约束见 `Codex-Skill构建指南.md`。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |

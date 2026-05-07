@@ -10,6 +10,32 @@
 
 ## [Unreleased]
 
+### 2026-05-07 — 新增 JSON/CSV 上传内存暂存并接入 Skill 脚本
+
+- 新增 conversation 级 JSON/CSV 上传接口，登录用户可上传文件到进程内存暂存区，返回 `upload_id`、文件摘要、列名和行数 preview；上传记录按用户和 conversation 隔离，并带大小、类型、TTL 与数量约束。
+- 消息提交支持 `metadata.upload_ids` 引用上传文件，主代理 prompt 只注入脱敏文件摘要，Skill 自动脚本通过 `uploaded_artifacts[].content` 获取原始 JSON/CSV 内容。
+- 前端输入区新增“上传文件”入口、拖拽上传区域和暂存区文件列表，发送消息时自动携带当前暂存文件的 `upload_ids`。
+- 暂存区支持按 conversation 查询与按文件删除，用户点击删除后会同步移除后端进程内存记录；若后续消息仍引用已删除或过期的 `upload_id`，后端会记录到 `missing_upload_ids` 并忽略该文件。
+- 更新 Codex Skill 构建指南中脚本输入说明，补充受控上传入口下脚本可读取原始文件内容、LLM prompt 仍只接收摘要的边界。
+
+### 2026-05-07 — 改造 mini BreedStat RCBD Skill 为项目兼容形态
+
+- 将 `skill/mini_breedstat_rcbd_skill/SKILL.md` 改为本项目可解析的 YAML frontmatter + 中文 Skill 指令，声明 `mini-breedstat-rcbd`、中文触发词、`runtime: python` 自动脚本与 `answer` 输出契约。
+- 新增 `scripts/run_rcbd.py` 作为 Python wrapper，负责本系统 JSON stdin/stdout、Rscript 查找、临时输入文件、R 脚本调用和结构化错误返回；保留原 `run_rcbd_local.R` / `render_rcbd_layout_html.R` 业务逻辑链路，不重写 RCBD 算法。
+- 更新该 Skill 的 README 与 R 依赖说明，移除旧 `.codex` / Windows Rscript 路径口径；将 RCBD 核心依赖切换为 Skill 包内 `scripts/rcbd_design_core.R`，并补充兼容性回归测试覆盖项目 Skill Catalog 发现、缺输入 JSON 输出与 bundled R 核心依赖成功执行。
+- RCBD Skill 的 R 执行链路已迁移到 `scripts/rcbd_design_core.R`，并删除旧 `scripts/design_Functions.R`，避免后续维护时继续引用过期核心脚本。
+
+### 2026-05-07 — 前端品牌文案改为小奥Agent
+
+- 将前端页面标题、顶部主标题、登录卡片与创建用户卡片中的“业务对话台”统一改为“小奥Agent”，将顶部副标题改为“AI育种助手”，并同步更新前端测试断言与 HTML title。
+
+### 2026-05-07 — 新增 Codex Skill 构建指南
+
+- 新增 `Codex-Skill构建指南.md`，面向 Oh-my-codex `skill-creator` 说明本系统可加载 Skill 的项目根目录 `skill/`、frontmatter、触发匹配、prompt 注入、受控 Python 脚本、Rscript wrapper、JSON IO、项目正式依赖快照、验证命令与常见错误。
+- 将项目级 Skill 默认扫描目录从 `.codex/skills` 调整为仓库根目录 `skill/`，保留用户级 `~/.codex/skills` 兼容入口。
+- 将仓库根目录 `skill/` 加入 `.gitignore`，作为本地 Skill 工作区使用，避免同事各自构建或调试的 Skill 包默认进入版本控制。
+- 同步更新 README、开发流程索引、Phase 8 文档与主代理 Skill PRD，明确本系统兼容的是受控 Skill runtime，不复刻完整 Codex workspace / plugin / shell 能力。
+
 ### 2026-05-07 — 新增对话上下文记忆与压缩 PRD
 
 - 新增 `docs/prd/backend/10-对话上下文记忆与压缩PRD.md`，定义 conversation 内会话延续型记忆、Planner / 主代理 prompt 注入范围、两级压缩策略、摘要持久化、安全审计与测试验收口径。

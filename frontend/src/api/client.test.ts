@@ -172,4 +172,48 @@ describe('createApiClient', () => {
     const api = createApiClient();
     expect(api.uiModes.map((mode) => mode.capabilityId)).toEqual([null, 'sql_query.query']);
   });
+
+
+  it('uploads a JSON or CSV file with multipart form data', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      upload_id: 'upl-1',
+      conversation_id: 'conv-1',
+      filename: 'materials.csv',
+      content_type: 'text/csv',
+      file_type: 'csv',
+      size_bytes: 24,
+      sha256: 'hash',
+      expires_at: '2026-05-07T10:00:00',
+      preview: { row_count: 1, columns: ['ped_id', 'design_check'], shape: 'table' },
+    }), { status: 201 }));
+    const api = createApiClient({ fetcher });
+    const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
+
+    const result = await api.uploadConversationFile('conv-1', file);
+
+    expect(result.upload_id).toBe('upl-1');
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/uploads', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }));
+    const init = fetcher.mock.calls[0][1] as RequestInit;
+    expect(init.body).toBeInstanceOf(FormData);
+    expect(init.headers).toBeUndefined();
+  });
+
+
+
+  it('lists and deletes uploaded conversation files', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', uploads: [] }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.listConversationUploads('conv-1');
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/uploads', expect.any(Object));
+
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ upload_id: 'upl-1', deleted: true }), { status: 200 }));
+    const deleted = await api.deleteConversationUpload('conv-1', 'upl-1');
+    expect(deleted.deleted).toBe(true);
+    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/conversations/conv-1/uploads/upl-1', expect.objectContaining({ method: 'DELETE' }));
+  });
+
 });

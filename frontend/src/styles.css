@@ -437,3 +437,36 @@ body {
   text-align: left;
   text-overflow: ellipsis;
 }
+
+.file-input-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.upload-drop-zone {
+  padding: 10px 12px;
+  border: 1px dashed #b7c7e6;
+  border-radius: 10px;
+  background: #f8fbff;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.upload-drop-zone-active {
+  border-color: #1677ff;
+  background: #eaf3ff;
+}
+
+.upload-file-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 4px;
+}

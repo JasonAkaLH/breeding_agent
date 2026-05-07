@@ -169,3 +169,7 @@ Smoke 验收重点：
 - 上传文件上下文已被主代理使用的状态提示。
 
 前端不应依赖 audit-only 事件作为用户主界面必需数据；正式用户可见信息应以后端明确标记为 `FRONTEND` 的事件和最终 artifact 为准。
+
+## 11. Skill 构建指南
+
+面向 Oh-my-codex `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `Codex-Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 Codex runtime 能力。

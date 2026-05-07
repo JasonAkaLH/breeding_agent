@@ -208,7 +208,14 @@ class MainAgentRespondCapability(CapabilityContract):
                         visibility=EventVisibility.AUDIT_ONLY,
                     )
                 )
-                payload = {"query": user_message, "uploaded_artifacts": artifact_context, "metadata": dict(request.metadata)}
+                script_artifacts = request.metadata.get("skill_artifacts")
+                if not isinstance(script_artifacts, list | tuple):
+                    script_artifacts = artifact_context
+                payload = {
+                    "query": user_message,
+                    "uploaded_artifacts": list(script_artifacts),
+                    "metadata": dict(request.metadata),
+                }
                 try:
                     output = await self._script_runner.run(match.manifest, script, payload)
                 except SkillScriptError as exc:

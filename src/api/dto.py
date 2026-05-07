@@ -54,6 +54,34 @@ class MessageAcceptedResponse(BaseModel):
     status: str
 
 
+class UploadPreviewResponse(BaseModel):
+    row_count: int | None = None
+    columns: list[str] = Field(default_factory=list)
+    shape: str | None = None
+
+
+class UploadFileResponse(BaseModel):
+    upload_id: str
+    conversation_id: str
+    filename: str
+    content_type: str
+    file_type: str
+    size_bytes: int
+    sha256: str
+    expires_at: datetime
+    preview: UploadPreviewResponse
+
+
+class UploadListResponse(BaseModel):
+    conversation_id: str
+    uploads: list[UploadFileResponse]
+
+
+class DeleteUploadResponse(BaseModel):
+    upload_id: str
+    deleted: bool
+
+
 class TaskSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -363,6 +363,68 @@ Use script result.
         self.assertEqual(result.output_payload["script_results"][0]["output"]["answer"], "脚本处理:执行脚本")
         self.assertIn("脚本处理:执行脚本", prompts[0])
 
+    async def test_auto_run_script_receives_raw_skill_artifacts_not_prompt_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+                    payload = json.load(sys.stdin)
+                    artifact = payload["uploaded_artifacts"][0]
+                    print(json.dumps({"answer": "content-bytes:" + str(len(artifact["content"]))}, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 脚本
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+outputs:
+  required:
+    - answer
+---
+
+# Scripted
+Use script result.
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+            prompts: list[str] = []
+
+            async def streamer(prompt: str):
+                prompts.append(prompt)
+                yield "done"
+
+            executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "执行脚本"},
+                    metadata={
+                        "uploaded_artifacts": [{"upload_id": "upl-1", "filename": "data.csv", "preview": {"row_count": 1}}],
+                        "skill_artifacts": [{"upload_id": "upl-1", "filename": "data.csv", "content": "ped_id,design_check\nA,0\n"}],
+                    },
+                )
+            )
+
+        self.assertEqual(result.output_payload["script_results"][0]["output"]["answer"], "content-bytes:24")
+        self.assertIn("data.csv", prompts[0])
+        self.assertNotIn("ped_id,design_check", prompts[0])
+
 
 if __name__ == "__main__":
     unittest.main()

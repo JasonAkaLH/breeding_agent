@@ -19,6 +19,19 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     me: vi.fn(async () => ({ user: { username: 'alice' } })),
     listCapabilities: vi.fn(async () => ({ capabilities: [{ capability_id: 'sql_query.query', name: 'SQLQuery', description: 'SQL', version: '1', status: 'active' }] })),
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
+    listConversationUploads: vi.fn(async () => ({ conversation_id: 'conv-test', uploads: [] })),
+    deleteConversationUpload: vi.fn(async (conversationId, uploadId) => ({ upload_id: uploadId, deleted: true })),
+    uploadConversationFile: vi.fn(async (_conversationId, file) => ({
+      upload_id: 'upl-1',
+      conversation_id: 'conv-test',
+      filename: file.name,
+      content_type: file.type || 'text/csv',
+      file_type: file.name.endsWith('.json') ? 'json' : 'csv',
+      size_bytes: file.size,
+      sha256: 'hash',
+      expires_at: '2026-05-07T10:00:00',
+      preview: { row_count: 1, columns: ['ped_id', 'design_check'], shape: 'table' },
+    })),
     cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
     listConversations: vi.fn(async () => ({ conversations: [] })),
     listConversationMessages: vi.fn(async () => ({ conversation_id: 'conv-test', messages: [] })),
@@ -49,7 +62,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
 
 async function renderAuthed(ui: ReactElement) {
   render(ui);
-  await screen.findByText('业务对话台');
+  await screen.findByText('小奥Agent');
 }
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type): TaskEventEnvelope {
@@ -98,7 +111,7 @@ describe('App', () => {
     });
     render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
-    expect(await screen.findByText('登录业务对话台')).toBeInTheDocument();
+    expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
     expect(api.createCaptcha).toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
     fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'alice-password' } });
@@ -111,7 +124,7 @@ describe('App', () => {
       captchaId: 'cap-1',
       captchaCode: '1234',
     }));
-    expect(await screen.findByText('业务对话台')).toBeInTheDocument();
+    expect(await screen.findByText('小奥Agent')).toBeInTheDocument();
     expect(screen.getByText('user: alice')).toBeInTheDocument();
   });
 
@@ -124,9 +137,9 @@ describe('App', () => {
     });
     render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
-    expect(await screen.findByText('登录业务对话台')).toBeInTheDocument();
+    expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '创建新用户' }));
-    expect(screen.getByText('创建业务对话台用户')).toBeInTheDocument();
+    expect(screen.getByText('创建小奥Agent用户')).toBeInTheDocument();
     expect(screen.getByText('密码至少 8 位，并且必须同时包含字母和数字。')).toBeInTheDocument();
 
     const submitButton = screen.getByRole('button', { name: '创建用户并登录' });
@@ -146,7 +159,7 @@ describe('App', () => {
       captchaId: 'cap-1',
       captchaCode: '1234',
     }));
-    expect(await screen.findByText('业务对话台')).toBeInTheDocument();
+    expect(await screen.findByText('小奥Agent')).toBeInTheDocument();
     expect(screen.getByText('user: charlie')).toBeInTheDocument();
   });
 
@@ -386,6 +399,65 @@ describe('App', () => {
     expect(reasoningBox).toHaveClass('reasoning-box-collapsed');
     await waitFor(() => expect(screen.getAllByText('你好').length).toBeGreaterThan(0));
     await screen.findByText(/已接通。/);
+  });
+
+  it('lists temporary uploads and deletes one from the backend memory area', async () => {
+    const api = makeApi({
+      listConversationUploads: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        uploads: [{
+          upload_id: 'upl-existing',
+          conversation_id: 'conv-test',
+          filename: 'existing.csv',
+          content_type: 'text/csv',
+          file_type: 'csv',
+          size_bytes: 24,
+          sha256: 'hash',
+          expires_at: '2026-05-07T10:00:00',
+          preview: { row_count: 1, columns: ['ped_id'], shape: 'table' },
+        }],
+      })),
+      deleteConversationUpload: vi.fn(async () => ({ upload_id: 'upl-existing', deleted: true })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    await screen.findByText(/existing.csv/);
+    fireEvent.click(screen.getByRole('button', { name: '删除文件 existing.csv' }));
+
+    await waitFor(() => expect(api.deleteConversationUpload).toHaveBeenCalledWith(expect.any(String), 'upl-existing'));
+    await waitFor(() => expect(screen.queryByText(/existing.csv/)).not.toBeInTheDocument());
+  });
+
+  it('uploads a CSV file and submits its upload id with the next message', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON 或 CSV 文件'), { target: { files: [file] } });
+
+    await screen.findByText(/materials.csv/);
+    await screen.findByText(/1 行/);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做3个区组RCBD' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledWith(expect.any(String), file));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { upload_ids: ['upl-1'] },
+    })));
+    expect(screen.getByText(/materials.csv/)).toBeInTheDocument();
+  });
+
+  it('uploads a CSV file by drag and drop', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const file = new File(['ped_id,design_check\nA,0\n'], 'dragged.csv', { type: 'text/csv' });
+    fireEvent.drop(screen.getByRole('button', { name: '拖拽上传 JSON 或 CSV 文件' }), {
+      dataTransfer: { files: [file] },
+    });
+
+    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledWith(expect.any(String), file));
+    expect(await screen.findByText(/dragged.csv/)).toBeInTheDocument();
   });
 
   it('submits deep thinking flag from the switch next to current mode', async () => {
