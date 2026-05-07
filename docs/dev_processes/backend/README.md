@@ -29,6 +29,7 @@
 | Phase 8 | Codex Skill 兼容层与上传文件上下文驱动的主代理技能选择机制 | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`、Phase 5.5 结论、Codex Skill `SKILL.md` 格式、Web 上传 artifact 约束 | `main_agent.respond`、Skill parser/catalog/matcher、IO contract、受控脚本 runner、ArtifactRef prompt context、主代理 streaming runtime |
 | Phase 8.1 | SQLQuery 宏能力与 LLM 动态 DAG 规划 | `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md`、Phase 8 主代理 LLM / Skill runtime 结论、SQL 查询整体能力边界 | SQLQuery public capability、macro/subworkflow capability 规则、LLM Planner 高层 DAG 规划边界 |
 | Phase 8.2 | 主代理真实 LLM Runtime 绑定与 Smoke 验证 | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`、Phase 8 主代理 streaming seam、Phase 8.1 Planner 前置契约、`src/integrations/llm_client.py` | 主代理真实 provider 显式 runtime 绑定、safe metadata、手工 smoke 入口 |
+| Phase 8.3 | 对话上下文记忆与压缩 | `docs/prd/backend/10-对话上下文记忆与压缩PRD.md`、Phase 8 / 8.1 主代理与 Planner runtime 结论、`src/integrations/token_counter.py` | conversation memory context、Planner / 主代理注入、两级压缩与摘要持久化实施方案 |
 
 ---
 
@@ -51,6 +52,7 @@
 - `Phase-8-Codex-Skill兼容层与上传文件上下文驱动的主代理技能选择机制.md`：二期主代理能力专题，已完成首轮主代理 LLM 接入与 Codex Skill 兼容层实现；用于沉淀 Codex Skill 格式兼容、输入输出契约识别、受控执行 skill 包内声明脚本、上传文件 `ArtifactRef` 边界与主代理技能选择机制；首版不复刻 Codex 本地文件 / 任意 shell / plugin runtime。
 - `Phase-8.1-SQLQuery宏能力与LLM动态DAG规划.md`：二期主代理规划专题设计稿，明确 SQL 查询公开命名改为 SQLQuery、对外只暴露 `sql_query.query` 宏能力，并把 `sql_query.*` 限定为内部固定子工作流实现细节。
 - `Phase-8.2-主代理真实LLM运行时绑定与Smoke验证.md`：二期主代理运行时收口专题，补齐主代理真实 provider 的显式 runtime 绑定、safe metadata 与本地手工 smoke 验证；不接完整 LLM Planner，不改变 SQLQuery 安全边界。
+- 后续 Phase 8.3 对话上下文记忆与压缩实施专题：输入为 `docs/prd/backend/10-对话上下文记忆与压缩PRD.md`；用于落地 conversation memory context、Planner / 主代理 prompt 注入、两级压缩策略与摘要持久化。当前已完成 PRD，开发过程文档待实施前补齐。
 
 ---
 
@@ -60,6 +62,7 @@
 - Phase 5.5 是一期验收后的增强专题，不修改 Phase 0 ~ Phase 7 的已完成验收结论。
 - Phase 8 是二期主代理能力专题，不修改 Phase 0 ~ Phase 7 的已完成验收结论，也不默认包含完整 Codex runtime 复刻。
 - Phase 8.2 只收口主代理真实 LLM runtime 绑定与 smoke，不把真实 provider 调用放入默认 unittest，也不默认让 SQLQuery 自动访问真实 provider。
+- Phase 8.3 只覆盖 conversation 内会话延续型记忆与上下文压缩，不默认实现跨会话长期记忆、向量召回或 SQLQuery 内部 LLM 全量历史注入。
 - 后续前端设计应在 `docs/prd/frontend/` 独立展开；不要把前端交互、页面结构或视觉方案混入后端 Phase 文档。
 - 后续若某个 Phase 范围扩大，必须先更新对应 Phase 文档，而不是直接在代码里扩范围。
 - 每个 Phase 结束时，都要能明确回答：

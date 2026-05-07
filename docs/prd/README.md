@@ -6,12 +6,14 @@
 
 | 目录 | 范围 | 状态 |
 |---|---|---|
-| `docs/prd/backend/` | 后端主代理框架、SQLQuery、LLM runtime、编排与 API 契约 | 当前正式基线 |
+| `docs/prd/backend/` | 后端主代理框架、SQLQuery、LLM runtime、对话记忆、编排与 API 契约 | 当前正式基线 |
 | `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | 已开始，v1 业务对话台 PRD 草案 |
 
 ## 后端 PRD 入口
 
 后端 PRD 的总览入口是：`docs/prd/backend/00-主代理框架PRD.md`。
+
+- 对话记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`。
 
 新增或补齐后端能力范围时，应同步更新：
 1. `docs/prd/backend/00-主代理框架PRD.md` 的专题索引；

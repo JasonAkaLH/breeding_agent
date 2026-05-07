@@ -10,6 +10,11 @@
 
 ## [Unreleased]
 
+### 2026-05-07 — 新增对话上下文记忆与压缩 PRD
+
+- 新增 `docs/prd/backend/10-对话上下文记忆与压缩PRD.md`，定义 conversation 内会话延续型记忆、Planner / 主代理 prompt 注入范围、两级压缩策略、摘要持久化、安全审计与测试验收口径。
+- 同步更新 PRD 总索引、后端 PRD 总览与后端开发流程索引，将对话记忆与 compression engineering 纳入后续 Phase 8.3 实施输入。
+
 ### 2026-05-05 — 调整 SQLQuery LLM 设置与复合查询拆分
 
 - 修复“品种信息 + 基因信息”类复合数据库问题未拆分的路由判断：当问题同时包含明确的品种信息表达和基因/基因型意图时，AutoWorkflow 与 SQLQuery intent route 会拆成审定品种库与基因型库两个 SQLQuery 分支，再由主代理汇总。

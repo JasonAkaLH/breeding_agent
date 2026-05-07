@@ -2,8 +2,8 @@
 
 - **项目**：multi_agent_framework
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至 Phase 8.2 实现事实）
-- **日期**：2026-04-27
+- **文档状态**：正式版（已补齐至对话上下文记忆与压缩 PRD）
+- **日期**：2026-05-07
 - **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；前端 PRD 后续放在 `docs/prd/frontend/`。
 
 ## 0. 目录定位
@@ -77,6 +77,7 @@
 | SQLQuery LLM 增强与真实库验证 | `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md` | Phase 5.5、prompt schema、LLM fallback、MySQL 只读适配器 |
 | 主代理 Skill 兼容与真实 LLM Runtime | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md` | Phase 8 / 8.2、普通主代理消息、Skill 上下文、真实 provider smoke |
 | 高层 DAG 规划与 SQLQuery 宏能力边界 | `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md` | Phase 8.1、public capability、planner validator、macro expander |
+| 对话上下文记忆与压缩 | `docs/prd/backend/10-对话上下文记忆与压缩PRD.md` | 多轮对话记忆、Planner / 主代理上下文注入、两级压缩策略 |
 
 ## 5. 当前已定的关键决策摘要
 
@@ -118,6 +119,15 @@
 - 主代理真实 LLM provider 必须通过可测试 seam 绑定；自动化测试默认使用 fake / injected stream，真实 provider 只在显式配置或手工 smoke 中验证。
 - 主代理与 SQLQuery 的 LLM 审计事件不得记录 API key、完整 prompt、完整 rows、base_url 等敏感信息。
 
+
+### 5.6 对话记忆与上下文压缩决策
+
+- v1 记忆系统定位为 conversation 内会话延续型记忆，不做跨会话长期用户画像或知识沉淀。
+- 对话记忆上下文注入 LLM Planner / 自动规划阶段与 `main_agent.respond` 最终回答阶段，保证追问、省略主语和纠错能正确影响路由与回答。
+- SQLQuery 内部 LLM 节点暂不直接消费完整对话记忆；如需上下文补全，应先在 public 规划层把当前轮问题合成为明确问题。
+- 记忆压缩采用两级策略：Level 1 删除 capability 业务中间产物；Level 2 对较早对话历史做摘要压缩并保留最近若干轮原文。
+- 记忆上下文必须按 account / conversation 隔离，并禁止注入 SQL、guard token、schema DDL、完整 rows、完整 prompt、API key、base_url 等敏感或高成本内容。
+
 ## 6. 相关配套文档
 
 - PRD 总目录：`docs/prd/README.md`
@@ -125,6 +135,7 @@
 - 数据库结构说明：`docs/MySQL数据库表结构说明.md`
 - SQLQuery prompt 输入模板：`docs/SQLQuery提示词输入模板.md`
 - 开发流程索引：`docs/dev_processes/backend/README.md`
+- 对话上下文记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`
 
 ## 7. 使用建议
 
