@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+### 2026-05-07 — 将 MySQL 连接配置迁移到本地 config.yaml
+
+- 移除 `src/mysql_engine.py` 中硬编码的真实 MySQL 连接串，改为从本地 `config.yaml` 的 `mysql_readonly.url` 或部署环境变量 `MAF_MYSQL_READONLY_URL` 读取。
+- 更新 SQLQuery / MySQL 相关 README、AGENTS 与 PRD 说明，明确真实数据库地址、账号、密码不得进入 tracked 文件。
+- 将 SQLQuery schema metadata 中的真实库名替换为逻辑库名，并补充 MySQL engine 配置解析测试，降低仓库泄露数据库访问权限的风险。
+
 ### 2026-05-07 — 新增 JSON/CSV 上传内存暂存并接入 Skill 脚本
 
 - 新增 conversation 级 JSON/CSV 上传接口，登录用户可上传文件到进程内存暂存区，返回 `upload_id`、文件摘要、列名和行数 preview；上传记录按用户和 conversation 隔离，并带大小、类型、TTL 与数量约束。

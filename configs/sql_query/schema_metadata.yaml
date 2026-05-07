@@ -1,6 +1,6 @@
 version: 1
 database:
-  name: chatudb
+  name: business_readonly
   dialect: mysql
   charset: utf8mb4
 schema_profiles:

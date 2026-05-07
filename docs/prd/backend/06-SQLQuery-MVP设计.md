@@ -3,18 +3,17 @@
 > 来源：从 `docs/prd/backend/00-主代理框架PRD.md` 拆分而来，承载 SQLQuery 的数据库接入前提、MVP 任务 DAG、Schema Context Builder 与验收闭环。
 
 ## 10.4 当前已知数据库接入参考
-仓库当前已有 `src/mysql_engine.py`，其中提供了基于 SQLAlchemy `create_engine` + `QueuePool` 的 MySQL 访问示例，可作为一期 SQLQuery 数据源接入参考。
+仓库当前已有 `src/mysql_engine.py`，其中提供了基于本地 `config.yaml` / 环境变量读取 MySQL 只读连接串并创建 SQLAlchemy `create_engine` + `QueuePool` 的接入方式，可作为一期 SQLQuery 数据源接入参考。
 
 基于当前仓库事实，需要强调：
-- 该示例可作为数据库连通性与连接池参数参考。
+- 该实现只保留数据库连通性与连接池参数逻辑，不在仓库内保存真实连接串、账号、密码或数据库地址。
 - 主代理框架核心业务逻辑仍必须保持 async 边界。
 - 正式执行链路中，数据库访问不得直接阻塞事件循环；应通过明确的异步执行边界进行封装。
-- 数据库连接信息在正式实现中应通过配置或密钥管理注入，不应以硬编码形式作为长期方案。
+- 数据库连接信息必须通过本地 `config.yaml` 或部署密钥环境注入，不应以硬编码形式进入仓库。
 - 一期 SQLQuery MVP 默认只允许只读查询，不允许写入、DDL 或高风险 SQL。
 - 当前 `src/mysql_engine.py` 只提供数据库连接示例，本身并不构成“只读保证”；正式实现必须引入独立的只读执行约束。
 - 正式执行时应优先使用数据库层面的只读账号 / 最小权限账号，而不是仅依赖 SQL 文本校验。
-- 当前 SQLQuery 执行链路中仅配置一个 MySQL 账号：`chatu:chatu123`。
-- 该账号已确认是只读账号，因此一期不设计多账号切换与权限编排机制。
+- 当前 SQLQuery 执行链路中仅配置一个 MySQL 只读账号，具体连接串与访问权限由本地 `config.yaml` 或部署环境提供，因此一期不设计多账号切换与权限编排机制。
 - 一期仍保留 SQL Guard，作为数据库只读权限之外的第二层保护。
 
 ## 10.5 SQLQuery MVP 任务 DAG 细化草案

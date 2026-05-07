@@ -61,7 +61,8 @@ npm run build
 python scripts/run_fullstack_dev.py
 ```
 
-运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、SQLQuery 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 可用显式 `config` dict 注入覆盖，不要在业务节点执行阶段重复读取 `config.yaml`。
+运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、SQLQuery、MySQL 只读连接与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 可用显式 `config` dict 注入覆盖，不要在业务节点执行阶段重复读取 `config.yaml`。
+MySQL 只读连接配置放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
 同一个 runtime 中的 `*_config_path` 必须指向同一个启动配置文件；如确需为不同组件使用不同 provider，请使用显式 `config` dict 或 client factory 注入，避免多个 YAML 文件竞争同一环境变量命名空间。
 
 如果某次变更引入了新工具，请在同一个 PR 中同步更新 `README.md` 与本文件。未来可能出现的命令示例：
@@ -89,7 +90,7 @@ python --version
 
 根目录中的 `requirements.txt` 视为当前环境依赖快照。写代码前应先查看 `requirements.txt`，确认当前可用依赖包；实现功能时应尽量基于现有依赖完成。如果确实需要新增依赖，应在 `multi_agent` 环境中安装，并同步更新 `requirements.txt`。
 
-按当前项目约定，推送到远端仓库时**不要求主动抹去敏感信息**。如 MySQL 数据库用户名、地址、LLM 的 API Key 等信息，默认可按仓库当前内容保留；只有在用户明确要求脱敏、替换或迁移到配置管理时，才执行相关处理。
+按当前项目约定，推送到远端仓库时**不要求主动抹去敏感信息**，但数据库连接信息已明确迁移到本地 `config.yaml` / 部署环境变量；后续不得把 MySQL 真实用户名、密码、地址或完整连接串写回 tracked 文件。其他敏感信息只有在用户明确要求脱敏、替换或迁移到配置管理时，才执行相关处理。
 
 根目录 `CHANGELOG.md` 是仓库级开发记录入口。每天开发工作结束时，应把当天工作内容写入 `CHANGELOG.md`。
 开始任何分析、设计、编码或文档修改工作前，也应先阅读 `CHANGELOG.md` 的最近相关条目，了解此前已经完成的工作与当前上下文，避免重复判断或偏离既有结论。
