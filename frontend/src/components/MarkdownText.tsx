@@ -120,7 +120,13 @@ function isTableStart(lines: string[], index: number): boolean {
   const separator = splitTableRow(lines[index + 1]);
   return header.length >= 2
     && separator.length === header.length
-    && separator.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+    && separator.every(isTableSeparatorCell);
+}
+
+function isTableSeparatorCell(cell: string): boolean {
+  // Assistant output often keeps separator width close to short headers, for example `:--` under `r`.
+  // Accept that compact alignment form so valid-looking chat tables render as tables instead of paragraphs.
+  return /^:?-{2,}:?$/.test(cell.trim());
 }
 
 function isTableRow(line: string): boolean {

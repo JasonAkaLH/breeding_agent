@@ -29,4 +29,17 @@ describe('MarkdownText', () => {
     expect(screen.getByText('水稻').tagName.toLowerCase()).toBe('strong');
     expect(screen.getByText('审定').tagName.toLowerCase()).toBe('code');
   });
+
+  it('renders assistant tables with compact aligned separator cells', () => {
+    render(
+      <MarkdownText
+        content={`| plots | r | trt |\n|:------|:--|:----|\n| 1 | 1 | A001 |`}
+      />,
+    );
+
+    expect(screen.getByRole('table')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'r' })).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: 'A001' })).toBeInTheDocument();
+  });
+
 });

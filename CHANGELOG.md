@@ -18,14 +18,19 @@
 - 更新 `Codex-Skill构建指南.md`，补充脚本下载文件必须写入 `MAF_SKILL_OUTPUT_DIR`、通过 stdout `output_files` 声明、HTML 只下载、多文件由平台打包 zip、源压缩包默认拒绝等构建规则。
 - 进一步补齐 Skill 输出文件构建规则：明确平台默认允许的扩展名、MIME 必须匹配扩展名、hardlink 禁止、`outputs.files` 只能收紧不能放宽；本地 mini BreedStat RCBD Skill manifest 收紧声明为 `.html` / `text/html` 输出。
 - 修复前端输入框 IME 组合态 Enter 误发送问题：中文输入法确认英文 / 候选词时不提交消息，非组合态 Enter 仍发送，Shift+Enter 仍保留换行。
+- 修复前端对话 Markdown 表格解析过严的问题：兼容助手输出中短列对齐分隔符如 `:--`，避免 RCBD / SQL 等结果表被当作普通段落显示。
 - Codex Skill manifest 新增 `parameters` / `input_parameters` 扩展，支持 Skill 自声明业务参数的类型、必填性、别名和正则解析规则；主代理在自动脚本执行前调用通用 resolver，把解析结果作为脚本 stdin 顶层字段注入。
 - 参数 resolver 新增 LLM 缺参补槽 fallback：确定性解析成功时不调用 LLM；仍缺少文本型标量参数时复用主代理 LLM runtime 生成候选 JSON，并经系统字段名、类型、source 与 artifact 边界校验后才注入脚本 payload。
 - 主代理 Skill 自动脚本路径新增 `skill.input_resolved` / `skill.input_missing` 审计事件；缺少必填参数时不再盲目执行脚本，而是把结构化缺参结果注入最终 prompt，避免 LLM 空口承诺补参但脚本未收到参数。
 - 参数解析层只读取当前问题、当前用户原文和安全的最近用户消息，脚本 payload 继续剥离完整 conversation memory / history summary / recent messages / resolved question，保持跨轮参数继承与上下文安全边界分离。
 - Skill 构建指南补充参数契约规则：脚本可接受的所有业务参数都必须列入 manifest，无默认值且必需的参数声明 `required: true`，有默认值的参数声明为非必填并写明 `default`，枚举型参数必须列出完整 `enum` 可接受值。
 - 本地 mini BreedStat RCBD Skill manifest 按参数契约补齐 `material_data`、`planter`、`seed`、`site_num`、`site_random`、`check_position_constraint` 与 `test_position_constraint` 声明，明确必填项、默认值和 `planter` 枚举范围。
+- 扩充本地 mini BreedStat RCBD Skill 的自然语言触发表达，覆盖“随机区组”、随机区组设计/试验、fieldbook、田间小区排布、对照位置约束、多点/多环境随机区组以及英文 RCBD / plot layout 说法。
+- 调整 `.gitignore`，允许项目级 `skill/` 目录随仓库入库，同时继续忽略 Skill 运行输出目录，避免后续 Skill 文件变更被本地忽略规则吞掉。
 - 修复会话记忆实体抽取把“要求2”误当品种实体的问题，并让本地 mini BreedStat RCBD wrapper 支持“2次重复”解析为 `blocks=2`。
 - 补充 parser、resolver、main_agent、conversation memory、API runtime 与本地 RCBD wrapper 回归测试，并更新 `Codex-Skill构建指南.md` 的参数声明与脚本输入边界说明。
+- 按 `Codex-Skill构建指南.md` 收口本地 `skill/mini_breedstat_rcbd_skill`：补齐可被后端解析的 `SKILL.md` frontmatter / triggers / outputs / parameters / Python auto-run script manifest，新增 `scripts/run_rcbd.py` wrapper 以受控方式调用包内 R 脚本和 `Rscript`，并移除 Skill 包内 README / PRD / 历史 outputs 产物。
+- 验证本地 mini BreedStat RCBD Skill 可被 `SkillCatalog` 发现并匹配，可通过上传 CSV 生成 30 行 RCBD fieldbook 与 `rcbd_layout.html` 输出文件；回归 `tests/integrations/codex_skills` 与 `tests/capabilities/main_agent` 通过。
 
 ### 2026-05-08 — 落地对话上下文记忆与压缩 v1
 

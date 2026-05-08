@@ -1,0 +1,12 @@
+[
+  {"ped_id":"CK_A","design_check":"1","set":"A"},
+  {"ped_id":"A001","design_check":"0","set":"A"},
+  {"ped_id":"A002","design_check":"0","set":"A"},
+  {"ped_id":"A003","design_check":"0","set":"A"},
+  {"ped_id":"A004","design_check":"0","set":"A"},
+  {"ped_id":"CK_B","design_check":"1","set":"B"},
+  {"ped_id":"B001","design_check":"0","set":"B"},
+  {"ped_id":"B002","design_check":"0","set":"B"},
+  {"ped_id":"B003","design_check":"0","set":"B"},
+  {"ped_id":"B004","design_check":"0","set":"B"}
+]

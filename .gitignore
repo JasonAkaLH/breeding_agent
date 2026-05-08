@@ -1,13 +1,15 @@
 # Local tooling
 .omx/
 .codex/
-/skill/
 .DS_Store
 .idea/
 .vscode/
 
 # Local config
 /config.yaml
+
+# Skill runtime artifacts
+/skill/**/outputs/
 
 # Local report drafts
 /本周工作周报.md

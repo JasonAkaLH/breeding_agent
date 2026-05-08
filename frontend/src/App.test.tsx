@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -275,6 +275,56 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: '历史问题' })).not.toBeInTheDocument();
     expect(await screen.findByText(/历史会话已删除/)).toBeInTheDocument();
     confirm.mockRestore();
+  });
+
+  it('shows deleted conversation feedback in a transient popup for five seconds', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      deleteConversation: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        deleted: true,
+        cancelled_task_ids: [],
+        deleted_counts: { conversation: 1, message: 2, task: 1 },
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    const deleteButton = await screen.findByRole('button', { name: '删除历史会话 历史问题' });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(deleteButton);
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(api.deleteConversation).toHaveBeenCalledWith('conv-history');
+      const notice = screen.getByRole('status');
+      expect(within(notice).getByText('历史会话已删除。')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(4_999);
+      });
+      expect(screen.getByRole('status')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+      confirm.mockRestore();
+    }
   });
 
   it('renames a historical conversation and updates the visible title', async () => {

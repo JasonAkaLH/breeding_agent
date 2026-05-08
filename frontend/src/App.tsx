@@ -42,8 +42,14 @@ interface PendingInterrupt {
   mode: ChatMode;
 }
 
+interface TransientNotice {
+  id: number;
+  message: string;
+}
+
 const CONVERSATION_STORAGE_KEY_PREFIX = 'maf.frontend.conversation_id';
 const WAITING_INPUT_CHECK_DELAY_MS = 8_000;
+const CONVERSATION_DELETE_NOTICE_DURATION_MS = 5_000;
 const INTERRUPT_FIELD_LABELS: Record<string, string> = {
   crop: '作物类型',
   missing_info: '补充信息',
@@ -95,11 +101,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [renamingConversationIds, setRenamingConversationIds] = useState<Set<string>>(() => new Set());
   const [capabilities, setCapabilities] = useState<CapabilityResponse[]>([]);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [conversationDeleteNotice, setConversationDeleteNotice] = useState<TransientNotice | null>(null);
   const subscriptionRef = useRef<TaskEventSubscription | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const composingInputRef = useRef(false);
   const taskPresentationModesRef = useRef<Map<string, ChatMode>>(new Map());
   const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
+  const transientNoticeIdRef = useRef(0);
+
+  function showConversationDeleteNotice(message: string) {
+    transientNoticeIdRef.current += 1;
+    setConversationDeleteNotice({ id: transientNoticeIdRef.current, message });
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -116,6 +129,16 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mounted = false;
     };
   }, [api]);
+
+  useEffect(() => {
+    if (!conversationDeleteNotice) return undefined;
+    const timeoutId = window.setTimeout(() => {
+      setConversationDeleteNotice((current) => (
+        current?.id === conversationDeleteNotice.id ? null : current
+      ));
+    }, CONVERSATION_DELETE_NOTICE_DURATION_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [conversationDeleteNotice]);
 
   const refreshUnfinishedTasks = useCallback(async (showLoading = false, targetConversationId = conversationId) => {
     if (!authUser || !targetConversationId) return;
@@ -362,7 +385,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         saveConversationId(authUser.username, next);
         resetConversationWorkspace(next);
       }
-      setGlobalError(result.cancelled_task_ids.length > 0
+      showConversationDeleteNotice(result.cancelled_task_ids.length > 0
         ? '历史会话已删除，相关未完成任务已自动停止。'
         : '历史会话已删除。');
     } catch (error) {
@@ -735,6 +758,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             </Space>
           </Flex>
         </Layout.Header>
+        {conversationDeleteNotice ? (
+          <div className="toast-notice" role="status" aria-live="polite">
+            <Alert
+              type="success"
+              showIcon
+              closable
+              onClose={() => setConversationDeleteNotice(null)}
+              message={conversationDeleteNotice.message}
+            />
+          </div>
+        ) : null}
         <Layout.Content className="app-content">
           <ConversationHistoryPanel
             conversations={conversationHistory}

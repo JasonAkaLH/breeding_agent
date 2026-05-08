@@ -39,6 +39,18 @@ class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):
         self.assertIn("mini-breedstat-rcbd", [skill.name for skill in catalog.skills])
         self.assertEqual(matches[0].manifest.name, "mini-breedstat-rcbd")
 
+        trigger_queries = (
+            "帮我用上传材料做随机区组，2次重复",
+            "请生成随机区组设计 fieldbook",
+            "make a randomized complete block design for these materials",
+            "按对照位置约束做田间小区排布",
+        )
+        for query in trigger_queries:
+            with self.subTest(query=query):
+                query_matches = match_skills(query, catalog)
+                self.assertGreater(query_matches[0].score, 0)
+                self.assertEqual(query_matches[0].manifest.name, "mini-breedstat-rcbd")
+
     def test_wrapper_returns_json_answer_when_required_input_is_missing(self) -> None:
         manifest = parse_skill_file(self.skill_file)
         result = asyncio.run(
