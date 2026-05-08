@@ -53,6 +53,7 @@ from src.lifecycle.interrupt_service import InterruptService
 from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
+from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowPlan
 from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
@@ -105,6 +106,7 @@ class ApiRuntime:
         session_service: SessionService | None = None,
         conversation_title_generator: ConversationTitleGenerator | None = None,
         upload_store: InMemoryUploadStore | None = None,
+        conversation_memory_builder: ConversationMemoryBuilder | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -121,6 +123,7 @@ class ApiRuntime:
         self.session_service = session_service
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
+        self._conversation_memory_builder = conversation_memory_builder
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
@@ -464,6 +467,7 @@ class ApiRuntime:
 
     async def _run_execution(self, request: OrchestrationRequest, *, active_task_count: int) -> None:
         try:
+            request = await self._attach_conversation_memory(request)
             plan_result = self.workflow_provider.build_plan(request)
             plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
             await self._record_plan_built(request, plan)
@@ -476,6 +480,46 @@ class ApiRuntime:
             async with self._lock:
                 self._running_tasks.pop(request.task_id, None)
             await self._clear_conversation_current_task(request.conversation_id, request.task_id)
+
+    async def _attach_conversation_memory(self, request: OrchestrationRequest) -> OrchestrationRequest:
+        if self._conversation_memory_builder is None:
+            return request
+        try:
+            conversation = await self.storage.get_conversation(request.conversation_id)
+            account_id = conversation.account_id if conversation is not None else None
+            context = await self._conversation_memory_builder.build(request, account_id=account_id)
+        except PermissionError:
+            raise
+        except Exception as exc:
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    event_type="conversation.memory_fallback",
+                    payload={"fallback_reason": "memory_builder_failed", "error_type": type(exc).__name__},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            return request
+
+        memory_payload = context.to_prompt_payload()
+        await self._record_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="conversation.memory_built",
+                payload=context.to_audit_payload(),
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+        return replace(
+            request,
+            user_message=context.effective_user_message,
+            current_user_message=context.current_user_message,
+            resolved_user_message=context.resolved_user_message,
+            memory_context=memory_payload,
+            metadata={**dict(request.metadata), "conversation_memory": memory_payload},
+        )
 
     async def _mark_task_failed(self, request: OrchestrationRequest, exc: Exception) -> None:
         task = await self.storage.get_task(request.task_id)
@@ -673,13 +717,33 @@ class ApiRuntime:
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
 
+        yielded_event_ids: set[str] = set()
+        terminal_event_types = {"task.completed", "task.failed", "task.cancelled"}
+        terminal_event_seen = False
         history = await self.storage.list_events_for_task(task_id)
         for event in history:
             if is_frontend_event(event):
+                yielded_event_ids.add(event.event_id)
+                terminal_event_seen = terminal_event_seen or event.event_type in terminal_event_types
                 yield event
 
         latest_task = await self.storage.get_task(task_id)
         if latest_task is not None and latest_task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            if not terminal_event_seen:
+                deadline = asyncio.get_running_loop().time() + 0.25
+                while asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                    late_history = await self.storage.list_events_for_task(task_id)
+                    for event in late_history:
+                        if event.event_id in yielded_event_ids:
+                            continue
+                        if not is_frontend_event(event):
+                            continue
+                        yielded_event_ids.add(event.event_id)
+                        terminal_event_seen = terminal_event_seen or event.event_type in terminal_event_types
+                        yield event
+                    if terminal_event_seen:
+                        return
             return
 
         subscription = self.event_broker.subscribe(task_id)
@@ -784,6 +848,8 @@ def build_api_runtime(
     auth_captcha_ttl_seconds: int = 300,
     auth_session_ttl_seconds: int = 28_800,
     upload_store: InMemoryUploadStore | None = None,
+    conversation_memory_builder: ConversationMemoryBuilder | None = None,
+    enable_conversation_memory: bool = True,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
         llm_text_generator=llm_text_generator,
@@ -801,6 +867,7 @@ def build_api_runtime(
         main_agent_llm_config_path=main_agent_llm_config_path,
         main_agent_llm_client_factory=main_agent_llm_client_factory,
         enable_conversation_title_llm=enable_conversation_title_llm,
+        enable_conversation_memory=enable_conversation_memory,
     )
 
     engine = create_sqlite_engine(database_path)
@@ -879,6 +946,12 @@ def build_api_runtime(
     resolved_sql_query_trim_max_tokens = _resolve_sql_query_trim_max_tokens(
         sql_query_trim_max_tokens=sql_query_trim_max_tokens,
         sql_query_llm_config=sql_query_llm_config,
+    )
+    resolved_conversation_memory_builder = _resolve_conversation_memory_builder(
+        storage=storage,
+        conversation_memory_builder=conversation_memory_builder,
+        main_agent_llm_runtime=main_agent_llm_runtime,
+        enable_conversation_memory=enable_conversation_memory,
     )
 
     main_agent_workflow_provider = MainAgentWorkflowProvider()
@@ -965,6 +1038,7 @@ def build_api_runtime(
         session_service=session_service,
         conversation_title_generator=resolved_conversation_title_generator,
         upload_store=upload_store,
+        conversation_memory_builder=resolved_conversation_memory_builder,
     )
 
 
@@ -985,6 +1059,7 @@ def _bootstrap_runtime_config_env(
     main_agent_llm_config_path: str | Path | None,
     main_agent_llm_client_factory: Callable[..., Any] | None,
     enable_conversation_title_llm: bool,
+    enable_conversation_memory: bool,
 ) -> None:
     explicit_paths: list[str | Path] = []
     should_bootstrap_default = False
@@ -1012,6 +1087,9 @@ def _bootstrap_runtime_config_env(
             explicit_paths.append(main_agent_llm_config_path)
         elif main_agent_llm_client_factory is None:
             should_bootstrap_default = True
+
+    if enable_conversation_memory:
+        should_bootstrap_default = True
 
     seen_paths: set[Path] = set()
     for config_path in explicit_paths:
@@ -1119,6 +1197,32 @@ def _resolve_conversation_title_generator(
         )
 
     return generate
+
+
+def _resolve_conversation_memory_builder(
+    *,
+    storage: SQLiteStorage,
+    conversation_memory_builder: ConversationMemoryBuilder | None,
+    main_agent_llm_runtime: SharedLLMRuntime,
+    enable_conversation_memory: bool,
+) -> ConversationMemoryBuilder | None:
+    if conversation_memory_builder is not None:
+        return conversation_memory_builder
+    if not enable_conversation_memory:
+        return None
+
+    async def generate_summary(prompt: str) -> str:
+        return await main_agent_llm_runtime.generate_text(
+            prompt,
+            thinking=False,
+            reasoning_effort="minimal",
+        )
+
+    return ConversationMemoryBuilder(
+        storage=storage,
+        config=ConversationMemoryConfig.from_runtime_config(),
+        summary_generator=generate_summary,
+    )
 
 
 def _resolve_sql_query_trim_max_tokens(

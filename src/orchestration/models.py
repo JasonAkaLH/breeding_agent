@@ -73,6 +73,17 @@ class OrchestrationRequest:
     user_message: str
     requested_capability_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    current_user_message: str | None = None
+    resolved_user_message: str | None = None
+    memory_context: Mapping[str, Any] | None = None
+
+    @property
+    def effective_user_message(self) -> str:
+        resolved = (self.resolved_user_message or "").strip()
+        if resolved:
+            return resolved
+        current = (self.current_user_message or "").strip()
+        return current or self.user_message
 
 
 @dataclass(slots=True, frozen=True)

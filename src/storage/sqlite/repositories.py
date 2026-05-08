@@ -15,6 +15,7 @@ from src.core.models import (
     CaptchaChallenge,
     Checkpoint,
     Conversation,
+    ConversationMemorySummary,
     EventRecord,
     Interrupt,
     InterruptAnswer,
@@ -34,6 +35,7 @@ from .models import (
     CaptchaChallengeRow,
     CheckpointRow,
     ConversationRow,
+    ConversationMemorySummaryRow,
     EventRecordRow,
     InterruptAnswerRow,
     InterruptRow,
@@ -53,6 +55,27 @@ def _row_to_conversation(row: ConversationRow) -> Conversation:
         status=row.status,
         current_task_id=row.current_task_id,
         title=row.title,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_conversation_memory_summary(row: ConversationMemorySummaryRow) -> ConversationMemorySummary:
+    return ConversationMemorySummary(
+        summary_id=row.summary_id,
+        conversation_id=row.conversation_id,
+        account_id=row.account_id,
+        covered_until_turn_id=row.covered_until_turn_id,
+        covered_until_message_id=row.covered_until_message_id,
+        covered_until_created_at=row.covered_until_created_at,
+        summary_text=row.summary_text,
+        source_message_count=row.source_message_count,
+        source_message_ids_hash=row.source_message_ids_hash,
+        estimated_tokens=row.estimated_tokens,
+        summary_version=row.summary_version,
+        compression_policy_version=row.compression_policy_version,
+        model_metadata_safe=dict(row.model_metadata_safe or {}),
+        last_error=row.last_error,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -342,6 +365,78 @@ class SQLiteStateRepository:
         ).all()
         return [_row_to_conversation(row) for row in rows]
 
+    def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary:
+        row = ConversationMemorySummaryRow(
+            summary_id=summary.summary_id,
+            conversation_id=summary.conversation_id,
+            account_id=summary.account_id,
+            covered_until_turn_id=summary.covered_until_turn_id,
+            covered_until_message_id=summary.covered_until_message_id,
+            covered_until_created_at=summary.covered_until_created_at,
+            summary_text=summary.summary_text,
+            source_message_count=summary.source_message_count,
+            source_message_ids_hash=summary.source_message_ids_hash,
+            estimated_tokens=summary.estimated_tokens,
+            summary_version=summary.summary_version,
+            compression_policy_version=summary.compression_policy_version,
+            model_metadata_safe=dict(summary.model_metadata_safe),
+            last_error=summary.last_error,
+            created_at=summary.created_at,
+            updated_at=summary.updated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_conversation_memory_summary(merged)
+
+    def get_conversation_memory_summary(self, summary_id: str) -> ConversationMemorySummary | None:
+        row = self._session.get(ConversationMemorySummaryRow, summary_id)
+        return None if row is None else _row_to_conversation_memory_summary(row)
+
+    def get_latest_conversation_memory_summary(
+        self,
+        conversation_id: str,
+        *,
+        account_id: str | None = None,
+    ) -> ConversationMemorySummary | None:
+        statement = select(ConversationMemorySummaryRow).where(
+            ConversationMemorySummaryRow.conversation_id == conversation_id
+        )
+        if account_id is not None:
+            statement = statement.where(ConversationMemorySummaryRow.account_id == account_id)
+        row = self._session.scalar(
+            statement.order_by(
+                ConversationMemorySummaryRow.covered_until_created_at.desc(),
+                ConversationMemorySummaryRow.covered_until_turn_id.desc(),
+                ConversationMemorySummaryRow.covered_until_message_id.desc(),
+                ConversationMemorySummaryRow.updated_at.desc(),
+                ConversationMemorySummaryRow.created_at.desc(),
+                ConversationMemorySummaryRow.summary_id.desc(),
+            )
+        )
+        return None if row is None else _row_to_conversation_memory_summary(row)
+
+    def list_conversation_memory_summaries(self, conversation_id: str) -> list[ConversationMemorySummary]:
+        rows = self._session.scalars(
+            select(ConversationMemorySummaryRow)
+            .where(ConversationMemorySummaryRow.conversation_id == conversation_id)
+            .order_by(
+                ConversationMemorySummaryRow.covered_until_created_at.desc(),
+                ConversationMemorySummaryRow.covered_until_turn_id.desc(),
+                ConversationMemorySummaryRow.covered_until_message_id.desc(),
+                ConversationMemorySummaryRow.updated_at.desc(),
+                ConversationMemorySummaryRow.created_at.desc(),
+                ConversationMemorySummaryRow.summary_id.desc(),
+            )
+        ).all()
+        return [_row_to_conversation_memory_summary(row) for row in rows]
+
+    def delete_conversation_memory_summaries_for_conversation(self, conversation_id: str) -> int:
+        result = self._session.execute(
+            delete(ConversationMemorySummaryRow).where(ConversationMemorySummaryRow.conversation_id == conversation_id)
+        )
+        self._session.flush()
+        return int(result.rowcount if result.rowcount is not None and result.rowcount > 0 else 0)
+
     def delete_conversation(self, conversation_id: str) -> dict[str, int]:
         task_ids = list(
             self._session.scalars(select(TaskRow.task_id).where(TaskRow.conversation_id == conversation_id)).all()
@@ -368,6 +463,7 @@ class SQLiteStateRepository:
         )
 
         deleted_counts: dict[str, int] = {
+            "conversation_memory_summary": 0,
             "mailbox_delivery": 0,
             "interrupt_answer": 0,
             "checkpoint": 0,
@@ -400,6 +496,10 @@ class SQLiteStateRepository:
             _delete("artifact", delete(ArtifactRow).where(ArtifactRow.task_id.in_(task_ids)))
             _delete("task_edge", delete(TaskEdgeRow).where(TaskEdgeRow.task_id.in_(task_ids)))
             _delete("task_node", delete(TaskNodeRow).where(TaskNodeRow.task_id.in_(task_ids)))
+        _delete(
+            "conversation_memory_summary",
+            delete(ConversationMemorySummaryRow).where(ConversationMemorySummaryRow.conversation_id == conversation_id),
+        )
         _delete("message", delete(MessageRow).where(or_(*message_conditions)))
         _delete("task", delete(TaskRow).where(TaskRow.conversation_id == conversation_id))
         _delete("conversation", delete(ConversationRow).where(ConversationRow.conversation_id == conversation_id))
@@ -828,6 +928,30 @@ class SQLiteStorage(StoragePort):
 
     async def delete_conversation(self, conversation_id: str) -> dict[str, int]:
         return await self._run(lambda state, collab: state.delete_conversation(conversation_id))
+
+    async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary:
+        return await self._run(lambda state, collab: state.save_conversation_memory_summary(summary))
+
+    async def get_conversation_memory_summary(self, summary_id: str) -> ConversationMemorySummary | None:
+        return await self._run(lambda state, collab: state.get_conversation_memory_summary(summary_id))
+
+    async def get_latest_conversation_memory_summary(
+        self,
+        conversation_id: str,
+        account_id: str | None = None,
+    ) -> ConversationMemorySummary | None:
+        return await self._run(
+            lambda state, collab: state.get_latest_conversation_memory_summary(
+                conversation_id,
+                account_id=account_id,
+            )
+        )
+
+    async def list_conversation_memory_summaries(self, conversation_id: str) -> list[ConversationMemorySummary]:
+        return await self._run(lambda state, collab: state.list_conversation_memory_summaries(conversation_id))
+
+    async def delete_conversation_memory_summaries_for_conversation(self, conversation_id: str) -> int:
+        return await self._run(lambda state, collab: state.delete_conversation_memory_summaries_for_conversation(conversation_id))
 
     async def save_message(self, message: Message) -> Message:
         return await self._run(lambda state, collab: state.save_message(message))

@@ -41,7 +41,8 @@ class AutoWorkflowProvider:
         )
 
     def build_plan(self, request: OrchestrationRequest) -> WorkflowPlan:
-        understanding = self._query_understanding.understand(request.user_message)
+        effective_question = request.effective_user_message
+        understanding = self._query_understanding.understand(effective_question)
         if not understanding.should_use_sql_query:
             return self._main_agent_provider.build_plan(request)
         if understanding.needs_decomposition and understanding.subquestions:
@@ -55,12 +56,12 @@ class AutoWorkflowProvider:
                 WorkflowNodePlan(
                     node_id="query_data",
                     capability_id="sql_query.query",
-                    input_payload={"user_question": request.user_message},
+                    input_payload={"user_question": request.effective_user_message},
                 ),
                 WorkflowNodePlan(
                     node_id=f"{request.task_id}:main_agent.respond",
                     capability_id="main_agent.respond",
-                    input_payload={"user_message": request.user_message},
+                    input_payload={"user_message": request.effective_user_message},
                     depends_on=("query_data",),
                 ),
             ),
@@ -106,7 +107,7 @@ class AutoWorkflowProvider:
                 WorkflowNodePlan(
                     node_id=f"{request.task_id}:main_agent.respond",
                     capability_id="main_agent.respond",
-                    input_payload={"user_message": request.user_message},
+                    input_payload={"user_message": request.effective_user_message},
                     depends_on=tuple(node.node_id for node in query_nodes),
                 ),
             ),

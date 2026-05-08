@@ -37,6 +37,26 @@ class Conversation:
 
 
 @dataclass(slots=True, frozen=True)
+class ConversationMemorySummary:
+    summary_id: str
+    conversation_id: str
+    account_id: str
+    covered_until_turn_id: str | None
+    covered_until_message_id: str | None
+    covered_until_created_at: datetime | None
+    summary_text: str
+    source_message_count: int
+    source_message_ids_hash: str
+    estimated_tokens: int
+    summary_version: str
+    compression_policy_version: str
+    model_metadata_safe: JsonMapping = field(default_factory=dict)
+    last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class AuthUser:
     username: str
     password_hash: str

@@ -61,6 +61,7 @@ class MainAgentRespondCapability(CapabilityContract):
             artifact_context=artifact_context,
             script_results=script_results,
             dependency_context=dependency_context,
+            memory_context=self._memory_context_from_metadata(request.metadata),
         )
 
         events = list(script_events)
@@ -214,7 +215,7 @@ class MainAgentRespondCapability(CapabilityContract):
                 payload = {
                     "query": user_message,
                     "uploaded_artifacts": list(script_artifacts),
-                    "metadata": dict(request.metadata),
+                    "metadata": self._script_safe_metadata(request.metadata),
                 }
                 try:
                     output = await self._script_runner.run(match.manifest, script, payload)
@@ -267,6 +268,20 @@ class MainAgentRespondCapability(CapabilityContract):
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
         return bool(value)
+
+    @staticmethod
+    def _memory_context_from_metadata(metadata: Mapping[str, Any]) -> Mapping[str, Any]:
+        value = metadata.get("conversation_memory") or metadata.get("memory_context") or {}
+        return value if isinstance(value, Mapping) else {}
+
+    @classmethod
+    def _script_safe_metadata(cls, metadata: Mapping[str, Any]) -> dict[str, Any]:
+        blocked = {"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"}
+        return {
+            str(key): value
+            for key, value in metadata.items()
+            if str(key) not in blocked
+        }
 
     @staticmethod
     def _sanitize_stream_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:

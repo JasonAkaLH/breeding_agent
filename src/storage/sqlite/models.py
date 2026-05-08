@@ -22,6 +22,31 @@ class ConversationRow(SQLiteBase):
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class ConversationMemorySummaryRow(SQLiteBase):
+    __tablename__ = "conversation_memory_summary"
+    __table_args__ = (
+        Index("idx_conversation_memory_summary_scope_updated", "conversation_id", "account_id", "updated_at"),
+        Index("idx_conversation_memory_summary_conversation_created", "conversation_id", "created_at"),
+    )
+
+    summary_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    covered_until_turn_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    covered_until_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    covered_until_created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_message_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_message_ids_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    estimated_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary_version: Mapped[str] = mapped_column(Text, nullable=False)
+    compression_policy_version: Mapped[str] = mapped_column(Text, nullable=False)
+    model_metadata_safe: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class AuthUserRow(SQLiteBase):
     __tablename__ = "auth_user"
     __table_args__ = (Index("idx_auth_user_status_updated", "status", "updated_at"),)

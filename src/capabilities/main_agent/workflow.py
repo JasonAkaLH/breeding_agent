@@ -15,7 +15,7 @@ MAIN_AGENT_CAPABILITY_DESCRIPTORS = (
 
 MAIN_AGENT_PLANNER_PAYLOAD_POLICIES = {
     "main_agent.respond": CapabilityPayloadPolicy(
-        system_payload_factory=lambda request: {"user_message": request.user_message},
+        system_payload_factory=lambda request: {"user_message": request.effective_user_message},
     ),
 }
 
@@ -29,7 +29,7 @@ class MainAgentWorkflowProvider:
                 WorkflowNodePlan(
                     node_id=node_id,
                     capability_id="main_agent.respond",
-                    input_payload={"user_message": request.user_message},
+                    input_payload={"user_message": request.effective_user_message},
                     criticality=NodeCriticality.REQUIRED,
                     retry_policy={"max_attempts": 1},
                     timeout_policy={"seconds": 60},

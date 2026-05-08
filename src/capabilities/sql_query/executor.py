@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any, Mapping
+
 from src.core.contracts import CapabilityContract, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.orchestration.models import ExecutionInstance, InstanceState
@@ -44,7 +47,7 @@ class SQLQueryExecutor(ExecutorPort):
         capability = self._capabilities.get(request.capability_id)
         if capability is None:
             raise ValueError(f"Unsupported SQLQuery capability_id: {request.capability_id}")
-        return await capability.execute(request)
+        return await capability.execute(replace(request, metadata=_without_conversation_memory(request.metadata)))
 
     @property
     def supported_capabilities(self) -> tuple[str, ...]:
@@ -58,3 +61,14 @@ def build_local_sql_query_instance(*, instance_id: str = "inst-sql-query-local")
         state=InstanceState.ONLINE,
         load_score=0,
     )
+
+
+def _without_conversation_memory(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    blocked = {
+        "conversation_memory",
+        "memory_context",
+        "recent_messages",
+        "history_summary",
+        "resolved_user_message",
+    }
+    return {str(key): value for key, value in metadata.items() if str(key) not in blocked}

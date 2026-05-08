@@ -16,7 +16,7 @@ SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS = (
 SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES = {
     "sql_query.query": CapabilityPayloadPolicy(
         planner_allowed_fields=("route_hint", "subtask_label", "parent_question"),
-        system_payload_factory=lambda request: {"user_question": request.user_message},
+        system_payload_factory=lambda request: {"user_question": request.effective_user_message},
     ),
 }
 
@@ -83,7 +83,7 @@ class SQLQueryWorkflowProvider:
             WorkflowNodePlan(
                 node_id=node_intent,
                 capability_id="sql_query.intent_route",
-                input_payload={"user_question": request.user_message, **safe_hints},
+                input_payload={"user_question": request.effective_user_message, **safe_hints},
                 retry_policy={"max_attempts": 1},
                 timeout_policy={"seconds": 10},
             ),

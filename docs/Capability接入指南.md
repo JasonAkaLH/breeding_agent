@@ -35,7 +35,7 @@ src/capabilities/<capability_name>/
 ```text
 src/capabilities/<capability_name>/
   __init__.py
-  workflow.py          # descriptor / payload policy / workflow provider / instance builder
+  workflow.py          # descriptor / payload policy / workflow provider；实例 builder 可放这里或 executor.py
   executor.py          # ExecutorPort 适配，分发到具体 CapabilityContract
   <node_or_logic>.py   # 具体业务节点，可按能力拆分
 ```
@@ -56,15 +56,16 @@ src/capabilities/sql_query/
 
 ---
 
-## 3. `workflow.py` 必须声明什么
+## 3. `workflow.py` / capability 包必须声明什么
 
-`workflow.py` 是 capability 接入主框架的第一入口，至少声明：
+`workflow.py` 通常是 capability 接入主框架的第一入口，至少声明：
 
 1. public capability descriptor；
 2. 如有内部节点，声明 internal descriptors；
 3. planner payload allowlist；
-4. workflow provider；
-5. local execution instance builder。
+4. workflow provider。
+
+capability 包还必须导出 local execution instance builder。推荐把 builder 放在 `workflow.py`，但不是强制要求；例如当前 SQLQuery 的 `build_local_sql_query_instance()` 放在 `executor.py`，再由 `src/capabilities/sql_query/__init__.py` 统一导出。runtime 装配只依赖 capability 包的导出契约，不依赖 builder 的具体文件位置。
 
 示例：
 
@@ -300,6 +301,17 @@ default_workflow_provider = LLMWorkflowProvider(
 
 如果它是单节点 public capability，则无需 macro provider；Planner 输出的节点会直接进入执行图，由 scheduler + executor 执行。
 
+### 6.6 显式 capability 路由是否要改
+
+默认产品路径应继续使用 `capability_id=None`，让 `LLMWorkflowProvider` / `AutoWorkflowProvider` 自动规划，并在需要时由 `main_agent.respond` 收束最终回答。
+
+如果新 capability 还要支持调试或兼容用的显式 `capability_id` 调用，需要检查 `src/orchestration/workflow_router.py`：
+
+- 当前 `main_agent` / `main_agent.*` 会路由到 `MainAgentWorkflowProvider`；
+- 当前 `sql_query` / `sql_query.query` 会直接路由到 `SQLQueryWorkflowProvider`；
+- 显式 `sql_query.query` 只运行 SQLQuery 内部六节点，不会自动追加 `main_agent.respond`；
+- 如果未来显式调用某个 capability 也必须生成主代理最终回答，应让对应 provider / router 返回含 `main_agent.respond` 的高层 DAG，并补 `tests/orchestration/test_workflow_router.py` 与 API 测试。
+
 ---
 
 ## 7. LLM Planner 要不要改
@@ -341,7 +353,53 @@ LLM Planner 当前会从 `CapabilityRegistry.list(public_only=True)` 动态读�
 
 ---
 
-## 9. API / 前端是否要改
+## 9. 主代理最终收束与上游结果契约
+
+SQLQuery 接入主代理的标准不是“主代理直接调用 SQLQuery 内部节点”，而是 **public DAG + macro expansion + dependency context**：
+
+1. 高层 DAG 先选择数据能力，例如 `sql_query.query`；
+2. `WorkflowExpander` 把 public macro 展开成内部固定 workflow；
+3. 下游 `main_agent.respond` 依赖 macro tail，例如 SQLQuery 的 `sql_query.result_filtering`；
+4. `OrchestrationService` 把已完成依赖节点的 `output_payload` 作为 `dependency_outputs` 传给主代理；
+5. `src/capabilities/main_agent/prompt_builder.py` 对 dependency output 做 allowlist 脱敏后注入主代理 prompt。
+
+因此，新增 capability 如果需要由主代理最终汇总，应确认：
+
+- 初始 planner / fallback / runtime replan 输出的高层 DAG 中，`main_agent.respond` 依赖该 capability 的尾节点；
+- capability 的 `output_payload` 包含适合主代理消费的安全字段，例如 `summary`、`response_text`、`row_count`、`columns`、`rows`、`highlights`、`caveats` 等；
+- 如果需要新增主代理可见字段，必须同步更新 `build_dependency_context()` / `_sanitize_dependency_output()` 的 allowlist，并补主代理 prompt 或 API 集成测试；
+- 不要把原始 SQL、连接信息、guard token、完整大表 rows、完整 prompt、文件路径或 secret 直接放进主代理 dependency context；
+- 如果 capability 已产出前端专用 artifact，仍建议提供一个简短 `summary` 或结构化摘要，避免主代理只能看到 artifact id 而无法回答。
+
+SQLQuery 的验证参考：
+
+- `tests/orchestration/test_workflow_expander.py`：macro tail 会重连到下游主代理；
+- `tests/orchestration/test_llm_workflow_provider.py`：Planner 缺主代理时会补 finalizer，主代理未依赖数据能力时会重连；
+- `tests/api/test_main_agent_llm.py`：默认数据库问题最终 prompt 包含“上游能力结果上下文”。
+
+---
+
+## 10. 运行时重编排接入
+
+如果 capability 的节点输出可能出现“当前结果不满足，但系统内可补足”的情况，可以接入运行时重编排；否则不要为了形式引入 replanner。
+
+当前有两层可参考：
+
+- `src/capabilities/main_agent/runtime_replanner.py`：通用主代理 LLM 观察 / 重排 advisor，只读取脱敏后的 node output，并只允许输出 public capability 高层 DAG；
+- `src/capabilities/sql_query/runtime_replanner.py`：SQLQuery capability 自己持有领域规则，识别多子问题拆分，并返回多个 public `sql_query.query` 分支 + `main_agent.respond` 汇总。
+
+新增 capability 如需专属 runtime replanner，应遵守：
+
+- replanner 放在 capability 包内，业务语义不要写进 `src/orchestration/` 通用层；
+- `build_replan()` 只返回 public capability 组成的 revised plan，再由 `WorkflowExpander` 展开 macro；
+- 必须尊重 `max_replans` / `max_dynamic_nodes`，避免无限重排；
+- observation / prompt 只使用必要的脱敏输出字段，禁止泄露 SQL、secret、完整 rows、完整 prompt 或外部系统凭据；
+- 在 `src/api/runtime.py` 的 `CompositeRuntimeReplanner([...])` 中显式装配；
+- 补 `tests/orchestration/test_runtime_*.py`，覆盖触发、不触发、预算、非法 revised plan 被拒绝、最终仍由主代理汇总等路径。
+
+---
+
+## 11. API / 前端是否要改
 
 ### 后端 API
 
@@ -367,15 +425,16 @@ LLM Planner 当前会从 `CapabilityRegistry.list(public_only=True)` 动态读�
 
 ---
 
-## 10. 测试要补哪些
+## 12. 测试要补哪些
 
 新增 capability 至少补以下测试面：
 
 | 测试层 | 建议路径 | 必测内容 |
 |---|---|---|
 | capability 单元测试 | `tests/capabilities/<capability_name>/` | 输入 payload、业务分支、错误/clarify/fallback、安全边界 |
-| workflow / planner 测试 | `tests/orchestration/` | descriptor public/internal、macro expansion、payload allowlist、Planner 可选择该 capability |
-| API 集成测试 | `tests/api/` | 默认提交消息后能规划并执行；planner 失败时 fallback 行为合理 |
+| workflow / planner 测试 | `tests/orchestration/` | descriptor public/internal、macro expansion、payload allowlist、Planner 可选择该 capability、主代理 finalizer / 依赖重连 |
+| runtime replan 测试 | `tests/orchestration/test_runtime_*.py` | 只有接入 runtime replanner 时需要；覆盖触发、不触发、预算与 public-only revised DAG |
+| API 集成测试 | `tests/api/` | 默认提交消息后能规划并执行；planner 失败时 fallback 行为合理；需要主代理汇总时 prompt 能看到上游结果上下文 |
 | e2e / observability | `tests/e2e/`、`tests/observability/` | 关键 happy path、事件和 audit 输出 |
 | 前端测试 | `frontend/src/**/*.test.ts(x)` | 只有新增 UI / artifact 展示时需要 |
 
@@ -399,7 +458,7 @@ npm run build
 
 ---
 
-## 11. 文档要同步哪里
+## 13. 文档要同步哪里
 
 新增 capability 时至少同步：
 
@@ -411,7 +470,7 @@ npm run build
 
 ---
 
-## 12. 最小接入检查清单
+## 14. 最小接入检查清单
 
 新增 capability 完成前，逐项确认：
 
@@ -422,7 +481,11 @@ npm run build
 - [ ] 已实现 `ExecutorPort` 和具体 `CapabilityContract`；
 - [ ] 已在 `src/api/runtime.py` 注册 descriptor / payload policy / execution instance / executor；
 - [ ] macro capability 已加入 `LLMWorkflowProvider` 的 `macro_providers`；
+- [ ] 如果支持显式 `capability_id` 调用，已确认 `WorkflowRouter` 语义并补测试；
 - [ ] 需要 deterministic fallback 时，已更新 `AutoWorkflowProvider`；
+- [ ] 如果默认自动路径要由主代理汇总，已确保 `main_agent.respond` 依赖能力尾节点；
+- [ ] 如果主代理需要消费新字段，已更新 dependency context allowlist 并补测试；
+- [ ] 如果接入 runtime replanner，已保证 public-only revised DAG、预算边界和 runtime replan 测试；
 - [ ] LLM Planner 不需要任何 capability-specific payload 特判；
 - [ ] 已补 capability / orchestration / API 测试；
 - [ ] 已更新 changelog 和相关 docs；
@@ -430,7 +493,7 @@ npm run build
 
 ---
 
-## 13. 当前两个 capability 的参考位置
+## 15. 当前两个 capability 的参考位置
 
 | 能力 | 参考文件 |
 |---|---|
@@ -440,4 +503,8 @@ npm run build
 | Capability registry policy 挂载点 | `src/orchestration/registry.py` |
 | LLM Planner provider | `src/orchestration/llm_workflow_provider.py` |
 | Planner prompt / output parser | `src/orchestration/planner_contract.py` |
+| Macro expansion | `src/orchestration/workflow_expander.py` |
+| 显式 capability 路由 | `src/orchestration/workflow_router.py` |
+| 主代理上游结果注入 | `src/capabilities/main_agent/prompt_builder.py` |
+| Runtime replanner 参考 | `src/capabilities/main_agent/runtime_replanner.py`、`src/capabilities/sql_query/runtime_replanner.py` |
 | Runtime 装配 | `src/api/runtime.py` |

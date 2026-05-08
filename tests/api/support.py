@@ -67,6 +67,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         main_agent_reasoning_effort="minimal",
         conversation_title_generator=None,
         enable_conversation_title_llm: bool | None = None,
+        conversation_memory_builder=None,
+        enable_conversation_memory: bool = True,
         skill_roots=(),
         auth_captcha_code_generator=lambda: "1234",
     ) -> ApiRuntime:
@@ -116,6 +118,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             main_agent_reasoning_effort=main_agent_reasoning_effort,
             conversation_title_generator=conversation_title_generator,
             enable_conversation_title_llm=conversation_title_configured if enable_conversation_title_llm is None else enable_conversation_title_llm,
+            conversation_memory_builder=conversation_memory_builder,
+            enable_conversation_memory=enable_conversation_memory,
             skill_roots=skill_roots,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
@@ -172,6 +176,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         main_agent_reasoning_effort="minimal",
         conversation_title_generator=None,
         enable_conversation_title_llm: bool | None = None,
+        conversation_memory_builder=None,
+        enable_conversation_memory: bool = True,
         skill_roots=(),
         auth_captcha_code_generator=lambda: "1234",
     ) -> None:
@@ -200,6 +206,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             main_agent_reasoning_effort=main_agent_reasoning_effort,
             conversation_title_generator=conversation_title_generator,
             enable_conversation_title_llm=enable_conversation_title_llm,
+            conversation_memory_builder=conversation_memory_builder,
+            enable_conversation_memory=enable_conversation_memory,
             skill_roots=skill_roots,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )

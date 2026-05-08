@@ -10,6 +10,36 @@
 
 ## [Unreleased]
 
+### 2026-05-08 — 落地对话上下文记忆与压缩 v1
+
+- 新增 `ConversationMemoryContext` 构建链路，在 workflow provider 规划前按当前 conversation / account 读取历史消息、assistant 最终回答和安全摘要，并生成 `current_user_message` / `resolved_user_message` / recent messages / history summary 等 prompt-safe 上下文。
+- 新增 conversation memory SQLite 摘要快照表与 storage port，支持按 conversation / account 保存、读取最新摘要和删除会话时级联清理；摘要覆盖边界后的任务不会通过 TEXT artifact 回流进 prompt。
+- Planner、AutoWorkflow、SQLQuery public macro 与主代理 workflow 统一使用系统侧 `effective_user_message`，使“那它的基因型呢”等追问在 LLM Planner 禁用或 fallback 时仍可路由到明确 SQLQuery 问题。
+- 主代理 prompt 新增带边界标注的对话记忆区块，并在 Skill 自动脚本与 SQLQuery 内部 LLM 调用前剥离完整 conversation memory metadata，防止历史记忆、SQL、rows、guard token 或上传原文越界透传。
+- 补充 storage / orchestration / API runtime / main_agent / SQLQuery 分层测试，覆盖 root message 排除、assistant artifact 去重、摘要复用、summary entity 指代补全、权限隔离、安全 allowlist、脚本隔离、fallback 审计与 SSE terminal event race。
+
+### 2026-05-08 — 补强 Capability 接入指南
+
+- 更新 `docs/Capability接入指南.md`，根据当前 SQLQuery 接入主代理的实际链路补充显式 capability 路由、主代理 dependency context 收束、运行时重编排接入、测试面与检查清单说明。
+
+### 2026-05-08 — 明确对话记忆 token 预算配置来源
+
+- 更新对话上下文记忆与压缩 PRD，明确 `conversation_memory_max_tokens` 逻辑值默认取启动配置 `config.yaml` 的 `trim_max_tokens`，运行期从已 bootstrap 的 `MAF_CONFIG_TRIM_MAX_TOKENS` 环境变量读取，业务节点不重复读取配置文件。
+- 进一步澄清 `trim_max_tokens` 是本轮上下文工程总 token 上限来源，实际可用于对话记忆的预算需先扣除 system prompt、当前问题、上传摘要、上游能力结果、Skill 上下文和模型输出预留空间，不能让历史记忆直接用满窗口。
+- 补充 SQLQuery 追问补全契约：上下文改写不能依赖 LLM Planner 自由改写 `user_question`，应由系统侧 memory builder / orchestration 生成可信 effective question，再通过系统 payload 注入 public capability。
+- 明确记忆上下文 / effective question 必须在 workflow provider 构建 plan 前生成，LLM Planner 与 deterministic `AutoWorkflowProvider` fallback 都要使用同一份系统侧补全结果，避免 fallback 路径退化为单轮判断。
+- 补充主代理最终回答去重规则：同一 `task_id` 已有 assistant history message 时，记忆构建优先使用 message，不再重复读取同任务最终 TEXT artifact。
+- 明确 conversation memory 必须使用独立 `ConversationMemorySafeAllowlist`，不得直接复用主代理 dependency context allowlist，避免 `rows`、`candidate_rows`、`storage_ref`、SQL 或 schema DDL 等进入长期记忆。
+- 补充 Skill 脚本边界：conversation memory 默认不得通过 `request.metadata` 原样透传给自动脚本，如需携带相关信息必须先剥离或替换为脚本专用 allowlist。
+- 明确跨轮上传文件引用边界：记忆只保存 upload 脱敏摘要 / `upload_id` / 文件名 / preview 等安全 metadata，不持久化完整内容；原始内容仅在 `InMemoryUploadStore` 仍有效且权限校验通过时可继续使用。
+- 补充摘要快照字段与 LLM 注入边界：新增 `account_id`、source hash、版本、safe model metadata、last error 等持久化 / 审计字段，并明确正常 Planner / 主代理 prompt 只注入带边界标注的 `history_summary`，不传存储 metadata。
+- 明确当前任务 `root_message_id` 对应 user message 必须从 `ConversationMemoryContext` 历史部分排除，当前用户问题只出现在独立 current_user_message 区块，避免重复注入。
+- 新增澄清 / interrupt answer 消息规则，明确补充信息应标注为当前任务 clarification message，不作为新的独立业务轮次或当前问题，也不得在摘要中覆盖原始 root message。
+- 全面扩展对话记忆 PRD 的验收标准与测试计划，覆盖 effective question 系统生成、fallback 自动规划、去重、安全 allowlist、Skill 脚本隔离、跨轮上传边界、clarification 归并、摘要 metadata 不入 prompt、安全审计与分层回归命令。
+- 补齐 `ConversationMemoryContext` 模型字段，新增 `root_message_id`、`current_user_message`、`resolved_user_message`、`clarification_messages` 与 `resolution_metadata`，并要求补全问题不得覆盖用户原文。
+- 明确 prompt 当前问题区块必须区分 `current_user_message` 用户原文与 `resolved_user_message` 系统补全 effective question；Planner / public capability 可优先用补全结果，最终回答仍需保留用户原文边界。
+- 明确对话记忆可选配置默认与覆盖规则：`recent_turns` 默认 6 个业务轮次，summary 预算由实际 memory 可用预算派生，summary LLM 默认启用但可通过 runtime / 已 bootstrap 环境变量禁用，禁用时走 fallback 不阻塞请求。
+
 ### 2026-05-07 — 将 MySQL 连接配置迁移到本地 config.yaml
 
 - 移除 `src/mysql_engine.py` 中硬编码的真实 MySQL 连接串，改为从本地 `config.yaml` 的 `mysql_readonly.url` 或部署环境变量 `MAF_MYSQL_READONLY_URL` 读取。

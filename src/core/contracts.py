@@ -10,6 +10,7 @@ from .models import (
     AuthUser,
     Checkpoint,
     Conversation,
+    ConversationMemorySummary,
     CaptchaChallenge,
     EventRecord,
     Interrupt,
@@ -80,6 +81,20 @@ class StoragePort(Protocol):
     async def list_conversations_for_account(self, account_id: str) -> list[Conversation]: ...
 
     async def delete_conversation(self, conversation_id: str) -> dict[str, int]: ...
+
+    async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary: ...
+
+    async def get_conversation_memory_summary(self, summary_id: str) -> ConversationMemorySummary | None: ...
+
+    async def get_latest_conversation_memory_summary(
+        self,
+        conversation_id: str,
+        account_id: str | None = None,
+    ) -> ConversationMemorySummary | None: ...
+
+    async def list_conversation_memory_summaries(self, conversation_id: str) -> list[ConversationMemorySummary]: ...
+
+    async def delete_conversation_memory_summaries_for_conversation(self, conversation_id: str) -> int: ...
 
     async def save_message(self, message: Message) -> Message: ...
 

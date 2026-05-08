@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+import unittest
+from dataclasses import replace
+from datetime import datetime
+from typing import Iterable
+
+from src.core.enums import ArtifactType, MessageRole, TaskStatus
+from src.core.models import Artifact, Conversation, ConversationMemorySummary, Message, Task
+from src.orchestration.conversation_memory import (
+    ConversationMemoryBuilder,
+    ConversationMemoryConfig,
+    ConversationMemorySafeAllowlist,
+)
+from src.orchestration.models import OrchestrationRequest
+
+
+class FakeStorage:
+    def __init__(self, *, conversation: Conversation, messages=(), tasks=(), artifacts_by_task=None, latest_summary=None):
+        self.conversation = conversation
+        self.messages = list(messages)
+        self.tasks = list(tasks)
+        self.artifacts_by_task = dict(artifacts_by_task or {})
+        self.latest_summary = latest_summary
+        self.saved_summaries = []
+
+    async def get_conversation(self, conversation_id: str):
+        return self.conversation if self.conversation.conversation_id == conversation_id else None
+
+    async def list_messages_for_conversation(self, conversation_id: str):
+        return [message for message in self.messages if message.conversation_id == conversation_id]
+
+    async def list_tasks_for_conversation(self, conversation_id: str, statuses: Iterable[TaskStatus] | None = None):
+        tasks = [task for task in self.tasks if task.conversation_id == conversation_id]
+        if statuses is not None:
+            allowed = set(statuses)
+            tasks = [task for task in tasks if task.status in allowed]
+        return tasks
+
+    async def list_artifacts_for_task(self, task_id: str):
+        return list(self.artifacts_by_task.get(task_id, ()))
+
+    async def get_latest_conversation_memory_summary(self, conversation_id: str, account_id: str | None = None):
+        if self.latest_summary is None:
+            return None
+        if self.latest_summary.conversation_id != conversation_id:
+            return None
+        if account_id is not None and self.latest_summary.account_id != account_id:
+            return None
+        return self.latest_summary
+
+    async def save_conversation_memory_summary(self, summary):
+        self.saved_summaries.append(summary)
+        return summary
+
+
+class ConversationMemorySafeAllowlistTest(unittest.TestCase):
+    def test_allowlist_rejects_sensitive_and_high_cost_fields(self) -> None:
+        projected = ConversationMemorySafeAllowlist.project_capability_output(
+            {
+                "summary": "安全摘要",
+                "route_id": "genotype_db",
+                "row_count": 9,
+                "columns": ["variety_name", "gene", "extra", "overflow"],
+                "rows": [{"secret": "full-row"}],
+                "candidate_rows": [{"secret": "candidate"}],
+                "storage_ref": "raw://payload",
+                "sql": "SELECT * FROM secret",
+                "schema_ddl": "CREATE TABLE secret",
+                "guard_token": "guard-secret",
+                "prompt": "raw prompt",
+                "api_key": "secret-key",
+                "base_url": "https://secret.example",
+            },
+            max_columns=3,
+        )
+
+        self.assertEqual(projected["summary"], "安全摘要")
+        self.assertEqual(projected["route_id"], "genotype_db")
+        self.assertEqual(projected["row_count"], 9)
+        self.assertEqual(projected["columns"], ["variety_name", "gene", "extra"])
+        self.assertTrue(projected["truncated"])
+        for forbidden in ("rows", "candidate_rows", "storage_ref", "sql", "schema_ddl", "guard_token", "prompt", "api_key", "base_url"):
+            self.assertNotIn(forbidden, projected)
+
+    def test_upload_projection_excludes_raw_content(self) -> None:
+        projected = ConversationMemorySafeAllowlist.project_upload_summary(
+            {
+                "upload_id": "upl-1",
+                "filename": "data.csv",
+                "content_type": "text/csv",
+                "preview": {"row_count": 2},
+                "content": "raw,file,body",
+            }
+        )
+
+        self.assertEqual(projected["upload_id"], "upl-1")
+        self.assertEqual(projected["filename"], "data.csv")
+        self.assertNotIn("content", projected)
+
+
+class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_builder_excludes_current_root_and_resolves_followup(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "查一下龙粳33的品种信息", task_id="task-1", created_at=now),
+            Message("task-1:assistant", "conv-1", MessageRole.ASSISTANT, "龙粳33是水稻品种。", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "那它的基因型数据库里有什么？", task_id="task-2", created_at=now),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
+        builder = ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000))
+
+        context = await builder.build(
+            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型数据库里有什么？"),
+            account_id="alice",
+        )
+
+        self.assertEqual(context.current_user_message, "那它的基因型数据库里有什么？")
+        self.assertEqual(context.resolved_user_message, "查询龙粳33的基因型信息")
+        self.assertNotIn("msg-current", [message.message_id for message in context.recent_messages])
+        self.assertIn("msg-1", [message.message_id for message in context.recent_messages])
+
+    async def test_builder_deduplicates_assistant_message_and_text_artifact(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "查龙粳33", task_id="task-1", created_at=now),
+            Message("task-1:assistant", "conv-1", MessageRole.ASSISTANT, "assistant message answer", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "继续", task_id="task-2", created_at=now),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        artifacts = {"task-1": [Artifact("art-1", "task-1", "node-1", ArtifactType.TEXT, "artifact answer", is_complete=True)]}
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks, artifacts_by_task=artifacts)
+        context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
+            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            account_id="alice",
+        )
+
+        rendered = "\n".join(message.content for message in context.recent_messages)
+        self.assertIn("assistant message answer", rendered)
+        self.assertNotIn("artifact answer", rendered)
+
+    async def test_builder_uses_text_artifact_when_assistant_message_missing(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "查龙粳33", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "继续", task_id="task-2", created_at=now),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        artifacts = {"task-1": [Artifact("art-1", "task-1", "node-1", ArtifactType.TEXT, "artifact answer", is_complete=True)]}
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks, artifacts_by_task=artifacts)
+        context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
+            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            account_id="alice",
+        )
+
+        self.assertIn("artifact answer", "\n".join(message.content for message in context.recent_messages))
+
+    async def test_builder_rejects_owner_mismatch(self) -> None:
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"))
+        builder = ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000))
+
+        with self.assertRaises(PermissionError):
+            await builder.build(OrchestrationRequest("task-1", "conv-1", "msg-1", "你好"), account_id="bob")
+
+    async def test_builder_reuses_latest_summary_for_followup_resolution(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        later = datetime(2026, 5, 8, 9, 5, 0)
+        summary = ConversationMemorySummary(
+            summary_id="summary-1",
+            conversation_id="conv-1",
+            account_id="alice",
+            covered_until_turn_id="task-1",
+            covered_until_message_id="task-1:assistant",
+            covered_until_created_at=now,
+            summary_text="旧摘要：用户查询过龙粳33。",
+            source_message_count=2,
+            source_message_ids_hash="old-hash",
+            estimated_tokens=10,
+            summary_version="conversation-memory-summary-v1",
+            compression_policy_version="conversation-memory-policy-v1",
+            created_at=now,
+            updated_at=now,
+        )
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "查一下龙粳33的品种信息", task_id="task-1", created_at=now),
+            Message("task-1:assistant", "conv-1", MessageRole.ASSISTANT, "龙粳33是水稻品种。", task_id="task-1", created_at=now),
+            Message("msg-2", "conv-1", MessageRole.USER, "再看产量表现", task_id="task-2", created_at=later),
+            Message("task-2:assistant", "conv-1", MessageRole.ASSISTANT, "产量表现稳定。", task_id="task-2", created_at=later),
+            Message("msg-current", "conv-1", MessageRole.USER, "继续", task_id="task-3", created_at=later),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-2", status=TaskStatus.COMPLETED, created_at=later),
+            Task("task-3", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=later),
+        ]
+        storage = FakeStorage(
+            conversation=Conversation("conv-1", "alice"),
+            messages=messages,
+            tasks=tasks,
+            latest_summary=summary,
+        )
+
+        context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
+            OrchestrationRequest("task-3", "conv-1", "msg-current", "继续"),
+            account_id="alice",
+        )
+
+        self.assertEqual(context.history_summary, "旧摘要：用户查询过龙粳33。")
+        self.assertEqual(context.resolved_user_message, "围绕龙粳33继续回答：继续")
+        rendered = "\n".join(message.content for message in context.recent_messages)
+        self.assertIn("再看产量表现", rendered)
+        self.assertNotIn("查一下龙粳33", rendered)
+
+    async def test_builder_does_not_reintroduce_covered_task_text_artifact_after_summary(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        later = datetime(2026, 5, 8, 9, 5, 0)
+        summary = ConversationMemorySummary(
+            summary_id="summary-1",
+            conversation_id="conv-1",
+            account_id="alice",
+            covered_until_turn_id="task-1",
+            covered_until_message_id="task-1:assistant",
+            covered_until_created_at=now,
+            summary_text="旧摘要：用户查询过龙粳33。",
+            source_message_count=2,
+            source_message_ids_hash="old-hash",
+            estimated_tokens=10,
+            summary_version="conversation-memory-summary-v1",
+            compression_policy_version="conversation-memory-policy-v1",
+            created_at=now,
+            updated_at=now,
+        )
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "查一下龙粳33的品种信息", task_id="task-1", created_at=now),
+            Message("task-1:assistant", "conv-1", MessageRole.ASSISTANT, "assistant history text", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "那它的基因型呢？", task_id="task-2", created_at=later),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=later),
+        ]
+        artifacts = {"task-1": [Artifact("art-1", "task-1", "node-1", ArtifactType.TEXT, "COVERED_ARTIFACT_RAW_TEXT", is_complete=True)]}
+        storage = FakeStorage(
+            conversation=Conversation("conv-1", "alice"),
+            messages=messages,
+            tasks=tasks,
+            artifacts_by_task=artifacts,
+            latest_summary=summary,
+        )
+
+        context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
+            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+            account_id="alice",
+        )
+
+        self.assertEqual(context.resolved_user_message, "查询龙粳33的基因型信息")
+        rendered = "\n".join(message.content for message in context.recent_messages)
+        self.assertNotIn("assistant history text", rendered)
+        self.assertNotIn("COVERED_ARTIFACT_RAW_TEXT", rendered)
