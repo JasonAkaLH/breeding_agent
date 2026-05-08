@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .io_contract import SkillIOContract
+from .parameters import SkillParameterSpec
 from .script_manifest import SkillScriptEntrypoint
 
 
@@ -18,6 +19,7 @@ class SkillManifest:
     inputs: SkillIOContract = SkillIOContract()
     outputs: SkillIOContract = SkillIOContract()
     scripts: tuple[SkillScriptEntrypoint, ...] = ()
+    parameters: Mapping[str, SkillParameterSpec] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property

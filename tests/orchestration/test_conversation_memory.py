@@ -146,6 +146,27 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("assistant message answer", rendered)
         self.assertNotIn("artifact answer", rendered)
 
+    async def test_builder_does_not_treat_requirement_number_as_variety_entity(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "你依据这份文件帮我设计一个随机区组，要求2次重复", task_id="task-1", created_at=now),
+            Message("task-1:assistant", "conv-1", MessageRole.ASSISTANT, "我理解为 blocks=2。", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "按照你的操作继续生成。", task_id="task-2", created_at=now),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
+
+        context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
+            OrchestrationRequest("task-2", "conv-1", "msg-current", "按照你的操作继续生成。"),
+            account_id="alice",
+        )
+
+        self.assertIsNone(context.resolved_user_message)
+        self.assertEqual(context.resolution_metadata["reason"], "no_history_entity")
+
     async def test_builder_uses_text_artifact_when_assistant_message_missing(self) -> None:
         now = datetime(2026, 5, 8, 9, 0, 0)
         messages = [

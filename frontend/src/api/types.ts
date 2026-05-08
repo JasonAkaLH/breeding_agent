@@ -155,6 +155,14 @@ export interface ArtifactResponse {
   summary: string | null;
   is_complete: boolean;
   created_at: string | null;
+  filename?: string | null;
+  mime_type?: string | null;
+  size_bytes?: number | null;
+  sha256?: string | null;
+  download_url?: string | null;
+  source_file_count?: number | null;
+  archive_format?: string | null;
+  retention_status?: string | null;
 }
 
 export interface TaskArtifactsResponse {

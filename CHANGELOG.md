@@ -10,6 +10,23 @@
 
 ## [Unreleased]
 
+### 2026-05-08 — 新增 Skill 参数解析与结构化入参传递
+
+- 新增 `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`，定义 Skill 脚本产出 HTML / CSV / XLSX / PDF 等文件时的平台统一 managed artifact、受控输出目录、下载鉴权、prompt 安全摘要与前端附件展示边界；补充 v1 输出文件不设应用层单文件大小上限，但同一 account / conversation 只保留一个 active 输出文件，新输出顶替并删除旧输出，旧下载地址对外统一返回 `404` 并在内部审计记录 gone；HTML v1 只下载不做站内 sandbox 预览；单次 Skill 产出多个合法输出文件时由平台用 Python 标准库 `zipfile` 打包为 1 个 zip artifact；前端 v1 统一使用附件卡片，不做 Skill 类型定制文件 UI；Skill manifest `outputs.files` v1 可选，默认使用全局 allowlist，声明后只能收紧不能放宽。
+- 落地 Skill 输出文件 artifact v1：`SkillScriptRunner` 为脚本提供 `MAF_SKILL_OUTPUT_DIR`，平台校验 `output_files` 相对路径、类型、manifest 收紧规则与 zip entry 安全；新增本地 managed artifact file store、单 active 输出替换/删除、旧 artifact 下载 404/gone 审计、`/api/v1/artifacts/{artifact_id}/download` 下载接口，以及前端统一“生成文件”附件卡片。
+- 补强输出文件生命周期失败边界：新 artifact metadata 持久化后才 supersede 旧 active 输出；旧 metadata 替换失败会拒绝新输出并保留旧 active；旧文件正文删除失败不再暴露旧下载；主代理 LLM 在文件收集后失败时仍保留可下载的新 file artifact。
+- 更新 `Codex-Skill构建指南.md`，补充脚本下载文件必须写入 `MAF_SKILL_OUTPUT_DIR`、通过 stdout `output_files` 声明、HTML 只下载、多文件由平台打包 zip、源压缩包默认拒绝等构建规则。
+- 进一步补齐 Skill 输出文件构建规则：明确平台默认允许的扩展名、MIME 必须匹配扩展名、hardlink 禁止、`outputs.files` 只能收紧不能放宽；本地 mini BreedStat RCBD Skill manifest 收紧声明为 `.html` / `text/html` 输出。
+- 修复前端输入框 IME 组合态 Enter 误发送问题：中文输入法确认英文 / 候选词时不提交消息，非组合态 Enter 仍发送，Shift+Enter 仍保留换行。
+- Codex Skill manifest 新增 `parameters` / `input_parameters` 扩展，支持 Skill 自声明业务参数的类型、必填性、别名和正则解析规则；主代理在自动脚本执行前调用通用 resolver，把解析结果作为脚本 stdin 顶层字段注入。
+- 参数 resolver 新增 LLM 缺参补槽 fallback：确定性解析成功时不调用 LLM；仍缺少文本型标量参数时复用主代理 LLM runtime 生成候选 JSON，并经系统字段名、类型、source 与 artifact 边界校验后才注入脚本 payload。
+- 主代理 Skill 自动脚本路径新增 `skill.input_resolved` / `skill.input_missing` 审计事件；缺少必填参数时不再盲目执行脚本，而是把结构化缺参结果注入最终 prompt，避免 LLM 空口承诺补参但脚本未收到参数。
+- 参数解析层只读取当前问题、当前用户原文和安全的最近用户消息，脚本 payload 继续剥离完整 conversation memory / history summary / recent messages / resolved question，保持跨轮参数继承与上下文安全边界分离。
+- Skill 构建指南补充参数契约规则：脚本可接受的所有业务参数都必须列入 manifest，无默认值且必需的参数声明 `required: true`，有默认值的参数声明为非必填并写明 `default`，枚举型参数必须列出完整 `enum` 可接受值。
+- 本地 mini BreedStat RCBD Skill manifest 按参数契约补齐 `material_data`、`planter`、`seed`、`site_num`、`site_random`、`check_position_constraint` 与 `test_position_constraint` 声明，明确必填项、默认值和 `planter` 枚举范围。
+- 修复会话记忆实体抽取把“要求2”误当品种实体的问题，并让本地 mini BreedStat RCBD wrapper 支持“2次重复”解析为 `blocks=2`。
+- 补充 parser、resolver、main_agent、conversation memory、API runtime 与本地 RCBD wrapper 回归测试，并更新 `Codex-Skill构建指南.md` 的参数声明与脚本输入边界说明。
+
 ### 2026-05-08 — 落地对话上下文记忆与压缩 v1
 
 - 新增 `ConversationMemoryContext` 构建链路，在 workflow provider 规划前按当前 conversation / account 读取历史消息、assistant 最终回答和安全摘要，并生成 `current_user_message` / `resolved_user_message` / recent messages / history summary 等 prompt-safe 上下文。

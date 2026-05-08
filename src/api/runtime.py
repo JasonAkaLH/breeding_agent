@@ -27,6 +27,7 @@ from src.capabilities.main_agent import (
     MainAgentExecutor,
     MainAgentRuntimeReplanner,
     MainAgentWorkflowProvider,
+    SkillOutputArtifactManager,
     StreamGenerator,
     build_local_main_agent_instance,
 )
@@ -43,7 +44,7 @@ from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
-from src.integrations.codex_skills import SkillCatalog
+from src.integrations.codex_skills import SkillCatalog, SkillInputTextGenerator, SkillScriptRunner
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
@@ -65,6 +66,7 @@ from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
 from src.orchestration.workflow_router import WorkflowRouter
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
+from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
 
 from .conversation_titles import (
     ConversationTitleGenerator,
@@ -107,6 +109,7 @@ class ApiRuntime:
         conversation_title_generator: ConversationTitleGenerator | None = None,
         upload_store: InMemoryUploadStore | None = None,
         conversation_memory_builder: ConversationMemoryBuilder | None = None,
+        artifact_file_store: LocalArtifactFileStore | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -124,6 +127,7 @@ class ApiRuntime:
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
+        self.artifact_file_store = artifact_file_store or LocalArtifactFileStore(Path("runtime/artifacts"))
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
@@ -622,6 +626,7 @@ class ApiRuntime:
         for task_id in cancelled_task_ids:
             await self._cancel_existing_execution(task_id)
 
+        await self._delete_conversation_file_artifacts(conversation_id)
         deleted_counts = await self.storage.delete_conversation(conversation_id)
         return {
             "conversation_id": conversation_id,
@@ -629,6 +634,14 @@ class ApiRuntime:
             "cancelled_task_ids": cancelled_task_ids,
             "deleted_counts": deleted_counts,
         }
+
+    async def _delete_conversation_file_artifacts(self, conversation_id: str) -> None:
+        tasks = await self.storage.list_tasks_for_conversation(conversation_id)
+        for task in tasks:
+            for artifact in await self.storage.list_artifacts_for_task(task.task_id):
+                metadata = parse_file_storage_ref(artifact.storage_ref)
+                if is_active_skill_output_file(metadata):
+                    self.artifact_file_store.delete(str(metadata.get("storage_key")))
 
     async def rename_conversation(self, conversation_id: str, title: str, *, account_id: str | None = None) -> Conversation:
         normalized_title = validate_conversation_title(title)
@@ -839,6 +852,8 @@ def build_api_runtime(
     main_agent_llm_config_path: str | Path | None = None,
     main_agent_llm_client_factory: Callable[..., Any] | None = None,
     main_agent_reasoning_effort: ReasoningEffort = "minimal",
+    skill_input_text_generator: SkillInputTextGenerator | None = None,
+    enable_skill_input_llm: bool = True,
     conversation_title_generator: ConversationTitleGenerator | None = None,
     enable_conversation_title_llm: bool = True,
     skill_roots: Iterable[str | Path] | None = None,
@@ -850,6 +865,7 @@ def build_api_runtime(
     upload_store: InMemoryUploadStore | None = None,
     conversation_memory_builder: ConversationMemoryBuilder | None = None,
     enable_conversation_memory: bool = True,
+    artifact_store_path: str | Path | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
         llm_text_generator=llm_text_generator,
@@ -873,6 +889,7 @@ def build_api_runtime(
     engine = create_sqlite_engine(database_path)
     bootstrap_sqlite_database(engine)
     storage = SQLiteStorage(create_sqlite_session_factory(engine))
+    artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
     password_hasher = PasswordHasher()
     captcha_service = CaptchaService(
         storage,
@@ -930,6 +947,17 @@ def build_api_runtime(
         main_agent_llm_runtime=main_agent_llm_runtime,
         enable_conversation_title_llm=enable_conversation_title_llm,
     )
+    resolved_skill_input_text_generator = _resolve_skill_input_text_generator(
+        skill_input_text_generator=skill_input_text_generator,
+        main_agent_llm_runtime=main_agent_llm_runtime,
+        enable_skill_input_llm=enable_skill_input_llm,
+    )
+    skill_output_artifact_manager = SkillOutputArtifactManager(
+        storage=storage,
+        file_store=artifact_file_store,
+        now_fn=ApiRuntime._utcnow_naive,
+    )
+    skill_script_runner = SkillScriptRunner(output_processor=skill_output_artifact_manager.process_for_runner)
     resolved_main_agent_stream_generator, main_agent_stream_metadata = _resolve_main_agent_stream_binding(
         main_agent_stream_generator=main_agent_stream_generator,
         main_agent_llm_runtime=main_agent_llm_runtime,
@@ -1002,6 +1030,9 @@ def build_api_runtime(
                     stream_metadata=main_agent_stream_metadata,
                     default_reasoning_effort=main_agent_reasoning_effort,
                     skill_catalog=resolved_skill_catalog,
+                    script_runner=skill_script_runner,
+                    skill_input_text_generator=resolved_skill_input_text_generator,
+                    skill_output_artifact_manager=skill_output_artifact_manager,
                     live_event_recorder=record_live_event,
                 ),
                 SQLQueryExecutor(
@@ -1039,6 +1070,7 @@ def build_api_runtime(
         conversation_title_generator=resolved_conversation_title_generator,
         upload_store=upload_store,
         conversation_memory_builder=resolved_conversation_memory_builder,
+        artifact_file_store=artifact_file_store,
     )
 
 
@@ -1192,6 +1224,27 @@ def _resolve_conversation_title_generator(
     async def generate(title_source: str) -> str:
         return await main_agent_llm_runtime.generate_text(
             build_conversation_title_prompt(title_source),
+            thinking=False,
+            reasoning_effort="minimal",
+        )
+
+    return generate
+
+
+def _resolve_skill_input_text_generator(
+    *,
+    skill_input_text_generator: SkillInputTextGenerator | None,
+    main_agent_llm_runtime: SharedLLMRuntime,
+    enable_skill_input_llm: bool,
+) -> SkillInputTextGenerator | None:
+    if skill_input_text_generator is not None:
+        return skill_input_text_generator
+    if not enable_skill_input_llm:
+        return None
+
+    async def generate(prompt: str) -> str:
+        return await main_agent_llm_runtime.generate_text(
+            prompt,
             thinking=False,
             reasoning_effort="minimal",
         )

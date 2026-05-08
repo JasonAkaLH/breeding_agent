@@ -425,6 +425,561 @@ Use script result.
         self.assertIn("data.csv", prompts[0])
         self.assertNotIn("ped_id,design_check", prompts[0])
 
+    async def test_auto_run_script_receives_resolved_skill_parameters_without_raw_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+                    payload = json.load(sys.stdin)
+                    metadata = payload.get("metadata", {})
+                    forbidden = {"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"}
+                    print(json.dumps({
+                        "answer": "blocks=" + str(payload.get("blocks")),
+                        "blocks": payload.get("blocks"),
+                        "has_raw_memory": any(key in payload or key in metadata for key in forbidden),
+                    }, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 生成
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  blocks:
+    type: integer
+    required: true
+    aliases:
+      - 重复
+      - 区组
+    patterns:
+      - '(\\d+)\\s*(?:个|次)?(?:重复|区组)'
+---
+
+# Scripted
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+
+            async def streamer(_prompt: str):
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "按照你的操作继续生成。"},
+                    metadata={
+                        "conversation_memory": {
+                            "current_user_message": "按照你的操作继续生成。",
+                            "recent_messages": [
+                                {"role": "user", "content": "你依据这份文件帮我设计一个随机区组，要求2次重复"},
+                                {"role": "assistant", "content": "我理解为 blocks=999，但不能作为执行入参来源。"},
+                            ],
+                            "history_summary": "secret-history",
+                            "resolved_user_message": "围绕要求2继续回答：按照你的操作继续生成。",
+                        },
+                    },
+                )
+            )
+
+        output = result.output_payload["script_results"][0]["output"]
+        self.assertEqual(output["blocks"], 2)
+        self.assertFalse(output["has_raw_memory"])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.input_resolved", event_types)
+        resolved_event = next(event for event in result.events if event.event_type == "skill.input_resolved")
+        self.assertEqual(resolved_event.payload["resolved_fields"], ["blocks"])
+        self.assertNotIn("secret-history", str(resolved_event.payload))
+
+    async def test_auto_run_script_missing_required_parameter_returns_structured_result_without_running_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            sentinel = Path(tmpdir) / "sentinel.txt"
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    f"""
+                    import json
+                    from pathlib import Path
+                    Path({str(sentinel)!r}).write_text("ran", encoding="utf-8")
+                    print(json.dumps({{"answer": "script ran"}}, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 生成
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  blocks:
+    type: integer
+    required: true
+    aliases:
+      - 重复
+    patterns:
+      - '(\\d+)\\s*(?:个|次)?重复'
+---
+
+# Scripted
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+            prompts: list[str] = []
+
+            async def streamer(prompt: str):
+                prompts.append(prompt)
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "继续生成"},
+                    metadata={"conversation_memory": {"recent_messages": [{"role": "assistant", "content": "blocks=2"}]}},
+                )
+            )
+
+        self.assertFalse(sentinel.exists())
+        output = result.output_payload["script_results"][0]["output"]
+        self.assertFalse(output["ok"])
+        self.assertEqual(output["error"]["type"], "missing_input")
+        self.assertEqual(output["missing"], ["blocks"])
+        self.assertIn("blocks", prompts[0])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.input_missing", event_types)
+        self.assertNotIn("skill.script_started", event_types)
+
+    async def test_auto_run_script_uses_llm_fallback_for_missing_scalar_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+                    payload = json.load(sys.stdin)
+                    metadata = payload.get("metadata", {})
+                    forbidden = {"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"}
+                    print(json.dumps({
+                        "answer": "blocks=" + str(payload.get("blocks")),
+                        "blocks": payload.get("blocks"),
+                        "has_raw_memory": any(key in payload or key in metadata for key in forbidden),
+                    }, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 生成
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  blocks:
+    type: integer
+    required: true
+    aliases:
+      - 重复
+      - 区组
+    patterns:
+      - '(\\d+)\\s*(?:个|次)?(?:重复|区组)'
+---
+
+# Scripted
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+            slot_prompts: list[str] = []
+
+            async def streamer(_prompt: str):
+                yield "done"
+
+            async def slot_generator(prompt: str) -> str:
+                slot_prompts.append(prompt)
+                return '{"resolved": {"blocks": {"value": 2, "source": "recent_user_message", "evidence": "不进入审计"}}}'
+
+            result = await MainAgentExecutor(
+                stream_generator=streamer,
+                skill_catalog=catalog,
+                skill_input_text_generator=slot_generator,
+            ).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "按照你的操作继续生成。"},
+                    metadata={
+                        "conversation_memory": {
+                            "current_user_message": "按照你的操作继续生成。",
+                            "recent_messages": [
+                                {"role": "user", "content": "重复数这个参数就是 blocks，取两次。"},
+                                {"role": "assistant", "content": "我理解为 blocks=999，但不能作为执行入参来源。"},
+                            ],
+                            "history_summary": "secret-history",
+                            "resolved_user_message": "沿用最近用户说明的 blocks 参数继续生成。",
+                        },
+                        "Conversation_Memory": {"history_summary": "case-secret-history"},
+                    },
+                )
+            )
+
+        output = result.output_payload["script_results"][0]["output"]
+        self.assertEqual(output["blocks"], 2)
+        self.assertFalse(output["has_raw_memory"])
+        self.assertEqual(len(slot_prompts), 1)
+        self.assertIn("resolved_user_message", slot_prompts[0])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.input_resolved", event_types)
+        self.assertIn("skill.script_started", event_types)
+        self.assertNotIn("skill.input_missing", event_types)
+        resolved_event = next(event for event in result.events if event.event_type == "skill.input_resolved")
+        self.assertEqual(resolved_event.payload["sources"]["blocks"]["source"], "llm_slot_resolver:recent_user_message")
+        self.assertNotIn("不进入审计", str(resolved_event.payload))
+        self.assertNotIn("secret-history", str(resolved_event.payload))
+        self.assertNotIn("case-secret-history", str(result.output_payload["script_results"]))
+
+    async def test_auto_run_script_llm_fallback_failure_keeps_structured_missing_without_running_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            sentinel = Path(tmpdir) / "llm-fallback-sentinel.txt"
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    f"""
+                    import json
+                    from pathlib import Path
+                    Path({str(sentinel)!r}).write_text("ran", encoding="utf-8")
+                    print(json.dumps({{"answer": "script ran"}}, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 生成
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  blocks:
+    type: integer
+    required: true
+---
+
+# Scripted
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+
+            async def streamer(_prompt: str):
+                yield "done"
+
+            async def slot_generator(_prompt: str) -> str:
+                return "not-json"
+
+            result = await MainAgentExecutor(
+                stream_generator=streamer,
+                skill_catalog=catalog,
+                skill_input_text_generator=slot_generator,
+            ).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "继续生成"},
+                    metadata={"conversation_memory": {"recent_messages": [{"role": "user", "content": "blocks 是两个。"}]}},
+                )
+            )
+
+        self.assertFalse(sentinel.exists())
+        output = result.output_payload["script_results"][0]["output"]
+        self.assertEqual(output["missing"], ["blocks"])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.input_missing", event_types)
+        self.assertIn("skill.input_resolution_diagnostic", event_types)
+        self.assertNotIn("skill.script_started", event_types)
+        diagnostic_event = next(event for event in result.events if event.event_type == "skill.input_resolution_diagnostic")
+        self.assertEqual(diagnostic_event.payload["diagnostics"], ["llm_invalid_json"])
+
+    async def test_auto_run_script_missing_required_artifact_parameter_does_not_run_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            sentinel = Path(tmpdir) / "artifact-sentinel.txt"
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    f"""
+                    import json
+                    from pathlib import Path
+                    Path({str(sentinel)!r}).write_text("ran", encoding="utf-8")
+                    print(json.dumps({{"answer": "script ran"}}, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 随机区组
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  blocks:
+    type: integer
+    required: true
+    patterns:
+      - '(\\d+)\\s*(?:个|次)?重复'
+  material_data:
+    type: artifact
+    required: true
+    source: artifact
+---
+
+# Scripted
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+
+            async def streamer(_prompt: str):
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "请生成随机区组，要求2次重复"},
+                )
+            )
+
+        self.assertFalse(sentinel.exists())
+        output = result.output_payload["script_results"][0]["output"]
+        self.assertEqual(output["missing"], ["material_data"])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.input_missing", event_types)
+        self.assertNotIn("skill.script_started", event_types)
+
+    async def test_auto_run_script_artifact_parameter_success_runs_script_with_marker_and_raw_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+                    payload = json.load(sys.stdin)
+                    print(json.dumps({
+                        "answer": "ok",
+                        "blocks": payload.get("blocks"),
+                        "material_data": payload.get("material_data"),
+                        "artifact_content": payload["uploaded_artifacts"][0].get("content"),
+                    }, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 随机区组
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  blocks:
+    type: integer
+    required: true
+    patterns:
+      - '(\\d+)\\s*(?:个|次)?重复'
+  material_data:
+    type: artifact
+    required: true
+    source: artifact
+---
+
+# Scripted
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+
+            async def streamer(_prompt: str):
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "请生成随机区组，要求2次重复"},
+                    metadata={
+                        "skill_artifacts": [
+                            {
+                                "upload_id": "upl-1",
+                                "filename": "materials.csv",
+                                "content": "ped_id,design_check\nA,0\n",
+                            }
+                        ]
+                    },
+                )
+            )
+
+        output = result.output_payload["script_results"][0]["output"]
+        self.assertEqual(output["blocks"], 2)
+        self.assertEqual(output["material_data"], {"available": True, "count": 1})
+        self.assertEqual(output["artifact_content"], "ped_id,design_check\nA,0\n")
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.input_resolved", event_types)
+        self.assertIn("skill.script_started", event_types)
+        self.assertNotIn("skill.input_missing", event_types)
+
+    async def test_auto_run_script_input_contract_missing_returns_structured_result_before_started_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "scripted"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            sentinel = Path(tmpdir) / "contract-sentinel.txt"
+            (scripts_dir / "answer.py").write_text(
+                textwrap.dedent(
+                    f"""
+                    import json
+                    from pathlib import Path
+                    Path({str(sentinel)!r}).write_text("ran", encoding="utf-8")
+                    print(json.dumps({{"answer": "script ran"}}, ensure_ascii=False))
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+triggers:
+  - 脚本
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+        - user_id
+outputs:
+  required:
+    - answer
+---
+
+# Scripted
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+
+            async def streamer(_prompt: str):
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "执行脚本"},
+                )
+            )
+
+        self.assertFalse(sentinel.exists())
+        output = result.output_payload["script_results"][0]["output"]
+        self.assertEqual(output["missing"], ["user_id"])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.input_missing", event_types)
+        self.assertNotIn("skill.script_started", event_types)
+
 
 if __name__ == "__main__":
     unittest.main()

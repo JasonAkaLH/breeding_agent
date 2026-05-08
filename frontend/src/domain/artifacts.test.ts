@@ -154,6 +154,40 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(summarizeCapabilityArtifactDisplays(displays)).toBe('查询已完成，共返回 0 行结果。');
   });
 
+
+
+  it('returns a file artifact display for downloadable Skill output files', () => {
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({ artifact_type: 'text', storage_ref: '最终回答', summary: '最终' }),
+      artifact({
+        artifact_id: 'art-file-1',
+        producer_node_id: 'task-1:main_agent.respond',
+        artifact_type: 'file',
+        storage_ref: '',
+        summary: 'HTML 布局',
+        filename: 'layout.html',
+        mime_type: 'text/html',
+        size_bytes: 12,
+        download_url: '/api/v1/artifacts/art-file-1/download',
+        source_file_count: 1,
+        archive_format: null,
+        retention_status: 'active',
+      }),
+    ]);
+
+    expect(displays).toHaveLength(1);
+    expect(displays[0]).toMatchObject({
+      kind: 'file',
+      result: {
+        artifactId: 'art-file-1',
+        filename: 'layout.html',
+        mimeType: 'text/html',
+        downloadUrl: '/api/v1/artifacts/art-file-1/download',
+      },
+    });
+    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('HTML 布局');
+  });
+
   it('does not turn unrelated capability summaries into SQLQuery cards', () => {
     const displays = parseCapabilityArtifactDisplays([
       artifact({

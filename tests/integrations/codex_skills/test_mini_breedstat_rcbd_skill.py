@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import shutil
 import unittest
@@ -53,6 +54,18 @@ class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):
         self.assertEqual(result["error"]["type"], "missing_input")
         self.assertIn("blocks", result["missing"])
 
+    def test_wrapper_parse_blocks_accepts_chinese_repeat_classifier_and_top_level_override(self) -> None:
+        script_file = Path("skill/mini_breedstat_rcbd_skill/scripts/run_rcbd.py")
+        if not script_file.exists():
+            self.skipTest("local mini BreedStat RCBD wrapper is not present")
+        spec = importlib.util.spec_from_file_location("run_rcbd", script_file)
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None and spec.loader is not None
+        spec.loader.exec_module(module)
+
+        self.assertEqual(module.parse_blocks({"query": "要求2次重复"}, {}), 2)
+        self.assertEqual(module.parse_blocks({"query": "要求2次重复", "blocks": 3}, {}), 3)
+
     def test_wrapper_uses_bundled_rcbd_core_dependency(self) -> None:
         self._skip_without_rscript()
         manifest = parse_skill_file(self.skill_file)
@@ -74,6 +87,9 @@ class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):
         self.assertIn("RCBD 设计已完成", result["answer"])
         self.assertEqual(result["design"], "rcbd")
         self.assertEqual(len(result["out_design"]), 30)
+        if result.get("layout_html_generated"):
+            self.assertEqual(result["output_files"][0]["path"], "outputs/rcbd_layout.html")
+            self.assertNotIn("layout_html", result)
 
     def test_wrapper_accepts_uploaded_artifact_content(self) -> None:
         self._skip_without_rscript()
@@ -95,6 +111,9 @@ class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn("RCBD 设计已完成", result["answer"])
         self.assertEqual(result["design"], "rcbd")
+        if result.get("layout_html_generated"):
+            self.assertEqual(result["output_files"][0]["mime_type"], "text/html")
+            self.assertNotIn("layout_html", result)
 
 
 if __name__ == "__main__":

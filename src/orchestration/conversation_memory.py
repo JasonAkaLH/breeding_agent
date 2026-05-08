@@ -671,6 +671,8 @@ def _extract_variety_entity(text: str) -> str | None:
 
 
 def _strip_entity_prefix(candidate: str) -> str:
+    if _looks_like_non_entity_number(candidate):
+        return ""
     prefixes = (
         "帮我查询",
         "帮我查",
@@ -696,6 +698,23 @@ def _strip_entity_prefix(candidate: str) -> str:
             normalized = normalized[1:]
             changed = True
     return normalized
+
+
+def _looks_like_non_entity_number(candidate: str) -> bool:
+    non_entity_prefixes = (
+        "要求",
+        "需要",
+        "设置",
+        "使用",
+        "按照",
+        "重复",
+        "区组",
+        "次数",
+        "第",
+        "共",
+    )
+    prefixes = "|".join(re.escape(prefix) for prefix in non_entity_prefixes)
+    return bool(re.fullmatch(rf"(?:{prefixes})\d{{1,4}}号?", candidate))
 
 
 def _estimate_context_tokens(

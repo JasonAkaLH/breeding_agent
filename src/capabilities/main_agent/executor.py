@@ -5,11 +5,24 @@ from typing import Any, Mapping
 
 from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
 from src.core.enums import EventVisibility
-from src.integrations.codex_skills import SkillCatalog, SkillScriptError, SkillScriptRunner, match_skills
+from src.integrations.codex_skills import (
+    SkillCatalog,
+    SkillInputResolutionContext,
+    SkillInputTextGenerator,
+    SkillScriptError,
+    SkillScriptRunner,
+    match_skills,
+    resolve_skill_inputs_with_llm,
+)
 from src.integrations.llm_client import LLMClient, ReasoningEffort
 
 from .helpers import LiveEventRecorder, StreamGenerator, iter_stream_events, make_event, make_text_artifact
 from .prompt_builder import build_artifact_context, build_dependency_context, build_main_agent_prompt
+from .skill_output_artifacts import (
+    SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY,
+    SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY,
+    SkillOutputArtifactManager,
+)
 from .workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS
 
 _REASONING_EFFORTS: set[str] = {"minimal", "low", "medium", "high"}
@@ -40,6 +53,8 @@ class MainAgentRespondCapability(CapabilityContract):
         default_reasoning_effort: ReasoningEffort = "minimal",
         skill_catalog: SkillCatalog | None = None,
         script_runner: SkillScriptRunner | None = None,
+        skill_input_text_generator: SkillInputTextGenerator | None = None,
+        skill_output_artifact_manager: SkillOutputArtifactManager | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
     ) -> None:
         self._stream_generator = stream_generator
@@ -47,6 +62,8 @@ class MainAgentRespondCapability(CapabilityContract):
         self._default_reasoning_effort = default_reasoning_effort
         self._skill_catalog = skill_catalog or SkillCatalog(())
         self._script_runner = script_runner or SkillScriptRunner()
+        self._skill_input_text_generator = skill_input_text_generator
+        self._skill_output_artifact_manager = skill_output_artifact_manager
         self._live_event_recorder = live_event_recorder
 
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
@@ -54,7 +71,7 @@ class MainAgentRespondCapability(CapabilityContract):
         artifact_context = build_artifact_context(request.metadata)
         dependency_context = build_dependency_context(request.dependency_outputs)
         skill_matches = match_skills(user_message, self._skill_catalog)
-        script_results, script_events = await self._run_auto_scripts(request, user_message, artifact_context, skill_matches)
+        script_results, script_events, script_artifacts = await self._run_auto_scripts(request, user_message, artifact_context, skill_matches)
         prompt = build_main_agent_prompt(
             user_message=user_message,
             skill_matches=skill_matches,
@@ -143,7 +160,15 @@ class MainAgentRespondCapability(CapabilityContract):
                 capability_id=request.capability_id,
                 task_id=request.task_id,
                 node_id=request.node_id,
-                output_payload={"response_source": "llm", "fallback_used": True, "fallback_reason": "provider_failed"},
+                output_payload={
+                    "response_source": "llm",
+                    "fallback_used": True,
+                    "fallback_reason": "provider_failed",
+                    "matched_skills": [match.manifest.name for match in skill_matches],
+                    "script_results": script_results,
+                    "prompt_recorded": False,
+                },
+                artifacts=tuple(script_artifacts),
                 events=tuple(events),
                 error=CapabilityExecutionError(
                     code="main_agent_llm_failed",
@@ -190,16 +215,80 @@ class MainAgentRespondCapability(CapabilityContract):
                 "script_results": script_results,
                 "prompt_recorded": False,
             },
-            artifacts=(artifact,),
+            artifacts=(*script_artifacts, artifact),
             events=tuple(events),
         )
 
     async def _run_auto_scripts(self, request, user_message, artifact_context, skill_matches):
         script_results: list[dict[str, Any]] = []
+        pending_file_artifacts = []
         events = []
+        raw_script_artifacts = request.metadata.get("skill_artifacts")
+        script_input_artifacts = raw_script_artifacts if isinstance(raw_script_artifacts, list | tuple) else artifact_context
         for match in skill_matches:
             for script in match.manifest.scripts:
                 if not script.auto_run:
+                    continue
+                base_payload = {
+                    "query": user_message,
+                    "uploaded_artifacts": list(script_input_artifacts),
+                    "metadata": self._script_safe_metadata(request.metadata),
+                }
+                resolution = await resolve_skill_inputs_with_llm(
+                    match.manifest,
+                    script,
+                    base_payload,
+                    SkillInputResolutionContext.from_metadata(
+                        query=user_message,
+                        metadata=request.metadata,
+                        artifact_summaries=tuple(artifact_context),
+                    ),
+                    text_generator=self._skill_input_text_generator,
+                )
+                if resolution.diagnostics:
+                    events.append(
+                        make_event(
+                            request,
+                            event_type="skill.input_resolution_diagnostic",
+                            payload={
+                                "skill_name": match.manifest.name,
+                                "entrypoint": script.name,
+                                "diagnostics": list(resolution.diagnostics),
+                            },
+                            visibility=EventVisibility.AUDIT_ONLY,
+                        )
+                    )
+                if resolution.sources:
+                    events.append(
+                        make_event(
+                            request,
+                            event_type="skill.input_resolved",
+                            payload=resolution.audit_payload(skill_name=match.manifest.name, entrypoint=script.name),
+                            visibility=EventVisibility.AUDIT_ONLY,
+                        )
+                    )
+                if resolution.missing:
+                    self._record_missing_skill_input(
+                        request=request,
+                        script_results=script_results,
+                        events=events,
+                        skill_name=match.manifest.name,
+                        entrypoint=script.name,
+                        missing=resolution.missing,
+                        resolved_fields=resolution.resolved_fields,
+                    )
+                    continue
+                contract_missing = self._missing_script_contract_inputs(script.input_contract.required, resolution.payload)
+                if contract_missing:
+                    self._record_missing_skill_input(
+                        request=request,
+                        script_results=script_results,
+                        events=events,
+                        skill_name=match.manifest.name,
+                        entrypoint=script.name,
+                        missing=contract_missing,
+                        resolved_fields=resolution.resolved_fields,
+                    )
                     continue
                 events.append(
                     make_event(
@@ -209,16 +298,17 @@ class MainAgentRespondCapability(CapabilityContract):
                         visibility=EventVisibility.AUDIT_ONLY,
                     )
                 )
-                script_artifacts = request.metadata.get("skill_artifacts")
-                if not isinstance(script_artifacts, list | tuple):
-                    script_artifacts = artifact_context
-                payload = {
-                    "query": user_message,
-                    "uploaded_artifacts": list(script_artifacts),
-                    "metadata": self._script_safe_metadata(request.metadata),
-                }
                 try:
-                    output = await self._script_runner.run(match.manifest, script, payload)
+                    output = await self._script_runner.run(
+                        match.manifest,
+                        script,
+                        resolution.payload,
+                        output_context={
+                            "task_id": request.task_id,
+                            "conversation_id": request.conversation_id,
+                            "node_id": request.node_id,
+                        },
+                    )
                 except SkillScriptError as exc:
                     events.append(
                         make_event(
@@ -229,6 +319,53 @@ class MainAgentRespondCapability(CapabilityContract):
                         )
                     )
                     continue
+                artifact = output.pop(SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY, None)
+                if artifact is not None:
+                    discard_diagnostics = self._discard_pending_skill_artifacts(pending_file_artifacts, script_results)
+                    for diagnostic in discard_diagnostics:
+                        events.append(
+                            make_event(
+                                request,
+                                event_type="skill.output_file_rejected",
+                                payload={
+                                    "skill_name": match.manifest.name,
+                                    "entrypoint": script.name,
+                                    "path": diagnostic.get("path", ""),
+                                    "reason": diagnostic.get("reason", "pending_artifact_cleanup_failed"),
+                                },
+                                visibility=EventVisibility.AUDIT_ONLY,
+                            )
+                        )
+                    pending_file_artifacts.append(artifact)
+                rejections = output.pop(SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY, ())
+                if rejections:
+                    for rejection in rejections:
+                        events.append(
+                            make_event(
+                                request,
+                                event_type="skill.output_file_rejected",
+                                payload={
+                                    "skill_name": match.manifest.name,
+                                    "entrypoint": script.name,
+                                    "path": rejection.path,
+                                    "reason": rejection.reason,
+                                },
+                                visibility=EventVisibility.AUDIT_ONLY,
+                            )
+                        )
+                if "output_files" in output:
+                    events.append(
+                        make_event(
+                            request,
+                            event_type="skill.output_file_collected",
+                            payload={
+                                "skill_name": match.manifest.name,
+                                "entrypoint": script.name,
+                                "file_count": len(output.get("output_files") or ()),
+                            },
+                            visibility=EventVisibility.AUDIT_ONLY,
+                        )
+                    )
                 script_results.append({"skill_name": match.manifest.name, "entrypoint": script.name, "output": output})
                 events.append(
                     make_event(
@@ -238,7 +375,34 @@ class MainAgentRespondCapability(CapabilityContract):
                         visibility=EventVisibility.AUDIT_ONLY,
                     )
                 )
-        return script_results, tuple(events)
+        return script_results, tuple(events), tuple(pending_file_artifacts)
+
+    def _discard_pending_skill_artifacts(self, script_artifacts: list, script_results: list[dict[str, Any]]) -> tuple[dict[str, str], ...]:
+        cleanup_diagnostics: list[dict[str, str]] = []
+        if self._skill_output_artifact_manager is None:
+            script_artifacts.clear()
+            return ()
+        for existing in list(script_artifacts):
+            rejection = self._skill_output_artifact_manager.discard_unsaved_artifact(existing)
+            if rejection is not None:
+                cleanup_diagnostics.append({"path": rejection.path, "reason": rejection.reason, "message": rejection.message})
+        script_artifacts.clear()
+        for result in script_results:
+            output = result.get("output")
+            if not isinstance(output, dict) or "output_files" not in output:
+                continue
+            output.pop("output_files", None)
+            output_diagnostics = output.setdefault("output_file_diagnostics", [])
+            if isinstance(output_diagnostics, list):
+                output_diagnostics.append(
+                    {
+                        "path": "",
+                        "reason": "superseded_by_later_skill_output",
+                        "message": "A later Skill output file replaced this output in the same response.",
+                    }
+                )
+                output_diagnostics.extend(cleanup_diagnostics)
+        return tuple(cleanup_diagnostics)
 
     def _resolve_stream_binding(self, *, reasoning_effort: ReasoningEffort) -> tuple[StreamGenerator, dict[str, Any]]:
         if self._stream_generator is not None:
@@ -280,8 +444,63 @@ class MainAgentRespondCapability(CapabilityContract):
         return {
             str(key): value
             for key, value in metadata.items()
-            if str(key) not in blocked
+            if str(key).lower() not in blocked
         }
+
+    @staticmethod
+    def _missing_skill_input_output(missing: tuple[str, ...]) -> dict[str, Any]:
+        missing_list = list(missing)
+        fields = "、".join(missing_list)
+        return {
+            "ok": False,
+            "error": {
+                "type": "missing_input",
+                "message": f"缺少 Skill 脚本必需参数：{fields}。",
+            },
+            "missing": missing_list,
+            "answer": f"缺少 Skill 脚本必需参数：{fields}。请补充后再执行。",
+        }
+
+    @classmethod
+    def _record_missing_skill_input(
+        cls,
+        *,
+        request: CapabilityExecutionRequest,
+        script_results: list[dict[str, Any]],
+        events: list,
+        skill_name: str,
+        entrypoint: str,
+        missing: tuple[str, ...],
+        resolved_fields: tuple[str, ...] = (),
+    ) -> None:
+        output = cls._missing_skill_input_output(missing)
+        script_results.append(
+            {
+                "skill_name": skill_name,
+                "entrypoint": entrypoint,
+                "output": output,
+                "input_resolution": {
+                    "resolved_fields": list(resolved_fields),
+                    "missing": list(missing),
+                },
+            }
+        )
+        events.append(
+            make_event(
+                request,
+                event_type="skill.input_missing",
+                payload={
+                    "skill_name": skill_name,
+                    "entrypoint": entrypoint,
+                    "missing": list(missing),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+
+    @staticmethod
+    def _missing_script_contract_inputs(required: tuple[str, ...], payload: Mapping[str, Any]) -> tuple[str, ...]:
+        return tuple(key for key in required if key not in payload)
 
     @staticmethod
     def _sanitize_stream_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -311,6 +530,8 @@ class MainAgentExecutor(ExecutorPort):
         default_reasoning_effort: ReasoningEffort = "minimal",
         skill_catalog: SkillCatalog | None = None,
         script_runner: SkillScriptRunner | None = None,
+        skill_input_text_generator: SkillInputTextGenerator | None = None,
+        skill_output_artifact_manager: SkillOutputArtifactManager | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
     ) -> None:
         self._capabilities: dict[str, CapabilityContract] = {
@@ -320,6 +541,8 @@ class MainAgentExecutor(ExecutorPort):
                 default_reasoning_effort=default_reasoning_effort,
                 skill_catalog=skill_catalog,
                 script_runner=script_runner,
+                skill_input_text_generator=skill_input_text_generator,
+                skill_output_artifact_manager=skill_output_artifact_manager,
                 live_event_recorder=live_event_recorder,
             )
         }

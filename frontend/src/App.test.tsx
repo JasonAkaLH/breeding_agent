@@ -401,6 +401,23 @@ describe('App', () => {
     await screen.findByText(/已接通。/);
   });
 
+  it('does not submit while IME composition is confirming text with Enter', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: 'block' } });
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
+
+    expect(api.submitMessage).not.toHaveBeenCalled();
+
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(1));
+  });
+
   it('lists temporary uploads and deletes one from the backend memory area', async () => {
     const api = makeApi({
       listConversationUploads: vi.fn(async () => ({
@@ -516,6 +533,30 @@ describe('App', () => {
     expect(screen.getByText('查询已完成，共返回 1 行结果。')).toBeInTheDocument();
     expect(screen.getByText('原始表格预览默认隐藏')).toBeInTheDocument();
     expect(screen.queryByText(/select secret/i)).not.toBeInTheDocument();
+  });
+
+
+
+  it('renders downloadable Skill output files as a unified attachment card', async () => {
+    const api = makeApi({
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [
+          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '已生成文件。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'art-file-1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-1/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '生成文件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByText('已生成文件。')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText('生成文件').length).toBeGreaterThan(0));
+    expect(screen.getByText('layout.html')).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /下\s*载/ });
+    expect(link).toHaveAttribute('href', '/api/v1/artifacts/art-file-1/download');
   });
 
   it('shows the upstream capability currently being executed inside the assistant bubble', async () => {

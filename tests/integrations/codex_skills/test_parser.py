@@ -29,6 +29,16 @@ scripts:
     runtime: python
     auto_run: true
     timeout_seconds: 3
+parameters:
+  blocks:
+    type: integer
+    required: true
+    source: query
+    aliases:
+      - 重复
+      - 区组
+    patterns:
+      - '(\\d+)\\s*(?:个|次)?(?:重复|区组)'
 custom_field: keep-me
 ---
 
@@ -52,6 +62,11 @@ custom_field: keep-me
         self.assertEqual(manifest.scripts[0].path, "scripts/render.py")
         self.assertTrue(manifest.scripts[0].auto_run)
         self.assertEqual(manifest.scripts[0].timeout_seconds, 3)
+        self.assertEqual(manifest.parameters["blocks"].type, "integer")
+        self.assertTrue(manifest.parameters["blocks"].required)
+        self.assertEqual(manifest.parameters["blocks"].sources, ("query",))
+        self.assertEqual(manifest.parameters["blocks"].aliases, ("重复", "区组"))
+        self.assertEqual(manifest.parameters["blocks"].patterns, (r"(\d+)\s*(?:个|次)?(?:重复|区组)",))
         self.assertEqual(manifest.metadata["custom_field"], "keep-me")
 
     def test_rejects_invalid_or_empty_skill(self) -> None:

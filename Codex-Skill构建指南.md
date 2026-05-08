@@ -3,7 +3,7 @@
 - **适用对象**：使用 Oh-my-codex / Codex 的 `skill-creator` 创建 Skill，并希望这些 Skill 能被本项目后端 `main_agent.respond` 使用的开发者。
 - **适配范围**：本系统的 Codex Skill 兼容层，而不是完整 Codex 本地 runtime。
 - **当前实现入口**：`src/integrations/codex_skills/`、`src/capabilities/main_agent/`、`src/api/runtime.py`。
-- **更新时间**：2026-05-07
+- **更新时间**：2026-05-08
 
 ## 1. 一句话结论
 
@@ -67,6 +67,7 @@ triggers:
 | `triggers` | 强烈建议 | 按子串命中，分数最高；中文 Skill 必须尽量列出自然触发表达。 |
 | `inputs` | 可选 | 会被解析；顶层 `inputs.required` 当前不阻塞主代理执行，主要作为契约说明。 |
 | `outputs` | 脚本 Skill 建议 | 顶层 `outputs.required` 会用于校验脚本 JSON 输出。 |
+| `parameters` / `input_parameters` | 脚本 Skill 建议 | 声明主代理在执行自动脚本前解析的业务参数；系统先做确定性解析，仍缺少文本型标量参数时才让 LLM 生成候选 JSON，最终只有通过系统校验的值会作为脚本 stdin 顶层字段注入。 |
 | `scripts` | 可选 | 只支持声明式 Python 脚本；`auto_run: true` 时自动执行。 |
 | 其他顶层字段 | 可选 | 会进入 manifest metadata，但当前主代理不依赖。 |
 
@@ -402,6 +403,7 @@ cat(toJSON(result, auto_unbox = TRUE, null = "null"))
 ```json
 {
   "query": "用户当前问题",
+  "blocks": 2,
   "uploaded_artifacts": [
     {
       "upload_id": "...",
@@ -423,9 +425,43 @@ cat(toJSON(result, auto_unbox = TRUE, null = "null"))
 注意：
 - 当用户通过前端上传 JSON / CSV 并在消息中引用 `upload_ids` 时，自动脚本收到的 `uploaded_artifacts` 会包含原始 `content`，用于确定性处理文件内容。
 - 主代理 prompt 中的“上传文件上下文”仍只注入脱敏摘要，不包含原始 `content`；不要把脚本收到原文误认为 LLM prompt 也能直接读取完整文件。
+- 如果 Skill 在 frontmatter 声明了 `parameters`，主代理会在执行自动脚本前解析参数，并把成功解析的值作为 stdin 顶层字段注入；例如 RCBD Skill 可声明 `blocks`，使“2次重复”解析成 `"blocks": 2`。
+- Skill 自动脚本可接受的所有业务参数都必须在 `parameters` / `input_parameters` 中列出；即使某个参数由脚本默认值补齐，也要声明出来，避免主代理、LLM 补槽、审计和脚本维护者各自理解一套隐式契约。
+- 没有默认值且脚本执行必须依赖的参数必须声明 `required: true`；有默认值的参数应声明为非必填（`required: false` 或省略 `required`），并写明 `default`，脚本内部默认值必须与 manifest 保持一致。当前 resolver 不会自动把 `default` 注入 stdin，脚本应在字段缺失时应用同一默认值。
+- 枚举型参数必须用 `enum` 列出全部可接受值；如用户可能使用中文 / 英文 / 缩写表达，应同时在 `aliases`、`patterns` 或 Skill 正文中说明映射关系。当前 resolver 主要按参数名、类型和 source 做系统校验，不会替脚本强制枚举校验；脚本仍必须拒绝不在枚举范围内的值。
+- 参数解析顺序固定为：显式 payload / 上传 artifact / 安全 metadata / 当前问题与安全最近用户消息的正则解析 / LLM 缺参补槽。前面步骤已解析出的值不会被 LLM 覆盖。
+- LLM 补槽只在仍缺少 `string`、`integer`、`number` 等文本型标量参数时触发；它只能返回候选 JSON，系统会按 manifest 声明的参数名、类型、source 和 required 规则再次校验。LLM 不能直接启动脚本，也不能把口头承诺变成入参。
+- `artifact` / `file` / `data` 参数只能由真实上传或上传摘要满足，LLM 不得虚构文件或数据参数。
+- 自动脚本不会收到完整 `conversation_memory`、`history_summary`、`recent_messages` 或 `resolved_user_message` 原文；需要跨轮继承的值必须先经 `parameters` 解析成结构化字段。
 - 如果没有通过受控上传入口引用文件，`uploaded_artifacts` 可能只有脱敏 metadata，不保证包含 `content`。
 - 脚本 `cwd` 是临时隔离目录，不是仓库根目录，也不是 Skill 源目录。
 - 如需读取 Skill 包内资源，请用 `Path(__file__).parent` 定位。
+
+参数声明示例：
+
+```yaml
+parameters:
+  blocks:
+    type: integer
+    required: true
+    aliases: [blocks, 区组数, 区组, 重复数, 重复, reps, replications]
+    patterns:
+      - '(?:blocks?|区组数|区组|重复数|重复|reps?|replications?)\s*[:：=]?\s*(\d+)'
+      - '(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)'
+  material_data:
+    type: artifact
+    required: true
+    source: artifact
+  analysis_mode:
+    type: string
+    required: false
+    default: anova
+    enum: [anova, layout_only, summary_only]
+    aliases: [分析模式, 输出模式]
+```
+
+`source: artifact` 表示该必填参数由 `uploaded_artifacts` 是否存在来满足；脚本仍通过 `uploaded_artifacts` 读取实际文件内容，`material_data` 顶层字段只是可审计的可用性标记。
+`analysis_mode` 是带默认值的可选枚举参数；如果 stdin 中没有该字段，脚本应使用 `anova`，并拒绝不在 `enum` 列表中的其他值。
 
 ### 6.4 脚本必须输出什么
 
@@ -436,6 +472,45 @@ stdout 必须是 JSON object，例如：
 ```
 
 如果 `outputs.required` 或 `scripts[].outputs.required` 声明了必需字段，stdout JSON 必须包含这些字段，否则脚本结果会被视为失败，不会注入主代理 prompt。
+
+如果脚本需要产出可下载文件，应写入运行时提供的 `MAF_SKILL_OUTPUT_DIR`，并在 stdout JSON 中声明 `output_files`：
+
+```json
+{
+  "answer": "处理完成，已生成文件。",
+  "output_files": [
+    {
+      "path": "outputs/result.html",
+      "filename": "result.html",
+      "mime_type": "text/html",
+      "label": "结果文件",
+      "summary": "可下载后在本地查看。"
+    }
+  ]
+}
+```
+
+文件产出边界：
+
+- `path` 必须是 `outputs/` 下的相对路径，不能是绝对路径、`..`、symlink、hardlink 或目录。
+- 当前平台默认允许的输出扩展名为：`.txt`、`.md`、`.json`、`.csv`、`.tsv`、`.html`、`.pdf`、`.xlsx`、`.png`、`.jpg`、`.jpeg`。
+- 如果声明 `mime_type`，必须与文件扩展名匹配；例如 `.html` 只能声明 `text/html`，不能把 `result.html` 声明为 `application/json`。
+- 脚本可声明多个合法输出文件；平台会自动打包成 1 个 zip 下载文件。
+- 同一会话只保留当前 1 个 Skill 输出文件；新输出会替换旧输出。
+- HTML v1 只下载不站内预览；文件正文不会进入主代理 prompt。
+- Skill 直接声明 `.zip` / `.tar` / `.gz` 源文件默认不允许；多文件 zip 由平台生成。
+- 文件收集、保存或旧文件替换失败不会让主代理整体崩溃；平台会拒绝本次文件产物并记录诊断，主回答仍应基于脚本结构化输出说明文件未保存。
+
+如果 Skill 只会产出少数固定文件类型，建议在 manifest 的 `outputs.files` 中声明更严格的扩展名 / MIME 约束。该声明只能在平台默认 allowlist 基础上收紧，不能放宽全局拒绝项：
+
+```yaml
+outputs:
+  required:
+    - answer
+  files:
+    - extensions: [.html]
+      mime_types: [text/html]
+```
 
 ### 6.5 脚本型 Skill 示例
 
@@ -511,7 +586,7 @@ print(json.dumps(result, ensure_ascii=False))
 2. SKILL.md frontmatter 必须包含 name、description；中文任务必须包含高质量 triggers。
 3. 本系统只会把 SKILL.md body 注入 LLM，不会自动读取 references/ 或 assets/。
 4. 如需脚本，只能声明 scripts[].runtime=python，path 必须是包内相对路径，不能使用绝对路径、..、symlink、shell、node 或任意命令。
-5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；stdout 必须是 JSON object。若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
+5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；如需业务参数，必须用 parameters/input_parameters 声明可解析字段，LLM 只会在缺参时生成候选并由系统校验后注入，不要依赖主代理口头承诺传参；stdout 必须是 JSON object。若需要下载文件，写入 MAF_SKILL_OUTPUT_DIR 并用 output_files 声明；若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
 6. 如果声明 outputs.required 或 scripts[].outputs.required，脚本 stdout 必须包含这些字段。
 7. 不要创建 README、安装指南、CHANGELOG 等额外说明文件；除非脚本需要，不要创建 references/ 或 assets/。
 8. Skill 正文保持精简，写 Use when、Workflow、Output、Boundaries；不要放 secret、内网地址、数据库密码或要求模型读取本地路径。
@@ -532,6 +607,12 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] 如果有脚本，`path` 是包内相对路径，不包含 `..`。
 - [ ] 如果有脚本，stdout 是 JSON object。
 - [ ] 如果声明了 required 输出，脚本真实输出包含这些字段。
+- [ ] 如果脚本产出下载文件，文件写入 `MAF_SKILL_OUTPUT_DIR`，stdout `output_files[].path` 使用 `outputs/` 下相对路径，不使用绝对路径、`..`、symlink、hardlink 或目录，且不声明平台默认拒绝的源压缩包。
+- [ ] 输出文件扩展名属于平台 allowlist；如声明 `mime_type`，MIME 与扩展名匹配。
+- [ ] 如果 Skill 只产出固定文件类型，已用 `outputs.files` 声明更严格的扩展名 / MIME 约束，且该声明只收紧、不放宽平台默认规则。
+- [ ] 如果脚本需要业务参数，已在 `parameters` / `input_parameters` 中列出所有可接受字段、类型、required、默认值、aliases 或 patterns，并在脚本内保留最终校验。
+- [ ] 没有默认值且脚本必须依赖的业务参数已声明 `required: true`；有默认值的业务参数声明为非必填并写明 `default`，脚本默认值与 manifest 一致。
+- [ ] 枚举型参数已用 `enum` 列出所有可接受值，脚本会拒绝不在枚举范围内的值。
 - [ ] 不依赖执行时安装新包。
 - [ ] 不依赖 cwd 指向 Skill 目录。
 - [ ] 如果使用 R，Skill 仍通过 Python wrapper 暴露；`.R` 文件在包内，且 R stdout 是 JSON object。

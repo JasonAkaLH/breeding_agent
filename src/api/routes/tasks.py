@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
-from src.core.enums import NodeStatus, TaskStatus
+from src.core.enums import ArtifactType, EventVisibility, NodeStatus, TaskStatus
+from src.core.models import Artifact, EventRecord
+from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
 
 from ..auth import get_optional_owned_conversation, require_authenticated_user, require_task_owner
 from ..dto import (
@@ -207,15 +212,130 @@ async def get_task_artifacts(task_id: str, request: Request) -> TaskArtifactsRes
     return TaskArtifactsResponse(
         task_id=task_id,
         artifacts=[
-            ArtifactResponse(
-                artifact_id=artifact.artifact_id,
-                producer_node_id=artifact.producer_node_id,
-                artifact_type=str(artifact.artifact_type),
-                storage_ref=artifact.storage_ref,
-                summary=artifact.summary,
-                is_complete=artifact.is_complete,
-                created_at=artifact.created_at,
-            )
+            _artifact_response(artifact)
             for artifact in artifacts
+            if _should_return_artifact(artifact)
         ],
     )
+
+
+@router.get("/api/v1/artifacts/{artifact_id}/download")
+async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
+    runtime = _runtime(request)
+    user = await require_authenticated_user(request)
+    artifact = await runtime.storage.get_artifact(artifact_id)
+    if artifact is None or artifact.artifact_type != ArtifactType.FILE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
+    await require_task_owner(runtime, artifact.task_id, user)
+    metadata = parse_file_storage_ref(artifact.storage_ref)
+    if not is_active_skill_output_file(metadata):
+        await runtime.storage.append_event(
+            _artifact_event(
+                artifact=artifact,
+                event_type="artifact.download_gone",
+                payload={"artifact_id": artifact.artifact_id},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
+    storage_key = str(metadata.get("storage_key"))
+    try:
+        file_path = runtime.artifact_file_store.open_path(storage_key)
+    except ValueError as exc:
+        await runtime.storage.append_event(
+            _artifact_event(
+                artifact=artifact,
+                event_type="artifact.download_denied",
+                payload={"artifact_id": artifact.artifact_id, "reason": "invalid_storage_key"},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}") from exc
+    if not file_path.exists() or not file_path.is_file():
+        await runtime.storage.append_event(
+            _artifact_event(
+                artifact=artifact,
+                event_type="artifact.download_denied",
+                payload={"artifact_id": artifact.artifact_id, "reason": "file_missing"},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")
+    await runtime.storage.append_event(
+        _artifact_event(
+            artifact=artifact,
+            event_type="artifact.downloaded",
+            payload={
+                "artifact_id": artifact.artifact_id,
+                "filename": metadata.get("filename"),
+                "mime_type": metadata.get("mime_type"),
+            },
+        )
+    )
+    return FileResponse(
+        file_path,
+        media_type=str(metadata.get("mime_type") or "application/octet-stream"),
+        filename=str(metadata.get("filename") or file_path.name),
+        headers={"X-Content-Type-Options": "nosniff"},
+        content_disposition_type="attachment",
+    )
+
+
+def _should_return_artifact(artifact: Artifact) -> bool:
+    if artifact.artifact_type != ArtifactType.FILE:
+        return True
+    return is_active_skill_output_file(parse_file_storage_ref(artifact.storage_ref))
+
+
+def _artifact_response(artifact: Artifact) -> ArtifactResponse:
+    if artifact.artifact_type != ArtifactType.FILE:
+        return ArtifactResponse(
+            artifact_id=artifact.artifact_id,
+            producer_node_id=artifact.producer_node_id,
+            artifact_type=str(artifact.artifact_type),
+            storage_ref=artifact.storage_ref,
+            summary=artifact.summary,
+            is_complete=artifact.is_complete,
+            created_at=artifact.created_at,
+        )
+    metadata = parse_file_storage_ref(artifact.storage_ref) or {}
+    return ArtifactResponse(
+        artifact_id=artifact.artifact_id,
+        producer_node_id=artifact.producer_node_id,
+        artifact_type=str(artifact.artifact_type),
+        storage_ref="",
+        summary=str(metadata.get("summary") or artifact.summary or ""),
+        is_complete=artifact.is_complete,
+        created_at=artifact.created_at,
+        filename=_optional_string(metadata.get("filename")),
+        mime_type=_optional_string(metadata.get("mime_type")),
+        size_bytes=_optional_int(metadata.get("size_bytes")),
+        sha256=_optional_string(metadata.get("sha256")),
+        download_url=f"/api/v1/artifacts/{artifact.artifact_id}/download",
+        source_file_count=_optional_int(metadata.get("source_file_count")),
+        archive_format=_optional_string(metadata.get("archive_format")),
+        retention_status=_optional_string(metadata.get("retention_status")),
+    )
+
+
+def _artifact_event(*, artifact: Artifact, event_type: str, payload: dict) -> EventRecord:
+    return EventRecord(
+        event_id=f"{artifact.artifact_id}:{event_type}:{uuid4().hex[:12]}",
+        conversation_id=str((parse_file_storage_ref(artifact.storage_ref) or {}).get("conversation_id") or ""),
+        task_id=artifact.task_id,
+        node_id=artifact.producer_node_id,
+        event_type=event_type,
+        payload=payload,
+        visibility=EventVisibility.AUDIT_ONLY,
+    )
+
+
+def _optional_string(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

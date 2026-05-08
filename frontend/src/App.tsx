@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
@@ -97,6 +97,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [globalError, setGlobalError] = useState<string | null>(null);
   const subscriptionRef = useRef<TaskEventSubscription | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const composingInputRef = useRef(false);
   const taskPresentationModesRef = useRef<Map<string, ChatMode>>(new Map());
   const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
 
@@ -442,6 +443,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
       setGlobalError(friendlyError(error));
     }
+  }
+
+  function isComposerImeConfirming(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+    const reactEvent = event as ReactKeyboardEvent<HTMLTextAreaElement> & { isComposing?: boolean };
+    const nativeEvent = event.nativeEvent as KeyboardEvent & { keyCode?: number };
+    return composingInputRef.current || reactEvent.isComposing === true || nativeEvent.isComposing === true || nativeEvent.keyCode === 229;
   }
 
   async function handleUploadFile(file: File | undefined) {
@@ -803,8 +810,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                 aria-label="请输入问题"
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
+                onCompositionStart={() => {
+                  composingInputRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingInputRef.current = false;
+                }}
                 onPressEnter={(event) => {
-                  if (!event.shiftKey) {
+                  if (!event.shiftKey && !isComposerImeConfirming(event)) {
                     event.preventDefault();
                     void handleSubmit();
                   }
@@ -1332,6 +1345,9 @@ function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDispl
   if (display.kind === 'sql_query') {
     return <SqlQueryResultCard result={display.result} />;
   }
+  if (display.kind === 'file') {
+    return <FileArtifactCard result={display.result} />;
+  }
   return null;
 }
 
@@ -1339,7 +1355,29 @@ function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): strin
   if (display.kind === 'sql_query') {
     return `${display.kind}:${display.result.sourceArtifactIds.join(',')}`;
   }
+  if (display.kind === 'file') {
+    return `${display.kind}:${display.result.artifactId}`;
+  }
   return 'capability-artifact';
+}
+
+function FileArtifactCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'file' }>['result'] }) {
+  return (
+    <Card size="small" className="capability-card" title="生成文件">
+      <Space direction="vertical" size="small">
+        <Space wrap>
+          <Typography.Text strong>{result.filename}</Typography.Text>
+          <Tag>{result.mimeType}</Tag>
+          {result.archiveFormat === 'zip' ? <Tag color="blue">ZIP</Tag> : null}
+          {result.sourceFileCount && result.sourceFileCount > 1 ? <Tag>{result.sourceFileCount} 个文件</Tag> : null}
+        </Space>
+        <Typography.Text type="secondary">{result.summary}</Typography.Text>
+        <Button href={result.downloadUrl} target="_blank" rel="noreferrer">
+          下载
+        </Button>
+      </Space>
+    </Card>
+  );
 }
 
 function ActivityNotice({ text }: { text: string }) {

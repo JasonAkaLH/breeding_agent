@@ -14,23 +14,62 @@ export interface SqlQueryDisplayModel {
   sourceArtifactIds: string[];
 }
 
+export interface FileArtifactDisplayModel {
+  artifactId: string;
+  filename: string;
+  mimeType: string;
+  summary: string;
+  downloadUrl: string;
+  sizeBytes?: number;
+  sourceFileCount?: number;
+  archiveFormat?: string;
+}
+
 export type CapabilityArtifactDisplay =
   | {
       kind: 'sql_query';
       result: SqlQueryDisplayModel;
+    }
+  | {
+      kind: 'file';
+      result: FileArtifactDisplayModel;
     };
 
 export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): CapabilityArtifactDisplay[] {
+  const displays: CapabilityArtifactDisplay[] = [];
   const sqlResult = parseSqlQueryArtifacts(artifacts);
   const hasSqlResult = Boolean(sqlResult.table) || sqlResult.sourceArtifactIds.length > 0;
-  return hasSqlResult ? [{ kind: 'sql_query', result: sqlResult }] : [];
+  if (hasSqlResult) {
+    displays.push({ kind: 'sql_query', result: sqlResult });
+  }
+  displays.push(...parseFileArtifactDisplays(artifacts).map((result) => ({ kind: 'file' as const, result })));
+  return displays;
 }
 
 export function summarizeCapabilityArtifactDisplays(displays: CapabilityArtifactDisplay[]): string {
   const first = displays[0];
   if (!first) return '';
   if (first.kind === 'sql_query') return first.result.summary;
+  if (first.kind === 'file') return first.result.summary;
   return '';
+}
+
+export function parseFileArtifactDisplays(artifacts: ArtifactResponse[]): FileArtifactDisplayModel[] {
+  return artifacts
+    .filter((artifact) => artifact.artifact_type === 'file' && Boolean(artifact.download_url))
+    .map((artifact) => {
+      const filename = stringOrFallback(artifact.filename, '生成文件');
+      return {
+        artifactId: artifact.artifact_id,
+        filename,
+        mimeType: stringOrFallback(artifact.mime_type, 'application/octet-stream'),
+        summary: stringOrFallback(artifact.summary, filename),
+        downloadUrl: artifact.download_url || '',
+        sizeBytes: typeof artifact.size_bytes === 'number' ? artifact.size_bytes : undefined,
+        sourceFileCount: typeof artifact.source_file_count === 'number' ? artifact.source_file_count : undefined,
+        archiveFormat: typeof artifact.archive_format === 'string' && artifact.archive_format ? artifact.archive_format : undefined,
+      };
+    });
 }
 
 export function parseSqlQueryArtifacts(artifacts: ArtifactResponse[]): SqlQueryDisplayModel {
@@ -101,6 +140,10 @@ function isMainAgentTextArtifact(artifact: ArtifactResponse): boolean {
   return artifact.producer_node_id.includes('main_agent.respond')
     || artifact.artifact_id.includes('main_agent_response')
     || artifact.artifact_id.includes('main_agent_text');
+}
+
+function stringOrFallback(value: string | null | undefined, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
 function parseStorageRef(artifact: ArtifactResponse, warnings: string[]): Record<string, unknown> | null {

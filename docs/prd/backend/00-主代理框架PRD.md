@@ -2,7 +2,7 @@
 
 - **项目**：multi_agent_framework
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至对话上下文记忆与压缩 PRD）
+- **文档状态**：正式版（已补齐至 Skill 输出文件 Artifact 与下载 PRD）
 - **日期**：2026-05-07
 - **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；前端 PRD 后续放在 `docs/prd/frontend/`。
 
@@ -78,6 +78,7 @@
 | 主代理 Skill 兼容与真实 LLM Runtime | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md` | Phase 8 / 8.2、普通主代理消息、Skill 上下文、真实 provider smoke |
 | 高层 DAG 规划与 SQLQuery 宏能力边界 | `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md` | Phase 8.1、public capability、planner validator、macro expander |
 | 对话上下文记忆与压缩 | `docs/prd/backend/10-对话上下文记忆与压缩PRD.md` | 多轮对话记忆、Planner / 主代理上下文注入、两级压缩策略 |
+| Skill 输出文件 Artifact 与下载 | `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md` | Skill 产出 HTML / CSV / XLSX / PDF 等文件、managed artifact、下载鉴权、安全边界 |
 
 ## 5. 当前已定的关键决策摘要
 
@@ -128,6 +129,13 @@
 - 记忆压缩采用两级策略：Level 1 删除 capability 业务中间产物；Level 2 对较早对话历史做摘要压缩并保留最近若干轮原文。
 - 记忆上下文必须按 account / conversation 隔离，并禁止注入 SQL、guard token、schema DDL、完整 rows、完整 prompt、API key、base_url 等敏感或高成本内容。
 
+### 5.7 Skill 输出文件与下载决策
+
+- Skill 生成的 HTML、CSV、XLSX、PDF、图片等文件必须由平台统一收集为 managed artifact，不能由 Skill 暴露本地路径或自定义下载接口。
+- 下载入口必须复用 task / conversation owner 鉴权，前端只使用 `artifact_id` / `download_url`，不得看到服务器真实路径。
+- 输出文件内容默认不进入主代理 prompt；prompt 只注入文件名、类型、大小、摘要等安全 metadata。
+- v1 HTML 文件默认按附件下载，不作为站内可信页面直接 inline 渲染；未来如需预览应单独设计 sandbox / CSP。
+
 ## 6. 相关配套文档
 
 - PRD 总目录：`docs/prd/README.md`
@@ -136,6 +144,7 @@
 - SQLQuery prompt 输入模板：`docs/SQLQuery提示词输入模板.md`
 - 开发流程索引：`docs/dev_processes/backend/README.md`
 - 对话上下文记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`
+- Skill 输出文件 Artifact 与下载 PRD：`docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
 
 ## 7. 使用建议
 

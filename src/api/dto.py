@@ -176,6 +176,14 @@ class ArtifactResponse(BaseModel):
     summary: str | None
     is_complete: bool
     created_at: datetime | None
+    filename: str | None = None
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    sha256: str | None = None
+    download_url: str | None = None
+    source_file_count: int | None = None
+    archive_format: str | None = None
+    retention_status: str | None = None
 
 
 class TaskArtifactsResponse(BaseModel):

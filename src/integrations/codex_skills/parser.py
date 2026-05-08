@@ -7,6 +7,7 @@ import yaml
 
 from .io_contract import SkillIOContract
 from .manifest import SkillManifest
+from .parameters import parse_parameter_specs
 from .script_manifest import SkillScriptEntrypoint
 
 
@@ -15,7 +16,7 @@ class SkillParseError(ValueError):
 
 
 _FRONTMATTER = "---"
-_KNOWN_FIELDS = {"name", "description", "triggers", "inputs", "outputs", "scripts"}
+_KNOWN_FIELDS = {"name", "description", "triggers", "inputs", "outputs", "scripts", "parameters", "input_parameters"}
 
 
 def parse_skill_file(path: str | Path) -> SkillManifest:
@@ -43,6 +44,7 @@ def parse_skill_file(path: str | Path) -> SkillManifest:
         inputs=SkillIOContract.from_mapping(data.get("inputs")),
         outputs=SkillIOContract.from_mapping(data.get("outputs")),
         scripts=_parse_scripts(data.get("scripts"), source_path),
+        parameters=parse_parameter_specs(data.get("parameters") or data.get("input_parameters")),
         metadata={key: value for key, value in data.items() if key not in _KNOWN_FIELDS},
     )
 
