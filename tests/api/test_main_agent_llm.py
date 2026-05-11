@@ -86,6 +86,28 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["completed_node_count"], 6)
 
+    async def test_explicit_sql_query_capability_bypasses_llm_planner(self) -> None:
+        def planner(_prompt: str) -> str:
+            raise AssertionError("Explicit capability routing must not call the LLM planner.")
+
+        async def streamer(_prompt: str):
+            yield "unused"
+
+        await self.reconfigure_runtime(
+            planner_text_generator=planner,
+            main_agent_stream_generator=streamer,
+            skill_roots=[],
+        )
+        response = await self.submit_message(
+            conversation_id="conv-explicit-sql-bypass",
+            content="查询品种龙粳33的基因型信息",
+            capability_id="sql_query.query",
+        )
+        self.assertEqual(response.status_code, 202)
+        terminal = await self.wait_for_terminal_task(response.json()["task_id"])
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(terminal["completed_node_count"], 6)
+
     async def test_default_database_question_auto_builds_sqlquery_then_main_agent_dag(self) -> None:
         prompts: list[str] = []
 
@@ -210,19 +232,23 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(terminal["completed_node_count"], 1)
         self.assertIn("你好，介绍一下你能做什么", prompts[0])
 
-    async def test_invalid_llm_planner_output_falls_back_to_deterministic_auto_route(self) -> None:
+    async def test_invalid_llm_planner_output_fails_after_repair_without_deterministic_auto_route(self) -> None:
+        planner_prompts: list[str] = []
+
         async def streamer(prompt: str):
             yield "fallback answer"
 
+        def planner(prompt: str) -> str:
+            planner_prompts.append(prompt)
+            return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "sql_query.sql_generate"}]})
+
         await self.reconfigure_runtime(
             main_agent_stream_generator=streamer,
-            planner_text_generator=lambda _prompt: json.dumps(
-                {"nodes": [{"node_id": "bad", "capability_id": "sql_query.sql_generate"}]}
-            ),
+            planner_text_generator=planner,
             skill_roots=[],
         )
         response = await self.client.post(
-            "/api/v1/conversations/conv-llm-planner-fallback/messages",
+            "/api/v1/conversations/conv-llm-planner-fail/messages",
             json={
                 "account_id": "acc-1",
                 "content": "查询龙粳33",
@@ -235,13 +261,16 @@ class MainAgentLLMAPITest(APITestCase):
         task_id = response.json()["task_id"]
 
         terminal = await self.wait_for_terminal_task(task_id)
-        self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 7)
+        self.assertEqual(terminal["status"], "failed")
+        self.assertEqual(terminal["completed_node_count"], 0)
+        self.assertEqual(len(planner_prompts), 2)
+        self.assertIn("上一轮 Planner 输出未通过校验", planner_prompts[1])
+
         events = await self.runtime.storage.list_events_for_task(task_id)
-        plan_event = next(event for event in events if event.event_type == "workflow.plan_built")
-        self.assertEqual(plan_event.payload["metadata"]["route"], "auto")
-        self.assertTrue(plan_event.payload["metadata"]["planner_fallback_used"])
-        self.assertEqual(plan_event.payload["metadata"]["planner_fallback_reason"], "WorkflowPlanValidationError")
+        self.assertFalse(any(event.event_type == "workflow.plan_built" for event in events))
+        failed_event = next(event for event in events if event.event_type == "task.failed")
+        self.assertEqual(failed_event.payload["code"], "planning_failed")
+        self.assertEqual(failed_event.payload["planner_reason"], "WorkflowPlanValidationError")
 
     async def test_llm_planner_cannot_replace_user_input_or_skip_sql_dependency(self) -> None:
         prompts: list[str] = []

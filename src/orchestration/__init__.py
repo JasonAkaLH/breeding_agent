@@ -2,7 +2,7 @@ from .backpressure import BackpressureGuard, BackpressureRejected
 from .completion_policy import CompletionPolicy, CompletionStatus
 from .composite_executor import CompositeExecutor
 from .auto_workflow_provider import AutoWorkflowProvider
-from .llm_workflow_provider import LLMWorkflowProvider
+from .llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
 from .models import (
     CapabilityDescriptor,
     ExecutionInstance,
@@ -29,6 +29,7 @@ from .runtime_replanner import (
 )
 from .scheduler import NoAvailableInstanceError, Scheduler
 from .service import OrchestrationService
+from .skill_workflow_provider import SkillWorkflowProvider
 from .workflow_expander import WorkflowExpander, WorkflowExpansionError
 from .workflow_plan_validator import WorkflowPlanValidationError, WorkflowPlanValidator
 from .workflow_router import WorkflowRouter
@@ -38,6 +39,7 @@ __all__ = [
     "BackpressureRejected",
     "AutoWorkflowProvider",
     "LLMWorkflowProvider",
+    "WorkflowPlanningError",
     "CapabilityDescriptor",
     "CapabilityPayloadPolicy",
     "CapabilityRegistry",
@@ -61,6 +63,7 @@ __all__ = [
     "WorkflowPlanValidationError",
     "WorkflowPlanValidator",
     "Scheduler",
+    "SkillWorkflowProvider",
     "WorkflowRouter",
     "RuntimeReplanContext",
     "RuntimeReplanDecision",

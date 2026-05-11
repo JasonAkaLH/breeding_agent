@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { ApiClient } from './api/client';
 import type { TaskEventEnvelope } from './api/types';
-import type { EventSourceFactory } from './api/taskEvents';
+import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
 
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
@@ -17,7 +17,6 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     register: vi.fn(async () => ({ user: { username: 'charlie' } })),
     logout: vi.fn(async () => ({ logged_out: true })),
     me: vi.fn(async () => ({ user: { username: 'alice' } })),
-    listCapabilities: vi.fn(async () => ({ capabilities: [{ capability_id: 'sql_query.query', name: 'SQLQuery', description: 'SQL', version: '1', status: 'active' }] })),
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
     listConversationUploads: vi.fn(async () => ({ conversation_id: 'conv-test', uploads: [] })),
     deleteConversationUpload: vi.fn(async (conversationId, uploadId) => ({ upload_id: uploadId, deleted: true })),
@@ -50,7 +49,6 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       created_at: null,
       updated_at: null,
     })),
-    listConversationTasks: vi.fn(async () => ({ conversation_id: 'conv-test', tasks: [] })),
     listInterrupts: vi.fn(async () => ({ task_id: 'task-1', interrupts: [] })),
     answerInterrupt: vi.fn(async () => ({ interrupt_id: 'interrupt-1', status: 'answered', node_id: 'node-1', answer_payload: {} })),
     getTask: vi.fn(),
@@ -102,6 +100,13 @@ function makeSequencedEventSourceFactory(eventBatches: TaskEventEnvelope[][]): E
   };
 }
 
+function makeErrorEventSourceFactory(): EventSourceFactory {
+  return (_url, handlers) => {
+    handlers.onError(new Error('stream disconnected'));
+    return { close: vi.fn() };
+  };
+}
+
 describe('App', () => {
   it('shows login page when no session exists and logs in with captcha', async () => {
     const api = makeApi({
@@ -125,7 +130,7 @@ describe('App', () => {
       captchaCode: '1234',
     }));
     expect(await screen.findByText('小奥Agent')).toBeInTheDocument();
-    expect(screen.getByText('user: alice')).toBeInTheDocument();
+    expect(screen.queryByText('user: alice')).not.toBeInTheDocument();
   });
 
   it('creates a new user from the login page with a letter and digit password', async () => {
@@ -160,19 +165,112 @@ describe('App', () => {
       captchaCode: '1234',
     }));
     expect(await screen.findByText('小奥Agent')).toBeInTheDocument();
-    expect(screen.getByText('user: charlie')).toBeInTheDocument();
+    expect(screen.queryByText('user: charlie')).not.toBeInTheDocument();
   });
 
-  it('keeps task progress collapsed in the header until the user opens it', async () => {
+  it('keeps task progress collapsed in a top-right floating capsule until the user opens it', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
-    expect(screen.getByRole('button', { name: /任务进程/ })).toBeInTheDocument();
+    expect(screen.queryByText('业务对话')).not.toBeInTheDocument();
+    const capsule = screen.getByLabelText('任务进程悬浮胶囊');
+    const trigger = within(capsule).getByRole('button', { name: /任务进程/ });
+    expect(trigger).toHaveClass('task-status-capsule');
     expect(screen.queryByText('准备就绪')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /任务进程/ }));
+    fireEvent.click(trigger);
 
     expect(await screen.findByText('准备就绪')).toBeInTheDocument();
+  });
+
+  it('renders history in a left sidebar and keeps a minimal floating send bar in the chat workspace', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const sidebar = screen.getByRole('complementary', { name: '历史会话侧边栏' });
+    const workspace = screen.getByRole('main', { name: '对话工作区' });
+    const sendBar = within(workspace).getByRole('region', { name: '悬浮发送栏' });
+    const sendRow = within(sendBar).getByRole('group', { name: '消息发送栏' });
+    const conversationList = within(workspace).getByLabelText('对话内容');
+
+    expect(within(workspace).queryByText('业务对话')).not.toBeInTheDocument();
+    expect(within(workspace).getByLabelText('任务进程悬浮胶囊')).toBeInTheDocument();
+    expect(within(sidebar).getByText('历史会话')).toBeInTheDocument();
+    const userCard = within(sidebar).getByRole('region', { name: '用户信息与账户操作' });
+    expect(within(userCard).getByText('用户信息')).toBeInTheDocument();
+    expect(within(userCard).getByText('alice')).toBeInTheDocument();
+    const accountSettingsButton = within(userCard).getByRole('button', { name: '用户账户设置' });
+    expect(accountSettingsButton).toBeInTheDocument();
+    expect(within(userCard).getByRole('button', { name: '退出登录' })).toBeInTheDocument();
+    expect(within(workspace).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument();
+    fireEvent.click(accountSettingsButton);
+    expect(await screen.findByText('用户账户设置功能会在后续版本开放。')).toBeInTheDocument();
+    expect(conversationList).toBeInTheDocument();
+    expect(conversationList.parentElement).toHaveClass('app-content');
+    expect(conversationList.closest('.conversation-card')).toBeNull();
+    expect(screen.queryByText('主代理可用')).not.toBeInTheDocument();
+    expect(screen.queryByText('SQLQuery可用')).not.toBeInTheDocument();
+    expect(screen.queryByText(/user:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/conversation:/)).not.toBeInTheDocument();
+    expect(within(sendRow).getByLabelText('请输入问题')).toBeInTheDocument();
+    expect(within(sendRow).getByRole('button', { name: '发送' })).toBeInTheDocument();
+    expect(within(sendRow).getByRole('button', { name: '打开输入功能菜单' })).toBeInTheDocument();
+    expect(within(sendRow).queryByRole('button', { name: '选择 JSON 或 CSV 文件' })).not.toBeInTheDocument();
+    expect(sendBar).toHaveClass('floating-composer');
+
+    fireEvent.click(within(sendRow).getByRole('button', { name: '打开输入功能菜单' }));
+    expect(await screen.findByRole('button', { name: '选择 JSON 或 CSV 文件' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
+    expect(await screen.findByLabelText('深度思考')).toBeInTheDocument();
+  });
+
+  it('shows stream interruption feedback as a five-second popup instead of an inline prompt box', async () => {
+    const api = makeApi({
+      getTask: vi.fn(async () => ({
+        task_id: 'task-1',
+        conversation_id: 'conv-test',
+        status: 'running',
+        root_node_id: 'task-1:main',
+        summary: null,
+        requested_capability_id: null,
+        active_node_count: 1,
+        completed_node_count: 0,
+        failed_node_count: 0,
+        cancel_requested: false,
+        created_at: null,
+        updated_at: null,
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeErrorEventSourceFactory()} />);
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
+      fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(api.getTask).toHaveBeenCalledWith('task-1');
+      const noticeText = screen.getByText('事件流暂时中断，正在尝试查询任务状态。');
+      expect(noticeText.closest('.toast-notice')).not.toBeNull();
+      expect(noticeText.closest('.app-content')).toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(4_999);
+      });
+      expect(screen.getByText('事件流暂时中断，正在尝试查询任务状态。')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.queryByText('事件流暂时中断，正在尝试查询任务状态。')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('loads historical messages for the selected user-owned conversation', async () => {
@@ -205,6 +303,62 @@ describe('App', () => {
     expect(await screen.findByText('以前的回答')).toBeInTheDocument();
   });
 
+  it('renders history entries as flat rows with hover-revealed actions', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const historyItem = await screen.findByRole('button', { name: '历史问题' });
+    expect(historyItem).toHaveClass('history-item');
+    expect(historyItem).not.toHaveClass('ant-btn');
+    expect(within(historyItem).getByText('历史问题')).toHaveClass('history-item-title');
+
+    const row = historyItem.closest('.history-row') as HTMLElement;
+    expect(row).not.toBeNull();
+    const actions = within(row).getByLabelText('历史会话操作 历史问题');
+    expect(actions).toHaveClass('history-actions');
+    expect(within(actions).getByRole('button', { name: '重命名历史会话 历史问题' })).toBeInTheDocument();
+    expect(within(actions).getByRole('button', { name: '删除历史会话 历史问题' })).toBeInTheDocument();
+  });
+
+  it('renders the history header without a count and uses an icon-only refresh action', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const sidebar = screen.getByRole('complementary', { name: '历史会话侧边栏' });
+    const historyHeader = within(sidebar).getByText('历史会话').closest('.ant-card-head') as HTMLElement;
+    expect(historyHeader).not.toBeNull();
+    expect(within(historyHeader).queryByText('1')).not.toBeInTheDocument();
+    expect(historyHeader.querySelector('.ant-tag')).toBeNull();
+
+    const refreshButton = within(historyHeader).getByRole('button', { name: '刷新历史会话' });
+    expect(refreshButton).toHaveClass('history-refresh-button');
+    expect(refreshButton).not.toHaveTextContent('刷新');
+  });
+
   it('reloads the active historical conversation and continues with the same conversation id', async () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
@@ -230,7 +384,7 @@ describe('App', () => {
     });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
-    expect(screen.getByText('conversation: conv-history')).toBeInTheDocument();
+    expect(screen.queryByText('conversation: conv-history')).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
 
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
@@ -413,7 +567,7 @@ describe('App', () => {
     });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
-    expect(screen.getByText('conversation: conv-history')).toBeInTheDocument();
+    expect(screen.queryByText('conversation: conv-history')).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
     expect(await screen.findByText('以前的问题')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '删除历史会话 历史问题' }));
@@ -421,7 +575,6 @@ describe('App', () => {
     await waitFor(() => expect(api.deleteConversation).toHaveBeenCalledWith('conv-history'));
     expect(screen.queryByText('以前的问题')).not.toBeInTheDocument();
     expect(screen.getByText('开始一次业务问答')).toBeInTheDocument();
-    expect(screen.queryByText('conversation: conv-history')).not.toBeInTheDocument();
     confirm.mockRestore();
   });
 
@@ -449,6 +602,56 @@ describe('App', () => {
     expect(reasoningBox).toHaveClass('reasoning-box-collapsed');
     await waitFor(() => expect(screen.getAllByText('你好').length).toBeGreaterThan(0));
     await screen.findByText(/已接通。/);
+  });
+
+  it('only follows streaming output when the conversation view is already at the bottom', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    const conversationList = screen.getByLabelText('对话内容') as HTMLDivElement;
+    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 1200 });
+    Object.defineProperty(conversationList, 'clientHeight', { configurable: true, value: 600 });
+    conversationList.scrollTop = 600;
+    fireEvent.scroll(conversationList);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '生成一段长回答' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
+    expect(conversationList.scrollTop).toBe(1200);
+
+    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 1600 });
+    await act(async () => {
+      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '第一段内容。', ordinal: 1 }, 'delta-1'));
+    });
+
+    await screen.findByText('第一段内容。');
+    expect(conversationList.scrollTop).toBe(1600);
+
+    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 2000 });
+    conversationList.scrollTop = 200;
+    fireEvent.scroll(conversationList);
+    await act(async () => {
+      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '继续生成。', ordinal: 2 }, 'delta-2'));
+    });
+
+    await screen.findByText(/第一段内容。继续生成。/);
+    expect(conversationList.scrollTop).toBe(200);
+
+    conversationList.scrollTop = 1400;
+    fireEvent.scroll(conversationList);
+    Object.defineProperty(conversationList, 'scrollHeight', { configurable: true, value: 2400 });
+    await act(async () => {
+      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '回到底部后继续。', ordinal: 3 }, 'delta-3'));
+    });
+
+    await screen.findByText(/回到底部后继续。/);
+    expect(conversationList.scrollTop).toBe(2400);
   });
 
   it('does not submit while IME composition is confirming text with Enter', async () => {
@@ -519,20 +722,29 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'dragged.csv', { type: 'text/csv' });
-    fireEvent.drop(screen.getByRole('button', { name: '拖拽上传 JSON 或 CSV 文件' }), {
+    const uploadDropZone = screen.getByRole('region', { name: '拖拽上传区' });
+
+    fireEvent.dragOver(uploadDropZone, {
+      dataTransfer: { files: [file], types: ['Files'] },
+    });
+    expect(uploadDropZone).toHaveClass('chat-floating-stack-dragging');
+
+    fireEvent.drop(uploadDropZone, {
       dataTransfer: { files: [file] },
     });
 
     await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledWith(expect.any(String), file));
     expect(await screen.findByText(/dragged.csv/)).toBeInTheDocument();
+    expect(uploadDropZone).not.toHaveClass('chat-floating-stack-dragging');
   });
 
-  it('submits deep thinking flag from the switch next to current mode', async () => {
+  it('submits deep thinking flag from the composer function menu', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
-    expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByLabelText('深度思考'));
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '请深入分析' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -550,7 +762,8 @@ describe('App', () => {
       event('task.completed'),
     ])} />);
 
-    fireEvent.click(screen.getByLabelText('深度思考'));
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '请深度思考' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -572,7 +785,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     expect(screen.queryByLabelText('对话模式')).not.toBeInTheDocument();
-    expect(screen.getByText('当前模式：自动规划')).toBeInTheDocument();
+    expect(screen.queryByText('当前模式：自动规划')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
     expect(screen.queryByText('主代理会自动判断是否需要调用 SQLQuery，无需手动切换模式。')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -633,10 +846,26 @@ describe('App', () => {
     });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
-    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '你好' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '你好' } });
+      fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    expect((await screen.findAllByText(/当前会话已有任务运行中/)).length).toBeGreaterThan(0);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const noticeText = screen.getByText(/当前会话已有任务运行中/);
+      expect(noticeText.closest('.toast-notice')).not.toBeNull();
+      expect(noticeText.closest('.app-content')).toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(screen.queryByText(/当前会话已有任务运行中/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps polling until graph has waiting_for_input and submits the next input as interrupt answer', async () => {
@@ -806,43 +1035,22 @@ describe('App', () => {
     expect(api.submitMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('shows unfinished task list and lets the user stop a listed task', async () => {
+  it('does not render the unfinished task list and still lets the user cancel the current task', async () => {
     const api = makeApi({
-      listConversationTasks: vi.fn()
-        .mockResolvedValueOnce({
-          conversation_id: 'conv-test',
-          tasks: [{
-            task_id: 'task-running',
-            conversation_id: 'conv-test',
-            status: 'running',
-            root_node_id: 'task-running:main',
-            active_node_count: 1,
-            completed_node_count: 0,
-            failed_node_count: 0,
-            cancel_requested: false,
-            summary: '查询龙粳33',
-            requested_capability_id: 'sql_query.query',
-            created_at: '2026-04-27T00:00:00',
-            updated_at: '2026-04-27T00:00:01',
-          }],
-        })
-        .mockResolvedValue({
-          conversation_id: 'conv-test',
-          tasks: [],
-        }),
-      cancelTask: vi.fn(async () => ({ task_id: 'task-running', status: 'cancelling', accepted: true })),
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
     });
 
-    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} />);
 
-    expect(await screen.findByText('未完成任务')).toBeInTheDocument();
-    expect(screen.queryByText('查询龙粳33')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '展开未完成任务' }));
-    expect(await screen.findByText('查询龙粳33')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '停止任务 task-running' }));
+    expect(screen.queryByText('未完成任务')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '展开未完成任务' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    fireEvent.click(await screen.findByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByRole('button', { name: '取消任务' }));
 
-    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-running'));
-    await waitFor(() => expect(screen.getByText('暂无未完成任务')).toBeInTheDocument());
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(screen.queryByText('暂无未完成任务')).not.toBeInTheDocument();
   });
 
 });

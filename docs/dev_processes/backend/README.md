@@ -31,6 +31,7 @@
 | Phase 8.2 | 主代理真实 LLM Runtime 绑定与 Smoke 验证 | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`、Phase 8 主代理 streaming seam、Phase 8.1 Planner 前置契约、`src/integrations/llm_client.py` | 主代理真实 provider 显式 runtime 绑定、safe metadata、手工 smoke 入口 |
 | Phase 8.3 | 对话上下文记忆与压缩 | `docs/prd/backend/10-对话上下文记忆与压缩PRD.md`、Phase 8 / 8.1 主代理与 Planner runtime 结论、`src/integrations/token_counter.py` | conversation memory context、Planner / 主代理注入、两级压缩与摘要持久化实施方案 |
 | Phase 8.4 | Skill 输出文件 Artifact 与下载 | `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`、Phase 8 Skill runtime、上传文件与 artifact 存储现状 | Skill 输出文件收集、managed artifact store、下载鉴权、前端附件展示 |
+| Phase 8.5 | Skill 一等 Capability 能力池 | `docs/prd/backend/12-Skill一等Capability能力池PRD.md`、Phase 8 Skill runtime、Phase 8.1 Planner public capability 边界 | 项目 Skill 注册为 `skill.*` public capability、Planner / Replanner 可发现、forced skill 执行路径 |
 
 ---
 
@@ -55,6 +56,7 @@
 - `Phase-8.2-主代理真实LLM运行时绑定与Smoke验证.md`：二期主代理运行时收口专题，补齐主代理真实 provider 的显式 runtime 绑定、safe metadata 与本地手工 smoke 验证；不接完整 LLM Planner，不改变 SQLQuery 安全边界。
 - 后续 Phase 8.3 对话上下文记忆与压缩实施专题：输入为 `docs/prd/backend/10-对话上下文记忆与压缩PRD.md`；用于落地 conversation memory context、Planner / 主代理 prompt 注入、两级压缩策略与摘要持久化。当前已完成 PRD，开发过程文档待实施前补齐。
 - 后续 Phase 8.4 Skill 输出文件 Artifact 与下载实施专题：输入为 `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`；用于落地 Skill 产出文件的受控输出目录、managed artifact store、下载 API、鉴权与前端附件展示。当前已完成 PRD 草案，开发过程文档待实施前补齐。
+- 后续 Phase 8.5 Skill 一等 Capability 能力池实施专题：输入为 `docs/prd/backend/12-Skill一等Capability能力池PRD.md`；用于把项目级 Skill 注册为 `skill.*` public capability，让 Planner / Replanner / API 与 SQLQuery 使用同一个能力池。当前已完成 PRD 草案，开发过程文档待实施前补齐。
 
 ---
 

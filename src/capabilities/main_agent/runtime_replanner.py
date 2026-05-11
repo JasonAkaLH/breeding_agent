@@ -202,14 +202,13 @@ class MainAgentRuntimeReplanner:
         node_ids = {node.node_id for node in nodes}
         downstream_dependencies = {dependency for node in nodes for dependency in node.depends_on}
         tail_nodes = tuple(node for node in nodes if node.node_id not in downstream_dependencies)
-        tail_node_ids = tuple(node.node_id for node in tail_nodes)
         tail_main_nodes = tuple(node for node in tail_nodes if node.capability_id == "main_agent.respond")
-        non_main_tail_ids = tuple(node.node_id for node in tail_nodes if node.capability_id != "main_agent.respond")
+        non_answering_tail_ids = tuple(node.node_id for node in tail_nodes if not cls._is_answer_producing(node.capability_id))
         if tail_main_nodes:
-            if not non_main_tail_ids:
+            if not non_answering_tail_ids:
                 return nodes, False, False
             target = tail_main_nodes[-1]
-            missing_dependencies = tuple(node_id for node_id in non_main_tail_ids if node_id not in target.depends_on)
+            missing_dependencies = tuple(node_id for node_id in non_answering_tail_ids if node_id not in target.depends_on)
             if not missing_dependencies:
                 return nodes, False, False
             rewired = WorkflowNodePlan(
@@ -217,21 +216,28 @@ class MainAgentRuntimeReplanner:
                 capability_id=target.capability_id,
                 depends_on=target.depends_on + missing_dependencies,
                 input_payload=target.input_payload,
+                metadata=target.metadata,
                 criticality=target.criticality,
                 retry_policy=target.retry_policy,
                 timeout_policy=target.timeout_policy,
                 resource_class=target.resource_class,
             )
             return tuple(rewired if node.node_id == target.node_id else node for node in nodes), False, True
+        if not non_answering_tail_ids:
+            return nodes, False, False
         final_node = payload_policy.apply(
             WorkflowNodePlan(
                 node_id=cls._unique_node_id("answer_user", node_ids),
                 capability_id="main_agent.respond",
-                depends_on=tail_node_ids,
+                depends_on=non_answering_tail_ids,
             ),
             request=request,
         )
         return (*nodes, final_node), True, False
+
+    @staticmethod
+    def _is_answer_producing(capability_id: str) -> bool:
+        return capability_id == "main_agent.respond" or capability_id.startswith("skill.")
 
     @staticmethod
     def _unique_node_id(preferred: str, existing: set[str]) -> str:

@@ -20,7 +20,7 @@ export function SqlQueryResultCard({ result }: Props) {
   return (
     <Card className="result-card" title="SQLQuery 查询结果" size="small">
       <Typography.Paragraph>{result.summary}</Typography.Paragraph>
-      {typeof result.table?.rowCount === 'number' ? <Tag color="blue">共 {result.table.rowCount} 行</Tag> : null}
+      {typeof result.table?.rowCount === 'number' ? <Tag color="green">共 {result.table.rowCount} 行</Tag> : null}
       {result.table?.truncated ? <Tag color="orange">仅展示预览</Tag> : null}
       {columns.length > 0 ? (
         <div className="result-table-section">

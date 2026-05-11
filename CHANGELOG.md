@@ -10,6 +10,69 @@
 
 ## [Unreleased]
 
+### 2026-05-11 — 调整前端历史记忆条目交互
+
+- 左侧历史 / 记忆栏条目从 Ant Design 气泡按钮改为扁平列表行，使用左侧农业绿强调线标记当前会话，减少侧栏视觉噪音。
+- “重命名”“删除”操作收纳到条目右侧悬浮操作区，默认隐藏，仅在鼠标悬停或键盘聚焦该历史条目时浮现。
+- 移除“历史会话”标题旁边的数量计数，把“刷新”文字按钮改为仅图标按钮，保留无障碍刷新标签。
+
+### 2026-05-11 — 优化前端流式生成滚动跟随
+
+- 调整前端 `conversation-list` 自动滚动策略：流式生成期间仅当用户当前视角已在对话底部附近时跟随新内容滚到底部；用户主动滚动查看历史消息时保持当前位置，不再被增量输出强制拉回最新气泡。
+- 切换会话时重置为默认跟随最新消息，避免沿用上一会话的历史浏览状态。
+
+### 2026-05-11 — 收口 LLM-only Planner 编排语义
+
+- 调整自动规划语义：除用户请求明确携带 `capability_id` 的显式能力路由外，`routing_mode=auto` / 无显式 capability 的请求一律由 LLM Planner 基于 public capability pool 和对话记忆自行编排。
+- `LLMWorkflowProvider` 不再在 Planner 输出非法 JSON、内部 capability、无效 DAG 或 provider 异常时静默退回 deterministic `AutoWorkflowProvider`；Planner 输出校验失败时只允许同一个 LLM 自修复一次，仍失败则 fail-closed 标记任务失败并记录 `planning_failed` 审计。
+- 强化 Planner prompt：追问、参数调整、继续上次任务等请求必须结合 conversation memory 判断是否继续调用上一轮相关 public capability，禁止依赖系统确定性路由替 LLM 做能力选择。
+- 默认 runtime replanner 在 LLM Planner 启用时只保留 LLM 型主代理 replan advisor；SQLQuery 专属确定性 runtime replan 仅在显式禁用 LLM Planner 的 legacy / 测试模式下保留。
+- 补充 / 更新 orchestration 与 API 回归测试，覆盖 Planner 自修复、失败不 fallback、显式 capability 直达仍保留，以及 planning failure 事件语义。
+
+### 2026-05-09 — 调整前端业务对话台视觉与任务提示
+
+- 前端对话台改为浅米色页面底色与农业绿重点色，并调整为左侧历史会话栏、右侧完整对话工作区、底部悬浮输入栏的布局。
+- 输入区域收口为单行发送栏加发送按钮，上传文件、思考强度、深度思考和当前任务取消保留在悬浮工具区，避免打断主要输入路径。
+- 移除前端“未完成任务”提示显示栏及其轮询、API client 包装、响应类型、样式和测试依赖，同时保留当前任务取消能力。
+- 移除前端工作区顶部错误提示栏，把事件流中断、历史会话加载失败、提交失败、上传失败等原提示栏消息统一改为 5 秒自动消失的浮层提示。
+- 移除前端工具区里的“当前模式：自动规划”显示文案，自动规划提交逻辑保持不变。
+- 将聊天输入区改为固定在页面底部的胶囊输入框，右侧新增“+”功能菜单承载上传文件、思考强度、深度思考和当前任务取消能力。
+- 移除顶部“主代理可用 / SQLQuery可用”、`user:` 与 `conversation:` 状态标签，并清理前端不再使用的能力目录展示调用。
+- 收紧前端页面滚动模型：根页面不再共享滚动条，右侧仅对话内容区独立滚动且顶部栏不动，左侧仅历史卡片内容独立滚动且“小奥Agent”标题不动。
+- 放宽右侧对话工作区宽度限制，让对话卡片和底部输入胶囊占满右侧可用空间。
+- 恢复用户 / 助手消息气泡原有宽度表现，仅补齐 `conversation-list` 及对话卡片 body 的 100% 宽度，让动态对话列表容器占满右侧对话框。
+- 移除空对话欢迎区的固定最小高度，避免对话动态区域在空状态下额外设置视觉下限。
+- 移除对话内容外层卡片包装，让 `conversation-list` 直接填满 `app-content`，底部 `chat-floating-stack` 继续作为固定浮层覆盖在其上。
+- 新增对话流式生成期间的自动滚动锁定：`conversation-list` 在新消息和助手增量更新后自动滚到最新内容底部，保持视角跟随正在生成的信息气泡。
+- 将拖拽上传命中区提升到 `chat-floating-stack`，拖入文件时展示农业绿虚线与提示气泡，释放后自动上传，同时保留输入框、加号菜单和发送按钮的点击行为。
+- 将“用户信息”“用户账户设置”和“退出登录”集中收纳到左侧栏底部用户卡片，使账户操作固定在历史栏下方且不随历史列表滚动。
+- 移除右侧工作区顶部栏，把“任务进程”改为右上角靠边悬浮胶囊，保留下拉任务详情但减少对对话区域的占用。
+
+### 2026-05-09 — 完成 Skill 一等 Capability 能力池开发
+
+- 将符合公开范围的项目级 Skill 注册为 `skill.*` public capability：新增 Skill capability 映射模块，支持 manifest 显式 `capability_id`、稳定名称派生、public root 过滤、unsupported runtime 排除、非法 / 重复 / reserved id 跳过诊断，并保留用户级 Skill 只走主代理内部 matcher 的兼容路径。
+- 调整 API runtime 装配顺序，先解析 `SkillCatalog` 与 public skill roots，再把 Skill descriptor 注册进同一个 `CapabilityRegistry` public pool；`LLMWorkflowProvider`、`MainAgentRuntimeReplanner`、`AutoWorkflowProvider` 与 `WorkflowRouter` 共用包含 SQLQuery 与 `skill.*` 的 macro provider 映射。
+- 新增 `SkillWorkflowProvider`，把 Planner / 显式路由选择的 `skill.*` public macro 安全展开为 `main_agent.respond` forced skill 节点；Planner 输出的 Skill `input_payload` 默认 fail-closed，不允许注入脚本路径、forced skill 字段或任意业务参数。
+- 扩展 `CapabilityDescriptor`、API DTO 与 `/api/v1/capabilities` 响应，返回 `kind` / `source` 以区分内置能力与 Skill capability；`JsonlAuditSink` 新增启动期同步审计，记录 `skill.capability_registered` 与 `skill.capability_registration_skipped`，只保存 public root 相对路径摘要或 outside-public-roots 标记。
+- 主代理执行器支持系统注入的 `forced_skill_name` / `forced_skill_capability_id`，forced Skill 优先于文本 matcher 并产生 `skill.forced_selected` / `skill.forced_missing` 审计事件；编排执行层会剥离用户请求 metadata 中伪造的 forced skill 保留字段，只有节点 metadata 可传入 forced skill。
+- 调整 Planner / Replanner 的 answer-producing 尾节点规则：`main_agent.respond` 与 `skill.*` 不再被追加冗余最终主代理节点，`sql_query.query` 等非回答型尾节点仍保持“能力结果 → 主代理最终回答”的 finalizer 行为。
+- 补齐 `tests/integrations/codex_skills/test_skill_capabilities.py`、`tests/orchestration/test_llm_workflow_provider.py`、`tests/orchestration/test_workflow_router.py`、`tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py`、`tests/api/test_capabilities_list.py` 与 `tests/api/test_skill_capability_pool.py`，覆盖能力注册、public/private root、Planner 可见性、安全展开、forced skill、安全 metadata 剥离、API 目录与 fake planner 端到端路径。
+- 本次从 `.omx/context/skill-capability-pool-20260509T051631Z.md` 与下方中断记录继续完成；中断记录保留作为上下文，不再代表当前实现状态。
+
+### 2026-05-09 — 新增 Skill 一等 Capability 能力池 PRD
+
+- 新增 `docs/prd/backend/12-Skill一等Capability能力池PRD.md`，定义项目级 Skill 升级为 `skill.*` public capability 的目标、边界、注册规则、Planner / Replanner 可发现性、forced skill 执行模型、安全审计、验收标准与测试计划。
+- 同步更新后端 PRD 总览、PRD 总索引与后端开发流程索引，将该专题列为后续 Phase 8.5 输入，明确 Skill 与 SQLQuery 等内置能力应进入同一个 public capability pool。
+
+### 2026-05-09 — Skill 一等 Capability 能力池开发中断记录
+
+- 已按 `$ralph` 启动 `docs/prd/backend/12-Skill一等Capability能力池PRD.md` 的实现，并建立上下文快照 `.omx/context/skill-capability-pool-20260509T051631Z.md`；本轮在实现中途被用户有意中断，代码尚未达到可验收状态，下一次应从当前工作树继续而不是视为完成。
+- 已先补失败测试以锁定目标行为：`tests/integrations/codex_skills/test_skill_capabilities.py`、`tests/orchestration/test_llm_workflow_provider.py` 的 Skill public macro 用例、`tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py` 的 forced skill 用例、`tests/api/test_capabilities_list.py` 与 `tests/api/test_skill_capability_pool.py` 的 API / fake planner 用例。
+- 当前部分实现已开始：新增 `src/integrations/codex_skills/skill_capabilities.py`、`src/orchestration/skill_workflow_provider.py`，并修改 `CapabilityDescriptor` / `WorkflowNodePlan` 增加 `kind`、`source`、节点 `metadata`，让 `OrchestrationService` 把节点 metadata 合并进 capability execution metadata；`LLMWorkflowProvider` 与 `MainAgentRuntimeReplanner` 已开始把 `skill.*` 视为 answer-producing capability，避免重复补主代理 finalizer。
+- 当前 `MainAgentRespondCapability` 已开始支持 `forced_skill_name` / `forced_skill_capability_id`，会生成 `skill.forced_selected` / `skill.forced_missing` 审计事件；但相关实现还需继续审查事件顺序、缺失 forced skill 的失败 / fallback 语义，以及与脚本参数解析和 artifact 收集的完整兼容性。
+- 当前 `src/api/runtime.py` 只改到引入 `build_skill_capability_registry` / `SkillWorkflowProvider` 并给 `build_api_runtime()` 增加 `public_skill_roots` 参数，尚未完成 runtime 装配顺序调整、Skill descriptor 注册、Skill macro provider 注入、WorkflowRouter 显式 `skill.*` 路由、API DTO `kind/source` 输出、测试 support 的 `public_skill_roots` 透传。
+- 已运行一次目标失败测试命令，失败原因符合“实现尚未完成”：缺少 `skill_capabilities` / `skill_workflow_provider` 模块、测试类名误写、`APITestCase.reconfigure_runtime()` 尚不接受 `public_skill_roots`；之后已新增模块并修正部分代码，但尚未重新跑完整目标测试。下一次应先修完 runtime/API/support wiring，再运行 `tests/integrations/codex_skills`、`tests/orchestration`、`tests/capabilities/main_agent`、`tests/api` 相关回归。
+
 ### 2026-05-08 — 新增 Skill 参数解析与结构化入参传递
 
 - 新增 `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`，定义 Skill 脚本产出 HTML / CSV / XLSX / PDF 等文件时的平台统一 managed artifact、受控输出目录、下载鉴权、prompt 安全摘要与前端附件展示边界；补充 v1 输出文件不设应用层单文件大小上限，但同一 account / conversation 只保留一个 active 输出文件，新输出顶替并删除旧输出，旧下载地址对外统一返回 `404` 并在内部审计记录 gone；HTML v1 只下载不做站内 sandbox 预览；单次 Skill 产出多个合法输出文件时由平台用 Python 标准库 `zipfile` 打包为 1 个 zip artifact；前端 v1 统一使用附件卡片，不做 Skill 类型定制文件 UI；Skill manifest `outputs.files` v1 可选，默认使用全局 allowlist，声明后只能收紧不能放宽。

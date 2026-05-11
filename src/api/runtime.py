@@ -44,7 +44,13 @@ from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
-from src.integrations.codex_skills import SkillCatalog, SkillInputTextGenerator, SkillScriptRunner
+from src.integrations.codex_skills import (
+    SkillCapabilityRegistry,
+    SkillCatalog,
+    SkillInputTextGenerator,
+    SkillScriptRunner,
+    build_skill_capability_registry,
+)
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
@@ -55,7 +61,7 @@ from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
 from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig
-from src.orchestration.llm_workflow_provider import LLMWorkflowProvider
+from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowPlan
 from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
@@ -64,6 +70,7 @@ from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
 from src.orchestration.runtime_replanner import CompositeRuntimeReplanner, RuntimeReplanner
 from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
+from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_router import WorkflowRouter
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
 from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
@@ -531,12 +538,21 @@ class ApiRuntime:
             return
         failed = replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive())
         await self.storage.save_task(failed)
+        payload: dict[str, Any] = {"code": "execution_crash", "message": str(exc)}
+        if isinstance(exc, WorkflowPlanningError):
+            payload = {
+                "code": "planning_failed",
+                "message": str(exc),
+                "planner_reason": exc.reason,
+                "planner_diagnostic": exc.diagnostic[:200],
+                "planner_attempts": exc.attempts,
+            }
         await self._record_event(
             self._make_event(
                 task_id=request.task_id,
                 conversation_id=request.conversation_id,
                 event_type="task.failed",
-                payload={"code": "execution_crash", "message": str(exc)},
+                payload=payload,
             )
         )
 
@@ -857,6 +873,7 @@ def build_api_runtime(
     conversation_title_generator: ConversationTitleGenerator | None = None,
     enable_conversation_title_llm: bool = True,
     skill_roots: Iterable[str | Path] | None = None,
+    public_skill_roots: Iterable[str | Path] | None = None,
     skill_catalog: SkillCatalog | None = None,
     runtime_replanner: RuntimeReplanner | None = None,
     auth_captcha_code_generator: Callable[[], str] | None = None,
@@ -903,6 +920,10 @@ def build_api_runtime(
         ttl_seconds=auth_session_ttl_seconds,
     )
 
+    roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
+    resolved_skill_catalog = skill_catalog or SkillCatalog.from_roots(roots)
+    resolved_public_skill_roots = tuple(public_skill_roots) if public_skill_roots is not None else roots[:1]
+
     capability_registry = CapabilityRegistry()
     _register_capability_descriptors(
         capability_registry,
@@ -915,22 +936,24 @@ def build_api_runtime(
         planner_payload_policies=SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES,
     )
     _register_capability_descriptors(capability_registry, SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS)
+    skill_capabilities = build_skill_capability_registry(
+        resolved_skill_catalog,
+        public_skill_roots=resolved_public_skill_roots,
+        reserved_capability_ids=[descriptor.capability_id for descriptor in capability_registry.list()],
+    )
+    _register_capability_descriptors(capability_registry, skill_capabilities.descriptors)
 
     instance_registry = InstanceRegistry()
     instance_registry.register(build_local_main_agent_instance())
     instance_registry.register(build_local_sql_query_instance())
 
     audit_sink = JsonlAuditSink(audit_log_path)
+    _record_skill_capability_startup_audit(audit_sink, skill_capabilities)
     event_broker = InMemoryEventBroker(audit_sink=audit_sink)
 
     async def record_live_event(event: EventRecord) -> None:
         await storage.append_event(event)
         await event_broker.publish(event)
-
-    resolved_skill_catalog = skill_catalog
-    if resolved_skill_catalog is None:
-        roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
-        resolved_skill_catalog = SkillCatalog.from_roots(roots)
 
     main_agent_llm_runtime = _resolve_main_agent_llm_runtime(
         main_agent_llm_config=main_agent_llm_config,
@@ -984,7 +1007,12 @@ def build_api_runtime(
 
     main_agent_workflow_provider = MainAgentWorkflowProvider()
     sql_query_workflow_provider = SQLQueryWorkflowProvider()
-    macro_providers = {"sql_query.query": sql_query_workflow_provider}
+    skill_workflow_provider = SkillWorkflowProvider(skill_capabilities.skill_name_by_capability_id)
+    skill_macro_providers = {
+        capability_id: skill_workflow_provider
+        for capability_id in skill_capabilities.skill_name_by_capability_id
+    }
+    macro_providers = {"sql_query.query": sql_query_workflow_provider, **skill_macro_providers}
 
     auto_workflow_provider = AutoWorkflowProvider(
         main_agent_provider=main_agent_workflow_provider,
@@ -1004,17 +1032,17 @@ def build_api_runtime(
         text_generator=resolved_planner_text_generator,
         payload_policies=planner_payload_policies,
     )
-    resolved_runtime_replanner = runtime_replanner or CompositeRuntimeReplanner(
-        [
-            MainAgentRuntimeReplanner(
-                capability_registry=capability_registry,
-                macro_providers=macro_providers,
-                text_generator=resolved_planner_text_generator,
-                payload_policies=planner_payload_policies,
-            ),
-            SQLQueryRuntimeReplanner(macro_providers=macro_providers),
-        ]
-    )
+    default_replanners: list[RuntimeReplanner] = [
+        MainAgentRuntimeReplanner(
+            capability_registry=capability_registry,
+            macro_providers=macro_providers,
+            text_generator=resolved_planner_text_generator,
+            payload_policies=planner_payload_policies,
+        )
+    ]
+    if not enable_llm_planner:
+        default_replanners.append(SQLQueryRuntimeReplanner(macro_providers=macro_providers))
+    resolved_runtime_replanner = runtime_replanner or CompositeRuntimeReplanner(default_replanners)
 
     cancellation_service = CancellationService(storage, event_sink=event_broker, audit_sink=audit_sink)
     interrupt_service = InterruptService(storage, event_sink=event_broker, audit_sink=audit_sink)
@@ -1062,6 +1090,7 @@ def build_api_runtime(
             default_provider=default_workflow_provider,
             main_agent_provider=main_agent_workflow_provider,
             sql_query_provider=sql_query_workflow_provider,
+            skill_provider=skill_workflow_provider,
         ),
         mysql_adapter=resolved_mysql_adapter,
         password_hasher=password_hasher,
@@ -1315,6 +1344,32 @@ def _register_capability_descriptors(
         capability_registry.register(
             descriptor,
             planner_payload_policy=policies.get(descriptor.capability_id),
+        )
+
+
+def _record_skill_capability_startup_audit(
+    audit_sink: JsonlAuditSink,
+    skill_capabilities: SkillCapabilityRegistry,
+) -> None:
+    for descriptor in skill_capabilities.descriptors:
+        audit_sink.record_sync(
+            "skill.capability_registered",
+            {
+                "capability_id": descriptor.capability_id,
+                "skill_name": skill_capabilities.skill_name_by_capability_id[descriptor.capability_id],
+                "source_path": skill_capabilities.source_path_by_capability_id.get(descriptor.capability_id, ""),
+                "source": descriptor.source,
+            },
+        )
+    for diagnostic in skill_capabilities.diagnostics:
+        audit_sink.record_sync(
+            "skill.capability_registration_skipped",
+            {
+                "skill_name": diagnostic.skill_name,
+                "reason": diagnostic.reason,
+                "message": diagnostic.message,
+                "source_path": diagnostic.source_path_summary,
+            },
         )
 
 

@@ -10,9 +10,10 @@ from src.capabilities.sql_query.workflow import SQL_QUERY_PUBLIC_CAPABILITY_DESC
 from src.core.enums import NodeStatus
 from src.core.models import TaskNode
 from src.orchestration.completion_policy import CompletionStatus
-from src.orchestration.models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.registry import CapabilityRegistry
 from src.orchestration.runtime_replanner import RuntimeReplanContext
+from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 
 
 class MainAgentRuntimeReplannerTest(unittest.TestCase):
@@ -95,6 +96,79 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         self.assertIn("sql_query.intent_route", capabilities)
         self.assertEqual(decision.plan.nodes[-1].capability_id, "main_agent.respond")
         self.assertEqual(decision.plan.metadata["runtime_replan_source"], "main_agent_llm_runtime")
+
+    def test_runtime_replanner_skill_capability_expands_with_replanner_source(self) -> None:
+        async def text_generator(_prompt: str, **_: object) -> str:
+            return json.dumps(
+                {
+                    "action": "replan",
+                    "reason": "use rcbd skill",
+                    "nodes": [{"node_id": "design", "capability_id": "skill.mini_breedstat_rcbd"}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = self._registry()
+        registry.register(
+            CapabilityDescriptor(
+                capability_id="skill.mini_breedstat_rcbd",
+                name="mini-breedstat-rcbd",
+                description="生成 RCBD 随机区组设计",
+                kind="skill",
+                source="skill",
+            )
+        )
+        request = OrchestrationRequest(
+            task_id="task-skill-replan",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="做随机区组设计",
+        )
+        context = RuntimeReplanContext(
+            request=request,
+            plan=WorkflowPlan(
+                task_id="task-skill-replan",
+                nodes=(WorkflowNodePlan(node_id="answer", capability_id="main_agent.respond"),),
+                max_replans=1,
+                max_dynamic_nodes=4,
+            ),
+            nodes={
+                "answer": TaskNode(
+                    node_id="answer",
+                    task_id="task-skill-replan",
+                    capability_id="main_agent.respond",
+                    status=NodeStatus.COMPLETED,
+                )
+            },
+            node_outputs={
+                "answer": {
+                    "satisfaction": {
+                        "satisfied": False,
+                        "reason_code": "needs_skill",
+                        "replan_recommended": True,
+                    }
+                }
+            },
+            completion_status=CompletionStatus.RUNNING,
+        )
+        replanner = MainAgentRuntimeReplanner(
+            capability_registry=registry,
+            macro_providers={
+                "sql_query.query": SQLQueryWorkflowProvider(),
+                "skill.mini_breedstat_rcbd": SkillWorkflowProvider(
+                    {"skill.mini_breedstat_rcbd": "mini-breedstat-rcbd"}
+                ),
+            },
+            text_generator=text_generator,
+        )
+
+        decision = asyncio.run(replanner.build_replan(context))
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual([node.capability_id for node in decision.plan.nodes], ["main_agent.respond"])
+        self.assertEqual(decision.plan.nodes[0].metadata["forced_skill_source"], "replanner")
+        self.assertEqual(decision.plan.nodes[0].metadata["forced_skill_name"], "mini-breedstat-rcbd")
 
     def test_does_not_call_llm_when_outputs_are_satisfied(self) -> None:
         calls: list[str] = []

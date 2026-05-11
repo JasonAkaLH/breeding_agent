@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme } from 'antd';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { ReloadOutlined } from '@ant-design/icons';
+import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
 import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { CapabilityResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { applyTaskEvent, createInitialTaskEventState, createSubmittingTaskState, isTaskActive, markTaskCompleted, markTaskFailed, markWaitingInputRequired, type TaskEventState } from './domain/taskEvents';
 import { SqlQueryResultCard } from './components/SqlQueryResultCard';
@@ -45,11 +46,13 @@ interface PendingInterrupt {
 interface TransientNotice {
   id: number;
   message: string;
+  type: 'success' | 'warning';
 }
 
 const CONVERSATION_STORAGE_KEY_PREFIX = 'maf.frontend.conversation_id';
 const WAITING_INPUT_CHECK_DELAY_MS = 8_000;
-const CONVERSATION_DELETE_NOTICE_DURATION_MS = 5_000;
+const TRANSIENT_NOTICE_DURATION_MS = 5_000;
+const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const INTERRUPT_FIELD_LABELS: Record<string, string> = {
   crop: '作物类型',
   missing_info: '补充信息',
@@ -72,6 +75,32 @@ const REASONING_EFFORT_OPTIONS: { label: string; value: ReasoningEffort }[] = [
   { label: '中', value: 'medium' },
   { label: '高', value: 'high' },
 ];
+const AGRICULTURE_THEME: ThemeConfig = {
+  algorithm: theme.defaultAlgorithm,
+  token: {
+    colorPrimary: '#2f7d32',
+    colorPrimaryHover: '#3f8f44',
+    colorPrimaryActive: '#1f5e28',
+    colorPrimaryBg: '#e8f3e4',
+    colorPrimaryBorder: '#b9d7b4',
+    colorInfo: '#2f7d32',
+    colorSuccess: '#2f7d32',
+    colorLink: '#2f7d32',
+    colorBgBase: '#fffaf0',
+    colorBgLayout: '#f6f0e4',
+    colorBgContainer: '#fffaf0',
+    colorBgElevated: '#fffdf7',
+    colorBorder: '#e7dcc6',
+    colorText: '#263328',
+    colorTextSecondary: '#6f725a',
+    borderRadius: 12,
+    fontFamily: 'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  },
+};
+
+function isConversationViewAtBottom(element: HTMLElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX;
+}
 
 function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING_INPUT_CHECK_DELAY_MS }: AppProps) {
   const api = useMemo(() => apiClient ?? createApiClient(), [apiClient]);
@@ -91,27 +120,28 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null);
   const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
-  const [unfinishedTasks, setUnfinishedTasks] = useState<TaskSummaryResponse[]>([]);
-  const [taskListLoading, setTaskListLoading] = useState(false);
-  const [taskListExpanded, setTaskListExpanded] = useState(false);
   const [conversationHistory, setConversationHistory] = useState<ConversationSummaryResponse[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [stoppingTaskIds, setStoppingTaskIds] = useState<Set<string>>(() => new Set());
   const [deletingConversationIds, setDeletingConversationIds] = useState<Set<string>>(() => new Set());
   const [renamingConversationIds, setRenamingConversationIds] = useState<Set<string>>(() => new Set());
-  const [capabilities, setCapabilities] = useState<CapabilityResponse[]>([]);
-  const [globalError, setGlobalError] = useState<string | null>(null);
-  const [conversationDeleteNotice, setConversationDeleteNotice] = useState<TransientNotice | null>(null);
+  const [transientNotice, setTransientNotice] = useState<TransientNotice | null>(null);
   const subscriptionRef = useRef<TaskEventSubscription | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const conversationListRef = useRef<HTMLDivElement | null>(null);
+  const shouldFollowConversationRef = useRef(true);
+  const lastAutoFollowConversationIdRef = useRef(conversationId);
   const composingInputRef = useRef(false);
   const taskPresentationModesRef = useRef<Map<string, ChatMode>>(new Map());
   const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
   const transientNoticeIdRef = useRef(0);
 
-  function showConversationDeleteNotice(message: string) {
+  function showTransientNotice(message: string, type: TransientNotice['type'] = 'warning') {
     transientNoticeIdRef.current += 1;
-    setConversationDeleteNotice({ id: transientNoticeIdRef.current, message });
+    setTransientNotice({ id: transientNoticeIdRef.current, message, type });
+  }
+
+  function clearTransientNotice() {
+    setTransientNotice(null);
   }
 
   useEffect(() => {
@@ -131,27 +161,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }, [api]);
 
   useEffect(() => {
-    if (!conversationDeleteNotice) return undefined;
+    if (!transientNotice) return undefined;
     const timeoutId = window.setTimeout(() => {
-      setConversationDeleteNotice((current) => (
-        current?.id === conversationDeleteNotice.id ? null : current
+      setTransientNotice((current) => (
+        current?.id === transientNotice.id ? null : current
       ));
-    }, CONVERSATION_DELETE_NOTICE_DURATION_MS);
+    }, TRANSIENT_NOTICE_DURATION_MS);
     return () => window.clearTimeout(timeoutId);
-  }, [conversationDeleteNotice]);
-
-  const refreshUnfinishedTasks = useCallback(async (showLoading = false, targetConversationId = conversationId) => {
-    if (!authUser || !targetConversationId) return;
-    if (showLoading) setTaskListLoading(true);
-    try {
-      const result = await api.listConversationTasks(targetConversationId);
-      setUnfinishedTasks(result.tasks);
-    } catch {
-      if (showLoading) setGlobalError('未完成任务列表刷新失败，请稍后重试。');
-    } finally {
-      if (showLoading) setTaskListLoading(false);
-    }
-  }, [api, authUser, conversationId]);
+  }, [transientNotice]);
 
   const refreshConversationHistory = useCallback(async () => {
     if (!authUser) return;
@@ -160,7 +177,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       const result = await api.listConversations();
       setConversationHistory(result.conversations);
     } catch {
-      setGlobalError('历史会话加载失败，请稍后重试。');
+      showTransientNotice('历史会话加载失败，请稍后重试。');
     } finally {
       setHistoryLoading(false);
     }
@@ -168,30 +185,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   useEffect(() => {
     if (!authUser) return;
-    let mounted = true;
-    api.listCapabilities()
-      .then((result) => {
-        if (mounted) setCapabilities(result.capabilities);
-      })
-      .catch(() => {
-        if (mounted) setGlobalError('能力目录加载失败，仍可尝试提交普通对话。');
-      });
     return () => {
-      mounted = false;
       subscriptionRef.current?.close();
     };
-  }, [api, authUser]);
-
-  useEffect(() => {
-    if (!authUser || !conversationId) return;
-    void refreshUnfinishedTasks();
-    const interval = window.setInterval(() => {
-      void refreshUnfinishedTasks();
-    }, 5_000);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [refreshUnfinishedTasks]);
+  }, [authUser]);
 
   useEffect(() => {
     if (!authUser) return;
@@ -213,6 +210,29 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }, [refreshConversationUploads]);
 
   const active = isTaskActive(taskState.phase);
+
+  const handleConversationScroll = useCallback(() => {
+    const conversationList = conversationListRef.current;
+    if (!conversationList) return;
+    shouldFollowConversationRef.current = isConversationViewAtBottom(conversationList);
+  }, []);
+
+  useLayoutEffect(() => {
+    const conversationList = conversationListRef.current;
+    if (!conversationList) return;
+
+    const conversationChanged = lastAutoFollowConversationIdRef.current !== conversationId;
+    if (conversationChanged) {
+      lastAutoFollowConversationIdRef.current = conversationId;
+      shouldFollowConversationRef.current = true;
+    }
+
+    if (messages.length === 0 && !active) return;
+    if (!shouldFollowConversationRef.current) return;
+
+    conversationList.scrollTop = conversationList.scrollHeight;
+    shouldFollowConversationRef.current = true;
+  }, [active, conversationId, currentAssistantId, messages]);
 
   useEffect(() => {
     if (!currentTaskId || !active || taskState.phase === 'cancelling') return;
@@ -304,7 +324,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       const result = await api.listConversations();
       setConversationHistory(result.conversations);
     } catch {
-      setGlobalError('历史会话加载失败，请稍后重试。');
+      showTransientNotice('历史会话加载失败，请稍后重试。');
     }
   }
 
@@ -316,13 +336,16 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setMessages([]);
     setConversationHistory([]);
     setPendingUploads([]);
-    setUnfinishedTasks([]);
     setCurrentTaskId(null);
     setCurrentAssistantId(null);
     setPendingInterrupt(null);
     setTaskState(createInitialTaskEventState());
     setDeletingConversationIds(new Set());
     setRenamingConversationIds(new Set());
+  }
+
+  function handleAccountSettings() {
+    showTransientNotice('用户账户设置功能会在后续版本开放。');
   }
 
   function resetConversationWorkspace(nextConversationId: string) {
@@ -334,7 +357,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setCurrentAssistantId(null);
     setPendingInterrupt(null);
     setTaskState(createInitialTaskEventState());
-    setUnfinishedTasks([]);
     taskPresentationModesRef.current.clear();
     pendingAssistantPatchesRef.current.clear();
   }
@@ -360,9 +382,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       const result = await api.listConversationMessages(nextConversationId);
       setMessages(result.messages.map(messageFromHistory).filter((message): message is ConversationMessage => message !== null));
-      void refreshUnfinishedTasks(false, nextConversationId);
     } catch {
-      setGlobalError('历史消息加载失败，请稍后重试。');
+      showTransientNotice('历史消息加载失败，请稍后重试。');
     }
   }
 
@@ -373,7 +394,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (!window.confirm(`确定删除历史会话“${title}”吗？如果该会话有正在进行中的任务，系统会自动停止后再删除。`)) {
       return;
     }
-    setGlobalError(null);
+    clearTransientNotice();
     setDeletingConversationIds((current) => new Set(current).add(targetConversationId));
     try {
       const result = await api.deleteConversation(targetConversationId);
@@ -385,11 +406,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         saveConversationId(authUser.username, next);
         resetConversationWorkspace(next);
       }
-      showConversationDeleteNotice(result.cancelled_task_ids.length > 0
-        ? '历史会话已删除，相关未完成任务已自动停止。'
-        : '历史会话已删除。');
+      showTransientNotice(result.cancelled_task_ids.length > 0
+        ? '历史会话已删除，相关运行中任务已自动停止。'
+        : '历史会话已删除。', 'success');
     } catch (error) {
-      setGlobalError(friendlyError(error));
+      showTransientNotice(friendlyError(error));
     } finally {
       setDeletingConversationIds((current) => {
         const next = new Set(current);
@@ -407,10 +428,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (nextTitle === null) return;
     const trimmedTitle = nextTitle.trim();
     if (!trimmedTitle) {
-      setGlobalError('会话名称不能为空。');
+      showTransientNotice('会话名称不能为空。');
       return;
     }
-    setGlobalError(null);
+    clearTransientNotice();
     setRenamingConversationIds((current) => new Set(current).add(targetConversationId));
     try {
       const renamed = await api.renameConversation(targetConversationId, trimmedTitle);
@@ -418,7 +439,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         item.conversation_id === targetConversationId ? renamed : item
       )));
     } catch (error) {
-      setGlobalError(friendlyError(error));
+      showTransientNotice(friendlyError(error));
     } finally {
       setRenamingConversationIds((current) => {
         const next = new Set(current);
@@ -431,7 +452,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   async function handleSubmit() {
     const content = input.trim();
     if (!authUser || !conversationId || !content || active) return;
-    setGlobalError(null);
+    clearTransientNotice();
     if (pendingInterrupt) {
       await handleInterruptAnswer(content, pendingInterrupt);
       return;
@@ -461,10 +482,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       taskPresentationModesRef.current.set(accepted.task_id, mode);
       setCurrentTaskId(accepted.task_id);
       subscribeToTask(accepted.task_id, assistantMessage.id);
-      void refreshUnfinishedTasks();
     } catch (error) {
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
-      setGlobalError(friendlyError(error));
+      showTransientNotice(friendlyError(error));
     }
   }
 
@@ -476,13 +496,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   async function handleUploadFile(file: File | undefined) {
     if (!authUser || !conversationId || !file || interactionLocked || uploadingFile) return;
-    setGlobalError(null);
+    clearTransientNotice();
     setUploadingFile(true);
     try {
       const uploaded = await api.uploadConversationFile(conversationId, file);
       setPendingUploads((current) => [...current, uploaded]);
     } catch (error) {
-      setGlobalError(friendlyError(error));
+      showTransientNotice(friendlyError(error));
     } finally {
       setUploadingFile(false);
       if (uploadInputRef.current) {
@@ -498,7 +518,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       await api.deleteConversationUpload(conversationId, upload.upload_id);
       setPendingUploads((current) => current.filter((item) => item.upload_id !== upload.upload_id));
     } catch (error) {
-      setGlobalError(friendlyError(error));
+      showTransientNotice(friendlyError(error));
     } finally {
       setDeletingUploadIds((current) => {
         const next = new Set(current);
@@ -508,19 +528,40 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
   }
 
-  function handleUploadDragOver(event: DragEvent<HTMLDivElement>) {
+  function isFileDrag(event: DragEvent<HTMLDivElement>): boolean {
+    const types = Array.from(event.dataTransfer.types ?? []);
+    return types.length === 0 || types.includes('Files') || event.dataTransfer.files.length > 0;
+  }
+
+  function canAcceptDraggedUpload(): boolean {
+    return Boolean(authUser && conversationId && !interactionLocked && !uploadingFile);
+  }
+
+  function handleUploadDragEnter(event: DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event)) return;
     event.preventDefault();
-    if (!interactionLocked && !uploadingFile) setDraggingUpload(true);
+    if (canAcceptDraggedUpload()) setDraggingUpload(true);
+  }
+
+  function handleUploadDragOver(event: DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = canAcceptDraggedUpload() ? 'copy' : 'none';
+    if (canAcceptDraggedUpload()) setDraggingUpload(true);
   }
 
   function handleUploadDragLeave(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
     setDraggingUpload(false);
   }
 
   function handleUploadDrop(event: DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event)) return;
     event.preventDefault();
     setDraggingUpload(false);
+    if (!canAcceptDraggedUpload()) return;
     void handleUploadFile(event.dataTransfer.files?.[0]);
   }
 
@@ -551,10 +592,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       setPendingInterrupt(null);
       setCurrentTaskId(interrupt.taskId);
       subscribeToTask(interrupt.taskId, assistantMessage.id);
-      void refreshUnfinishedTasks();
     } catch (error) {
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
-      setGlobalError(friendlyError(error));
+      showTransientNotice(friendlyError(error));
     }
   }
 
@@ -585,20 +625,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (event.event_type === 'task.cancelled') {
         subscriptionRef.current?.close();
         taskPresentationModesRef.current.delete(taskId);
-        void refreshUnfinishedTasks();
       }
       return next;
     });
     if (event.event_type === 'task.completed') {
       updateAssistantMessage(assistantId, { reasoningComplete: true });
       void loadArtifacts(taskId, assistantId);
-    } else if (event.event_type === 'task.failed') {
-      void refreshUnfinishedTasks();
     }
   }
 
   async function handleEventStreamError(taskId: string, assistantId: string) {
-    setGlobalError('事件流暂时中断，正在尝试查询任务状态。');
+    showTransientNotice('事件流暂时中断，正在尝试查询任务状态。');
     try {
       const task = await api.getTask(taskId);
       if (task.status === 'completed') {
@@ -609,7 +646,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         setTaskState((state) => ({ ...state, phase: 'cancelled', statusText: '任务已取消' }));
       }
     } catch {
-      setGlobalError('事件流中断，任务状态暂时无法确认。');
+      showTransientNotice('事件流中断，任务状态暂时无法确认。');
     }
   }
 
@@ -631,44 +668,34 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       setCurrentTaskId(null);
       taskPresentationModesRef.current.delete(taskId);
       subscriptionRef.current?.close();
-      void refreshUnfinishedTasks();
       void refreshConversationHistory();
     } catch {
       setTaskState((state) => markTaskCompleted(state, '任务已完成，但结果加载失败'));
-      setGlobalError('结果加载失败，可稍后重试。');
-      void refreshUnfinishedTasks();
-    }
-  }
-
-  async function handleStopTask(taskId: string) {
-    setStoppingTaskIds((current) => new Set(current).add(taskId));
-    const isCurrentTask = currentTaskId === taskId;
-    if (isCurrentTask) {
-      setTaskState((state) => ({ ...state, phase: 'cancelling', statusText: '停止请求已发送' }));
-    }
-    try {
-      await api.cancelTask(taskId);
-      if (isCurrentTask) {
-        setPendingInterrupt(null);
-        setCurrentTaskId(null);
-        subscriptionRef.current?.close();
-        setTaskState((state) => ({ ...state, phase: 'cancelled', statusText: '任务已取消', errorMessage: null }));
-      }
-      await refreshUnfinishedTasks();
-    } catch (error) {
-      setGlobalError(friendlyError(error));
-    } finally {
-      setStoppingTaskIds((current) => {
-        const next = new Set(current);
-        next.delete(taskId);
-        return next;
-      });
+      showTransientNotice('结果加载失败，可稍后重试。');
     }
   }
 
   async function handleCancel() {
     if (!currentTaskId) return;
-    await handleStopTask(currentTaskId);
+    const taskId = currentTaskId;
+    const previousPhase = taskState.phase;
+    setTaskState((state) => ({ ...state, phase: 'cancelling', statusText: '取消请求已发送' }));
+    try {
+      await api.cancelTask(taskId);
+      setPendingInterrupt(null);
+      setCurrentTaskId(null);
+      subscriptionRef.current?.close();
+      setTaskState((state) => ({ ...state, phase: 'cancelled', statusText: '任务已取消', errorMessage: null }));
+    } catch (error) {
+      const message = friendlyError(error);
+      showTransientNotice(message);
+      setTaskState((state) => ({
+        ...state,
+        phase: previousPhase,
+        statusText: '取消任务失败，请稍后重试',
+        errorMessage: message,
+      }));
+    }
   }
 
   function updateAssistantMessage(messageId: string, patch: AssistantMessagePatch) {
@@ -717,10 +744,57 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   const interactionLocked = active || Boolean(pendingInterrupt);
   const inputPlaceholder = pendingInterrupt ? interruptAnswerPlaceholder(pendingInterrupt) : '请输入你的问题，主代理会自动选择能力并规划执行。';
+  const composerMenuContent = (
+    <Space direction="vertical" size="middle" className="composer-menu">
+      <Button
+        block
+        aria-label="选择 JSON 或 CSV 文件"
+        onClick={() => uploadInputRef.current?.click()}
+        disabled={interactionLocked || uploadingFile}
+        loading={uploadingFile}
+      >
+        上传 JSON / CSV 文件
+      </Button>
+      <Space size="small" align="center" className="composer-menu-row">
+        <Typography.Text type="secondary">思考强度</Typography.Text>
+        <Select
+          aria-label="思考强度"
+          value={reasoningEffort}
+          options={REASONING_EFFORT_OPTIONS}
+          onChange={setReasoningEffort}
+          disabled={interactionLocked}
+          size="small"
+          style={{ width: 104 }}
+        />
+      </Space>
+      <Space size="small" align="center" className="composer-menu-row">
+        <Typography.Text type="secondary">深度思考</Typography.Text>
+        <Switch
+          aria-label="深度思考"
+          checked={deepThinking}
+          onChange={setDeepThinking}
+          checkedChildren="开"
+          unCheckedChildren="关"
+          disabled={interactionLocked}
+        />
+      </Space>
+      {active && currentTaskId ? (
+        <Button
+          danger
+          block
+          aria-label="取消任务"
+          onClick={handleCancel}
+          loading={taskState.phase === 'cancelling'}
+        >
+          取消任务
+        </Button>
+      ) : null}
+    </Space>
+  );
 
   if (authUser === undefined) {
     return (
-      <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
+      <ConfigProvider locale={zhCN} theme={AGRICULTURE_THEME}>
         <Layout className="app-shell auth-shell">
           <Space direction="vertical" align="center">
             <Spin />
@@ -733,43 +807,20 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   if (authUser === null) {
     return (
-      <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
+      <ConfigProvider locale={zhCN} theme={AGRICULTURE_THEME}>
         <LoginPage api={api} onLogin={handleLogin} />
       </ConfigProvider>
     );
   }
 
   return (
-    <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
-      <Layout className="app-shell">
-        <Layout.Header className="app-header">
-          <Flex justify="space-between" align="center" gap="middle">
-            <div>
-              <Typography.Title level={3} className="app-title">小奥Agent</Typography.Title>
-              <Typography.Text type="secondary">AI育种助手</Typography.Text>
-            </div>
-            <Space wrap>
-              <CapabilityBadge capabilityId="main_agent.respond" label="主代理" capabilities={capabilities} />
-              <CapabilityBadge capabilityId="sql_query.query" label="SQLQuery" capabilities={capabilities} />
-              <TaskStatusDropdown state={taskState} />
-              <Tag color="green">user: {authUser.username}</Tag>
-              <Tag color="geekblue">conversation: {conversationId.slice(0, 12)}</Tag>
-              <Button size="small" onClick={handleLogout}>退出登录</Button>
-            </Space>
-          </Flex>
-        </Layout.Header>
-        {conversationDeleteNotice ? (
-          <div className="toast-notice" role="status" aria-live="polite">
-            <Alert
-              type="success"
-              showIcon
-              closable
-              onClose={() => setConversationDeleteNotice(null)}
-              message={conversationDeleteNotice.message}
-            />
+    <ConfigProvider locale={zhCN} theme={AGRICULTURE_THEME}>
+      <Layout className="app-shell app-chat-layout">
+        <aside className="app-sidebar" aria-label="历史会话侧边栏">
+          <div className="sidebar-brand">
+            <Typography.Title level={3} className="app-title">小奥Agent</Typography.Title>
+            <Typography.Text type="secondary">AI育种助手</Typography.Text>
           </div>
-        ) : null}
-        <Layout.Content className="app-content">
           <ConversationHistoryPanel
             conversations={conversationHistory}
             activeConversationId={conversationId}
@@ -783,119 +834,117 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             deletingConversationIds={deletingConversationIds}
             renamingConversationIds={renamingConversationIds}
           />
-          {globalError ? <Alert className="top-alert" type="warning" showIcon closable onClose={() => setGlobalError(null)} message={globalError} /> : null}
-          <Card className="conversation-card" styles={{ body: { padding: 0 } }}>
-            <div className="conversation-list" aria-label="对话内容">
+          <SidebarUserCard
+            user={authUser}
+            onAccountSettings={handleAccountSettings}
+            onLogout={handleLogout}
+          />
+        </aside>
+        {transientNotice ? (
+          <div className="toast-notice" role="status" aria-live="polite">
+            <Alert
+              type={transientNotice.type}
+              showIcon
+              closable
+              onClose={clearTransientNotice}
+              message={transientNotice.message}
+            />
+          </div>
+        ) : null}
+        <main className="chat-workspace" aria-label="对话工作区">
+          <div className="task-status-floating" aria-label="任务进程悬浮胶囊">
+            <TaskStatusDropdown state={taskState} />
+          </div>
+          <section className="app-content" aria-label="当前对话面板">
+            <div ref={conversationListRef} className="conversation-list" aria-label="对话内容" onScroll={handleConversationScroll}>
               {messages.length === 0 ? <EmptyWelcome /> : messages.map((message) => <MessageBubble key={message.id} message={message} />)}
               {active && currentAssistantId && !taskState.assistantText && !taskState.currentActivityText ? (
                 <div className="assistant-pending"><Spin size="small" /> <span>等待任务事件...</span></div>
               ) : null}
             </div>
-          </Card>
-          <TaskListPanel
-            tasks={unfinishedTasks}
-            loading={taskListLoading}
-            expanded={taskListExpanded}
-            stoppingTaskIds={stoppingTaskIds}
-            onToggleExpanded={() => setTaskListExpanded((expanded) => !expanded)}
-            onRefresh={() => void refreshUnfinishedTasks(true)}
-            onStop={(taskId) => void handleStopTask(taskId)}
-          />
-          <Card className="composer-card">
-            <Space direction="vertical" size="middle" className="composer-space">
+            <div
+              className={`chat-floating-stack${draggingUpload ? ' chat-floating-stack-dragging' : ''}`}
+              role="region"
+              aria-label="拖拽上传区"
+              onDragEnter={handleUploadDragEnter}
+              onDragOver={handleUploadDragOver}
+              onDragLeave={handleUploadDragLeave}
+              onDrop={handleUploadDrop}
+            >
+              <div className="chat-upload-drop-hint" aria-hidden={!draggingUpload}>释放文件以上传到当前对话</div>
               {pendingInterrupt ? <InterruptInputBanner interrupt={pendingInterrupt} onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
-              <div
-                className={`upload-drop-zone${draggingUpload ? ' upload-drop-zone-active' : ''}`}
-                role="button"
-                tabIndex={0}
-                aria-label="拖拽上传 JSON 或 CSV 文件"
-                onClick={() => uploadInputRef.current?.click()}
-                onDragOver={handleUploadDragOver}
-                onDragLeave={handleUploadDragLeave}
-                onDrop={handleUploadDrop}
+              <Card
+                className={`composer-card floating-composer${draggingUpload ? ' floating-composer-dragging' : ''}`}
+                role="region"
+                aria-label="悬浮发送栏"
               >
-                <Typography.Text type="secondary">
-                  拖拽 JSON/CSV 文件到这里，或点击上传文件
-                </Typography.Text>
-              </div>
-              {pendingUploads.length > 0 ? (
-                <Space size={[8, 8]} wrap aria-label="暂存区文件列表">
-                  {pendingUploads.map((upload) => (
-                    <Tag key={upload.upload_id} className="upload-file-tag">
-                      {upload.filename}
-                      {typeof upload.preview.row_count === 'number' ? ` · ${upload.preview.row_count} 行` : ''}
-                      {upload.preview.columns.length > 0 ? ` · ${upload.preview.columns.slice(0, 3).join('/')}` : ''}
+                <Space direction="vertical" size="small" className="composer-space">
+                  {pendingUploads.length > 0 ? (
+                    <Space size={[8, 8]} wrap aria-label="暂存区文件列表" className="composer-attachments">
+                      {pendingUploads.map((upload) => (
+                        <Tag key={upload.upload_id} className="upload-file-tag">
+                          {upload.filename}
+                          {typeof upload.preview.row_count === 'number' ? ` · ${upload.preview.row_count} 行` : ''}
+                          {upload.preview.columns.length > 0 ? ` · ${upload.preview.columns.slice(0, 3).join('/')}` : ''}
+                          <Button
+                            type="link"
+                            danger
+                            size="small"
+                            aria-label={`删除文件 ${upload.filename}`}
+                            loading={deletingUploadIds.has(upload.upload_id)}
+                            disabled={interactionLocked}
+                            onClick={() => void handleDeleteUpload(upload)}
+                          >
+                            删除
+                          </Button>
+                        </Tag>
+                      ))}
+                    </Space>
+                  ) : null}
+                  <div className="send-row" role="group" aria-label="消息发送栏">
+                    <Input.TextArea
+                      aria-label="请输入问题"
+                      value={input}
+                      onChange={(event) => setInput(event.target.value)}
+                      onCompositionStart={() => {
+                        composingInputRef.current = true;
+                      }}
+                      onCompositionEnd={() => {
+                        composingInputRef.current = false;
+                      }}
+                      onPressEnter={(event) => {
+                        if (!event.shiftKey && !isComposerImeConfirming(event)) {
+                          event.preventDefault();
+                          void handleSubmit();
+                        }
+                      }}
+                      placeholder={inputPlaceholder}
+                      autoSize={{ minRows: 1, maxRows: 5 }}
+                      disabled={active && taskState.phase !== 'cancelling'}
+                    />
+                    <Popover
+                      content={composerMenuContent}
+                      trigger="click"
+                      placement="topRight"
+                      overlayClassName="composer-menu-popover"
+                    >
                       <Button
-                        type="link"
-                        danger
-                        size="small"
-                        aria-label={`删除文件 ${upload.filename}`}
-                        loading={deletingUploadIds.has(upload.upload_id)}
-                        disabled={interactionLocked}
-                        onClick={() => void handleDeleteUpload(upload)}
+                        aria-label="打开输入功能菜单"
+                        className="composer-action-button composer-plus-button"
                       >
-                        删除
+                        +
                       </Button>
-                    </Tag>
-                  ))}
-                </Space>
-              ) : null}
-              <Input.TextArea
-                aria-label="请输入问题"
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onCompositionStart={() => {
-                  composingInputRef.current = true;
-                }}
-                onCompositionEnd={() => {
-                  composingInputRef.current = false;
-                }}
-                onPressEnter={(event) => {
-                  if (!event.shiftKey && !isComposerImeConfirming(event)) {
-                    event.preventDefault();
-                    void handleSubmit();
-                  }
-                }}
-                placeholder={inputPlaceholder}
-                autoSize={{ minRows: 3, maxRows: 8 }}
-                disabled={active && taskState.phase !== 'cancelling'}
-              />
-              <Flex justify="space-between" align="center" gap="middle">
-                <Space wrap size="middle" align="center">
-                  <Typography.Text type="secondary">当前模式：自动规划</Typography.Text>
-                  <Space size="small" align="center">
-                    <Typography.Text type="secondary">思考强度</Typography.Text>
-                    <Select
-                      aria-label="思考强度"
-                      value={reasoningEffort}
-                      options={REASONING_EFFORT_OPTIONS}
-                      onChange={setReasoningEffort}
-                      disabled={interactionLocked}
-                      size="small"
-                      style={{ width: 104 }}
-                    />
-                  </Space>
-                  <Space size="small" align="center">
-                    <Typography.Text type="secondary">深度思考</Typography.Text>
-                    <Switch
-                      aria-label="深度思考"
-                      checked={deepThinking}
-                      onChange={setDeepThinking}
-                      checkedChildren="开"
-                      unCheckedChildren="关"
-                      disabled={interactionLocked}
-                    />
-                  </Space>
-                </Space>
-                <Space>
-                  <Button
-                    aria-label="选择 JSON 或 CSV 文件"
-                    onClick={() => uploadInputRef.current?.click()}
-                    disabled={interactionLocked || uploadingFile}
-                    loading={uploadingFile}
-                  >
-                    上传文件
-                  </Button>
+                    </Popover>
+                    <Button
+                      type="primary"
+                      aria-label="发送"
+                      className="composer-send-button"
+                      onClick={handleSubmit}
+                      disabled={!input.trim() || active || uploadingFile}
+                    >
+                      发送
+                    </Button>
+                  </div>
                   <input
                     ref={uploadInputRef}
                     className="file-input-hidden"
@@ -905,31 +954,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                     disabled={interactionLocked || uploadingFile}
                     onChange={(event) => void handleUploadFile(event.target.files?.[0])}
                   />
-                  {active && currentTaskId ? (
-                    <Button
-                      danger
-                      aria-label="取消任务"
-                      onClick={handleCancel}
-                      loading={taskState.phase === 'cancelling' || stoppingTaskIds.has(currentTaskId)}
-                    >
-                      取消任务
-                    </Button>
-                  ) : null}
-                  <Button type="primary" aria-label="发送" onClick={handleSubmit} disabled={!input.trim() || active || uploadingFile}>发送</Button>
                 </Space>
-              </Flex>
-            </Space>
-          </Card>
-        </Layout.Content>
+              </Card>
+            </div>
+          </section>
+        </main>
       </Layout>
     </ConfigProvider>
   );
-}
-
-function CapabilityBadge({ capabilityId, label, capabilities }: { capabilityId: string; label: string; capabilities: CapabilityResponse[] }) {
-  const found = capabilities.find((capability) => capability.capability_id === capabilityId || (capabilityId === 'main_agent.respond' && capability.capability_id === 'main_agent.respond'));
-  const active = found?.status === 'active';
-  return <Badge status={active ? 'success' : 'default'} text={`${label}${active ? '可用' : '未确认'}`} />;
 }
 
 function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (user: UserResponse) => void | Promise<void> }) {
@@ -1098,15 +1130,20 @@ function ConversationHistoryPanel({
   return (
     <Card
       className="history-card"
-      title={(
-        <Space size="small">
-          <span>历史会话</span>
-          <Tag>{conversations.length}</Tag>
-        </Space>
-      )}
+      title="历史会话"
       extra={(
         <Space size="small">
-          <Button size="small" onClick={onRefresh} loading={loading}>刷新</Button>
+          <Button
+            className="history-refresh-button"
+            size="small"
+            type="text"
+            shape="circle"
+            aria-label="刷新历史会话"
+            title="刷新"
+            icon={<ReloadOutlined aria-hidden="true" />}
+            onClick={onRefresh}
+            loading={loading}
+          />
           <Button size="small" type="primary" onClick={onNewConversation} disabled={interactionLocked}>新建对话</Button>
         </Space>
       )}
@@ -1114,44 +1151,79 @@ function ConversationHistoryPanel({
       {conversations.length === 0 ? (
         <Typography.Text type="secondary">暂无历史会话。当前对话发送消息后会自动归档到你的用户名下。</Typography.Text>
       ) : (
-        <Space direction="vertical" size="small" className="history-list">
+        <div className="history-list" role="list" aria-label="历史会话列表">
           {conversations.map((conversation) => {
             const title = conversation.title?.trim() || conversation.conversation_id.slice(0, 18);
+            const active = conversation.conversation_id === activeConversationId;
             return (
-              <div key={conversation.conversation_id} className="history-row">
-                <Button
-                  block
-                  className="history-item"
-                  type={conversation.conversation_id === activeConversationId ? 'primary' : 'default'}
+              <div key={conversation.conversation_id} className="history-row" role="listitem">
+                <button
+                  type="button"
+                  className={`history-item${active ? ' history-item-active' : ''}`}
                   disabled={interactionLocked}
+                  aria-current={active ? 'page' : undefined}
                   onClick={() => onSelectConversation(conversation.conversation_id)}
                 >
-                  {title}
-                </Button>
-                <Button
-                  size="small"
-                  aria-label={`重命名历史会话 ${title}`}
-                  loading={renamingConversationIds.has(conversation.conversation_id)}
-                  disabled={loading}
-                  onClick={() => onRenameConversation(conversation.conversation_id)}
-                >
-                  重命名
-                </Button>
-                <Button
-                  danger
-                  size="small"
-                  aria-label={`删除历史会话 ${title}`}
-                  loading={deletingConversationIds.has(conversation.conversation_id)}
-                  disabled={loading}
-                  onClick={() => onDeleteConversation(conversation.conversation_id)}
-                >
-                  删除
-                </Button>
+                  <span className="history-item-title">{title}</span>
+                </button>
+                <div className="history-actions" aria-label={`历史会话操作 ${title}`}>
+                  <Button
+                    type="text"
+                    size="small"
+                    aria-label={`重命名历史会话 ${title}`}
+                    loading={renamingConversationIds.has(conversation.conversation_id)}
+                    disabled={loading}
+                    onClick={() => onRenameConversation(conversation.conversation_id)}
+                  >
+                    重命名
+                  </Button>
+                  <Button
+                    danger
+                    type="text"
+                    size="small"
+                    aria-label={`删除历史会话 ${title}`}
+                    loading={deletingConversationIds.has(conversation.conversation_id)}
+                    disabled={loading}
+                    onClick={() => onDeleteConversation(conversation.conversation_id)}
+                  >
+                    删除
+                  </Button>
+                </div>
               </div>
             );
           })}
-        </Space>
+        </div>
       )}
+    </Card>
+  );
+}
+
+function SidebarUserCard({
+  user,
+  onAccountSettings,
+  onLogout,
+}: {
+  user: UserResponse;
+  onAccountSettings: () => void;
+  onLogout: () => void;
+}) {
+  return (
+    <Card
+      className="sidebar-user-card"
+      role="region"
+      aria-label="用户信息与账户操作"
+      title="用户信息"
+    >
+      <Space direction="vertical" size="small" className="sidebar-user-stack">
+        <div>
+          <Typography.Text type="secondary">当前用户</Typography.Text>
+          <Typography.Text strong className="sidebar-username">{user.username}</Typography.Text>
+        </div>
+        <Space.Compact block>
+          <Button block onClick={onAccountSettings}>用户账户设置</Button>
+          <Button block danger onClick={onLogout}>退出登录</Button>
+        </Space.Compact>
+      </Space>
     </Card>
   );
 }
@@ -1163,104 +1235,6 @@ function EmptyWelcome() {
       <Typography.Paragraph type="secondary">直接描述你的问题即可。</Typography.Paragraph>
     </div>
   );
-}
-
-function TaskListPanel({
-  tasks,
-  loading,
-  expanded,
-  stoppingTaskIds,
-  onToggleExpanded,
-  onRefresh,
-  onStop,
-}: {
-  tasks: TaskSummaryResponse[];
-  loading: boolean;
-  expanded: boolean;
-  stoppingTaskIds: Set<string>;
-  onToggleExpanded: () => void;
-  onRefresh: () => void;
-  onStop: (taskId: string) => void;
-}) {
-  return (
-    <Card
-      className={`task-list-card ${expanded ? 'task-list-card-expanded' : 'task-list-card-collapsed'}`}
-      title={(
-        <Space size="small">
-          <span>未完成任务</span>
-          <Tag color={tasks.length > 0 ? 'orange' : 'default'}>{tasks.length}</Tag>
-        </Space>
-      )}
-      extra={(
-        <Space size="small">
-          <Button size="small" aria-label={expanded ? '收起未完成任务' : '展开未完成任务'} onClick={onToggleExpanded}>
-            {expanded ? '收起' : '展开'}
-          </Button>
-          <Button size="small" onClick={onRefresh} loading={loading}>刷新</Button>
-        </Space>
-      )}
-    >
-      {!expanded ? null : tasks.length === 0 ? (
-        <Typography.Text type="secondary">暂无未完成任务</Typography.Text>
-      ) : (
-        <Space direction="vertical" size="small" className="task-list-items">
-          {tasks.map((task) => {
-            const stopping = stoppingTaskIds.has(task.task_id);
-            const stopDisabled = stopping || task.cancel_requested || task.status === 'cancelling';
-            return (
-              <div className="task-list-item" key={task.task_id}>
-                <div className="task-list-main">
-                  <Typography.Text strong>{task.summary?.trim() || `任务 ${shortTaskId(task.task_id)}`}</Typography.Text>
-                  <Space size={[6, 6]} wrap className="task-list-meta">
-                    <Tag color={taskStatusColor(task.status)}>{taskStatusLabel(task.status)}</Tag>
-                    <Typography.Text type="secondary">{capabilityLabel(task.requested_capability_id)}</Typography.Text>
-                    <Typography.Text type="secondary">活动节点 {task.active_node_count}</Typography.Text>
-                    <Typography.Text type="secondary">ID {shortTaskId(task.task_id)}</Typography.Text>
-                  </Space>
-                </div>
-                <Button
-                  danger
-                  size="small"
-                  aria-label={`停止任务 ${task.task_id}`}
-                  disabled={stopDisabled}
-                  loading={stopping}
-                  onClick={() => onStop(task.task_id)}
-                >
-                  停止任务
-                </Button>
-              </div>
-            );
-          })}
-        </Space>
-      )}
-    </Card>
-  );
-}
-
-function taskStatusLabel(status: string): string {
-  if (status === 'accepted') return '已提交';
-  if (status === 'planning') return '规划中';
-  if (status === 'running') return '运行中';
-  if (status === 'cancelling') return '停止中';
-  return status;
-}
-
-function taskStatusColor(status: string): string {
-  if (status === 'running') return 'processing';
-  if (status === 'cancelling') return 'red';
-  if (status === 'accepted' || status === 'planning') return 'blue';
-  return 'default';
-}
-
-function capabilityLabel(capabilityId: string | null): string {
-  if (capabilityId === 'sql_query.query' || capabilityId === 'sql_query') return 'SQLQuery';
-  if (capabilityId === null) return '自动规划';
-  if (capabilityId.startsWith('main_agent')) return '主代理';
-  return capabilityId;
-}
-
-function shortTaskId(taskId: string): string {
-  return taskId.length > 12 ? `${taskId.slice(0, 12)}…` : taskId;
 }
 
 function buildInterruptAnswerPayload(interrupt: PendingInterrupt, content: string): Record<string, unknown> {
@@ -1281,7 +1255,7 @@ function InterruptPromptCard({ interrupt }: { interrupt: PendingInterrupt }) {
       {fieldLabels.length > 0 ? (
         <div className="interrupt-card-row">
           <Typography.Text type="secondary">需要补充：</Typography.Text>
-          <Space size={[6, 6]} wrap>{fieldLabels.map((field) => <Tag key={field} color="blue">{field}</Tag>)}</Space>
+          <Space size={[6, 6]} wrap>{fieldLabels.map((field) => <Tag key={field} color="green">{field}</Tag>)}</Space>
         </div>
       ) : null}
       {optionLabels.length > 0 ? (
@@ -1402,7 +1376,7 @@ function FileArtifactCard({ result }: { result: Extract<CapabilityArtifactDispla
         <Space wrap>
           <Typography.Text strong>{result.filename}</Typography.Text>
           <Tag>{result.mimeType}</Tag>
-          {result.archiveFormat === 'zip' ? <Tag color="blue">ZIP</Tag> : null}
+          {result.archiveFormat === 'zip' ? <Tag color="green">ZIP</Tag> : null}
           {result.sourceFileCount && result.sourceFileCount > 1 ? <Tag>{result.sourceFileCount} 个文件</Tag> : null}
         </Space>
         <Typography.Text type="secondary">{result.summary}</Typography.Text>
@@ -1470,7 +1444,7 @@ function TaskStatusDropdown({ state }: { state: TaskEventState }) {
         </div>
       )}
     >
-      <Button size="small" aria-label="任务进程">
+      <Button size="small" className="task-status-capsule" aria-label="任务进程">
         <Space size="small">
           <Badge status={taskStatusBadgeStatus(state)} />
           <span>任务进程</span>

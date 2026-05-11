@@ -40,6 +40,12 @@ class WorkflowPlanValidator:
                 raise WorkflowPlanValidationError(
                     f"Input payload for node {node.node_id} must be JSON serializable."
                 ) from exc
+            try:
+                json.dumps(node.metadata)
+            except (TypeError, ValueError) as exc:
+                raise WorkflowPlanValidationError(
+                    f"Metadata for node {node.node_id} must be JSON serializable."
+                ) from exc
 
         for node in plan.nodes:
             for dependency in node.depends_on:

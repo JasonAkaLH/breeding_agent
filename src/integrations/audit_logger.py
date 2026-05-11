@@ -40,6 +40,28 @@ class JsonlAuditSink(AuditSink):
         async with self._lock:
             await asyncio.to_thread(self._append_line, line)
 
+    def record_sync(
+        self,
+        event_type: str,
+        payload: Payload,
+        *,
+        conversation_id: str | None = None,
+        task_id: str | None = None,
+        node_id: str | None = None,
+    ) -> None:
+        """Record startup-time audit evidence before an event loop is available."""
+
+        record = {
+            "recorded_at": self._utcnow(),
+            "event_type": event_type,
+            "conversation_id": conversation_id,
+            "task_id": task_id,
+            "node_id": node_id,
+            "payload": dict(payload),
+        }
+        line = json.dumps(record, ensure_ascii=False, default=self._json_default) + "\n"
+        self._append_line(line)
+
     def _append_line(self, line: str) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:

@@ -17,6 +17,14 @@ from .runtime_replanner import NoopRuntimeReplanner, RuntimeReplanContext, Runti
 from .scheduler import Scheduler
 from .workflow_plan_validator import WorkflowPlanValidator
 
+_SYSTEM_NODE_METADATA_KEYS = frozenset(
+    {
+        "forced_skill_capability_id",
+        "forced_skill_name",
+        "forced_skill_source",
+    }
+)
+
 
 class OrchestrationService:
     def __init__(
@@ -331,6 +339,19 @@ class OrchestrationService:
             value = dict(value or {})
         return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
+    @staticmethod
+    def _execution_metadata(
+        request_metadata: Any,
+        node_metadata: Any,
+    ) -> dict[str, Any]:
+        request_values = dict(request_metadata or {})
+        node_values = dict(node_metadata or {})
+        for key in _SYSTEM_NODE_METADATA_KEYS:
+            if key not in node_values:
+                request_values.pop(key, None)
+        request_values.update(node_values)
+        return request_values
+
     async def _build_runtime_replan_decision(
         self,
         *,
@@ -408,7 +429,7 @@ class OrchestrationService:
                 node_id=task_node.node_id,
                 input_payload=dict(node_plan.input_payload),
                 dependency_outputs={dependency: dict(dependency_outputs.get(dependency, {})) for dependency in node_plan.depends_on},
-                metadata=dict(request.metadata),
+                metadata=self._execution_metadata(request.metadata, node_plan.metadata),
             )
         )
 

@@ -2,7 +2,6 @@ import type {
   CancelTaskResponse,
   AnswerInterruptResponse,
   AuthUserResponse,
-  CapabilityListResponse,
   CaptchaChallengeResponse,
   ChatMode,
   ConversationListResponse,
@@ -17,7 +16,6 @@ import type {
   SubmitMessageRequest,
   TaskArtifactsResponse,
   TaskGraphResponse,
-  TaskListResponse,
   TaskSummaryResponse,
   UploadFileResponse,
   UploadListResponse,
@@ -47,7 +45,6 @@ export interface ApiClient {
   register(input: { username: string; password: string; captchaId: string; captchaCode: string }): Promise<AuthUserResponse>;
   logout(): Promise<LogoutResponse>;
   me(): Promise<AuthUserResponse>;
-  listCapabilities(): Promise<CapabilityListResponse>;
   listConversationUploads(conversationId: string): Promise<UploadListResponse>;
   deleteConversationUpload(conversationId: string, uploadId: string): Promise<DeleteUploadResponse>;
   uploadConversationFile(conversationId: string, file: File): Promise<UploadFileResponse>;
@@ -56,7 +53,6 @@ export interface ApiClient {
   listConversationMessages(conversationId: string): Promise<ConversationMessagesResponse>;
   deleteConversation(conversationId: string): Promise<DeleteConversationResponse>;
   renameConversation(conversationId: string, title: string): Promise<ConversationSummaryResponse>;
-  listConversationTasks(conversationId: string): Promise<TaskListResponse>;
   getTask(taskId: string): Promise<TaskSummaryResponse>;
   cancelTask(taskId: string): Promise<CancelTaskResponse>;
   getTaskArtifacts(taskId: string): Promise<TaskArtifactsResponse>;
@@ -131,7 +127,6 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     }),
     logout: () => request<LogoutResponse>('/api/v1/auth/logout', { method: 'POST' }),
     me: () => request<AuthUserResponse>('/api/v1/auth/me'),
-    listCapabilities: () => request<CapabilityListResponse>('/api/v1/capabilities'),
     listConversationUploads: (conversationId) => request<UploadListResponse>(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads`,
     ),
@@ -185,9 +180,6 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     renameConversation: (conversationId, title) => request<ConversationSummaryResponse>(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}`,
       { method: 'PATCH', body: JSON.stringify({ title }) },
-    ),
-    listConversationTasks: (conversationId) => request<TaskListResponse>(
-      `/api/v1/conversations/${encodeURIComponent(conversationId)}/tasks?scope=unfinished`,
     ),
     getTask: (taskId) => request<TaskSummaryResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
     cancelTask: (taskId) => request<CancelTaskResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),

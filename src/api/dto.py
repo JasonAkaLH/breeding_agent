@@ -230,6 +230,8 @@ class CapabilityResponse(BaseModel):
     description: str
     version: str
     status: str
+    kind: str = "capability"
+    source: str = "builtin"
 
 
 class CapabilityListResponse(BaseModel):

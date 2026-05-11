@@ -14,6 +14,7 @@ from .parameters import SkillParameterSpec
 from .parser import SkillParseError, parse_skill_file
 from .script_manifest import SkillScriptEntrypoint
 from .script_runner import SkillScriptError, SkillScriptRunner
+from .skill_capabilities import SkillCapabilityDiagnostic, SkillCapabilityRegistry, build_skill_capability_registry
 
 __all__ = [
     "SkillCatalog",
@@ -29,6 +30,9 @@ __all__ = [
     "SkillScriptEntrypoint",
     "SkillScriptError",
     "SkillScriptRunner",
+    "SkillCapabilityDiagnostic",
+    "SkillCapabilityRegistry",
+    "build_skill_capability_registry",
     "match_skills",
     "parse_skill_file",
     "resolve_skill_inputs",

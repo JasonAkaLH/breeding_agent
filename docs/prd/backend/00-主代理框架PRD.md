@@ -2,7 +2,7 @@
 
 - **项目**：multi_agent_framework
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至 Skill 输出文件 Artifact 与下载 PRD）
+- **文档状态**：正式版（已补齐至 Skill 一等 Capability 能力池 PRD）
 - **日期**：2026-05-07
 - **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；前端 PRD 后续放在 `docs/prd/frontend/`。
 
@@ -79,6 +79,7 @@
 | 高层 DAG 规划与 SQLQuery 宏能力边界 | `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md` | Phase 8.1、public capability、planner validator、macro expander |
 | 对话上下文记忆与压缩 | `docs/prd/backend/10-对话上下文记忆与压缩PRD.md` | 多轮对话记忆、Planner / 主代理上下文注入、两级压缩策略 |
 | Skill 输出文件 Artifact 与下载 | `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md` | Skill 产出 HTML / CSV / XLSX / PDF 等文件、managed artifact、下载鉴权、安全边界 |
+| Skill 一等 Capability 能力池 | `docs/prd/backend/12-Skill一等Capability能力池PRD.md` | 将项目 Skill 注册为 `skill.*` public capability、Planner / Replanner 可发现、统一能力池 |
 
 ## 5. 当前已定的关键决策摘要
 
@@ -136,6 +137,13 @@
 - 输出文件内容默认不进入主代理 prompt；prompt 只注入文件名、类型、大小、摘要等安全 metadata。
 - v1 HTML 文件默认按附件下载，不作为站内可信页面直接 inline 渲染；未来如需预览应单独设计 sandbox / CSP。
 
+### 5.8 Skill 一等 Capability 能力池决策
+
+- 项目级 Skill 应可升级为 `skill.*` public capability，进入与 `main_agent.respond`、`sql_query.query` 相同的 `CapabilityRegistry` public 能力池。
+- Planner / Runtime Replanner / `/api/v1/capabilities` 必须从同一 public capability pool 发现公开 Skill，避免深度思考阶段看不到已注册 Skill。
+- v1 推荐采用 “Skill public macro → `main_agent.respond` forced skill” 模型：LLM 只选择 `skill.*` capability，系统注入可信 forced skill metadata，继续复用主代理受控 Skill runtime。
+- 默认只公开仓库项目级 `skill/` 下的 Skill；用户级 `~/.codex/skills` 不默认公开给业务 Planner 或 API。
+
 ## 6. 相关配套文档
 
 - PRD 总目录：`docs/prd/README.md`
@@ -145,6 +153,7 @@
 - 开发流程索引：`docs/dev_processes/backend/README.md`
 - 对话上下文记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`
 - Skill 输出文件 Artifact 与下载 PRD：`docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
+- Skill 一等 Capability 能力池 PRD：`docs/prd/backend/12-Skill一等Capability能力池PRD.md`
 
 ## 7. 使用建议
 

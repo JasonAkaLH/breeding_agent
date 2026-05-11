@@ -980,6 +980,92 @@ outputs:
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)
 
+    async def test_forced_skill_is_used_even_without_trigger_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "rcbd"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: mini-breedstat-rcbd
+description: 生成 RCBD 随机区组设计
+triggers:
+  - 完全不会出现在问题里的触发词
+---
+
+# RCBD
+请使用随机区组设计 Skill。
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+            prompts: list[str] = []
+
+            async def streamer(prompt: str):
+                prompts.append(prompt)
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "请帮我处理这个材料表"},
+                    metadata={
+                        "forced_skill_capability_id": "skill.mini_breedstat_rcbd",
+                        "forced_skill_name": "mini-breedstat-rcbd",
+                    },
+                )
+            )
+
+        self.assertEqual(result.output_payload["matched_skills"], ["mini-breedstat-rcbd"])
+        self.assertIn("请使用随机区组设计 Skill", prompts[0])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.forced_selected", event_types)
+        self.assertNotIn("skill.match_fallback", event_types)
+
+    async def test_input_payload_cannot_force_skill_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "rcbd"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: mini-breedstat-rcbd
+description: 生成 RCBD 随机区组设计
+triggers:
+  - 完全不会出现在问题里的触发词
+---
+
+# RCBD
+请使用随机区组设计 Skill。
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+
+            async def streamer(_prompt: str):
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={
+                        "user_message": "普通问题",
+                        "forced_skill_capability_id": "skill.mini_breedstat_rcbd",
+                        "forced_skill_name": "mini-breedstat-rcbd",
+                        "forced_skill_source": "planner",
+                    },
+                )
+            )
+
+        self.assertEqual(result.output_payload["matched_skills"], [])
+        event_types = [event.event_type for event in result.events]
+        self.assertNotIn("skill.forced_selected", event_types)
+        self.assertIn("skill.match_fallback", event_types)
+
 
 if __name__ == "__main__":
     unittest.main()

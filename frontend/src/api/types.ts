@@ -78,11 +78,6 @@ export interface TaskSummaryResponse {
   updated_at: string | null;
 }
 
-export interface TaskListResponse {
-  conversation_id: string;
-  tasks: TaskSummaryResponse[];
-}
-
 export interface ConversationSummaryResponse {
   conversation_id: string;
   account_id: string;
@@ -197,18 +192,6 @@ export interface CancelTaskResponse {
   task_id: string;
   status: string;
   accepted: boolean;
-}
-
-export interface CapabilityResponse {
-  capability_id: string;
-  name: string;
-  description: string;
-  version: string;
-  status: string;
-}
-
-export interface CapabilityListResponse {
-  capabilities: CapabilityResponse[];
 }
 
 export interface TaskEventEnvelope {

@@ -39,6 +39,26 @@ class PlannerOutputError(ValueError):
 TextGenerator = Callable[..., str | Awaitable[str]]
 
 
+def build_planner_repair_prompt(
+    original_prompt: str,
+    *,
+    previous_output: str,
+    error_reason: str,
+    diagnostic: str,
+) -> str:
+    """Ask the same LLM planner to repair its own invalid plan output."""
+
+    return (
+        f"{original_prompt}\n\n"
+        "上一轮 Planner 输出未通过校验，不能交给系统执行，也不能改由确定性规则兜底。"
+        "请你只基于上面的 public capability 目录重新编排，修正为可执行的 JSON。\n"
+        f"- 校验错误类型：{error_reason}\n"
+        f"- 校验诊断：{diagnostic[:500]}\n"
+        f"- 上一轮原始输出：\n{previous_output[:2000]}\n\n"
+        "现在只返回修正后的 JSON 对象，不要输出 Markdown、解释、代码块或额外文本。"
+    )
+
+
 def build_planner_prompt(
     request: OrchestrationRequest,
     *,
@@ -54,11 +74,14 @@ def build_planner_prompt(
     memory_block = _format_memory_block(request.memory_context)
     return (
         "你是一个受边界约束的高层工作流规划器。"
+        "除非用户请求已经显式指定某个 capability，否则所有路由和 DAG 编排都由你基于上下文决定。"
         "只返回 JSON。请选择最小且有用的无环 DAG。"
         "只能使用下面列出的 public capability。"
         "禁止输出 SQLQuery 内部 capability 或低层实现节点。"
         "对于数据库 / 数据查询问题，优先规划 sql_query.query，然后让 main_agent.respond 依赖它完成对话式最终回答；"
-        "对于普通问题，只使用 main_agent.respond。\n\n"
+        "对于明确匹配公开 Skill 的任务，优先规划对应 skill.* capability；"
+        "对于追问、参数调整、继续上次任务等请求，必须结合对话记忆判断是否继续调用上一轮相关 public capability；"
+        "对于兜底对话、解释、汇总，使用 main_agent.respond。\n\n"
         f"可用 public capability：\n{capability_block}\n\n"
         f"{memory_block}"
         f"{question_block}\n\n"
@@ -106,7 +129,7 @@ async def build_plan_from_llm_output(
         public_capabilities=public_capabilities,
         planner_payload_allowlist=planner_payload_allowlist,
     )
-    raw_output = _call_text_generator(text_generator, prompt, request=request)
+    raw_output = call_text_generator(text_generator, prompt, request=request)
     if inspect.isawaitable(raw_output):
         raw_output = await raw_output
     if not isinstance(raw_output, str):
@@ -114,7 +137,7 @@ async def build_plan_from_llm_output(
     return parse_planner_output(raw_output, task_id=request.task_id)
 
 
-def _call_text_generator(text_generator: TextGenerator, prompt: str, *, request: OrchestrationRequest):
+def call_text_generator(text_generator: TextGenerator, prompt: str, *, request: OrchestrationRequest):
     try:
         signature = inspect.signature(text_generator)
     except (TypeError, ValueError):
@@ -126,6 +149,10 @@ def _call_text_generator(text_generator: TextGenerator, prompt: str, *, request:
     if accepts_kwargs or "request" in signature.parameters:
         return text_generator(prompt, request=request)
     return text_generator(prompt)
+
+
+def _call_text_generator(text_generator: TextGenerator, prompt: str, *, request: OrchestrationRequest):
+    return call_text_generator(text_generator, prompt, request=request)
 
 
 def _format_public_capabilities(

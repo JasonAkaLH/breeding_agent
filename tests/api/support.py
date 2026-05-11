@@ -72,6 +72,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         conversation_memory_builder=None,
         enable_conversation_memory: bool = True,
         skill_roots=(),
+        public_skill_roots=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
@@ -125,6 +126,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             conversation_memory_builder=conversation_memory_builder,
             enable_conversation_memory=enable_conversation_memory,
             skill_roots=skill_roots,
+            public_skill_roots=public_skill_roots,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
 
@@ -185,6 +187,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         conversation_memory_builder=None,
         enable_conversation_memory: bool = True,
         skill_roots=(),
+        public_skill_roots=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> None:
         await self.client.aclose()
@@ -217,6 +220,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             conversation_memory_builder=conversation_memory_builder,
             enable_conversation_memory=enable_conversation_memory,
             skill_roots=skill_roots,
+            public_skill_roots=public_skill_roots,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
         await self._bind_client()

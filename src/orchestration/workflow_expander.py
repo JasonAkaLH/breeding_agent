@@ -51,6 +51,7 @@ class WorkflowExpander:
                     metadata={
                         **dict(request.metadata),
                         "macro_input_payload": dict(node.input_payload),
+                        "macro_source": str(plan.metadata.get("source") or plan.metadata.get("route") or ""),
                     },
                     current_user_message=request.current_user_message,
                     resolved_user_message=self._resolve_macro_user_message(node, request),

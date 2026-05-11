@@ -15,7 +15,8 @@ from src.capabilities.sql_query import (
     SQLQueryWorkflowProvider,
 )
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
-from src.orchestration.llm_workflow_provider import LLMWorkflowProvider
+from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
+from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.registry import CapabilityRegistry
@@ -410,26 +411,31 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan.metadata["planner_finalizer_rewired"])
         self.assertFalse(plan.metadata["planner_finalizer_added"])
 
-    async def test_planner_provider_exception_falls_back(self) -> None:
+    async def test_planner_provider_exception_fails_without_deterministic_fallback(self) -> None:
         def planner(_prompt: str) -> str:
             raise RuntimeError("planner unavailable")
 
-        plan = await self.make_provider(planner).build_plan(
-            OrchestrationRequest(
-                task_id="task-provider-fail",
-                conversation_id="conv-1",
-                root_message_id="msg-1",
-                user_message="你好",
+        with self.assertRaises(WorkflowPlanningError) as raised:
+            await self.make_provider(planner).build_plan(
+                OrchestrationRequest(
+                    task_id="task-provider-fail",
+                    conversation_id="conv-1",
+                    root_message_id="msg-1",
+                    user_message="你好",
+                )
             )
-        )
 
-        self.assertEqual([node.capability_id for node in plan.nodes], ["main_agent.respond"])
-        self.assertTrue(plan.metadata["planner_fallback_used"])
-        self.assertEqual(plan.metadata["planner_fallback_reason"], "RuntimeError")
+        self.assertEqual(raised.exception.reason, "RuntimeError")
+        self.assertEqual(raised.exception.attempts, 1)
 
-    async def test_internal_capability_output_falls_back_to_deterministic_auto_plan(self) -> None:
-        def planner(_prompt: str) -> str:
-            return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "sql_query.sql_generate"}]})
+    async def test_internal_capability_output_is_repaired_by_llm_instead_of_deterministic_fallback(self) -> None:
+        prompts: list[str] = []
+
+        def planner(prompt: str) -> str:
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "sql_query.sql_generate"}]})
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "sql_query.query"}]})
 
         plan = await self.make_provider(planner).build_plan(
             OrchestrationRequest(
@@ -440,13 +446,22 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(plan.metadata["route"], "auto")
-        self.assertTrue(plan.metadata["planner_fallback_used"])
-        self.assertEqual(plan.metadata["planner_fallback_reason"], "WorkflowPlanValidationError")
+        self.assertEqual(plan.metadata["route"], "llm_planner")
+        self.assertFalse(plan.metadata["planner_fallback_used"])
+        self.assertEqual(plan.metadata["planner_repair_attempts"], 1)
+        self.assertIn("上一轮 Planner 输出未通过校验", prompts[1])
         self.assertIn("sql_query.intent_route", [node.capability_id for node in plan.nodes])
 
-    async def test_invalid_planner_json_falls_back(self) -> None:
-        plan = await self.make_provider(lambda _prompt: "not json").build_plan(
+    async def test_invalid_planner_json_is_repaired_by_llm(self) -> None:
+        prompts: list[str] = []
+
+        def planner(prompt: str) -> str:
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return "not json"
+            return json.dumps({"nodes": [{"node_id": "answer_user", "capability_id": "main_agent.respond"}]})
+
+        plan = await self.make_provider(planner).build_plan(
             OrchestrationRequest(
                 task_id="task-4",
                 conversation_id="conv-1",
@@ -456,8 +471,81 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([node.capability_id for node in plan.nodes], ["main_agent.respond"])
-        self.assertTrue(plan.metadata["planner_fallback_used"])
-        self.assertEqual(plan.metadata["planner_fallback_reason"], "PlannerOutputError")
+        self.assertEqual(plan.metadata["route"], "llm_planner")
+        self.assertFalse(plan.metadata["planner_fallback_used"])
+        self.assertEqual(plan.metadata["planner_repair_attempts"], 1)
+        self.assertIn("not json", prompts[1])
+
+    async def test_invalid_planner_json_fails_after_llm_repair_attempt_is_exhausted(self) -> None:
+        prompts: list[str] = []
+
+        def planner(prompt: str) -> str:
+            prompts.append(prompt)
+            return "still not json"
+
+        with self.assertRaises(WorkflowPlanningError) as raised:
+            await self.make_provider(planner).build_plan(
+                OrchestrationRequest(
+                    task_id="task-invalid-after-repair",
+                    conversation_id="conv-1",
+                    root_message_id="msg-1",
+                    user_message="你好",
+                )
+            )
+
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(raised.exception.reason, "PlannerOutputError")
+        self.assertEqual(raised.exception.attempts, 2)
+
+    async def test_skill_public_capability_is_visible_and_expands_to_forced_main_agent_without_extra_finalizer(self) -> None:
+        self.registry.register(
+            CapabilityDescriptor(
+                capability_id="skill.mini_breedstat_rcbd",
+                name="mini-breedstat-rcbd",
+                description="生成 RCBD 随机区组设计",
+                kind="skill",
+                source="skill",
+            )
+        )
+        prompts: list[str] = []
+
+        def planner(prompt: str) -> str:
+            prompts.append(prompt)
+            return json.dumps({
+                "nodes": [
+                    {
+                        "node_id": "design_rcbd",
+                        "capability_id": "skill.mini_breedstat_rcbd",
+                        "input_payload": {"forced_skill_name": "evil", "script_path": "hack.py"},
+                    }
+                ]
+            })
+
+        provider = LLMWorkflowProvider(
+            capability_registry=self.registry,
+            fallback_provider=self.fallback_provider,
+            macro_providers={
+                "sql_query.query": self.sql_query_provider,
+                "skill.mini_breedstat_rcbd": SkillWorkflowProvider({"skill.mini_breedstat_rcbd": "mini-breedstat-rcbd"}),
+            },
+            text_generator=planner,
+        )
+        plan = await provider.build_plan(
+            OrchestrationRequest(
+                task_id="task-skill",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="用上传材料做随机区组设计",
+            )
+        )
+
+        self.assertIn("skill.mini_breedstat_rcbd", prompts[0])
+        self.assertEqual([node.capability_id for node in plan.nodes], ["main_agent.respond"])
+        self.assertEqual(plan.nodes[0].input_payload, {"user_message": "用上传材料做随机区组设计"})
+        self.assertEqual(plan.nodes[0].metadata["forced_skill_capability_id"], "skill.mini_breedstat_rcbd")
+        self.assertEqual(plan.nodes[0].metadata["forced_skill_name"], "mini-breedstat-rcbd")
+        self.assertEqual(plan.nodes[0].metadata["forced_skill_source"], "planner")
+        self.assertFalse(plan.metadata["planner_finalizer_added"])
 
 
 if __name__ == "__main__":

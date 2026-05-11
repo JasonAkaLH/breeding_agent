@@ -9,6 +9,7 @@ from src.integrations.codex_skills import (
     SkillCatalog,
     SkillInputResolutionContext,
     SkillInputTextGenerator,
+    SkillMatch,
     SkillScriptError,
     SkillScriptRunner,
     match_skills,
@@ -70,7 +71,7 @@ class MainAgentRespondCapability(CapabilityContract):
         user_message = str(request.input_payload.get("user_message") or "")
         artifact_context = build_artifact_context(request.metadata)
         dependency_context = build_dependency_context(request.dependency_outputs)
-        skill_matches = match_skills(user_message, self._skill_catalog)
+        skill_matches, forced_skill_events = self._resolve_skill_matches(request, user_message)
         script_results, script_events, script_artifacts = await self._run_auto_scripts(request, user_message, artifact_context, skill_matches)
         prompt = build_main_agent_prompt(
             user_message=user_message,
@@ -81,7 +82,7 @@ class MainAgentRespondCapability(CapabilityContract):
             memory_context=self._memory_context_from_metadata(request.metadata),
         )
 
-        events = list(script_events)
+        events = [*forced_skill_events, *script_events]
         reasoning_effort = self._resolve_reasoning_effort(request.metadata)
         thinking_enabled = self._resolve_thinking_enabled(request.metadata)
         for match in skill_matches:
@@ -156,6 +157,7 @@ class MainAgentRespondCapability(CapabilityContract):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
+
             return CapabilityExecutionResult(
                 capability_id=request.capability_id,
                 task_id=request.task_id,
@@ -218,6 +220,54 @@ class MainAgentRespondCapability(CapabilityContract):
             artifacts=(*script_artifacts, artifact),
             events=tuple(events),
         )
+
+    def _resolve_skill_matches(self, request: CapabilityExecutionRequest, user_message: str) -> tuple[list[SkillMatch], list[Any]]:
+        forced_skill_name = self._forced_skill_name(request)
+        if not forced_skill_name:
+            return match_skills(user_message, self._skill_catalog), []
+
+        manifest = self._skill_catalog.get(forced_skill_name)
+        if manifest is None:
+            return [], [
+                make_event(
+                    request,
+                    event_type="skill.forced_missing",
+                    payload={
+                        "skill_name": forced_skill_name,
+                        "capability_id": self._forced_skill_capability_id(request),
+                        "source": self._forced_skill_source(request),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            ]
+
+        return [SkillMatch(manifest=manifest, score=10_000, reason="forced_capability")], [
+            make_event(
+                request,
+                event_type="skill.forced_selected",
+                payload={
+                    "skill_name": manifest.name,
+                    "capability_id": self._forced_skill_capability_id(request),
+                    "source": self._forced_skill_source(request),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        ]
+
+    @staticmethod
+    def _forced_skill_name(request: CapabilityExecutionRequest) -> str:
+        value = request.metadata.get("forced_skill_name")
+        return str(value).strip() if value else ""
+
+    @staticmethod
+    def _forced_skill_capability_id(request: CapabilityExecutionRequest) -> str:
+        value = request.metadata.get("forced_skill_capability_id")
+        return str(value).strip() if value else ""
+
+    @staticmethod
+    def _forced_skill_source(request: CapabilityExecutionRequest) -> str:
+        value = request.metadata.get("forced_skill_source")
+        return str(value).strip() if value else "unknown"
 
     async def _run_auto_scripts(self, request, user_message, artifact_context, skill_matches):
         script_results: list[dict[str, Any]] = []

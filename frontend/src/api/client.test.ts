@@ -113,15 +113,6 @@ describe('createApiClient', () => {
     }));
   });
 
-  it('lists unfinished conversation tasks for the task panel', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', tasks: [] }), { status: 200 }));
-    const api = createApiClient({ fetcher });
-
-    await api.listConversationTasks('conv-1');
-
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/tasks?scope=unfinished', expect.any(Object));
-  });
-
   it('lists conversations and conversation messages for history restore', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversations: [] }), { status: 200 }));
     const api = createApiClient({ fetcher });

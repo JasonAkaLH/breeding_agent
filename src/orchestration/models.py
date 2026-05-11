@@ -27,6 +27,8 @@ class CapabilityDescriptor:
     version: str = "1"
     enabled: bool = True
     public: bool = True
+    kind: str = "capability"
+    source: str = "builtin"
 
 
 @dataclass(slots=True, frozen=True)
@@ -43,6 +45,7 @@ class WorkflowNodePlan:
     node_id: str
     capability_id: str
     input_payload: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     depends_on: tuple[str, ...] = ()
     criticality: NodeCriticality = NodeCriticality.REQUIRED
     retry_policy: Mapping[str, Any] = field(default_factory=dict)
