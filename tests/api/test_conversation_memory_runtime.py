@@ -76,6 +76,96 @@ class ConversationMemoryRuntimeAPITest(APITestCase):
         self.assertNotIn("recent_messages", memory_event.payload)
         self.assertNotIn("history_summary", memory_event.payload)
 
+    async def test_injected_llm_resolution_generator_builds_effective_question_before_planning(self) -> None:
+        resolution_prompts: list[str] = []
+        planner_prompts: list[str] = []
+        answer_prompts: list[str] = []
+
+        async def resolver(prompt: str) -> str:
+            resolution_prompts.append(prompt)
+            if "那它的基因型" not in prompt:
+                return json.dumps(
+                    {
+                        "should_resolve": False,
+                        "resolved_user_message": None,
+                        "referenced_entity": None,
+                        "entity_type": None,
+                        "source": {"type": None, "message_id": None, "evidence_text": None},
+                        "confidence": "high",
+                        "reason": "当前问题不需要补全。",
+                        "risk_flags": [],
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "should_resolve": True,
+                    "resolved_user_message": "查询龙粳18的基因型信息",
+                    "referenced_entity": "龙粳18",
+                    "entity_type": "crop_variety",
+                    "source": {
+                        "type": "recent_message",
+                        "message_id": None,
+                        "evidence_text": "再查一下龙粳18",
+                    },
+                    "confidence": "high",
+                    "reason": "多个候选实体按最近明确提到的业务实体解析。",
+                    "risk_flags": ["multiple_candidate_entities_resolved_by_recency"],
+                },
+                ensure_ascii=False,
+            )
+
+        async def planner(prompt: str) -> str:
+            planner_prompts.append(prompt)
+            return json.dumps({"nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}]}, ensure_ascii=False)
+
+        async def streamer(prompt: str):
+            answer_prompts.append(prompt)
+            yield "已完成。"
+
+        await self.reconfigure_runtime(
+            planner_text_generator=planner,
+            main_agent_stream_generator=streamer,
+            conversation_memory_resolution_generator=resolver,
+            skill_roots=[],
+        )
+
+        for content in ("查一下龙粳33的品种信息", "再查一下龙粳18"):
+            response = await self.submit_message(
+                conversation_id="conv-memory-llm-resolution",
+                content=content,
+                capability_id="main_agent.respond",
+            )
+            self.assertEqual(response.status_code, 202)
+            terminal = await self.wait_for_terminal_task(response.json()["task_id"])
+            self.assertEqual(terminal["status"], "completed")
+
+        response = await self.submit_message(
+            conversation_id="conv-memory-llm-resolution",
+            content="那它的基因型数据库里有什么？",
+            capability_id=None,
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+
+        self.assertGreaterEqual(len(resolution_prompts), 3)
+        self.assertIn("默认选择最近一次被明确提到的业务实体", resolution_prompts[-1])
+        self.assertIn("龙粳33", resolution_prompts[-1])
+        self.assertIn("龙粳18", resolution_prompts[-1])
+        self.assertEqual(len(planner_prompts), 1)
+        self.assertIn("系统根据历史补全后的 effective question", planner_prompts[0])
+        self.assertIn("查询龙粳18的基因型信息", planner_prompts[0])
+        self.assertIn("查询龙粳18的基因型信息", answer_prompts[-1])
+
+        memory_event = next(
+            event
+            for event in await self.runtime.storage.list_events_for_task(task_id)
+            if event.event_type == "conversation.memory_built"
+        )
+        self.assertTrue(memory_event.payload["resolved"])
+
     async def test_memory_builder_failure_falls_back_without_failing_task(self) -> None:
         class BrokenMemoryBuilder:
             async def build(self, _request, *, account_id=None):

@@ -29,6 +29,7 @@ class CapabilityDescriptor:
     public: bool = True
     kind: str = "capability"
     source: str = "builtin"
+    source_path: str = ""
 
 
 @dataclass(slots=True, frozen=True)

@@ -1,15 +1,30 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ReloadOutlined } from '@ant-design/icons';
-import { Alert, Badge, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
+import { CopyOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
 import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
 import type { ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
-import { applyTaskEvent, createInitialTaskEventState, createSubmittingTaskState, isTaskActive, markTaskCompleted, markTaskFailed, markWaitingInputRequired, type TaskEventState } from './domain/taskEvents';
+import { pickWelcomePrompt } from './domain/welcomePrompts';
+import {
+  applyTaskEvent,
+  createInitialTaskEventState,
+  createSubmittingTaskState,
+  isTaskActive,
+  markTaskCompleted,
+  markTaskFailed,
+  markWaitingInputRequired,
+  taskProgressDisplayText,
+  type TaskEventState,
+} from './domain/taskEvents';
 import { SqlQueryResultCard } from './components/SqlQueryResultCard';
 import { MarkdownText } from './components/MarkdownText';
 import './styles.css';
+
+const INPUT_MENU_BUTTON_IMAGE = '/pics/input-menu-plus-button.svg';
+const SEND_BUTTON_IMAGE = '/pics/send-up-arrow-button.svg?v=20260511-arrow-balanced';
+const ACCOUNT_SETTINGS_BUTTON_IMAGE = '/pics/account-settings-gear-button.svg?v=20260511-gear-visible';
 
 interface AppProps {
   apiClient?: ApiClient;
@@ -30,10 +45,11 @@ interface ConversationMessage {
   activityText?: string;
   artifactDisplays?: CapabilityArtifactDisplay[];
   finalContentLoaded?: boolean;
+  replyCompleted?: boolean;
   interruptPrompt?: PendingInterrupt;
 }
 
-type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'artifactDisplays' | 'finalContentLoaded' | 'interruptPrompt'>>;
+type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
 
 interface PendingInterrupt {
   taskId: string;
@@ -271,9 +287,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         const interrupts = await api.listInterrupts(taskId).catch(() => ({ task_id: taskId, interrupts: [] }));
         const openInterrupt = interrupts.interrupts.find((interrupt) => interrupt.status === 'open');
         if (!openInterrupt) {
+          const waitingProgressText = '正在等待任务给出补充信息';
+          if (currentAssistantId) {
+            updateAssistantMessage(currentAssistantId, { activityText: waitingProgressText });
+          }
           setTaskState((state) => ({
             ...state,
-            statusText: '正在等待任务给出补充信息',
+            statusText: waitingProgressText,
             errorMessage: null,
           }));
           return false;
@@ -464,6 +484,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       content: '',
       mode,
       reasoningRequested: deepThinking,
+      activityText: taskProgressDisplayText(createSubmittingTaskState()),
     };
     setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
     setCurrentAssistantId(assistantMessage.id);
@@ -566,13 +587,15 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleInterruptAnswer(content: string, interrupt: PendingInterrupt) {
+    const resumeProgressText = '补充信息已提交，正在继续任务';
     const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content, mode: interrupt.mode };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
       role: 'assistant',
-      content: '已收到补充信息，继续当前任务...',
+      content: '',
       mode: interrupt.mode,
       reasoningRequested: false,
+      activityText: resumeProgressText,
     };
     setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
     setCurrentAssistantId(assistantMessage.id);
@@ -580,7 +603,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setTaskState((state) => ({
       ...state,
       phase: 'running',
-      statusText: '补充信息已提交，正在继续任务',
+      statusText: resumeProgressText,
       assistantText: '',
       reasoningText: '',
       errorMessage: null,
@@ -609,14 +632,19 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   function handleTaskEvent(event: TaskEventEnvelope, taskId: string, assistantId: string) {
     setTaskState((previous) => {
       const next = applyTaskEvent(previous, event);
+      const previousProgressText = taskProgressDisplayText(previous);
+      const nextProgressText = taskProgressDisplayText(next);
       if (next.assistantText !== previous.assistantText) {
         updateAssistantStreamingContent(assistantId, next.assistantText);
+        if (next.assistantText) {
+          updateAssistantMessage(assistantId, { activityText: undefined });
+        }
       }
       if (next.reasoningText !== previous.reasoningText) {
         updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
       }
-      if (next.currentActivityText !== previous.currentActivityText) {
-        updateAssistantMessage(assistantId, { activityText: next.currentActivityText ?? undefined });
+      if (nextProgressText !== previousProgressText) {
+        updateAssistantMessage(assistantId, { activityText: next.assistantText ? undefined : nextProgressText });
       }
       if (['task.failed', 'node.failed', 'sql_query.sql_guard_blocked'].includes(event.event_type)) {
         subscriptionRef.current?.close();
@@ -629,7 +657,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       return next;
     });
     if (event.event_type === 'task.completed') {
-      updateAssistantMessage(assistantId, { reasoningComplete: true });
+      updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
       void loadArtifacts(taskId, assistantId);
     }
   }
@@ -661,6 +689,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           content: fallbackText ?? artifactSummary,
           artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
           finalContentLoaded: true,
+          replyCompleted: true,
         });
       }
       updateAssistantMessage(assistantId, { activityText: undefined });
@@ -743,7 +772,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   const interactionLocked = active || Boolean(pendingInterrupt);
-  const inputPlaceholder = pendingInterrupt ? interruptAnswerPlaceholder(pendingInterrupt) : '请输入你的问题，主代理会自动选择能力并规划执行。';
+  const inputPlaceholder = pendingInterrupt ? interruptAnswerPlaceholder(pendingInterrupt) : '从这里开始...';
   const composerMenuContent = (
     <Space direction="vertical" size="middle" className="composer-menu">
       <Button
@@ -852,15 +881,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           </div>
         ) : null}
         <main className="chat-workspace" aria-label="对话工作区">
-          <div className="task-status-floating" aria-label="任务进程悬浮胶囊">
-            <TaskStatusDropdown state={taskState} />
-          </div>
           <section className="app-content" aria-label="当前对话面板">
             <div ref={conversationListRef} className="conversation-list" aria-label="对话内容" onScroll={handleConversationScroll}>
-              {messages.length === 0 ? <EmptyWelcome /> : messages.map((message) => <MessageBubble key={message.id} message={message} />)}
-              {active && currentAssistantId && !taskState.assistantText && !taskState.currentActivityText ? (
-                <div className="assistant-pending"><Spin size="small" /> <span>等待任务事件...</span></div>
-              ) : null}
+              {messages.length === 0 ? <EmptyWelcome key={conversationId} /> : messages.map((message) => <MessageBubble key={message.id} message={message} />)}
             </div>
             <div
               className={`chat-floating-stack${draggingUpload ? ' chat-floating-stack-dragging' : ''}`}
@@ -920,6 +943,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       }}
                       placeholder={inputPlaceholder}
                       autoSize={{ minRows: 1, maxRows: 5 }}
+                      wrap="soft"
                       disabled={active && taskState.phase !== 'cancelling'}
                     />
                     <Popover
@@ -928,22 +952,38 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       placement="topRight"
                       overlayClassName="composer-menu-popover"
                     >
-                      <Button
-                        aria-label="打开输入功能菜单"
-                        className="composer-action-button composer-plus-button"
-                      >
-                        +
-                      </Button>
+                      <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="打开输入功能菜单">
+                        <Button
+                          aria-label="打开输入功能菜单"
+                          className="composer-action-button composer-image-button composer-plus-button"
+                        >
+                          <img
+                            aria-hidden="true"
+                            alt=""
+                            className="composer-button-image"
+                            draggable={false}
+                            src={INPUT_MENU_BUTTON_IMAGE}
+                          />
+                        </Button>
+                      </span>
                     </Popover>
-                    <Button
-                      type="primary"
-                      aria-label="发送"
-                      className="composer-send-button"
-                      onClick={handleSubmit}
-                      disabled={!input.trim() || active || uploadingFile}
-                    >
-                      发送
-                    </Button>
+                    <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="发送">
+                      <Button
+                        type="primary"
+                        aria-label="发送"
+                        className="composer-send-button composer-image-button"
+                        onClick={handleSubmit}
+                        disabled={!input.trim() || active || uploadingFile}
+                      >
+                        <img
+                          aria-hidden="true"
+                          alt=""
+                          className="composer-button-image"
+                          draggable={false}
+                          src={SEND_BUTTON_IMAGE}
+                        />
+                      </Button>
+                    </span>
                   </div>
                   <input
                     ref={uploadInputRef}
@@ -1133,17 +1173,18 @@ function ConversationHistoryPanel({
       title="历史会话"
       extra={(
         <Space size="small">
-          <Button
-            className="history-refresh-button"
-            size="small"
-            type="text"
-            shape="circle"
-            aria-label="刷新历史会话"
-            title="刷新"
-            icon={<ReloadOutlined aria-hidden="true" />}
-            onClick={onRefresh}
-            loading={loading}
-          />
+          <span className="button-tooltip-anchor" data-tooltip="刷新历史会话">
+            <Button
+              className="history-refresh-button"
+              size="small"
+              type="text"
+              shape="circle"
+              aria-label="刷新历史会话"
+              icon={<ReloadOutlined aria-hidden="true" />}
+              onClick={onRefresh}
+              loading={loading}
+            />
+          </span>
           <Button size="small" type="primary" onClick={onNewConversation} disabled={interactionLocked}>新建对话</Button>
         </Space>
       )}
@@ -1212,27 +1253,42 @@ function SidebarUserCard({
       className="sidebar-user-card"
       role="region"
       aria-label="用户信息与账户操作"
-      title="用户信息"
     >
       <Space direction="vertical" size="small" className="sidebar-user-stack">
         <div>
           <Typography.Text type="secondary">当前用户</Typography.Text>
           <Typography.Text strong className="sidebar-username">{user.username}</Typography.Text>
         </div>
-        <Space.Compact block>
-          <Button block onClick={onAccountSettings}>用户账户设置</Button>
-          <Button block danger onClick={onLogout}>退出登录</Button>
-        </Space.Compact>
+        <div className="sidebar-user-actions">
+          <span className="button-tooltip-anchor sidebar-user-tooltip-anchor" data-tooltip="用户账户设置">
+            <Button
+              type="text"
+              aria-label="用户账户设置"
+              className="sidebar-account-settings-button"
+              onClick={onAccountSettings}
+            >
+              <img
+                src={ACCOUNT_SETTINGS_BUTTON_IMAGE}
+                alt=""
+                aria-hidden="true"
+                draggable={false}
+                className="sidebar-account-settings-image"
+              />
+            </Button>
+          </span>
+          <Button className="sidebar-logout-button" danger onClick={onLogout}>退出登录</Button>
+        </div>
       </Space>
     </Card>
   );
 }
 
 function EmptyWelcome() {
+  const welcomePrompt = useMemo(() => pickWelcomePrompt(), []);
+
   return (
     <div className="empty-welcome">
-      <Typography.Title level={4}>开始一次业务问答</Typography.Title>
-      <Typography.Paragraph type="secondary">直接描述你的问题即可。</Typography.Paragraph>
+      <Typography.Title level={4}>{welcomePrompt}</Typography.Title>
     </div>
   );
 }
@@ -1325,11 +1381,15 @@ function interruptAnswerPlaceholder(interrupt: PendingInterrupt): string {
 function MessageBubble({ message }: { message: ConversationMessage }) {
   const className = message.role === 'user' ? 'message message-user' : 'message message-assistant';
   const shouldShowContent = Boolean(message.content);
+  const shouldShowReasoning = message.role === 'assistant' && (message.reasoningRequested || message.reasoningContent);
+  const shouldShowAssistantActions = message.role === 'assistant'
+    && (Boolean(message.finalContentLoaded) || Boolean(message.replyCompleted))
+    && Boolean(message.content.trim());
   return (
     <div className={className}>
       <div className="message-meta">{message.role === 'user' ? '你' : message.mode === 'sql_query' ? 'SQLQuery' : '主代理'}</div>
       <div className="message-body">
-        {message.role === 'assistant' && (message.reasoningRequested || message.reasoningContent) ? (
+        {shouldShowReasoning ? (
           <ReasoningBox content={message.reasoningContent ?? ''} complete={message.reasoningComplete} />
         ) : null}
         {message.interruptPrompt ? (
@@ -1345,8 +1405,50 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
           <ActivityNotice text="正在等待回答..." />
         )}
       </div>
+      {shouldShowAssistantActions ? (
+        <div className="message-actions" aria-label="回复操作">
+          <span className="button-tooltip-anchor message-action-tooltip-anchor" data-tooltip="复制">
+            <Button
+              type="text"
+              size="small"
+              shape="circle"
+              className="message-action-button"
+              aria-label="复制"
+              icon={<CopyOutlined aria-hidden="true" />}
+              onClick={() => {
+                void copyTextToClipboard(message.content);
+              }}
+            />
+          </span>
+        </div>
+      ) : null}
     </div>
   );
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall through to the legacy copy path when browser clipboard permissions reject the call.
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.opacity = '0';
+  try {
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+  } finally {
+    textarea.remove();
+  }
 }
 
 function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDisplay }) {
@@ -1424,78 +1526,16 @@ function ReasoningBox({ content, complete }: { content: string; complete?: boole
   );
 }
 
-function TaskStatusDropdown({ state }: { state: TaskEventState }) {
-  const type = taskStatusAlertType(state);
-  return (
-    <Popover
-      trigger="click"
-      placement="bottomRight"
-      title="任务进程"
-      content={(
-        <div className="task-status-popover">
-          <Alert
-            className="task-status-detail"
-            type={type}
-            showIcon
-            message={state.statusText}
-            description={state.errorMessage ?? undefined}
-          />
-          {state.currentActivityText ? <Typography.Text type="secondary">{state.currentActivityText}</Typography.Text> : null}
-        </div>
-      )}
-    >
-      <Button size="small" className="task-status-capsule" aria-label="任务进程">
-        <Space size="small">
-          <Badge status={taskStatusBadgeStatus(state)} />
-          <span>任务进程</span>
-          <Tag color={taskStatusTagColor(state)}>{taskStatusPhaseLabel(state)}</Tag>
-        </Space>
-      </Button>
-    </Popover>
-  );
-}
-
-function taskStatusAlertType(state: TaskEventState): 'success' | 'info' | 'warning' | 'error' {
-  if (state.phase === 'failed') return 'error';
-  if (state.phase === 'cancelled') return 'warning';
-  if (state.phase === 'completed') return 'success';
-  return 'info';
-}
-
-function taskStatusBadgeStatus(state: TaskEventState): 'success' | 'processing' | 'default' | 'error' | 'warning' {
-  if (state.phase === 'failed') return 'error';
-  if (state.phase === 'cancelled' || state.phase === 'cancelling' || state.phase === 'waiting_for_input') return 'warning';
-  if (isTaskActive(state.phase)) return 'processing';
-  if (state.phase === 'completed') return 'success';
-  return 'default';
-}
-
-function taskStatusTagColor(state: TaskEventState): string {
-  if (state.phase === 'failed') return 'red';
-  if (state.phase === 'cancelled' || state.phase === 'cancelling' || state.phase === 'waiting_for_input') return 'orange';
-  if (isTaskActive(state.phase)) return 'processing';
-  if (state.phase === 'completed') return 'green';
-  return 'default';
-}
-
-function taskStatusPhaseLabel(state: TaskEventState): string {
-  if (state.phase === 'idle') return '空闲';
-  if (state.phase === 'completed') return '完成';
-  if (state.phase === 'failed') return '失败';
-  if (state.phase === 'cancelled') return '已取消';
-  if (state.phase === 'waiting_for_input') return '待补充';
-  if (state.phase === 'cancelling') return '停止中';
-  return '运行中';
-}
-
 function messageFromHistory(message: MessageResponse): ConversationMessage | null {
   if (message.role !== 'user' && message.role !== 'assistant') return null;
+  const assistantReplyCompleted = message.role === 'assistant' && message.stream_status === 'complete';
   return {
     id: message.message_id,
     role: message.role,
     content: message.content,
     mode: 'chat',
-    finalContentLoaded: message.role === 'assistant',
+    finalContentLoaded: assistantReplyCompleted || undefined,
+    replyCompleted: assistantReplyCompleted || undefined,
   };
 }
 

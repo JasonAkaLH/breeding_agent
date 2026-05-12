@@ -8,6 +8,16 @@ from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryR
 from tests.api.support import APITestCase
 
 
+def _sqlquery_prompt_kind(prompt: str) -> str:
+    if "sql_query.intent_route" in prompt:
+        return "intent_route"
+    if "sql_query.sql_generate" in prompt:
+        return "sql_generate"
+    if "sql_query.result_filtering" in prompt:
+        return "result_filtering"
+    return "unknown"
+
+
 class MainAgentLoopOrchestrationAPITest(APITestCase):
     async def test_sqlquery_default_llm_does_not_reuse_main_agent_llm_override(self) -> None:
         class FakeMainAgentLLM:
@@ -54,6 +64,8 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
                 self.calls.append({"prompt": prompt, "thinking": thinking, "reasoning_effort": reasoning_effort})
+                if "sql_query.intent_route" in prompt:
+                    return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
                 if "sql_query.sql_generate" in prompt:
                     return json.dumps(
                         {
@@ -108,10 +120,10 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
         self.assertEqual(len(FakeDefaultSQLQueryLLM.instances), 1)
         sql_calls = FakeDefaultSQLQueryLLM.instances[0].calls
         self.assertEqual(
-            ["sql_generate" if "sql_query.sql_generate" in call["prompt"] else "result_filtering" for call in sql_calls],
-            ["sql_generate", "result_filtering"],
+            [_sqlquery_prompt_kind(call["prompt"]) for call in sql_calls],
+            ["intent_route", "sql_generate", "result_filtering"],
         )
-        self.assertTrue(all(call["thinking"] is True for call in sql_calls))
+        self.assertEqual([call["thinking"] for call in sql_calls], [False, True, True])
         self.assertTrue(all(call["reasoning_effort"] == "high" for call in sql_calls))
 
     async def test_default_auto_flow_separates_main_agent_and_sqlquery_llm_instances(self) -> None:
@@ -166,6 +178,9 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
                 self.calls.append({"method": "generate_text", "prompt": prompt, "thinking": thinking, "reasoning_effort": reasoning_effort})
+                if "sql_query.intent_route" in prompt:
+                    call_log.append("sql:intent_route")
+                    return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
                 if "sql_query.sql_generate" in prompt:
                     call_log.append("sql:sql_generate")
                     return json.dumps(
@@ -232,14 +247,11 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
                 main_prompt_kinds.append("plan")
             elif "你是小奥 Agent 的主代理" in prompt:
                 main_prompt_kinds.append("answer")
-        sql_prompt_kinds = [
-            "sql_generate" if "sql_query.sql_generate" in call["prompt"] else "result_filtering"
-            for call in sql_client.calls
-        ]
+        sql_prompt_kinds = [_sqlquery_prompt_kind(call["prompt"]) for call in sql_client.calls]
         self.assertEqual(main_prompt_kinds, ["plan", "answer"])
-        self.assertEqual(sql_prompt_kinds, ["sql_generate", "result_filtering"])
-        self.assertEqual(call_log, ["main:plan", "sql:sql_generate", "sql:result_filtering", "main:answer"])
-        self.assertTrue(all(call["thinking"] is True for call in sql_client.calls))
+        self.assertEqual(sql_prompt_kinds, ["intent_route", "sql_generate", "result_filtering"])
+        self.assertEqual(call_log, ["main:plan", "sql:intent_route", "sql:sql_generate", "sql:result_filtering", "main:answer"])
+        self.assertEqual([call["thinking"] for call in sql_client.calls], [False, True, True])
         self.assertTrue(all(call["reasoning_effort"] == "high" for call in sql_client.calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)
@@ -324,6 +336,9 @@ class MainAgentLoopRuntimeReplanAPITest(APITestCase):
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
                 self.calls.append({"method": "generate_text", "prompt": prompt, "thinking": thinking, "reasoning_effort": reasoning_effort})
+                if "sql_query.intent_route" in prompt:
+                    call_log.append("sql:intent_route")
+                    return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
                 if "sql_query.sql_generate" in prompt:
                     call_log.append("sql:sql_generate")
                     return json.dumps(
@@ -397,14 +412,11 @@ class MainAgentLoopRuntimeReplanAPITest(APITestCase):
                 main_prompt_kinds.append("replan")
             elif "你是小奥 Agent 的主代理" in prompt:
                 main_prompt_kinds.append("answer")
-        sql_prompt_kinds = [
-            "sql_generate" if "sql_query.sql_generate" in call["prompt"] else "result_filtering"
-            for call in sql_client.calls
-        ]
+        sql_prompt_kinds = [_sqlquery_prompt_kind(call["prompt"]) for call in sql_client.calls]
         self.assertEqual(main_prompt_kinds, ["plan", "replan", "answer"])
-        self.assertEqual(sql_prompt_kinds, ["sql_generate", "sql_generate", "result_filtering"])
-        self.assertEqual(call_log, ["main:plan", "sql:sql_generate", "main:replan", "sql:sql_generate", "sql:result_filtering", "main:answer"])
-        self.assertTrue(all(call["thinking"] is True for call in sql_client.calls))
+        self.assertEqual(sql_prompt_kinds, ["intent_route", "sql_generate", "intent_route", "sql_generate", "result_filtering"])
+        self.assertEqual(call_log, ["main:plan", "sql:intent_route", "sql:sql_generate", "main:replan", "sql:intent_route", "sql:sql_generate", "sql:result_filtering", "main:answer"])
+        self.assertEqual([call["thinking"] for call in sql_client.calls], [False, True, False, True, True])
         self.assertTrue(all(call["reasoning_effort"] == "high" for call in sql_client.calls))
 
         events = await self.runtime.storage.list_events_for_task(task_id)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import Protocol
 
@@ -52,6 +52,7 @@ class LLMWorkflowProvider:
         capability_registry: CapabilityRegistry,
         fallback_provider: WorkflowProvider,
         macro_providers: Mapping[str, WorkflowProvider],
+        macro_provider_resolver: Callable[[str], WorkflowProvider | None] | None = None,
         text_generator: TextGenerator | None = None,
         payload_policies: Mapping[str, CapabilityPayloadPolicy] | None = None,
         max_repair_attempts: int = 1,
@@ -60,7 +61,10 @@ class LLMWorkflowProvider:
         self._fallback_provider = fallback_provider
         self._macro_providers = dict(macro_providers)
         self._text_generator = text_generator
-        self._expander = WorkflowExpander(self._macro_providers)
+        self._expander = WorkflowExpander(
+            self._macro_providers,
+            macro_provider_resolver=macro_provider_resolver,
+        )
         self._public_validator = WorkflowPlanValidator(capability_registry, public_only=True)
         self._internal_validator = WorkflowPlanValidator(capability_registry, public_only=False)
         self._payload_policy_overrides = dict(payload_policies or {})

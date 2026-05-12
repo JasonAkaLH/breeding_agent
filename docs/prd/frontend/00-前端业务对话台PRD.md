@@ -303,7 +303,7 @@ v1 后端没有服务端会话列表和历史检索 API，因此前端只做最�
 
 ## 12. 技术选型建议与约束（草案）
 
-本节用于约束 v1 前端实施方向，避免在未开始实现前过早引入重型框架或与当前后端事件模型不匹配的对话 SDK。技术选型在进入实现前仍应补充到 `docs/dev_processes/frontend/` 的实施文档中；本文先给出 PRD 级推荐口径。
+本节用于约束 v1 前端实施方向，避免在未开始实现前过早引入重型框架或与当前后端事件模型不匹配的对话 SDK。技术选型后续如需调整，应直接补充到前端 PRD 或新增前端专题 PRD；本文先给出 PRD 级推荐口径。
 
 ### 12.1 行业常见路线判断
 
@@ -353,7 +353,7 @@ React + TypeScript + Vite + Ant Design + EventSource/SSE
 2. 前端不得为了适配 UI SDK 而要求后端改变 `event_type`、artifact 类型或 SQLQuery public capability 边界。
 3. 如果未来选择 Next.js，应明确其职责是前端应用框架还是 BFF；不得把后端 orchestration 逻辑迁入前端服务层。
 4. 如果未来引入 AI 对话 SDK，应先定义兼容层，而不是让 UI 直接依赖第三方 stream protocol。
-5. 技术选型进入实现前，应在 `docs/dev_processes/frontend/` 补充：
+5. 技术选型发生重大变化前，应在前端 PRD 中补充：
    - 工程目录结构；
    - API client 与 SSE client 设计；
    - event reducer / 状态机设计；

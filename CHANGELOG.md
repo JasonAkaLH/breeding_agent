@@ -10,6 +10,113 @@
 
 ## [Unreleased]
 
+### 2026-05-12 — 实现 MCP Runtime Phase 1 基线
+
+- 新增 `src/integrations/mcp/`，实现 MCP 2025-11-25 client runtime 基线：JSON-RPC lifecycle、`initialize` / `notifications/initialized`、request id 关联、Streamable HTTP transport、协议 / session header、tools/list 分页、tools/call、SSE JSON 响应解析、静态鉴权注入与授权 / 协议错误映射。
+- 新增 `MCPRuntimeState` 不可变 bundle 与 allowlist 公开策略，将受控 read-only MCP tool 转换为 public `mcp.*` capability descriptor、payload policy 与 capability 到 server/tool binding；发现失败保留旧 bundle，optional server 失败不影响内置能力。
+- 新增 `src/capabilities/mcp_tool/` generic executor，执行前按 planner allowlist 和 JSON Schema fail-closed 校验输入，执行后把 MCP `structuredContent` / text content 映射为 `CapabilityExecutionResult`，并输出脱敏 audit-only 调用事件。
+- API runtime 支持显式 `mcp_config` / `mcp_client_factory` 注入，启动期注册 MCP capability、实例与 executor，shutdown 时关闭 MCP client；主代理依赖上下文允许接收清洗后的 MCP tool 输出用于最终汇总。
+- 补充 integrations / capability / orchestration / API 回归测试，覆盖 lifecycle、分页、allowlist、schema 校验、注册、Planner 选择 MCP capability、主代理汇总、发现失败降级与 shutdown 关闭。
+- 将 `docs/prd/backend/14-MCPRuntime实现需求PRD.md` 文档状态更新为 Phase 1 已实现，并追加当前实现范围与 Phase 2 留白。
+- 根据架构复核补齐 MCP 安全闭环：外部输出进入主代理前会粗粒度脱敏并屏蔽 URL，执行结果按 `outputSchema` 校验，空 planner allowlist 改为 fail-closed，MCP refresh 采用 pending bundle 同步成功后再 commit 的激活流程。
+
+### 2026-05-12 — 新增 MCP Runtime 实现需求 PRD
+
+- 新增 `docs/prd/backend/14-MCPRuntime实现需求PRD.md`，明确 MCP Runtime 作为外部 MCP server / tools 的 client runtime 接入层，原始 MCP tool 必须先经 `src/integrations/mcp/` 适配并由 capability 包装后进入现有编排体系。
+- 按 MCP latest spec 2025-11-25 重写通信协议要求，覆盖 JSON-RPC 2.0、lifecycle negotiation、Streamable HTTP / stdio 标准 transport 抽象、`MCP-Protocol-Version`、`MCP-Session-Id`、SSE reconnect、authorization、tools/list、tools/call、icons 与 experimental tasks metadata 边界。
+- 对 MCP Runtime PRD 做 document-perfectization 复审修订，补齐最小 client capabilities、`notifications/initialized`、request id 唯一性、unsupported client feature 响应、schema dialect、OAuth Phase 1/2 边界、bundle 原子激活、SSE 复连、授权错误映射和协议级验收标准。
+- 更新 `docs/prd/README.md` 与 `docs/prd/backend/00-主代理框架PRD.md` 后端专题索引和关键决策，将 MCP Runtime 纳入后端 PRD 基线。
+
+### 2026-05-12 — 收紧 Skill 渐进式披露发现层
+
+- 主代理隐式 Skill fallback 匹配默认只注入最高分的单个 Skill 指令，保留调用方显式 `max_matches` 扩展能力，降低多 Skill 全文同时进入 prompt 的过披露风险。
+- `CapabilityDescriptor`、Planner public capability 目录与 `/api/v1/capabilities` 增加 Skill `source_path` 摘要，让发现层更接近 Codex 的 name / description / path 粒度，同时保持 API 字段向后兼容。
+- Planner public capability 列表增加 8000 字符预算控制，超限时先缩短 description，再省略尾部 capability 并提示预算省略，避免大规模 Skill 池挤占规划上下文。
+
+### 2026-05-12 — 拉宽历史会话条目边界
+
+- 左侧历史会话列表条目改为 full-bleed 显示，左边贴齐页面边缘、右边贴齐左侧栏右边缘，并移除条目之间的纵向空隙。
+- 历史条目的“重命名 / 删除”操作区与按钮说明小气泡保持同一触发机制：只在鼠标悬浮条目时出现，点击造成的 focus 不再让操作区常驻。
+
+### 2026-05-11 — 提高上传文档默认大小上限
+
+- 上传 JSON / CSV 文档的默认大小上限从 2MB 提高到 20MB，并用常量 `DEFAULT_MAX_UPLOAD_FILE_BYTES` 固化，避免后续代码分散硬编码。
+
+### 2026-05-11 — 收紧上传文件大小早期校验
+
+- 上传接口改为按固定 chunk 分块读取文件内容，并在读取过程中根据 `upload_store.max_file_bytes` 立即拒绝超限文件，避免先完整读入超大上传再校验。
+- 保留 `InMemoryUploadStore.save()` 内部大小校验作为二次防线，并补充 API / helper 回归测试覆盖超限早拒绝、刚好等于限制、权限预检优先于大小校验和正常上传路径。
+
+### 2026-05-11 — 实现 Skill 新聊天动态加载闭环
+
+- 新增 `SkillRuntimeState` / `SkillRuntimeBundle`，将 Skill catalog、public `skill.*` capability、capability 到 Skill 映射、revision 与刷新结果收口为进程内不可变快照；刷新时按 `SKILL.md` 内容指纹判断是否需要激活新 bundle。
+- API runtime 在新 conversation 首次任务提交前刷新 Skill bundle，并同步更新 `CapabilityRegistry`，确保新增、修改或删除公开项目 Skill 后，不重启服务也能影响后续新聊天的 Planner prompt、显式 `skill.*` 路由与 `/api/v1/capabilities`。
+- `WorkflowExpander`、`LLMWorkflowProvider`、`AutoWorkflowProvider`、`MainAgentRuntimeReplanner` 与 `SkillWorkflowProvider` 支持动态 Skill macro provider / skill name resolver，避免只更新 registry 后出现 Planner 可见但 macro 展开或 forced skill 执行不可见的半刷新状态。
+- `MainAgentExecutor` 支持按 `skill_bundle_revision` 解析对应 Skill catalog；任务调度时记录并 retain revision，运行中任务不会因后续 Skill 刷新改变 forced skill manifest 解析。
+- 增加 `skill.bundle_refresh_*` 审计和 `skill_bundle_revision` 计划 / forced skill 事件字段，并补充 integration / orchestration / API 回归测试覆盖新增、删除、显式路由、刷新失败回退、上传先建 conversation 后首次消息、动态 macro 展开与旧 revision 保留。
+- 同步更新 `docs/prd/backend/13-Skill动态加载与热部署PRD.md` 状态为 Phase 1 已实现，并明确当前仍以 `script_package_snapshot=false` 作为后续生产级热部署增强边界。
+
+### 2026-05-11 — 新增 Skill 动态加载与热部署 PRD
+
+- 新增 `docs/prd/backend/13-Skill动态加载与热部署PRD.md`，明确当前 Skill 加载仍是 runtime 启动期一次性扫描，新聊天热部署需要以 Skill runtime bundle 为单位同步刷新 catalog、capability registry、macro providers、Planner / Replanner 与主代理 forced skill 执行链路。
+- PRD 将“新聊天动态加载”的后端可靠触发点定义为新 conversation 首次任务提交前，并补充新增 / 修改 / 删除 Skill、刷新失败回退、运行中任务 revision 保护、生产级 package snapshot、安全边界、审计事件与测试验收标准。
+- 同步更新 `docs/prd/README.md` 与后端 PRD 总览索引，将 Skill 动态加载与热部署纳入后续后端专题基线。
+
+### 2026-05-11 — 接入 SQLQuery 内部 LLM 语义路由
+
+- SQLQuery 内部 `intent_route` 现在会复用已配置的 SQLQuery LLM runtime 判断具体查询路由，即审定品种库、基因型数据库或品种综合概览；LLM 输出仍必须命中已配置 `route_id`，否则回退到原有规则路由。
+- `SQLQueryExecutor` 将 `llm_text_generator` 注入到 `SQLQueryIntentRouteCapability`，让“具体查哪个库”的判断与 SQL 生成 / 结果筛选共用同一套 SQLQuery LLM 配置；路由判断固定走非流式、`thinking=False` 的轻量调用，不继承前端深度思考开关。
+- 高层 LLM Planner 和 SQLQuery 宏展开不再向内部 `intent_route` 透传 `route_hint`，Planner 只能选择是否调用 `sql_query.query`，不能代替 SQLQuery 内部 LLM 决定具体数据库。
+- 补充 executor 与 API runtime 回归测试，覆盖 SQLQuery 内部路由 LLM 调用、请求元数据透传和后续 SQL 生成 / 结果筛选链路。
+
+### 2026-05-11 — 优化前端生成进度提示
+
+- 前端生成中的助手气泡不再展示“等待任务事件...”，改为在助手气泡内保留转圈并展示当前任务进展，如提交中、任务已提交、正在规划、正在执行 SQLQuery 等。
+- 任务事件到达时会用同一套任务状态文案实时刷新助手气泡内处理提示；答案开始流式输出后自动切换为回答内容。
+- 修复任务中断后提交补充信息的续跑气泡仍显示固定“已收到补充信息”文案的问题，续跑阶段同样展示可刷新的任务进程。
+- 删除右上角“任务进程”悬浮胶囊，避免同一任务进度在页面上重复出现。
+- 悬浮发送栏收敛为单一半透明毛玻璃输入胶囊，去掉外层背景、网格与状态字，只保留克制的输入、功能菜单与发送入口。
+- 页面按钮统一加入克制的 liquid glass 视觉语言，并弱化主页左侧栏硬分割线、历史列表分割线和卡片头部线条，让整体更轻。
+- 功能菜单入口改为严格圆形按钮，`+` 号由字体字形改为两条 CSS 线绘制，避免字体基线导致视觉不居中。
+- 新增 `frontend/public/pics/input-menu-plus-button.svg` 与 `frontend/public/pics/send-up-arrow-button.svg` 两个毛玻璃 / 液态玻璃按钮资源，并将发送栏功能菜单与发送按钮切换为图片按钮。
+- 重新调整发送按钮图片中的向上箭头为深色主描边，并保留轻微高光，提升箭头与液态玻璃背景的对比度。
+- 移除发送按钮 SVG 中覆盖在箭头中心的浅色高光线，改为深色箭头叠加外圈浅色 halo，同时提高发送按钮禁用态图片不透明度，避免空输入时箭头显得过浅。
+- 发送按钮的向上箭头最终收口为整支纯深色描边，并取消发送按钮图片禁用态降透明度，确保空输入时箭头仍清晰可见。
+- 发送按钮向上箭头从近黑粗描边调为深灰绿细描边，降低图标压迫感并保留足够对比度。
+- 为发送按钮图片 URL 增加版本查询参数，避免 Chrome 继续复用同名 SVG 缓存导致箭头视觉调整不生效。
+- 悬浮发送栏桌面端宽度缩短约 33%，并改为按右侧工作区中心点居中定位；窄屏仍保持左右安全边距铺开。
+- 补充消息输入框长文本回归测试，明确发送栏不设置 `maxlength`，长文本会原样提交给后端。
+- 调整发送栏长文本输入态：降低外层和文本域圆角、增加右侧内边距和稳定滚动槽，并将功能按钮底部对齐，避免多行输入被胶囊圆角或滚动条视觉遮挡。
+- 去掉左侧用户信息卡片的“用户信息”头部顶栏，仅保留当前用户、账户设置和退出登录操作区。
+- 左侧栏内部历史区与用户信息区改为 0 间距贴合布局，并移除左侧栏内部卡片与历史条目的圆角，让边缘更对齐。
+- 在左侧历史区与用户信息区之间补充一条低存在感细分隔线，保持贴合布局同时提供轻量区分；分隔线改为半像素浅色伪元素，避免过粗过深。
+- 新增 `frontend/src/domain/welcomePrompts.ts` 固化 20 条冷静专业的新任务欢迎语，空对话欢迎区每次进入新空会话时随机展示一句，并移除原固定副标题。
+- 发送栏默认占位文本从长提示改为“从这里开始...”，降低输入入口视觉噪音。
+- 新增 `frontend/public/pics/account-settings-gear-button.svg` 圆形齿轮图片按钮，并将用户信息卡片的“用户账户设置”改为左下角图形入口。
+- 修正账户设置按钮 SVG 齿轮图层的 filter 裁剪范围，并为图片 URL 增加版本参数，避免浏览器继续显示无齿轮的旧缓存。
+- 为刷新历史、用户账户设置、输入功能菜单与发送等图标 / 图片按钮补充 hover 小气泡说明，避免仅靠图标猜测按钮功能。
+- 将按钮说明小气泡收口为纯 hover 触发，不再因点击后的 focus 状态常驻页面。
+- 在已完成的助手回复气泡底部新增灰色图标“复制”操作，可复制该气泡的文本内容；流式生成未完成时不显示该操作。
+- 复制操作在浏览器 Clipboard API 拒绝时会降级到临时文本域复制；历史助手消息也会依据 `stream_status=complete` 决定是否展示复制按钮。
+- 补充前端任务状态与 App 回归测试，覆盖无回答流时助手气泡内进度刷新和胶囊入口移除。
+
+### 2026-05-11 — 接入 LLM 保守对话补全
+
+- `ConversationMemoryBuilder` 新增保守 LLM resolver：在任务规划前用结构化 JSON 判断当前用户问题是否需要基于同一会话历史补全实体，只有高置信、证据完整且无阻断风险时才采用补全文本。
+- 多候选实体补全策略改为“最近明确业务实体优先”；若最近上下文包含多个并列实体且单数指代不清，则不补全。
+- LLM resolver 输出非法、调用失败或未启用时保持确定性补全 fallback；SQLQuery 仍只接收系统补全后的 effective question，不接收完整 conversation memory metadata。
+- 补充 orchestration / API 测试覆盖 LLM 补全、最近实体选择、并列歧义拒绝和非法输出 fallback，并更新对话记忆 PRD。
+
+### 2026-05-11 — 新增 Agent 基础设施优化建议
+
+- 新增 `docs/Agent基础设施优化建议.md`，沉淀当前 Agent infra 成熟度判断、主要短板，以及生产运行基座、资源治理、可观测性、Capability 插件化与 Skill sandbox 等后续优化优先级。
+- 删除已被 PRD / Phase 体系吸收的根目录历史文档：`docs/SQLQuery-LLM版本改造方案.md`、`docs/LLM接入阶段建议.md`、`docs/一期开发计划.md`、`docs/第二阶段评估输入.md`、`docs/一期核心模块边界.md`、`docs/一期验收报告.md`。
+- 删除 `docs/dev_processes/` 开发流程目录，将当前文档权威源收口到 `docs/prd/`、`README.md`、`AGENTS.md` 与 `CHANGELOG.md`。
+- 将 `docs/一期验收报告.md` 的关键验收结论、测试证据与一期边界并入 `docs/prd/backend/00-主代理框架PRD.md`，避免删除历史文档与开发流程目录后丢失验收依据。
+- 更新 `README.md`、`AGENTS.md`、`docs/prd/README.md`、后端专题 PRD、前端 PRD、Capability 接入指南与本建议文档中的引用说明，避免正式入口继续指向已删除历史文档或开发流程目录。
+- 历史文档清理完成后，移除 `docs/Agent基础设施优化建议.md` 中的“历史文档清理判断”章节，让该文档聚焦 infra 优化建议。
+- 本次仅调整文档，不改变运行时代码与测试基线。
+
 ### 2026-05-11 — 调整前端历史记忆条目交互
 
 - 左侧历史 / 记忆栏条目从 Ant Design 气泡按钮改为扁平列表行，使用左侧农业绿强调线标记当前会话，减少侧栏视觉噪音。

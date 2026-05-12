@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any, Mapping
 
 from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
@@ -53,6 +54,7 @@ class MainAgentRespondCapability(CapabilityContract):
         stream_metadata: Mapping[str, Any] | None = None,
         default_reasoning_effort: ReasoningEffort = "minimal",
         skill_catalog: SkillCatalog | None = None,
+        skill_catalog_resolver: Callable[[str | None], SkillCatalog] | None = None,
         script_runner: SkillScriptRunner | None = None,
         skill_input_text_generator: SkillInputTextGenerator | None = None,
         skill_output_artifact_manager: SkillOutputArtifactManager | None = None,
@@ -62,6 +64,7 @@ class MainAgentRespondCapability(CapabilityContract):
         self._stream_metadata = self._sanitize_stream_metadata(stream_metadata or {})
         self._default_reasoning_effort = default_reasoning_effort
         self._skill_catalog = skill_catalog or SkillCatalog(())
+        self._skill_catalog_resolver = skill_catalog_resolver
         self._script_runner = script_runner or SkillScriptRunner()
         self._skill_input_text_generator = skill_input_text_generator
         self._skill_output_artifact_manager = skill_output_artifact_manager
@@ -222,11 +225,23 @@ class MainAgentRespondCapability(CapabilityContract):
         )
 
     def _resolve_skill_matches(self, request: CapabilityExecutionRequest, user_message: str) -> tuple[list[SkillMatch], list[Any]]:
+        revision = self._skill_bundle_revision(request)
+        try:
+            skill_catalog = self._resolve_skill_catalog(revision)
+        except KeyError:
+            return [], [
+                make_event(
+                    request,
+                    event_type="skill.bundle_missing",
+                    payload={"skill_bundle_revision": revision},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            ]
         forced_skill_name = self._forced_skill_name(request)
         if not forced_skill_name:
-            return match_skills(user_message, self._skill_catalog), []
+            return match_skills(user_message, skill_catalog), []
 
-        manifest = self._skill_catalog.get(forced_skill_name)
+        manifest = skill_catalog.get(forced_skill_name)
         if manifest is None:
             return [], [
                 make_event(
@@ -236,6 +251,7 @@ class MainAgentRespondCapability(CapabilityContract):
                         "skill_name": forced_skill_name,
                         "capability_id": self._forced_skill_capability_id(request),
                         "source": self._forced_skill_source(request),
+                        "skill_bundle_revision": revision,
                     },
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
@@ -249,10 +265,16 @@ class MainAgentRespondCapability(CapabilityContract):
                     "skill_name": manifest.name,
                     "capability_id": self._forced_skill_capability_id(request),
                     "source": self._forced_skill_source(request),
+                    "skill_bundle_revision": revision,
                 },
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         ]
+
+    def _resolve_skill_catalog(self, revision: str | None) -> SkillCatalog:
+        if self._skill_catalog_resolver is not None:
+            return self._skill_catalog_resolver(revision)
+        return self._skill_catalog
 
     @staticmethod
     def _forced_skill_name(request: CapabilityExecutionRequest) -> str:
@@ -268,6 +290,11 @@ class MainAgentRespondCapability(CapabilityContract):
     def _forced_skill_source(request: CapabilityExecutionRequest) -> str:
         value = request.metadata.get("forced_skill_source")
         return str(value).strip() if value else "unknown"
+
+    @staticmethod
+    def _skill_bundle_revision(request: CapabilityExecutionRequest) -> str | None:
+        value = request.metadata.get("skill_bundle_revision")
+        return str(value).strip() if value else None
 
     async def _run_auto_scripts(self, request, user_message, artifact_context, skill_matches):
         script_results: list[dict[str, Any]] = []
@@ -579,6 +606,7 @@ class MainAgentExecutor(ExecutorPort):
         stream_metadata: Mapping[str, Any] | None = None,
         default_reasoning_effort: ReasoningEffort = "minimal",
         skill_catalog: SkillCatalog | None = None,
+        skill_catalog_resolver: Callable[[str | None], SkillCatalog] | None = None,
         script_runner: SkillScriptRunner | None = None,
         skill_input_text_generator: SkillInputTextGenerator | None = None,
         skill_output_artifact_manager: SkillOutputArtifactManager | None = None,
@@ -590,6 +618,7 @@ class MainAgentExecutor(ExecutorPort):
                 stream_metadata=stream_metadata,
                 default_reasoning_effort=default_reasoning_effort,
                 skill_catalog=skill_catalog,
+                skill_catalog_resolver=skill_catalog_resolver,
                 script_runner=script_runner,
                 skill_input_text_generator=skill_input_text_generator,
                 skill_output_artifact_manager=skill_output_artifact_manager,

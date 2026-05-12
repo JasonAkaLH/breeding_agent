@@ -1,8 +1,45 @@
 from __future__ import annotations
 
 import json
+import unittest
 
+from src.api.routes.uploads import _read_upload_content_with_limit
+from src.api.upload_store import DEFAULT_MAX_UPLOAD_FILE_BYTES, InMemoryUploadStore, UploadValidationError
 from tests.api.support import APITestCase
+
+
+class _ChunkedUpload:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.read_calls = 0
+
+    async def read(self, size: int = -1):
+        self.read_calls += 1
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+
+class UploadReadLimitTest(unittest.IsolatedAsyncioTestCase):
+    def test_default_upload_limit_is_twenty_mebibytes(self) -> None:
+        self.assertEqual(DEFAULT_MAX_UPLOAD_FILE_BYTES, 20 * 1024 * 1024)
+        self.assertEqual(InMemoryUploadStore().max_file_bytes, DEFAULT_MAX_UPLOAD_FILE_BYTES)
+
+    async def test_read_upload_content_stops_as_soon_as_limit_is_exceeded(self) -> None:
+        upload = _ChunkedUpload([b"12345", b"67890", b"extra-should-not-be-read"])
+
+        with self.assertRaisesRegex(UploadValidationError, "exceeds 9 bytes"):
+            await _read_upload_content_with_limit(upload, max_bytes=9, chunk_size=5)
+
+        self.assertEqual(upload.read_calls, 2)
+
+    async def test_read_upload_content_allows_exact_limit(self) -> None:
+        upload = _ChunkedUpload([b"12345", b"67890"])
+
+        content = await _read_upload_content_with_limit(upload, max_bytes=10, chunk_size=5)
+
+        self.assertEqual(content, b"1234567890")
+        self.assertEqual(upload.read_calls, 3)
 
 
 class UploadsAPITest(APITestCase):
@@ -100,6 +137,17 @@ class UploadsAPITest(APITestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    async def test_upload_rejects_oversized_file_with_configured_limit(self) -> None:
+        self.runtime.upload_store.max_file_bytes = 16
+
+        response = await self.client.post(
+            "/api/v1/conversations/conv-upload/uploads",
+            files={"file": ("large.csv", "col\n" + "x" * 32, "text/csv")},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("exceeds 16 bytes", response.json()["detail"])
+
     async def test_upload_and_reference_are_owner_scoped(self) -> None:
         upload = await self.client.post(
             "/api/v1/conversations/conv-owned/uploads",
@@ -117,6 +165,13 @@ class UploadsAPITest(APITestCase):
         )
         self.assertEqual(forbidden_upload.status_code, 404)
 
+        self.runtime.upload_store.max_file_bytes = 16
+        forbidden_oversized_upload = await self.client.post(
+            "/api/v1/conversations/conv-owned/uploads",
+            files={"file": ("large.csv", "col\n" + "x" * 32, "text/csv")},
+        )
+        self.assertEqual(forbidden_oversized_upload.status_code, 404)
+
         submitted = await self.submit_message(
             conversation_id="conv-owned",
             account_id="bob",
@@ -128,6 +183,4 @@ class UploadsAPITest(APITestCase):
 
 
 if __name__ == "__main__":
-    import unittest
-
     unittest.main()

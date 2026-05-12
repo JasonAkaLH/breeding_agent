@@ -56,9 +56,10 @@ class AutoWorkflowProviderTest(unittest.TestCase):
         intent_nodes = [node for node in plan.nodes if node.capability_id == "sql_query.intent_route"]
         self.assertEqual(len(intent_nodes), 2)
         self.assertEqual(
-            [node.input_payload["route_hint"] for node in intent_nodes],
-            ["approval_variety_db", "genotype_db"],
+            [node.input_payload["user_question"] for node in intent_nodes],
+            ["查询龙粳33的审定信息", "查询龙粳33的基因型信息"],
         )
+        self.assertTrue(all("route_hint" not in node.input_payload for node in intent_nodes))
         self.assertEqual(
             [node.input_payload["subtask_label"] for node in intent_nodes],
             ["审定信息", "基因型信息"],
@@ -87,9 +88,10 @@ class AutoWorkflowProviderTest(unittest.TestCase):
         intent_nodes = [node for node in plan.nodes if node.capability_id == "sql_query.intent_route"]
         self.assertEqual(len(intent_nodes), 2)
         self.assertEqual(
-            [node.input_payload["route_hint"] for node in intent_nodes],
-            ["approval_variety_db", "genotype_db"],
+            [node.input_payload["user_question"] for node in intent_nodes],
+            ["查询龙粳33的审定信息", "查询龙粳33的基因型信息"],
         )
+        self.assertTrue(all("route_hint" not in node.input_payload for node in intent_nodes))
         self.assertEqual(plan.metadata["auto_strategy"], "deterministic_sql_query_decomposed_then_main_agent")
 
     def test_plain_chat_falls_back_to_main_agent_only(self) -> None:

@@ -464,9 +464,8 @@ npm run build
 
 1. `CHANGELOG.md`：记录能力目的、接入点、验证结果；
 2. `docs/prd/backend/`：如果是新业务能力或新架构边界，补 PRD 或专题说明；
-3. `docs/dev_processes/backend/`：如果是阶段性实现，补 Phase / 实施记录；
-4. 本指南：如果接入流程发生变化，更新本文件；
-5. `README.md` / `AGENTS.md`：只有新增标准命令、目录职责或长期规则时才改。
+3. 本指南：如果接入流程发生变化，更新本文件；
+4. `README.md` / `AGENTS.md`：只有新增标准命令、目录职责或长期规则时才改。
 
 ---
 

@@ -19,6 +19,7 @@ SUPPORTED_UPLOAD_CONTENT_TYPES: dict[str, Literal["json", "csv"]] = {
     "application/csv": "csv",
     "application/vnd.ms-excel": "csv",
 }
+DEFAULT_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024
 
 
 class UploadValidationError(ValueError):
@@ -62,7 +63,7 @@ class InMemoryUploadStore:
     def __init__(
         self,
         *,
-        max_file_bytes: int = 2 * 1024 * 1024,
+        max_file_bytes: int = DEFAULT_MAX_UPLOAD_FILE_BYTES,
         ttl_seconds: int = 30 * 60,
         max_files_per_account: int = 20,
         now_fn: Callable[[], datetime] | None = None,

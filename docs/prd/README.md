@@ -16,12 +16,13 @@
 - 对话记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`。
 - Skill 输出文件 Artifact 与下载 PRD：`docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`。
 - Skill 一等 Capability 能力池 PRD：`docs/prd/backend/12-Skill一等Capability能力池PRD.md`。
+- Skill 动态加载与热部署 PRD：`docs/prd/backend/13-Skill动态加载与热部署PRD.md`。
+- MCP Runtime 实现需求 PRD：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`。
 
 新增或补齐后端能力范围时，应同步更新：
 1. `docs/prd/backend/00-主代理框架PRD.md` 的专题索引；
 2. 对应专题 PRD 文件；
-3. `docs/dev_processes/backend/README.md` 的阶段索引；
-4. `CHANGELOG.md` 的当天开发记录。
+3. `CHANGELOG.md` 的当天开发记录。
 
 
 ## 前端 PRD 入口
@@ -30,8 +31,7 @@
 
 当前前端 v1 严格基于已实现后端 API，定位为内部业务用户对话台；后续如补充调试台、权限、上传、历史中心，应新增或拆分专题 PRD。
 
-## 与开发流程文档的关系
+## 文档维护口径
 
 - `docs/prd/backend/*.md`：描述“应具备什么能力、边界和验收口径”。
-- `docs/dev_processes/backend/*.md`：描述“按什么阶段实现、怎么验证、当前完成到哪里”。
 - 如果实现已经超过 PRD 粒度，应优先补 PRD，再继续扩展实现或前端设计。

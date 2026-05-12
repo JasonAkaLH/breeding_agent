@@ -109,6 +109,10 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
         self.assertTrue(result.output_payload["needs_decomposition"])
         self.assertEqual(result.output_payload["route_resolution_strategy"], "composite_multi_route")
         self.assertEqual(
+            [subtask["user_question"] for subtask in result.output_payload["subquestions"]],
+            ["查询龙粳33的审定信息", "查询龙粳33的基因型信息"],
+        )
+        self.assertEqual(
             [subtask["route_hint"] for subtask in result.output_payload["subquestions"]],
             ["approval_variety_db", "genotype_db"],
         )
@@ -186,7 +190,10 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
 
         self.assertIsNone(result.interrupt)
         self.assertEqual(result.output_payload["route_id"], "genotype_db")
-        self.assertEqual(seen_metadata, [{"deep_thinking": True, "main_agent_reasoning_effort": "medium"}])
+        self.assertEqual(
+            seen_metadata,
+            [{"deep_thinking": False, "main_agent_reasoning_effort": "medium", "main_agent_thinking_enabled": False}],
+        )
 
     def test_invalid_llm_semantic_router_output_falls_back_to_deterministic_route(self) -> None:
         def semantic_router(_prompt: str) -> str:

@@ -21,6 +21,10 @@ class CapabilityRegistry:
         else:
             self._planner_payload_policies[descriptor.capability_id] = planner_payload_policy
 
+    def unregister(self, capability_id: str) -> None:
+        self._capabilities.pop(capability_id, None)
+        self._planner_payload_policies.pop(capability_id, None)
+
     def get(self, capability_id: str) -> CapabilityDescriptor | None:
         return self._capabilities.get(capability_id)
 

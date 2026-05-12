@@ -24,3 +24,27 @@ class SQLQueryWorkflowProviderTest(unittest.TestCase):
         self.assertEqual(plan.nodes[5].capability_id, "sql_query.result_filtering")
         self.assertEqual(plan.max_replans, 1)
         self.assertEqual(plan.max_dynamic_nodes, 24)
+
+    def test_macro_route_hint_is_not_forwarded_to_internal_intent_route(self) -> None:
+        provider = SQLQueryWorkflowProvider()
+        request = OrchestrationRequest(
+            task_id="task-hint",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="查询龙粳33的基因型信息",
+            metadata={
+                "macro_input_payload": {
+                    "route_hint": "genotype_db",
+                    "subtask_label": "基因型信息",
+                    "parent_question": "龙粳33的审定信息和基因型信息都查一下",
+                }
+            },
+        )
+
+        plan = provider.build_plan(request)
+
+        intent_payload = plan.nodes[0].input_payload
+        self.assertEqual(intent_payload["user_question"], "查询龙粳33的基因型信息")
+        self.assertNotIn("route_hint", intent_payload)
+        self.assertEqual(intent_payload["subtask_label"], "基因型信息")
+        self.assertEqual(intent_payload["parent_question"], "龙粳33的审定信息和基因型信息都查一下")

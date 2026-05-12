@@ -8,6 +8,8 @@ from tests.e2e.support import E2EAPITestCase
 class SQLQueryLLMFlowE2ETest(E2EAPITestCase):
     async def test_fake_llm_happy_path_completes_without_real_provider(self) -> None:
         async def fake_llm(prompt: str) -> str:
+            if "sql_query.intent_route" in prompt:
+                return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
             if "sql_query.sql_generate" in prompt:
                 return json.dumps(
                     {

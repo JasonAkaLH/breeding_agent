@@ -36,6 +36,36 @@ triggers:
         self.assertGreater(matches[0].score, 0)
         self.assertIn("trigger", matches[0].reason)
 
+    def test_matcher_defaults_to_single_best_skill_for_progressive_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for name, trigger in (
+                ("first-report", "周报"),
+                ("second-report", "周报"),
+            ):
+                skill_dir = root / name
+                skill_dir.mkdir()
+                (skill_dir / "SKILL.md").write_text(
+                    f"""---
+name: {name}
+description: 生成汇报材料
+triggers:
+  - {trigger}
+---
+
+# {name}
+""",
+                    encoding="utf-8",
+                )
+
+            catalog = SkillCatalog.from_roots([root])
+
+        default_matches = match_skills("帮我写本周周报", catalog)
+        expanded_matches = match_skills("帮我写本周周报", catalog, max_matches=2)
+
+        self.assertEqual(len(default_matches), 1)
+        self.assertEqual([match.manifest.name for match in expanded_matches], ["first-report", "second-report"])
+
     def test_runner_executes_declared_python_script_with_json_io(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_dir = Path(tmpdir) / "scripted"

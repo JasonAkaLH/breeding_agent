@@ -25,6 +25,7 @@ async def list_capabilities(request: Request) -> CapabilityListResponse:
                 status="active" if descriptor.enabled else "disabled",
                 kind=descriptor.kind,
                 source=descriptor.source,
+                source_path=descriptor.source_path,
             )
             for descriptor in runtime.capability_registry.list(public_only=True)
         ]

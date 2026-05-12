@@ -47,6 +47,10 @@ export function createSubmittingTaskState(): TaskEventState {
   };
 }
 
+export function taskProgressDisplayText(state: TaskEventState): string {
+  return state.currentActivityText ?? state.statusText;
+}
+
 export function markTaskCompleted(state: TaskEventState, statusText = '任务已完成'): TaskEventState {
   return { ...state, phase: 'completed', statusText, currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, errorMessage: null };
 }

@@ -232,6 +232,7 @@ class CapabilityResponse(BaseModel):
     status: str
     kind: str = "capability"
     source: str = "builtin"
+    source_path: str = ""
 
 
 class CapabilityListResponse(BaseModel):

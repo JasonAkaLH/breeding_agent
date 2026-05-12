@@ -1,0 +1,42 @@
+<svg width="84" height="84" viewBox="0 0 84 84" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="发送">
+  <defs>
+    <linearGradient id="sendGlass" x1="17" y1="9" x2="70" y2="76" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.90"/>
+      <stop offset="0.28" stop-color="#F8F1E2" stop-opacity="0.62"/>
+      <stop offset="0.66" stop-color="#AFC29D" stop-opacity="0.56"/>
+      <stop offset="1" stop-color="#6F7E5F" stop-opacity="0.70"/>
+    </linearGradient>
+    <radialGradient id="sendLiquidA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(24 19) rotate(42) scale(44 28)">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="0.50" stop-color="#FFFFFF" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sendLiquidB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(59 58) rotate(-38) scale(34 29)">
+      <stop offset="0" stop-color="#31422F" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#31422F" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sendStroke" x1="18" y1="12" x2="72" y2="70" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.98"/>
+      <stop offset="0.46" stop-color="#FFFFFF" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#3F4B38" stop-opacity="0.22"/>
+    </linearGradient>
+    <filter id="sendShadow" x="2" y="2" width="80" height="82" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="11" stdDeviation="8" flood-color="#405038" flood-opacity="0.22"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="1.5" flood-color="#FFFFFF" flood-opacity="0.82"/>
+    </filter>
+    <filter id="sendBlur" x="8" y="8" width="68" height="68" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+  </defs>
+  <circle cx="42" cy="42" r="35" fill="#7D936C" fill-opacity="0.14" filter="url(#sendBlur)"/>
+  <g filter="url(#sendShadow)">
+    <circle cx="42" cy="42" r="32" fill="url(#sendGlass)"/>
+    <circle cx="42" cy="42" r="32" fill="url(#sendLiquidA)"/>
+    <circle cx="42" cy="42" r="32" fill="url(#sendLiquidB)"/>
+    <circle cx="42" cy="42" r="31.25" stroke="url(#sendStroke)" stroke-width="1.5"/>
+    <path d="M23.6 29.1C30.1 19.8 45.8 16.2 57.3 22.5" stroke="white" stroke-opacity="0.64" stroke-width="2" stroke-linecap="round"/>
+    <path d="M28.2 62.5C38.4 67.6 52.4 66.4 60.5 57.7" stroke="#263326" stroke-opacity="0.16" stroke-width="2" stroke-linecap="round"/>
+    <path d="M42 57V29" stroke="#263328" stroke-width="4.8" stroke-linecap="round"/>
+    <path d="M31.5 39.5L42 29L52.5 39.5" stroke="#263328" stroke-width="4.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

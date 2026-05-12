@@ -174,7 +174,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("恶意替换", str(plan.nodes[0].input_payload))
         self.assertNotIn("恶意替换", str(plan.nodes[-1].input_payload))
 
-    async def test_sql_query_payload_policy_allows_safe_route_and_subtask_hints(self) -> None:
+    async def test_sql_query_payload_policy_drops_route_hint_but_keeps_subtask_context(self) -> None:
         def planner(_prompt: str) -> str:
             return json.dumps(
                 {
@@ -205,7 +205,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
 
         intent_node = plan.node_by_id("task-sql-hints:query_genotype_info:intent_route")
         self.assertEqual(intent_node.input_payload["user_question"], "龙粳33的审定信息和基因型信息都查一下")
-        self.assertEqual(intent_node.input_payload["route_hint"], "genotype_db")
+        self.assertNotIn("route_hint", intent_node.input_payload)
         self.assertEqual(intent_node.input_payload["subtask_label"], "基因型信息")
         self.assertEqual(intent_node.input_payload["parent_question"], "龙粳33的审定信息和基因型信息都查一下")
         self.assertNotIn("allowed_tables", intent_node.input_payload)

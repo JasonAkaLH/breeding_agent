@@ -136,7 +136,7 @@ class SQLQueryIntentRouteCapability(CapabilityContract):
             raw_output = await call_text_generator(
                 self._semantic_text_generator,
                 self._build_semantic_route_prompt(user_question),
-                request=request,
+                request=self._semantic_route_request(request),
             )
             decoded = parse_json_object(raw_output)
         except LLMOutputError as exc:
@@ -170,6 +170,15 @@ class SQLQueryIntentRouteCapability(CapabilityContract):
             route_hint=None,
         ), None
 
+    @staticmethod
+    def _semantic_route_request(request: CapabilityExecutionRequest) -> CapabilityExecutionRequest:
+        """Use the SQLQuery LLM non-streaming path but disable thinking for route choice."""
+
+        metadata = dict(request.metadata)
+        metadata["deep_thinking"] = False
+        metadata["main_agent_thinking_enabled"] = False
+        return replace(request, metadata=metadata)
+
     def _build_semantic_route_prompt(self, user_question: str) -> str:
         routes = [
             {
@@ -184,6 +193,7 @@ class SQLQueryIntentRouteCapability(CapabilityContract):
             if isinstance(route, Mapping) and route.get("enabled", True)
         ]
         return (
+            "节点：sql_query.intent_route。\n"
             "你是 SQLQuery 的受控语义路由器。只判断用户问题属于哪个已配置数据库路由，不生成 SQL。"
             "只能返回 JSON 对象，字段包括：intent、route_id、route_ids、inferred_crop、clarification_needed。"
             "route_id 必须来自给定 routes；如果不是数据库问题，intent=non_database。\n\n"

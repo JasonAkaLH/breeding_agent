@@ -31,6 +31,7 @@ from src.capabilities.main_agent import (
     StreamGenerator,
     build_local_main_agent_instance,
 )
+from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.sql_query import (
     SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS,
     SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS,
@@ -48,11 +49,13 @@ from src.integrations.codex_skills import (
     SkillCapabilityRegistry,
     SkillCatalog,
     SkillInputTextGenerator,
+    SkillRuntimeRefreshResult,
+    SkillRuntimeState,
     SkillScriptRunner,
-    build_skill_capability_registry,
 )
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
+from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
@@ -60,7 +63,7 @@ from src.lifecycle.interrupt_service import InterruptService
 from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
-from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig
+from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig, ResolutionGenerator
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowPlan
 from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
@@ -117,6 +120,9 @@ class ApiRuntime:
         upload_store: InMemoryUploadStore | None = None,
         conversation_memory_builder: ConversationMemoryBuilder | None = None,
         artifact_file_store: LocalArtifactFileStore | None = None,
+        audit_sink: JsonlAuditSink | None = None,
+        skill_runtime_state: SkillRuntimeState | None = None,
+        mcp_runtime_state: MCPRuntimeState | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -135,10 +141,17 @@ class ApiRuntime:
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
         self.artifact_file_store = artifact_file_store or LocalArtifactFileStore(Path("runtime/artifacts"))
+        self._audit_sink = audit_sink
+        self._skill_runtime_state = skill_runtime_state
+        self._mcp_runtime_state = mcp_runtime_state
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
+        self._task_skill_bundle_revisions: dict[str, str] = {}
+        self._task_mcp_bundle_revisions: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._skill_refresh_lock = asyncio.Lock()
+        self._mcp_refresh_lock = asyncio.Lock()
 
     @staticmethod
     def _utcnow_naive() -> datetime:
@@ -246,6 +259,8 @@ class ApiRuntime:
             and existing_conversation.account_id != authenticated_account_id
         ):
             raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+        await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
+        await self._refresh_mcp_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._conversation_guard.ensure_conversation_available(conversation_id)
         self._ensure_supported_capability(request.capability_id)
 
@@ -307,6 +322,10 @@ class ApiRuntime:
         )
 
         metadata = dict(request.metadata)
+        if self._skill_runtime_state is not None:
+            metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
+        if self._mcp_runtime_state is not None:
+            metadata["mcp_bundle_revision"] = self._mcp_runtime_state.active_revision
         if upload_context["uploaded_artifacts"]:
             metadata["uploaded_artifacts"] = [
                 *self._metadata_list(metadata.get("uploaded_artifacts")),
@@ -341,11 +360,8 @@ class ApiRuntime:
         content_type: str | None,
         content: bytes,
     ) -> UploadedFileRecord:
-        existing_conversation = await self.storage.get_conversation(conversation_id)
+        existing_conversation = await self.ensure_upload_allowed(conversation_id, account_id)
         now = self._utcnow_naive()
-        if existing_conversation is not None:
-            if existing_conversation.account_id != account_id:
-                raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
         record = self.upload_store.save(
             account_id=account_id,
             conversation_id=conversation_id,
@@ -363,6 +379,12 @@ class ApiRuntime:
                 )
             )
         return record
+
+    async def ensure_upload_allowed(self, conversation_id: str, account_id: str) -> Conversation | None:
+        existing_conversation = await self.storage.get_conversation(conversation_id)
+        if existing_conversation is not None and existing_conversation.account_id != account_id:
+            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+        return existing_conversation
 
     async def list_uploads(self, conversation_id: str, account_id: str) -> list[UploadedFileRecord]:
         existing_conversation = await self.storage.get_conversation(conversation_id)
@@ -471,6 +493,8 @@ class ApiRuntime:
             )
 
     async def _schedule_execution(self, request: OrchestrationRequest) -> None:
+        self._retain_task_skill_revision(request)
+        self._retain_task_mcp_revision(request)
         async with self._lock:
             active_task_count = len(self._running_tasks)
             handle = asyncio.create_task(self._run_execution(request, active_task_count=active_task_count))
@@ -488,9 +512,13 @@ class ApiRuntime:
         except Exception as exc:
             await self._mark_task_failed(request, exc)
         finally:
-            async with self._lock:
-                self._running_tasks.pop(request.task_id, None)
-            await self._clear_conversation_current_task(request.conversation_id, request.task_id)
+            try:
+                await self._clear_conversation_current_task(request.conversation_id, request.task_id)
+                await self._release_task_skill_revision_if_terminal(request.task_id)
+                await self._release_task_mcp_revision_if_terminal(request.task_id)
+            finally:
+                async with self._lock:
+                    self._running_tasks.pop(request.task_id, None)
 
     async def _attach_conversation_memory(self, request: OrchestrationRequest) -> OrchestrationRequest:
         if self._conversation_memory_builder is None:
@@ -596,11 +624,18 @@ class ApiRuntime:
                 event_type="workflow.plan_built",
                 payload={
                     "node_count": len(plan.nodes),
-                    "metadata": self._json_safe_mapping(plan.metadata),
+                    "metadata": self._plan_audit_metadata(request, plan),
                 },
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         )
+
+    def _plan_audit_metadata(self, request: OrchestrationRequest, plan: WorkflowPlan) -> dict[str, Any]:
+        metadata = dict(plan.metadata)
+        revision = request.metadata.get("skill_bundle_revision")
+        if revision:
+            metadata["skill_bundle_revision"] = revision
+        return self._json_safe_mapping(metadata)
 
     @staticmethod
     def _json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -732,6 +767,7 @@ class ApiRuntime:
                 root_message_id=task.root_message_id,
                 user_message=combined_message,
                 requested_capability_id=task.requested_capability_id,
+                metadata=self._resume_skill_revision_metadata(task.task_id),
             )
         )
         return {
@@ -797,6 +833,8 @@ class ApiRuntime:
                 await asyncio.gather(*pending, return_exceptions=True)
         if self._mysql_adapter is not None:
             await self._mysql_adapter.aclose()
+        if self._mcp_runtime_state is not None:
+            await self._mcp_runtime_state.aclose()
         await asyncio.to_thread(self._engine.dispose)
 
     def _ensure_supported_capability(self, capability_id: str | None) -> None:
@@ -808,6 +846,217 @@ class ApiRuntime:
         if descriptor is not None and descriptor.public:
             return
         raise ValueError(f"Unsupported capability_id: {capability_id}")
+
+    async def _refresh_skills_for_new_conversation_if_needed(
+        self,
+        conversation_id: str,
+        existing_conversation: Conversation | None,
+    ) -> None:
+        if self._skill_runtime_state is None:
+            return
+        if existing_conversation is not None:
+            tasks = await self.storage.list_tasks_for_conversation(conversation_id)
+            if tasks:
+                return
+        async with self._skill_refresh_lock:
+            if existing_conversation is not None:
+                tasks = await self.storage.list_tasks_for_conversation(conversation_id)
+                if tasks:
+                    return
+            self._record_skill_refresh_started("conversation_start")
+            result = self._skill_runtime_state.refresh_if_changed(reason="conversation_start")
+            if result.status == "completed":
+                self._sync_skill_capability_registry()
+                if self._audit_sink is not None:
+                    _record_skill_capability_startup_audit(
+                        self._audit_sink,
+                        self._skill_runtime_state.active_bundle.skill_capabilities,
+                    )
+            self._record_skill_refresh_audit(result)
+
+    def _sync_skill_capability_registry(self) -> None:
+        if self._skill_runtime_state is None:
+            return
+        for descriptor in list(self.capability_registry.list()):
+            if descriptor.kind == "skill" or descriptor.source == "skill" or descriptor.capability_id.startswith("skill."):
+                self.capability_registry.unregister(descriptor.capability_id)
+        _register_capability_descriptors(
+            self.capability_registry,
+            self._skill_runtime_state.active_bundle.skill_capabilities.descriptors,
+        )
+
+    async def _refresh_mcp_for_new_conversation_if_needed(
+        self,
+        conversation_id: str,
+        existing_conversation: Conversation | None,
+    ) -> None:
+        if self._mcp_runtime_state is None or not self._mcp_runtime_state.config.refreshes_on_conversation_start():
+            return
+        if existing_conversation is not None:
+            tasks = await self.storage.list_tasks_for_conversation(conversation_id)
+            if tasks:
+                return
+        async with self._mcp_refresh_lock:
+            if existing_conversation is not None:
+                tasks = await self.storage.list_tasks_for_conversation(conversation_id)
+                if tasks:
+                    return
+            self._record_mcp_refresh_started("conversation_start")
+            pending = await self._mcp_runtime_state.prepare_refresh(reason="conversation_start", force=True)
+            result = pending.result
+            if result.status == "completed":
+                try:
+                    self._sync_mcp_capability_registry(pending.bundle)
+                except Exception:
+                    await self._mcp_runtime_state.discard_activation(pending)
+                    raise
+                await self._mcp_runtime_state.commit_activation(pending)
+            self._record_mcp_refresh_audit(result)
+
+    def _sync_mcp_capability_registry(self, bundle: MCPRuntimeBundle) -> None:
+        if self._mcp_runtime_state is None:
+            return
+        _sync_mcp_capability_registry(self.capability_registry, self.instance_registry, bundle)
+
+    def _record_skill_refresh_audit(self, result: SkillRuntimeRefreshResult) -> None:
+        if self._audit_sink is None:
+            return
+        payload = {
+            "reason": result.reason,
+            "previous_revision": result.previous_revision,
+            "active_revision": result.active_revision,
+            "registered_count": result.registered_count,
+            "skipped_count": result.skipped_count,
+            "duration_ms": result.duration_ms,
+            "script_package_snapshot": result.script_package_snapshot,
+        }
+        if result.status == "completed":
+            self._audit_sink.record_sync("skill.bundle_refresh_completed", payload)
+        elif result.status == "skipped":
+            self._audit_sink.record_sync("skill.bundle_refresh_skipped", payload)
+        elif result.status == "failed":
+            self._audit_sink.record_sync(
+                "skill.bundle_refresh_failed",
+                {**payload, "error_type": result.error_type, "fallback_revision": result.active_revision},
+            )
+
+    def _record_skill_refresh_started(self, reason: str) -> None:
+        if self._audit_sink is None or self._skill_runtime_state is None:
+            return
+        self._audit_sink.record_sync(
+            "skill.bundle_refresh_started",
+            {
+                "reason": reason,
+                "previous_revision": self._skill_runtime_state.active_revision,
+            },
+        )
+
+    def _record_mcp_refresh_audit(self, result: MCPRuntimeRefreshResult) -> None:
+        if self._audit_sink is None:
+            return
+        payload = {
+            "reason": result.reason,
+            "previous_revision": result.previous_revision,
+            "active_revision": result.active_revision,
+            "registered_count": result.registered_count,
+            "skipped_count": result.skipped_count,
+            "duration_ms": result.duration_ms,
+        }
+        if result.status == "completed":
+            self._audit_sink.record_sync("mcp.server_discovery_completed", payload)
+            self._record_mcp_capability_registration_audit()
+        elif result.status == "skipped":
+            self._audit_sink.record_sync("mcp.server_discovery_skipped", payload)
+        elif result.status == "failed":
+            self._audit_sink.record_sync(
+                "mcp.server_discovery_failed",
+                {**payload, "error_type": result.error_type, "fallback_revision": result.active_revision},
+            )
+
+    def _record_mcp_refresh_started(self, reason: str) -> None:
+        if self._audit_sink is None or self._mcp_runtime_state is None:
+            return
+        self._audit_sink.record_sync(
+            "mcp.server_discovery_started",
+            {
+                "reason": reason,
+                "previous_revision": self._mcp_runtime_state.active_revision,
+            },
+        )
+
+    def _record_mcp_capability_registration_audit(self) -> None:
+        if self._audit_sink is None or self._mcp_runtime_state is None:
+            return
+        bundle = self._mcp_runtime_state.active_bundle
+        for descriptor in bundle.descriptors:
+            self._audit_sink.record_sync(
+                "mcp.capability_registered",
+                {
+                    "capability_id": descriptor.capability_id,
+                    "name": descriptor.name,
+                    "source_path": descriptor.source_path,
+                    "source": descriptor.source,
+                },
+            )
+        for diagnostic in bundle.diagnostics:
+            self._audit_sink.record_sync(
+                "mcp.capability_registration_skipped",
+                {
+                    "server_id": diagnostic.server_id,
+                    "tool_name": diagnostic.tool_name,
+                    "capability_id": diagnostic.capability_id,
+                    "reason": diagnostic.reason,
+                    "message": diagnostic.message,
+                },
+            )
+
+    def _retain_task_skill_revision(self, request: OrchestrationRequest) -> None:
+        if self._skill_runtime_state is None or request.task_id in self._task_skill_bundle_revisions:
+            return
+        raw_revision = request.metadata.get("skill_bundle_revision") or self._skill_runtime_state.active_revision
+        revision = str(raw_revision).strip()
+        if not revision:
+            return
+        self._skill_runtime_state.retain_revision(revision)
+        self._task_skill_bundle_revisions[request.task_id] = revision
+
+    def _retain_task_mcp_revision(self, request: OrchestrationRequest) -> None:
+        if self._mcp_runtime_state is None or request.task_id in self._task_mcp_bundle_revisions:
+            return
+        raw_revision = request.metadata.get("mcp_bundle_revision") or self._mcp_runtime_state.active_revision
+        revision = str(raw_revision).strip()
+        if not revision:
+            return
+        self._mcp_runtime_state.retain_revision(revision)
+        self._task_mcp_bundle_revisions[request.task_id] = revision
+
+    async def _release_task_skill_revision_if_terminal(self, task_id: str) -> None:
+        if self._skill_runtime_state is None:
+            return
+        task = await self.storage.get_task(task_id)
+        if task is None or task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            return
+        revision = self._task_skill_bundle_revisions.pop(task_id, None)
+        if revision:
+            self._skill_runtime_state.release_revision(revision)
+
+    async def _release_task_mcp_revision_if_terminal(self, task_id: str) -> None:
+        if self._mcp_runtime_state is None:
+            return
+        task = await self.storage.get_task(task_id)
+        if task is None or task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            return
+        revision = self._task_mcp_bundle_revisions.pop(task_id, None)
+        if revision:
+            self._mcp_runtime_state.release_revision(revision)
+
+    def _resume_skill_revision_metadata(self, task_id: str) -> dict[str, object]:
+        revision = self._task_skill_bundle_revisions.get(task_id)
+        if revision:
+            return {"skill_bundle_revision": revision}
+        if self._skill_runtime_state is not None:
+            return {"skill_bundle_revision": self._skill_runtime_state.active_revision}
+        return {}
 
     @staticmethod
     def _format_answer_message(answer_payload: dict[str, object]) -> str:
@@ -875,6 +1124,9 @@ def build_api_runtime(
     skill_roots: Iterable[str | Path] | None = None,
     public_skill_roots: Iterable[str | Path] | None = None,
     skill_catalog: SkillCatalog | None = None,
+    mcp_config: Mapping[str, Any] | None = None,
+    mcp_client_factory: Callable[..., Any] | None = None,
+    mcp_runtime_state: MCPRuntimeState | None = None,
     runtime_replanner: RuntimeReplanner | None = None,
     auth_captcha_code_generator: Callable[[], str] | None = None,
     auth_captcha_ttl_seconds: int = 300,
@@ -882,6 +1134,8 @@ def build_api_runtime(
     upload_store: InMemoryUploadStore | None = None,
     conversation_memory_builder: ConversationMemoryBuilder | None = None,
     enable_conversation_memory: bool = True,
+    conversation_memory_resolution_generator: ResolutionGenerator | None = None,
+    enable_conversation_memory_resolution_llm: bool = True,
     artifact_store_path: str | Path | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
@@ -921,7 +1175,6 @@ def build_api_runtime(
     )
 
     roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
-    resolved_skill_catalog = skill_catalog or SkillCatalog.from_roots(roots)
     resolved_public_skill_roots = tuple(public_skill_roots) if public_skill_roots is not None else roots[:1]
 
     capability_registry = CapabilityRegistry()
@@ -936,19 +1189,52 @@ def build_api_runtime(
         planner_payload_policies=SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES,
     )
     _register_capability_descriptors(capability_registry, SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS)
-    skill_capabilities = build_skill_capability_registry(
-        resolved_skill_catalog,
+    skill_runtime_state = SkillRuntimeState(
+        skill_roots=roots,
         public_skill_roots=resolved_public_skill_roots,
         reserved_capability_ids=[descriptor.capability_id for descriptor in capability_registry.list()],
+        initial_catalog=skill_catalog,
+        refresh_enabled=skill_catalog is None,
     )
-    _register_capability_descriptors(capability_registry, skill_capabilities.descriptors)
+    _register_capability_descriptors(capability_registry, skill_runtime_state.active_bundle.skill_capabilities.descriptors)
 
     instance_registry = InstanceRegistry()
     instance_registry.register(build_local_main_agent_instance())
     instance_registry.register(build_local_sql_query_instance())
 
     audit_sink = JsonlAuditSink(audit_log_path)
-    _record_skill_capability_startup_audit(audit_sink, skill_capabilities)
+    _record_skill_capability_startup_audit(audit_sink, skill_runtime_state.active_bundle.skill_capabilities)
+    resolved_mcp_runtime_state = mcp_runtime_state or MCPRuntimeState(
+        config=_resolve_mcp_runtime_config(mcp_config),
+        client_factory=mcp_client_factory,
+        reserved_capability_ids=[descriptor.capability_id for descriptor in capability_registry.list()],
+    )
+    if resolved_mcp_runtime_state.config.enabled:
+        audit_sink.record_sync(
+            "mcp.server_discovery_started",
+            {
+                "reason": "startup",
+                "previous_revision": resolved_mcp_runtime_state.active_revision,
+            },
+        )
+        pending_mcp_activation = resolved_mcp_runtime_state.prepare_refresh_sync(reason="startup", force=True)
+        mcp_refresh_result = pending_mcp_activation.result
+        if mcp_refresh_result.status == "completed":
+            try:
+                _sync_mcp_capability_registry(
+                    capability_registry,
+                    instance_registry,
+                    pending_mcp_activation.bundle,
+                )
+            except Exception:
+                resolved_mcp_runtime_state.discard_activation_sync(pending_mcp_activation)
+                raise
+            resolved_mcp_runtime_state.commit_activation_sync(pending_mcp_activation)
+        _record_mcp_startup_audit(
+            audit_sink,
+            resolved_mcp_runtime_state,
+            mcp_refresh_result,
+        )
     event_broker = InMemoryEventBroker(audit_sink=audit_sink)
 
     async def record_live_event(event: EventRecord) -> None:
@@ -1003,20 +1289,32 @@ def build_api_runtime(
         conversation_memory_builder=conversation_memory_builder,
         main_agent_llm_runtime=main_agent_llm_runtime,
         enable_conversation_memory=enable_conversation_memory,
+        resolution_generator=conversation_memory_resolution_generator,
+        enable_resolution_llm=enable_conversation_memory_resolution_llm,
     )
 
     main_agent_workflow_provider = MainAgentWorkflowProvider()
     sql_query_workflow_provider = SQLQueryWorkflowProvider()
-    skill_workflow_provider = SkillWorkflowProvider(skill_capabilities.skill_name_by_capability_id)
-    skill_macro_providers = {
-        capability_id: skill_workflow_provider
-        for capability_id in skill_capabilities.skill_name_by_capability_id
-    }
-    macro_providers = {"sql_query.query": sql_query_workflow_provider, **skill_macro_providers}
+
+    def resolve_skill_name(capability_id: str, revision: str | None) -> str | None:
+        try:
+            return skill_runtime_state.skill_name_for_capability(capability_id, revision)
+        except KeyError:
+            return None
+
+    skill_workflow_provider = SkillWorkflowProvider(skill_name_resolver=resolve_skill_name)
+
+    def resolve_macro_provider(capability_id: str):
+        if capability_id.startswith("skill."):
+            return skill_workflow_provider
+        return None
+
+    macro_providers = {"sql_query.query": sql_query_workflow_provider}
 
     auto_workflow_provider = AutoWorkflowProvider(
         main_agent_provider=main_agent_workflow_provider,
         macro_providers=macro_providers,
+        macro_provider_resolver=resolve_macro_provider,
     )
     resolved_planner_text_generator = _resolve_planner_text_generator(
         planner_text_generator=planner_text_generator,
@@ -1029,6 +1327,7 @@ def build_api_runtime(
         capability_registry=capability_registry,
         fallback_provider=auto_workflow_provider,
         macro_providers=macro_providers,
+        macro_provider_resolver=resolve_macro_provider,
         text_generator=resolved_planner_text_generator,
         payload_policies=planner_payload_policies,
     )
@@ -1036,6 +1335,7 @@ def build_api_runtime(
         MainAgentRuntimeReplanner(
             capability_registry=capability_registry,
             macro_providers=macro_providers,
+            macro_provider_resolver=resolve_macro_provider,
             text_generator=resolved_planner_text_generator,
             payload_policies=planner_payload_policies,
         )
@@ -1057,7 +1357,8 @@ def build_api_runtime(
                     stream_generator=resolved_main_agent_stream_generator,
                     stream_metadata=main_agent_stream_metadata,
                     default_reasoning_effort=main_agent_reasoning_effort,
-                    skill_catalog=resolved_skill_catalog,
+                    skill_catalog=skill_runtime_state.active_bundle.catalog,
+                    skill_catalog_resolver=skill_runtime_state.catalog_for_revision,
                     script_runner=skill_script_runner,
                     skill_input_text_generator=resolved_skill_input_text_generator,
                     skill_output_artifact_manager=skill_output_artifact_manager,
@@ -1069,6 +1370,7 @@ def build_api_runtime(
                     llm_text_generator=resolved_sql_query_text_generator,
                     trim_max_tokens=resolved_sql_query_trim_max_tokens,
                 ),
+                MCPToolExecutor(runtime_state=resolved_mcp_runtime_state),
             ]
         ),
         completion_policy=CompletionPolicy(),
@@ -1100,6 +1402,9 @@ def build_api_runtime(
         upload_store=upload_store,
         conversation_memory_builder=resolved_conversation_memory_builder,
         artifact_file_store=artifact_file_store,
+        audit_sink=audit_sink,
+        skill_runtime_state=skill_runtime_state,
+        mcp_runtime_state=resolved_mcp_runtime_state,
     )
 
 
@@ -1287,6 +1592,8 @@ def _resolve_conversation_memory_builder(
     conversation_memory_builder: ConversationMemoryBuilder | None,
     main_agent_llm_runtime: SharedLLMRuntime,
     enable_conversation_memory: bool,
+    resolution_generator: ResolutionGenerator | None,
+    enable_resolution_llm: bool,
 ) -> ConversationMemoryBuilder | None:
     if conversation_memory_builder is not None:
         return conversation_memory_builder
@@ -1300,10 +1607,18 @@ def _resolve_conversation_memory_builder(
             reasoning_effort="minimal",
         )
 
+    async def generate_resolution(prompt: str) -> str:
+        return await main_agent_llm_runtime.generate_text(
+            prompt,
+            thinking=False,
+            reasoning_effort="minimal",
+        )
+
     return ConversationMemoryBuilder(
         storage=storage,
         config=ConversationMemoryConfig.from_runtime_config(),
         summary_generator=generate_summary,
+        resolution_generator=resolution_generator or (generate_resolution if enable_resolution_llm else None),
     )
 
 
@@ -1345,6 +1660,102 @@ def _register_capability_descriptors(
             descriptor,
             planner_payload_policy=policies.get(descriptor.capability_id),
         )
+
+
+def _sync_mcp_capability_registry(
+    capability_registry: CapabilityRegistry,
+    instance_registry: InstanceRegistry,
+    bundle: MCPRuntimeBundle,
+) -> None:
+    previous_descriptors = [descriptor for descriptor in capability_registry.list() if _is_mcp_descriptor(descriptor)]
+    previous_policies = {
+        descriptor.capability_id: capability_registry.get_planner_payload_policy(descriptor.capability_id)
+        for descriptor in previous_descriptors
+    }
+    try:
+        for descriptor in previous_descriptors:
+            capability_registry.unregister(descriptor.capability_id)
+        _register_capability_descriptors(
+            capability_registry,
+            bundle.descriptors,
+            planner_payload_policies=bundle.payload_policies,
+        )
+        if bundle.bindings:
+            instance_registry.register(build_local_mcp_tool_instance(tuple(bundle.bindings)))
+    except Exception:
+        for descriptor in list(capability_registry.list()):
+            if _is_mcp_descriptor(descriptor):
+                capability_registry.unregister(descriptor.capability_id)
+        for descriptor in previous_descriptors:
+            capability_registry.register(
+                descriptor,
+                planner_payload_policy=previous_policies.get(descriptor.capability_id),
+            )
+        if previous_descriptors:
+            instance_registry.register(
+                build_local_mcp_tool_instance(tuple(descriptor.capability_id for descriptor in previous_descriptors))
+            )
+        raise
+
+
+def _is_mcp_descriptor(descriptor: CapabilityDescriptor) -> bool:
+    return descriptor.kind == "mcp_tool" or descriptor.source == "mcp" or descriptor.capability_id.startswith("mcp.")
+
+
+def _resolve_mcp_runtime_config(config: Mapping[str, Any] | None) -> MCPRuntimeConfig:
+    if config is not None:
+        return MCPRuntimeConfig.from_mapping(config)
+    loaded = load_config()
+    raw = loaded.get("mcp")
+    if isinstance(raw, Mapping):
+        return MCPRuntimeConfig.from_mapping(raw)
+    return MCPRuntimeConfig.disabled()
+
+
+def _record_mcp_startup_audit(
+    audit_sink: JsonlAuditSink,
+    runtime_state: MCPRuntimeState,
+    refresh_result: MCPRuntimeRefreshResult,
+) -> None:
+    payload = {
+        "reason": refresh_result.reason,
+        "previous_revision": refresh_result.previous_revision,
+        "active_revision": refresh_result.active_revision,
+        "registered_count": refresh_result.registered_count,
+        "skipped_count": refresh_result.skipped_count,
+        "duration_ms": refresh_result.duration_ms,
+    }
+    if refresh_result.status == "completed":
+        audit_sink.record_sync("mcp.server_discovery_completed", payload)
+        for descriptor in runtime_state.active_bundle.descriptors:
+            audit_sink.record_sync(
+                "mcp.capability_registered",
+                {
+                    "capability_id": descriptor.capability_id,
+                    "name": descriptor.name,
+                    "source_path": descriptor.source_path,
+                    "source": descriptor.source,
+                },
+            )
+        for diagnostic in runtime_state.active_bundle.diagnostics:
+            audit_sink.record_sync(
+                "mcp.capability_registration_skipped",
+                {
+                    "server_id": diagnostic.server_id,
+                    "tool_name": diagnostic.tool_name,
+                    "capability_id": diagnostic.capability_id,
+                    "reason": diagnostic.reason,
+                    "message": diagnostic.message,
+                },
+            )
+        return
+    if refresh_result.status == "failed":
+        audit_sink.record_sync(
+            "mcp.server_discovery_failed",
+            {**payload, "error_type": refresh_result.error_type, "fallback_revision": refresh_result.active_revision},
+        )
+        return
+    audit_sink.record_sync("mcp.server_discovery_skipped", payload)
 
 
 def _record_skill_capability_startup_audit(

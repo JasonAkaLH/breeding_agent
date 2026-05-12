@@ -62,6 +62,7 @@ description: 私人工具
         self.assertNotIn("skill.private_helper", capabilities)
         self.assertEqual(capabilities["skill.mini_breedstat_rcbd"]["kind"], "skill")
         self.assertEqual(capabilities["skill.mini_breedstat_rcbd"]["source"], "skill")
+        self.assertEqual(capabilities["skill.mini_breedstat_rcbd"]["source_path"], "rcbd/SKILL.md")
 
         audit_records = [
             json.loads(line)

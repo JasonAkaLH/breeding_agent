@@ -272,8 +272,26 @@ class QueryUnderstandingService:
 
     @staticmethod
     def _extract_primary_entity(user_question: str) -> str | None:
-        match = re.search(r"[\u4e00-\u9fffA-Za-z]{1,12}\d+[A-Za-z0-9_-]*", user_question)
-        return match.group(0) if match else None
+        for match in re.finditer(r"[\u4e00-\u9fffA-Za-z]{1,12}\d+[A-Za-z0-9_-]*", user_question):
+            candidate = QueryUnderstandingService._clean_entity_candidate(match.group(0))
+            if candidate:
+                return candidate
+        return None
+
+    @staticmethod
+    def _clean_entity_candidate(candidate: str) -> str | None:
+        cleaned = str(candidate or "").strip()
+        if not cleaned:
+            return None
+        for marker in ("查询一下", "查一下", "了解一下", "看一下", "查询", "查查", "看看", "检索", "搜索", "查", "找"):
+            marker_index = cleaned.rfind(marker)
+            if marker_index >= 0:
+                cleaned = cleaned[marker_index + len(marker) :].strip()
+                break
+        cleaned = re.sub(r"^(?:请|帮我|你帮我|你给我|给我|我想|想|要|一下)+", "", cleaned).strip()
+        if not re.search(r"\d", cleaned):
+            return None
+        return cleaned or None
 
     def _explicit_route_alias_match(self, normalized_question: str) -> Mapping[str, Any] | None:
         matched_routes: dict[str, Mapping[str, Any]] = {}

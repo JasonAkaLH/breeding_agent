@@ -1,10 +1,9 @@
 # SQLQuery LLM 增强与真实库验证
 
 - **范围**：后端 / SQLQuery capability
-- **文档状态**：正式版（补齐 Phase 5.5 及后续实现事实）
+- **文档状态**：正式版（补齐 SQLQuery LLM 增强及后续实现事实）
 - **日期**：2026-04-27
 - **上游基线**：`docs/prd/backend/06-SQLQuery-MVP设计.md`
-- **对应开发过程**：`docs/dev_processes/backend/Phase-5.5-SQLQuery-LLM增强专题.md`
 
 ## 1. 背景
 
@@ -13,6 +12,7 @@
 ## 2. 目标
 
 SQLQuery LLM 增强的目标是：
+- 让 `sql_query.intent_route` 可调用 LLM 在已配置 route 集合内判断具体查询审定品种库、基因型数据库或品种综合概览；
 - 让 `sql_query.sql_generate` 可在裁剪后的 schema 上下文内调用 LLM 生成只读 SQL；
 - 让 `sql_query.result_filtering` 可在已执行结果上调用 LLM 判断候选行是否符合用户真实需求，并返回筛选后的表格；
 - 保留确定性 fallback，确保 provider 不可用、输出非法或未配置时仍有可测试的降级路径；
@@ -81,7 +81,9 @@ SQL 生成 prompt 采用 legacy `sql_query_agent` 风格：LLM 主路径只输�
 - SQLQuery 默认跟随主代理通用 `deep_thinking` / `main_agent_thinking_enabled` 与 `main_agent_reasoning_effort` 设置，保持非流式调用且只消费最终 answer；`sql_query_reasoning_effort` 仅作为兼容覆盖入口；
 - `enable_sql_query_llm`：可在 fake backend / 默认自动化测试中显式关闭真实 provider 访问。
 
-同一个 resolved text generator 会同时传给 `sql_query.sql_generate` 与 `sql_query.result_filtering`，确保 SQL 生成和候选结果筛选都先走 LLM 主路径，再按各自规则降级。
+同一个 resolved text generator 会同时传给 `sql_query.intent_route`、`sql_query.sql_generate` 与 `sql_query.result_filtering`，确保具体数据库 route 判断、SQL 生成和候选结果筛选都先走 LLM 主路径，再按各自规则降级。`intent_route` 的 LLM 固定使用非流式 `generate_text` 且强制 `thinking=False`，不继承前端深度思考开关；它只允许返回已配置的 `route_id`，不生成 SQL。输出非法、provider 失败或 route 不在配置集合内时，回退到原有配置规则路由。
+
+高层 Planner 只能选择 public 宏能力 `sql_query.query` 与高层依赖关系，不能通过 `route_hint` 指定具体数据库；`SQLQueryWorkflowProvider` 展开宏能力时也不会把宏输入中的 `route_hint` 继续下发给内部 `intent_route`。复合查询拆出的子问题可以携带 `subtask_label` / `parent_question` 作为上下文，但每个子问题最终仍由 SQLQuery 内部轻量 LLM 路由节点判断应查哪个库。
 
 ### 4.5 Fallback
 

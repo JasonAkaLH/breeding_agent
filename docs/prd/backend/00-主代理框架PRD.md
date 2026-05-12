@@ -2,8 +2,8 @@
 
 - **项目**：multi_agent_framework
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至 Skill 一等 Capability 能力池 PRD）
-- **日期**：2026-05-07
+- **文档状态**：正式版（已补齐至 MCP Runtime 实现需求 PRD；PRD 目录为当前文档基线）
+- **日期**：2026-05-12
 - **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；前端 PRD 后续放在 `docs/prd/frontend/`。
 
 ## 0. 目录定位
@@ -74,12 +74,14 @@
 | 状态存储与迁移策略 | `docs/prd/backend/04-状态存储与迁移策略.md` | SQLite / PostgreSQL、mailbox DDL、迁移 |
 | API 与核心数据模型 | `docs/prd/backend/05-API与核心数据模型.md` | API、Conversation/Task/Node 等对象模型 |
 | SQLQuery MVP 设计 | `docs/prd/backend/06-SQLQuery-MVP设计.md` | SQLQuery 路由、SQL Guard、Schema Context Builder、MVP 验收 |
-| SQLQuery LLM 增强与真实库验证 | `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md` | Phase 5.5、prompt schema、LLM fallback、MySQL 只读适配器 |
-| 主代理 Skill 兼容与真实 LLM Runtime | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md` | Phase 8 / 8.2、普通主代理消息、Skill 上下文、真实 provider smoke |
-| 高层 DAG 规划与 SQLQuery 宏能力边界 | `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md` | Phase 8.1、public capability、planner validator、macro expander |
+| SQLQuery LLM 增强与真实库验证 | `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md` | prompt schema、LLM fallback、MySQL 只读适配器 |
+| 主代理 Skill 兼容与真实 LLM Runtime | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md` | 普通主代理消息、Skill 上下文、真实 provider smoke |
+| 高层 DAG 规划与 SQLQuery 宏能力边界 | `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md` | public capability、planner validator、macro expander |
 | 对话上下文记忆与压缩 | `docs/prd/backend/10-对话上下文记忆与压缩PRD.md` | 多轮对话记忆、Planner / 主代理上下文注入、两级压缩策略 |
 | Skill 输出文件 Artifact 与下载 | `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md` | Skill 产出 HTML / CSV / XLSX / PDF 等文件、managed artifact、下载鉴权、安全边界 |
 | Skill 一等 Capability 能力池 | `docs/prd/backend/12-Skill一等Capability能力池PRD.md` | 将项目 Skill 注册为 `skill.*` public capability、Planner / Replanner 可发现、统一能力池 |
+| Skill 动态加载与热部署 | `docs/prd/backend/13-Skill动态加载与热部署PRD.md` | 新聊天首次任务前动态刷新 Skill runtime bundle，实现公开 Skill 热加载、原子激活与运行中任务保护 |
+| MCP Runtime 实现需求 | `docs/prd/backend/14-MCPRuntime实现需求PRD.md` | 按 MCP latest spec 2025-11-25 设计外部 MCP server / tools 接入、标准通信、capability 包装与安全治理 |
 
 ## 5. 当前已定的关键决策摘要
 
@@ -144,25 +146,71 @@
 - v1 推荐采用 “Skill public macro → `main_agent.respond` forced skill” 模型：LLM 只选择 `skill.*` capability，系统注入可信 forced skill metadata，继续复用主代理受控 Skill runtime。
 - 默认只公开仓库项目级 `skill/` 下的 Skill；用户级 `~/.codex/skills` 不默认公开给业务 Planner 或 API。
 
-## 6. 相关配套文档
+### 5.9 Skill 动态加载与热部署决策
+
+- 当前 Skill 加载模型是 runtime 启动期一次性扫描；新增、删除或修改 `SKILL.md` 默认不会在不重启服务的情况下进入 Planner / Replanner / API 能力池。
+- 后续热部署应以 **Skill runtime bundle** 为刷新单位，同步包含 `SkillCatalog`、`skill.*` descriptors、capability 映射、macro providers、主代理 forced skill 执行所需 manifest 与 revision 信息。
+- “每次开启新聊天动态加载 Skill”的可靠后端边界是新 conversation 的首次任务提交前，而不是前端仅生成本地 `conversation_id` 的点击动作。
+- 刷新必须原子激活：成功则新任务使用新 bundle，失败则保留上一份可用 bundle，内置 capability 不受影响。
+- 运行中任务应记录 `skill_bundle_revision` 并继续使用其规划时的 Skill 快照；生产级热部署还应为公开 Skill 脚本与必要资源建立 package snapshot。
+
+### 5.10 MCP Runtime 决策
+
+- MCP Runtime 在本项目中首先是 **MCP client runtime**，用于接入外部 MCP server 暴露的 tools；不在该专题内把本平台反向实现为 MCP server。
+- MCP 通信协议层必须按 MCP latest spec 2025-11-25 设计，基于 JSON-RPC 2.0、lifecycle negotiation、standard transports、Streamable HTTP / stdio 抽象、`MCP-Protocol-Version` 与 `MCP-Session-Id` 等标准语义。
+- MCP 原始 tool 不直接成为 orchestration 概念；外部工具必须先经过 `src/integrations/mcp/` 适配，再由业务 capability 或受控 generic MCP capability 进入 `CapabilityRegistry`。
+- Planner 只允许看到本地审核后的 public capability 描述和 payload allowlist；不得直接看到未审核 tool description、server endpoint、auth token、任意 headers 或完整 tool schema。
+- MCP tool 默认不公开；只有 allowlist 且低风险、只读、幂等、输入输出清晰的 tool 才可配置为 generic public capability。
+- destructive / write / credentialed external 类 tool 必须走业务 capability、Interrupt / confirmation 与审计，不允许 generic public 直达。
+- v1 远程 server 必须支持 Streamable HTTP；stdio 是 MCP 标准 transport，但必须显式配置并受沙箱、进程生命周期和权限治理约束。
+
+## 6. 当前验收基线与归档证据
+
+一期范围内承诺的“主代理最小内核 + SQLQuery 只读 MVP + FastAPI/SSE/cancel/query API”已完成；该结论仅覆盖一期冻结范围，不包含 PostgreSQL 正式化、第二 capability、长期记忆专题、跨任务知识沉淀、主代理 / 通用子代理 LLM 化等后续增强主题。
+
+| 验收口径 | 证据 | 结论 |
+|---|---|---|
+| 能提交任务 | `tests/api/test_message_submission.py`、`tests/e2e/test_sql_query_happy_path.py` | 通过 |
+| 能观察状态和事件流 | `tests/api/test_task_query.py`、`tests/api/test_task_events_sse.py`、`tests/e2e/test_sql_query_happy_path.py` | 通过 |
+| 能取消任务 | `tests/api/test_task_cancel.py`、`tests/e2e/test_cancel_late_result_ignored.py` | 通过 |
+| 会话延续型记忆最小字段可被持久化并恢复 | `tests/storage/test_sqlite_conversation_repository.py`、`tests/storage/test_sqlite_task_repository.py`、`tests/storage/test_sqlite_interrupt_repository.py` | 通过 |
+| 能跑通 SQLQuery 只读链路 | `tests/capabilities/sql_query/test_orchestration_flow.py`、`tests/e2e/test_sql_query_happy_path.py` | 通过 |
+| 能阻断危险 SQL | `tests/capabilities/sql_query/test_sql_guard.py`、`tests/e2e/test_sql_query_guard_block.py`、`tests/observability/test_audit_jsonl.py` | 通过 |
+
+关键验收链路：
+
+- Happy path：提交消息后生成 DAG，SQL Guard 通过，只读执行完成，summary / artifact 落地，事件流收敛为 `task.completed`。
+- Guard blocked：危险 SQL 被 `sql_query.sql_guard_blocked` 审计记录阻断，任务收敛为 `failed`，保留 `block_reason` 与 `route_context`。
+- Interrupt / Resume：缺少必要业务信息时触发 interrupt；用户补充信息后恢复原 task，而不是创建新 task。
+- Cancel + late result ignored：节点运行中取消任务后，迟到结果不回写 `completed`，审计保留 `task.late_result_discarded`。
+- Observability / Audit：JSONL 审计具备 `event_type / task_id / payload`，blocked SQL 与 cancel 路径均有可复核字段。
+
+已知一期边界：
+
+1. SSE broker 为单进程内存实现，适合本地与一期最小闭环，不代表多实例生产方案。
+2. cancel 采用语义终止，不依赖数据库物理 kill。
+3. interrupt / resume 已具备验收闭环，但公开 API 仍以一期既定最小面为主，没有扩展为完整前端交互产品面。
+
+## 7. 相关配套文档
 
 - PRD 总目录：`docs/prd/README.md`
 - 前端 PRD 预留入口：`docs/prd/frontend/README.md`
 - 数据库结构说明：`docs/MySQL数据库表结构说明.md`
 - SQLQuery prompt 输入模板：`docs/SQLQuery提示词输入模板.md`
-- 开发流程索引：`docs/dev_processes/backend/README.md`
 - 对话上下文记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`
 - Skill 输出文件 Artifact 与下载 PRD：`docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
 - Skill 一等 Capability 能力池 PRD：`docs/prd/backend/12-Skill一等Capability能力池PRD.md`
+- Skill 动态加载与热部署 PRD：`docs/prd/backend/13-Skill动态加载与热部署PRD.md`
+- MCP Runtime 实现需求 PRD：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`
 
-## 7. 使用建议
+## 8. 使用建议
 
 - 做全局规划时先读本文件。
 - 做局部设计或开发计划时优先读取对应专题文档。
 - 做 SQLQuery 实现或提示词设计时，配合 `docs/prd/backend/06-SQLQuery-MVP设计.md`、`docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md` 与 `docs/SQLQuery提示词输入模板.md` 一起阅读。
 - 做前端设计时，不要把前端范围追加到本文件；应在 `docs/prd/frontend/` 新建独立 PRD，并引用本目录中的后端接口和事件契约。
 
-## 8. 后续专题设计与演进项
+## 9. 后续专题设计与演进项
 
 以下事项不阻碍当前 PRD 作为正式基线，但建议在后续专题设计中继续细化：
 - PostgreSQL 最终 DDL 文件生成方式与索引增强细节。

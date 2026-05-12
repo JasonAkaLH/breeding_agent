@@ -15,7 +15,7 @@ SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS = (
 
 SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES = {
     "sql_query.query": CapabilityPayloadPolicy(
-        planner_allowed_fields=("route_hint", "subtask_label", "parent_question"),
+        planner_allowed_fields=("subtask_label", "parent_question"),
         system_payload_factory=lambda request: {"user_question": request.effective_user_message},
     ),
 }
@@ -74,7 +74,7 @@ class SQLQueryWorkflowProvider:
         macro_input_payload = request.metadata.get("macro_input_payload", {})
         safe_hints = {}
         if isinstance(macro_input_payload, dict):
-            for key in ("route_hint", "subtask_label", "parent_question"):
+            for key in ("subtask_label", "parent_question"):
                 value = macro_input_payload.get(key)
                 if isinstance(value, str) and value.strip():
                     safe_hints[key] = value.strip()

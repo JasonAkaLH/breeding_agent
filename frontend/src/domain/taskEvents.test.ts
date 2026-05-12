@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState, markWaitingInputRequired } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, markWaitingInputRequired, taskProgressDisplayText } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -20,12 +20,14 @@ describe('applyTaskEvent', () => {
     state = applyTaskEvent(state, event('task.accepted'));
     expect(state.phase).toBe('accepted');
     expect(state.statusText).toContain('已提交');
+    expect(taskProgressDisplayText(state)).toBe('任务已提交');
 
     state = applyTaskEvent(state, event('node.started', { capability_id: 'sql_query.sql_execute_readonly' }, 'node-1'));
     expect(state.phase).toBe('running');
     expect(state.statusText).toContain('检索数据库');
     expect(state.currentActivityText).toBe('正在执行 SQLQuery：正在检索数据库');
     expect(state.currentCapabilityLabel).toBe('SQLQuery');
+    expect(taskProgressDisplayText(state)).toBe('正在执行 SQLQuery：正在检索数据库');
 
     state = applyTaskEvent(state, event('node.started', { capability_id: 'sql_query.result_filtering' }, 'node-filter'));
     expect(state.statusText).toContain('筛选查询结果');

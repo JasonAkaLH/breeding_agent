@@ -26,7 +26,7 @@ class SQLQueryExecutor(ExecutorPort):
         trim_max_tokens: int | None = None,
     ) -> None:
         self._capabilities: dict[str, CapabilityContract] = {
-            "sql_query.intent_route": SQLQueryIntentRouteCapability(),
+            "sql_query.intent_route": SQLQueryIntentRouteCapability(semantic_text_generator=llm_text_generator),
             "sql_query.schema_context_prepare": SQLQuerySchemaContextPrepareCapability(),
             "sql_query.sql_generate": SQLQuerySQLGenerateCapability(
                 generator=sql_generator,

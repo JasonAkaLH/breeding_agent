@@ -29,6 +29,13 @@ def _isolated_config_env():
         os.environ.update(saved)
 
 
+def _sqlquery_prompt_name(prompt: str) -> str:
+    for name in ("sql_query.intent_route", "sql_query.sql_generate", "sql_query.result_filtering"):
+        if name in prompt:
+            return name
+    return "unknown"
+
+
 class SQLQueryLLMRuntimeAPITest(APITestCase):
     async def test_configured_sqlquery_llm_client_is_used_by_generate_and_filtering(self) -> None:
         calls: list[dict[str, Any]] = []
@@ -52,6 +59,8 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
                         "kwargs": self.kwargs,
                     }
                 )
+                if "sql_query.intent_route" in prompt:
+                    return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
                 if "sql_query.sql_generate" in prompt:
                     return json.dumps(
                         {
@@ -99,10 +108,10 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
         terminal = await self.wait_for_terminal_task(task_id)
 
         self.assertEqual(terminal["status"], "completed")
-        prompt_names = ["sql_query.sql_generate" if "sql_query.sql_generate" in call["prompt"] else "sql_query.result_filtering" for call in calls]
-        self.assertEqual(prompt_names, ["sql_query.sql_generate", "sql_query.result_filtering"])
+        prompt_names = [_sqlquery_prompt_name(call["prompt"]) for call in calls]
+        self.assertEqual(prompt_names, ["sql_query.intent_route", "sql_query.sql_generate", "sql_query.result_filtering"])
         self.assertTrue(all(call["reasoning_effort"] == "low" for call in calls))
-        self.assertTrue(all(call["thinking"] is False for call in calls))
+        self.assertEqual([call["thinking"] for call in calls], [False, False, False])
         self.assertTrue(all(call["kwargs"]["config"]["model"] == "fake-sql" for call in calls))
 
         artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
@@ -141,6 +150,8 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
                         "reasoning_effort": reasoning_effort,
                     }
                 )
+                if "sql_query.intent_route" in prompt:
+                    return {"answer": json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)}
                 if "sql_query.sql_generate" in prompt:
                     return {
                         "reasoning_content": "这里的推理内容不能进入 SQL 解析。",
@@ -194,8 +205,8 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
         terminal = await self.wait_for_terminal_task(task_id)
 
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual([call["reasoning_effort"] for call in calls], ["medium", "medium"])
-        self.assertEqual([call["thinking"] for call in calls], [True, True])
+        self.assertEqual([call["reasoning_effort"] for call in calls], ["medium", "medium", "medium"])
+        self.assertEqual([call["thinking"] for call in calls], [False, True, True])
 
         artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
         generated = next(artifact for artifact in artifacts if "generated_sql" in artifact.artifact_id)
@@ -218,6 +229,8 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
                 reasoning_effort: str = "minimal",
             ) -> str:
                 calls.append({"prompt": prompt, "kwargs": self.kwargs})
+                if "sql_query.intent_route" in prompt:
+                    return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
                 if "sql_query.sql_generate" in prompt:
                     return json.dumps(
                         {
@@ -338,6 +351,8 @@ class SQLQueryLLMRuntimeAPITest(APITestCase):
                 reasoning_effort: str = "minimal",
             ) -> str:
                 calls.append({"prompt": prompt, "kwargs": self.kwargs})
+                if "sql_query.intent_route" in prompt:
+                    return json.dumps({"intent": "database", "route_id": "genotype_db"}, ensure_ascii=False)
                 if "sql_query.sql_generate" in prompt:
                     return json.dumps(
                         {

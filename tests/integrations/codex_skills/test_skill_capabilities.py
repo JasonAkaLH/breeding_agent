@@ -41,6 +41,7 @@ triggers:
         self.assertEqual(descriptor.name, "mini-breedstat-rcbd")
         self.assertEqual(descriptor.kind, "skill")
         self.assertEqual(descriptor.source, "skill")
+        self.assertEqual(descriptor.source_path, "rcbd/SKILL.md")
         self.assertTrue(descriptor.public)
         self.assertEqual(registry.skill_name_by_capability_id["skill.mini_breedstat_rcbd"], "mini-breedstat-rcbd")
 

@@ -1,0 +1,44 @@
+<svg width="84" height="84" viewBox="0 0 84 84" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="打开输入功能菜单">
+  <defs>
+    <linearGradient id="plusGlass" x1="18" y1="10" x2="68" y2="76" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.88"/>
+      <stop offset="0.34" stop-color="#FFF8E9" stop-opacity="0.58"/>
+      <stop offset="0.68" stop-color="#DBE8D2" stop-opacity="0.46"/>
+      <stop offset="1" stop-color="#EAF0E4" stop-opacity="0.74"/>
+    </linearGradient>
+    <radialGradient id="plusLiquidA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(26 22) rotate(45) scale(44 30)">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="0.52" stop-color="#FFFFFF" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="plusLiquidB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(60 59) rotate(-35) scale(32 28)">
+      <stop offset="0" stop-color="#9CB58A" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#9CB58A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="plusStroke" x1="18" y1="12" x2="72" y2="70" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.96"/>
+      <stop offset="0.48" stop-color="#FFFFFF" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#6F775E" stop-opacity="0.20"/>
+    </linearGradient>
+    <filter id="plusShadow" x="2" y="2" width="80" height="82" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#59624F" flood-opacity="0.16"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="1.5" flood-color="#FFFFFF" flood-opacity="0.80"/>
+    </filter>
+    <filter id="plusBlur" x="8" y="8" width="68" height="68" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+  </defs>
+  <circle cx="42" cy="42" r="35" fill="#F7F1E4" fill-opacity="0.18" filter="url(#plusBlur)"/>
+  <g filter="url(#plusShadow)">
+    <circle cx="42" cy="42" r="32" fill="url(#plusGlass)"/>
+    <circle cx="42" cy="42" r="32" fill="url(#plusLiquidA)"/>
+    <circle cx="42" cy="42" r="32" fill="url(#plusLiquidB)"/>
+    <circle cx="42" cy="42" r="31.25" stroke="url(#plusStroke)" stroke-width="1.5"/>
+    <path d="M23.5 29.5C29.7 19.6 45.2 15.9 57.2 22.7" stroke="white" stroke-opacity="0.62" stroke-width="2" stroke-linecap="round"/>
+    <path d="M26.8 62.2C36.8 68.1 51.7 67.3 60.7 58.4" stroke="#6F775E" stroke-opacity="0.15" stroke-width="2" stroke-linecap="round"/>
+    <rect x="29" y="40" width="26" height="4" rx="2" fill="#59624F" fill-opacity="0.92"/>
+    <rect x="40" y="29" width="4" height="26" rx="2" fill="#59624F" fill-opacity="0.92"/>
+    <rect x="30" y="40.25" width="24" height="1" rx="0.5" fill="white" fill-opacity="0.55"/>
+    <rect x="40.25" y="30" width="1" height="24" rx="0.5" fill="white" fill-opacity="0.42"/>
+  </g>
+</svg>

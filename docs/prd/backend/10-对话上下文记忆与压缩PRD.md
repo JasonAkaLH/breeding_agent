@@ -72,7 +72,11 @@ v1 记忆上下文注入范围为：
    - 用于自然语言回答的承接、消歧与上下文一致性。
    - 与现有上传 artifact context、Skill context、上游 dependency context 合并，但必须保持边界标注。
 
-v1 暂不把完整 conversation memory 直接注入 SQLQuery 内部 LLM 节点。若 SQLQuery 需要上下文补全，不应依赖 LLM Planner 在 `input_payload` 中自由改写 `user_question`；当前 planner payload policy 会 fail-closed，且 public `sql_query.query` 的可信 `user_question` 由系统 payload 填充。后续实现应由系统侧 memory builder / orchestration 层基于 `ConversationMemoryContext` 生成受控的 `resolved_user_message` / effective question，同时保留原始当前用户问题；Planner prompt 可读取 memory context 辅助选择 public capability，public capability 的 `user_question` 则应由系统可信字段填充，确保“那它的基因型呢”这类追问在进入 SQLQuery 内部 workflow 前已经被系统补全为明确问题。
+v1 暂不把完整 conversation memory 直接注入 SQLQuery 内部 LLM 节点。若 SQLQuery 需要上下文补全，不应依赖 LLM Planner 在 `input_payload` 中自由改写 `user_question`；当前 planner payload policy 会 fail-closed，且 public `sql_query.query` 的可信 `user_question` 由系统 payload 填充。
+
+当前系统由 memory builder / orchestration 层基于 `ConversationMemoryContext` 生成受控的 `resolved_user_message` / effective question，同时保留原始当前用户问题。该补全优先走保守 LLM 结构化判断：LLM 只判断是否需要补全实体、补全哪个实体和证据来源，不能回答问题或选择 capability；只有 `should_resolve=true`、`confidence=high`、补全文本 / 实体 / evidence 均存在且没有阻断风险标记时才采用。若历史中存在多个候选实体，默认选择最近一次被明确提到的业务实体；若最近上下文是多个并列实体且单数指代不清，则不补全。LLM 输出非法、调用失败或未启用时，允许退回到既有确定性规则，且不得阻断任务。
+
+Planner prompt 可读取 memory context 辅助选择 public capability，public capability 的 `user_question` 则应由系统可信字段填充，确保“那它的基因型呢”这类追问在进入 SQLQuery 内部 workflow 前已经被系统补全为明确问题。
 
 Conversation memory 默认不得通过 `request.metadata` 原样透传给 Skill 自动脚本。若运行时需要在 metadata 中携带 memory 相关信息，也必须在执行 Skill script 前剥离或替换为脚本专用 allowlist；v1 Skill script 只接收当前轮 query、显式上传 artifact 和既有脚本输入契约，不读取完整 conversation memory。
 
@@ -86,7 +90,7 @@ Conversation memory 默认不得通过 `request.metadata` 原样透传给 Skill 
 | `root_message_id` | 当前任务根用户消息 ID，用于从历史 memory 中排除当前问题 |
 | `source_message_count` | 参与构建的原始消息数量 |
 | `current_user_message` | 当前用户原始问题，仅作为独立 current 区块注入，不进入历史摘要 |
-| `resolved_user_message` | 系统基于 memory 补全后的 effective question，可为空；用于 Planner / public capability 的可信系统输入 |
+| `resolved_user_message` | 系统基于 memory 通过保守 LLM resolver / fallback 规则补全后的 effective question，可为空；用于 Planner / public capability 的可信系统输入 |
 | `recent_messages` | 保留原文的最近用户 / 助手消息，按时间升序 |
 | `clarification_messages` | 当前任务或历史业务轮次中的 interrupt answer / resume 补充消息，需保留与 task / interrupt 的关联 |
 | `history_summary` | Level 2 生成的较早历史摘要，可为空 |

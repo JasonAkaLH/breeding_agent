@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Mapping, Protocol
 
@@ -17,8 +18,14 @@ class WorkflowExpansionError(ValueError):
 
 
 class WorkflowExpander:
-    def __init__(self, macro_providers: Mapping[str, WorkflowProvider]) -> None:
+    def __init__(
+        self,
+        macro_providers: Mapping[str, WorkflowProvider],
+        *,
+        macro_provider_resolver: Callable[[str], WorkflowProvider | None] | None = None,
+    ) -> None:
         self._macro_providers = dict(macro_providers)
+        self._macro_provider_resolver = macro_provider_resolver
 
     def expand(self, plan: WorkflowPlan, *, request: OrchestrationRequest) -> WorkflowPlan:
         ordered_nodes = self._topological_nodes(plan)
@@ -34,7 +41,7 @@ class WorkflowExpander:
                 for dependency in node.depends_on
                 for tail_id in expanded_tail_ids_by_original[dependency]
             )
-            provider = self._macro_providers.get(node.capability_id)
+            provider = self._resolve_macro_provider(node.capability_id)
             if provider is None:
                 expanded_node = replace(node, depends_on=high_level_dependencies)
                 expanded_nodes.append(expanded_node)
@@ -113,6 +120,14 @@ class WorkflowExpander:
             max_replans=max_replans,
             max_dynamic_nodes=max_dynamic_nodes,
         )
+
+    def _resolve_macro_provider(self, capability_id: str) -> WorkflowProvider | None:
+        provider = self._macro_providers.get(capability_id)
+        if provider is not None:
+            return provider
+        if self._macro_provider_resolver is None:
+            return None
+        return self._macro_provider_resolver(capability_id)
 
     @staticmethod
     def _resolve_macro_user_message(node: WorkflowNodePlan, request: OrchestrationRequest) -> str:

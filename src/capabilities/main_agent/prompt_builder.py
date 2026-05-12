@@ -143,5 +143,12 @@ def _sanitize_dependency_output(output: Mapping[str, Any]) -> dict[str, Any]:
         "filter_reason",
         "highlights",
         "caveats",
+        "mcp_tool",
+        "content",
+        "text",
+        "structured_content",
+        "is_error",
+        "output_size_bytes",
+        "external_content_notice",
     )
     return {key: output[key] for key in allowlist if key in output}

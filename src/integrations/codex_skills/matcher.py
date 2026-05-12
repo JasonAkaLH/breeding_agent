@@ -13,7 +13,7 @@ class SkillMatch:
     reason: str
 
 
-def match_skills(query: str, catalog: SkillCatalog, *, max_matches: int = 3) -> list[SkillMatch]:
+def match_skills(query: str, catalog: SkillCatalog, *, max_matches: int = 1) -> list[SkillMatch]:
     text = query.lower()
     matches: list[SkillMatch] = []
     for skill in catalog.skills:

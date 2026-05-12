@@ -17,7 +17,6 @@
 - `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、SQLQuery 结果卡片与 Vitest 测试。
 - `tests/`：后端按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
 - `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。
-- `docs/dev_processes/`：开发流程文档总目录；后端 Phase 文档在 `docs/dev_processes/backend/`，前端 Phase 文档在 `docs/dev_processes/frontend/`。
 - `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归；`run_fullstack_dev.py` 可拉起前后端用于人工验证。
 - `skill/`：项目级 Codex Skill 目录；后端默认扫描 `skill/**/SKILL.md`，不要再把项目共享 Skill 放在 `.codex/skills/`。
 
@@ -145,4 +144,4 @@ PR 至少应包含：
 - 已完成的验证
 
 ## 架构约束
-本仓库服务于自研、多 Agent、面向内部业务的框架建设。当前后端主代理框架、SQLQuery、状态存储、API/SSE、主代理 Skill / LLM runtime 已形成实现基线；新增重大运行时、部署方式、编排模型或跨模块边界变更前，应先更新对应 PRD / dev_processes 设计与测试计划。
+本仓库服务于自研、多 Agent、面向内部业务的框架建设。当前后端主代理框架、SQLQuery、状态存储、API/SSE、主代理 Skill / LLM runtime 已形成实现基线；新增重大运行时、部署方式、编排模型或跨模块边界变更前，应先更新对应 PRD 设计与测试计划。

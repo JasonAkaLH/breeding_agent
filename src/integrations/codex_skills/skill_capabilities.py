@@ -105,9 +105,10 @@ def build_skill_capability_registry(
             public=True,
             kind="skill",
             source="skill",
+            source_path=_source_path_summary(skill, roots),
         )
         skill_names[capability_id] = skill.name
-        source_paths[capability_id] = _source_path_summary(skill, roots)
+        source_paths[capability_id] = descriptors[capability_id].source_path
 
     return SkillCapabilityRegistry(
         descriptors_by_id=descriptors,

@@ -1,9 +1,8 @@
 # 高层 DAG 规划与 SQLQuery 宏能力边界
 
 - **范围**：后端 / 编排层 / SQLQuery public capability
-- **文档状态**：正式版（补齐 Phase 8.1 + 完整 LLM Planner 接入事实）
+- **文档状态**：正式版（补齐 SQLQuery 宏能力与完整 LLM Planner 接入事实）
 - **日期**：2026-04-27
-- **对应开发过程**：`docs/dev_processes/backend/Phase-8.1-SQLQuery宏能力与LLM动态DAG规划.md`
 
 ## 1. 背景
 
@@ -82,7 +81,7 @@ Planner 输出要求：
 - 依赖必须引用同一 plan 内已存在节点；
 - 节点 ID 不得重复。
 
-Runtime 已接入 planner prompt / output parser / fake LLM seam / 可选真实 LLM client。测试默认可关闭真实 planner，生产默认会尝试 planner 并在失败时安全回退。2026-04-28 起，默认生产路径中 planner、runtime replan advisor 与 main_agent finalizer 共享一个主代理 `SharedLLMRuntime`；SQLQuery 内部 text generator 使用独立 SQLQuery LLM runtime，非流式且 `thinking=disabled`，不复用主代理 LLM 实例。显式组件级 fake / override seam 仅作为测试和定制入口保留。
+Runtime 已接入 planner prompt / output parser / fake LLM seam / 可选真实 LLM client。测试默认可关闭真实 planner，生产默认会尝试 planner 并在失败时安全回退。2026-04-28 起，默认生产路径中 planner、runtime replan advisor 与 main_agent finalizer 共享一个主代理 `SharedLLMRuntime`；SQLQuery 内部 text generator 使用独立 SQLQuery LLM runtime，非流式且不复用主代理 LLM 实例。其中具体数据库 route 判断固定由 `sql_query.intent_route` 通过 SQLQuery 内部 text generator 发起轻量 `thinking=False` 调用完成，`sql_generate` / `result_filtering` 仍按 SQLQuery runtime 配置使用各自的非流式 LLM 调用。显式组件级 fake / override seam 仅作为测试和定制入口保留。
 LLM-facing Prompt 使用中文表达；JSON key、capability_id、node_id、SQL 字段名等机器契约保持英文 / 原始标识，避免破坏解析和执行边界。
 
 信任边界：
@@ -90,6 +89,7 @@ LLM-facing Prompt 使用中文表达；JSON key、capability_id、node_id、SQL 
 - `CapabilityPayloadPolicy` / `PlannerPayloadPolicy` 默认 fail-closed：未配置 capability 不接收任何 planner-provided payload 字段；策略跟随 capability 注册到 `CapabilityRegistry`，不是由 LLM Planner 为 SQLQuery 写死判断。
 - 每个 capability 可声明 `planner_allowed_fields`，仅白名单字段会从 LLM 输出进入执行图；`system_payload_factory` 负责从可信请求上下文生成系统字段，且系统字段始终覆盖 planner 字段；Planner prompt 会按 public capability 清单展示 allowlist，让后续 capability 在注册时即可获得同一套规划提示与执行保护。
 - 对当前 public capability，系统会强制用真实用户问题覆盖 `main_agent.respond.user_message` 与 `sql_query.query.user_question`，不信任 LLM 改写后的查询/回答文本。
+- `sql_query.query` 不接收 Planner 提供的 `route_hint`；Planner 只能决定是否调用 SQLQuery 宏能力，具体查询审定品种库、基因型数据库还是品种综合概览由 SQLQuery 内部 `intent_route` LLM 节点决定。
 - 若 planner 同时输出 SQLQuery 和主代理但缺少依赖，系统会把主代理 finalizer 重连到数据能力叶子节点；若没有主代理 finalizer，则自动追加。
 
 ## 6. WorkflowPlanValidator 契约

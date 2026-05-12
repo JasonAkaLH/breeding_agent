@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -31,11 +32,15 @@ class AutoWorkflowProvider:
         *,
         main_agent_provider: WorkflowProvider,
         macro_providers: Mapping[str, WorkflowProvider],
+        macro_provider_resolver: Callable[[str], WorkflowProvider | None] | None = None,
         query_understanding: QueryUnderstandingService | None = None,
     ) -> None:
         self._main_agent_provider = main_agent_provider
         self._macro_providers = dict(macro_providers)
-        self._expander = WorkflowExpander(self._macro_providers)
+        self._expander = WorkflowExpander(
+            self._macro_providers,
+            macro_provider_resolver=macro_provider_resolver,
+        )
         self._query_understanding = query_understanding or QueryUnderstandingService.from_yaml_file(
             Path(__file__).resolve().parents[2] / "configs/sql_query/routing_rules.yaml"
         )

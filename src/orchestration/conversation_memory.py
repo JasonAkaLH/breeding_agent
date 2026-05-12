@@ -21,6 +21,17 @@ SUMMARY_VERSION = "conversation-memory-summary-v1"
 COMPRESSION_POLICY_VERSION = "conversation-memory-policy-v1"
 
 SummaryGenerator = Callable[[str], str | Awaitable[str]]
+ResolutionGenerator = Callable[[str], str | Awaitable[str]]
+
+_BLOCKING_RESOLUTION_RISK_FLAGS = {
+    "ambiguous_parallel_entities",
+    "ambiguous_reference",
+    "low_confidence",
+    "multiple_candidate_entities",
+    "no_candidate_entities",
+    "current_message_complete",
+    "task_continuation_not_entity_resolution",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,11 +248,13 @@ class ConversationMemoryBuilder:
         storage,
         config: ConversationMemoryConfig | None = None,
         summary_generator: SummaryGenerator | None = None,
+        resolution_generator: ResolutionGenerator | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._storage = storage
         self._config = config or ConversationMemoryConfig.from_runtime_config()
         self._summary_generator = summary_generator
+        self._resolution_generator = resolution_generator
         self._now_fn = now_fn or datetime.utcnow
 
     async def build(self, request: OrchestrationRequest, *, account_id: str | None = None) -> ConversationMemoryContext:
@@ -268,14 +281,15 @@ class ConversationMemoryBuilder:
             include_artifact_task_ids=post_boundary_task_ids,
         )
         source_message_count = len(history_messages)
-        resolved_user_message, resolution_metadata = self._resolve_user_message(
-            current_user_message,
-            turns,
-            summary_text=latest_summary.summary_text if latest_summary is not None else None,
-        )
         capability_summaries = self._capability_summaries_from_metadata(request.metadata)
         upload_summaries = self._upload_summaries_from_metadata(request.metadata)
         capability_summaries = (*capability_summaries, *upload_summaries)
+        resolved_user_message, resolution_metadata = await self._resolve_user_message(
+            current_user_message,
+            turns,
+            summary_text=latest_summary.summary_text if latest_summary is not None else None,
+            capability_summaries=capability_summaries,
+        )
 
         context = await self._compress(
             request=request,
@@ -529,7 +543,170 @@ class ConversationMemoryBuilder:
             )
         )
 
-    def _resolve_user_message(
+    async def _resolve_user_message(
+        self,
+        current_user_message: str,
+        turns: list[_BusinessTurn],
+        *,
+        summary_text: str | None = None,
+        capability_summaries: tuple[dict[str, Any], ...] = (),
+    ) -> tuple[str | None, dict[str, Any]]:
+        llm_invalid_reason: str | None = None
+        if self._resolution_generator is not None:
+            try:
+                llm_resolution = await self._resolve_user_message_with_llm(
+                    current_user_message,
+                    turns,
+                    summary_text=summary_text,
+                    capability_summaries=capability_summaries,
+                )
+            except Exception:
+                llm_resolution = None
+                llm_invalid_reason = "llm_resolution_failed"
+            if llm_resolution is not None:
+                return llm_resolution
+            if llm_invalid_reason is None:
+                llm_invalid_reason = "llm_resolution_invalid_json"
+
+        resolved, metadata = self._resolve_user_message_deterministic(
+            current_user_message,
+            turns,
+            summary_text=summary_text,
+        )
+        if llm_invalid_reason is not None:
+            metadata = {**metadata, "fallback_reason": llm_invalid_reason}
+        return resolved, metadata
+
+    async def _resolve_user_message_with_llm(
+        self,
+        current_user_message: str,
+        turns: list[_BusinessTurn],
+        *,
+        summary_text: str | None,
+        capability_summaries: tuple[dict[str, Any], ...],
+    ) -> tuple[str | None, dict[str, Any]] | None:
+        if self._resolution_generator is None:
+            return None
+        prompt = self._build_resolution_prompt(
+            current_user_message,
+            turns,
+            summary_text=summary_text,
+            capability_summaries=capability_summaries,
+        )
+        generated = self._resolution_generator(prompt)
+        if inspect.isawaitable(generated):
+            generated = await generated
+        decision = _parse_resolution_decision(str(generated or ""))
+        if decision is None:
+            return None
+
+        raw_should_resolve = decision.get("should_resolve")
+        if not isinstance(raw_should_resolve, bool):
+            return None
+        should_resolve = raw_should_resolve
+        confidence = str(decision.get("confidence") or "").strip().lower()
+        referenced_entity = str(decision.get("referenced_entity") or "").strip()
+        resolved_user_message = str(decision.get("resolved_user_message") or "").strip()
+        reason = str(decision.get("reason") or "").strip()
+        risk_flags = _coerce_risk_flags(decision.get("risk_flags"))
+        source = decision.get("source") if isinstance(decision.get("source"), Mapping) else {}
+        evidence_text = str(source.get("evidence_text") or "").strip() if isinstance(source, Mapping) else ""
+
+        metadata: dict[str, Any] = {
+            "resolved": False,
+            "strategy": "llm_entity_resolution",
+            "confidence": confidence or "unknown",
+            "reason": reason or "llm_returned_no_resolution",
+            "risk_flags": risk_flags,
+        }
+        if referenced_entity:
+            metadata["entity"] = referenced_entity
+        entity_type = str(decision.get("entity_type") or "").strip()
+        if entity_type:
+            metadata["entity_type"] = entity_type
+        if source:
+            metadata["source"] = _json_safe_mapping(dict(source))
+
+        if not should_resolve:
+            return None, metadata
+
+        rejection_reason = _resolution_rejection_reason(
+            confidence=confidence,
+            referenced_entity=referenced_entity,
+            resolved_user_message=resolved_user_message,
+            evidence_text=evidence_text,
+            risk_flags=risk_flags,
+        )
+        if rejection_reason is None and not _resolution_evidence_in_context(
+            source=source if isinstance(source, Mapping) else {},
+            referenced_entity=referenced_entity,
+            evidence_text=evidence_text,
+            turns=turns,
+            summary_text=summary_text,
+            capability_summaries=capability_summaries,
+        ):
+            rejection_reason = "evidence_not_found_in_context"
+        if rejection_reason is not None:
+            return None, {**metadata, "reason": reason or rejection_reason, "rejection_reason": rejection_reason}
+
+        safe_resolved_user_message = _compose_resolved_question(current_user_message, referenced_entity)
+        return safe_resolved_user_message, {
+            **metadata,
+            "resolved": True,
+            "llm_resolved_user_message": resolved_user_message,
+            "reason": reason or "llm_high_confidence_resolution",
+        }
+
+    def _build_resolution_prompt(
+        self,
+        current_user_message: str,
+        turns: list[_BusinessTurn],
+        *,
+        summary_text: str | None,
+        capability_summaries: tuple[dict[str, Any], ...],
+    ) -> str:
+        resolver_turns = turns[-self._config.recent_turns :] if self._config.recent_turns > 0 else turns
+        recent_messages = [message.to_prompt_dict() for turn in resolver_turns for message in turn.memory_messages()]
+        prompt_payload = {
+            "current_user_message": current_user_message,
+            "recent_messages": recent_messages,
+            "history_summary": summary_text or "",
+            "capability_summaries": list(capability_summaries),
+        }
+        schema = {
+            "should_resolve": "boolean",
+            "resolved_user_message": "string|null",
+            "referenced_entity": "string|null",
+            "entity_type": "crop_variety|file|task_object|previous_result|unknown|null",
+            "source": {
+                "type": "recent_message|history_summary|capability_summary|null",
+                "message_id": "string|null",
+                "evidence_text": "string|null",
+            },
+            "confidence": "high|medium|low",
+            "reason": "string",
+            "risk_flags": ["string"],
+        }
+        return (
+            "你是一个保守的对话上下文补全器，只负责判断当前用户问题是否需要根据同一 conversation 的历史补全实体。\n"
+            "你不是问答模型，不要回答用户问题；你不是规划器，不要选择 capability。\n"
+            "你不能编造实体、字段、结论或业务事实，只能使用输入中明确出现过的历史消息、历史摘要和当前用户原文。\n\n"
+            "任务：\n"
+            "1. 判断当前用户问题是否缺少明确实体或对象。\n"
+            "2. 判断它是否通过“它、这个、该品种、上一个、继续、换成、不是这个”等表达引用历史上下文。\n"
+            "3. 如果需要补全，必须只补全必要实体，不扩展任务范围，不美化改写。\n"
+            "4. 如果历史中存在多个候选实体，默认选择最近一次被明确提到的业务实体；最近按输入消息顺序判断，越靠后的消息越新。\n"
+            "5. 如果最近一条消息中有多个实体，优先选择与当前问题最相关的实体；仍无法判断时选择该消息最后一个被提到的实体。\n"
+            "6. 如果最近相关上下文是多个并列实体且当前问题使用单数指代无法区分，必须返回 should_resolve=false，并给出 ambiguous_parallel_entities。\n"
+            "7. 不要把数字、参数、次数、区组数、文件名片段误判为品种或业务实体。\n"
+            "8. 如果只能低置信度猜测、会改变用户意图、或当前问题本身已完整，必须返回 should_resolve=false。\n\n"
+            "输出必须是严格 JSON，不要 Markdown，不要解释性文本。JSON 字段形态如下：\n"
+            f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
+            "输入如下，recent_messages 已按时间升序排列：\n"
+            f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2, default=str)}"
+        )
+
+    def _resolve_user_message_deterministic(
         self,
         current_user_message: str,
         turns: list[_BusinessTurn],
@@ -570,6 +747,107 @@ class ConversationMemoryBuilder:
 def effective_user_message(request: OrchestrationRequest) -> str:
     resolved = (request.resolved_user_message or "").strip()
     return resolved or (request.current_user_message or request.user_message)
+
+
+def _parse_resolution_decision(raw_output: str) -> dict[str, Any] | None:
+    text = raw_output.strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = _strip_json_code_fence(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, Mapping):
+        return None
+    if "should_resolve" not in parsed:
+        return None
+    return dict(parsed)
+
+
+def _strip_json_code_fence(text: str) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _coerce_risk_flags(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    flags: list[str] = []
+    for item in value:
+        flag = str(item).strip()
+        if flag:
+            flags.append(flag)
+    return flags
+
+
+def _resolution_rejection_reason(
+    *,
+    confidence: str,
+    referenced_entity: str,
+    resolved_user_message: str,
+    evidence_text: str,
+    risk_flags: list[str],
+) -> str | None:
+    if confidence != "high":
+        return "confidence_not_high"
+    if not referenced_entity:
+        return "missing_referenced_entity"
+    if not resolved_user_message:
+        return "missing_resolved_user_message"
+    if not evidence_text:
+        return "missing_evidence_text"
+    if referenced_entity not in resolved_user_message:
+        return "resolved_message_missing_entity"
+    blocking_flags = sorted({flag for flag in risk_flags if flag.lower() in _BLOCKING_RESOLUTION_RISK_FLAGS})
+    if blocking_flags:
+        return "blocking_risk_flags:" + ",".join(blocking_flags)
+    return None
+
+
+def _resolution_evidence_in_context(
+    *,
+    source: Mapping[str, Any],
+    referenced_entity: str,
+    evidence_text: str,
+    turns: list[_BusinessTurn],
+    summary_text: str | None,
+    capability_summaries: tuple[dict[str, Any], ...],
+) -> bool:
+    source_type = str(source.get("type") or "").strip()
+    message_id = str(source.get("message_id") or "").strip()
+    haystacks: list[str] = []
+    if source_type == "recent_message" and message_id:
+        for turn in turns:
+            for message in turn.memory_messages():
+                if message.message_id == message_id:
+                    haystacks.append(message.content)
+                    break
+    elif source_type == "history_summary":
+        if summary_text:
+            haystacks.append(summary_text)
+    elif source_type == "capability_summary":
+        haystacks.extend(json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str) for summary in capability_summaries)
+    else:
+        for turn in turns:
+            haystacks.extend(message.content for message in turn.memory_messages())
+        if summary_text:
+            haystacks.append(summary_text)
+        haystacks.extend(json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str) for summary in capability_summaries)
+
+    return any(evidence_text in haystack and referenced_entity in haystack for haystack in haystacks)
 
 
 def _messages_after_summary_boundary(

@@ -5,6 +5,7 @@ import App from './App';
 import type { ApiClient } from './api/client';
 import type { TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
+import { WELCOME_PROMPTS } from './domain/welcomePrompts';
 
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
@@ -168,19 +169,14 @@ describe('App', () => {
     expect(screen.queryByText('user: charlie')).not.toBeInTheDocument();
   });
 
-  it('keeps task progress collapsed in a top-right floating capsule until the user opens it', async () => {
+  it('does not render the old top-right task progress capsule', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     expect(screen.queryByText('业务对话')).not.toBeInTheDocument();
-    const capsule = screen.getByLabelText('任务进程悬浮胶囊');
-    const trigger = within(capsule).getByRole('button', { name: /任务进程/ });
-    expect(trigger).toHaveClass('task-status-capsule');
+    expect(screen.queryByLabelText('任务进程悬浮胶囊')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /任务进程/ })).not.toBeInTheDocument();
     expect(screen.queryByText('准备就绪')).not.toBeInTheDocument();
-
-    fireEvent.click(trigger);
-
-    expect(await screen.findByText('准备就绪')).toBeInTheDocument();
   });
 
   it('renders history in a left sidebar and keeps a minimal floating send bar in the chat workspace', async () => {
@@ -194,13 +190,18 @@ describe('App', () => {
     const conversationList = within(workspace).getByLabelText('对话内容');
 
     expect(within(workspace).queryByText('业务对话')).not.toBeInTheDocument();
-    expect(within(workspace).getByLabelText('任务进程悬浮胶囊')).toBeInTheDocument();
+    expect(within(workspace).queryByLabelText('任务进程悬浮胶囊')).not.toBeInTheDocument();
     expect(within(sidebar).getByText('历史会话')).toBeInTheDocument();
+    const historyRefreshButton = within(sidebar).getByRole('button', { name: '刷新历史会话' });
+    expect(historyRefreshButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '刷新历史会话');
     const userCard = within(sidebar).getByRole('region', { name: '用户信息与账户操作' });
-    expect(within(userCard).getByText('用户信息')).toBeInTheDocument();
+    expect(within(userCard).queryByText('用户信息')).not.toBeInTheDocument();
     expect(within(userCard).getByText('alice')).toBeInTheDocument();
     const accountSettingsButton = within(userCard).getByRole('button', { name: '用户账户设置' });
     expect(accountSettingsButton).toBeInTheDocument();
+    expect(within(userCard).queryByText('用户账户设置')).not.toBeInTheDocument();
+    expect(accountSettingsButton.querySelector('img')).toHaveAttribute('src', '/pics/account-settings-gear-button.svg?v=20260511-gear-visible');
+    expect(accountSettingsButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '用户账户设置');
     expect(within(userCard).getByRole('button', { name: '退出登录' })).toBeInTheDocument();
     expect(within(workspace).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument();
     fireEvent.click(accountSettingsButton);
@@ -212,13 +213,19 @@ describe('App', () => {
     expect(screen.queryByText('SQLQuery可用')).not.toBeInTheDocument();
     expect(screen.queryByText(/user:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/conversation:/)).not.toBeInTheDocument();
-    expect(within(sendRow).getByLabelText('请输入问题')).toBeInTheDocument();
-    expect(within(sendRow).getByRole('button', { name: '发送' })).toBeInTheDocument();
-    expect(within(sendRow).getByRole('button', { name: '打开输入功能菜单' })).toBeInTheDocument();
+    expect(within(sendRow).getByLabelText('请输入问题')).toHaveAttribute('placeholder', '从这里开始...');
+    const sendButton = within(sendRow).getByRole('button', { name: '发送' });
+    const inputMenuButton = within(sendRow).getByRole('button', { name: '打开输入功能菜单' });
+    expect(sendButton).toBeInTheDocument();
+    expect(inputMenuButton).toBeInTheDocument();
+    expect(sendButton.querySelector('img')).toHaveAttribute('src', '/pics/send-up-arrow-button.svg?v=20260511-arrow-balanced');
+    expect(inputMenuButton.querySelector('img')).toHaveAttribute('src', '/pics/input-menu-plus-button.svg');
+    expect(sendButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '发送');
+    expect(inputMenuButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '打开输入功能菜单');
     expect(within(sendRow).queryByRole('button', { name: '选择 JSON 或 CSV 文件' })).not.toBeInTheDocument();
     expect(sendBar).toHaveClass('floating-composer');
 
-    fireEvent.click(within(sendRow).getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(inputMenuButton);
     expect(await screen.findByRole('button', { name: '选择 JSON 或 CSV 文件' })).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
     expect(await screen.findByLabelText('深度思考')).toBeInTheDocument();
@@ -301,6 +308,147 @@ describe('App', () => {
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
     expect(await screen.findByText('以前的问题')).toBeInTheDocument();
     expect(await screen.findByText('以前的回答')).toBeInTheDocument();
+  });
+
+  it('shows an icon-only copy action below completed assistant replies and copies their text', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+          { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: '以前的回答', task_id: 'task-history', stream_status: 'complete', created_at: null },
+        ],
+      })),
+    });
+
+    try {
+      await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+      fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+
+      const assistantText = await screen.findByText('以前的回答');
+      const assistantBubble = assistantText.closest('.message-assistant') as HTMLElement;
+      expect(assistantBubble).not.toBeNull();
+      const copyButton = within(assistantBubble).getByRole('button', { name: '复制' });
+      expect(copyButton).not.toHaveTextContent('复制');
+      expect(copyButton.querySelector('svg')).not.toBeNull();
+      expect(copyButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '复制');
+
+      fireEvent.click(copyButton);
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('以前的回答'));
+    } finally {
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        delete (navigator as { clipboard?: unknown }).clipboard;
+      }
+    }
+  });
+
+  it('falls back to document copy when clipboard write is rejected', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const originalExecCommand = document.execCommand;
+    const writeText = vi.fn(async () => {
+      throw new Error('clipboard denied');
+    });
+    const execCommand = vi.fn(() => true);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    document.execCommand = execCommand;
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+          { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: 'fallback 复制内容', task_id: 'task-history', stream_status: 'complete', created_at: null },
+        ],
+      })),
+    });
+
+    try {
+      await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+      fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+      const assistantText = await screen.findByText('fallback 复制内容');
+      const assistantBubble = assistantText.closest('.message-assistant') as HTMLElement;
+      fireEvent.click(within(assistantBubble).getByRole('button', { name: '复制' }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('fallback 复制内容'));
+      await waitFor(() => expect(execCommand).toHaveBeenCalledWith('copy'));
+    } finally {
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        delete (navigator as { clipboard?: unknown }).clipboard;
+      }
+      if (originalExecCommand) {
+        document.execCommand = originalExecCommand;
+      } else {
+        delete (document as { execCommand?: unknown }).execCommand;
+      }
+    }
+  });
+
+  it('does not show the copy action for historical assistant replies that are not complete', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          account_id: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+          { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: '还没完成的历史回答', task_id: 'task-history', stream_status: 'streaming', created_at: null },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+
+    const assistantText = await screen.findByText('还没完成的历史回答');
+    const assistantBubble = assistantText.closest('.message-assistant') as HTMLElement;
+    expect(assistantBubble).not.toBeNull();
+    expect(within(assistantBubble).queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
   });
 
   it('renders history entries as flat rows with hover-revealed actions', async () => {
@@ -574,7 +722,9 @@ describe('App', () => {
 
     await waitFor(() => expect(api.deleteConversation).toHaveBeenCalledWith('conv-history'));
     expect(screen.queryByText('以前的问题')).not.toBeInTheDocument();
-    expect(screen.getByText('开始一次业务问答')).toBeInTheDocument();
+    const welcomeHeading = screen.getByRole('heading', { level: 4 });
+    expect(WELCOME_PROMPTS).toContain(welcomeHeading.textContent);
+    expect(screen.queryByText('直接描述你的问题即可。')).not.toBeInTheDocument();
     confirm.mockRestore();
   });
 
@@ -602,6 +752,23 @@ describe('App', () => {
     expect(reasoningBox).toHaveClass('reasoning-box-collapsed');
     await waitFor(() => expect(screen.getAllByText('你好').length).toBeGreaterThan(0));
     await screen.findByText(/已接通。/);
+  });
+
+  it('submits long composer input without a character cap', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    const input = screen.getByLabelText('请输入问题');
+    const longPrompt = `请完整分析以下长文本：${'不要截断这段输入。'.repeat(800)}`;
+    expect(input).not.toHaveAttribute('maxlength');
+    expect(input).toHaveAttribute('wrap', 'soft');
+
+    fireEvent.change(input, { target: { value: longPrompt } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: longPrompt,
+    })));
   });
 
   it('only follows streaming output when the conversation view is already at the bottom', async () => {
@@ -833,7 +1000,69 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    expect(await screen.findByText('正在执行 SQLQuery：正在检索数据库')).toBeInTheDocument();
+    const progressText = await screen.findByText('正在执行 SQLQuery：正在检索数据库');
+    const assistantBubble = progressText.closest('.message-assistant') as HTMLElement;
+    expect(assistantBubble).not.toBeNull();
+    expect(assistantBubble.querySelector('.activity-notice')).not.toBeNull();
+    expect(assistantBubble.querySelector('.ant-spin')).not.toBeNull();
+  });
+
+  it('does not show the assistant copy action until the reply is completed', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '流式主代理回答', ordinal: 1 }));
+    });
+    const streamingBubble = (await screen.findByText('流式主代理回答')).closest('.message-assistant') as HTMLElement;
+    expect(streamingBubble).not.toBeNull();
+    expect(within(streamingBubble).queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.completed'));
+    });
+    expect(await within(streamingBubble).findByRole('button', { name: '复制' })).toBeInTheDocument();
+  });
+
+  it('replaces the waiting-for-event hint with live task progress inside the assistant bubble', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
+    const submittingBubble = screen.getByText('提交中').closest('.message-assistant') as HTMLElement;
+    expect(submittingBubble).not.toBeNull();
+    expect(submittingBubble.querySelector('.ant-spin')).not.toBeNull();
+    expect(screen.queryByText('等待任务事件...')).not.toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    expect((await screen.findByText('任务已提交')).closest('.message-assistant')).not.toBeNull();
+    expect(screen.queryByText('等待任务事件...')).not.toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.graph_created', {}, 'graph-created'));
+    });
+    expect((await screen.findByText('正在规划并准备执行能力')).closest('.message-assistant')).not.toBeNull();
+    expect(screen.queryByText('等待任务事件...')).not.toBeInTheDocument();
   });
 
   it('shows a friendly busy-conversation error', async () => {
@@ -910,7 +1139,17 @@ describe('App', () => {
         updated_at: null,
       })),
     });
-    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} waitingInputCheckDelayMs={1} />);
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [event('task.accepted', {}, 'accepted-before-interrupt')],
+        [
+          event('task.accepted', {}, 'accepted-after-interrupt'),
+          event('node.started', { capability_id: 'sql_query.sql_execute_readonly' }, 'execute-after-interrupt'),
+        ],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询基因型' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -928,7 +1167,12 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { crop: '水稻' }));
-    expect(screen.getByText('已收到补充信息，继续当前任务...')).toBeInTheDocument();
+    const resumedProgress = await screen.findByText('正在执行 SQLQuery：正在检索数据库');
+    const resumedBubble = resumedProgress.closest('.message-assistant') as HTMLElement;
+    expect(resumedBubble).not.toBeNull();
+    expect(resumedBubble.querySelector('.activity-notice')).not.toBeNull();
+    expect(resumedBubble.querySelector('.ant-spin')).not.toBeNull();
+    expect(screen.queryByText('已收到补充信息，继续当前任务...')).not.toBeInTheDocument();
     expect(api.cancelTask).not.toHaveBeenCalled();
   });
 

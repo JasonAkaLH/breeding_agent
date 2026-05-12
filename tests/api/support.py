@@ -71,8 +71,13 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         enable_conversation_title_llm: bool | None = None,
         conversation_memory_builder=None,
         enable_conversation_memory: bool = True,
+        conversation_memory_resolution_generator=None,
+        enable_conversation_memory_resolution_llm: bool = False,
         skill_roots=(),
         public_skill_roots=None,
+        mcp_config=None,
+        mcp_client_factory=None,
+        mcp_runtime_state=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
@@ -125,8 +130,13 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             enable_conversation_title_llm=conversation_title_configured if enable_conversation_title_llm is None else enable_conversation_title_llm,
             conversation_memory_builder=conversation_memory_builder,
             enable_conversation_memory=enable_conversation_memory,
+            conversation_memory_resolution_generator=conversation_memory_resolution_generator,
+            enable_conversation_memory_resolution_llm=enable_conversation_memory_resolution_llm,
             skill_roots=skill_roots,
             public_skill_roots=public_skill_roots,
+            mcp_config=mcp_config,
+            mcp_client_factory=mcp_client_factory,
+            mcp_runtime_state=mcp_runtime_state,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
 
@@ -186,8 +196,13 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         enable_conversation_title_llm: bool | None = None,
         conversation_memory_builder=None,
         enable_conversation_memory: bool = True,
+        conversation_memory_resolution_generator=None,
+        enable_conversation_memory_resolution_llm: bool = False,
         skill_roots=(),
         public_skill_roots=None,
+        mcp_config=None,
+        mcp_client_factory=None,
+        mcp_runtime_state=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> None:
         await self.client.aclose()
@@ -219,8 +234,13 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             enable_conversation_title_llm=enable_conversation_title_llm,
             conversation_memory_builder=conversation_memory_builder,
             enable_conversation_memory=enable_conversation_memory,
+            conversation_memory_resolution_generator=conversation_memory_resolution_generator,
+            enable_conversation_memory_resolution_llm=enable_conversation_memory_resolution_llm,
             skill_roots=skill_roots,
             public_skill_roots=public_skill_roots,
+            mcp_config=mcp_config,
+            mcp_client_factory=mcp_client_factory,
+            mcp_runtime_state=mcp_runtime_state,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
         await self._bind_client()

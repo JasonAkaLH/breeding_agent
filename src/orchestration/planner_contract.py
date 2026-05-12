@@ -8,6 +8,10 @@ from typing import Any, Iterable
 from .models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 
 
+PUBLIC_CAPABILITY_LIST_BUDGET_CHARS = 8_000
+_SHORTENED_CAPABILITY_DESCRIPTION_CHARS = 160
+
+
 PLANNER_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -159,6 +163,7 @@ def _format_public_capabilities(
     public_capabilities: Iterable[CapabilityDescriptor] | None,
     *,
     planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
+    budget_chars: int = PUBLIC_CAPABILITY_LIST_BUDGET_CHARS,
 ) -> str:
     capabilities = tuple(public_capabilities or ())
     allowlist = {
@@ -172,10 +177,37 @@ def _format_public_capabilities(
             "- sql_query.query：通过 SQLQuery 安全回答自然语言数据查询。"
             "规划器 input_payload 允许字段：无；系统会填充可信字段。"
         )
-    return "\n".join(
-        f"- {descriptor.capability_id}：{descriptor.name} — {descriptor.description} "
-        f"规划器 input_payload 允许字段：{_format_payload_fields(allowlist.get(descriptor.capability_id, ()))}。"
+    full_block = "\n".join(
+        _format_capability_line(descriptor, allowlist.get(descriptor.capability_id, ()))
         for descriptor in capabilities
+    )
+    if len(full_block) <= budget_chars:
+        return full_block
+
+    shortened_lines = [
+        _format_capability_line(
+            descriptor,
+            allowlist.get(descriptor.capability_id, ()),
+            shorten_description=True,
+        )
+        for descriptor in capabilities
+    ]
+    return _fit_capability_lines(shortened_lines, budget_chars)
+
+
+def _format_capability_line(
+    descriptor: CapabilityDescriptor,
+    planner_payload_fields: Iterable[str],
+    *,
+    shorten_description: bool = False,
+) -> str:
+    description = descriptor.description
+    if shorten_description:
+        description = _shorten_text(description, _SHORTENED_CAPABILITY_DESCRIPTION_CHARS)
+    source_path_part = f" 路径：{descriptor.source_path}。" if descriptor.source_path else ""
+    return (
+        f"- {descriptor.capability_id}：{descriptor.name} — {description}"
+        f"{source_path_part} 规划器 input_payload 允许字段：{_format_payload_fields(planner_payload_fields)}。"
     )
 
 
@@ -184,6 +216,44 @@ def _format_payload_fields(fields: Iterable[str]) -> str:
     if not field_tuple:
         return "无；系统会填充可信字段"
     return ", ".join(field_tuple)
+
+
+def _fit_capability_lines(lines: list[str], budget_chars: int) -> str:
+    omission_notice = "- 部分 capability 因列表预算被省略；请只使用本列表中已经出现的 capability。"
+    if budget_chars <= len(omission_notice):
+        return _shorten_text(omission_notice, max(0, budget_chars))
+
+    selected: list[str] = []
+    selected_len = 0
+    for index, line in enumerate(lines):
+        separator_len = 1 if selected else 0
+        candidate_len = selected_len + separator_len + len(line)
+        reserve_notice = 1 + len(omission_notice) if index < len(lines) - 1 else 0
+        if candidate_len + reserve_notice <= budget_chars:
+            selected.append(line)
+            selected_len = candidate_len
+            continue
+        break
+
+    if len(selected) == len(lines):
+        return "\n".join(selected)
+    while selected and len("\n".join(selected)) + 1 + len(omission_notice) > budget_chars:
+        selected.pop()
+    if selected:
+        return "\n".join((*selected, omission_notice))
+    first_budget = budget_chars - 1 - len(omission_notice)
+    first_line = _shorten_text(lines[0], first_budget)
+    return "\n".join((first_line, omission_notice))
+
+
+def _shorten_text(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return "." * limit
+    return value[: limit - 3].rstrip() + "..."
 
 
 def _reject_unknown_keys(payload: dict[str, Any], allowed_keys: set[str], context: str) -> None:

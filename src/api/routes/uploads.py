@@ -8,6 +8,7 @@ from ..runtime import ApiRuntime
 from ..upload_store import UploadValidationError
 
 router = APIRouter()
+UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _runtime(request: Request) -> ApiRuntime:
@@ -26,6 +27,25 @@ def _upload_response(record) -> UploadFileResponse:
         expires_at=record.expires_at,
         preview=UploadPreviewResponse(**record.preview),
     )
+
+
+async def _read_upload_content_with_limit(
+    file: UploadFile,
+    *,
+    max_bytes: int,
+    chunk_size: int = UPLOAD_READ_CHUNK_BYTES,
+) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise UploadValidationError(f"Uploaded file exceeds {max_bytes} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @router.get("/api/v1/conversations/{conversation_id}/uploads", response_model=UploadListResponse)
@@ -54,8 +74,12 @@ async def upload_conversation_file(
 ) -> UploadFileResponse:
     runtime = _runtime(request)
     user = await require_authenticated_user(request)
-    content = await file.read()
     try:
+        await runtime.ensure_upload_allowed(conversation_id, user.username)
+        content = await _read_upload_content_with_limit(
+            file,
+            max_bytes=runtime.upload_store.max_file_bytes,
+        )
         record = await runtime.save_upload(
             conversation_id=conversation_id,
             account_id=user.username,

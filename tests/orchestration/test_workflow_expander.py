@@ -4,6 +4,7 @@ import unittest
 
 from src.capabilities.sql_query import SQLQueryWorkflowProvider
 from src.orchestration.models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_expander import WorkflowExpander
 
 
@@ -78,6 +79,33 @@ class WorkflowExpanderTest(unittest.TestCase):
 
         self.assertGreaterEqual(expanded.max_replans, 1)
         self.assertGreaterEqual(expanded.max_dynamic_nodes, 12)
+
+    def test_dynamic_macro_provider_resolver_expands_skill_capability_with_revision(self) -> None:
+        skill_provider = SkillWorkflowProvider(
+            skill_name_resolver=lambda capability_id, revision: (
+                "demo-hot-reload" if capability_id == "skill.demo_hot_reload" and revision == "skillrev-1" else None
+            )
+        )
+        request = OrchestrationRequest(
+            task_id="task-skill-dynamic",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="请处理动态加载任务",
+            metadata={"skill_bundle_revision": "skillrev-1"},
+        )
+        high_level = WorkflowPlan(
+            task_id="task-skill-dynamic",
+            nodes=(WorkflowNodePlan(node_id="demo", capability_id="skill.demo_hot_reload"),),
+        )
+
+        expanded = WorkflowExpander(
+            {},
+            macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+        ).expand(high_level, request=request)
+
+        self.assertEqual([node.capability_id for node in expanded.nodes], ["main_agent.respond"])
+        self.assertEqual(expanded.nodes[0].metadata["forced_skill_name"], "demo-hot-reload")
+        self.assertEqual(expanded.nodes[0].metadata["skill_bundle_revision"], "skillrev-1")
 
 
 if __name__ == "__main__":
