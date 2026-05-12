@@ -1,0 +1,638 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
+from src.core.enums import ArtifactType, EventVisibility
+from src.core.models import Artifact, EventRecord
+from src.integrations.codex_skills import (
+    SkillExecutionConfigError,
+    SkillManifest,
+    SkillPlatformExecutionContext,
+    SkillPlatformHandlerRegistry,
+    SkillScriptExecutionService,
+    SkillScriptRunner,
+    SkillRuntimeState,
+    SkillServiceRegistry,
+    build_skill_artifact_context,
+    build_skill_safe_metadata,
+    call_platform_handler,
+    coerce_skill_response_text,
+    resolve_skill_execution_config,
+    select_skill_entrypoint,
+)
+
+
+@dataclass(slots=True, frozen=True)
+class _ResolvedSkill:
+    revision: str | None
+    manifest: SkillManifest
+    capability_id: str
+
+
+class _UnknownSkillBundleRevisionError(KeyError):
+    pass
+
+
+class SkillExecutor(ExecutorPort):
+    def __init__(
+        self,
+        *,
+        runtime_state: SkillRuntimeState,
+        script_runner: SkillScriptRunner | None = None,
+        skill_input_text_generator=None,
+        platform_handler_registry: SkillPlatformHandlerRegistry | None = None,
+        service_registry: SkillServiceRegistry | None = None,
+    ) -> None:
+        self._runtime_state = runtime_state
+        self._script_service = SkillScriptExecutionService(
+            script_runner=script_runner or SkillScriptRunner(),
+            skill_input_text_generator=skill_input_text_generator,
+        )
+        self._platform_handler_registry = platform_handler_registry or SkillPlatformHandlerRegistry()
+        self._service_registry = service_registry or SkillServiceRegistry()
+
+    def supports(self, capability_id: str) -> bool:
+        try:
+            return capability_id in set(self._runtime_state.known_skill_capability_ids())
+        except Exception:
+            return False
+
+    async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
+        try:
+            resolved = self._resolve_skill(request)
+        except _UnknownSkillBundleRevisionError:
+            return self._error_result(
+                request,
+                code="skill_bundle_revision_missing",
+                message="Skill bundle revision is not available.",
+            )
+        except KeyError:
+            return self._error_result(request, code="skill_capability_not_registered", message="Skill capability is not registered.")
+        except SkillExecutionConfigError as exc:
+            return self._error_result(request, code="skill_execution_config_invalid", message=str(exc))
+
+        try:
+            execution = resolve_skill_execution_config(resolved.manifest)
+        except SkillExecutionConfigError as exc:
+            return self._error_result(request, code="skill_execution_config_invalid", message=str(exc))
+
+        started_event = self._make_event(
+            request,
+            event_type="skill.execution_started",
+            payload={
+                "capability_id": request.capability_id,
+                "skill_name": resolved.manifest.name,
+                "skill_bundle_revision": resolved.revision,
+                "mode": execution.mode,
+                "answer_mode": execution.answer_mode,
+            },
+            visibility=EventVisibility.AUDIT_ONLY,
+        )
+        events: list[EventRecord] = [started_event]
+        artifact_context = build_skill_artifact_context(request.metadata)
+        user_message = self._resolve_user_message(request)
+        started_at = time.monotonic()
+
+        if execution.mode == "delegated_main_agent":
+            failed = self._make_event(
+                request,
+                event_type="skill.execution_failed",
+                payload={
+                    "capability_id": request.capability_id,
+                    "skill_name": resolved.manifest.name,
+                    "mode": execution.mode,
+                    "reason": "delegated_main_agent_not_executable",
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={"skill_name": resolved.manifest.name},
+                events=(started_event, failed),
+                error=CapabilityExecutionError(
+                    code="skill_execution_mode_not_supported",
+                    message="Delegated main-agent skills are not executed by SkillExecutor.",
+                    retriable=False,
+                ),
+            )
+
+        if execution.mode == "python_subprocess":
+            if execution.services:
+                failed = self._make_event(
+                    request,
+                    event_type="skill.execution_failed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "reason": "service_binding_not_allowed_for_python_subprocess",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+                return CapabilityExecutionResult(
+                    capability_id=request.capability_id,
+                    task_id=request.task_id,
+                    node_id=request.node_id,
+                    output_payload={"skill_name": resolved.manifest.name},
+                    events=(started_event, failed),
+                    error=CapabilityExecutionError(
+                        code="skill_service_denied",
+                        message="python_subprocess skills cannot bind controlled services.",
+                        retriable=False,
+                    ),
+                )
+            try:
+                script = select_skill_entrypoint(resolved.manifest)
+            except SkillExecutionConfigError as exc:
+                failed = self._make_event(
+                    request,
+                    event_type="skill.execution_failed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "reason": "entrypoint_not_allowed",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+                return CapabilityExecutionResult(
+                    capability_id=request.capability_id,
+                    task_id=request.task_id,
+                    node_id=request.node_id,
+                    output_payload={"skill_name": resolved.manifest.name},
+                    events=(started_event, failed),
+                    error=CapabilityExecutionError(
+                        code="skill_entrypoint_not_allowed",
+                        message=str(exc),
+                        retriable=False,
+                    ),
+                )
+            return await self._execute_script_skill(
+                request=request,
+                resolved=resolved,
+                execution=execution,
+                user_message=user_message,
+                artifact_context=artifact_context,
+                script=script,
+                started_at=started_at,
+                prior_events=events,
+            )
+
+        return await self._execute_platform_service_skill(
+            request=request,
+            resolved=resolved,
+            execution=execution,
+            user_message=user_message,
+            artifact_context=artifact_context,
+            started_at=started_at,
+            prior_events=events,
+        )
+
+    def _resolve_skill(self, request: CapabilityExecutionRequest) -> _ResolvedSkill:
+        revision = str(request.metadata.get("skill_bundle_revision") or "").strip() or None
+        try:
+            bundle = self._runtime_state.bundle_for_revision(revision)
+        except KeyError as exc:
+            raise _UnknownSkillBundleRevisionError(revision or "") from exc
+        skill_name = bundle.skill_capabilities.skill_name_by_capability_id.get(request.capability_id)
+        if not skill_name:
+            raise KeyError(request.capability_id)
+        manifest = bundle.catalog.get(skill_name)
+        if manifest is None:
+            raise SkillExecutionConfigError(f"Missing manifest for {request.capability_id}")
+        return _ResolvedSkill(revision=revision, manifest=manifest, capability_id=request.capability_id)
+
+    async def _execute_script_skill(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        resolved: _ResolvedSkill,
+        execution,
+        user_message: str,
+        artifact_context: tuple[Mapping[str, Any], ...],
+        script,
+        started_at: float,
+        prior_events: list[EventRecord],
+    ) -> CapabilityExecutionResult:
+        script_result = await self._script_service.execute(
+            manifest=resolved.manifest,
+            script=script,
+            user_message=user_message,
+            metadata=request.metadata,
+            artifact_context=artifact_context,
+            output_context={
+                "task_id": request.task_id,
+                "conversation_id": request.conversation_id,
+                "node_id": request.node_id,
+            },
+        )
+        events = list(prior_events)
+        if script_result.resolution is not None and script_result.resolution.diagnostics:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.input_resolution_diagnostic",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "diagnostics": list(script_result.resolution.diagnostics),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        if script_result.resolution is not None and script_result.resolution.sources:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.input_resolved",
+                    payload=script_result.resolution.audit_payload(skill_name=resolved.manifest.name, entrypoint=script.name),
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        if script_result.status == "missing_input":
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.input_missing",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "missing": list(script_result.missing),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.execution_failed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "reason": "missing_input",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={"skill_name": resolved.manifest.name, "missing": list(script_result.missing)},
+                events=tuple(events),
+                error=CapabilityExecutionError(
+                    code="skill_input_missing",
+                    message="Missing required skill input.",
+                    retriable=False,
+                    metadata={"missing": list(script_result.missing)},
+                ),
+            )
+
+        events.append(
+            self._make_event(
+                request,
+                event_type="skill.entrypoint_started",
+                payload={"skill_name": resolved.manifest.name, "entrypoint": script.name},
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+        if script_result.status == "failed":
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.entrypoint_failed",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "reason": script_result.failure_reason,
+                        "code": script_result.failure_code,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.execution_failed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "reason": script_result.failure_code,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={"skill_name": resolved.manifest.name},
+                events=tuple(events),
+                error=CapabilityExecutionError(
+                    code=script_result.failure_code,
+                    message=script_result.failure_reason or "Skill script failed.",
+                    retriable=script_result.failure_code == "skill_script_timeout",
+                ),
+            )
+
+        artifacts = []
+        if script_result.artifact is not None:
+            artifacts.append(script_result.artifact)
+        for rejection in script_result.rejections:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.output_file_rejected",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "path": getattr(rejection, "path", ""),
+                        "reason": getattr(rejection, "reason", "output_file_rejected"),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        if script_result.output_file_count:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.output_file_collected",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "file_count": script_result.output_file_count,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        response_text = coerce_skill_response_text(script_result.output)
+        if execution.answer_mode == "direct" and response_text:
+            artifacts.append(self._make_text_artifact(request, response_text))
+        events.append(
+            self._make_event(
+                request,
+                event_type="skill.entrypoint_completed",
+                payload={"skill_name": resolved.manifest.name, "entrypoint": script.name, "schema_validated": True},
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+        events.append(
+            self._make_event(
+                request,
+                event_type="skill.execution_completed",
+                payload={
+                    "capability_id": request.capability_id,
+                    "skill_name": resolved.manifest.name,
+                    "mode": execution.mode,
+                    "answer_mode": execution.answer_mode,
+                    "duration_ms": int((time.monotonic() - started_at) * 1000),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload=dict(script_result.output),
+            artifacts=tuple(artifacts),
+            events=tuple(events),
+        )
+
+    async def _execute_platform_service_skill(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        resolved: _ResolvedSkill,
+        execution,
+        user_message: str,
+        artifact_context: tuple[Mapping[str, Any], ...],
+        started_at: float,
+        prior_events: list[EventRecord],
+    ) -> CapabilityExecutionResult:
+        events = list(prior_events)
+        try:
+            handler, services = self._platform_handler_registry.resolve(
+                capability_id=request.capability_id,
+                config=execution,
+                service_registry=self._service_registry,
+            )
+        except PermissionError as exc:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.service_denied",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "handler": execution.handler,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.execution_failed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "reason": "service_denied",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={"skill_name": resolved.manifest.name},
+                events=tuple(events),
+                error=CapabilityExecutionError(
+                    code="skill_service_denied",
+                    message=str(exc),
+                    retriable=False,
+                ),
+            )
+
+        events.append(
+            self._make_event(
+                request,
+                event_type="skill.service_bound",
+                payload={
+                    "capability_id": request.capability_id,
+                    "skill_name": resolved.manifest.name,
+                    "handler": execution.handler,
+                    "services": tuple(sorted(services)),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+        try:
+            handler_result = await call_platform_handler(
+                handler,
+                SkillPlatformExecutionContext(
+                    capability_id=request.capability_id,
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    node_id=request.node_id,
+                    manifest=resolved.manifest,
+                    skill_bundle_revision=resolved.revision,
+                    input_payload={
+                        "query": user_message,
+                        "user_message": user_message,
+                        **{key: value for key, value in request.input_payload.items() if key not in {"user_message", "query"}},
+                    },
+                    artifact_context=artifact_context,
+                    dependency_outputs=request.dependency_outputs,
+                    safe_metadata=build_skill_safe_metadata(request.metadata),
+                    services=services,
+                ),
+            )
+        except Exception as exc:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.execution_failed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "reason": "service_failed",
+                        "error_type": type(exc).__name__,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={"skill_name": resolved.manifest.name},
+                events=tuple(events),
+                error=CapabilityExecutionError(
+                    code="skill_service_failed",
+                    message="Platform skill handler failed.",
+                    retriable=False,
+                    metadata={"error_type": type(exc).__name__},
+                ),
+            )
+
+        artifacts = list(handler_result.artifacts)
+        output_payload = dict(handler_result.output_payload)
+        response_text = coerce_skill_response_text(output_payload)
+        if execution.answer_mode == "direct" and response_text:
+            artifacts.append(self._make_text_artifact(request, response_text))
+        events.extend(handler_result.events)
+        if handler_result.error is None and handler_result.interrupt is None:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.execution_completed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "answer_mode": execution.answer_mode,
+                        "duration_ms": int((time.monotonic() - started_at) * 1000),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        elif handler_result.interrupt is not None:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.execution_interrupted",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "interrupt_id": handler_result.interrupt.interrupt_id,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        else:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.execution_failed",
+                    payload={
+                        "capability_id": request.capability_id,
+                        "skill_name": resolved.manifest.name,
+                        "mode": execution.mode,
+                        "reason": handler_result.error.code,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload=output_payload,
+            artifacts=tuple(artifacts),
+            events=tuple(events),
+            interrupt=handler_result.interrupt,
+            error=handler_result.error,
+        )
+
+    @staticmethod
+    def _resolve_user_message(request: CapabilityExecutionRequest) -> str:
+        user_message = str(request.input_payload.get("user_message") or request.input_payload.get("query") or "").strip()
+        return user_message
+
+    @staticmethod
+    def _error_result(request: CapabilityExecutionRequest, *, code: str, message: str) -> CapabilityExecutionResult:
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload={},
+            error=CapabilityExecutionError(code=code, message=message, retriable=False),
+        )
+
+    @staticmethod
+    def _make_event(
+        request: CapabilityExecutionRequest,
+        *,
+        event_type: str,
+        payload: Mapping[str, Any],
+        visibility: EventVisibility,
+    ) -> EventRecord:
+        serialized = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(f"{request.node_id}:{event_type}:{serialized}".encode("utf-8")).hexdigest()[:12]
+        return EventRecord(
+            event_id=f"{request.node_id}:{event_type}:{digest}",
+            conversation_id=request.conversation_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            event_type=event_type,
+            payload=dict(payload),
+            visibility=visibility,
+        )
+
+    @staticmethod
+    def _make_text_artifact(request: CapabilityExecutionRequest, text: str) -> Artifact:
+        digest = hashlib.sha256(f"{request.node_id}:text:{text}".encode("utf-8")).hexdigest()[:12]
+        return Artifact(
+            artifact_id=f"{request.node_id}:skill_text:{digest}",
+            task_id=request.task_id,
+            producer_node_id=request.node_id,
+            artifact_type=ArtifactType.TEXT,
+            storage_ref=text,
+            summary=text[:120] or None,
+            is_complete=True,
+        )

@@ -14,10 +14,10 @@ class SharedLLMRuntime:
 
     The runtime owns one lazily-created client instance. Callers may share that
     instance across phases inside the same owner domain (for example the main
-    agent's plan/observe/replan/final-answer loop). Separate capability-internal
-    domains such as SQLQuery should create their own runtime instance so their
-    non-streaming LLM calls stay independent while sharing request-level
-    reasoning configuration when desired.
+    agent's plan/observe/replan/final-answer loop). Capability-internal domains
+    that need LLM help should receive a narrow adapter from the owning runtime
+    instead of creating independent clients unless a product contract explicitly
+    requires isolation.
     """
 
     def __init__(

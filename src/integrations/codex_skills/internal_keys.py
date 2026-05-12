@@ -1,0 +1,5 @@
+from __future__ import annotations
+
+
+SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY = "__maf_skill_output_artifact__"
+SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY = "__maf_skill_output_rejections__"

@@ -117,23 +117,42 @@ export function parseAssistantTextArtifact(artifacts: ArtifactResponse[]): strin
 }
 
 function isSummaryArtifact(artifact: ArtifactResponse): boolean {
-  return artifact.artifact_type === 'summary';
+  return artifact.artifact_type === 'summary' || artifactMetadata(artifact).artifact_role === 'summary';
 }
 
 function isFilteredPreviewArtifact(artifact: ArtifactResponse): boolean {
-  return artifact.artifact_id.includes('filtered_query_result') || artifact.producer_node_id.includes('result_filtering');
+  const metadata = artifactMetadata(artifact);
+  return metadata.artifact_role === 'filtered_query_result'
+    || artifact.artifact_id.includes('filtered_query_result')
+    || artifact.producer_node_id.includes('result_filtering');
 }
 
 function isPreviewArtifact(artifact: ArtifactResponse): boolean {
-  return isFilteredPreviewArtifact(artifact) || artifact.artifact_id.includes('query_result_preview') || artifact.producer_node_id.includes('sql_execute_readonly');
+  const metadata = artifactMetadata(artifact);
+  return metadata.artifact_role === 'query_result_preview'
+    || isFilteredPreviewArtifact(artifact)
+    || artifact.artifact_id.includes('query_result_preview')
+    || artifact.producer_node_id.includes('sql_execute_readonly');
 }
 
 function isSqlQueryDisplayArtifact(artifact: ArtifactResponse): boolean {
+  const metadata = artifactMetadata(artifact);
   return (
-    isPreviewArtifact(artifact)
+    metadata.domain_kind === 'sql_query'
+    || metadata.capability_id === 'skill.sql_query'
+    || isPreviewArtifact(artifact)
     || artifact.artifact_id.includes('sql_query')
     || artifact.producer_node_id.includes('sql_query')
   );
+}
+
+function artifactMetadata(artifact: ArtifactResponse): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(artifact.storage_ref) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function isMainAgentTextArtifact(artifact: ArtifactResponse): boolean {

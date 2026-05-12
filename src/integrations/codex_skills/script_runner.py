@@ -14,7 +14,15 @@ from .script_manifest import SkillScriptEntrypoint
 
 
 class SkillScriptError(RuntimeError):
-    pass
+    code = "skill_script_failed"
+
+
+class SkillScriptTimeoutError(SkillScriptError):
+    code = "skill_script_timeout"
+
+
+class SkillScriptOutputValidationError(SkillScriptError):
+    code = "skill_output_validation_failed"
 
 
 SkillOutputProcessor = Callable[..., Awaitable[dict[str, Any]] | dict[str, Any]]
@@ -69,7 +77,7 @@ class SkillScriptRunner:
             except asyncio.TimeoutError as exc:
                 process.kill()
                 await process.communicate()
-                raise SkillScriptError(f"Skill script timed out after {script.timeout_seconds:g}s") from exc
+                raise SkillScriptTimeoutError(f"Skill script timed out after {script.timeout_seconds:g}s") from exc
 
             if len(stdout) > self._max_stdout_bytes:
                 raise SkillScriptError("Skill script stdout exceeded limit")
@@ -79,14 +87,14 @@ class SkillScriptRunner:
             try:
                 decoded = json.loads(stdout.decode("utf-8"))
             except json.JSONDecodeError as exc:
-                raise SkillScriptError("Skill script stdout must be a JSON object") from exc
+                raise SkillScriptOutputValidationError("Skill script stdout must be a JSON object") from exc
             if not isinstance(decoded, dict):
-                raise SkillScriptError("Skill script stdout must be a JSON object")
+                raise SkillScriptOutputValidationError("Skill script stdout must be a JSON object")
             try:
                 script.output_contract.validate_required(decoded)
                 manifest.outputs.validate_required(decoded)
             except ValueError as exc:
-                raise SkillScriptError(str(exc)) from exc
+                raise SkillScriptOutputValidationError(str(exc)) from exc
             output = dict(decoded)
             if self._output_processor is not None:
                 try:

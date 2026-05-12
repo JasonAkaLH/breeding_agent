@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from src.capabilities.sql_query import SQLQueryWorkflowProvider
 from src.orchestration.models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_expander import WorkflowExpander
+from src.integrations.codex_skills.skill_runtime_state import SkillRuntimeState
 
 
 class WorkflowExpanderTest(unittest.TestCase):
@@ -106,6 +109,106 @@ class WorkflowExpanderTest(unittest.TestCase):
         self.assertEqual([node.capability_id for node in expanded.nodes], ["main_agent.respond"])
         self.assertEqual(expanded.nodes[0].metadata["forced_skill_name"], "demo-hot-reload")
         self.assertEqual(expanded.nodes[0].metadata["skill_bundle_revision"], "skillrev-1")
+
+    def test_skill_executor_mode_expands_to_skill_node_and_finalizer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            skill_dir = root / "scripted"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: scripted
+description: 处理文本
+scripts:
+  - name: echo
+    path: scripts/echo.py
+    runtime: python
+---
+
+# Scripted
+运行脚本。
+""",
+                encoding="utf-8",
+            )
+            state = SkillRuntimeState.from_roots(
+                skill_roots=(root,),
+                public_skill_roots=(root,),
+                reserved_capability_ids=("main_agent.respond", "sql_query.query"),
+            )
+            skill_provider = SkillWorkflowProvider(
+                skill_name_resolver=lambda capability_id, revision: state.skill_name_for_capability(capability_id, revision),
+                skill_manifest_resolver=lambda capability_id, revision: state.catalog_for_revision(revision).get(state.skill_name_for_capability(capability_id, revision) or ""),
+            )
+            request = OrchestrationRequest(
+                task_id="task-skill-executor",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="请处理这个文本",
+                metadata={"skill_bundle_revision": state.active_revision},
+            )
+            high_level = WorkflowPlan(
+                task_id="task-skill-executor",
+                nodes=(WorkflowNodePlan(node_id="demo", capability_id="skill.scripted"),),
+            )
+
+            expanded = WorkflowExpander(
+                {},
+                macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+            ).expand(high_level, request=request)
+
+        self.assertEqual([node.capability_id for node in expanded.nodes], ["skill.scripted", "main_agent.respond"])
+        self.assertEqual(expanded.nodes[0].input_payload["user_message"], "请处理这个文本")
+        self.assertEqual(expanded.nodes[1].depends_on, (expanded.nodes[0].node_id,))
+
+    def test_skill_direct_answer_mode_does_not_add_finalizer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            skill_dir = root / "direct"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: direct
+description: 直接回答
+scripts:
+  - name: echo
+    path: scripts/echo.py
+    runtime: python
+execution:
+  answer_mode: direct
+---
+
+# Direct
+直接回答。
+""",
+                encoding="utf-8",
+            )
+            state = SkillRuntimeState.from_roots(
+                skill_roots=(root,),
+                public_skill_roots=(root,),
+                reserved_capability_ids=("main_agent.respond", "sql_query.query"),
+            )
+            skill_provider = SkillWorkflowProvider(
+                skill_name_resolver=lambda capability_id, revision: state.skill_name_for_capability(capability_id, revision),
+                skill_manifest_resolver=lambda capability_id, revision: state.catalog_for_revision(revision).get(state.skill_name_for_capability(capability_id, revision) or ""),
+            )
+            request = OrchestrationRequest(
+                task_id="task-skill-direct",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="请直接回答",
+                metadata={"skill_bundle_revision": state.active_revision},
+            )
+            high_level = WorkflowPlan(
+                task_id="task-skill-direct",
+                nodes=(WorkflowNodePlan(node_id="demo", capability_id="skill.direct"),),
+            )
+
+            expanded = WorkflowExpander(
+                {},
+                macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+            ).expand(high_level, request=request)
+
+        self.assertEqual([node.capability_id for node in expanded.nodes], ["skill.direct"])
 
 
 if __name__ == "__main__":

@@ -90,6 +90,26 @@ Body.
             self.assertEqual(state.active_revision, first_revision)
             self.assertIn("skill.demo_skill", state.active_skill_capability_ids())
 
+    def test_known_skill_capability_ids_keep_retained_revision_until_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            self._write_skill(root, "demo-skill", "version one")
+            state = SkillRuntimeState.from_roots(
+                skill_roots=(root,),
+                public_skill_roots=(root,),
+                reserved_capability_ids=("main_agent.respond", "sql_query.query"),
+            )
+            first_revision = state.active_revision
+            state.retain_revision(first_revision)
+
+            (root / "demo-skill" / "SKILL.md").unlink()
+            result = state.refresh_if_changed(reason="conversation_start")
+
+            self.assertEqual(result.status, "completed")
+            self.assertIn("skill.demo_skill", state.known_skill_capability_ids())
+            state.release_revision(first_revision)
+            self.assertNotIn("skill.demo_skill", state.known_skill_capability_ids())
+
 
 if __name__ == "__main__":
     unittest.main()

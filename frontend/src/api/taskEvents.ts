@@ -53,6 +53,7 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
       'main_agent.output_delta',
       'main_agent.output_final',
       'main_agent.reasoning_delta',
+      'skill.progress',
       'sql_query.sql_guard_passed',
       'sql_query.sql_guard_blocked',
       'task.interrupt_answered',

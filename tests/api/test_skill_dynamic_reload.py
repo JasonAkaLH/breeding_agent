@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 from tests.api.support import APITestCase
 
@@ -166,3 +167,33 @@ triggers:
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
         self.assertIn("skill.demo_hot_reload", prompts[0])
+
+    async def test_refresh_sync_failure_restores_previous_active_skill_bundle(self) -> None:
+        project_skill_root = self.workspace / "skill"
+        self._write_skill(project_skill_root, name="baseline-skill", description="基础 Skill")
+
+        async def streamer(_prompt: str, **_kwargs):
+            yield "done"
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=streamer,
+        )
+        previous_revision = self.runtime._skill_runtime_state.active_revision  # noqa: SLF001 - test validates runtime rollback seam
+        before = await self.client.get("/api/v1/capabilities")
+        before_ids = {item["capability_id"] for item in before.json()["capabilities"]}
+
+        self._write_skill(project_skill_root, name="new-skill", description="新增 Skill")
+        with patch.object(self.runtime, "_sync_skill_capability_registry", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                await self.submit_message(
+                    conversation_id="conv-refresh-failure",
+                    content="触发刷新失败",
+                    capability_id=None,
+                )
+
+        self.assertEqual(self.runtime._skill_runtime_state.active_revision, previous_revision)  # noqa: SLF001
+        after = await self.client.get("/api/v1/capabilities")
+        after_ids = {item["capability_id"] for item in after.json()["capabilities"]}
+        self.assertEqual(before_ids, after_ids)

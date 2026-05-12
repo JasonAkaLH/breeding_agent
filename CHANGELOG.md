@@ -10,6 +10,36 @@
 
 ## [Unreleased]
 
+### 2026-05-12 — SQLQuery 迁移为 Skill platform-service 能力
+
+- 新增项目级 `skill/sql-query/SKILL.md`，将公开数据库查询能力收口为 `skill.sql_query`，`/api/v1/capabilities` 不再公开 `sql_query.query` 或内部 `sql_query.*` capability；API 边界仍兼容 `sql_query` / `sql_query.query` alias 并转换到 `skill.sql_query`。
+- 新增 `src/sql_query/engine.py` 与 `src/sql_query/platform_handler.py`，通过 Skill Executor 的 `platform_service` handler 执行 SQLQuery 既有 intent route、schema context、SQL generation、SQL guard、readonly execute 与 result filtering 主链路，并向前端输出 `skill.progress` 阶段事件与带 `domain_kind=sql_query` metadata 的 artifact。
+- API runtime 移除 native SQLQuery descriptor、instance、workflow provider、executor 与 runtime replanner 装配；`src/orchestration/` 去除 SQLQuery 业务 import / router special case / auto fallback hardcode，Planner prompt 改为依赖公开 `skill.*` 能力描述选择 SQLQuery。
+- SQLQuery Skill 内部 LLM service `llm.sql_query` 改为主代理 LLMProvider 的非流式、`thinking=false` adapter；不再实例化专属 SQLQuery LLM client，并对 provider 返回的 `reasoning_content` 只取普通 answer 文本。
+- 前端 SQLQuery 手动模式切到 `skill.sql_query`，任务进度支持 `skill.progress` + `domain_kind=sql_query`，结果卡片识别改为 artifact metadata 优先、旧字符串 fallback 兼容。
+- 补充并更新 API / orchestration / e2e / observability / frontend 回归测试，覆盖 alias、Skill finalizer、service binding、capability list、artifact metadata、progress event 和 SQLQuery LLM Provider 复用规则。
+
+### 2026-05-12 — 复审 SQLQuery Skill 化迁移计划
+
+- 按已落地的 generic Skill Executor infra 重新审视 `docs/SQLQuery-Skill化迁移计划.md`，将迁移前提从“先实现 Skill Executor”更新为“使用现有 `platform_service` / `answer_mode` / service allowlist 能力承载 SQLQuery”。
+- 明确 `skill.sql_query` 必须使用 `execution.mode=platform_service` 与 `answer_mode=requires_finalizer`，不能用带 MySQL / LLM service binding 的 `python_subprocess` 脚本模式。
+- 重排 SQLQuery 迁移阶段：先固化 native 行为基线，再抽 domain engine、并行注册 platform handler、清理 orchestration / runtime 特判、前端改 metadata / stage event 识别，最后删除 native capability 与 alias。
+- 补充 SQLQuery Skill 化后的 LLM Provider 规则：迁移后的 `skill.sql_query` 新实现不再维护独立 LLM client，`llm.sql_query` 仅作为受控 service 名称，底层沿用主代理 LLMProvider 的非流式、`thinking=false` adapter，并明确忽略 `reasoning_content`；兼容期内现有 native SQLQuery runtime 可暂时保持原装配方式。
+
+### 2026-05-12 — 新增 Skill Executor 实现需求 PRD
+
+- 新增 `docs/prd/backend/15-SkillExecutor实现需求PRD.md`，明确 `skill.*` 一等执行器的职责边界、非目标、执行链路、service binding、安全约束、artifact / event / audit 归一化、测试计划和 SQLQuery Skill 化前置要求。
+- 更新 `docs/prd/README.md` 与 `docs/prd/backend/00-主代理框架PRD.md`，将 Skill Executor 纳入后端 PRD 专题索引与关键决策基线。
+- 对 Skill Executor PRD 做 document-perfectization 复核修订，补齐受众与影响面、`delegated_main_agent` / `python_subprocess` / `platform_service` 三种执行模式、`answer_mode`、service-bound Skill 只能走 runtime 预注册 handler、Skill executor instance 随 bundle 刷新同步、rollout / rollback 与新增测试验收项。
+- 新增 `src/capabilities/skill_tool/` generic Skill Executor，实现 `skill.*` 的执行壳、`python_subprocess` / `platform_service` / `delegated_main_agent` 模式边界、direct / finalizer answer mode、受控 handler / service allowlist 和 direct text artifact 输出。
+- 在 `src/integrations/codex_skills/` 新增 execution 配置与脚本执行公共服务，Skill capability registry 补充 planner payload policy，Skill runtime state 补充 retained revision 能力集合，主代理 Skill auto-run 脚本路径改为复用公共脚本执行服务，减少脚本执行逻辑散落。
+- `src/orchestration/skill_workflow_provider.py` 支持基于 Skill manifest 的 executor-mode 展开；`src/api/runtime.py` 启动期与热刷新时同步 skill descriptor、payload policy 与本地 Skill executor instance，并为后续 trusted platform-service Skill 预留 runtime handler / service 注册入口。
+- 新增 integrations / capability / orchestration / API 回归测试，覆盖 execution config 解析、SkillExecutor 执行、platform handler allowlist、workflow expansion、API 显式 skill 执行和动态刷新后的 skill instance 同步。
+
+### 2026-05-12 — 新增 SQLQuery Skill 化迁移计划
+
+- 新增 `docs/SQLQuery-Skill化迁移计划.md`，基于当前代码事实规划将 SQLQuery 从原生 capability 迁移为项目级 `skill.sql_query` 的分阶段方案，覆盖通用 Skill executor、受控 service binding、SQLQuery 领域服务拆分、orchestration 去特判、API runtime 清理、前端兼容与验收标准。
+
 ### 2026-05-12 — 实现 MCP Runtime Phase 1 基线
 
 - 新增 `src/integrations/mcp/`，实现 MCP 2025-11-25 client runtime 基线：JSON-RPC lifecycle、`initialize` / `notifications/initialized`、request id 关联、Streamable HTTP transport、协议 / session header、tools/list 分页、tools/call、SSE JSON 响应解析、静态鉴权注入与授权 / 协议错误映射。

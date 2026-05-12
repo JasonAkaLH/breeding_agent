@@ -13,7 +13,7 @@ class MainAgentLLMAPITest(APITestCase):
             yield "你好"
             yield "，我是主代理"
 
-        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=[])
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
         response = await self.client.post(
             "/api/v1/conversations/conv-main/messages",
             json={
@@ -48,7 +48,7 @@ class MainAgentLLMAPITest(APITestCase):
             yield {"reasoning": "先分析", "answer": None}
             yield {"answer": "最终回答", "reasoning": None}
 
-        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=[])
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
         response = await self.client.post(
             "/api/v1/conversations/conv-main-reasoning/messages",
             json={
@@ -80,11 +80,11 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(frontend_answer, ["最终回答"])
 
     async def test_explicit_sql_query_capability_runs_internal_filtering_node(self) -> None:
-        response = await self.submit_message(content="查询品种龙粳33的基因型信息", capability_id="sql_query.query")
+        response = await self.submit_message(content="查询品种龙粳33的基因型信息", capability_id="skill.sql_query")
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 6)
+        self.assertEqual(terminal["completed_node_count"], 2)
 
     async def test_explicit_sql_query_capability_bypasses_llm_planner(self) -> None:
         def planner(_prompt: str) -> str:
@@ -96,17 +96,17 @@ class MainAgentLLMAPITest(APITestCase):
         await self.reconfigure_runtime(
             planner_text_generator=planner,
             main_agent_stream_generator=streamer,
-            skill_roots=[],
+            skill_roots=None,
         )
         response = await self.submit_message(
             conversation_id="conv-explicit-sql-bypass",
             content="查询品种龙粳33的基因型信息",
-            capability_id="sql_query.query",
+            capability_id="skill.sql_query",
         )
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 6)
+        self.assertEqual(terminal["completed_node_count"], 2)
 
     async def test_default_database_question_auto_builds_sqlquery_then_main_agent_dag(self) -> None:
         prompts: list[str] = []
@@ -115,7 +115,10 @@ class MainAgentLLMAPITest(APITestCase):
             prompts.append(prompt)
             yield "这是主代理整理后的数据库答案"
 
-        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=[])
+        def planner(_prompt: str) -> str:
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.sql_query"}]})
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, planner_text_generator=planner, skill_roots=None)
         response = await self.client.post(
             "/api/v1/conversations/conv-auto-sql/messages",
             json={
@@ -131,15 +134,14 @@ class MainAgentLLMAPITest(APITestCase):
 
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 7)
+        self.assertEqual(terminal["completed_node_count"], 2)
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         nodes_by_capability = {node.capability_id: node for node in nodes}
-        self.assertIn("sql_query.intent_route", nodes_by_capability)
-        self.assertIn("sql_query.sql_execute_readonly", nodes_by_capability)
+        self.assertIn("skill.sql_query", nodes_by_capability)
         self.assertIn("main_agent.respond", nodes_by_capability)
         edges = await self.runtime.storage.list_task_edges(task_id)
         self.assertIn(
-            (nodes_by_capability["sql_query.result_filtering"].node_id, nodes_by_capability["main_agent.respond"].node_id),
+            (nodes_by_capability["skill.sql_query"].node_id, nodes_by_capability["main_agent.respond"].node_id),
             {(edge.from_node_id, edge.to_node_id) for edge in edges},
         )
         self.assertIn("上游能力结果上下文", prompts[-1])
@@ -156,7 +158,7 @@ class MainAgentLLMAPITest(APITestCase):
             return json.dumps(
                 {
                     "nodes": [
-                        {"node_id": "query_data", "capability_id": "sql_query.query"},
+                        {"node_id": "query_data", "capability_id": "skill.sql_query"},
                         {
                             "node_id": "answer_user",
                             "capability_id": "main_agent.respond",
@@ -173,7 +175,7 @@ class MainAgentLLMAPITest(APITestCase):
         await self.reconfigure_runtime(
             main_agent_stream_generator=streamer,
             planner_text_generator=planner,
-            skill_roots=[],
+            skill_roots=None,
         )
         response = await self.client.post(
             "/api/v1/conversations/conv-llm-planner-sql/messages",
@@ -190,8 +192,8 @@ class MainAgentLLMAPITest(APITestCase):
 
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 7)
-        self.assertIn("sql_query.query", planner_prompts[0])
+        self.assertEqual(terminal["completed_node_count"], 2)
+        self.assertIn("skill.sql_query", planner_prompts[0])
         self.assertNotIn("sql_query.sql_generate", planner_prompts[0])
         events = await self.runtime.storage.list_events_for_task(task_id)
         plan_event = next(event for event in events if event.event_type == "workflow.plan_built")
@@ -212,7 +214,7 @@ class MainAgentLLMAPITest(APITestCase):
         await self.reconfigure_runtime(
             main_agent_stream_generator=streamer,
             planner_text_generator=planner,
-            skill_roots=[],
+            skill_roots=None,
         )
         response = await self.client.post(
             "/api/v1/conversations/conv-llm-planner-chat/messages",
@@ -245,7 +247,7 @@ class MainAgentLLMAPITest(APITestCase):
         await self.reconfigure_runtime(
             main_agent_stream_generator=streamer,
             planner_text_generator=planner,
-            skill_roots=[],
+            skill_roots=None,
         )
         response = await self.client.post(
             "/api/v1/conversations/conv-llm-planner-fail/messages",
@@ -281,7 +283,7 @@ class MainAgentLLMAPITest(APITestCase):
                     "nodes": [
                         {
                             "node_id": "query_data",
-                            "capability_id": "sql_query.query",
+                            "capability_id": "skill.sql_query",
                             "input_payload": {"user_question": "恶意替换查询"},
                         },
                         {
@@ -300,7 +302,7 @@ class MainAgentLLMAPITest(APITestCase):
         await self.reconfigure_runtime(
             main_agent_stream_generator=streamer,
             planner_text_generator=planner,
-            skill_roots=[],
+            skill_roots=None,
         )
         response = await self.submit_message(
             conversation_id="conv-planner-boundary",
@@ -316,7 +318,7 @@ class MainAgentLLMAPITest(APITestCase):
         nodes_by_capability = {node.capability_id: node for node in nodes}
         edges = await self.runtime.storage.list_task_edges(task_id)
         self.assertIn(
-            (nodes_by_capability["sql_query.result_filtering"].node_id, nodes_by_capability["main_agent.respond"].node_id),
+            (nodes_by_capability["skill.sql_query"].node_id, nodes_by_capability["main_agent.respond"].node_id),
             {(edge.from_node_id, edge.to_node_id) for edge in edges},
         )
         self.assertIn("查询龙粳33", prompts[-1])
@@ -355,7 +357,7 @@ class MainAgentLLMAPITest(APITestCase):
             },
             planner_llm_client_factory=FakePlannerLLMClient,
             planner_reasoning_effort="low",
-            skill_roots=[],
+            skill_roots=None,
         )
         response = await self.submit_message(
             conversation_id="conv-planner-factory",
@@ -447,7 +449,7 @@ triggers:
             },
             main_agent_llm_client_factory=FakeLLMClient,
             main_agent_reasoning_effort="low",
-            skill_roots=[],
+            skill_roots=None,
         )
 
         response = await self.submit_message(
@@ -507,7 +509,7 @@ triggers:
             },
             main_agent_llm_client_factory=FakeLLMClient,
             main_agent_reasoning_effort="minimal",
-            skill_roots=[],
+            skill_roots=None,
         )
 
         response = await self.client.post(

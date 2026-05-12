@@ -67,13 +67,17 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         main_agent_reasoning_effort="minimal",
         skill_input_text_generator=None,
         enable_skill_input_llm: bool = True,
+        skill_platform_handlers=None,
+        trusted_skill_handlers=None,
+        trusted_skill_services=None,
+        skill_services=None,
         conversation_title_generator=None,
         enable_conversation_title_llm: bool | None = None,
         conversation_memory_builder=None,
         enable_conversation_memory: bool = True,
         conversation_memory_resolution_generator=None,
         enable_conversation_memory_resolution_llm: bool = False,
-        skill_roots=(),
+        skill_roots=None,
         public_skill_roots=None,
         mcp_config=None,
         mcp_client_factory=None,
@@ -101,6 +105,13 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         conversation_title_configured = conversation_title_generator is not None
+        if (
+            main_agent_stream_generator is None
+            and main_agent_llm_config is None
+            and main_agent_llm_config_path is None
+            and main_agent_llm_client_factory is None
+        ):
+            main_agent_stream_generator = lambda _prompt, **_kwargs: "测试回答"
         return build_api_runtime(
             database_path=self.workspace / "phase6-api.sqlite3",
             audit_log_path=self.workspace / "audit.jsonl",
@@ -126,6 +137,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             main_agent_reasoning_effort=main_agent_reasoning_effort,
             skill_input_text_generator=skill_input_text_generator,
             enable_skill_input_llm=enable_skill_input_llm,
+            skill_platform_handlers=skill_platform_handlers,
+            trusted_skill_handlers=trusted_skill_handlers,
+            trusted_skill_services=trusted_skill_services,
+            skill_services=skill_services,
             conversation_title_generator=conversation_title_generator,
             enable_conversation_title_llm=conversation_title_configured if enable_conversation_title_llm is None else enable_conversation_title_llm,
             conversation_memory_builder=conversation_memory_builder,
@@ -192,13 +207,17 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         main_agent_reasoning_effort="minimal",
         skill_input_text_generator=None,
         enable_skill_input_llm: bool = True,
+        skill_platform_handlers=None,
+        trusted_skill_handlers=None,
+        trusted_skill_services=None,
+        skill_services=None,
         conversation_title_generator=None,
         enable_conversation_title_llm: bool | None = None,
         conversation_memory_builder=None,
         enable_conversation_memory: bool = True,
         conversation_memory_resolution_generator=None,
         enable_conversation_memory_resolution_llm: bool = False,
-        skill_roots=(),
+        skill_roots=None,
         public_skill_roots=None,
         mcp_config=None,
         mcp_client_factory=None,
@@ -230,6 +249,10 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             main_agent_reasoning_effort=main_agent_reasoning_effort,
             skill_input_text_generator=skill_input_text_generator,
             enable_skill_input_llm=enable_skill_input_llm,
+            skill_platform_handlers=skill_platform_handlers,
+            trusted_skill_handlers=trusted_skill_handlers,
+            trusted_skill_services=trusted_skill_services,
+            skill_services=skill_services,
             conversation_title_generator=conversation_title_generator,
             enable_conversation_title_llm=enable_conversation_title_llm,
             conversation_memory_builder=conversation_memory_builder,
@@ -251,7 +274,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         conversation_id: str = "conv-1",
         account_id: str = "acc-1",
         content: str = "查询某个品种的基因型信息",
-        capability_id: str | None = "sql_query.query",
+        capability_id: str | None = "skill.sql_query",
         metadata: dict | None = None,
     ) -> httpx.Response:
         return await self.client.post(

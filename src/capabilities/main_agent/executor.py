@@ -8,21 +8,19 @@ from src.core.contracts import CapabilityContract, CapabilityExecutionError, Cap
 from src.core.enums import EventVisibility
 from src.integrations.codex_skills import (
     SkillCatalog,
-    SkillInputResolutionContext,
+    SkillExecutionConfigError,
     SkillInputTextGenerator,
     SkillMatch,
-    SkillScriptError,
+    SkillScriptExecutionService,
     SkillScriptRunner,
     match_skills,
-    resolve_skill_inputs_with_llm,
+    resolve_skill_execution_config,
 )
 from src.integrations.llm_client import LLMClient, ReasoningEffort
 
 from .helpers import LiveEventRecorder, StreamGenerator, iter_stream_events, make_event, make_text_artifact
 from .prompt_builder import build_artifact_context, build_dependency_context, build_main_agent_prompt
 from .skill_output_artifacts import (
-    SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY,
-    SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY,
     SkillOutputArtifactManager,
 )
 from .workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS
@@ -69,6 +67,10 @@ class MainAgentRespondCapability(CapabilityContract):
         self._skill_input_text_generator = skill_input_text_generator
         self._skill_output_artifact_manager = skill_output_artifact_manager
         self._live_event_recorder = live_event_recorder
+        self._script_execution_service = SkillScriptExecutionService(
+            script_runner=self._script_runner,
+            skill_input_text_generator=self._skill_input_text_generator,
+        )
 
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         user_message = str(request.input_payload.get("user_message") or "")
@@ -303,26 +305,29 @@ class MainAgentRespondCapability(CapabilityContract):
         raw_script_artifacts = request.metadata.get("skill_artifacts")
         script_input_artifacts = raw_script_artifacts if isinstance(raw_script_artifacts, list | tuple) else artifact_context
         for match in skill_matches:
+            try:
+                execution_config = resolve_skill_execution_config(match.manifest)
+            except SkillExecutionConfigError:
+                execution_config = None
+            if execution_config is not None and execution_config.mode == "delegated_main_agent":
+                continue
             for script in match.manifest.scripts:
                 if not script.auto_run:
                     continue
-                base_payload = {
-                    "query": user_message,
-                    "uploaded_artifacts": list(script_input_artifacts),
-                    "metadata": self._script_safe_metadata(request.metadata),
-                }
-                resolution = await resolve_skill_inputs_with_llm(
-                    match.manifest,
-                    script,
-                    base_payload,
-                    SkillInputResolutionContext.from_metadata(
-                        query=user_message,
-                        metadata=request.metadata,
-                        artifact_summaries=tuple(artifact_context),
-                    ),
-                    text_generator=self._skill_input_text_generator,
+                execution = await self._script_execution_service.execute(
+                    manifest=match.manifest,
+                    script=script,
+                    user_message=user_message,
+                    metadata=request.metadata,
+                    artifact_context=tuple(script_input_artifacts),
+                    output_context={
+                        "task_id": request.task_id,
+                        "conversation_id": request.conversation_id,
+                        "node_id": request.node_id,
+                    },
                 )
-                if resolution.diagnostics:
+                resolution = execution.resolution
+                if resolution is not None and resolution.diagnostics:
                     events.append(
                         make_event(
                             request,
@@ -335,7 +340,7 @@ class MainAgentRespondCapability(CapabilityContract):
                             visibility=EventVisibility.AUDIT_ONLY,
                         )
                     )
-                if resolution.sources:
+                if resolution is not None and resolution.sources:
                     events.append(
                         make_event(
                             request,
@@ -344,27 +349,15 @@ class MainAgentRespondCapability(CapabilityContract):
                             visibility=EventVisibility.AUDIT_ONLY,
                         )
                     )
-                if resolution.missing:
+                if execution.status == "missing_input":
                     self._record_missing_skill_input(
                         request=request,
                         script_results=script_results,
                         events=events,
                         skill_name=match.manifest.name,
                         entrypoint=script.name,
-                        missing=resolution.missing,
-                        resolved_fields=resolution.resolved_fields,
-                    )
-                    continue
-                contract_missing = self._missing_script_contract_inputs(script.input_contract.required, resolution.payload)
-                if contract_missing:
-                    self._record_missing_skill_input(
-                        request=request,
-                        script_results=script_results,
-                        events=events,
-                        skill_name=match.manifest.name,
-                        entrypoint=script.name,
-                        missing=contract_missing,
-                        resolved_fields=resolution.resolved_fields,
+                        missing=execution.missing,
+                        resolved_fields=resolution.resolved_fields if resolution is not None else (),
                     )
                     continue
                 events.append(
@@ -375,28 +368,18 @@ class MainAgentRespondCapability(CapabilityContract):
                         visibility=EventVisibility.AUDIT_ONLY,
                     )
                 )
-                try:
-                    output = await self._script_runner.run(
-                        match.manifest,
-                        script,
-                        resolution.payload,
-                        output_context={
-                            "task_id": request.task_id,
-                            "conversation_id": request.conversation_id,
-                            "node_id": request.node_id,
-                        },
-                    )
-                except SkillScriptError as exc:
+                if execution.status == "failed":
                     events.append(
                         make_event(
                             request,
                             event_type="skill.script_failed",
-                            payload={"skill_name": match.manifest.name, "entrypoint": script.name, "reason": str(exc)[:200]},
+                            payload={"skill_name": match.manifest.name, "entrypoint": script.name, "reason": execution.failure_reason},
                             visibility=EventVisibility.AUDIT_ONLY,
                         )
                     )
                     continue
-                artifact = output.pop(SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY, None)
+                output = dict(execution.output)
+                artifact = execution.artifact
                 if artifact is not None:
                     discard_diagnostics = self._discard_pending_skill_artifacts(pending_file_artifacts, script_results)
                     for diagnostic in discard_diagnostics:
@@ -414,7 +397,7 @@ class MainAgentRespondCapability(CapabilityContract):
                             )
                         )
                     pending_file_artifacts.append(artifact)
-                rejections = output.pop(SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY, ())
+                rejections = execution.rejections
                 if rejections:
                     for rejection in rejections:
                         events.append(
@@ -430,7 +413,7 @@ class MainAgentRespondCapability(CapabilityContract):
                                 visibility=EventVisibility.AUDIT_ONLY,
                             )
                         )
-                if "output_files" in output:
+                if execution.output_file_count:
                     events.append(
                         make_event(
                             request,
@@ -438,7 +421,7 @@ class MainAgentRespondCapability(CapabilityContract):
                             payload={
                                 "skill_name": match.manifest.name,
                                 "entrypoint": script.name,
-                                "file_count": len(output.get("output_files") or ()),
+                                "file_count": execution.output_file_count,
                             },
                             visibility=EventVisibility.AUDIT_ONLY,
                         )
@@ -515,15 +498,6 @@ class MainAgentRespondCapability(CapabilityContract):
         value = metadata.get("conversation_memory") or metadata.get("memory_context") or {}
         return value if isinstance(value, Mapping) else {}
 
-    @classmethod
-    def _script_safe_metadata(cls, metadata: Mapping[str, Any]) -> dict[str, Any]:
-        blocked = {"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"}
-        return {
-            str(key): value
-            for key, value in metadata.items()
-            if str(key).lower() not in blocked
-        }
-
     @staticmethod
     def _missing_skill_input_output(missing: tuple[str, ...]) -> dict[str, Any]:
         missing_list = list(missing)
@@ -574,10 +548,6 @@ class MainAgentRespondCapability(CapabilityContract):
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         )
-
-    @staticmethod
-    def _missing_script_contract_inputs(required: tuple[str, ...], payload: Mapping[str, Any]) -> tuple[str, ...]:
-        return tuple(key for key in required if key not in payload)
 
     @staticmethod
     def _sanitize_stream_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:

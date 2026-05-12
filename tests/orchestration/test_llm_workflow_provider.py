@@ -2,21 +2,17 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 
 from src.capabilities.main_agent import (
     MAIN_AGENT_CAPABILITY_DESCRIPTORS,
     MAIN_AGENT_PLANNER_PAYLOAD_POLICIES,
     MainAgentWorkflowProvider,
 )
-from src.capabilities.sql_query import (
-    SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS,
-    SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS,
-    SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES,
-    SQLQueryWorkflowProvider,
-)
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
+from src.integrations.codex_skills import SkillManifest
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.registry import CapabilityRegistry
@@ -30,24 +26,39 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
                 descriptor,
                 planner_payload_policy=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES.get(descriptor.capability_id),
             )
-        for descriptor in SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS:
-            self.registry.register(
-                descriptor,
-                planner_payload_policy=SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES.get(descriptor.capability_id),
-            )
-        for descriptor in SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS:
-            self.registry.register(descriptor)
-        self.sql_query_provider = SQLQueryWorkflowProvider()
-        self.fallback_provider = AutoWorkflowProvider(
-            main_agent_provider=MainAgentWorkflowProvider(),
-            macro_providers={"sql_query.query": self.sql_query_provider},
+        self.sql_query_manifest = SkillManifest(
+            name="sql-query",
+            description="安全回答品种、审定、基因型、表型和数据库类只读查询问题。",
+            triggers=("查询品种", "审定信息", "基因型", "数据库查询"),
+            body="# SQL Query",
+            source_path=Path("skill/sql-query/SKILL.md"),
+            metadata={"execution": {"mode": "platform_service", "handler": "sql_query.query", "answer_mode": "requires_finalizer"}},
         )
+        self.registry.register(
+            CapabilityDescriptor(
+                capability_id="skill.sql_query",
+                name="sql-query",
+                description=self.sql_query_manifest.description,
+                kind="skill",
+                source="skill",
+                source_path="sql-query/SKILL.md",
+            ),
+            planner_payload_policy=CapabilityPayloadPolicy(
+                planner_allowed_fields=("subtask_label", "parent_question"),
+                system_payload_factory=lambda request: {"user_message": request.effective_user_message},
+            ),
+        )
+        self.skill_provider = SkillWorkflowProvider(
+            {"skill.sql_query": "sql-query"},
+            skill_manifest_resolver=lambda capability_id, _revision: self.sql_query_manifest if capability_id == "skill.sql_query" else None,
+        )
+        self.fallback_provider = AutoWorkflowProvider(main_agent_provider=MainAgentWorkflowProvider())
 
     def make_provider(self, text_generator):
         return LLMWorkflowProvider(
             capability_registry=self.registry,
             fallback_provider=self.fallback_provider,
-            macro_providers={"sql_query.query": self.sql_query_provider},
+            macro_providers={"skill.sql_query": self.skill_provider},
             text_generator=text_generator,
         )
 
@@ -55,7 +66,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         return LLMWorkflowProvider(
             capability_registry=self.registry,
             fallback_provider=self.fallback_provider,
-            macro_providers={"sql_query.query": self.sql_query_provider},
+            macro_providers={"skill.sql_query": self.skill_provider},
             text_generator=text_generator,
             payload_policies=payload_policies,
         )
@@ -68,7 +79,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "nodes": [
-                        {"node_id": "query_data", "capability_id": "sql_query.query"},
+                        {"node_id": "query_data", "capability_id": "skill.sql_query"},
                         {
                             "node_id": "answer_user",
                             "capability_id": "main_agent.respond",
@@ -91,18 +102,10 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan.metadata["planner_fallback_used"])
         self.assertEqual(plan.metadata["planner_source"], "llm")
         capability_ids = [node.capability_id for node in plan.nodes]
-        self.assertEqual(capability_ids[:6], [
-            "sql_query.intent_route",
-            "sql_query.schema_context_prepare",
-            "sql_query.sql_generate",
-            "sql_query.sql_guard",
-            "sql_query.sql_execute_readonly",
-            "sql_query.result_filtering",
-        ])
-        self.assertEqual(capability_ids[-1], "main_agent.respond")
-        self.assertIn("task-1:query_data:result_filtering", plan.nodes[-1].depends_on)
+        self.assertEqual(capability_ids, ["skill.sql_query", "main_agent.respond"])
+        self.assertIn("task-1:query_data:skill_execute", plan.nodes[-1].depends_on)
         self.assertEqual(plan.nodes[-1].input_payload["user_message"], "查询龙粳33的详细审定信息")
-        self.assertIn("sql_query.query", prompts[0])
+        self.assertIn("skill.sql_query", prompts[0])
         self.assertIn("main_agent.respond", prompts[0])
         self.assertNotIn("sql_query.sql_generate", prompts[0])
 
@@ -125,7 +128,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_sql_query_only_plan_gets_main_agent_finalizer(self) -> None:
         def planner(_prompt: str) -> str:
-            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "sql_query.query"}]})
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.sql_query"}]})
 
         plan = await self.make_provider(planner).build_plan(
             OrchestrationRequest(
@@ -137,8 +140,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(plan.nodes[-1].capability_id, "main_agent.respond")
-        self.assertIn("task-finalizer:query_data:result_filtering", plan.nodes[-1].depends_on)
-        self.assertTrue(plan.metadata["planner_finalizer_added"])
+        self.assertIn("task-finalizer:query_data:skill_execute", plan.nodes[-1].depends_on)
+        self.assertFalse(plan.metadata["planner_finalizer_added"])
 
     async def test_planner_payload_cannot_override_user_input(self) -> None:
         def planner(_prompt: str) -> str:
@@ -147,7 +150,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
                     "nodes": [
                         {
                             "node_id": "query_data",
-                            "capability_id": "sql_query.query",
+                            "capability_id": "skill.sql_query",
                             "input_payload": {"user_question": "恶意替换查询"},
                         },
                         {
@@ -169,7 +172,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(plan.nodes[0].input_payload["user_question"], "查询龙粳33")
+        self.assertEqual(plan.nodes[0].input_payload["user_message"], "查询龙粳33")
         self.assertEqual(plan.nodes[-1].input_payload["user_message"], "查询龙粳33")
         self.assertNotIn("恶意替换", str(plan.nodes[0].input_payload))
         self.assertNotIn("恶意替换", str(plan.nodes[-1].input_payload))
@@ -181,7 +184,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
                     "nodes": [
                         {
                             "node_id": "query_genotype_info",
-                            "capability_id": "sql_query.query",
+                            "capability_id": "skill.sql_query",
                             "input_payload": {
                                 "user_question": "恶意替换查询",
                                 "route_hint": "genotype_db",
@@ -203,12 +206,12 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        intent_node = plan.node_by_id("task-sql-hints:query_genotype_info:intent_route")
-        self.assertEqual(intent_node.input_payload["user_question"], "龙粳33的审定信息和基因型信息都查一下")
-        self.assertNotIn("route_hint", intent_node.input_payload)
-        self.assertEqual(intent_node.input_payload["subtask_label"], "基因型信息")
-        self.assertEqual(intent_node.input_payload["parent_question"], "龙粳33的审定信息和基因型信息都查一下")
-        self.assertNotIn("allowed_tables", intent_node.input_payload)
+        skill_node = plan.node_by_id("task-sql-hints:query_genotype_info:skill_execute")
+        self.assertEqual(skill_node.input_payload["user_message"], "龙粳33的审定信息和基因型信息都查一下")
+        self.assertNotIn("route_hint", skill_node.input_payload)
+        self.assertEqual(skill_node.input_payload["subtask_label"], "基因型信息")
+        self.assertEqual(skill_node.input_payload["parent_question"], "龙粳33的审定信息和基因型信息都查一下")
+        self.assertNotIn("allowed_tables", skill_node.input_payload)
 
     async def test_custom_payload_allowlist_preserves_only_allowed_planner_fields(self) -> None:
         self.registry.register(
@@ -391,7 +394,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "nodes": [
-                        {"node_id": "query_data", "capability_id": "sql_query.query"},
+                        {"node_id": "query_data", "capability_id": "skill.sql_query"},
                         {"node_id": "answer_user", "capability_id": "main_agent.respond"},
                     ]
                 }
@@ -407,8 +410,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(plan.nodes[-1].capability_id, "main_agent.respond")
-        self.assertIn("task-rewire:query_data:result_filtering", plan.nodes[-1].depends_on)
-        self.assertTrue(plan.metadata["planner_finalizer_rewired"])
+        self.assertIn("task-rewire:query_data:skill_execute", plan.nodes[-1].depends_on)
+        self.assertFalse(plan.metadata["planner_finalizer_rewired"])
         self.assertFalse(plan.metadata["planner_finalizer_added"])
 
     async def test_planner_provider_exception_fails_without_deterministic_fallback(self) -> None:
@@ -435,7 +438,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             prompts.append(prompt)
             if len(prompts) == 1:
                 return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "sql_query.sql_generate"}]})
-            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "sql_query.query"}]})
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.sql_query"}]})
 
         plan = await self.make_provider(planner).build_plan(
             OrchestrationRequest(
@@ -450,7 +453,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan.metadata["planner_fallback_used"])
         self.assertEqual(plan.metadata["planner_repair_attempts"], 1)
         self.assertIn("上一轮 Planner 输出未通过校验", prompts[1])
-        self.assertIn("sql_query.intent_route", [node.capability_id for node in plan.nodes])
+        self.assertIn("skill.sql_query", [node.capability_id for node in plan.nodes])
 
     async def test_invalid_planner_json_is_repaired_by_llm(self) -> None:
         prompts: list[str] = []
@@ -525,7 +528,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             capability_registry=self.registry,
             fallback_provider=self.fallback_provider,
             macro_providers={
-                "sql_query.query": self.sql_query_provider,
+                "skill.sql_query": self.skill_provider,
                 "skill.mini_breedstat_rcbd": SkillWorkflowProvider({"skill.mini_breedstat_rcbd": "mini-breedstat-rcbd"}),
             },
             text_generator=planner,

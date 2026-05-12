@@ -96,6 +96,10 @@ class SkillRuntimeState:
         except KeyError as exc:
             raise KeyError(f"Unknown Skill bundle revision: {revision}") from exc
 
+    def activate_revision(self, revision: str) -> None:
+        self.bundle_for_revision(revision)
+        self._active_revision = revision
+
     def catalog_for_revision(self, revision: str | None = None) -> SkillCatalog:
         return self.bundle_for_revision(revision).catalog
 
@@ -105,6 +109,12 @@ class SkillRuntimeState:
 
     def active_skill_capability_ids(self) -> tuple[str, ...]:
         return tuple(self.active_bundle.skill_capabilities.skill_name_by_capability_id)
+
+    def known_skill_capability_ids(self) -> tuple[str, ...]:
+        known: set[str] = set()
+        for bundle in self._bundles.values():
+            known.update(bundle.skill_capabilities.skill_name_by_capability_id)
+        return tuple(sorted(known))
 
     def retain_revision(self, revision: str | None) -> None:
         if not revision:

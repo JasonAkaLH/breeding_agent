@@ -43,6 +43,24 @@ class WorkflowExpander:
             )
             provider = self._resolve_macro_provider(node.capability_id)
             if provider is None:
+                existing_main_agent_tails = tuple(
+                    existing.node_id
+                    for existing in expanded_nodes
+                    if existing.capability_id == "main_agent.respond"
+                )
+                if node.capability_id == "main_agent.respond" and not high_level_dependencies and existing_main_agent_tails:
+                    expanded_tail_ids_by_original[node.node_id] = (existing_main_agent_tails[-1],)
+                    continue
+                if (
+                    node.capability_id == "main_agent.respond"
+                    and high_level_dependencies
+                    and all(
+                        any(existing.node_id == dependency and existing.capability_id == "main_agent.respond" for existing in expanded_nodes)
+                        for dependency in high_level_dependencies
+                    )
+                ):
+                    expanded_tail_ids_by_original[node.node_id] = high_level_dependencies
+                    continue
                 expanded_node = replace(node, depends_on=high_level_dependencies)
                 expanded_nodes.append(expanded_node)
                 expanded_tail_ids_by_original[node.node_id] = (expanded_node.node_id,)

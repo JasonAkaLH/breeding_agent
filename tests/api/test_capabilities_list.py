@@ -15,9 +15,11 @@ class CapabilitiesListAPITest(APITestCase):
             capability_ids,
             {
                 "main_agent.respond",
-                "sql_query.query",
+                "skill.mini_breedstat_rcbd",
+                "skill.sql_query",
             },
         )
+        self.assertNotIn("sql_query.query", capability_ids)
         self.assertTrue(all(item["status"] == "active" for item in payload["capabilities"]))
 
     async def test_capabilities_endpoint_lists_project_skill_capabilities(self) -> None:

@@ -78,14 +78,14 @@ describe('createApiClient', () => {
     });
   });
 
-  it('submits SQLQuery mode with sql_query.query only', async () => {
+  it('submits SQLQuery mode with skill.sql_query only', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
     await api.submitMessage({ conversationId: 'conv-1', accountId: 'acc-1', content: '查询龙粳33', mode: 'sql_query' });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
-    expect(body.capability_id).toBe('sql_query.query');
+    expect(body.capability_id).toBe('skill.sql_query');
     expect(JSON.stringify(body)).not.toContain('sql_query.sql_generate');
   });
 
@@ -161,7 +161,7 @@ describe('createApiClient', () => {
 
   it('exposes only public UI modes', () => {
     const api = createApiClient();
-    expect(api.uiModes.map((mode) => mode.capabilityId)).toEqual([null, 'sql_query.query']);
+    expect(api.uiModes.map((mode) => mode.capabilityId)).toEqual([null, 'skill.sql_query']);
   });
 
 

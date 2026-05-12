@@ -21,7 +21,7 @@ class InterruptResumeE2ETest(E2EAPITestCase):
 
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 6)
+        self.assertEqual(terminal["completed_node_count"], 2)
 
         answered_records = self.find_audit_records("lifecycle.interrupt_answered")
         self.assertTrue(answered_records)

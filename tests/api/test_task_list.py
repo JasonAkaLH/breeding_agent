@@ -23,7 +23,7 @@ class TaskListAPITest(APITestCase):
         listed = list_response.json()["tasks"]
         self.assertEqual([task["task_id"] for task in listed], [task_id])
         self.assertEqual(listed[0]["summary"], "查询龙粳33")
-        self.assertEqual(listed[0]["requested_capability_id"], "sql_query.query")
+        self.assertEqual(listed[0]["requested_capability_id"], "skill.sql_query")
         self.assertGreaterEqual(listed[0]["active_node_count"], 1)
 
         cancel_response = await self.client.post(f"/api/v1/tasks/{task_id}/cancel")

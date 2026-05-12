@@ -1066,6 +1066,63 @@ triggers:
         self.assertNotIn("skill.forced_selected", event_types)
         self.assertIn("skill.match_fallback", event_types)
 
+    async def test_delegated_main_agent_skill_does_not_run_auto_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "delegated"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            (scripts_dir / "should_not_run.py").write_text(
+                'raise SystemExit("should not run")',
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """---
+name: delegated-skill
+description: 委托技能
+triggers:
+  - 委托技能
+scripts:
+  - name: should-not-run
+    path: scripts/should_not_run.py
+    runtime: python
+    auto_run: true
+execution:
+  mode: delegated_main_agent
+---
+
+# Delegated Skill
+只注入指令，不执行脚本。
+"""
+                ).strip(),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([root])
+            seen_prompts: list[str] = []
+
+            async def streamer(prompt: str):
+                seen_prompts.append(prompt)
+                yield "done"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "请使用委托技能"},
+                )
+            )
+
+        self.assertEqual(result.output_payload["response_text"], "done")
+        self.assertEqual(result.output_payload["script_results"], [])
+        event_types = [event.event_type for event in result.events]
+        self.assertNotIn("skill.script_started", event_types)
+        self.assertNotIn("skill.script_completed", event_types)
+        self.assertIn("Delegated Skill", seen_prompts[0])
+        self.assertNotIn("Skill 脚本输出", seen_prompts[0])
+
 
 if __name__ == "__main__":
     unittest.main()

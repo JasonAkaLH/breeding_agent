@@ -13,7 +13,7 @@ class CancelLateResultE2ETest(E2EAPITestCase):
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
-        await self.wait_for_node_status(task_id, node_suffix=":sql_execute_readonly", status="running")
+        await self.wait_for_node_status(task_id, node_suffix=":skill_execute", status="running")
 
         cancel_response = await self.client.post(f"/api/v1/tasks/{task_id}/cancel")
         self.assertEqual(cancel_response.status_code, 202)

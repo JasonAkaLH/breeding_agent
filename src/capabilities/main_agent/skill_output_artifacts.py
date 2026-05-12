@@ -11,6 +11,10 @@ from uuid import uuid4
 from src.core.contracts import StoragePort
 from src.core.enums import ArtifactType
 from src.core.models import Artifact
+from src.integrations.codex_skills.internal_keys import (
+    SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY,
+    SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY,
+)
 from src.integrations.codex_skills.manifest import SkillManifest
 from src.integrations.codex_skills.output_files import (
     CollectedSkillOutputFile,
@@ -27,9 +31,6 @@ from src.storage.artifact_files import (
     sanitize_download_filename,
 )
 
-
-SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY = "__maf_skill_output_artifact__"
-SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY = "__maf_skill_output_rejections__"
 
 
 @dataclass(slots=True, frozen=True)

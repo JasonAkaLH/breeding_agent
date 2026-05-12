@@ -2,7 +2,7 @@
 
 - **项目**：multi_agent_framework
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至 MCP Runtime 实现需求 PRD；PRD 目录为当前文档基线）
+- **文档状态**：正式版（已补齐至 Skill Executor 实现需求 PRD；PRD 目录为当前文档基线）
 - **日期**：2026-05-12
 - **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；前端 PRD 后续放在 `docs/prd/frontend/`。
 
@@ -82,6 +82,7 @@
 | Skill 一等 Capability 能力池 | `docs/prd/backend/12-Skill一等Capability能力池PRD.md` | 将项目 Skill 注册为 `skill.*` public capability、Planner / Replanner 可发现、统一能力池 |
 | Skill 动态加载与热部署 | `docs/prd/backend/13-Skill动态加载与热部署PRD.md` | 新聊天首次任务前动态刷新 Skill runtime bundle，实现公开 Skill 热加载、原子激活与运行中任务保护 |
 | MCP Runtime 实现需求 | `docs/prd/backend/14-MCPRuntime实现需求PRD.md` | 按 MCP latest spec 2025-11-25 设计外部 MCP server / tools 接入、标准通信、capability 包装与安全治理 |
+| Skill Executor 实现需求 | `docs/prd/backend/15-SkillExecutor实现需求PRD.md` | 定义 `skill.*` 一等执行器的职责边界、service binding、安全约束、artifact/event 归一化与 SQLQuery Skill 化前置要求 |
 
 ## 5. 当前已定的关键决策摘要
 
@@ -144,6 +145,7 @@
 - 项目级 Skill 应可升级为 `skill.*` public capability，进入与 `main_agent.respond`、`sql_query.query` 相同的 `CapabilityRegistry` public 能力池。
 - Planner / Runtime Replanner / `/api/v1/capabilities` 必须从同一 public capability pool 发现公开 Skill，避免深度思考阶段看不到已注册 Skill。
 - v1 推荐采用 “Skill public macro → `main_agent.respond` forced skill” 模型：LLM 只选择 `skill.*` capability，系统注入可信 forced skill metadata，继续复用主代理受控 Skill runtime。
+- 后续结构化 / 脚本型 / 项目级可信 Skill 应按 `docs/prd/backend/15-SkillExecutor实现需求PRD.md` 演进为 generic Skill Executor 执行模型，forced `main_agent.respond` 仅作为兼容路径。
 - 默认只公开仓库项目级 `skill/` 下的 Skill；用户级 `~/.codex/skills` 不默认公开给业务 Planner 或 API。
 
 ### 5.9 Skill 动态加载与热部署决策
@@ -163,6 +165,15 @@
 - MCP tool 默认不公开；只有 allowlist 且低风险、只读、幂等、输入输出清晰的 tool 才可配置为 generic public capability。
 - destructive / write / credentialed external 类 tool 必须走业务 capability、Interrupt / confirmation 与审计，不允许 generic public 直达。
 - v1 远程 server 必须支持 Streamable HTTP；stdio 是 MCP 标准 transport，但必须显式配置并受沙箱、进程生命周期和权限治理约束。
+
+### 5.11 Skill Executor 决策
+
+- Skill Executor 是通用执行壳，不承载 SQLQuery、数据分析、报告生成等业务逻辑；业务语义必须放在 Skill 包、领域服务或 MCP tool 背后。
+- `skill.*` capability 的执行必须按 Skill bundle revision 固定版本，避免新聊天热刷新影响运行中任务。
+- script Skill 应由 generic Skill Executor 执行并归一化为 `CapabilityExecutionResult`、artifact、event 与 audit；不应长期依附 `main_agent.respond` 私有脚本路径。
+- service binding 必须采用“manifest 声明 + runtime allowlist”双重授权；普通 public Skill 和用户级 Skill 默认不能获得 MySQL readonly、内部 LLM、secret 等受控资源。
+- Skill Executor 与 MCP Tool Executor 对等，分别承接 `skill.*` 与 `mcp.*` 能力来源；orchestration 不应再为具体业务 Skill 写特判。
+- SQLQuery 后续迁移为 `skill.sql_query` 必须先满足 Skill Executor 的受控执行、service binding、artifact/event 归一化与安全审计要求。
 
 ## 6. 当前验收基线与归档证据
 
@@ -202,6 +213,7 @@
 - Skill 一等 Capability 能力池 PRD：`docs/prd/backend/12-Skill一等Capability能力池PRD.md`
 - Skill 动态加载与热部署 PRD：`docs/prd/backend/13-Skill动态加载与热部署PRD.md`
 - MCP Runtime 实现需求 PRD：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`
+- Skill Executor 实现需求 PRD：`docs/prd/backend/15-SkillExecutor实现需求PRD.md`
 
 ## 8. 使用建议
 

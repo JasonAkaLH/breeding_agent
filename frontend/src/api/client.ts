@@ -77,7 +77,7 @@ export class ApiError extends Error {
 
 export const UI_MODES: UiModeOption[] = [
   { key: 'chat', label: '普通对话', capabilityId: null },
-  { key: 'sql_query', label: '数据库查询（SQLQuery）', capabilityId: 'sql_query.query' },
+  { key: 'sql_query', label: '数据库查询（SQLQuery）', capabilityId: 'skill.sql_query' },
 ];
 
 interface CreateApiClientOptions {

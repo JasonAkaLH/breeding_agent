@@ -32,23 +32,17 @@ from src.capabilities.main_agent import (
     build_local_main_agent_instance,
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
-from src.capabilities.sql_query import (
-    SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS,
-    SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS,
-    SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES,
-    SQLQueryExecutor,
-    SQLQueryRuntimeReplanner,
-    SQLQueryWorkflowProvider,
-    build_local_sql_query_instance,
-)
-from src.core.contracts import CapabilityExecutionRequest
+from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
+from src.sql_query.platform_handler import SQLQueryPlatformHandler
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import (
     SkillCapabilityRegistry,
     SkillCatalog,
+    SkillPlatformHandlerRegistry,
     SkillInputTextGenerator,
+    SkillServiceRegistry,
     SkillRuntimeRefreshResult,
     SkillRuntimeState,
     SkillScriptRunner,
@@ -262,7 +256,8 @@ class ApiRuntime:
         await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._refresh_mcp_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._conversation_guard.ensure_conversation_available(conversation_id)
-        self._ensure_supported_capability(request.capability_id)
+        requested_capability_id = self._canonical_capability_id(request.capability_id)
+        self._ensure_supported_capability(requested_capability_id)
 
         upload_context = await self.resolve_uploads_for_message(
             conversation_id,
@@ -305,7 +300,7 @@ class ApiRuntime:
             conversation_id=conversation_id,
             root_message_id=message_id,
             status=TaskStatus.ACCEPTED,
-            requested_capability_id=request.capability_id,
+            requested_capability_id=requested_capability_id,
             summary=request.content,
             created_at=now,
             updated_at=now,
@@ -322,6 +317,9 @@ class ApiRuntime:
         )
 
         metadata = dict(request.metadata)
+        if request.capability_id != requested_capability_id and request.capability_id is not None:
+            metadata["requested_capability_alias"] = request.capability_id
+            metadata["canonical_capability_id"] = requested_capability_id
         if self._skill_runtime_state is not None:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
         if self._mcp_runtime_state is not None:
@@ -341,7 +339,7 @@ class ApiRuntime:
             conversation_id=conversation_id,
             root_message_id=message_id,
             user_message=request.content,
-            requested_capability_id=request.capability_id,
+            requested_capability_id=requested_capability_id,
             metadata=metadata,
         )
         await self._schedule_execution(orchestration_request)
@@ -837,10 +835,16 @@ class ApiRuntime:
             await self._mcp_runtime_state.aclose()
         await asyncio.to_thread(self._engine.dispose)
 
+    @staticmethod
+    def _canonical_capability_id(capability_id: str | None) -> str | None:
+        if capability_id in {"sql_query", "sql_query.query"}:
+            return "skill.sql_query"
+        if capability_id == "main_agent":
+            return "main_agent.respond"
+        return capability_id
+
     def _ensure_supported_capability(self, capability_id: str | None) -> None:
         if capability_id is None:
-            return
-        if capability_id in {"main_agent", "sql_query"}:
             return
         descriptor = self.capability_registry.get(capability_id)
         if descriptor is not None and descriptor.public:
@@ -864,26 +868,29 @@ class ApiRuntime:
                 if tasks:
                     return
             self._record_skill_refresh_started("conversation_start")
-            result = self._skill_runtime_state.refresh_if_changed(reason="conversation_start")
-            if result.status == "completed":
-                self._sync_skill_capability_registry()
-                if self._audit_sink is not None:
-                    _record_skill_capability_startup_audit(
-                        self._audit_sink,
-                        self._skill_runtime_state.active_bundle.skill_capabilities,
-                    )
-            self._record_skill_refresh_audit(result)
+            previous_revision = self._skill_runtime_state.active_revision
+            self._skill_runtime_state.retain_revision(previous_revision)
+            try:
+                result = self._skill_runtime_state.refresh_if_changed(reason="conversation_start")
+                if result.status == "completed":
+                    try:
+                        self._sync_skill_capability_registry()
+                    except Exception:
+                        self._skill_runtime_state.activate_revision(previous_revision)
+                        raise
+                    if self._audit_sink is not None:
+                        _record_skill_capability_startup_audit(
+                            self._audit_sink,
+                            self._skill_runtime_state.active_bundle.skill_capabilities,
+                        )
+                self._record_skill_refresh_audit(result)
+            finally:
+                self._skill_runtime_state.release_revision(previous_revision)
 
     def _sync_skill_capability_registry(self) -> None:
         if self._skill_runtime_state is None:
             return
-        for descriptor in list(self.capability_registry.list()):
-            if descriptor.kind == "skill" or descriptor.source == "skill" or descriptor.capability_id.startswith("skill."):
-                self.capability_registry.unregister(descriptor.capability_id)
-        _register_capability_descriptors(
-            self.capability_registry,
-            self._skill_runtime_state.active_bundle.skill_capabilities.descriptors,
-        )
+        _sync_skill_capability_registry(self.capability_registry, self.instance_registry, self._skill_runtime_state)
 
     async def _refresh_mcp_for_new_conversation_if_needed(
         self,
@@ -1119,6 +1126,10 @@ def build_api_runtime(
     main_agent_reasoning_effort: ReasoningEffort = "minimal",
     skill_input_text_generator: SkillInputTextGenerator | None = None,
     enable_skill_input_llm: bool = True,
+    skill_platform_handlers: Mapping[str, Callable[..., Any]] | None = None,
+    trusted_skill_handlers: Mapping[str, str] | None = None,
+    trusted_skill_services: Mapping[str, tuple[str, ...] | list[str] | set[str]] | None = None,
+    skill_services: Mapping[str, Any] | None = None,
     conversation_title_generator: ConversationTitleGenerator | None = None,
     enable_conversation_title_llm: bool = True,
     skill_roots: Iterable[str | Path] | None = None,
@@ -1183,12 +1194,6 @@ def build_api_runtime(
         MAIN_AGENT_CAPABILITY_DESCRIPTORS,
         planner_payload_policies=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES,
     )
-    _register_capability_descriptors(
-        capability_registry,
-        SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS,
-        planner_payload_policies=SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES,
-    )
-    _register_capability_descriptors(capability_registry, SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS)
     skill_runtime_state = SkillRuntimeState(
         skill_roots=roots,
         public_skill_roots=resolved_public_skill_roots,
@@ -1196,11 +1201,10 @@ def build_api_runtime(
         initial_catalog=skill_catalog,
         refresh_enabled=skill_catalog is None,
     )
-    _register_capability_descriptors(capability_registry, skill_runtime_state.active_bundle.skill_capabilities.descriptors)
 
     instance_registry = InstanceRegistry()
     instance_registry.register(build_local_main_agent_instance())
-    instance_registry.register(build_local_sql_query_instance())
+    _sync_skill_capability_registry(capability_registry, instance_registry, skill_runtime_state)
 
     audit_sink = JsonlAuditSink(audit_log_path)
     _record_skill_capability_startup_audit(audit_sink, skill_runtime_state.active_bundle.skill_capabilities)
@@ -1274,15 +1278,36 @@ def build_api_runtime(
     )
     resolved_sql_query_text_generator = _resolve_sql_query_text_generator(
         llm_text_generator=llm_text_generator,
-        sql_query_llm_config=sql_query_llm_config,
-        sql_query_llm_client_factory=sql_query_llm_client_factory,
-        sql_query_reasoning_effort=sql_query_reasoning_effort,
-        main_agent_reasoning_effort=main_agent_reasoning_effort,
+        main_agent_llm_runtime=main_agent_llm_runtime,
         enable_sql_query_llm=enable_sql_query_llm,
     )
     resolved_sql_query_trim_max_tokens = _resolve_sql_query_trim_max_tokens(
         sql_query_trim_max_tokens=sql_query_trim_max_tokens,
         sql_query_llm_config=sql_query_llm_config,
+    )
+    resolved_skill_service_registry = SkillServiceRegistry(
+        {
+            "mysql_readonly": resolved_mysql_adapter,
+            "llm.sql_query": resolved_sql_query_text_generator,
+            "artifact_writer": skill_output_artifact_manager,
+            "progress_events": record_live_event,
+            **dict(skill_services or {}),
+        }
+    )
+    default_skill_platform_handlers = {
+        "sql_query.query": SQLQueryPlatformHandler(
+            sql_generator=sql_generator,
+            trim_max_tokens=resolved_sql_query_trim_max_tokens,
+        ),
+    }
+    default_trusted_skill_handlers = {"skill.sql_query": "sql_query.query"}
+    default_trusted_skill_services = {
+        "skill.sql_query": ("mysql_readonly", "llm.sql_query", "artifact_writer", "progress_events"),
+    }
+    resolved_skill_platform_handler_registry = SkillPlatformHandlerRegistry(
+        handlers={**default_skill_platform_handlers, **dict(skill_platform_handlers or {})},
+        trusted_skill_handlers={**default_trusted_skill_handlers, **dict(trusted_skill_handlers or {})},
+        trusted_skill_services={**default_trusted_skill_services, **dict(trusted_skill_services or {})},
     )
     resolved_conversation_memory_builder = _resolve_conversation_memory_builder(
         storage=storage,
@@ -1294,7 +1319,6 @@ def build_api_runtime(
     )
 
     main_agent_workflow_provider = MainAgentWorkflowProvider()
-    sql_query_workflow_provider = SQLQueryWorkflowProvider()
 
     def resolve_skill_name(capability_id: str, revision: str | None) -> str | None:
         try:
@@ -1302,14 +1326,26 @@ def build_api_runtime(
         except KeyError:
             return None
 
-    skill_workflow_provider = SkillWorkflowProvider(skill_name_resolver=resolve_skill_name)
+    def resolve_skill_manifest(capability_id: str, revision: str | None):
+        skill_name = resolve_skill_name(capability_id, revision)
+        if not skill_name:
+            return None
+        try:
+            return skill_runtime_state.catalog_for_revision(revision).get(skill_name)
+        except KeyError:
+            return None
+
+    skill_workflow_provider = SkillWorkflowProvider(
+        skill_name_resolver=resolve_skill_name,
+        skill_manifest_resolver=resolve_skill_manifest,
+    )
 
     def resolve_macro_provider(capability_id: str):
         if capability_id.startswith("skill."):
             return skill_workflow_provider
         return None
 
-    macro_providers = {"sql_query.query": sql_query_workflow_provider}
+    macro_providers = {}
 
     auto_workflow_provider = AutoWorkflowProvider(
         main_agent_provider=main_agent_workflow_provider,
@@ -1340,8 +1376,6 @@ def build_api_runtime(
             payload_policies=planner_payload_policies,
         )
     ]
-    if not enable_llm_planner:
-        default_replanners.append(SQLQueryRuntimeReplanner(macro_providers=macro_providers))
     resolved_runtime_replanner = runtime_replanner or CompositeRuntimeReplanner(default_replanners)
 
     cancellation_service = CancellationService(storage, event_sink=event_broker, audit_sink=audit_sink)
@@ -1364,11 +1398,12 @@ def build_api_runtime(
                     skill_output_artifact_manager=skill_output_artifact_manager,
                     live_event_recorder=record_live_event,
                 ),
-                SQLQueryExecutor(
-                    mysql_adapter=resolved_mysql_adapter,
-                    sql_generator=sql_generator,
-                    llm_text_generator=resolved_sql_query_text_generator,
-                    trim_max_tokens=resolved_sql_query_trim_max_tokens,
+                SkillExecutor(
+                    runtime_state=skill_runtime_state,
+                    script_runner=skill_script_runner,
+                    skill_input_text_generator=resolved_skill_input_text_generator,
+                    platform_handler_registry=resolved_skill_platform_handler_registry,
+                    service_registry=resolved_skill_service_registry,
                 ),
                 MCPToolExecutor(runtime_state=resolved_mcp_runtime_state),
             ]
@@ -1391,7 +1426,6 @@ def build_api_runtime(
         workflow_provider=WorkflowRouter(
             default_provider=default_workflow_provider,
             main_agent_provider=main_agent_workflow_provider,
-            sql_query_provider=sql_query_workflow_provider,
             skill_provider=skill_workflow_provider,
         ),
         mysql_adapter=resolved_mysql_adapter,
@@ -1507,10 +1541,7 @@ def _resolve_main_agent_llm_runtime(
 def _resolve_sql_query_text_generator(
     *,
     llm_text_generator,
-    sql_query_llm_config: Mapping[str, Any] | None,
-    sql_query_llm_client_factory: Callable[..., Any] | None,
-    sql_query_reasoning_effort: ReasoningEffort | None,
-    main_agent_reasoning_effort: ReasoningEffort,
+    main_agent_llm_runtime: SharedLLMRuntime,
     enable_sql_query_llm: bool,
 ):
     if llm_text_generator is not None:
@@ -1518,31 +1549,14 @@ def _resolve_sql_query_text_generator(
     if not enable_sql_query_llm:
         return None
 
-    config_source = (
-        "sql_query_explicit_override"
-        if sql_query_llm_config is not None or sql_query_llm_client_factory is not None
-        else "environment"
-    )
-    sql_query_runtime = SharedLLMRuntime(
-        client_factory=sql_query_llm_client_factory or LLMClient,
-        config=sql_query_llm_config,
-        config_source=config_source,
-    )
-
-    default_reasoning_effort = sql_query_reasoning_effort or main_agent_reasoning_effort
-
-    async def generate(prompt: str, *, request: CapabilityExecutionRequest | None = None) -> str:
-        metadata = dict(request.metadata) if request is not None else {}
-        thinking = _resolve_request_thinking_enabled(metadata)
-        reasoning_effort = _resolve_request_reasoning_effort(metadata, fallback=default_reasoning_effort)
-        return await sql_query_runtime.generate_text(
+    async def generate(prompt: str, **_: Any) -> str:
+        return await main_agent_llm_runtime.generate_text(
             prompt,
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
+            thinking=False,
+            reasoning_effort="minimal",
         )
 
     return generate
-
 
 def _resolve_conversation_title_generator(
     *,
@@ -1662,6 +1676,39 @@ def _register_capability_descriptors(
         )
 
 
+def _sync_skill_capability_registry(
+    capability_registry: CapabilityRegistry,
+    instance_registry: InstanceRegistry,
+    runtime_state: SkillRuntimeState,
+) -> None:
+    registry = runtime_state.active_bundle.skill_capabilities
+    previous_descriptors = [descriptor for descriptor in capability_registry.list() if _is_skill_descriptor(descriptor)]
+    previous_policies = {
+        descriptor.capability_id: capability_registry.get_planner_payload_policy(descriptor.capability_id)
+        for descriptor in previous_descriptors
+    }
+    try:
+        for descriptor in previous_descriptors:
+            capability_registry.unregister(descriptor.capability_id)
+        _register_capability_descriptors(
+            capability_registry,
+            registry.descriptors,
+            planner_payload_policies=registry.payload_policies,
+        )
+        instance_registry.register(build_local_skill_executor_instance(runtime_state.known_skill_capability_ids()))
+    except Exception:
+        for descriptor in list(capability_registry.list()):
+            if _is_skill_descriptor(descriptor):
+                capability_registry.unregister(descriptor.capability_id)
+        for descriptor in previous_descriptors:
+            capability_registry.register(
+                descriptor,
+                planner_payload_policy=previous_policies.get(descriptor.capability_id),
+            )
+        instance_registry.register(build_local_skill_executor_instance(runtime_state.known_skill_capability_ids()))
+        raise
+
+
 def _sync_mcp_capability_registry(
     capability_registry: CapabilityRegistry,
     instance_registry: InstanceRegistry,
@@ -1700,6 +1747,10 @@ def _sync_mcp_capability_registry(
 
 def _is_mcp_descriptor(descriptor: CapabilityDescriptor) -> bool:
     return descriptor.kind == "mcp_tool" or descriptor.source == "mcp" or descriptor.capability_id.startswith("mcp.")
+
+
+def _is_skill_descriptor(descriptor: CapabilityDescriptor) -> bool:
+    return descriptor.kind == "skill" or descriptor.source == "skill" or descriptor.capability_id.startswith("skill.")
 
 
 def _resolve_mcp_runtime_config(config: Mapping[str, Any] | None) -> MCPRuntimeConfig:

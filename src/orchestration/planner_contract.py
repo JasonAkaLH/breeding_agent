@@ -81,8 +81,8 @@ def build_planner_prompt(
         "除非用户请求已经显式指定某个 capability，否则所有路由和 DAG 编排都由你基于上下文决定。"
         "只返回 JSON。请选择最小且有用的无环 DAG。"
         "只能使用下面列出的 public capability。"
-        "禁止输出 SQLQuery 内部 capability 或低层实现节点。"
-        "对于数据库 / 数据查询问题，优先规划 sql_query.query，然后让 main_agent.respond 依赖它完成对话式最终回答；"
+        "禁止输出任何内部 capability 或低层实现节点。"
+        "对于数据库 / 数据查询问题，如果 public capability 列表中存在匹配的 skill.* 能力，优先规划对应 skill.* capability；"
         "对于明确匹配公开 Skill 的任务，优先规划对应 skill.* capability；"
         "对于追问、参数调整、继续上次任务等请求，必须结合对话记忆判断是否继续调用上一轮相关 public capability；"
         "对于兜底对话、解释、汇总，使用 main_agent.respond。\n\n"
@@ -174,8 +174,6 @@ def _format_public_capabilities(
         return (
             "- main_agent.respond：默认主代理 LLM 回答能力。"
             "规划器 input_payload 允许字段：无；系统会填充可信字段。\n"
-            "- sql_query.query：通过 SQLQuery 安全回答自然语言数据查询。"
-            "规划器 input_payload 允许字段：无；系统会填充可信字段。"
         )
     full_block = "\n".join(
         _format_capability_line(descriptor, allowlist.get(descriptor.capability_id, ()))
