@@ -6,7 +6,7 @@
 
 | 目录 | 范围 | 状态 |
 |---|---|---|
-| `docs/prd/backend/` | 后端主代理框架、SQLQuery、LLM runtime、对话记忆、编排与 API 契约 | 当前正式基线 |
+| `docs/prd/backend/` | 后端主代理框架、Skill runtime、LLM runtime、对话记忆、编排与 API 契约 | 当前正式基线 |
 | `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | 已开始，v1 业务对话台 PRD 草案 |
 
 ## 后端 PRD 入口
@@ -19,6 +19,7 @@
 - Skill 动态加载与热部署 PRD：`docs/prd/backend/13-Skill动态加载与热部署PRD.md`。
 - MCP Runtime 实现需求 PRD：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`。
 - Skill Executor 实现需求 PRD：`docs/prd/backend/15-SkillExecutor实现需求PRD.md`。
+- Rust 化 Runtime 模块评估 PRD：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`。
 
 新增或补齐后端能力范围时，应同步更新：
 1. `docs/prd/backend/00-主代理框架PRD.md` 的专题索引；

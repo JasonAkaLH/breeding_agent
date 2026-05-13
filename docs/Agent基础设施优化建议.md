@@ -2,12 +2,12 @@
 
 - 日期：2026-05-11
 - 状态：基础设施评估与后续优化建议稿；不代表已经批准实施或已经完成改造。
-- 范围：当前仓库内主代理、编排、状态存储、Capability / Skill、SQLQuery、API / SSE、前端业务对话台与配套测试 / 文档。
+- 范围：当前仓库内主代理、编排、状态存储、Capability / Skill、可移除 数据查询 Skill、API / SSE、前端业务对话台与配套测试 / 文档。
 - 依据：本次只读检查当前代码与文档关系；未访问真实 LLM / MySQL provider，未运行全量回归。
 
 ## 1. 当前成熟度判断
 
-当前项目已经不是“概念验证”或空框架，而是一个**单机服务型 Agent 平台内核 + SQLQuery / Skill 能力体系 + 前端业务对话台**的可运行基线。
+当前项目已经不是“概念验证”或空框架，而是一个**单机服务型 Agent 平台内核 + 可移除 Skill 能力体系 + 前端业务对话台**的可运行基线。
 
 已经形成的基础设施能力包括：
 
@@ -18,7 +18,7 @@
 | 生命周期 | task / node / mailbox / interrupt / cancel / conversation guard 规则独立沉淀。 | `src/lifecycle/` |
 | 状态存储 | 已有状态存储抽象与 SQLite 实现，为后续 PostgreSQL 迁移留出接口。 | `src/storage/` |
 | 主代理能力 | `main_agent.respond`、prompt 构造、streaming 输出与 Skill 兼容层已落地。 | `src/capabilities/main_agent/` |
-| SQLQuery 能力 | public macro + 内部只读查询 workflow、SQL Guard、schema context 与候选表格筛选已落地。 | `src/capabilities/sql_query/`, `src/sql_query/`, `configs/sql_query/` |
+| 可移除数据查询 Skill | 数据查询 Skill 作为 `skill.data_lookup` platform-service bundle 示例；manifest、领域 runtime 与配置均归属 `skill/<domain-query>/`，系统 runtime 只提供 generic Skill loader / allowlisted handler。 | `skill/<domain-query>/` |
 | Skill 能力池 | 项目级 Skill 已可进入 public capability pool，并有 forced skill、安全 metadata 剥离与审计。 | `skill/`, `src/integrations/codex_skills/`, `src/orchestration/skill_workflow_provider.py` |
 | 前端联调 | React + TypeScript + Vite + Ant Design 对话台、SSE client、状态 reducer 与结果卡片测试已存在。 | `frontend/` |
 | 验证资产 | 后端按模块分层 `unittest`，前端有 Vitest / build 命令；当前文档基线已收口到 PRD 目录与少量专题说明。 | `tests/`, `docs/prd/`, `docs/` |
@@ -30,9 +30,9 @@
 | 风险 | 当前表现 | 影响 |
 | --- | --- | --- |
 | 单机运行假设较强 | SQLite、进程内事件 broker、本地 runtime 装配与部分内存态能力仍是主路径。 | 横向扩展、重启恢复、生产可用性受限。 |
-| 执行资源治理不足 | 已有 retry / timeout / scheduler 概念，但缺少统一的并发预算、LLM token 预算、能力级限流和资源池治理。 | 多用户 / 多任务并发时容易出现 provider 抖动、DB 压力或任务互相拖慢。 |
+| 执行资源治理不足 | 已有 retry / timeout / scheduler 概念，但缺少统一的并发预算、LLM token 预算、能力级限流和资源池治理。 | 多用户 / 多任务并发时容易出现 provider 抖动、外部数据源压力或任务互相拖慢。 |
 | 事件与任务恢复能力偏弱 | SSE 与任务事件已有实现，但还没有明确的持久化事件重放、断线恢复与 dispatcher 恢复模型。 | 前端断线、服务重启或长任务中断后，用户体验和排障难度上升。 |
-| 运维观测仍偏测试驱动 | 有 audit log 与大量测试，但缺少统一 metrics、trace、health/readiness、告警字段与日志轮转策略。 | 线上定位慢，难以量化 LLM / SQLQuery / Skill 的成功率、耗时和 fallback 分布。 |
+| 运维观测仍偏测试驱动 | 有 audit log 与大量测试，但缺少统一 metrics、trace、health/readiness、告警字段与日志轮转策略。 | 线上定位慢，难以量化 LLM / Skill 的成功率、耗时和 fallback 分布。 |
 | Capability 扩展仍依赖中心装配 | Skill 已一等化，但 runtime 中央装配、前端能力模式与 public capability 发现仍有继续插件化空间。 | 后续新增能力时容易在 API runtime、前端展示、Planner prompt、审计和测试多处同步修改。 |
 | Skill 信任边界待强化 | 当前已做 public root、manifest、forced metadata 与 artifact 安全约束，但若 Skill 来源变复杂，仍需要更强 sandbox。 | 第三方 / 半可信 Skill 执行时存在网络、文件、CPU / 内存与依赖供应链风险。 |
 | 文档权威源有漂移 | 若干根目录历史文档已被 PRD / Phase 文档吸收，但仍被部分文档或 README 提及。 | 新协作者容易误读旧方案为当前事实。 |
@@ -53,10 +53,10 @@
 
 | 优化项 | 建议交付物 | 验收口径 |
 | --- | --- | --- |
-| 统一执行预算 | 为 task、capability、LLM、SQLQuery、Skill 定义 timeout、retry、并发、队列长度和 token / cost 预算。 | 超限行为可预测：排队、拒绝、取消或失败事件均可审计。 |
+| 统一执行预算 | 为 task、capability、LLM、数据查询 Skill、Skill 定义 timeout、retry、并发、队列长度和 token / cost 预算。 | 超限行为可预测：排队、拒绝、取消或失败事件均可审计。 |
 | 并行 ready-node 调度 | 在 DAG 语义允许时支持 bounded parallel execution，并按 capability 类型隔离并发池。 | 独立节点可并行，依赖节点顺序稳定；失败传播与 cancel 语义保持一致。 |
 | LLM provider 观测 | 记录 provider、model、prompt / completion token、耗时、失败类型、自修复次数、fallback / fail-closed 原因。 | 可按任务和 capability 汇总 LLM 成本、延迟和失败率。 |
-| SQLQuery 观测 | 记录 schema context 构建、SQL Guard、DB 查询、LIKE 召回、LLM 表格筛选、降级路径耗时与结果规模。 | 可定位慢查询、召回失败、Guard 拒绝和 provider 降级。 |
+| 数据查询 Skill 观测 | 记录 schema context 构建、SQL Guard、DB 查询、LIKE 召回、LLM 表格筛选、降级路径耗时与结果规模。 | 可定位慢查询、召回失败、Guard 拒绝和 provider 降级。 |
 | Skill 执行观测 | 记录 selected / forced / missing、脚本耗时、artifact 产出、manifest 约束命中与 sandbox 拒绝。 | Skill 问题可从审计和 metrics 直接复盘。 |
 | Health / readiness | 增加 runtime 依赖健康检查：数据库、LLM 配置、MySQL readonly、artifact store、Skill catalog。 | 启动期与运行期可区分“服务存活”和“关键依赖可用”。 |
 
@@ -74,7 +74,7 @@
 
 1. **先做状态与恢复**：PostgreSQL 后端、迁移、durable dispatcher、事件 replay。
    这是从本地联调走向生产环境的前置条件。
-2. **再做资源治理**：capability 并发池、LLM / SQLQuery / Skill 预算、timeout / retry 统一语义。
+2. **再做资源治理**：capability 并发池、LLM / Skill 预算、timeout / retry 统一语义。
    这能避免多用户压力下把 provider、DB 或主进程拖垮。
 3. **同步补可观测性**：metrics、trace、health、审计字段标准化。
    没有观测就无法判断第 1、2 步是否有效。

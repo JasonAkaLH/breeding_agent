@@ -65,24 +65,52 @@ scripts:
             skill_file = self._write_skill(
                 Path(tmpdir),
                 """---
-name: sql-query
+name: platform
 description: 查询数据库
 execution:
   mode: platform_service
-  handler: sql_query.query
+  handler: skill.platform.handler
   trust_scope: project
   services:
     - mysql_readonly
 ---
 
-# SQL Query
-查询数据库。
+# Platform
+平台服务。
 """,
             )
             manifest = parse_skill_file(skill_file)
 
         with self.assertRaises(SkillExecutionConfigError):
             resolve_skill_execution_config(manifest)
+
+    def test_platform_service_reads_project_handler_module_and_defaults_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_file = self._write_skill(
+                Path(tmpdir),
+                """---
+name: platform
+description: 平台服务
+execution:
+  mode: platform_service
+  answer_mode: direct
+  trust_scope: project
+  handler_module: runtime/platform_handler.py
+  services:
+    - demo.service
+---
+
+# Platform
+平台服务。
+""",
+            )
+            manifest = parse_skill_file(skill_file)
+
+        config = resolve_skill_execution_config(manifest)
+        self.assertEqual(config.trust_scope, 'project')
+        self.assertEqual(config.handler_module, 'runtime/platform_handler.py')
+        self.assertEqual(config.handler_factory, 'build_handler')
+        self.assertEqual(config.services, ('demo.service',))
 
     def test_runtime_state_exposes_skill_payload_policies(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -107,7 +135,7 @@ scripts:
             state = SkillRuntimeState.from_roots(
                 skill_roots=(root,),
                 public_skill_roots=(root,),
-                reserved_capability_ids=('main_agent.respond', 'sql_query.query'),
+                reserved_capability_ids=('main_agent.respond',),
             )
 
         policy = state.active_bundle.skill_capabilities.payload_policies['skill.scripted']

@@ -73,7 +73,7 @@ runtime = build_api_runtime(
     mysql_adapter=MySQLReadonlyAdapter(runner=sql_runner),
     main_agent_stream_generator=main_agent_stream,
     enable_llm_planner=False,
-    enable_sql_query_llm=False,
+    enable_platform_llm=False,
     skill_roots=[],
 )
 app = create_app(runtime=runtime)

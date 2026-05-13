@@ -22,14 +22,14 @@ describe('applyTaskEvent', () => {
     expect(state.statusText).toContain('已提交');
     expect(taskProgressDisplayText(state)).toBe('任务已提交');
 
-    state = applyTaskEvent(state, event('node.started', { capability_id: 'sql_query.sql_execute_readonly' }, 'node-1'));
+    state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'execute_query' }, 'node-1'));
     expect(state.phase).toBe('running');
-    expect(state.statusText).toContain('检索数据库');
-    expect(state.currentActivityText).toBe('正在执行 SQLQuery：正在检索数据库');
-    expect(state.currentCapabilityLabel).toBe('SQLQuery');
-    expect(taskProgressDisplayText(state)).toBe('正在执行 SQLQuery：正在检索数据库');
+    expect(state.statusText).toContain('检索数据');
+    expect(state.currentActivityText).toBe('正在执行 Skill：正在检索数据');
+    expect(state.currentCapabilityLabel).toBe('Skill');
+    expect(taskProgressDisplayText(state)).toBe('正在执行 Skill：正在检索数据');
 
-    state = applyTaskEvent(state, event('node.started', { capability_id: 'sql_query.result_filtering' }, 'node-filter'));
+    state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'filter_results' }, 'node-filter'));
     expect(state.statusText).toContain('筛选查询结果');
   });
 
@@ -81,19 +81,16 @@ describe('applyTaskEvent', () => {
     state = applyTaskEvent(state, event('task.cancelled'));
     expect(state.phase).toBe('cancelled');
 
-    state = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'write_pattern_detected' }, 'guard-node-failed', 'task-1:sql_guard'));
+    state = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'write_pattern_detected' }, 'guard-node-failed', 'task-1:query_guard'));
     expect(state.phase).toBe('failed');
     expect(state.errorMessage).toContain('只读查询安全边界');
 
-    state = applyTaskEvent(createInitialTaskEventState(), event('sql_query.sql_guard_blocked'));
-    expect(state.phase).toBe('failed');
-    expect(state.errorMessage).toContain('只读查询安全边界');
   });
 
 
   it('keeps SQL Guard blocked message when a later task.failed event arrives', () => {
     let state = createInitialTaskEventState();
-    state = applyTaskEvent(state, event('node.failed', { code: 'write_pattern_detected' }, 'guard-node-failed', 'task-1:sql_guard'));
+    state = applyTaskEvent(state, event('node.failed', { code: 'write_pattern_detected' }, 'guard-node-failed', 'task-1:query_guard'));
     state = applyTaskEvent(state, event('task.failed', {}, 'task-failed'));
     expect(state.phase).toBe('failed');
     expect(state.errorMessage).toContain('只读查询安全边界');

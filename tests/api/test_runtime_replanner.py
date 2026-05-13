@@ -7,9 +7,9 @@ from tests.api.support import APITestCase
 
 
 class RuntimeReplannerAPITest(APITestCase):
-    async def test_default_runtime_replanner_keeps_sqlquery_as_single_skill_node(self) -> None:
+    async def test_default_runtime_replanner_keeps_legacyquery_as_single_skill_node(self) -> None:
         def planner(_prompt: str) -> str:
-            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.sql_query"}]})
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.generic_data_lookup"}]})
 
         await self.reconfigure_runtime(
             mysql_adapter=MySQLReadonlyAdapter(
@@ -17,7 +17,7 @@ class RuntimeReplannerAPITest(APITestCase):
             ),
             planner_text_generator=planner,
             main_agent_stream_generator=lambda _prompt, **_kwargs: "汇总回答",
-            enable_sql_query_llm=False,
+            enable_platform_llm=False,
             skill_roots=None,
         )
 
@@ -30,7 +30,7 @@ class RuntimeReplannerAPITest(APITestCase):
         graph = graph_response.json()
 
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual({node["capability_id"] for node in graph["nodes"]}, {"skill.sql_query", "main_agent.respond"})
+        self.assertEqual({node["capability_id"] for node in graph["nodes"]}, {"skill.generic_data_lookup", "main_agent.respond"})
         self.assertFalse(any("runtime_query_1" in node["node_id"] for node in graph["nodes"]))
 
 

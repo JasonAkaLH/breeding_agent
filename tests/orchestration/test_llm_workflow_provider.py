@@ -26,22 +26,22 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
                 descriptor,
                 planner_payload_policy=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES.get(descriptor.capability_id),
             )
-        self.sql_query_manifest = SkillManifest(
-            name="sql-query",
+        self.generic_data_lookup_manifest = SkillManifest(
+            name="generic-data-lookup",
             description="安全回答品种、审定、基因型、表型和数据库类只读查询问题。",
             triggers=("查询品种", "审定信息", "基因型", "数据库查询"),
-            body="# SQL Query",
-            source_path=Path("skill/sql-query/SKILL.md"),
-            metadata={"execution": {"mode": "platform_service", "handler": "sql_query.query", "answer_mode": "requires_finalizer"}},
+            body="# Data Query",
+            source_path=Path("skill/generic-data-lookup/SKILL.md"),
+            metadata={"execution": {"mode": "platform_service", "handler": "skill.data_lookup.platform_handler", "answer_mode": "requires_finalizer"}},
         )
         self.registry.register(
             CapabilityDescriptor(
-                capability_id="skill.sql_query",
-                name="sql-query",
-                description=self.sql_query_manifest.description,
+                capability_id="skill.generic_data_lookup",
+                name="generic-data-lookup",
+                description=self.generic_data_lookup_manifest.description,
                 kind="skill",
                 source="skill",
-                source_path="sql-query/SKILL.md",
+                source_path="generic-data-lookup/SKILL.md",
             ),
             planner_payload_policy=CapabilityPayloadPolicy(
                 planner_allowed_fields=("subtask_label", "parent_question"),
@@ -49,8 +49,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.skill_provider = SkillWorkflowProvider(
-            {"skill.sql_query": "sql-query"},
-            skill_manifest_resolver=lambda capability_id, _revision: self.sql_query_manifest if capability_id == "skill.sql_query" else None,
+            {"skill.generic_data_lookup": "generic-data-lookup"},
+            skill_manifest_resolver=lambda capability_id, _revision: self.generic_data_lookup_manifest if capability_id == "skill.generic_data_lookup" else None,
         )
         self.fallback_provider = AutoWorkflowProvider(main_agent_provider=MainAgentWorkflowProvider())
 
@@ -58,7 +58,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         return LLMWorkflowProvider(
             capability_registry=self.registry,
             fallback_provider=self.fallback_provider,
-            macro_providers={"skill.sql_query": self.skill_provider},
+            macro_providers={"skill.generic_data_lookup": self.skill_provider},
             text_generator=text_generator,
         )
 
@@ -66,12 +66,12 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         return LLMWorkflowProvider(
             capability_registry=self.registry,
             fallback_provider=self.fallback_provider,
-            macro_providers={"skill.sql_query": self.skill_provider},
+            macro_providers={"skill.generic_data_lookup": self.skill_provider},
             text_generator=text_generator,
             payload_policies=payload_policies,
         )
 
-    async def test_llm_sql_query_plan_is_validated_expanded_and_enriched(self) -> None:
+    async def test_llm_generic_data_lookup_plan_is_validated_expanded_and_enriched(self) -> None:
         prompts: list[str] = []
 
         async def planner(prompt: str) -> str:
@@ -79,7 +79,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "nodes": [
-                        {"node_id": "query_data", "capability_id": "skill.sql_query"},
+                        {"node_id": "query_data", "capability_id": "skill.generic_data_lookup"},
                         {
                             "node_id": "answer_user",
                             "capability_id": "main_agent.respond",
@@ -102,12 +102,12 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan.metadata["planner_fallback_used"])
         self.assertEqual(plan.metadata["planner_source"], "llm")
         capability_ids = [node.capability_id for node in plan.nodes]
-        self.assertEqual(capability_ids, ["skill.sql_query", "main_agent.respond"])
+        self.assertEqual(capability_ids, ["skill.generic_data_lookup", "main_agent.respond"])
         self.assertIn("task-1:query_data:skill_execute", plan.nodes[-1].depends_on)
         self.assertEqual(plan.nodes[-1].input_payload["user_message"], "查询龙粳33的详细审定信息")
-        self.assertIn("skill.sql_query", prompts[0])
+        self.assertIn("skill.generic_data_lookup", prompts[0])
         self.assertIn("main_agent.respond", prompts[0])
-        self.assertNotIn("sql_query.sql_generate", prompts[0])
+        self.assertNotIn("internal.generate", prompts[0])
 
     async def test_llm_main_agent_plan_gets_default_user_message_payload(self) -> None:
         def planner(_prompt: str) -> str:
@@ -126,9 +126,9 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.nodes[0].input_payload["user_message"], "你好，介绍一下你能做什么")
         self.assertEqual(plan.metadata["route"], "llm_planner")
 
-    async def test_sql_query_only_plan_gets_main_agent_finalizer(self) -> None:
+    async def test_generic_data_lookup_only_plan_gets_main_agent_finalizer(self) -> None:
         def planner(_prompt: str) -> str:
-            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.sql_query"}]})
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.generic_data_lookup"}]})
 
         plan = await self.make_provider(planner).build_plan(
             OrchestrationRequest(
@@ -150,7 +150,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
                     "nodes": [
                         {
                             "node_id": "query_data",
-                            "capability_id": "skill.sql_query",
+                            "capability_id": "skill.generic_data_lookup",
                             "input_payload": {"user_question": "恶意替换查询"},
                         },
                         {
@@ -177,17 +177,17 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("恶意替换", str(plan.nodes[0].input_payload))
         self.assertNotIn("恶意替换", str(plan.nodes[-1].input_payload))
 
-    async def test_sql_query_payload_policy_drops_route_hint_but_keeps_subtask_context(self) -> None:
+    async def test_generic_data_lookup_payload_policy_drops_route_hint_but_keeps_subtask_context(self) -> None:
         def planner(_prompt: str) -> str:
             return json.dumps(
                 {
                     "nodes": [
                         {
                             "node_id": "query_genotype_info",
-                            "capability_id": "skill.sql_query",
+                            "capability_id": "skill.generic_data_lookup",
                             "input_payload": {
                                 "user_question": "恶意替换查询",
-                                "route_hint": "genotype_db",
+                                "route_hint": "dataset_b",
                                 "subtask_label": "基因型信息",
                                 "parent_question": "龙粳33的审定信息和基因型信息都查一下",
                                 "allowed_tables": ["should_not_pass"],
@@ -389,12 +389,12 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plan.nodes[0].input_payload, {})
 
-    async def test_sql_query_and_unwired_main_agent_plan_is_rewired_to_use_query_result(self) -> None:
+    async def test_generic_data_lookup_and_unwired_main_agent_plan_is_rewired_to_use_query_result(self) -> None:
         def planner(_prompt: str) -> str:
             return json.dumps(
                 {
                     "nodes": [
-                        {"node_id": "query_data", "capability_id": "skill.sql_query"},
+                        {"node_id": "query_data", "capability_id": "skill.generic_data_lookup"},
                         {"node_id": "answer_user", "capability_id": "main_agent.respond"},
                     ]
                 }
@@ -437,8 +437,8 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         def planner(prompt: str) -> str:
             prompts.append(prompt)
             if len(prompts) == 1:
-                return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "sql_query.sql_generate"}]})
-            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.sql_query"}]})
+                return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "internal.generate"}]})
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.generic_data_lookup"}]})
 
         plan = await self.make_provider(planner).build_plan(
             OrchestrationRequest(
@@ -453,7 +453,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan.metadata["planner_fallback_used"])
         self.assertEqual(plan.metadata["planner_repair_attempts"], 1)
         self.assertIn("上一轮 Planner 输出未通过校验", prompts[1])
-        self.assertIn("skill.sql_query", [node.capability_id for node in plan.nodes])
+        self.assertIn("skill.generic_data_lookup", [node.capability_id for node in plan.nodes])
 
     async def test_invalid_planner_json_is_repaired_by_llm(self) -> None:
         prompts: list[str] = []
@@ -528,7 +528,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             capability_registry=self.registry,
             fallback_provider=self.fallback_provider,
             macro_providers={
-                "skill.sql_query": self.skill_provider,
+                "skill.generic_data_lookup": self.skill_provider,
                 "skill.mini_breedstat_rcbd": SkillWorkflowProvider({"skill.mini_breedstat_rcbd": "mini-breedstat-rcbd"}),
             },
             text_generator=planner,

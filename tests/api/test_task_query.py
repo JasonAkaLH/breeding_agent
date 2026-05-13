@@ -23,7 +23,7 @@ class TaskQueryAPITest(APITestCase):
         self.assertEqual(graph_payload["task_id"], task_id)
         self.assertEqual(len(graph_payload["nodes"]), 2)
         self.assertEqual(len(graph_payload["edges"]), 1)
-        self.assertEqual({node["capability_id"] for node in graph_payload["nodes"]}, {"skill.sql_query", "main_agent.respond"})
+        self.assertEqual({node["capability_id"] for node in graph_payload["nodes"]}, {"skill.generic_data_lookup", "main_agent.respond"})
 
         artifacts_response = await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")
         self.assertEqual(artifacts_response.status_code, 200)

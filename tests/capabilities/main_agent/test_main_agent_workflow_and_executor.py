@@ -83,10 +83,10 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
                 node_id="node-1",
                 input_payload={"user_message": "龙粳18详细信息"},
                 dependency_outputs={
-                    "task-1:query_data:sql_execute_readonly": {
+                    "task-1:query_data:execute_query": {
                         "columns": ["variety_name", "approval_num"],
                         "rows": [{"variety_name": "龙粳18", "approval_num": "黑审稻"}],
-                        "route_id": "approval_variety_db",
+                        "route_id": "dataset_a",
                         "row_count": 1,
                         "preview_row_count": 1,
                         "truncated": False,
@@ -97,7 +97,7 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.output_payload["response_text"], "这是整理后的答案")
         self.assertIn("上游能力结果上下文", seen_prompts[0])
-        self.assertIn("approval_variety_db", seen_prompts[0])
+        self.assertIn("dataset_a", seen_prompts[0])
         self.assertIn("columns", seen_prompts[0])
         self.assertIn("rows", seen_prompts[0])
         self.assertIn("龙粳18", seen_prompts[0])

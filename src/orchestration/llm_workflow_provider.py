@@ -39,9 +39,9 @@ class LLMWorkflowProvider:
     """Build an LLM-generated public DAG and fail closed on invalid planner output.
 
     The LLM is only trusted to choose public capabilities and high-level
-    dependencies.  Every candidate plan is validated before macro expansion,
-    then expanded through system-owned providers such as SQLQuery's fixed
-    workflow.  Invalid planner output is repaired by the LLM itself once, then
+    dependencies.  Every candidate plan is validated before expansion,
+    then expanded through system-owned providers such as SkillWorkflowProvider.
+    Invalid planner output is repaired by the LLM itself once, then
     fails without deterministic capability routing.  The fallback provider is
     reserved for explicitly disabled planner configurations.
     """

@@ -2,14 +2,18 @@
 
 - **适用对象**：使用 Oh-my-codex / Codex 的 `skill-creator` 创建 Skill，并希望这些 Skill 能被本项目后端 `main_agent.respond` 使用的开发者。
 - **适配范围**：本系统的 Codex Skill 兼容层，而不是完整 Codex 本地 runtime。
-- **当前实现入口**：`src/integrations/codex_skills/`、`src/capabilities/main_agent/`、`src/api/runtime.py`。
-- **更新时间**：2026-05-08
+- **当前实现入口**：`src/integrations/codex_skills/`、`src/capabilities/main_agent/`、`src/capabilities/skill_tool/`、`src/api/runtime.py`。
+- **更新时间**：2026-05-13
 
 ## 1. 一句话结论
 
-本系统可以加载 Codex 风格的 `SKILL.md`，按用户问题匹配 Skill，并把匹配到的 Skill 正文注入主代理 prompt；也可以受控执行 Skill manifest 明确声明的 Python 脚本，并把 JSON 输出注入主代理 prompt。
+本系统可以加载 Codex 风格的 `SKILL.md`，并支持三类后端执行形态：
 
-但本系统**不是完整 Codex runtime**：不会自动读取 Skill 的 `references/`，不会执行 Markdown 代码块，不支持 shell 脚本 / MCP / plugin runtime，也不会给脚本继承完整本机环境变量。
+1. **instruction-only Skill**：匹配后把 Skill 正文注入 `main_agent.respond`。
+2. **`python_subprocess` Skill**：受控执行 manifest 声明的 Python 脚本，并把 JSON 输出注入主代理。
+3. **`platform_service` Skill**：仅限项目信任 Skill，通过 runtime 预注册 / allowlist 的 handler 绑定受控服务。
+
+但本系统**不是完整 Codex runtime**：不会自动读取 Skill 的 `references/`，不会执行 Markdown 代码块，不支持 shell 脚本 / plugin runtime，也不会给脚本继承完整本机环境变量或 secret。
 
 ## 2. Skill 放在哪里
 
@@ -65,11 +69,17 @@ triggers:
 | `name` | 必填 | 解析必需；也参与匹配打分。 |
 | `description` | 强烈建议 | 参与匹配打分；应写清楚“什么时候使用”。 |
 | `triggers` | 强烈建议 | 按子串命中，分数最高；中文 Skill 必须尽量列出自然触发表达。 |
+| `capability_id` | 公开 Skill 必填 | 公开到 capability pool 的稳定 ID；项目 Skill 使用 `skill.*`，例如 `skill.data_lookup`。 |
 | `inputs` | 可选 | 会被解析；顶层 `inputs.required` 当前不阻塞主代理执行，主要作为契约说明。 |
-| `outputs` | 脚本 Skill 建议 | 顶层 `outputs.required` 会用于校验脚本 JSON 输出。 |
-| `parameters` / `input_parameters` | 脚本 Skill 建议 | 声明主代理在执行自动脚本前解析的业务参数；系统先做确定性解析，仍缺少文本型标量参数时才让 LLM 生成候选 JSON，最终只有通过系统校验的值会作为脚本 stdin 顶层字段注入。 |
+| `outputs` | 脚本 / 服务 Skill 建议 | 顶层 `outputs.required` 会用于校验脚本 JSON 输出，也可作为 platform-service 输出契约说明。 |
+| `parameters` / `input_parameters` | 脚本 / 服务 Skill 建议 | 声明执行前需要解析的业务参数；系统先做确定性解析，仍缺少文本型标量参数时才让 LLM 生成候选 JSON，最终只有通过系统校验的值会作为入参注入。 |
 | `scripts` | 可选 | 只支持声明式 Python 脚本；`auto_run: true` 时自动执行。 |
-| 其他顶层字段 | 可选 | 会进入 manifest metadata，但当前主代理不依赖。 |
+| `execution.mode` | 执行型 Skill 建议 | 支持 `delegated_main_agent`、`python_subprocess`、`platform_service`。 |
+| `execution.handler` | platform-service 必填 | runtime 预注册 / allowlist 的 handler key；不能作为动态 import 路径。 |
+| `execution.answer_mode` | 执行型 Skill 建议 | 支持 `direct`、`requires_finalizer`、`none`；platform-service 必须显式声明。 |
+| `execution.services` | platform-service 可选 | 仅能列出该 Skill allowlist 允许的服务名；普通脚本不能绑定服务。 |
+| `execution.trust_scope` | platform-service 建议 | 标记信任边界；当前项目内服务型 Skill 使用 `project`。 |
+| 其他顶层字段 | 可选 | 会进入 manifest metadata；除非 runtime 显式支持，否则不产生执行能力。 |
 
 ## 4. 匹配规则怎么写才有效
 
@@ -131,9 +141,43 @@ triggers:
 - 不要放 API key、数据库密码、内网地址等敏感信息。
 - 如果需要确定性处理，写脚本并通过 `scripts` 显式声明。
 
-## 6. 脚本型 Skill
+## 6. 平台服务型 Skill
 
-### 6.1 支持范围
+`platform_service` 用于把项目内受控业务服务包装成公开 `skill.*` capability。它不是普通脚本模式，也不是 native capability：编排层只看见 Skill capability，handler 与服务由 API runtime 显式注册并 allowlist。
+
+约束：
+
+- service-bound Skill 必须使用 `execution.mode: platform_service`。
+- `python_subprocess` 不能绑定 MySQL、内部 LLM、secret、完整环境变量或任意平台服务。
+- `execution.handler` 是稳定 handler key；`trust_scope: project` 的公开项目 Skill 可额外声明相对 `handler_module`，系统只在 public skill root 内受控加载该文件。
+- `execution.services` 只能请求该 Skill allowlist 内的服务；缺失或越权时 fail closed。
+- 需要主代理汇总结构化结果时，使用 `answer_mode: requires_finalizer`。
+
+数据查询 Skill 是当前 canonical platform-service Skill：
+
+```yaml
+name: data-lookup
+capability_id: skill.data_lookup
+description: 通过项目级 Skill platform-service 安全回答数据库类只读查询问题
+execution:
+  mode: platform_service
+  trust_scope: project
+  handler: skill.<name>.platform_handler
+  handler_module: runtime/data_query_skill/platform_handler.py
+  handler_factory: build_handler
+  answer_mode: requires_finalizer
+  services:
+    - mysql_readonly
+    - llm.non_stream
+    - artifact_writer
+    - progress_events
+```
+
+数据查询 Skill 仅以 `skill.data_lookup` 公开；planner/public capability、测试入口与 handler key 均应使用当前 Skill contract。
+
+## 7. 脚本型 Skill
+
+### 7.1 支持范围
 
 当前 `SkillScriptRunner` 只支持：
 
@@ -157,7 +201,7 @@ triggers:
 - 交互式 stdin
 
 
-### 6.2 运行环境与依赖口径
+### 7.2 运行环境与依赖口径
 
 脚本运行在公司后端统一 Python 运行环境中：
 
@@ -396,7 +440,7 @@ cat(toJSON(result, auto_unbox = TRUE, null = "null"))
 ```
 
 
-### 6.3 脚本收到什么输入
+### 7.3 脚本收到什么输入
 
 自动执行脚本的 stdin 是 JSON object：
 
@@ -463,7 +507,7 @@ parameters:
 `source: artifact` 表示该必填参数由 `uploaded_artifacts` 是否存在来满足；脚本仍通过 `uploaded_artifacts` 读取实际文件内容，`material_data` 顶层字段只是可审计的可用性标记。
 `analysis_mode` 是带默认值的可选枚举参数；如果 stdin 中没有该字段，脚本应使用 `anova`，并拒绝不在 `enum` 列表中的其他值。
 
-### 6.4 脚本必须输出什么
+### 7.4 脚本必须输出什么
 
 stdout 必须是 JSON object，例如：
 
@@ -512,7 +556,7 @@ outputs:
       mime_types: [text/html]
 ```
 
-### 6.5 脚本型 Skill 示例
+### 7.5 脚本型 Skill 示例
 
 目录：
 
@@ -576,7 +620,7 @@ result = {
 print(json.dumps(result, ensure_ascii=False))
 ```
 
-## 7. Oh-my-codex `skill-creator` 提示词模板
+## 8. Oh-my-codex `skill-creator` 提示词模板
 
 把下面这段作为创建 Skill 的约束交给 Oh-my-codex `skill-creator`：
 
@@ -587,13 +631,14 @@ print(json.dumps(result, ensure_ascii=False))
 3. 本系统只会把 SKILL.md body 注入 LLM，不会自动读取 references/ 或 assets/。
 4. 如需脚本，只能声明 scripts[].runtime=python，path 必须是包内相对路径，不能使用绝对路径、..、symlink、shell、node 或任意命令。
 5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；如需业务参数，必须用 parameters/input_parameters 声明可解析字段，LLM 只会在缺参时生成候选并由系统校验后注入，不要依赖主代理口头承诺传参；stdout 必须是 JSON object。若需要下载文件，写入 MAF_SKILL_OUTPUT_DIR 并用 output_files 声明；若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
-6. 如果声明 outputs.required 或 scripts[].outputs.required，脚本 stdout 必须包含这些字段。
-7. 不要创建 README、安装指南、CHANGELOG 等额外说明文件；除非脚本需要，不要创建 references/ 或 assets/。
-8. Skill 正文保持精简，写 Use when、Workflow、Output、Boundaries；不要放 secret、内网地址、数据库密码或要求模型读取本地路径。
-9. 输出最终文件树和每个文件内容。
+6. 只有项目信任、runtime 已注册 handler/service allowlist 的 Skill 才能声明 execution.mode=platform_service；不要把 platform handler 写成动态 import 路径，不要让 python_subprocess 绑定服务。
+7. 如果声明 outputs.required 或 scripts[].outputs.required，脚本 stdout 必须包含这些字段。
+8. 不要创建 README、安装指南、CHANGELOG 等额外说明文件；除非脚本需要，不要创建 references/ 或 assets/。
+9. Skill 正文保持精简，写 Use when、Workflow、Output、Boundaries；不要放 secret、内网地址、数据库密码或要求模型读取本地路径。
+10. 输出最终文件树和每个文件内容。
 ```
 
-## 8. 构建检查清单
+## 9. 构建检查清单
 
 交付 Skill 前逐项检查：
 
@@ -603,6 +648,8 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] 中文 Skill 有明确 `triggers`。
 - [ ] body 非空，且是主代理可直接遵循的操作说明。
 - [ ] 没有把 secret、完整数据库连接串、API key 写进 Skill。
+- [ ] 如果声明 `platform_service`，`capability_id` 使用 `skill.*`，`execution.handler` 是 runtime 预注册 handler key，`answer_mode` 已显式声明。
+- [ ] 如果声明 `platform_service`，`execution.services` 只列出 allowlist 允许的服务；没有把 MySQL、LLM、secret 暴露给普通脚本。
 - [ ] 如果有脚本，`runtime` 是 `python`。
 - [ ] 如果有脚本，`path` 是包内相对路径，不包含 `..`。
 - [ ] 如果有脚本，stdout 是 JSON object。
@@ -617,7 +664,7 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] 不依赖 cwd 指向 Skill 目录。
 - [ ] 如果使用 R，Skill 仍通过 Python wrapper 暴露；`.R` 文件在包内，且 R stdout 是 JSON object。
 
-## 9. 验证方法
+## 10. 验证方法
 
 ### 9.1 验证 parser 能读取 Skill
 
@@ -667,7 +714,7 @@ python -m unittest discover -s tests/integrations/codex_skills -p 'test_*.py'
 python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 ```
 
-## 10. 常见错误
+## 11. 常见错误
 
 | 错误 | 结果 | 修正 |
 |---|---|---|
@@ -681,7 +728,7 @@ python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 | 把详细资料放 references/ | 后端 LLM 看不到 | 把必要内容压缩进 SKILL.md body，或用脚本读取并输出摘要 |
 | 输出字段和 `outputs.required` 不一致 | 脚本结果失败 | 对齐 required 字段 |
 
-## 11. 和标准 Codex Skill 的差异
+## 12. 和标准 Codex Skill 的差异
 
 | 能力 | 标准 Codex / Oh-my-codex | 本系统后端当前支持 |
 |---|---|---|
@@ -696,7 +743,7 @@ python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 | MCP / plugin runtime | Codex 插件可提供 | 不支持 |
 | 本地文件访问 | Codex agent 可读 workspace | 主代理 LLM 不具备；脚本只可读自己包内可定位资源 |
 
-## 12. 给 Skill creator 的推荐默认策略
+## 13. 给 Skill creator 的推荐默认策略
 
 - 首选 prompt-only Skill：简单、稳定、最符合当前主代理注入方式。
 - 只有在需要确定性解析、统计、格式转换时才加 Python 脚本。

@@ -8,7 +8,7 @@ class TaskListAPITest(APITestCase):
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
 
-        response = await self.submit_message(content="查询龙粳33", capability_id="sql_query.query")
+        response = await self.submit_message(content="查询龙粳33", capability_id="skill.generic_data_lookup")
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
@@ -23,7 +23,7 @@ class TaskListAPITest(APITestCase):
         listed = list_response.json()["tasks"]
         self.assertEqual([task["task_id"] for task in listed], [task_id])
         self.assertEqual(listed[0]["summary"], "查询龙粳33")
-        self.assertEqual(listed[0]["requested_capability_id"], "skill.sql_query")
+        self.assertEqual(listed[0]["requested_capability_id"], "skill.generic_data_lookup")
         self.assertGreaterEqual(listed[0]["active_node_count"], 1)
 
         cancel_response = await self.client.post(f"/api/v1/tasks/{task_id}/cancel")

@@ -7,7 +7,7 @@
 
 ## 1. 背景
 
-当前系统已经具备主代理、SQLQuery、Skill 一等 capability、动态 Skill bundle、LLM Planner、runtime replanner、API/SSE 与状态存储基线。现阶段外部系统接入仍以单点 adapter 为主，例如 MySQL 只读适配器、LLM provider、Codex Skill 兼容层。
+当前系统已经具备主代理、数据查询 Skill、Skill 一等 capability、动态 Skill bundle、LLM Planner、runtime replanner、API/SSE 与状态存储基线。现阶段外部系统接入仍以单点 adapter 为主，例如 MySQL 只读适配器、LLM provider、Codex Skill 兼容层。
 
 后续如果需要接入来自外部 MCP server 的工具，不能把 MCP tool 直接作为 orchestration 内核概念暴露给 Planner。MCP tool 本质上是外部 server 暴露的可调用原语；本项目的稳定编排单位仍应是 **capability**。因此需要新增 MCP Runtime，把 MCP 的连接、发现、调用、鉴权、输出治理和审计收口到外部适配层，再通过受控 capability 包装进入现有编排系统。
 
@@ -78,7 +78,7 @@ MCP Runtime 的通信协议层必须按照 latest spec 2025-11-25 的通用通�
 2. MCP tool 通过 `src/capabilities/` 下的业务 capability 或受控 generic capability 进入执行链。
 3. 测试默认使用 fake MCP server / fake MCP client，不访问真实外部 MCP server。
 4. 所有外部 server、tool、auth、超时、限流、公开策略都由配置或 runtime 注入控制，禁止在代码里硬编码真实地址与密钥。
-5. MCP Runtime 失败不能影响内置 `main_agent.respond`、`sql_query.query` 与已注册 Skill capability。
+5. MCP Runtime 失败不能影响内置 `main_agent.respond` 与已注册 Skill capability（包括 `skill.data_lookup`）。
 
 ### 3.3 用户、干系人与受影响系统
 
@@ -354,7 +354,7 @@ mcp.<server_id>.<tool_slug>
 
 - 全局唯一；
 - 只允许小写字母、数字、下划线、短横线、点；
-- 不允许与 `main_agent.*`、`sql_query.*`、`skill.*` 冲突；
+- 不允许与 `main_agent.*`、`skill.*`、`mcp.*` 等保留 public capability namespace 冲突；
 - 业务 wrapper capability 不必使用 `mcp.` 前缀，应使用业务语义命名。
 
 ## 9. Tool 调用执行需求
@@ -546,7 +546,7 @@ v1 默认不新增用户手动选择 MCP tool 的 API。
 
 - `tests/api/test_mcp_runtime_registration.py`
   - fake MCP config 注册 public capability；
-  - discovery 失败不影响 main_agent / SQLQuery；
+  - discovery 失败不影响 main_agent / 数据查询 Skill；
   - `/api/v1/capabilities` 只返回脱敏 descriptor；
   - shutdown 会关闭 MCP client。
 

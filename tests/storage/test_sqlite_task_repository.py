@@ -16,7 +16,7 @@ class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
             root_message_id="msg-1",
             status=TaskStatus.RUNNING,
             routing_mode=RoutingMode.AUTO,
-            requested_capability_id="cap.sql_query",
+            requested_capability_id="cap.generic_data_lookup",
             root_node_id="node-1",
             summary="task summary",
             cancel_requested_at=datetime(2026, 4, 23, 11, 30, 0),
@@ -26,7 +26,7 @@ class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
         node = TaskNode(
             node_id="node-1",
             task_id="task-1",
-            capability_id="cap.sql_query",
+            capability_id="cap.generic_data_lookup",
             assigned_instance_id="inst-1",
             status=NodeStatus.RUNNING,
             criticality=NodeCriticality.REQUIRED,

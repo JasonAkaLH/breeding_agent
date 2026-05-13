@@ -15,11 +15,11 @@ from src.orchestration.planner_contract import (
 class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
     async def test_fake_llm_output_builds_high_level_public_dag(self) -> None:
         async def fake_generator(prompt: str) -> str:
-            self.assertIn("skill.sql_query", prompt)
+            self.assertIn("skill.generic_data_lookup", prompt)
             return """
             {
               "nodes": [
-                {"node_id": "query_data", "capability_id": "skill.sql_query", "input_payload": {"user_question": "查询龙粳33"}},
+                {"node_id": "query_data", "capability_id": "skill.generic_data_lookup", "input_payload": {"user_question": "查询龙粳33"}},
                 {"node_id": "answer_user", "capability_id": "main_agent.respond", "depends_on": ["query_data"]}
               ]
             }
@@ -37,8 +37,8 @@ class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
             text_generator=fake_generator,
             public_capabilities=(
                 CapabilityDescriptor(
-                    capability_id="skill.sql_query",
-                    name="sql-query",
+                    capability_id="skill.generic_data_lookup",
+                    name="generic-data-lookup",
                     description="安全回答数据库类只读查询问题。",
                     kind="skill",
                     source="skill",
@@ -48,7 +48,7 @@ class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plan.task_id, "task-1")
         self.assertEqual([node.node_id for node in plan.nodes], ["query_data", "answer_user"])
-        self.assertEqual(plan.nodes[0].capability_id, "skill.sql_query")
+        self.assertEqual(plan.nodes[0].capability_id, "skill.generic_data_lookup")
         self.assertEqual(plan.nodes[1].depends_on, ("query_data",))
         self.assertEqual(plan.metadata["source"], "llm_planner_output")
 

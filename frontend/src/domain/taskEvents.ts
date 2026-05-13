@@ -142,8 +142,6 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
         currentActivityText: null,
         errorMessage: state.errorMessage ?? failureMessage(event.payload, event.node_id),
       };
-    case 'sql_query.sql_guard_blocked':
-      return { ...withEvent, phase: 'failed', statusText: '查询未执行', currentActivityText: null, errorMessage: '当前查询不符合只读查询安全边界，请改用查询类问题。' };
     case 'skill.progress': {
       const progress = skillProgressActivity(event.payload);
       if (!progress) return withEvent;
@@ -172,40 +170,33 @@ function nodeActivity(value: unknown): { capabilityId: string; capabilityLabel: 
 }
 
 function capabilityLabel(capabilityId: string): string {
-  if (capabilityId === 'skill.sql_query' || capabilityId.startsWith('sql_query.')) return 'SQLQuery';
   if (capabilityId.startsWith('main_agent.')) return '主代理';
   if (capabilityId.startsWith('skill.')) return 'Skill';
   return capabilityId || '能力';
 }
 
 function skillProgressActivity(payload: Record<string, unknown>): { capabilityId: string; capabilityLabel: string; stepText: string } | null {
-  if (payload.domain_kind !== 'sql_query' && payload.capability_id !== 'skill.sql_query') return null;
+  const capabilityId = typeof payload.capability_id === 'string' ? payload.capability_id : 'skill';
   const stage = typeof payload.stage === 'string' ? payload.stage : '';
-  const label = typeof payload.label === 'string' && payload.label.trim() ? payload.label.trim() : sqlQueryStageText(stage);
-  return { capabilityId: 'skill.sql_query', capabilityLabel: 'SQLQuery', stepText: label };
+  const label = typeof payload.label === 'string' && payload.label.trim() ? payload.label.trim() : dataQueryStageText(stage);
+  return { capabilityId, capabilityLabel: capabilityLabel(capabilityId), stepText: label };
 }
 
-function sqlQueryStageText(stage: string): string {
-  if (stage === 'intent_route') return '正在理解查询意图';
-  if (stage === 'schema_context_prepare' || stage === 'sql_generate') return '正在准备数据库查询';
-  if (stage === 'sql_guard') return '正在检查查询安全边界';
-  if (stage === 'sql_execute_readonly') return '正在检索数据库';
-  if (stage === 'result_filtering') return '正在筛选查询结果';
-  return '正在处理数据库查询';
+function dataQueryStageText(stage: string): string {
+  if (stage === 'understand_query') return '正在理解查询意图';
+  if (stage === 'prepare_query') return '正在准备数据查询';
+  if (stage === 'check_safety') return '正在检查查询安全边界';
+  if (stage === 'execute_query') return '正在检索数据';
+  if (stage === 'filter_results') return '正在筛选查询结果';
+  return '正在处理数据查询';
 }
 
 function nodeStatusText(capabilityId: string): string {
-  if (capabilityId === 'skill.sql_query') return '正在处理数据库查询';
-  if (capabilityId === 'sql_query.intent_route') return '正在理解查询意图';
-  if (capabilityId === 'sql_query.schema_context_prepare' || capabilityId === 'sql_query.sql_generate') return '正在准备数据库查询';
-  if (capabilityId === 'sql_query.sql_guard') return '正在检查查询安全边界';
-  if (capabilityId === 'sql_query.sql_execute_readonly') return '正在检索数据库';
-  if (capabilityId === 'sql_query.result_filtering') return '正在筛选查询结果';
   if (capabilityId === 'main_agent.respond') return '正在生成回答';
   return '正在处理';
 }
 
-const SQL_GUARD_BLOCK_CODES = new Set([
+const QUERY_GUARD_BLOCK_CODES = new Set([
   'empty_sql',
   'multiple_statements',
   'statement_root_denied',
@@ -218,7 +209,7 @@ const SQL_GUARD_BLOCK_CODES = new Set([
 
 function failureMessage(payload: Record<string, unknown>, nodeId: string | null): string {
   const code = typeof payload.code === 'string' ? payload.code : '';
-  if (SQL_GUARD_BLOCK_CODES.has(code) || nodeId?.includes(':sql_guard')) {
+  if (QUERY_GUARD_BLOCK_CODES.has(code)) {
     return '当前查询不符合只读查询安全边界，请改用查询类问题。';
   }
   if (code === 'guard_token_missing') return '查询安全校验未通过，请调整问题后重试。';

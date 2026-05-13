@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## 项目结构与模块组织
-当前仓库已进入前后端联调阶段，不再是空白/最小占位仓库。一期主代理内核、SQLQuery MVP、API/SSE、状态存储、后续 LLM/Skill 增强以及前端 v1 业务对话台均已有实际代码与测试。
+当前仓库已进入前后端联调阶段，不再是空白/最小占位仓库。一期主代理内核、可移除 数据查询 Skill bundle、API/SSE、状态存储、后续 LLM/Skill 增强以及前端 v1 业务对话台均已有实际代码与测试。
 
 当前主要目录职责如下：
 - `src/api/`：FastAPI app、DTO、SSE、runtime 装配与 API routes。
@@ -10,11 +10,9 @@
 - `src/lifecycle/`：task / node / mailbox / interrupt / cancel / conversation guard 生命周期规则。
 - `src/orchestration/`：capability registry、scheduler、workflow plan、LLM planner、router、validator、expander 与编排服务。
 - `src/capabilities/main_agent/`：`main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。
-- `src/capabilities/sql_query/`：SQLQuery public macro 与内部六节点只读查询 workflow；尾节点通过 LLM / 降级路径筛选 LIKE 召回的候选表格，同时保留原始表格 preview。
 - `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、LLM 上下文 token 计数等外部适配 / 运行时辅助能力。
-- `src/sql_query/`：SQLQuery schema context builder 与领域模型；作为 capability 层复用资产保留。
-- `configs/sql_query/`：SQLQuery routing rules、schema metadata、SQL Guard rules。
-- `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、SQLQuery 结果卡片与 Vitest 测试。
+- `skill/<domain-query>/`：可移除 数据查询 Skill bundle；manifest、领域 runtime、配置与 Skill 专属测试物理归属此目录，runtime 只通过 generic Skill loader / allowlisted platform-service handler 接入。
+- `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、通用 data-query / file artifact 渲染与 Vitest 测试。
 - `tests/`：后端按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
 - `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。
 - `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归；`run_fullstack_dev.py` 可拉起前后端用于人工验证。
@@ -34,7 +32,8 @@ conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
-conda run -n multi_agent python -m unittest discover -s tests/capabilities/sql_query -p 'test_*.py'
+# 项目级可移除 Skill 自测：在对应 Skill bundle 目录下运行其 tests/ 目录
+(cd skill/<skill-name> && conda run -n multi_agent python -m unittest discover -s tests -p 'test_*.py')
 conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
@@ -54,13 +53,13 @@ npm test -- --run
 npm run build
 ```
 
-全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime，会在启动期使用本地 `config.yaml` bootstrap 出环境变量来装配主代理、LLM Planner 与 SQLQuery 内部 LLM；需要 UI-only 验证时可加 `--fake-backend`）：
+全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime，会在启动期使用本地 `config.yaml` bootstrap 出环境变量来装配主代理、LLM Planner 与 Skill allowlisted LLM service；需要 UI-only 验证时可加 `--fake-backend`）：
 
 ```bash
 python scripts/run_fullstack_dev.py
 ```
 
-运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、SQLQuery、MySQL 只读连接与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 可用显式 `config` dict 注入覆盖，不要在业务节点执行阶段重复读取 `config.yaml`。
+运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、Skill runtime 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 可用显式 `config` dict 注入覆盖，不要在业务节点执行阶段重复读取 `config.yaml`。
 MySQL 只读连接配置放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
 同一个 runtime 中的 `*_config_path` 必须指向同一个启动配置文件；如确需为不同组件使用不同 provider，请使用显式 `config` dict 或 client factory 注入，避免多个 YAML 文件竞争同一环境变量命名空间。
 
@@ -144,4 +143,4 @@ PR 至少应包含：
 - 已完成的验证
 
 ## 架构约束
-本仓库服务于自研、多 Agent、面向内部业务的框架建设。当前后端主代理框架、SQLQuery、状态存储、API/SSE、主代理 Skill / LLM runtime 已形成实现基线；新增重大运行时、部署方式、编排模型或跨模块边界变更前，应先更新对应 PRD 设计与测试计划。
+本仓库服务于自研、多 Agent、面向内部业务的框架建设。当前后端主代理框架、数据查询 Skill、状态存储、API/SSE、主代理 Skill / LLM runtime 已形成实现基线；新增重大运行时、部署方式、编排模型或跨模块边界变更前，应先更新对应 PRD 设计与测试计划。

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, parseSqlQueryArtifacts, summarizeCapabilityArtifactDisplays } from './artifacts';
+import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, parseDataQueryArtifacts, summarizeCapabilityArtifactDisplays } from './artifacts';
 import type { ArtifactResponse } from '../api/types';
 
 function artifact(overrides: Partial<ArtifactResponse>): ArtifactResponse {
@@ -15,12 +15,12 @@ function artifact(overrides: Partial<ArtifactResponse>): ArtifactResponse {
   };
 }
 
-describe('parseSqlQueryArtifacts', () => {
+describe('parseDataQueryArtifacts', () => {
   it('prefers filtered result table while hiding SQL details', () => {
-    const result = parseSqlQueryArtifacts([
+    const result = parseDataQueryArtifacts([
       artifact({
         artifact_id: 'task-1:query_result_preview:raw',
-        producer_node_id: 'task-1:sql_execute_readonly',
+        producer_node_id: 'task-1:execute_query',
         storage_ref: JSON.stringify({
           sql: 'select * from secret',
           guard_pass_token: 'token',
@@ -34,7 +34,7 @@ describe('parseSqlQueryArtifacts', () => {
       }),
       artifact({
         artifact_id: 'task-1:filtered_query_result:def',
-        producer_node_id: 'task-1:result_filtering',
+        producer_node_id: 'task-1:filter_results',
         storage_ref: JSON.stringify({
           columns: ['variety_name', 'gene'],
           rows: [{ variety_name: '龙粳33', gene: 'G1' }],
@@ -46,7 +46,7 @@ describe('parseSqlQueryArtifacts', () => {
       }),
     ]);
 
-    expect(result.summary).toBe('查询已完成，共返回 1 行结果。');
+    expect(result.summary).toBe('数据查询已完成，共返回 1 行结果。');
     expect(result.table?.columns).toEqual(['variety_name', 'gene']);
     expect(result.table?.rows).toEqual([{ variety_name: '龙粳33', gene: 'G1' }]);
     expect(JSON.stringify(result)).not.toContain('select * from secret');
@@ -55,10 +55,10 @@ describe('parseSqlQueryArtifacts', () => {
   });
 
   it('falls back to artifact summary when summary artifact storage_ref is invalid JSON', () => {
-    const result = parseSqlQueryArtifacts([
+    const result = parseDataQueryArtifacts([
       artifact({
-        artifact_id: 'task-1:sql_query_result_summary:abc',
-        producer_node_id: 'task-1:sql_query.result_summarize',
+        artifact_id: 'task-1:data_query_result_summary:abc',
+        producer_node_id: 'task-1:data_query_summarize',
         artifact_type: 'summary',
         storage_ref: '{bad',
         summary: '降级摘要',
@@ -69,16 +69,16 @@ describe('parseSqlQueryArtifacts', () => {
   });
 
   it('returns a friendly unavailable state when artifacts are empty', () => {
-    const result = parseSqlQueryArtifacts([]);
+    const result = parseDataQueryArtifacts([]);
     expect(result.summary).toContain('结果不可用');
     expect(result.table).toBeUndefined();
   });
 
   it('builds a neutral completion line from an empty filtered table', () => {
-    const result = parseSqlQueryArtifacts([
+    const result = parseDataQueryArtifacts([
       artifact({
         artifact_id: 'task-1:filtered_query_result:def',
-        producer_node_id: 'task-1:result_filtering',
+        producer_node_id: 'task-1:filter_results',
         storage_ref: JSON.stringify({
           columns: ['variety_name'],
           rows: [],
@@ -88,15 +88,15 @@ describe('parseSqlQueryArtifacts', () => {
       }),
     ]);
 
-    expect(result.summary).toBe('查询已完成，共返回 0 行结果。');
+    expect(result.summary).toBe('数据查询已完成，共返回 0 行结果。');
     expect(result.table?.rows).toEqual([]);
   });
 
   it('builds a neutral completion line from the raw table when no filtered artifact exists', () => {
-    const result = parseSqlQueryArtifacts([
+    const result = parseDataQueryArtifacts([
       artifact({
         artifact_id: 'task-1:query_result_preview:def',
-        producer_node_id: 'task-1:sql_execute_readonly',
+        producer_node_id: 'task-1:execute_query',
         storage_ref: JSON.stringify({
           columns: ['variety_name'],
           rows: [{ variety_name: '龙粳33' }],
@@ -106,7 +106,7 @@ describe('parseSqlQueryArtifacts', () => {
       }),
     ]);
 
-    expect(result.summary).toBe('查询已完成，共返回 1 行结果。');
+    expect(result.summary).toBe('数据查询已完成，共返回 1 行结果。');
     expect(result.table?.rows).toEqual([{ variety_name: '龙粳33' }]);
   });
 });
@@ -140,7 +140,7 @@ describe('parseCapabilityArtifactDisplays', () => {
       artifact({ artifact_type: 'text', storage_ref: '最终回答', summary: '最终' }),
       artifact({
         artifact_id: 'task-1:filtered_query_result:def',
-        producer_node_id: 'task-1:result_filtering',
+        producer_node_id: 'task-1:filter_results',
         storage_ref: JSON.stringify({
           columns: ['variety_name'],
           rows: [],
@@ -150,8 +150,8 @@ describe('parseCapabilityArtifactDisplays', () => {
     ]);
 
     expect(displays).toHaveLength(1);
-    expect(displays[0]).toMatchObject({ kind: 'sql_query' });
-    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('查询已完成，共返回 0 行结果。');
+    expect(displays[0]).toMatchObject({ kind: 'data_query' });
+    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('数据查询已完成，共返回 0 行结果。');
   });
 
 
@@ -188,7 +188,7 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(summarizeCapabilityArtifactDisplays(displays)).toBe('HTML 布局');
   });
 
-  it('does not turn unrelated capability summaries into SQLQuery cards', () => {
+  it('does not turn unrelated capability summaries into data-query cards', () => {
     const displays = parseCapabilityArtifactDisplays([
       artifact({
         artifact_id: 'task-1:result_summary:abc',
@@ -202,7 +202,7 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(displays).toEqual([]);
   });
 
-  it('does not let unrelated summaries contaminate SQLQuery display summaries', () => {
+  it('does not let unrelated summaries contaminate data-query display summaries', () => {
     const displays = parseCapabilityArtifactDisplays([
       artifact({
         artifact_id: 'weather-summary:1',
@@ -213,7 +213,7 @@ describe('parseCapabilityArtifactDisplays', () => {
       }),
       artifact({
         artifact_id: 'task-1:filtered_query_result:def',
-        producer_node_id: 'task-1:result_filtering',
+        producer_node_id: 'task-1:filter_results',
         storage_ref: JSON.stringify({
           columns: ['variety_name'],
           rows: [],
@@ -222,7 +222,7 @@ describe('parseCapabilityArtifactDisplays', () => {
       }),
     ]);
 
-    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('查询已完成，共返回 0 行结果。');
+    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('数据查询已完成，共返回 0 行结果。');
     expect(JSON.stringify(displays)).not.toContain('天气结果');
   });
 });

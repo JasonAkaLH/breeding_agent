@@ -17,7 +17,7 @@ class SkillExecutorTest(unittest.IsolatedAsyncioTestCase):
         return SkillRuntimeState.from_roots(
             skill_roots=(root,),
             public_skill_roots=(root,),
-            reserved_capability_ids=('main_agent.respond', 'sql_query.query'),
+            reserved_capability_ids=('main_agent.respond',),
         )
 
     async def test_executes_python_subprocess_skill(self) -> None:
@@ -143,6 +143,48 @@ execution:
                 runtime_state=state,
                 platform_handler_registry=SkillPlatformHandlerRegistry(),
                 service_registry=SkillServiceRegistry(),
+            )
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': 'hello'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error.code, 'skill_service_denied')
+
+    async def test_platform_service_rejects_registered_handler_without_skill_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform'
+            skill_dir.mkdir(parents=True)
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: platform
+description: 平台服务
+execution:
+  mode: platform_service
+  answer_mode: direct
+  handler: demo.handler
+---
+
+# Platform
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            handlers = SkillPlatformHandlerRegistry(
+                handlers={'demo.handler': lambda ctx: {'response_text': 'should not run'}},
+            )
+            executor = SkillExecutor(
+                runtime_state=state,
+                platform_handler_registry=handlers,
             )
             result = await executor.execute(
                 CapabilityExecutionRequest(
@@ -348,6 +390,147 @@ execution:
         self.assertIsNone(result.error)
         self.assertEqual(result.output_payload['response_text'], 'handled hello')
         self.assertEqual(result.artifacts[0].artifact_type.value, 'text')
+
+    async def test_project_platform_handler_loads_from_public_skill_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform'
+            runtime_dir = skill_dir / 'runtime'
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / 'platform_handler.py').write_text(
+                textwrap.dedent(
+                    '''
+                    def build_handler():
+                        def handle(context):
+                            marker = context.services["demo.service"]
+                            return {"response_text": f"project {marker} {context.input_payload['query']}"}
+                        return handle
+                    '''
+                ).strip(),
+                encoding='utf-8',
+            )
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: platform
+description: 平台服务
+execution:
+  mode: platform_service
+  answer_mode: direct
+  trust_scope: project
+  handler: skill.platform.handler
+  handler_module: runtime/platform_handler.py
+  services:
+    - demo.service
+---
+
+# Platform
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            executor = SkillExecutor(
+                runtime_state=state,
+                service_registry=SkillServiceRegistry({'demo.service': 'svc'}),
+            )
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': 'hello'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload['response_text'], 'project svc hello')
+
+    async def test_project_platform_handler_rejects_outside_module_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform'
+            skill_dir.mkdir(parents=True)
+            outside = Path(tmpdir) / 'outside_handler.py'
+            outside.write_text('def build_handler():\n    return lambda context: {"response_text": "bad"}\n', encoding='utf-8')
+            (skill_dir / 'SKILL.md').write_text(
+                f"""---
+name: platform
+description: 平台服务
+execution:
+  mode: platform_service
+  answer_mode: direct
+  trust_scope: project
+  handler: skill.platform.handler
+  handler_module: {outside.as_posix()}
+---
+
+# Platform
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            executor = SkillExecutor(runtime_state=state)
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': 'hello'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error.code, 'skill_service_denied')
+
+    async def test_project_platform_handler_services_fail_closed_when_unregistered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform'
+            runtime_dir = skill_dir / 'runtime'
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / 'platform_handler.py').write_text(
+                'def build_handler():\n    return lambda context: {"response_text": "should not run"}\n',
+                encoding='utf-8',
+            )
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: platform
+description: 平台服务
+execution:
+  mode: platform_service
+  answer_mode: direct
+  trust_scope: project
+  handler: skill.platform.handler
+  handler_module: runtime/platform_handler.py
+  services:
+    - missing.service
+---
+
+# Platform
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            executor = SkillExecutor(runtime_state=state, service_registry=SkillServiceRegistry())
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': 'hello'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error.code, 'skill_service_denied')
 
     async def test_platform_service_rejects_missing_runtime_service_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

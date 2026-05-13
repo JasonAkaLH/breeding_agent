@@ -22,7 +22,7 @@ class AutoWorkflowProviderTest(unittest.TestCase):
 
         self.assertEqual([node.capability_id for node in plan.nodes], ["main_agent.respond"])
         self.assertEqual(plan.metadata["route"], "main_agent")
-        self.assertNotIn("sql_query", str(plan.nodes))
+        self.assertNotIn("generic_data_lookup", str(plan.nodes))
 
     def test_plain_chat_falls_back_to_main_agent_only(self) -> None:
         provider = AutoWorkflowProvider(main_agent_provider=MainAgentWorkflowProvider())

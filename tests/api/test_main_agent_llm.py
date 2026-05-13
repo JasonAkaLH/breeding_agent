@@ -79,14 +79,14 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(frontend_reasoning, ["先分析"])
         self.assertEqual(frontend_answer, ["最终回答"])
 
-    async def test_explicit_sql_query_capability_runs_internal_filtering_node(self) -> None:
-        response = await self.submit_message(content="查询品种龙粳33的基因型信息", capability_id="skill.sql_query")
+    async def test_explicit_generic_data_lookup_capability_runs_internal_filtering_node(self) -> None:
+        response = await self.submit_message(content="查询品种龙粳33的基因型信息", capability_id="skill.generic_data_lookup")
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["completed_node_count"], 2)
 
-    async def test_explicit_sql_query_capability_bypasses_llm_planner(self) -> None:
+    async def test_explicit_generic_data_lookup_capability_bypasses_llm_planner(self) -> None:
         def planner(_prompt: str) -> str:
             raise AssertionError("Explicit capability routing must not call the LLM planner.")
 
@@ -101,14 +101,14 @@ class MainAgentLLMAPITest(APITestCase):
         response = await self.submit_message(
             conversation_id="conv-explicit-sql-bypass",
             content="查询品种龙粳33的基因型信息",
-            capability_id="skill.sql_query",
+            capability_id="skill.generic_data_lookup",
         )
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["completed_node_count"], 2)
 
-    async def test_default_database_question_auto_builds_sqlquery_then_main_agent_dag(self) -> None:
+    async def test_default_database_question_auto_builds_legacyquery_then_main_agent_dag(self) -> None:
         prompts: list[str] = []
 
         async def streamer(prompt: str):
@@ -116,7 +116,7 @@ class MainAgentLLMAPITest(APITestCase):
             yield "这是主代理整理后的数据库答案"
 
         def planner(_prompt: str) -> str:
-            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.sql_query"}]})
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.generic_data_lookup"}]})
 
         await self.reconfigure_runtime(main_agent_stream_generator=streamer, planner_text_generator=planner, skill_roots=None)
         response = await self.client.post(
@@ -137,11 +137,11 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(terminal["completed_node_count"], 2)
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         nodes_by_capability = {node.capability_id: node for node in nodes}
-        self.assertIn("skill.sql_query", nodes_by_capability)
+        self.assertIn("skill.generic_data_lookup", nodes_by_capability)
         self.assertIn("main_agent.respond", nodes_by_capability)
         edges = await self.runtime.storage.list_task_edges(task_id)
         self.assertIn(
-            (nodes_by_capability["skill.sql_query"].node_id, nodes_by_capability["main_agent.respond"].node_id),
+            (nodes_by_capability["skill.generic_data_lookup"].node_id, nodes_by_capability["main_agent.respond"].node_id),
             {(edge.from_node_id, edge.to_node_id) for edge in edges},
         )
         self.assertIn("上游能力结果上下文", prompts[-1])
@@ -158,7 +158,7 @@ class MainAgentLLMAPITest(APITestCase):
             return json.dumps(
                 {
                     "nodes": [
-                        {"node_id": "query_data", "capability_id": "skill.sql_query"},
+                        {"node_id": "query_data", "capability_id": "skill.generic_data_lookup"},
                         {
                             "node_id": "answer_user",
                             "capability_id": "main_agent.respond",
@@ -193,8 +193,8 @@ class MainAgentLLMAPITest(APITestCase):
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["completed_node_count"], 2)
-        self.assertIn("skill.sql_query", planner_prompts[0])
-        self.assertNotIn("sql_query.sql_generate", planner_prompts[0])
+        self.assertIn("skill.generic_data_lookup", planner_prompts[0])
+        self.assertNotIn("internal.generate", planner_prompts[0])
         events = await self.runtime.storage.list_events_for_task(task_id)
         plan_event = next(event for event in events if event.event_type == "workflow.plan_built")
         self.assertEqual(plan_event.payload["metadata"]["route"], "llm_planner")
@@ -242,7 +242,7 @@ class MainAgentLLMAPITest(APITestCase):
 
         def planner(prompt: str) -> str:
             planner_prompts.append(prompt)
-            return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "sql_query.sql_generate"}]})
+            return json.dumps({"nodes": [{"node_id": "bad", "capability_id": "internal.generate"}]})
 
         await self.reconfigure_runtime(
             main_agent_stream_generator=streamer,
@@ -283,7 +283,7 @@ class MainAgentLLMAPITest(APITestCase):
                     "nodes": [
                         {
                             "node_id": "query_data",
-                            "capability_id": "skill.sql_query",
+                            "capability_id": "skill.generic_data_lookup",
                             "input_payload": {"user_question": "恶意替换查询"},
                         },
                         {
@@ -318,7 +318,7 @@ class MainAgentLLMAPITest(APITestCase):
         nodes_by_capability = {node.capability_id: node for node in nodes}
         edges = await self.runtime.storage.list_task_edges(task_id)
         self.assertIn(
-            (nodes_by_capability["skill.sql_query"].node_id, nodes_by_capability["main_agent.respond"].node_id),
+            (nodes_by_capability["skill.generic_data_lookup"].node_id, nodes_by_capability["main_agent.respond"].node_id),
             {(edge.from_node_id, edge.to_node_id) for edge in edges},
         )
         self.assertIn("查询龙粳33", prompts[-1])
@@ -372,8 +372,8 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(planner_reasoning_efforts, ["low"])
         self.assertIn("main_agent.respond", planner_prompts[0])
 
-    async def test_rejects_old_and_internal_sql_query_capability_ids(self) -> None:
-        for capability_id in ("nl2sql", "nl2sql.sql_generate", "sqlquery.query", "sql_query.sql_generate"):
+    async def test_rejects_old_and_internal_generic_data_lookup_capability_ids(self) -> None:
+        for capability_id in ("legacy_nl_query", "legacy_nl_query.generate", "legacyquery.query", "internal.generate"):
             response = await self.submit_message(content="查询品种龙粳33的基因型信息", capability_id=capability_id)
             self.assertEqual(response.status_code, 400, capability_id)
             self.assertIn("Unsupported capability_id", response.json()["detail"])

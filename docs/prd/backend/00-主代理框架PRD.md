@@ -2,19 +2,19 @@
 
 - **项目**：multi_agent_framework
 - **范围**：后端主代理框架
-- **文档状态**：正式版（已补齐至 Skill Executor 实现需求 PRD；PRD 目录为当前文档基线）
-- **日期**：2026-05-12
+- **文档状态**：正式版（已补齐至 Rust 化 Runtime 模块评估 PRD；PRD 目录为当前文档基线）
+- **日期**：2026-05-13
 - **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；前端 PRD 后续放在 `docs/prd/frontend/`。
 
 ## 0. 目录定位
 
-本 PRD 只覆盖后端：主代理框架、SQLQuery 能力链路、状态存储、API、LLM runtime 与后端可观测性。
+本 PRD 只覆盖后端：主代理框架、数据查询 Skill 能力链路、状态存储、API、LLM runtime 与后端可观测性。
 
 前端产品体验、页面结构、交互与视觉设计不在本文件展开；后续前端设计应以 `docs/prd/frontend/` 为入口，并引用本目录中的后端 API / 事件 / 能力契约。
 
 ## 1. 项目背景
 
-本项目面向内部付费用户，目标是构建一个办公助手后端。当前优先建设的是主代理框架，而不是具体功能 Agent 本身；后续文档 RAG、SQLQuery、数据分析、农业生物信息分析等能力将在该框架之上接入。
+本项目面向内部付费用户，目标是构建一个办公助手后端。当前优先建设的是主代理框架，而不是具体功能 Agent 本身；后续文档 RAG、数据查询 Skill、数据分析、农业生物信息分析等能力将在该框架之上接入。
 
 本框架不依赖 LangChain、LangGraph、AutoGen 等现成 Agent 框架，采用 Python 为主、异步优先的服务端架构；性能热点未来可下沉到 C++，但不作为一期前提。
 
@@ -33,7 +33,7 @@
 - 记忆系统（以会话延续型记忆为主）
 - 实时事件流
 - 用户主动中断任务
-- 首个可验收业务样例绑定为 **SQLQuery 只读查询链路**
+- 首个可验收业务样例绑定为 **数据查询 Skill 只读查询链路**
 
 ### 2.2 一期不做但必须预留接口
 
@@ -73,16 +73,17 @@
 | 协作协议与任务生命周期 | `docs/prd/backend/03-协作协议与任务生命周期.md` | mailbox、interrupt/resume、取消、状态机 |
 | 状态存储与迁移策略 | `docs/prd/backend/04-状态存储与迁移策略.md` | SQLite / PostgreSQL、mailbox DDL、迁移 |
 | API 与核心数据模型 | `docs/prd/backend/05-API与核心数据模型.md` | API、Conversation/Task/Node 等对象模型 |
-| SQLQuery MVP 设计 | `docs/prd/backend/06-SQLQuery-MVP设计.md` | SQLQuery 路由、SQL Guard、Schema Context Builder、MVP 验收 |
-| SQLQuery LLM 增强与真实库验证 | `docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md` | prompt schema、LLM fallback、MySQL 只读适配器 |
+| 可移除数据查询 Skill 设计 | 对应 Skill bundle 自带 docs | 领域路由、查询安全、Schema Context 与验收由 Skill 物理归属维护 |
+
 | 主代理 Skill 兼容与真实 LLM Runtime | `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md` | 普通主代理消息、Skill 上下文、真实 provider smoke |
-| 高层 DAG 规划与 SQLQuery 宏能力边界 | `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md` | public capability、planner validator、macro expander |
+| 高层 DAG 规划与 数据查询 Skill 边界 | 对应可移除 Skill bundle 自带的边界文档 | public capability、planner validator、Skill workflow expander |
 | 对话上下文记忆与压缩 | `docs/prd/backend/10-对话上下文记忆与压缩PRD.md` | 多轮对话记忆、Planner / 主代理上下文注入、两级压缩策略 |
 | Skill 输出文件 Artifact 与下载 | `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md` | Skill 产出 HTML / CSV / XLSX / PDF 等文件、managed artifact、下载鉴权、安全边界 |
 | Skill 一等 Capability 能力池 | `docs/prd/backend/12-Skill一等Capability能力池PRD.md` | 将项目 Skill 注册为 `skill.*` public capability、Planner / Replanner 可发现、统一能力池 |
 | Skill 动态加载与热部署 | `docs/prd/backend/13-Skill动态加载与热部署PRD.md` | 新聊天首次任务前动态刷新 Skill runtime bundle，实现公开 Skill 热加载、原子激活与运行中任务保护 |
 | MCP Runtime 实现需求 | `docs/prd/backend/14-MCPRuntime实现需求PRD.md` | 按 MCP latest spec 2025-11-25 设计外部 MCP server / tools 接入、标准通信、capability 包装与安全治理 |
-| Skill Executor 实现需求 | `docs/prd/backend/15-SkillExecutor实现需求PRD.md` | 定义 `skill.*` 一等执行器的职责边界、service binding、安全约束、artifact/event 归一化与 SQLQuery Skill 化前置要求 |
+| Skill Executor 实现需求 | `docs/prd/backend/15-SkillExecutor实现需求PRD.md` | 定义 `skill.*` 一等执行器的职责边界、service binding、安全约束、artifact/event 归一化与 数据查询 Skill 化前置要求 |
+| Rust 化 Runtime 模块评估 | `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` | SQLQuery Skill-only 后，评估 runtime substrate、Skill/MCP、storage/event、artifact 与 deterministic kernel 的 Rust native 下沉边界 |
 
 ## 5. 当前已定的关键决策摘要
 
@@ -94,7 +95,7 @@
 - 同一 `conversation_id` 内任务串行执行。
 - 主代理采用受规则、状态机与完成判定约束的编排型闭环，而不是自由试错式纯 ReAct。
 - 任务优先级采用“两层模型”：控制类动作独立最高优先级；普通任务按来源驱动排序，并允许少量结构化权重作为同类内排序依据。
-- 主框架与 capability 是明确上下级关系：主框架只管拆解、编排、分发；SQLQuery 等 capability 只管各自执行。
+- 主框架与 capability 是明确上下级关系：主框架只管拆解、编排、分发；数据查询 Skill 等 capability 只管各自执行。
 
 ### 5.2 协作与生命周期决策
 
@@ -110,26 +111,26 @@
 - PostgreSQL 存结构化状态与索引，不直接存大对象正文。
 - PostgreSQL DDL 采用 ORM Model + migration 生成；一期索引策略为基础索引 + 少量关键增强索引。
 
-### 5.4 SQLQuery 决策
+### 5.4 数据查询 Skill 决策
 
-- SQLQuery 是一期首个 MVP 样例，外部只暴露 `sql_query.query` 宏能力；`sql_query.*` 内部节点不作为外部请求入口。
-- SQLQuery 只允许只读查询；MySQL 只读执行必须通过 SQL Guard 通过令牌后才能执行。
+- 数据查询 Skill 是一期首个 MVP 样例，当前已迁移为可移除项目级 Skill bundle：外部只暴露 `skill.data_lookup`；领域 runtime、配置与测试归属 `skill/<domain-query>/`，系统 runtime 只保留 generic Skill loader。
+- 数据查询 Skill 只允许只读查询；MySQL 只读执行必须通过 SQL Guard 通过令牌后才能执行。
 - MySQL 连接串与只读账号只允许通过本地 `config.yaml` 或部署环境变量注入，不得在仓库内硬编码；仍保留 SQL Guard 作为数据库权限之外的第二层保护。
-- SQLQuery 的 SQL 生成与结果筛选默认可接入 LLM；当前默认 workflow 尾节点为 `sql_query.result_filtering`，负责从 `LIKE` 召回候选中筛掉不符合用户真实需求的行，并把筛选后的表格交给主代理整合。
+- 数据查询 Skill 的 SQL 生成与结果筛选默认可接入 LLM；当前 `skill.data_lookup` domain engine 尾阶段为 result filtering，负责从 `LIKE` 召回候选中筛掉不符合用户真实需求的行，并把筛选后的表格交给主代理整合。
 
 ### 5.5 主代理与 LLM Runtime 决策
 
-- `capability_id=None` 的普通消息默认进入 `main_agent.respond`；显式 `sql_query` / `sql_query.query` 进入 SQLQuery 固定 workflow。
+- `capability_id=None` 的普通消息默认进入 `main_agent.respond` 或由 LLM Planner 选择公开能力；显式 数据查询 Skill 入口使用 `skill.data_lookup`。
 - 主代理可读取 Codex Skill 兼容的 `SKILL.md` 元数据、上传 artifact 脱敏上下文与受控脚本输出，用于构造提示词。
 - 主代理真实 LLM provider 必须通过可测试 seam 绑定；自动化测试默认使用 fake / injected stream，真实 provider 只在显式配置或手工 smoke 中验证。
-- 主代理与 SQLQuery 的 LLM 审计事件不得记录 API key、完整 prompt、完整 rows、base_url 等敏感信息。
+- 主代理与 数据查询 Skill 的 LLM 审计事件不得记录 API key、完整 prompt、完整 rows、base_url 等敏感信息。
 
 
 ### 5.6 对话记忆与上下文压缩决策
 
 - v1 记忆系统定位为 conversation 内会话延续型记忆，不做跨会话长期用户画像或知识沉淀。
 - 对话记忆上下文注入 LLM Planner / 自动规划阶段与 `main_agent.respond` 最终回答阶段，保证追问、省略主语和纠错能正确影响路由与回答。
-- SQLQuery 内部 LLM 节点暂不直接消费完整对话记忆；如需上下文补全，应先在 public 规划层把当前轮问题合成为明确问题。
+- 数据查询 Skill 内部 LLM 节点暂不直接消费完整对话记忆；如需上下文补全，应先在 public 规划层把当前轮问题合成为明确问题。
 - 记忆压缩采用两级策略：Level 1 删除 capability 业务中间产物；Level 2 对较早对话历史做摘要压缩并保留最近若干轮原文。
 - 记忆上下文必须按 account / conversation 隔离，并禁止注入 SQL、guard token、schema DDL、完整 rows、完整 prompt、API key、base_url 等敏感或高成本内容。
 
@@ -142,7 +143,7 @@
 
 ### 5.8 Skill 一等 Capability 能力池决策
 
-- 项目级 Skill 应可升级为 `skill.*` public capability，进入与 `main_agent.respond`、`sql_query.query` 相同的 `CapabilityRegistry` public 能力池。
+- 项目级 Skill 应可升级为 `skill.*` public capability，进入与 `main_agent.respond` 相同的 `CapabilityRegistry` public 能力池。
 - Planner / Runtime Replanner / `/api/v1/capabilities` 必须从同一 public capability pool 发现公开 Skill，避免深度思考阶段看不到已注册 Skill。
 - v1 推荐采用 “Skill public macro → `main_agent.respond` forced skill” 模型：LLM 只选择 `skill.*` capability，系统注入可信 forced skill metadata，继续复用主代理受控 Skill runtime。
 - 后续结构化 / 脚本型 / 项目级可信 Skill 应按 `docs/prd/backend/15-SkillExecutor实现需求PRD.md` 演进为 generic Skill Executor 执行模型，forced `main_agent.respond` 仅作为兼容路径。
@@ -168,30 +169,38 @@
 
 ### 5.11 Skill Executor 决策
 
-- Skill Executor 是通用执行壳，不承载 SQLQuery、数据分析、报告生成等业务逻辑；业务语义必须放在 Skill 包、领域服务或 MCP tool 背后。
+- Skill Executor 是通用执行壳，不承载 数据查询 Skill、数据分析、报告生成等业务逻辑；业务语义必须放在 Skill 包、领域服务或 MCP tool 背后。
 - `skill.*` capability 的执行必须按 Skill bundle revision 固定版本，避免新聊天热刷新影响运行中任务。
 - script Skill 应由 generic Skill Executor 执行并归一化为 `CapabilityExecutionResult`、artifact、event 与 audit；不应长期依附 `main_agent.respond` 私有脚本路径。
 - service binding 必须采用“manifest 声明 + runtime allowlist”双重授权；普通 public Skill 和用户级 Skill 默认不能获得 MySQL readonly、内部 LLM、secret 等受控资源。
 - Skill Executor 与 MCP Tool Executor 对等，分别承接 `skill.*` 与 `mcp.*` 能力来源；orchestration 不应再为具体业务 Skill 写特判。
-- SQLQuery 后续迁移为 `skill.sql_query` 必须先满足 Skill Executor 的受控执行、service binding、artifact/event 归一化与安全审计要求。
+- 数据查询 Skill 后续迁移为 `skill.data_lookup` 必须先满足 Skill Executor 的受控执行、service binding、artifact/event 归一化与安全审计要求。
+
+### 5.12 Rust 化 Runtime 决策
+
+- SQLQuery 已归属可移除 `skill/sql-query/` bundle；主体框架 Rust 化不应重新引入 SQLQuery native capability。
+- `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust kernel。
+- 优先 Rust 化确定性、安全敏感、并发敏感和可重放模块：`src/core/` contract、`src/lifecycle/` 状态机、`src/storage/` durable store、Skill runtime trust gate、MCP protocol/runtime、artifact/upload/file safety。
+- LLM provider glue、FastAPI route、DTO、主代理 prompt 产品语义和前端 UI 不应整体 Rust 化；只在 sanitizer、token budget、大 payload 处理等热点处抽小 kernel。
+- SQLQuery 如需 Rust 化，应作为 Skill-owned native runtime 放在 `skill/sql-query/` 内部，并继续只通过 `skill.sql_query` platform-service handler 进入系统。
 
 ## 6. 当前验收基线与归档证据
 
-一期范围内承诺的“主代理最小内核 + SQLQuery 只读 MVP + FastAPI/SSE/cancel/query API”已完成；该结论仅覆盖一期冻结范围，不包含 PostgreSQL 正式化、第二 capability、长期记忆专题、跨任务知识沉淀、主代理 / 通用子代理 LLM 化等后续增强主题。
+一期范围内承诺的“主代理最小内核 + 数据查询 Skill 只读 MVP + FastAPI/SSE/cancel/query API”已完成；该结论仅覆盖一期冻结范围，不包含 PostgreSQL 正式化、第二 capability、长期记忆专题、跨任务知识沉淀、主代理 / 通用子代理 LLM 化等后续增强主题。
 
 | 验收口径 | 证据 | 结论 |
 |---|---|---|
-| 能提交任务 | `tests/api/test_message_submission.py`、`tests/e2e/test_sql_query_happy_path.py` | 通过 |
-| 能观察状态和事件流 | `tests/api/test_task_query.py`、`tests/api/test_task_events_sse.py`、`tests/e2e/test_sql_query_happy_path.py` | 通过 |
+| 能提交任务 | `tests/api/test_message_submission.py`、`tests/e2e/test_data_query_happy_path.py` | 通过 |
+| 能观察状态和事件流 | `tests/api/test_task_query.py`、`tests/api/test_task_events_sse.py`、`tests/e2e/test_data_query_happy_path.py` | 通过 |
 | 能取消任务 | `tests/api/test_task_cancel.py`、`tests/e2e/test_cancel_late_result_ignored.py` | 通过 |
 | 会话延续型记忆最小字段可被持久化并恢复 | `tests/storage/test_sqlite_conversation_repository.py`、`tests/storage/test_sqlite_task_repository.py`、`tests/storage/test_sqlite_interrupt_repository.py` | 通过 |
-| 能跑通 SQLQuery 只读链路 | `tests/capabilities/sql_query/test_orchestration_flow.py`、`tests/e2e/test_sql_query_happy_path.py` | 通过 |
-| 能阻断危险 SQL | `tests/capabilities/sql_query/test_sql_guard.py`、`tests/e2e/test_sql_query_guard_block.py`、`tests/observability/test_audit_jsonl.py` | 通过 |
+| 能跑通 数据查询 Skill 只读链路 | `skill/<domain-query>/tests/` | 通过 |
+| 能阻断危险 SQL | `skill/<domain-query>/tests/` | 通过 |
 
 关键验收链路：
 
 - Happy path：提交消息后生成 DAG，SQL Guard 通过，只读执行完成，summary / artifact 落地，事件流收敛为 `task.completed`。
-- Guard blocked：危险 SQL 被 `sql_query.sql_guard_blocked` 审计记录阻断，任务收敛为 `failed`，保留 `block_reason` 与 `route_context`。
+- Guard blocked：危险 SQL 在 `skill.data_lookup` 内部 guard 阶段被阻断，任务收敛为 `failed`；审计记录保留 `block_reason` 与脱敏 `route_context`，前端只展示安全失败提示。
 - Interrupt / Resume：缺少必要业务信息时触发 interrupt；用户补充信息后恢复原 task，而不是创建新 task。
 - Cancel + late result ignored：节点运行中取消任务后，迟到结果不回写 `completed`，审计保留 `task.late_result_discarded`。
 - Observability / Audit：JSONL 审计具备 `event_type / task_id / payload`，blocked SQL 与 cancel 路径均有可复核字段。
@@ -206,20 +215,21 @@
 
 - PRD 总目录：`docs/prd/README.md`
 - 前端 PRD 预留入口：`docs/prd/frontend/README.md`
-- 数据库结构说明：`docs/MySQL数据库表结构说明.md`
-- SQLQuery prompt 输入模板：`docs/SQLQuery提示词输入模板.md`
+- 具体数据类 Skill 的数据库结构说明由对应 Skill bundle 自带 docs 维护。
+- 具体数据类 Skill 的 prompt 输入模板由对应 Skill bundle 自带 docs 维护。
 - 对话上下文记忆与压缩 PRD：`docs/prd/backend/10-对话上下文记忆与压缩PRD.md`
 - Skill 输出文件 Artifact 与下载 PRD：`docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
 - Skill 一等 Capability 能力池 PRD：`docs/prd/backend/12-Skill一等Capability能力池PRD.md`
 - Skill 动态加载与热部署 PRD：`docs/prd/backend/13-Skill动态加载与热部署PRD.md`
 - MCP Runtime 实现需求 PRD：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`
 - Skill Executor 实现需求 PRD：`docs/prd/backend/15-SkillExecutor实现需求PRD.md`
+- Rust 化 Runtime 模块评估 PRD：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`
 
 ## 8. 使用建议
 
 - 做全局规划时先读本文件。
 - 做局部设计或开发计划时优先读取对应专题文档。
-- 做 SQLQuery 实现或提示词设计时，配合 `docs/prd/backend/06-SQLQuery-MVP设计.md`、`docs/prd/backend/07-SQLQuery-LLM增强与真实库验证.md` 与 `docs/SQLQuery提示词输入模板.md` 一起阅读。
+- 做具体数据类 Skill 实现或提示词设计时，应读取该 Skill bundle 自带 docs；系统级 PRD 只描述 generic Skill loader / Executor 边界。
 - 做前端设计时，不要把前端范围追加到本文件；应在 `docs/prd/frontend/` 新建独立 PRD，并引用本目录中的后端接口和事件契约。
 
 ## 9. 后续专题设计与演进项
@@ -229,4 +239,4 @@
 - PostgreSQL 部署完成后的索引优化、JSONB 查询策略与正式 DDL 生成流程。
 - 任务优先级权重的更细粒度策略。
 - Schema Context Builder 的更强评估样例与调优工具。
-- 前端 PRD：对话界面、任务流、事件流、SQLQuery 结果与主代理 Skill 命中状态展示。
+- 前端 PRD：对话界面、任务流、事件流、数据查询 Skill 结果与主代理 Skill 命中状态展示。

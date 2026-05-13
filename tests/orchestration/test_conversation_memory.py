@@ -60,7 +60,7 @@ class ConversationMemorySafeAllowlistTest(unittest.TestCase):
         projected = ConversationMemorySafeAllowlist.project_capability_output(
             {
                 "summary": "安全摘要",
-                "route_id": "genotype_db",
+                "route_id": "dataset_b",
                 "row_count": 9,
                 "columns": ["variety_name", "gene", "extra", "overflow"],
                 "rows": [{"secret": "full-row"}],
@@ -77,7 +77,7 @@ class ConversationMemorySafeAllowlistTest(unittest.TestCase):
         )
 
         self.assertEqual(projected["summary"], "安全摘要")
-        self.assertEqual(projected["route_id"], "genotype_db")
+        self.assertEqual(projected["route_id"], "dataset_b")
         self.assertEqual(projected["row_count"], 9)
         self.assertEqual(projected["columns"], ["variety_name", "gene", "extra"])
         self.assertTrue(projected["truncated"])

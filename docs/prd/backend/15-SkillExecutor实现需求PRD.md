@@ -5,7 +5,7 @@
 - **日期**：2026-05-12
 - **关联文档**：
   - `Codex-Skill构建指南.md`
-  - `docs/SQLQuery-Skill化迁移计划.md`
+  - `docs/数据查询 Skill-Skill化迁移计划.md`
   - `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`
   - `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
   - `docs/prd/backend/12-Skill一等Capability能力池PRD.md`
@@ -19,7 +19,7 @@
 
 Skill Executor 是框架层的**通用执行适配器**，负责把已被 Planner / Router 选中的 `skill.*` capability 安全、可观测、可调度地执行起来，并把执行结果归一化为系统标准的 `CapabilityExecutionResult`。
 
-它不负责业务决策，也不内置 SQLQuery、数据分析、报告生成等业务语义。业务逻辑必须放在 Skill 包、领域服务或 MCP tool 背后。
+它不负责业务决策，也不内置 数据查询 Skill、数据分析、报告生成等业务语义。业务逻辑必须放在 Skill 包、领域服务或 MCP tool 背后。
 
 建议边界定义如下：
 
@@ -40,10 +40,10 @@ Skill Executor 是框架层的**通用执行适配器**，负责把已被 Planne
 - `skill.*` 实际执行仍依附 `main_agent.respond`，不是独立可调度 executor；
 - Skill script 执行逻辑散落在 `MainAgentExecutor` 内，难以被其他 capability 复用；
 - `SkillScriptRunner` 只提供最小 Python 子进程执行，不支持项目级受控 service binding；
-- 对 SQLQuery 这类结构化、强安全、强可观测的能力来说，forced main agent 路径不足以承载长期演进；
+- 对 数据查询 Skill 这类结构化、强安全、强可观测的能力来说，forced main agent 路径不足以承载长期演进；
 - 如果要让“所有业务 capability 都来自 Skill 和 MCP tools”，必须有一个 generic Skill Executor 与 generic MCP Executor 对等。
 
-因此需要新增 Skill Executor 实现需求，作为后续 SQLQuery Skill 化和 capability 统一治理的前置基线。
+因此需要新增 Skill Executor 实现需求，作为后续 数据查询 Skill 化和 capability 统一治理的前置基线。
 
 ## 3. Codex Skill 机制对本项目的启发
 
@@ -69,7 +69,7 @@ OpenAI Codex Skills 的核心机制是：
 ### 4.1 产品目标
 
 1. 让项目级 Skill 可以作为真正的一等 public capability 被 Planner / Router / API 调用。
-2. 为 SQLQuery 后续迁移成 `skill.sql_query` 提供执行基础。
+2. 支撑并固化 数据查询 Skill 当前完成态：数据查询 Skill 已迁移为 `skill.data_lookup` platform-service，旧 native capability 已删除。
 3. 将业务 capability 来源统一收口为 Skill 与 MCP tools。
 4. 降低 orchestration 对具体业务能力的认知，使框架更轻量。
 5. 保留用户体验：用户仍通过自然语言发起任务，不需要理解 Skill Executor 内部机制。
@@ -79,7 +79,7 @@ OpenAI Codex Skills 的核心机制是：
 1. 新增 generic `SkillExecutor`，与 `MCPToolExecutor` 一样作为 `CompositeExecutor` 的一员。
 2. 抽出可复用 Skill execution service，避免 `MainAgentExecutor` 和 `SkillExecutor` 各自复制脚本执行、参数解析、artifact 处理逻辑。
 3. 支持固定 `skill_bundle_revision`，确保运行中任务不受后续 Skill 热刷新影响。
-4. 建立项目级可信 Skill 的 service binding 机制，为 SQLQuery 提供 MySQL readonly / SQLQuery LLM 等受控依赖。
+4. 建立项目级可信 Skill 的 service binding 机制，为 数据查询 Skill 提供 MySQL readonly / 数据查询 Skill LLM 等受控依赖。
 5. 统一 Skill 输出到 `CapabilityExecutionResult`、artifact、event、audit。
 6. 保持 async / await 调度模型，不在核心链路引入同步阻塞业务逻辑。
 
@@ -91,15 +91,15 @@ OpenAI Codex Skills 的核心机制是：
 | Skill 作者 | 如何把可复用工作流声明为平台能力 | 通过 `SKILL.md` metadata、脚本或平台服务 entrypoint 声明输入输出和执行模式 |
 | 后端维护者 | 避免业务能力继续侵入 orchestration | Skill Executor 只承接通用执行壳，业务逻辑放在 Skill 包、领域服务或 MCP tool 背后 |
 | 安全 / 运维 | 控制数据库、LLM、外部系统等敏感依赖 | service binding 必须 manifest 声明 + runtime allowlist 双重授权 |
-| 前端 | 稳定展示任务进度、最终回答和 artifact | 消费 `skill.progress`、artifact metadata 和 final answer，不依赖 SQLQuery 原生 capability id |
-| SQLQuery 迁移 | 从 native capability 迁移为 `skill.sql_query` | 先满足本 PRD 的平台服务 entrypoint、受控 service binding、artifact/event 归一化 |
+| 前端 | 稳定展示任务进度、最终回答和 artifact | 消费 `skill.progress`、artifact metadata 和 final answer，不依赖 数据查询 Skill 原生 capability id |
+| 数据查询 Skill 迁移 | 从 native capability 迁移为 `skill.data_lookup` | 先满足本 PRD 的平台服务 entrypoint、受控 service binding、artifact/event 归一化 |
 
 ## 5. 非目标
 
 1. 不复刻完整 Codex 本地 runtime。
 2. 不支持任意 shell、任意本地命令、任意依赖安装。
 3. 不允许 Skill 脚本继承完整环境变量或读取 secret。
-4. 不把 SQLQuery 业务逻辑写进 Skill Executor。
+4. 不把 数据查询 Skill 业务逻辑写进 Skill Executor。
 5. 不让 Planner 直接指定脚本路径、运行命令、service token 或本地文件路径。
 6. 不在本 PRD 中实现 Skill 市场、后台审核、在线权限配置 UI。
 7. 不把 MCP 协议通信细节放进 Skill Executor；MCP 仍由 `src/integrations/mcp/` 与 `MCPToolExecutor` 负责。
@@ -170,11 +170,11 @@ Skill Executor 和 MCP Tool Executor 对等：
 |---|---|---:|---|---|
 | `delegated_main_agent` | instruction-only Skill、兼容期 prompt 型 Skill | 否 | 展开到内部 final answer / main agent 路径 | 不执行脚本；只注入 Skill 指令和安全上下文 |
 | `python_subprocess` | 普通脚本型 Skill，适合确定性预处理、文件生成、小工具 | 否 | 复用受限 `SkillScriptRunner` 子进程 | 最小环境；无 secret；无 DB / 内部 LLM；不承诺可 import 项目源码 |
-| `platform_service` | 项目级可信 Skill，例如后续 `skill.sql_query` | 是，必须 allowlist | Skill Executor 调用平台注册的 async handler / domain service | 不允许 manifest 任意动态 import；handler 必须由 runtime 显式注册 |
+| `platform_service` | 项目级可信 Skill，例如当前 `skill.data_lookup` | 是，必须 allowlist | Skill Executor 调用平台注册的 async handler / domain service | 不允许 manifest 任意动态 import；handler 必须由 runtime 显式注册 |
 
 v1 不允许普通 `python_subprocess` Skill 直接获得 MySQL readonly、内部 LLM、HTTP client、完整环境变量或 secret。需要这些资源的 Skill 必须走 `platform_service`，并通过 runtime allowlist 绑定到平台已注册 handler。
 
-`platform_service` 不是把业务逻辑写入 Skill Executor；Skill Executor 只负责根据 capability id 查找被 allowlist 授权的 handler，真正业务逻辑仍放在 `src/sql_query/` 等领域服务内。
+`platform_service` 不是把业务逻辑写入 Skill Executor；Skill Executor 只负责根据 capability id 查找被 allowlist 授权的 handler，真正业务逻辑仍放在对应 Skill bundle（例如 `skill/<domain-query>/runtime/`）或领域服务内。
 
 ## 8. Skill Executor 职责边界
 
@@ -232,8 +232,8 @@ Skill Executor 必须负责：
 
 Skill Executor 不应负责：
 
-1. 判断用户意图是否需要 SQLQuery、数据分析或报告生成；这是 Planner / Router / Skill matcher 的职责。
-2. SQLQuery 的业务算法，例如数据库路由、SQL 生成、SQL Guard、结果筛选。
+1. 判断用户意图是否需要 数据查询 Skill、数据分析或报告生成；这是 Planner / Router / Skill matcher 的职责。
+2. 数据查询 Skill 的业务算法，例如数据库路由、SQL 生成、SQL Guard、结果筛选。
 3. MCP 协议 lifecycle、tools/list、tools/call。
 4. 最终 UI 展示和前端组件逻辑。
 5. 任意依赖安装或 runtime 环境变更。
@@ -282,7 +282,7 @@ execution:
 - instruction-only Skill：短期可继续 delegated main agent；
 - 普通 script Skill：优先走 `python_subprocess` Skill Executor；
 - project trusted Skill：必须走 `platform_service` Skill Executor；
-- `skill.sql_query`：必须走 `platform_service` Skill Executor；
+- `skill.data_lookup`：必须走 `platform_service` Skill Executor；
 - `answer_mode=requires_finalizer` 时，WorkflowProvider / LLMWorkflowProvider 必须追加内部 final answer 节点；`answer_mode=direct` 时不得重复追加回答节点。
 
 ### 9.3 输入 payload 策略
@@ -331,7 +331,7 @@ Skill capability 必须显式或默认确定回答模式，避免重复回答或
 | answer_mode | 含义 | 默认适用 |
 |---|---|---|
 | `direct` | Skill 自身输出就是用户可见最终回答 | 文本生成、报告生成等 answer-producing Skill |
-| `requires_finalizer` | Skill 输出结构化结果，需要内部 final answer synthesizer 汇总 | `skill.sql_query`、MCP 查询类结果、结构化数据分析 |
+| `requires_finalizer` | Skill 输出结构化结果，需要内部 final answer synthesizer 汇总 | `skill.data_lookup`、MCP 查询类结果、结构化数据分析 |
 | `none` | Skill 只产生 artifact 或副产物，不自动生成自然语言回答 | 纯文件生成、后台准备类 Skill |
 
 验收要求：
@@ -371,10 +371,10 @@ script Skill 必须满足：
 
 service binding 解决“受信 Skill 需要平台服务，但不能读取 secret”的问题。
 
-例如 SQLQuery Skill 需要：
+例如 数据查询 Skill 需要：
 
 - MySQL readonly adapter；
-- SQLQuery 内部 LLM text generator；
+- 数据查询 Skill 内部 LLM text generator；
 - artifact writer；
 - 可选 progress event emitter。
 
@@ -385,12 +385,12 @@ service binding 解决“受信 Skill 需要平台服务，但不能读取 secre
 ```yaml
 execution:
   mode: platform_service
-  handler: sql_query.query
+  handler: skill.data_lookup.platform_handler
   answer_mode: requires_finalizer
   trust_scope: project
   services:
     - mysql_readonly
-    - llm.sql_query
+    - llm.non_stream
     - artifact_writer
     - progress_events
 ```
@@ -401,10 +401,10 @@ runtime 必须有显式 allowlist：
 
 ```python
 trusted_skill_services = {
-    "skill.sql_query": ("mysql_readonly", "llm.sql_query", "artifact_writer", "progress_events"),
+    "skill.data_lookup": ("mysql_readonly", "llm.non_stream", "artifact_writer", "progress_events"),
 }
 trusted_skill_handlers = {
-    "skill.sql_query": "sql_query.query",
+    "skill.data_lookup": "skill.data_lookup.platform_handler",
 }
 ```
 
@@ -448,7 +448,7 @@ Skill Executor 必须复用 Skill 输出文件 artifact 规范。
 2. summary artifact；
 3. file artifact；
 4. text artifact；
-5. domain-specific metadata，例如 `domain_kind="sql_query"`。
+5. domain-specific metadata，例如 `domain_kind="data_query"`。
 
 要求：
 
@@ -478,9 +478,9 @@ Skill Executor 必须复用 Skill 输出文件 artifact 规范。
 
 ```json
 {
-  "capability_id": "skill.sql_query",
-  "skill_name": "sql-query",
-  "stage": "sql_execute_readonly",
+  "capability_id": "skill.data_lookup",
+  "skill_name": "data-lookup",
+  "stage": "execute_query",
   "message": "正在检索数据库"
 }
 ```
@@ -585,35 +585,35 @@ Skill Executor 应按可回滚方式上线：
 3. 对项目级真实 Skill 采用 manifest / runtime 配置双开关；
 4. 如 executor mode 失败，可把对应 Skill 回退为 `delegated_main_agent` 或禁用该 Skill capability；
 5. Skill bundle refresh 失败时继续保留上一份 active bundle，不得清空 capability pool；
-6. SQLQuery 迁移前必须保持 native SQLQuery 与 `skill.sql_query` 并行对比，确认输出和 artifact 兼容后再移除 native capability。
+6. 数据查询 Skill 迁移过渡期可以保持 native 数据查询 Skill 与 `skill.data_lookup` 并行对比；当前完成态必须移除 native capability、旧 provider/executor/replanner 与旧 request alias。
 
-## 11. 与 SQLQuery Skill 化的关系
+## 11. 与 数据查询 Skill 化的关系
 
-本 PRD 是 SQLQuery Skill 化的前置 PRD。
+本 PRD 是 数据查询 Skill 化的前置 PRD。
 
-SQLQuery 迁移目标：
+数据查询 Skill 迁移目标：
 
 ```text
-sql_query.query native capability
-→ skill.sql_query public capability
+legacy_query.query native capability（已删除）
+→ skill.data_lookup public capability
 ```
 
-但 Skill Executor 不直接实现 SQLQuery。
+但 Skill Executor 不直接实现 数据查询 Skill。
 
 正确关系：
 
 ```text
 SkillExecutor
-  负责执行 skill.sql_query 的壳
+  负责执行 skill.data_lookup 的壳
 
-SQLQuery domain engine
+数据查询 Skill domain engine
   负责 intent route / schema / SQL generation / guard / readonly execution / filtering
 
-skill/sql-query/SKILL.md
+skill/<domain-query>/SKILL.md
   负责声明何时使用、输入输出、entrypoint、service 需求
 ```
 
-禁止把 SQLQuery 业务逻辑写入 generic Skill Executor。
+禁止把 数据查询 Skill 业务逻辑写入 generic Skill Executor。
 
 ## 12. 安全需求
 
@@ -684,7 +684,7 @@ skill/sql-query/SKILL.md
 - artifacts；
 - final answer text。
 
-如果 SQLQuery 迁移为 `skill.sql_query`，前端应逐步从 “判断 `sql_query.*` capability id” 改成 “判断 artifact metadata / skill progress stage”。
+数据查询 Skill 已迁移为 `skill.data_lookup`；前端当前应以 `skill.data_lookup`、artifact metadata 和 `skill.progress` stage 为主，旧 `legacy_query.*` 字符串仅可作为历史 artifact/event 展示 fallback。
 
 ## 15. 测试计划
 
@@ -736,7 +736,7 @@ skill/sql-query/SKILL.md
 
 - 一个项目级测试 Skill 从自然语言触发到最终回答完整闭环；
 - 一个 script Skill 生成 artifact 并被前端 / API 查询；
-- 后续 SQLQuery Skill 化前，应先让 `skill.sql_query` e2e 通过，再删除 native SQLQuery capability。
+- 数据查询 Skill 已完成 Skill 化：`skill.data_lookup` e2e 通过，native 数据查询 Skill capability 已删除，旧 `data_query` / `legacy_query.query` 请求被拒绝。
 
 ### 15.6 推荐命令
 
@@ -748,7 +748,7 @@ conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 ```
 
-前端涉及 SQLQuery Skill artifact 展示时：
+前端涉及 数据查询 Skill artifact 展示时：
 
 ```bash
 cd frontend
@@ -785,11 +785,11 @@ npm run build
 - instruction-only Skill 仍可 delegated main agent；
 - Planner / Replanner / Macro expander 适配 execution mode 与 answer_mode。
 
-### Phase 5：SQLQuery Skill 化试点
+### Phase 5：数据查询 Skill 化试点（已完成）
 
-- 先让 `skill.sql_query` 以 `platform_service` 与 native SQLQuery 并存；
-- 对比输出、artifact、event；
-- 通过验收后再清理 native SQLQuery capability。
+- `skill.data_lookup` 以 `platform_service` 执行，handler key 为 `skill.data_lookup.platform_handler`；
+- 数据查询 Skill 输出、artifact、event 已由 Skill/domain path 承担；
+- native 数据查询 Skill capability、旧 provider/executor/replanner 和旧 request alias 已清理，`data_query` / `legacy_query.query` 请求返回 unsupported capability。
 
 ## 17. 验收标准
 
@@ -804,7 +804,7 @@ Skill Executor 主题完成时必须满足：
 7. audit 不记录 secret、完整 prompt、DB URL、provider base_url。
 8. orchestration 只按 `skill.*` 通用规则编排，不知道具体 Skill 业务逻辑。
 9. 至少一个测试 Skill 通过 API 显式调用、自动规划调用和 artifact 查询闭环。
-10. 为 SQLQuery 迁移到 `skill.sql_query` 留出明确接口，不需要再改 orchestration 核心。
+10. 数据查询 Skill 已迁移到 `skill.data_lookup`，orchestration 核心不含 数据查询 Skill native 分支；旧 `data_query` / `legacy_query.query` 请求被拒绝。
 11. `python_subprocess`、`platform_service`、`delegated_main_agent` 三种执行模式边界清晰，且测试覆盖未授权 service / handler 被拒绝。
 12. `answer_mode` 控制 final answer 追加行为，测试覆盖 direct 不重复、requires_finalizer 追加一次。
 13. Skill bundle 刷新会同步 CapabilityRegistry、payload policies、Skill executor instance supported capabilities 与 executor active bundle。
@@ -817,6 +817,6 @@ Skill Executor 主题完成时必须满足：
 4. instruction-only Skill 可以在兼容期继续走 delegated main agent。
 5. service binding 必须“manifest 声明 + runtime allowlist”双重通过。
 6. 用户级 Skill 默认不能获得数据库、内部 LLM 等受控服务。
-7. SQLQuery Skill 化必须以本 PRD 的 Skill Executor 为前置，不应直接把 SQLQuery 塞进现有主代理 forced skill 路径。
+7. 数据查询 Skill 化必须以本 PRD 的 Skill Executor 为前置，不应直接把 数据查询 Skill 塞进现有主代理 forced skill 路径。
 8. v1 中受控 service binding 只允许 `platform_service`，普通 `python_subprocess` Skill 不绑定受控服务。
 9. `platform_service` handler 必须 runtime 预注册，manifest 不能触发任意动态 import。

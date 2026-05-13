@@ -1,15 +1,15 @@
 import type { ArtifactResponse } from '../api/types';
 
-export interface SqlQueryTablePreview {
+export interface DataQueryTablePreview {
   columns: string[];
   rows: Record<string, unknown>[];
   rowCount?: number;
   truncated?: boolean;
 }
 
-export interface SqlQueryDisplayModel {
+export interface DataQueryDisplayModel {
   summary: string;
-  table?: SqlQueryTablePreview;
+  table?: DataQueryTablePreview;
   warnings: string[];
   sourceArtifactIds: string[];
 }
@@ -27,8 +27,8 @@ export interface FileArtifactDisplayModel {
 
 export type CapabilityArtifactDisplay =
   | {
-      kind: 'sql_query';
-      result: SqlQueryDisplayModel;
+      kind: 'data_query';
+      result: DataQueryDisplayModel;
     }
   | {
       kind: 'file';
@@ -37,10 +37,10 @@ export type CapabilityArtifactDisplay =
 
 export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): CapabilityArtifactDisplay[] {
   const displays: CapabilityArtifactDisplay[] = [];
-  const sqlResult = parseSqlQueryArtifacts(artifacts);
-  const hasSqlResult = Boolean(sqlResult.table) || sqlResult.sourceArtifactIds.length > 0;
-  if (hasSqlResult) {
-    displays.push({ kind: 'sql_query', result: sqlResult });
+  const dataQueryResult = parseDataQueryArtifacts(artifacts);
+  const hasDataQueryResult = Boolean(dataQueryResult.table) || dataQueryResult.sourceArtifactIds.length > 0;
+  if (hasDataQueryResult) {
+    displays.push({ kind: 'data_query', result: dataQueryResult });
   }
   displays.push(...parseFileArtifactDisplays(artifacts).map((result) => ({ kind: 'file' as const, result })));
   return displays;
@@ -49,7 +49,7 @@ export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): 
 export function summarizeCapabilityArtifactDisplays(displays: CapabilityArtifactDisplay[]): string {
   const first = displays[0];
   if (!first) return '';
-  if (first.kind === 'sql_query') return first.result.summary;
+  if (first.kind === 'data_query') return first.result.summary;
   if (first.kind === 'file') return first.result.summary;
   return '';
 }
@@ -72,21 +72,21 @@ export function parseFileArtifactDisplays(artifacts: ArtifactResponse[]): FileAr
     });
 }
 
-export function parseSqlQueryArtifacts(artifacts: ArtifactResponse[]): SqlQueryDisplayModel {
+export function parseDataQueryArtifacts(artifacts: ArtifactResponse[]): DataQueryDisplayModel {
   const warnings: string[] = [];
   const sourceArtifactIds: string[] = [];
-  const sqlArtifacts = artifacts.filter(isSqlQueryDisplayArtifact);
-  const summaryArtifact = sqlArtifacts.find(isSummaryArtifact);
-  const previewArtifact = sqlArtifacts.find(isFilteredPreviewArtifact) ?? sqlArtifacts.find(isPreviewArtifact);
+  const dataQueryArtifacts = artifacts.filter(isDataQueryDisplayArtifact);
+  const summaryArtifact = dataQueryArtifacts.find(isSummaryArtifact);
+  const previewArtifact = dataQueryArtifacts.find(isFilteredPreviewArtifact) ?? dataQueryArtifacts.find(isPreviewArtifact);
 
-  let summary = '查询已完成，但结果不可用。';
+  let summary = '数据查询已完成，但结果不可用。';
   if (summaryArtifact) {
     sourceArtifactIds.push(summaryArtifact.artifact_id);
     const parsed = parseStorageRef(summaryArtifact, warnings);
     summary = stringField(parsed, 'summary') || summaryArtifact.summary || summary;
   }
 
-  let table: SqlQueryTablePreview | undefined;
+  let table: DataQueryTablePreview | undefined;
   if (previewArtifact) {
     sourceArtifactIds.push(previewArtifact.artifact_id);
     const parsed = parseStorageRef(previewArtifact, warnings);
@@ -101,7 +101,7 @@ export function parseSqlQueryArtifacts(artifacts: ArtifactResponse[]): SqlQueryD
         truncated: booleanField(parsed, 'truncated'),
       };
       if (!summaryArtifact) {
-        summary = typeof rowCount === 'number' ? `查询已完成，共返回 ${rowCount} 行结果。` : '查询已完成，已返回表格结果。';
+        summary = typeof rowCount === 'number' ? `数据查询已完成，共返回 ${rowCount} 行结果。` : '数据查询已完成，已返回表格结果。';
       }
     }
   }
@@ -123,26 +123,24 @@ function isSummaryArtifact(artifact: ArtifactResponse): boolean {
 function isFilteredPreviewArtifact(artifact: ArtifactResponse): boolean {
   const metadata = artifactMetadata(artifact);
   return metadata.artifact_role === 'filtered_query_result'
-    || artifact.artifact_id.includes('filtered_query_result')
-    || artifact.producer_node_id.includes('result_filtering');
+    || artifact.artifact_id.includes('filtered_query_result');
 }
 
 function isPreviewArtifact(artifact: ArtifactResponse): boolean {
   const metadata = artifactMetadata(artifact);
   return metadata.artifact_role === 'query_result_preview'
     || isFilteredPreviewArtifact(artifact)
-    || artifact.artifact_id.includes('query_result_preview')
-    || artifact.producer_node_id.includes('sql_execute_readonly');
+    || artifact.artifact_id.includes('query_result_preview');
 }
 
-function isSqlQueryDisplayArtifact(artifact: ArtifactResponse): boolean {
+function isDataQueryDisplayArtifact(artifact: ArtifactResponse): boolean {
   const metadata = artifactMetadata(artifact);
   return (
-    metadata.domain_kind === 'sql_query'
-    || metadata.capability_id === 'skill.sql_query'
+    metadata.domain_kind === 'data_query'
+    || metadata.artifact_family === 'data_query'
+    || artifact.artifact_id.includes('data_query')
+    || artifact.producer_node_id.includes('data_query')
     || isPreviewArtifact(artifact)
-    || artifact.artifact_id.includes('sql_query')
-    || artifact.producer_node_id.includes('sql_query')
   );
 }
 

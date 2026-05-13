@@ -10,12 +10,38 @@
 
 ## [Unreleased]
 
+### 2026-05-13 — 新增 Rust 化 Runtime 模块评估 PRD
+
+- 新增 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，在 SQLQuery 已归属 `skill/sql-query/` bundle 的前提下，重新评估后端 runtime substrate、Skill/MCP runtime、storage/event、artifact/file、安全与 deterministic kernel 的 Rust native 下沉边界。
+- 更新 PRD 总目录与后端总览索引，明确 `ApiRuntime` 不整体 Rust 化，SQLQuery 如需 Rust 化应作为 Skill-owned native runtime，而不是主体框架 native capability。
+
+### 2026-05-13 — 完成 SQLQuery 物理归属 Skill 迁移
+
+- 将 SQLQuery runtime、配置、领域文档与专项回归全部收口到 `skill/sql-query/` bundle；系统目录只保留通用 Skill loader、service registry 与平台 handler 加载机制，移除 native capability / provider / executor / replanner / 旧测试入口。
+- API runtime 改为通用 `platform_llm_*` 与 `llm.non_stream` service 装配，project platform-service handler 仅允许来自 public Skill root 的相对 `handler_module` 或显式 per-skill trusted handler allowlist，避免系统内置 SQLQuery handler 残留。
+- 系统测试改用 generic `skill.generic_data_lookup` fixture 覆盖 Skill platform-service 编排、finalizer、任务查询、取消、权限与 MCP 共存；SQLQuery 行为测试只在 `skill/sql-query/tests/` 内运行。
+- 前端 SQLQuery 专属卡片、显式 mode、旧内部 stage / 路由标识清理为通用 `DataQueryResultCard`、`data_query` artifact 与 generic Skill progress；系统文档改为说明可移除数据查询 Skill 模式，SQLQuery 细节随 bundle 自带文档维护。
+- 新增 Skill bundle ownership guard，验证系统源码、测试、前端与活跃文档不再硬编码 SQLQuery 归属细节；完成全量后端分层 unittest、Skill bundle 测试、前端 Vitest/build、compileall、diff check 与架构复核。
+
+### 2026-05-13 — 清理前端 SQLQuery 专属展示与可移除 Skill 文档口径
+
+- 将前端 SQLQuery 结果卡片与 artifact display model 泛化为 `DataQueryResultCard` / `data_query`，移除 `skill.sql_query` 显式 UI mode 与 SQLQuery 专属文案，保留基于通用 query result artifact 的表格预览渲染。
+- 更新前端事件 reducer 测试与 artifact 测试，进度文案改为 generic Skill / 数据查询表达，避免前端依赖 SQLQuery 专属 capability id。
+- 同步 README、AGENTS 与活跃 PRD / 指南文档口径：SQLQuery 是可移除 `skill/sql-query/` bundle，系统 runtime 只提供 generic Skill loader / allowlisted platform-service handler。
+
+### 2026-05-13 — 完成 SQLQuery Skill-only 能力收口
+
+- 将 SQLQuery 可复用阶段实现迁入 `skill/sql-query/runtime/sql_query_skill/`，删除原 SQLQuery provider / executor / replanner、public/internal descriptor 与本地 instance builder。
+- `skill/sql-query` 改为唯一公开 SQLQuery 入口 `skill.sql_query`，platform handler 改由 `skill/sql-query/SKILL.md` 声明并通过通用 project Skill loader 加载，API runtime 对非 public SQLQuery 请求 id 返回 unsupported capability。
+- SQLQuery 行为测试迁移到 `skill/sql-query/tests/`，新增 Skill-only 架构守护测试与 engine 回归，覆盖无旧包/导入/符号、metadata 脱敏、Skill progress/artifact metadata 与 SQL Guard。
+- 更新 Codex Skill 构建指南、README、AGENTS 与当前架构/PRD 文档，明确 SQLQuery 是 Skill platform-service 能力，domain stages 只在 handler 内部执行。
+
 ### 2026-05-12 — SQLQuery 迁移为 Skill platform-service 能力
 
-- 新增项目级 `skill/sql-query/SKILL.md`，将公开数据库查询能力收口为 `skill.sql_query`，`/api/v1/capabilities` 不再公开 `sql_query.query` 或内部 `sql_query.*` capability；API 边界仍兼容 `sql_query` / `sql_query.query` alias 并转换到 `skill.sql_query`。
-- 新增 `src/sql_query/engine.py` 与 `src/sql_query/platform_handler.py`，通过 Skill Executor 的 `platform_service` handler 执行 SQLQuery 既有 intent route、schema context、SQL generation、SQL guard、readonly execute 与 result filtering 主链路，并向前端输出 `skill.progress` 阶段事件与带 `domain_kind=sql_query` metadata 的 artifact。
-- API runtime 移除 native SQLQuery descriptor、instance、workflow provider、executor 与 runtime replanner 装配；`src/orchestration/` 去除 SQLQuery 业务 import / router special case / auto fallback hardcode，Planner prompt 改为依赖公开 `skill.*` 能力描述选择 SQLQuery。
-- SQLQuery Skill 内部 LLM service `llm.sql_query` 改为主代理 LLMProvider 的非流式、`thinking=false` adapter；不再实例化专属 SQLQuery LLM client，并对 provider 返回的 `reasoning_content` 只取普通 answer 文本。
+- 新增项目级 `skill/sql-query/SKILL.md`，将公开数据库查询能力收口为 `skill.sql_query`，`/api/v1/capabilities` 只展示 Skill public capability；该日曾短暂保留 alias 转换，已在 2026-05-13 清理为 unsupported capability。
+- 新增 `skill/sql-query/runtime/sql_query_skill/engine.py` 与 Skill bundle handler，通过 Skill Executor 的 `platform_service` handler 执行 SQLQuery 既有 intent route、schema context、SQL generation、SQL guard、readonly execute 与 result filtering 主链路，并向前端输出 `skill.progress` 阶段事件与带 `domain_kind=sql_query` metadata 的 artifact。
+- API runtime 移除原 SQLQuery descriptor、instance、workflow provider、executor 与 runtime replanner 装配；`src/orchestration/` 去除 SQLQuery 业务 import / router special case / auto fallback hardcode，Planner prompt 改为依赖公开 `skill.*` 能力描述选择 SQLQuery。
+- SQLQuery Skill 内部 LLM service 改用通用 `llm.non_stream` platform adapter；不再实例化专属 SQLQuery LLM client，并对 provider 返回的 `reasoning_content` 只取普通 answer 文本。
 - 前端 SQLQuery 手动模式切到 `skill.sql_query`，任务进度支持 `skill.progress` + `domain_kind=sql_query`，结果卡片识别改为 artifact metadata 优先、旧字符串 fallback 兼容。
 - 补充并更新 API / orchestration / e2e / observability / frontend 回归测试，覆盖 alias、Skill finalizer、service binding、capability list、artifact metadata、progress event 和 SQLQuery LLM Provider 复用规则。
 
@@ -23,8 +49,8 @@
 
 - 按已落地的 generic Skill Executor infra 重新审视 `docs/SQLQuery-Skill化迁移计划.md`，将迁移前提从“先实现 Skill Executor”更新为“使用现有 `platform_service` / `answer_mode` / service allowlist 能力承载 SQLQuery”。
 - 明确 `skill.sql_query` 必须使用 `execution.mode=platform_service` 与 `answer_mode=requires_finalizer`，不能用带 MySQL / LLM service binding 的 `python_subprocess` 脚本模式。
-- 重排 SQLQuery 迁移阶段：先固化 native 行为基线，再抽 domain engine、并行注册 platform handler、清理 orchestration / runtime 特判、前端改 metadata / stage event 识别，最后删除 native capability 与 alias。
-- 补充 SQLQuery Skill 化后的 LLM Provider 规则：迁移后的 `skill.sql_query` 新实现不再维护独立 LLM client，`llm.sql_query` 仅作为受控 service 名称，底层沿用主代理 LLMProvider 的非流式、`thinking=false` adapter，并明确忽略 `reasoning_content`；兼容期内现有 native SQLQuery runtime 可暂时保持原装配方式。
+- 重排 SQLQuery 迁移阶段：先固化迁移前行为基线，再抽 domain engine、并行注册 platform handler、清理 orchestration / runtime 特判、前端改 metadata / stage event 识别，最后删除原 capability 与 alias。
+- 补充 SQLQuery Skill 化后的 LLM Provider 规则：迁移后的 `skill.sql_query` 新实现不再维护独立 LLM client，`llm.non_stream` 作为通用受控 service 名称，底层沿用主代理 LLMProvider 的非流式、`thinking=false` adapter，并明确忽略 `reasoning_content`；该迁移兼容期已在 2026-05-13 结束。
 
 ### 2026-05-12 — 新增 Skill Executor 实现需求 PRD
 
@@ -95,8 +121,8 @@
 ### 2026-05-11 — 接入 SQLQuery 内部 LLM 语义路由
 
 - SQLQuery 内部 `intent_route` 现在会复用已配置的 SQLQuery LLM runtime 判断具体查询路由，即审定品种库、基因型数据库或品种综合概览；LLM 输出仍必须命中已配置 `route_id`，否则回退到原有规则路由。
-- `SQLQueryExecutor` 将 `llm_text_generator` 注入到 `SQLQueryIntentRouteCapability`，让“具体查哪个库”的判断与 SQL 生成 / 结果筛选共用同一套 SQLQuery LLM 配置；路由判断固定走非流式、`thinking=False` 的轻量调用，不继承前端深度思考开关。
-- 高层 LLM Planner 和 SQLQuery 宏展开不再向内部 `intent_route` 透传 `route_hint`，Planner 只能选择是否调用 `sql_query.query`，不能代替 SQLQuery 内部 LLM 决定具体数据库。
+- 迁移前 SQLQuery native executor 将 `llm_text_generator` 注入到 intent route 阶段，让“具体查哪个库”的判断与 SQL 生成 / 结果筛选共用同一套 SQLQuery LLM 配置；路由判断固定走非流式、`thinking=False` 的轻量调用，不继承前端深度思考开关。
+- 高层 LLM Planner 和迁移前 SQLQuery 宏展开不再向内部 intent route 阶段透传 `route_hint`，Planner 只能选择是否调用 SQLQuery public 数据能力，不能代替 SQLQuery 内部 LLM 决定具体数据库。
 - 补充 executor 与 API runtime 回归测试，覆盖 SQLQuery 内部路由 LLM 调用、请求元数据透传和后续 SQL 生成 / 结果筛选链路。
 
 ### 2026-05-11 — 优化前端生成进度提示
@@ -192,7 +218,7 @@
 - 新增 `SkillWorkflowProvider`，把 Planner / 显式路由选择的 `skill.*` public macro 安全展开为 `main_agent.respond` forced skill 节点；Planner 输出的 Skill `input_payload` 默认 fail-closed，不允许注入脚本路径、forced skill 字段或任意业务参数。
 - 扩展 `CapabilityDescriptor`、API DTO 与 `/api/v1/capabilities` 响应，返回 `kind` / `source` 以区分内置能力与 Skill capability；`JsonlAuditSink` 新增启动期同步审计，记录 `skill.capability_registered` 与 `skill.capability_registration_skipped`，只保存 public root 相对路径摘要或 outside-public-roots 标记。
 - 主代理执行器支持系统注入的 `forced_skill_name` / `forced_skill_capability_id`，forced Skill 优先于文本 matcher 并产生 `skill.forced_selected` / `skill.forced_missing` 审计事件；编排执行层会剥离用户请求 metadata 中伪造的 forced skill 保留字段，只有节点 metadata 可传入 forced skill。
-- 调整 Planner / Replanner 的 answer-producing 尾节点规则：`main_agent.respond` 与 `skill.*` 不再被追加冗余最终主代理节点，`sql_query.query` 等非回答型尾节点仍保持“能力结果 → 主代理最终回答”的 finalizer 行为。
+- 调整 Planner / Replanner 的 answer-producing 尾节点规则：`main_agent.respond` 与 `skill.*` 不再被追加冗余最终主代理节点；非回答型数据能力尾节点仍保持“能力结果 → 主代理最终回答”的 finalizer 行为。
 - 补齐 `tests/integrations/codex_skills/test_skill_capabilities.py`、`tests/orchestration/test_llm_workflow_provider.py`、`tests/orchestration/test_workflow_router.py`、`tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py`、`tests/api/test_capabilities_list.py` 与 `tests/api/test_skill_capability_pool.py`，覆盖能力注册、public/private root、Planner 可见性、安全展开、forced skill、安全 metadata 剥离、API 目录与 fake planner 端到端路径。
 - 本次从 `.omx/context/skill-capability-pool-20260509T051631Z.md` 与下方中断记录继续完成；中断记录保留作为上下文，不再代表当前实现状态。
 
@@ -333,18 +359,18 @@
 - 移除对话区下方常驻任务进程状态栏，将“准备就绪 / 正在准备数据库查询 / 任务已完成”等任务进程状态收纳到顶部栏“任务进程”点击展开浮层中。
 - 更新 `AGENTS.md` 开发准则：明确当前项目不再追求“最小糊上”的临时实现，后续代码需按长期交付标准保证稳健、可维护、无冗余且逻辑闭环。
 - 补充 auth storage/API 多用户隔离测试与前端登录/历史测试，并完成后端分层 unittest、前端 Vitest 与 build 回归。
-- 整改 SQLQuery 数据库路由：新增配置驱动的 `QueryUnderstandingService` 统一 AutoWorkflow 与 SQLQuery intent route 判断，并为 intent route 预留受校验的可选 LLM 语义路由 seam；审定品种查询缺作物时改为多作物审定表宽查，审定信息 + 基因型信息复合问题会自动拆成两个 public `sql_query.query` 分支后由主代理汇总，并把 route candidate / subtask / no-crop broad / LLM router fallback 元数据写入 intent/schema 输出。
+- 整改 SQLQuery 数据库路由：新增配置驱动的 `QueryUnderstandingService` 统一 AutoWorkflow 与 SQLQuery intent route 判断，并为 intent route 预留受校验的可选 LLM 语义路由 seam；审定品种查询缺作物时改为多作物审定表宽查，审定信息 + 基因型信息复合问题会自动拆成两个 SQLQuery public 数据能力分支后由主代理汇总，并把 route candidate / subtask / no-crop broad / LLM router fallback 元数据写入 intent/schema 输出。
 
 ### 2026-04-30 — 完成前后端本地联调启动验证
 
 - 使用 `scripts/run_fullstack_dev.py --frontend-port 3000 --backend-port 8000` 拉起真实后端与 Vite 前端，确认前端固定运行在 `http://127.0.0.1:3000/`，并通过 Vite proxy 转发 `/api` 到后端 `http://127.0.0.1:8000`。
-- 验证 `GET /`、前端代理路径 `GET /api/v1/capabilities` 与后端直连 `GET /api/v1/capabilities` 均返回 `200 OK`，能力列表包含 `main_agent.respond` 与 `sql_query.query`。
+- 验证 `GET /`、前端代理路径 `GET /api/v1/capabilities` 与后端直连 `GET /api/v1/capabilities` 均返回 `200 OK`，能力列表包含主代理与当时的 SQLQuery public 数据能力。
 - 工作结束时已停止本地全栈开发进程，并确认 3000 / 8000 端口无监听进程残留。
 
 ### 2026-04-28 — 补充 tiktoken 依赖与 Token 计数工具
 
 - 主代理编排内核新增运行时受控重编排闭环：`OrchestrationService` 可在节点执行结果或完成判定后调用 `RuntimeReplanner`，在 `max_replans` / `max_dynamic_nodes` 预算内校验 revised DAG、追加新节点、orphan 未执行旧节点并继续调度；新增 `task.replan_started`、`task.graph_updated`、`task.replanned`、`task.replan_rejected` 事件，避免 `REPLAN_AVAILABLE` 只记录后直接失败。
-- 新增 SQLQuery capability 内部 `SQLQueryRuntimeReplanner` 与 `result_filtering.satisfaction` 输出契约：当单个 SQLQuery 宏能力的节点结果明确建议重排，且用户问题包含多作物 / 多地区并列查询时，会在运行时拆成多个 `sql_query.query` public 宏节点并由 `main_agent.respond` 汇总；编排层只负责通用 revised DAG 校验、预算与调度，不承载 SQL/schema/农业领域规则。
+- 新增迁移前 SQLQuery runtime replanner 与 `result_filtering.satisfaction` 输出契约：当单个 SQLQuery 数据能力结果明确建议重排，且用户问题包含多作物 / 多地区并列查询时，会在运行时拆成多个 SQLQuery public 数据能力节点并由 `main_agent.respond` 汇总；编排层只负责通用 revised DAG 校验、预算与调度，不承载 SQL/schema/农业领域规则。
 - 主代理 LLM runtime 收口为单实例共享：默认自动模式下，planner 高层 DAG、运行时观察/重排 advisor 与 `main_agent.respond` 最终总结通过同一个主代理 `SharedLLMRuntime` 调用；SQLQuery 内部 `sql_generate` / `result_filtering` 使用独立 SQLQuery LLM runtime，固定非流式、`thinking=disabled`，不复用主代理 LLM 实例。显式组件级 fake / override seam 保留。
 - 主代理编排、运行时重排、主代理 Skill 注入说明与 SQLQuery SQL 生成 / 结果筛选的 LLM-facing Prompt 统一改写为中文表达；保留 JSON / SQL 字段名等机器契约，降低中文模型理解英文系统提示的偏差。
 - `deep_thinking` / `main_agent_reasoning_effort` 现在会作用于主代理编排阶段；planner 使用同一 runtime 的 thinking 流收集推理片段，并通过 `main_agent.reasoning_delta`（`stage=orchestration_plan`）在前端可见事件中展示。
@@ -359,7 +385,7 @@
 - SQLQuery SQL 生成与 SQL Guard 不再默认补充或强制要求 `LIMIT`，允许只读查询返回全量匹配数据；prompt 仅要求在用户明确提出前 N 条、限制条数或分页时才生成 `LIMIT`。
 - SQLQuery `result_filtering` 移除固定 `200` 行候选行硬上限；进入筛选 LLM 的 `candidate_rows` 现在完全由 `trim_max_tokens` 裁剪结果决定，不再在 token trim 后二次按行数截断。
 - SQLQuery SQL 生成 Prompt 复刻 legacy `xiaoao_agent/sub_agents/sql_query_agent` 的 DDL 拼接方式：`schema_metadata.yaml` 仍作为表结构保存源，`schema_context_prepare` 会按当前 selected tables / columns 渲染 `schema_ddl`，审定品种库按作物收敛注入表结构，基因型数据库保留完整 gene schema；`sql_generate` 主路径接受 raw SQL / fenced SQL 输出并反推表字段使用情况，同时保留旧 JSON 输出兼容，`sql_guard` 表白名单优先收窄到当前 selected tables。
-- 修复前端在 SQLQuery 暂停 / 补充信息恢复后最终回答消失的问题：前端不再根据任务图中的 `sql_query.*` 节点把恢复后的助手消息强制改成 SQLQuery 模式，而是始终优先展示主代理 text artifact，并把 SQLQuery 表格作为能力补充结果卡片；同时新增通用 capability artifact display 入口，避免后续新增 capability 时复现“能力结果覆盖/隐藏主代理回答”的问题。
+- 修复前端在 SQLQuery 暂停 / 补充信息恢复后最终回答消失的问题：前端不再根据任务图中的迁移前 SQLQuery 内部节点把恢复后的助手消息强制改成 SQLQuery 模式，而是始终优先展示主代理 text artifact，并把 SQLQuery 表格作为能力补充结果卡片；同时新增通用 capability artifact display 入口，避免后续新增 capability 时复现“能力结果覆盖/隐藏主代理回答”的问题。
 
 ### 2026-04-27 — 强化宽泛问题的第一性原理处理
 
@@ -383,21 +409,21 @@
 - SQLQuery 尾节点从 `result_summarize` 重命名并改造为 `result_filtering`：SQL 生成阶段继续用 `LIKE` 召回候选品种，尾节点通过 LLM 输出 `keep_row_indexes` 筛选真正符合用户需求的行，最终返回 `filtered_query_result` 表格；无 LLM 或 LLM 失败时保守保留候选表格并记录 fallback。
 - 收紧 SQLQuery 单品种编号筛选规则：当用户查询“龙粳18”这类明确编号品种时，`result_filtering` 会只保留规范化等于“龙粳18”或“龙粳18号”的行，并剔除“龙粳1836 / 龙粳1823”等编号后继续追加数字的其他品种；该规则在无 LLM 或 LLM 误保留时也会作为后过滤生效。
 - 修复 interrupt 反复追问时复用同一 `interrupt_id` 可能导致节点停在 `waiting_for_input` 但无 open interrupt 的问题；interrupt id 现在带 reason/input 指纹，避免“无限转圈”式悬挂。
-- 排查并取消本地人工验证会话中遗留的 `task-7ff47608987d`：该任务停在 `sql_query.intent_route` 的 `waiting_for_input`，旧前端未支持 interrupt answer，导致后续普通提交被 ConversationSerialGuard 以 409 busy 拒绝。
+- 排查并取消本地人工验证会话中遗留的 `task-7ff47608987d`：该任务停在迁移前 SQLQuery intent route 阶段的 `waiting_for_input`，旧前端未支持 interrupt answer，导致后续普通提交被 ConversationSerialGuard 以 409 busy 拒绝。
 - 新增默认自动规划 provider：用户不再需要显式选择 capability；数据库/品种/审定/基因型类问题会自动展开为 `SQLQuery` 六节点宏能力，再交给 `main_agent.respond` 结合上游结果生成自然语言最终回答，普通问题仍保持单主代理路径。
 - SQLQuery 默认运行链路保留末端 `result_summarize` 节点，内部 DAG 回到 intent route、schema context、SQL generate、SQL guard、readonly execute、result summarize 六节点；主代理接收 SQLQuery 上游摘要结果做最终对话式整合。
 - SQLQuery SQL 生成新增品种名 LIKE 匹配约束：LLM prompt 明确禁止 `variety_name = ...`，LLM 若返回严格等值条件会触发 fallback；确定性 fallback 统一使用 `variety_name LIKE '%关键词%'`。
 - 主代理 Prompt 新增“上游能力结果上下文”注入，只暴露 SQLQuery 摘要、路由、行数等安全字段，让主代理可基于 capability 结果整合回答，而不是重新猜测或忽略已完成节点。
 - 前端业务对话台移除“普通对话 / SQLQuery”手动模式选择，展示为“当前模式：自动规划”，数据库类输入仅提示主代理会自动判断是否调用 SQLQuery；自动 SQLQuery 路径仍会在主代理最终回答下展示折叠的结果卡片，未完成任务列表中的空 capability 也显示为“自动规划”。
 - 完成完整 LLM Planner runtime 接入：默认自动规划入口先尝试 LLM 生成 public-only 高层 DAG，再经过 public validator、macro expander 与 internal validator 后执行；planner 输出非法、引用 internal capability 或 provider 不可用时自动 fallback 到确定性 `AutoWorkflowProvider`。
-- Planner prompt 现在注入当前 public capability 清单并明确数据库问题优先规划 `sql_query.query -> main_agent.respond`；系统会强制用真实用户问题覆盖当前 public capability 的 `user_message` / `user_question`，并在 SQL-only 或未连线主代理计划中自动追加/重连主代理 finalizer，确保主代理接收上游结果上下文。
-- 新增正式的 per-capability planner payload allowlist：`CapabilityPayloadPolicy` / `PlannerPayloadPolicy` 默认 fail-closed，策略随 capability 注册进入 `CapabilityRegistry`，LLM Planner prompt 会展示每个 public capability 允许的 payload 字段；只有 capability 明确声明的字段才会从 LLM planner payload 进入执行图，系统生成字段始终覆盖 planner 字段。当前 `main_agent.respond` 与 `sql_query.query` 均只是首批注册策略，由各自 capability 模块声明真实用户输入注入规则。
+- Planner prompt 现在注入当前 public capability 清单并明确数据库问题优先规划 SQLQuery 数据能力后接 `main_agent.respond`；系统会强制用真实用户问题覆盖当前 public capability 的 `user_message` / `user_question`，并在 SQL-only 或未连线主代理计划中自动追加/重连主代理 finalizer，确保主代理接收上游结果上下文。
+- 新增正式的 per-capability planner payload allowlist：`CapabilityPayloadPolicy` / `PlannerPayloadPolicy` 默认 fail-closed，策略随 capability 注册进入 `CapabilityRegistry`，LLM Planner prompt 会展示每个 public capability 允许的 payload 字段；只有 capability 明确声明的字段才会从 LLM planner payload 进入执行图，系统生成字段始终覆盖 planner 字段。主代理与当时的 SQLQuery public 数据能力是首批注册策略，由各自模块声明真实用户输入注入规则。
 - `build_api_runtime` 新增 planner 注入 seam（fake text generator / LLM config / factory / reasoning effort / enable 开关），`ApiRuntime` 支持异步 workflow provider，并新增 `workflow.plan_built` audit-only 事件记录 planner route、fallback 状态与原因。
 - 补充 LLM Planner orchestration 与 API 集成测试，覆盖成功展开、单主代理、payload 覆盖保护、capability registry payload policy、未来 capability 自定义 allowlist、自动 finalizer、未连线主代理重连、provider 异常 fallback、internal capability fallback 与非法 JSON fallback。
 - 新增 `docs/Capability接入指南.md`，明确后续新增 capability 时在 `src/capabilities/<name>/`、`src/api/runtime.py`、planner payload allowlist、macro provider、AutoWorkflowProvider、测试与文档中分别要加入什么，避免把新能力逻辑写成 SQLQuery 式特判。
 - 前端对话框新增上游能力执行感知：根据 `node.started` / `node.completed` 事件在助手气泡内展示“正在执行 SQLQuery / 主代理 / 未来 capability”的当前步骤，避免长时间只显示等待回答。
 - 前端 Markdown 渲染补齐 GitHub 风格基础表格解析与横向滚动样式，使主代理返回的 Markdown 表格不再作为普通段落显示。
-- 补齐 SQLQuery 内部 LLM 默认装配：真实 API runtime 现在会用 `config.yaml` 创建 SQLQuery 文本生成器，并同时传给 `sql_query.sql_generate` 与 `sql_query.result_filtering`；显式注入的 `llm_text_generator` 仍保持最高优先级，fake backend 明确关闭真实 SQLQuery LLM。
+- 补齐 SQLQuery 内部 LLM 默认装配：真实 API runtime 当时会用 `config.yaml` 创建 SQLQuery 文本生成器，并同时传给 SQL generation 与 result filtering 阶段；显式注入的 `llm_text_generator` 仍保持最高优先级，fake backend 明确关闭真实 SQLQuery LLM。
 - SQLQuery SQL 生成 Prompt 与确定性 fallback 增加“X 系列 / 名字里带 X / 名称中包含 X”识别规则；例如“龙粳系列”会生成 `variety_name LIKE '%龙粳%'`，避免无 WHERE 条件只返回前 50 条无关数据。
 
 ### 2026-04-27 — 新增主代理思考控制
@@ -433,7 +459,7 @@
 ### 2026-04-27 — 新增前端业务对话台 PRD 草案
 
 - 基于当前后端 FastAPI / SSE / capability / artifact 实现事实，新增 `docs/prd/frontend/00-前端业务对话台PRD.md`，明确前端 v1 定位为内部业务用户对话台，而非研发调试台。
-- 明确 v1 仅依赖现有 API：普通对话走 `main_agent.respond`，数据库查询走 `sql_query.query`，SQLQuery 默认展示自然语言摘要与简表预览。
+- 明确 v1 仅依赖当时现有 API：普通对话走 `main_agent.respond`，数据库查询走 SQLQuery public 数据能力，SQLQuery 默认展示自然语言摘要与简表预览。
 - 更新 `docs/prd/frontend/README.md` 与 `docs/prd/README.md`，将前端 PRD 状态从预留改为已开始，并记录 v1 非目标与后续后端 API 增强项。
 
 ### 2026-04-27 — 同步当前实现基线的文档、PRD 与 Agent 规则
@@ -463,17 +489,17 @@
 ### 2026-04-27 — 补齐 Phase 8.1 LLM Planner 前置契约
 
 - 按 Phase 8.1 文档计划补齐 LLM Planner 前置契约：新增 `WorkflowPlanValidator`，校验 public capability、重复节点、未知依赖、环形依赖与 JSON-serializable input payload。
-- 新增 `WorkflowExpander`，将高层 `sql_query.query` 宏能力展开为 SQLQuery 固定内部子工作流，并正确改写上游 / 下游依赖。
+- 新增迁移前 `WorkflowExpander`，将高层 SQLQuery public 数据能力展开为 SQLQuery 固定内部子工作流，并正确改写上游 / 下游依赖。
 - 新增 Planner 输出 JSON schema、fake LLM 输出解析 seam 与回归测试，继续保持“不实现完整 LLM Planner、不开放 SQLQuery 内部节点给 Planner”的阶段边界。
 - 更新 Phase 8.1 文档状态与补齐记录，明确首轮 public SQLQuery 边界与本次 Planner 前置契约均已完成。
 
 ### 2026-04-24 — 完成 SQLQuery LLM 增强与 Phase 8 主代理首轮能力
 
 - 建立 Phase 5.5 / Phase 8 / Phase 8.1 的专题文档与阶段索引：新增 SQLQuery LLM 增强专题、Codex Skill 兼容层专题、SQLQuery 宏能力与 LLM 动态 DAG 规划设计稿，并同步更新 `docs/dev_processes/README.md` 与 `docs/LLM接入阶段建议.md`。
-- 收口 SQLQuery 公开命名与能力边界：对外保留 `sql_query` / `sql_query.query`，新增 public capability `sql_query.query`（展示名 `SQLQuery`），默认隐藏并拒绝外部直接调用 `sql_query.*` 内部节点及旧 `nl2sql*` / `sqlquery*` id。
+- 迁移前收口 SQLQuery 公开命名与能力边界：对外保留当时的 SQLQuery public id（展示名 `SQLQuery`），默认隐藏并拒绝外部直接调用内部节点及更早旧 id。
 - 完成 Phase 8 主代理首轮实现：新增 `main_agent.respond`、`MainAgentWorkflowProvider`、`CompositeExecutor` 与 workflow router；普通消息默认进入主代理，显式 SQL 查询进入固定 SQLQuery workflow。
 - 落地 Codex Skill 兼容层与主代理 prompt 上下文：新增 `src/integrations/codex_skills/` 与 `src/capabilities/main_agent/`，支持解析 `SKILL.md`、识别 IO / scripts 扩展、匹配 skill、受控 Python 脚本 runner、上传 artifact 脱敏 metadata 注入，以及 `main_agent.output_delta` / `main_agent.output_final` streaming 事件。
-- 完成 Phase 5.5 SQLQuery LLM 首轮 TDD 实施：新增 `src/capabilities/sql_query/prompt_builders.py`、`llm_utils.py`，改造 `sql_generate` 与 `result_summarize` 支持注入 LLM 文本生成器、结构化 JSON 输出、clarify / reject、rows preview、确定性 fallback 与 `sql_query.llm_call` / `sql_query.llm_fallback` 审计事件。
+- 完成 Phase 5.5 SQLQuery LLM 首轮 TDD 实施：当时在原 SQLQuery package 中新增 prompt builder / LLM utils，改造 SQL generation 与 result summarize 支持注入 LLM 文本生成器、结构化 JSON 输出、clarify / reject、rows preview、确定性 fallback 与 SQLQuery LLM 审计事件。
 - 整理 LLM client seam：将根目录 `llm_client.py` 移入 `src/integrations/llm_client.py`，改用 `yaml.safe_load` 与初始化期配置读取，补齐 `generate_text()`、`generate_text_with_thinking()`、`stream_text()` 与 `ReasoningEffort` 范围收窄。
 - 修复 interrupt/resume 相关竞态：避免 late open interrupt 覆盖 answered 状态，并在恢复调度时重置旧 workflow 节点状态、先落库 `WAITING_FOR_INPUT` 再暴露 open interrupt。
 - 补充主代理、Skill 兼容层、SQLQuery LLM、observability 与 e2e 测试；新增 `tests/integrations` 与 `tests/capabilities/main_agent` 最小测试命令，并同步更新 `README.md`、`AGENTS.md`。
@@ -487,7 +513,7 @@
 - 完成 Phase 2 storage：新增 `src/storage/` 与 `src/storage/sqlite/`，落地 SQLite base / session / bootstrap、ORM model、repository、async storage façade、`InterruptAnswer` 与 `StoragePort` 增量；新增 `docs/dev_processes/Phase-2-SQLite状态存储表结构草案.md` 与 `tests/storage/`。
 - 完成 Phase 3 lifecycle：新增 `src/lifecycle/`，落地 task state machine、mailbox、interrupt/resume、cancellation、conversation serial guard、typed payload 基础设施与相关存储 primitive；新增 `tests/lifecycle/` 与任务上下文终止状态流转图（Markdown / PNG）。
 - 完成 Phase 4 orchestration：新增 `src/orchestration/`，落地 capability / instance registry、scheduler、workflow/task plan、completion policy、strict reject backpressure、orchestration service 与所需状态查询 seam；新增 `tests/orchestration/` 并修订主代理编排能力流程图。
-- 完成 Phase 5 SQLQuery MVP：新增 `src/capabilities/sql_query/` 与 `src/integrations/`，复用 `src/sql_query/` 与 `configs/sql_query/*.yaml` 接入 intent route、schema context、SQL generate、SQL Guard、readonly execute、result summarize 六节点 workflow；新增 `tests/capabilities/sql_query/`、SQLQuery 子代理结构图，以及 SQLQuery LLM 改造方案和 LLM 接入阶段建议图文档。
+- 完成 Phase 5 SQLQuery MVP：当时新增 SQLQuery capability package 与 integrations，当时复用系统级 SQLQuery package 与 YAML configs 接入 intent route、schema context、SQL generate、SQL Guard、readonly execute、result summarize 六阶段 workflow；新增对应测试、SQLQuery 子代理结构图，以及 SQLQuery LLM 改造方案和 LLM 接入阶段建议图文档。
 - 完成 Phase 6 API/SSE：新增 `src/api/`、FastAPI app、DTO、消息提交/任务查询/SSE/取消/任务图/产物/能力目录接口、进程内事件 broker 与 JSONL audit logger；补齐 live fan-out、late result discard、取消事件与 `tests/api/`。
 - 完成 Phase 7 验收与二期评估输入：新增 `tests/e2e/`、`tests/observability/`，覆盖 happy path、guard blocked、interrupt/resume、cancel late result ignored 与 JSONL audit；新增 `docs/一期验收报告.md` 与 `docs/第二阶段评估输入.md`，并同步更新各阶段最小测试命令到 `README.md`、`AGENTS.md` 与 Phase 文档。
 - 更新仓库规则：在 `AGENTS.md` 中新增开始分析、设计、编码或文档修改前必须先阅读 `CHANGELOG.md` 最近相关条目的要求。
@@ -497,7 +523,7 @@
 - 建立并持续收口主代理框架 PRD，明确主框架只负责任务拆解、编排、分发，具体业务能力以下层 capability 形式接入。
 - 将 PRD 重构为“总览 + 专题”结构，新增 `docs/prd/` 专题文档，降低单文档耦合度并方便后续按模块做计划与实现。
 - 补齐 SQLQuery 首个 MVP 相关设计资产，包括数据库结构说明、Prompt 输入模板、业务路由规则、schema 元数据与 SQL Guard 规则。
-- 新增 `src/sql_query/` 的 schema context builder 骨架与基础模型定义，用于后续按 TDD 推进 capability 落地。
+- 新增系统级 SQLQuery schema context builder 骨架与基础模型定义，用于后续按 TDD 推进 capability 落地。
 - 导出当前 `multi_agent` 环境依赖到根目录 `requirements.txt`，并补充仓库规则：优先基于现有依赖实现功能。
 - 新增根目录 `CHANGELOG.md`，作为仓库级开发记录入口，并在仓库规则中明确要求每日开发结束时手动补记当天工作内容。
 - 收口主代理思维模式、完成判定闭环、优先级两层模型、模块划分与主框架/Capability 上下级边界等关键架构决策。

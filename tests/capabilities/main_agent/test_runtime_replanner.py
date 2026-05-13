@@ -3,36 +3,71 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from pathlib import Path
 
 from src.capabilities.main_agent.runtime_replanner import MainAgentRuntimeReplanner
 from src.capabilities.main_agent.workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS, MAIN_AGENT_PLANNER_PAYLOAD_POLICIES
-from src.capabilities.sql_query.workflow import SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS, SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES, SQLQueryWorkflowProvider
 from src.core.enums import NodeStatus
 from src.core.models import TaskNode
+from src.integrations.codex_skills import SkillManifest
 from src.orchestration.completion_policy import CompletionStatus
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.registry import CapabilityRegistry
 from src.orchestration.runtime_replanner import RuntimeReplanContext
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 
 
 class MainAgentRuntimeReplannerTest(unittest.TestCase):
+    def _generic_data_lookup_manifest(self) -> SkillManifest:
+        return SkillManifest(
+            name="generic-data-lookup",
+            description="通过项目级 Skill platform-service 安全回答数据库类只读查询问题。",
+            triggers=("查询品种", "审定信息", "基因型", "数据库查询"),
+            body="# DataLookup Skill",
+            source_path=Path("skill/generic-data-lookup/SKILL.md"),
+            metadata={
+                "execution": {
+                    "mode": "platform_service",
+                    "handler": "skill.data_lookup.platform_handler",
+                    "answer_mode": "requires_finalizer",
+                }
+            },
+        )
+
     def _registry(self) -> CapabilityRegistry:
         registry = CapabilityRegistry()
-        for descriptor in (*MAIN_AGENT_CAPABILITY_DESCRIPTORS, *SQL_QUERY_PUBLIC_CAPABILITY_DESCRIPTORS):
-            if descriptor.capability_id.startswith("main_agent"):
-                registry.register(descriptor, planner_payload_policy=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES.get(descriptor.capability_id))
-            else:
-                registry.register(descriptor, planner_payload_policy=SQL_QUERY_PUBLIC_PLANNER_PAYLOAD_POLICIES.get(descriptor.capability_id))
-        # internal descriptors are validated after macro expansion in production; the
-        # unit test focuses on public replan construction.
-        from src.capabilities.sql_query.workflow import SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS
-
-        for descriptor in SQL_QUERY_INTERNAL_CAPABILITY_DESCRIPTORS:
-            registry.register(descriptor)
+        for descriptor in MAIN_AGENT_CAPABILITY_DESCRIPTORS:
+            registry.register(
+                descriptor,
+                planner_payload_policy=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES.get(descriptor.capability_id),
+            )
+        registry.register(
+            CapabilityDescriptor(
+                capability_id="skill.generic_data_lookup",
+                name="generic-data-lookup",
+                description="通过项目级 Skill platform-service 安全回答数据库类只读查询问题。",
+                kind="skill",
+                source="skill",
+                source_path="generic-data-lookup/SKILL.md",
+            ),
+            planner_payload_policy=CapabilityPayloadPolicy(
+                planner_allowed_fields=("subtask_label", "parent_question"),
+                system_payload_factory=lambda request: {"user_message": request.effective_user_message},
+            ),
+        )
         return registry
 
-    def test_llm_runtime_replanner_returns_expanded_revised_plan_from_unsatisfied_output(self) -> None:
+    def _macro_providers(self) -> dict[str, SkillWorkflowProvider]:
+        manifest = self._generic_data_lookup_manifest()
+        return {
+            "skill.generic_data_lookup": SkillWorkflowProvider(
+                {"skill.generic_data_lookup": "generic-data-lookup"},
+                skill_manifest_resolver=lambda capability_id, _revision: manifest if capability_id == "skill.generic_data_lookup" else None,
+            )
+        }
+
+    def test_llm_runtime_replanner_returns_expanded_revised_skill_plan_from_unsatisfied_output(self) -> None:
         calls: list[dict] = []
 
         async def text_generator(prompt: str, *, request=None, stage: str | None = None) -> str:
@@ -42,7 +77,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                     "action": "replan",
                     "reason": "split query after empty result",
                     "nodes": [
-                        {"node_id": "query_again", "capability_id": "sql_query.query"},
+                        {"node_id": "query_again", "capability_id": "skill.generic_data_lookup"},
                         {"node_id": "answer_user", "capability_id": "main_agent.respond", "depends_on": ["query_again"]},
                     ],
                 },
@@ -59,7 +94,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
             request=request,
             plan=WorkflowPlan(
                 task_id="task-1",
-                nodes=(WorkflowNodePlan(node_id="query_data", capability_id="sql_query.query"),),
+                nodes=(WorkflowNodePlan(node_id="query_data", capability_id="skill.generic_data_lookup"),),
                 max_replans=1,
                 max_dynamic_nodes=24,
             ),
@@ -67,7 +102,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                 "filter": TaskNode(
                     node_id="filter",
                     task_id="task-1",
-                    capability_id="sql_query.result_filtering",
+                    capability_id="skill.generic_data_lookup",
                     status=NodeStatus.COMPLETED,
                 )
             },
@@ -81,7 +116,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         )
         replanner = MainAgentRuntimeReplanner(
             capability_registry=self._registry(),
-            macro_providers={"sql_query.query": SQLQueryWorkflowProvider()},
+            macro_providers=self._macro_providers(),
             text_generator=text_generator,
         )
 
@@ -93,7 +128,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         self.assertEqual(decision.metadata["replan_source"], "main_agent_llm_runtime")
         self.assertEqual(calls[0]["stage"], "orchestration_replan")
         capabilities = [node.capability_id for node in decision.plan.nodes]
-        self.assertIn("sql_query.intent_route", capabilities)
+        self.assertEqual(capabilities, ["skill.generic_data_lookup", "main_agent.respond"])
         self.assertEqual(decision.plan.nodes[-1].capability_id, "main_agent.respond")
         self.assertEqual(decision.plan.metadata["runtime_replan_source"], "main_agent_llm_runtime")
 
@@ -154,7 +189,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         replanner = MainAgentRuntimeReplanner(
             capability_registry=registry,
             macro_providers={
-                "sql_query.query": SQLQueryWorkflowProvider(),
+                **self._macro_providers(),
                 "skill.mini_breedstat_rcbd": SkillWorkflowProvider(
                     {"skill.mini_breedstat_rcbd": "mini-breedstat-rcbd"}
                 ),
@@ -187,7 +222,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         )
         replanner = MainAgentRuntimeReplanner(
             capability_registry=self._registry(),
-            macro_providers={"sql_query.query": SQLQueryWorkflowProvider()},
+            macro_providers=self._macro_providers(),
             text_generator=text_generator,
         )
 
@@ -211,7 +246,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                 "filter": TaskNode(
                     node_id="filter",
                     task_id="task-sensitive",
-                    capability_id="sql_query.result_filtering",
+                    capability_id="skill.generic_data_lookup",
                     status=NodeStatus.COMPLETED,
                 )
             },
@@ -226,7 +261,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
                         {"variety_name": "龙粳35", "very_long_detail": "z" * 500},
                     ],
                     "row_count": 3,
-                    "route_id": "genotype_db",
+                    "route_id": "dataset_b",
                     "satisfaction": {"satisfied": False, "reason_code": "no_relevant_rows_after_filtering", "replan_recommended": True},
                 }
             },
@@ -234,7 +269,7 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         )
         replanner = MainAgentRuntimeReplanner(
             capability_registry=self._registry(),
-            macro_providers={"sql_query.query": SQLQueryWorkflowProvider()},
+            macro_providers=self._macro_providers(),
             text_generator=text_generator,
         )
 

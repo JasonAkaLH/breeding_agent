@@ -33,7 +33,7 @@ class MessageSubmissionAPITest(APITestCase):
         self.assertEqual(terminal["status"], "cancelled")
 
     async def test_waiting_input_task_can_be_answered_and_resumed(self) -> None:
-        first = await self.submit_message(content="帮我查询一下", capability_id="sql_query.query")
+        first = await self.submit_message(content="帮我查询一下", capability_id="skill.generic_data_lookup")
         self.assertEqual(first.status_code, 202)
         first_payload = first.json()
 
@@ -55,14 +55,19 @@ class MessageSubmissionAPITest(APITestCase):
         self.assertEqual(interrupts.status_code, 200)
         open_interrupt = interrupts.json()["interrupts"][0]
         self.assertEqual(open_interrupt["status"], "open")
-        self.assertEqual(open_interrupt["reason_code"], "route_not_resolved")
+        self.assertEqual(open_interrupt["reason_code"], "lookup_target_missing")
 
         answer = await self.client.post(
             f"/api/v1/tasks/{first_payload['task_id']}/interrupts/{open_interrupt['interrupt_id']}/answer",
-            json={"answer_payload": {"route_id": "approval_variety_db"}},
+            json={"answer_payload": {"lookup_target": "龙粳33"}},
         )
         self.assertEqual(answer.status_code, 202)
         self.assertEqual(answer.json()["status"], "answered")
 
         terminal = await self.wait_for_terminal_task(first_payload["task_id"])
         self.assertEqual(terminal["status"], "completed")
+
+    async def test_legacy_generic_data_lookup_native_capability_id_is_rejected(self) -> None:
+        response = await self.submit_message(content="查询龙粳33", capability_id="legacy.query")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported capability_id", response.text)

@@ -2,11 +2,11 @@
 
 - **项目**：multi_agent_framework
 - **范围**：后端 capability registry、Planner / Replanner 能力发现、Skill runtime 接入边界
-- **文档状态**：PRD 草案
+- **文档状态**：已实现并更新（2026-05-13 起 数据查询 Skill 也作为 `skill.data_lookup` platform-service 进入能力池）
 - **日期**：2026-05-09
 - **关联 PRD**：
   - `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`
-  - `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md`
+  - 对应可移除 Skill bundle 自带的边界文档
   - `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
 
 ## 1. 背景与问题
@@ -18,14 +18,14 @@
 
 这导致一个关键断层：
 
-- SQLQuery 作为 public capability 注册在 `CapabilityRegistry`，因此 Planner / Replanner / `/api/v1/capabilities` 可发现 `sql_query.query`。
+- 数据查询 Skill 已作为项目级 public Skill 注册在 `CapabilityRegistry`，因此 Planner / Replanner / `/api/v1/capabilities` 可发现 `skill.data_lookup`。
 - 已注册 Skill 只在 `main_agent.respond` 内部匹配，Planner / Replanner 的 public capability 搜索上下文不可见。
 - 用户开启深度思考后，如果 LLM Planner 或 Runtime Replanner 需要“搜索系统能力”，它只能看到内置 public capability，看不到项目已经扫描到的 Skill。
 
 当前代码事实：
 
 - `CapabilityRegistry` 是 public capability 的注册与发现入口，`list(public_only=True)` 返回 Planner / API 可见能力：`src/orchestration/registry.py:7-37`。
-- API runtime 当前只注册主代理、SQLQuery public capability 与 SQLQuery 内部节点：`src/api/runtime.py:906-917`。
+- API runtime 当前注册主代理、项目级 public Skill（含 `skill.data_lookup`）与 MCP tool capability；数据查询 Skill domain stage 不再作为 capability 注册。
 - `SkillCatalog` 在 runtime 中较晚扫描并只注入 `MainAgentExecutor`：`src/api/runtime.py:930-933`、`src/api/runtime.py:1028-1037`。
 - LLM Planner 使用 `capability_registry.list(public_only=True)` 构造可用能力上下文：`src/orchestration/llm_workflow_provider.py:55-65`。
 - Runtime Replanner 同样只格式化 `capability_registry.list(public_only=True)`：`src/capabilities/main_agent/runtime_replanner.py:262-303`。
@@ -38,12 +38,12 @@
 
 ### 2.1 产品目标
 
-把符合条件的项目 Skill 提升为系统一等 public capability，使它们与 SQLQuery 一样出现在同一个能力池中：
+把符合条件的项目 Skill 提升为系统一等 public capability；数据查询 Skill 当前也以 `skill.data_lookup` project Skill 身份出现在同一个能力池中：
 
 ```text
 CapabilityRegistry public pool
 ├── main_agent.respond
-├── sql_query.query
+├── skill.data_lookup
 ├── skill.mini_breedstat_rcbd
 ├── skill.<project_skill_a>
 └── skill.<project_skill_b>
@@ -55,7 +55,7 @@ CapabilityRegistry public pool
 
 - Skill 进入 `CapabilityRegistry` 后仍复用现有受控 Skill runtime，不引入任意 shell、任意本地文件读写或插件 runtime。
 - Planner / Replanner 只能选择系统公开的 `skill.*` capability，不能自行指定脚本路径、Skill 根目录或任意参数。
-- Skill capability 必须保持与 SQLQuery 宏能力同级：对 Planner 公开的是 public macro contract，不暴露内部脚本执行细节。
+- Skill capability 必须保持与 数据查询 Skill 同级：对 Planner 公开的是 public capability contract，不暴露内部脚本、handler 或 domain stage 细节。
 - `/api/v1/capabilities` 返回统一能力池，便于前端或诊断工具展示内置能力与项目 Skill。
 - 保持 deterministic fallback：当 LLM Planner 禁用或失败时，现有 `main_agent.respond` 内部 Skill 匹配仍可兜底，不阻塞普通对话。
 
@@ -63,7 +63,7 @@ CapabilityRegistry public pool
 
 - 不复刻完整 Codex runtime、plugin runtime、任意 shell runtime。
 - 不允许 Planner 直接输出 Skill 脚本节点、脚本路径、临时文件路径或运行时命令。
-- 不把 SQLQuery 内部节点、Skill 内部脚本、参数解析器作为 public capability 暴露。
+- 不把 数据查询 Skill 内部节点、Skill 内部脚本、参数解析器作为 public capability 暴露。
 - 不把所有用户级 `~/.codex/skills` 默认公开给业务用户和 Planner。
 - 不在本 PRD 中设计 Skill 市场、权限后台、人工审核、版本发布流程。
 - 不新增前端 Skill 专属业务卡片；前端 v1 仍通过统一 capability / artifact / 附件契约展示。
@@ -71,7 +71,7 @@ CapabilityRegistry public pool
 ## 4. 用户故事
 
 1. **深度思考选择 Skill**
-   - 作为业务用户，我上传材料表并要求“做随机区组设计”时，开启深度思考后系统应能在能力池里发现 `skill.mini_breedstat_rcbd`，而不是只看到 `main_agent.respond` / `sql_query.query`。
+   - 作为业务用户，我上传材料表并要求“做随机区组设计”时，开启深度思考后系统应能在能力池里发现 `skill.mini_breedstat_rcbd`，而不是只看到 `main_agent.respond` / `skill.data_lookup`。
 
 2. **能力目录统一展示**
    - 作为前端或调试工具，我调用 `/api/v1/capabilities` 时，应能看到系统内置能力和已公开项目 Skill，且能区分 capability 来源。
@@ -84,7 +84,7 @@ CapabilityRegistry public pool
 
 ## 5. 术语
 
-- **Built-in capability**：系统代码静态定义的 public capability，如 `main_agent.respond`、`sql_query.query`。
+- **Built-in capability**：系统代码静态定义的 public capability，如 `main_agent.respond`。数据查询 Skill 的公开入口是 public Skill capability `skill.data_lookup`。
 - **Skill capability**：从符合条件的 `SkillManifest` 映射得到的 public capability，命名空间为 `skill.*`。
 - **Skill macro**：Planner 可见的高层能力；执行前由系统转换为受控主代理 Skill 执行路径。
 - **Forced Skill**：系统根据 `skill.*` capability_id 派生的可信 Skill 选择信号，注入 `main_agent.respond`，绕过或优先于文本 matcher。
@@ -152,13 +152,13 @@ LLM Planner 与 Runtime Replanner 必须从同一个 public capability pool 获�
 - `LLMWorkflowProvider` 的 `public_capabilities` 应包含已公开 Skill capability。
 - `MainAgentRuntimeReplanner` 的 “可用 public capability” 区块应包含已公开 Skill capability。
 - Planner prompt 文案必须从“普通问题只使用 `main_agent.respond`”改为：
-  - 数据查询优先 `sql_query.query`；
+  - 数据查询优先 `skill.data_lookup`；
   - 明确匹配公开 Skill 的任务优先选择对应 `skill.*`；
   - 兜底对话、解释、汇总使用 `main_agent.respond`。
 
 ### 6.3 Skill Capability 执行模型
 
-v1 推荐采用 **Skill public macro → `main_agent.respond` forced skill** 模型。
+v1 最初推荐采用 **Skill public capability → `main_agent.respond` forced skill** 模型；当前 generic `SkillExecutor` 已进一步支持直接执行与 platform-service。
 
 高层 public plan 示例：
 
@@ -207,12 +207,12 @@ v1 推荐采用 **Skill public macro → `main_agent.respond` forced skill** 模
 可接受实现路径二选一：
 
 1. 在 `_ensure_final_main_agent` 中引入 answer-producing public capability 集合，包含 `main_agent.respond` 与公开 `skill.*`；
-2. 或调整顺序：先展开 public macro，再基于展开后的 tail 判断是否需要最终 `main_agent.respond`。
+2. 或调整顺序：先展开 public capability，再基于展开后的 tail 判断是否需要最终 `main_agent.respond`。
 
 验收要求：
 
 - 单节点 `skill.mini_breedstat_rcbd` 不应自动产生两个连续 `main_agent.respond` 节点。
-- `sql_query.query` 仍应保留“查询结果 → 主代理最终回答”的 finalizer 行为。
+- `skill.data_lookup` 通过 `answer_mode=requires_finalizer` 保留“查询结果 → 主代理最终回答”的 finalizer 行为。
 
 ### 6.5 API 能力目录
 
@@ -240,7 +240,7 @@ v1 推荐采用 **Skill public macro → `main_agent.respond` forced skill** 模
 ### 6.6 Fallback 与兼容
 
 - LLM Planner 禁用或失败时，`AutoWorkflowProvider` 仍可走现有 deterministic 路由：
-  - SQL 查询走 SQLQuery；
+  - SQL 查询走 数据查询 Skill；
   - 其他问题走 `main_agent.respond`；
   - `main_agent.respond` 内部继续执行 Skill matcher。
 - 未公开为 public capability 的 Skill 仍可被内部 matcher 使用。
@@ -339,13 +339,13 @@ Skill 执行继续遵守现有上传与 artifact 规则：
 
 **结论**：可作为后续优化，不作为 v1 推荐。
 
-### 8.3 方案 C：Skill public macro → main_agent forced skill（推荐）
+### 8.3 方案 C：Skill public capability → main_agent forced skill（历史推荐）
 
 **做法**：Skill 以 `skill.*` 注册 public capability；执行前由系统转换为带 forced skill metadata 的 `main_agent.respond`。
 
 **优点**：
 
-- 与 SQLQuery public macro 思路一致；
+- 与 数据查询 Skill public Skill contract 的边界一致；
 - Planner / Replanner / API 统一从 `CapabilityRegistry` 发现能力；
 - 复用现有主代理 Skill matcher、参数解析、脚本 runner、artifact manager；
 - 安全边界集中，LLM 只选择 capability_id。
@@ -361,7 +361,7 @@ Skill 执行继续遵守现有上传与 artifact 规则：
 
 1. **能力池可见**
    - 给 runtime 注入包含 `mini-breedstat-rcbd` 的 `SkillCatalog` 后，`capability_registry.list(public_only=True)` 包含 `skill.mini_breedstat_rcbd`。
-   - `/api/v1/capabilities` 返回 `main_agent.respond`、`sql_query.query` 和公开 Skill capability。
+   - `/api/v1/capabilities` 返回 `main_agent.respond`、`skill.data_lookup` 和公开 Skill capability。
 
 2. **Planner 可选择**
    - LLM Planner prompt 的 capability block 包含公开 Skill。
@@ -376,7 +376,7 @@ Skill 执行继续遵守现有上传与 artifact 规则：
    - 缺少必填参数时返回结构化缺参结果并产生 `skill.input_missing` 审计。
 
 5. **不破坏现有能力**
-   - SQLQuery 仍通过 `sql_query.query` public macro 展开为内部固定工作流。
+   - 数据查询 Skill 通过 `skill.data_lookup` platform-service handler 执行领域链路；能力池只展示该 Skill public capability。
    - 普通对话仍可使用 `main_agent.respond`。
    - 未公开 Skill 仍可通过主代理内部 matcher 兜底。
 
@@ -454,7 +454,7 @@ npm run build
 
 4. 调整 Planner finalizer 规则。
    - 把公开 Skill capability 视为 answer-producing，避免重复 finalizer。
-   - 保持 SQLQuery finalizer 行为。
+   - 保持 数据查询 Skill finalizer 行为。
 
 5. 调整 `MainAgentRespondCapability`。
    - 支持 `forced_skill_capability_id` / `forced_skill_name`。
@@ -492,7 +492,7 @@ npm run build
 
 ### Decision
 
-采用 **Skill public macro → `main_agent.respond` forced skill** 方案，将符合条件的项目 Skill 注册为 `skill.*` public capability，并纳入 `CapabilityRegistry` 统一能力池。
+采用 **Skill public capability** 方案，将符合条件的项目 Skill 注册为 `skill.*` public capability，并纳入 `CapabilityRegistry` 统一能力池；当前实现已扩展为 generic `SkillExecutor`，数据查询 Skill 走 `platform_service`。
 
 ### Drivers
 
@@ -507,7 +507,7 @@ npm run build
 
 ### Why chosen
 
-推荐方案与 SQLQuery public macro 的边界一致，同时最大化复用已有 `MainAgentRespondCapability` 的 Skill 匹配、参数解析、脚本 runner 与 artifact 管理能力。
+推荐方案与 数据查询 Skill public Skill contract 的边界一致，同时最大化复用已有 Skill 匹配、参数解析、执行与 artifact 管理能力。
 
 ### Consequences
 

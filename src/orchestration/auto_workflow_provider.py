@@ -17,7 +17,7 @@ class AutoWorkflowProvider:
 
     Capability selection belongs to the LLM planner or explicit public
     capability requests. When planner is disabled/unavailable, this provider
-    falls back to the main agent only and does not hardcode SQLQuery or any
+    falls back to the main agent only and does not hardcode any specific Skill or
     other business capability.
     """
 

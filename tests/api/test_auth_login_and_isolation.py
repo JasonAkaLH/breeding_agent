@@ -237,7 +237,7 @@ class AuthIsolationAPITest(APITestCase):
         await self.runtime.create_user("bob", "bob-password1")
 
         await self.login("alice", "alice-password1")
-        response = await self.submit_message(conversation_id="conv-running-delete", content="查询龙粳33", capability_id="sql_query.query")
+        response = await self.submit_message(conversation_id="conv-running-delete", content="查询龙粳33", capability_id="skill.generic_data_lookup")
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
@@ -266,7 +266,7 @@ class AuthIsolationAPITest(APITestCase):
         await self.runtime.create_user("bob", "bob-password1")
 
         await self.login("alice", "alice-password1")
-        response = await self.submit_message(conversation_id="conv-alice", content="查询龙粳33", capability_id="sql_query.query")
+        response = await self.submit_message(conversation_id="conv-alice", content="查询龙粳33", capability_id="skill.generic_data_lookup")
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
@@ -280,7 +280,7 @@ class AuthIsolationAPITest(APITestCase):
         stolen_submit = await self.submit_message(
             conversation_id="conv-alice",
             content="试图写入他人的忙碌会话",
-            capability_id="sql_query.query",
+            capability_id="skill.generic_data_lookup",
         )
         self.assertEqual(stolen_submit.status_code, 404)
         self.assertNotIn(task_id, stolen_submit.text)

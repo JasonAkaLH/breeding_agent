@@ -58,8 +58,8 @@ class MCPRuntimeRegistrationAPITests(APITestCase):
         capabilities = {item["capability_id"]: item for item in response.json()["capabilities"]}
 
         self.assertIn("main_agent.respond", capabilities)
-        self.assertIn("skill.sql_query", capabilities)
-        self.assertNotIn("sql_query.query", capabilities)
+        self.assertIn("skill.generic_data_lookup", capabilities)
+        self.assertNotIn("legacy.query", capabilities)
         self.assertIn("mcp.crm.search_customer", capabilities)
         mcp_descriptor = capabilities["mcp.crm.search_customer"]
         self.assertEqual(mcp_descriptor["kind"], "mcp_tool")
@@ -75,8 +75,8 @@ class MCPRuntimeRegistrationAPITests(APITestCase):
         capability_ids = {item["capability_id"] for item in response.json()["capabilities"]}
 
         self.assertIn("main_agent.respond", capability_ids)
-        self.assertIn("skill.sql_query", capability_ids)
-        self.assertNotIn("sql_query.query", capability_ids)
+        self.assertIn("skill.generic_data_lookup", capability_ids)
+        self.assertNotIn("legacy.query", capability_ids)
         self.assertNotIn("mcp.crm.search_customer", capability_ids)
 
     async def test_planner_can_call_public_mcp_capability_and_main_agent_receives_result(self) -> None:

@@ -33,6 +33,7 @@ class _ResolvedSkill:
     revision: str | None
     manifest: SkillManifest
     capability_id: str
+    public_skill_roots: tuple[Any, ...] = ()
 
 
 class _UnknownSkillBundleRevisionError(KeyError):
@@ -54,7 +55,9 @@ class SkillExecutor(ExecutorPort):
             script_runner=script_runner or SkillScriptRunner(),
             skill_input_text_generator=skill_input_text_generator,
         )
-        self._platform_handler_registry = platform_handler_registry or SkillPlatformHandlerRegistry()
+        self._platform_handler_registry = platform_handler_registry or SkillPlatformHandlerRegistry(
+            public_skill_roots=runtime_state.active_bundle.public_skill_roots,
+        )
         self._service_registry = service_registry or SkillServiceRegistry()
 
     def supports(self, capability_id: str) -> bool:
@@ -208,7 +211,12 @@ class SkillExecutor(ExecutorPort):
         manifest = bundle.catalog.get(skill_name)
         if manifest is None:
             raise SkillExecutionConfigError(f"Missing manifest for {request.capability_id}")
-        return _ResolvedSkill(revision=revision, manifest=manifest, capability_id=request.capability_id)
+        return _ResolvedSkill(
+            revision=revision,
+            manifest=manifest,
+            capability_id=request.capability_id,
+            public_skill_roots=bundle.public_skill_roots,
+        )
 
     async def _execute_script_skill(
         self,
@@ -424,8 +432,10 @@ class SkillExecutor(ExecutorPort):
         try:
             handler, services = self._platform_handler_registry.resolve(
                 capability_id=request.capability_id,
+                manifest=resolved.manifest,
                 config=execution,
                 service_registry=self._service_registry,
+                public_skill_roots=resolved.public_skill_roots,
             )
         except PermissionError as exc:
             events.append(

@@ -247,12 +247,16 @@ class SkillRuntimeState:
             if not root_path.exists():
                 continue
             for skill_file in sorted(root_path.rglob("SKILL.md")):
-                try:
-                    stat = skill_file.stat()
-                    digest = hashlib.sha256(skill_file.read_bytes()).hexdigest()
-                except OSError:
-                    continue
-                entries.append((str(skill_file.resolve()), f"{stat.st_size}:{digest}"))
+                skill_dir = skill_file.parent
+                for file_path in sorted(path for path in skill_dir.rglob("*") if path.is_file()):
+                    if "__pycache__" in file_path.parts or file_path.suffix == ".pyc":
+                        continue
+                    try:
+                        stat = file_path.stat()
+                        digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                    except OSError:
+                        continue
+                    entries.append((str(file_path.resolve()), f"{stat.st_size}:{digest}"))
         return tuple(entries)
 
     @staticmethod

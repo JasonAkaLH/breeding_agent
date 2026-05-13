@@ -6,7 +6,7 @@
 
 ## 1. 背景
 
-原后端 PRD 主要覆盖主代理编排内核与 SQLQuery MVP。当前实现已经新增普通主代理消息入口、Codex Skill 兼容层、上传文件上下文注入、主代理 streaming LLM 输出、真实 provider runtime 绑定和手工 smoke 脚本，因此需要补齐正式 PRD。
+原后端 PRD 主要覆盖主代理编排内核与 数据查询 Skill MVP。当前实现已经新增普通主代理消息入口、Codex Skill 兼容层、上传文件上下文注入、主代理 streaming LLM 输出、真实 provider runtime 绑定和手工 smoke 脚本，因此需要补齐正式 PRD。
 
 ## 2. 目标
 
@@ -16,7 +16,7 @@
 - 主代理通过 streaming LLM 输出前端可见的增量与最终事件；
 - runtime 支持 fake / injected stream、显式 LLM config、config path 与 client factory，保证测试与真实 provider 验证分离；
 - 真实 provider 调用只记录安全 metadata，不记录 prompt、API key、base_url 等敏感数据；
-- 保持 SQLQuery 显式请求仍走固定 SQLQuery workflow，不被普通主代理路径吞掉。
+- 保持 数据查询 Skill 显式请求走 `skill.data_lookup` platform-service workflow，由 project Skill bundle handler 在 Skill 内部执行 domain stages，不被普通主代理路径吞掉。
 
 ## 3. 非目标
 
@@ -36,8 +36,8 @@
 
 默认路由规则：
 - `capability_id=None` → `main_agent.respond`；
-- `capability_id="sql_query"` / `capability_id="sql_query.query"` → SQLQuery 固定 workflow；
-- `sql_query.*` 内部节点不允许作为外部普通请求入口。
+- `capability_id="skill.data_lookup"` → 数据查询 Skill platform-service workflow；
+- 数据查询 Skill domain stage 不允许作为外部普通请求入口。
 
 ### 4.2 输出事件
 
@@ -154,7 +154,7 @@ Smoke 验收重点：
 - audit 事件包含 `main_agent.llm_call`；
 - `prompt_recorded=false`；
 - 不泄漏 API key、完整 prompt、base_url 等敏感信息；
-- SQLQuery 显式请求仍走 `sql_query.query` 固定六节点 workflow，尾节点为 `sql_query.result_filtering`。
+- 数据查询 Skill 显式请求应走 `skill.data_lookup` platform-service workflow，尾阶段为 Skill handler 内部的 `filter_results`。
 
 ## 10. 对 API 与前端的影响
 

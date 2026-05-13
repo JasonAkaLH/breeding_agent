@@ -6,7 +6,7 @@
 - **日期**：2026-05-11
 - **关联 PRD**：
   - `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`
-  - `docs/prd/backend/09-高层DAG规划与SQLQuery宏能力边界.md`
+  - 对应可移除 Skill bundle 自带的边界文档
   - `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
   - `docs/prd/backend/12-Skill一等Capability能力池PRD.md`
 
@@ -56,7 +56,7 @@ LLM Planner / Replanner / capabilities API 看到最新 skill.* 能力
 - 不让 Planner 直接输出脚本路径、shell 命令、本地文件路径或 arbitrary tool call。
 - 不在每一轮普通消息、每一个 token 或每一次 SSE 事件里重复扫描 Skill。
 - 不要求前端“点击新建对话”立即调用后端创建 conversation；后端应以首次任务提交作为可靠边界。
-- 不改变 SQLQuery、主代理 LLM runtime、对话记忆与上传文件的既有契约。
+- 不改变 数据查询 Skill、主代理 LLM runtime、对话记忆与上传文件的既有契约。
 
 ## 4. 术语
 
@@ -71,7 +71,7 @@ LLM Planner / Replanner / capabilities API 看到最新 skill.* 能力
 本 PRD 的设计必须尊重以下当前实现事实：
 
 1. `CapabilityRegistry` 是 public capability 发现入口，Planner prompt、API capability 目录和执行前校验都依赖它。
-2. `skill.*` 当前不是直接执行节点，而是 public macro；系统会把它展开为 `main_agent.respond` forced skill 节点。
+2. `skill.*` 当前由通用 Skill workflow/provider 展开；普通 instruction/script Skill 可走受控 Skill executor 或 forced skill 路径，`platform_service` Skill 由 runtime allowlisted handler 执行。
 3. 调度器只选择支持真实执行 capability 的 instance；本地主代理 instance 支持的是 `main_agent.respond`，不是任意 `skill.*`。
 4. `MainAgentExecutor` 最终要用 `SkillCatalog.get(forced_skill_name)` 找到 manifest，才能运行 forced skill。
 5. `WorkflowExpander`、`LLMWorkflowProvider`、`AutoWorkflowProvider` 与 Runtime Replanner 内部都持有 macro provider 映射副本；刷新时不能只改一个外部 dict。
@@ -141,7 +141,7 @@ Skill 刷新必须以“构建新 bundle → 校验 → 原子激活”的顺序
 
 要求：
 
-- 内置 capability 不受 Skill 刷新影响，包括 `main_agent.respond`、`sql_query.query` 与 SQLQuery 内部 capability。
+- 内置 capability 不受 Skill 刷新影响，包括 `main_agent.respond`；数据查询 Skill 当前通过项目级 `skill.data_lookup` 公开，随 Skill bundle 进入能力池，平台 handler 由 runtime allowlist 绑定。
 - 新增公开 Skill 时，新 `skill.*` descriptor 应进入 public registry。
 - 删除或取消公开 Skill 时，对应 `skill.*` descriptor 应从 public registry 中移除，不能继续出现在 Planner prompt 或 `/api/v1/capabilities`。
 - 修改 `SKILL.md` description / capability_id / version 后，新 descriptor 应在下一次 bundle 激活后生效。

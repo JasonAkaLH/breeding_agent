@@ -11,7 +11,6 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     uiModes: [
       { key: 'chat', label: '普通对话', capabilityId: null },
-      { key: 'sql_query', label: '数据库查询（SQLQuery）', capabilityId: 'sql_query.query' },
     ],
     createCaptcha: vi.fn(async () => ({ captcha_id: 'cap-1', image_svg: '<svg><text>1234</text></svg>', expires_in_seconds: 300 })),
     login: vi.fn(async () => ({ user: { username: 'alice' } })),
@@ -210,7 +209,7 @@ describe('App', () => {
     expect(conversationList.parentElement).toHaveClass('app-content');
     expect(conversationList.closest('.conversation-card')).toBeNull();
     expect(screen.queryByText('主代理可用')).not.toBeInTheDocument();
-    expect(screen.queryByText('SQLQuery可用')).not.toBeInTheDocument();
+    expect(screen.queryByText('数据查询可用')).not.toBeInTheDocument();
     expect(screen.queryByText(/user:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/conversation:/)).not.toBeInTheDocument();
     expect(within(sendRow).getByLabelText('请输入问题')).toHaveAttribute('placeholder', '从这里开始...');
@@ -944,8 +943,8 @@ describe('App', () => {
       getTaskArtifacts: vi.fn(async () => ({
         task_id: 'task-1',
         artifacts: [
-          { artifact_id: 'main_agent_text:1', producer_node_id: 'main_agent.respond', artifact_type: 'text', storage_ref: '主代理已自动调用 SQLQuery，龙粳33共 1 行。', summary: 'final', is_complete: true, created_at: null },
-          { artifact_id: 'query_result_preview:1', producer_node_id: 'task-1:query_data:sql_execute_readonly', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [{ variety_name: '龙粳33' }], row_count: 1, truncated: false }), summary: 'preview', is_complete: true, created_at: null },
+          { artifact_id: 'main_agent_text:1', producer_node_id: 'main_agent.respond', artifact_type: 'text', storage_ref: '主代理已自动调用数据查询能力，龙粳33共 1 行。', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'query_result_preview:1', producer_node_id: 'task-1:query_data:execute_query', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [{ variety_name: '龙粳33' }], row_count: 1, truncated: false }), summary: 'preview', is_complete: true, created_at: null },
         ],
       })),
     });
@@ -954,13 +953,13 @@ describe('App', () => {
     expect(screen.queryByLabelText('对话模式')).not.toBeInTheDocument();
     expect(screen.queryByText('当前模式：自动规划')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
-    expect(screen.queryByText('主代理会自动判断是否需要调用 SQLQuery，无需手动切换模式。')).not.toBeInTheDocument();
+    expect(screen.queryByText('主代理会自动判断是否需要调用数据查询能力，无需手动切换模式。')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'chat' })));
-    expect(await screen.findByText(/主代理已自动调用 SQLQuery/)).toBeInTheDocument();
-    expect(await screen.findByText('SQLQuery 查询结果')).toBeInTheDocument();
-    expect(screen.getByText('查询已完成，共返回 1 行结果。')).toBeInTheDocument();
+    expect(await screen.findByText(/主代理已自动调用数据查询能力/)).toBeInTheDocument();
+    expect(await screen.findByText('数据查询结果')).toBeInTheDocument();
+    expect(screen.getByText('数据查询已完成，共返回 1 行结果。')).toBeInTheDocument();
     expect(screen.getByText('原始表格预览默认隐藏')).toBeInTheDocument();
     expect(screen.queryByText(/select secret/i)).not.toBeInTheDocument();
   });
@@ -993,14 +992,14 @@ describe('App', () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
-      event('node.started', { capability_id: 'sql_query.intent_route' }, 'sql-intent-started'),
-      event('node.started', { capability_id: 'sql_query.sql_execute_readonly' }, 'sql-execute-started'),
+      event('node.started', { capability_id: 'skill.data_query' }, 'sql-skill-started'),
+      event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'execute_query' }, 'sql-execute-progress'),
     ])} />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    const progressText = await screen.findByText('正在执行 SQLQuery：正在检索数据库');
+    const progressText = await screen.findByText('正在执行 Skill：正在检索数据');
     const assistantBubble = progressText.closest('.message-assistant') as HTMLElement;
     expect(assistantBubble).not.toBeNull();
     expect(assistantBubble.querySelector('.activity-notice')).not.toBeNull();
@@ -1101,7 +1100,7 @@ describe('App', () => {
     const runningGraph = {
       task_id: 'task-1',
       nodes: [
-        { node_id: 'task-1:sql_generate', capability_id: 'sql_query.sql_generate', status: 'running', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'task-1:skill_data_query', capability_id: 'skill.data_query', status: 'running', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
     };
@@ -1119,7 +1118,7 @@ describe('App', () => {
           interrupt_id: 'interrupt-1',
           conversation_id: 'conv-test',
           task_id: 'task-1',
-          node_id: 'task-1:intent_route',
+          node_id: 'task-1:skill_data_query',
           question: '请补充要查询的作物类型。',
           reason_code: 'crop_not_resolved',
           required_fields: { crop: { options: ['corn', 'rice', 'cotton', 'wheat', 'soybean'] } },
@@ -1145,7 +1144,7 @@ describe('App', () => {
         [event('task.accepted', {}, 'accepted-before-interrupt')],
         [
           event('task.accepted', {}, 'accepted-after-interrupt'),
-          event('node.started', { capability_id: 'sql_query.sql_execute_readonly' }, 'execute-after-interrupt'),
+          event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'execute_query' }, 'execute-after-interrupt'),
         ],
       ])}
       waitingInputCheckDelayMs={1}
@@ -1167,7 +1166,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { crop: '水稻' }));
-    const resumedProgress = await screen.findByText('正在执行 SQLQuery：正在检索数据库');
+    const resumedProgress = await screen.findByText('正在执行 Skill：正在检索数据');
     const resumedBubble = resumedProgress.closest('.message-assistant') as HTMLElement;
     expect(resumedBubble).not.toBeNull();
     expect(resumedBubble.querySelector('.activity-notice')).not.toBeNull();
@@ -1180,7 +1179,7 @@ describe('App', () => {
     const waitingGraph = {
       task_id: 'task-1',
       nodes: [
-        { node_id: 'task-1:intent_route', capability_id: 'sql_query.intent_route', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'task-1:skill_data_query', capability_id: 'skill.data_query', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
         { node_id: 'task-1:main_agent.respond', capability_id: 'main_agent.respond', status: 'pending', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
@@ -1199,10 +1198,10 @@ describe('App', () => {
           interrupt_id: 'interrupt-1',
           conversation_id: 'conv-test',
           task_id: 'task-1',
-          node_id: 'task-1:intent_route',
+          node_id: 'task-1:skill_data_query',
           question: '请选择查询范围。',
           reason_code: 'route_not_resolved',
-          required_fields: { route_id: { options: ['approval_variety_db'] } },
+          required_fields: { route_id: { options: ['dataset_a'] } },
           status: 'open',
         }],
       })),
@@ -1210,7 +1209,7 @@ describe('App', () => {
         task_id: 'task-1',
         artifacts: [
           { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '最终主代理回答：没有找到符合条件的记录。', summary: 'final', is_complete: true, created_at: null },
-          { artifact_id: 'filtered_query_result:1', producer_node_id: 'task-1:query_data:result_filtering', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [], row_count: 0, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
+          { artifact_id: 'filtered_query_result:1', producer_node_id: 'task-1:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ columns: ['variety_name'], rows: [], row_count: 0, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
         ],
       })),
     });
@@ -1236,15 +1235,15 @@ describe('App', () => {
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { route_id: '审定品种库' }));
     await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalled());
     expect(await screen.findByText(/最终主代理回答/)).toBeInTheDocument();
-    expect(await screen.findByText('SQLQuery 查询结果')).toBeInTheDocument();
-    expect(screen.getByText('查询已完成，共返回 0 行结果。')).toBeInTheDocument();
+    expect(await screen.findByText('数据查询结果')).toBeInTheDocument();
+    expect(screen.getByText('数据查询已完成，共返回 0 行结果。')).toBeInTheDocument();
   });
 
   it('keeps the task locked while waiting_for_input has no open interrupt yet', async () => {
     const waitingGraph = {
       task_id: 'task-1',
       nodes: [
-        { node_id: 'task-1:intent_route', capability_id: 'sql_query.intent_route', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+        { node_id: 'task-1:skill_data_query', capability_id: 'skill.data_query', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
       ],
       edges: [],
     };

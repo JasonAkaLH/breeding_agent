@@ -1,4 +1,4 @@
-export type ChatMode = 'chat' | 'sql_query';
+export type ChatMode = 'chat';
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
 export interface CaptchaChallengeResponse {

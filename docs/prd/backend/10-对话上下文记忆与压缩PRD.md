@@ -22,7 +22,7 @@
 ## 2. 目标
 
 1. **有记忆的自然对话**：同一 `conversation_id` 内，智能体在规划与回答时可读取历史上下文，使用户可以自然追问，例如“那它的基因型呢”“继续查这个品种的审定信息”“换成龙粳18”。
-2. **规划阶段可用记忆**：LLM Planner / 自动规划前应获得受控历史上下文，避免省略主语的追问无法正确路由到 SQLQuery 或主代理。
+2. **规划阶段可用记忆**：LLM Planner / 自动规划前应获得受控历史上下文，避免省略主语的追问无法正确路由到 数据查询 Skill 或主代理。
 3. **最终回答可用记忆**：`main_agent.respond` 应获得同一份对话记忆上下文，用于生成连贯、可承接前文的回答。
 4. **上下文预算可控**：当历史消息、artifact 摘要或 capability 结果过长时，按分级压缩策略控制进入 LLM 的 token 规模。
 5. **安全与隔离**：记忆仅在当前 account / conversation 授权范围内使用，不跨用户、跨 conversation 泄漏；不把 SQL、guard token、完整 rows、完整 prompt 等敏感或高成本内容注入通用记忆。
@@ -31,7 +31,7 @@
 
 - 不实现跨 conversation 的长期用户画像、长期偏好记忆或知识沉淀。
 - 不引入向量数据库、RAG 召回或跨任务知识库。
-- 不让 SQLQuery 内部 `sql_generate` / `result_filtering` 等专用节点直接消费完整对话记忆；SQLQuery 内部仍以明确问题与 schema context 为主。
+- 不让 数据查询 Skill 内部 `generate_query` / `filter_results` 等专用节点直接消费完整对话记忆；数据查询 Skill 内部仍以明确问题与 schema context 为主。
 - 不把 capability 原始中间产物、SQL、schema DDL、guard pass token、完整数据库 rows 或 provider prompt 记录到 audit。
 - 不改变现有前端历史会话 API 契约；v1 默认是后端内部上下文工程能力。
 
@@ -45,7 +45,7 @@
 
 用户：那它的基因型数据库里有什么？
 
-系统应能从同一 conversation 的历史中识别“它”指代“龙粳33”，并在规划阶段路由到 SQLQuery 基因型相关查询，最终回答时承接上一轮结果。
+系统应能从同一 conversation 的历史中识别“它”指代“龙粳33”，并在规划阶段路由到 数据查询 Skill 基因型相关查询，最终回答时承接上一轮结果。
 
 ### 4.2 纠错与替换
 
@@ -57,7 +57,7 @@
 
 ### 4.3 长会话压缩
 
-同一 conversation 经过多轮 SQLQuery、主代理总结与用户追问后，历史消息与能力结果超过 LLM 上下文预算。系统应先删除 capability 业务中间产物，再对更早对话进行摘要压缩，同时保留最近若干轮原文消息。
+同一 conversation 经过多轮 数据查询 Skill、主代理总结与用户追问后，历史消息与能力结果超过 LLM 上下文预算。系统应先删除 capability 业务中间产物，再对更早对话进行摘要压缩，同时保留最近若干轮原文消息。
 
 ## 5. 范围与注入位置
 
@@ -72,11 +72,11 @@ v1 记忆上下文注入范围为：
    - 用于自然语言回答的承接、消歧与上下文一致性。
    - 与现有上传 artifact context、Skill context、上游 dependency context 合并，但必须保持边界标注。
 
-v1 暂不把完整 conversation memory 直接注入 SQLQuery 内部 LLM 节点。若 SQLQuery 需要上下文补全，不应依赖 LLM Planner 在 `input_payload` 中自由改写 `user_question`；当前 planner payload policy 会 fail-closed，且 public `sql_query.query` 的可信 `user_question` 由系统 payload 填充。
+v1 暂不把完整 conversation memory 直接注入 数据查询 Skill 内部 LLM 阶段。若 数据查询 Skill 需要上下文补全，不应依赖 LLM Planner 在 `input_payload` 中自由改写 `user_question`；当前 planner payload policy 会 fail-closed，且 public `skill.data_lookup` 的可信 `user_question` 由系统 payload 填充。
 
 当前系统由 memory builder / orchestration 层基于 `ConversationMemoryContext` 生成受控的 `resolved_user_message` / effective question，同时保留原始当前用户问题。该补全优先走保守 LLM 结构化判断：LLM 只判断是否需要补全实体、补全哪个实体和证据来源，不能回答问题或选择 capability；只有 `should_resolve=true`、`confidence=high`、补全文本 / 实体 / evidence 均存在且没有阻断风险标记时才采用。若历史中存在多个候选实体，默认选择最近一次被明确提到的业务实体；若最近上下文是多个并列实体且单数指代不清，则不补全。LLM 输出非法、调用失败或未启用时，允许退回到既有确定性规则，且不得阻断任务。
 
-Planner prompt 可读取 memory context 辅助选择 public capability，public capability 的 `user_question` 则应由系统可信字段填充，确保“那它的基因型呢”这类追问在进入 SQLQuery 内部 workflow 前已经被系统补全为明确问题。
+Planner prompt 可读取 memory context 辅助选择 public capability，public capability 的 `user_question` 则应由系统可信字段填充，确保“那它的基因型呢”这类追问在进入 数据查询 Skill 内部 workflow 前已经被系统补全为明确问题。
 
 Conversation memory 默认不得通过 `request.metadata` 原样透传给 Skill 自动脚本。若运行时需要在 metadata 中携带 memory 相关信息，也必须在执行 Skill script 前剥离或替换为脚本专用 allowlist；v1 Skill script 只接收当前轮 query、显式上传 artifact 和既有脚本输入契约，不读取完整 conversation memory。
 
@@ -123,7 +123,7 @@ Conversation memory 必须使用独立的 `ConversationMemorySafeAllowlist`，�
 v1 conversation memory 只记住历史轮次中“用户曾上传过文件及其脱敏摘要 / `upload_id` / 文件名 / preview 等安全 metadata”，不保证跨轮可重新读取原始文件内容。若用户后续追问“继续用刚才那个文件”，系统可基于记忆提示曾有相关上传摘要；只有当上传记录仍在 `InMemoryUploadStore` 中且当前用户 / conversation 校验通过时，才可继续通过显式 upload reference 使用原始内容；若上传已过期或被删除，应要求用户重新上传。完整文件内容不得写入 conversation memory 或摘要快照。
 
 禁止读取或注入：
-- SQLQuery 原始 SQL、guard token、schema DDL、完整 rows、完整 candidate rows；
+- 数据查询 Skill 原始 SQL、guard token、schema DDL、完整 rows、完整 candidate rows；
 - 本地文件路径、`storage_ref` 中的大对象正文、API key、base_url、provider 原始 prompt；
 - 其他 account 或其他 conversation 的消息、任务、artifact。
 
@@ -304,7 +304,7 @@ v1 不新增前端必需 API。现有：
 ### 13.2 集成测试
 
 - API 连续提交多轮消息，第二轮追问正确携带 memory context / `resolved_user_message` 进入 planner fake prompt，并保留原始当前用户问题用于审计和最终回答边界。
-- SQLQuery 后续追问可基于上一轮品种名 / route 生成正确 public workflow；LLM Planner 不能通过 planner payload 覆盖可信 `user_question`。
+- 数据查询 Skill 后续追问可基于上一轮品种名 / route 生成正确 public workflow；LLM Planner 不能通过 planner payload 覆盖可信 `user_question`。
 - LLM Planner 禁用、provider 抛错、非法 JSON、输出 internal capability 四类 fallback 场景下，`AutoWorkflowProvider` 仍使用同一份系统侧 effective question。
 - `main_agent.respond` fake prompt 包含带边界标注的历史摘要和最近消息，但不包含摘要快照存储 metadata、SQL、完整 rows、guard token、base_url 或 API key。
 - Skill 自动脚本测试：即使 runtime metadata 内部携带 memory 相关字段，脚本 payload 也不会收到完整 conversation memory。
@@ -327,7 +327,7 @@ v1 不新增前端必需 API。现有：
 conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
-conda run -n multi_agent python -m unittest discover -s tests/capabilities/sql_query -p 'test_*.py'
+conda run -n multi_agent python -m unittest discover -s skill/<domain-query>/tests -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'

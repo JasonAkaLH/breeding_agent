@@ -2,7 +2,7 @@
 
 本文回答一个具体问题：**后续要加入新的 capability 要怎么做，都要在哪里加入什么？**
 
-当前框架的原则是：新增 capability 必须适配主代理编排标准，而不是让 orchestration 内核反向适配某个具体业务能力。SQLQuery 只是首个宏能力示例；后续 capability 应通过同一套 registry、executor、workflow provider、planner payload allowlist 接入。
+当前框架的原则是：新增 capability 必须适配主代理编排标准，而不是让 orchestration 内核反向适配某个具体业务能力。数据查询 Skill 当前是可移除项目级 `skill.data_lookup` platform-service bundle 示例；后续 capability 应通过同一套 registry、executor、workflow provider、planner payload allowlist 接入。
 
 ---
 
@@ -13,11 +13,11 @@
 | 类型 | 说明 | 例子 | 是否需要 macro provider |
 |---|---|---|---|
 | 单节点 public capability | LLM Planner 可以直接规划该 capability，执行时就是一个节点 | 未来的 `report.generate`、`file.analyze` | 通常不需要 |
-| public macro capability + internal 子工作流 | 对外只暴露一个高层 capability，内部展开成多个固定节点 | 当前 `sql_query.query` 展开为 intent route / schema / generate / guard / execute / result filtering | 需要 |
+| Skill platform-service + domain engine | 对外只暴露 `skill.*` capability，内部由受信任 handler 调用领域链路 | 当前 数据查询 Skill 作为可移除 `skill/<domain-query>/` platform-service Skill bundle 暴露，内部链路与配置归属该 bundle | 需要 |
 
 判断规则：
 - 如果用户只需要一个原子能力，且该能力的输入输出边界清晰，用单节点 public capability。
-- 如果能力内部有安全边界、固定 DAG、多个步骤或不应暴露给 LLM Planner 的实现节点，用 public macro capability。
+- 如果能力内部有安全边界、固定链路、多个步骤或不应暴露给 LLM Planner 的实现节点，优先用 `platform_service` Skill 或受控 workflow provider，只向外暴露一个 public capability。
 - Internal capability 必须 `public=False`，不能让 LLM Planner 直接选择。
 
 ---
@@ -40,18 +40,15 @@ src/capabilities/<capability_name>/
   <node_or_logic>.py   # 具体业务节点，可按能力拆分
 ```
 
-如果是复杂宏能力，可以按 SQLQuery 的方式拆成多个节点文件：
+如果是项目受控服务型能力，优先按 数据查询 Skill 当前形态接成 Skill platform-service：
 
 ```text
-src/capabilities/sql_query/
-  workflow.py
-  executor.py
-  intent_route.py
-  schema_context_prepare.py
-  sql_generate.py
-  sql_guard.py
-  sql_execute_readonly.py
-  result_filtering.py
+skill/<skill-name>/
+  SKILL.md                 # capability_id: skill.<name>, execution.mode: platform_service
+src/<domain_name>/
+  platform_handler.py      # runtime allowlist handler
+  engine.py                # 领域编排
+  <stage_or_logic>.py      # 领域步骤，不作为 public capability 暴露
 ```
 
 ---
@@ -65,7 +62,7 @@ src/capabilities/sql_query/
 3. planner payload allowlist；
 4. workflow provider。
 
-capability 包还必须导出 local execution instance builder。推荐把 builder 放在 `workflow.py`，但不是强制要求；例如当前 SQLQuery 的 `build_local_sql_query_instance()` 放在 `executor.py`，再由 `src/capabilities/sql_query/__init__.py` 统一导出。runtime 装配只依赖 capability 包的导出契约，不依赖 builder 的具体文件位置。
+代码型 capability 包必须导出 local execution instance builder。服务型业务能力（例如 数据查询 Skill）应优先通过 Skill manifest + runtime allowlisted handler 接入。
 
 示例：
 
@@ -273,7 +270,7 @@ instance_registry.register(build_local_report_instance())
 CompositeExecutor(
     [
         MainAgentExecutor(...),
-        SQLQueryExecutor(...),
+        SkillExecutor(...),          # covers service/script Skill capabilities such as skill.data_lookup
         ReportExecutor(...),
     ]
 )
@@ -290,7 +287,7 @@ default_workflow_provider = LLMWorkflowProvider(
     capability_registry=capability_registry,
     fallback_provider=auto_workflow_provider,
     macro_providers={
-        "sql_query.query": sql_query_workflow_provider,
+        "skill.data_lookup": data_query_skill_workflow_provider,
         "report.generate": report_workflow_provider,
     },
     ...
@@ -308,8 +305,8 @@ default_workflow_provider = LLMWorkflowProvider(
 如果新 capability 还要支持调试或兼容用的显式 `capability_id` 调用，需要检查 `src/orchestration/workflow_router.py`：
 
 - 当前 `main_agent` / `main_agent.*` 会路由到 `MainAgentWorkflowProvider`；
-- 当前 `sql_query` / `sql_query.query` 会直接路由到 `SQLQueryWorkflowProvider`；
-- 显式 `sql_query.query` 只运行 SQLQuery 内部六节点，不会自动追加 `main_agent.respond`；
+- 当前 数据查询 Skill 会通过公开 `skill.data_lookup` 路由到 `SkillWorkflowProvider`；
+- 显式 `skill.data_lookup` 会运行 Skill platform-service 节点，并按 `answer_mode=requires_finalizer` 追加 `main_agent.respond`；
 - 如果未来显式调用某个 capability 也必须生成主代理最终回答，应让对应 provider / router 返回含 `main_agent.respond` 的高层 DAG，并补 `tests/orchestration/test_workflow_router.py` 与 API 测试。
 
 ---
@@ -349,17 +346,17 @@ LLM Planner 当前会从 `CapabilityRegistry.list(public_only=True)` 动态读�
 
 - 命中新 capability；
 - 普通问题不误触发；
-- 与 SQLQuery 等既有能力不冲突。
+- 与 数据查询 Skill 等既有能力不冲突。
 
 ---
 
 ## 9. 主代理最终收束与上游结果契约
 
-SQLQuery 接入主代理的标准不是“主代理直接调用 SQLQuery 内部节点”，而是 **public DAG + macro expansion + dependency context**：
+数据查询 Skill 接入主代理的标准不是“主代理直接调用 数据查询 Skill 内部节点”，而是 **public Skill DAG + platform-service execution + dependency context**：
 
-1. 高层 DAG 先选择数据能力，例如 `sql_query.query`；
-2. `WorkflowExpander` 把 public macro 展开成内部固定 workflow；
-3. 下游 `main_agent.respond` 依赖 macro tail，例如 SQLQuery 的 `sql_query.result_filtering`；
+1. 高层 DAG 先选择数据能力，例如 `skill.data_lookup`；
+2. `WorkflowExpander` 根据 Skill manifest 生成 `skill.data_lookup` 执行节点，并按 `answer_mode=requires_finalizer` 追加最终主代理节点；
+3. 下游 `main_agent.respond` 依赖 Skill 执行节点；
 4. `OrchestrationService` 把已完成依赖节点的 `output_payload` 作为 `dependency_outputs` 传给主代理；
 5. `src/capabilities/main_agent/prompt_builder.py` 对 dependency output 做 allowlist 脱敏后注入主代理 prompt。
 
@@ -371,7 +368,7 @@ SQLQuery 接入主代理的标准不是“主代理直接调用 SQLQuery 内部�
 - 不要把原始 SQL、连接信息、guard token、完整大表 rows、完整 prompt、文件路径或 secret 直接放进主代理 dependency context；
 - 如果 capability 已产出前端专用 artifact，仍建议提供一个简短 `summary` 或结构化摘要，避免主代理只能看到 artifact id 而无法回答。
 
-SQLQuery 的验证参考：
+数据查询 Skill 的验证参考：
 
 - `tests/orchestration/test_workflow_expander.py`：macro tail 会重连到下游主代理；
 - `tests/orchestration/test_llm_workflow_provider.py`：Planner 缺主代理时会补 finalizer，主代理未依赖数据能力时会重连；
@@ -385,8 +382,7 @@ SQLQuery 的验证参考：
 
 当前有两层可参考：
 
-- `src/capabilities/main_agent/runtime_replanner.py`：通用主代理 LLM 观察 / 重排 advisor，只读取脱敏后的 node output，并只允许输出 public capability 高层 DAG；
-- `src/capabilities/sql_query/runtime_replanner.py`：SQLQuery capability 自己持有领域规则，识别多子问题拆分，并返回多个 public `sql_query.query` 分支 + `main_agent.respond` 汇总。
+- `src/capabilities/main_agent/runtime_replanner.py`：通用主代理 LLM 观察 / 重排 advisor，只读取脱敏后的 node output，并只允许输出 public capability 高层 DAG；数据查询 Skill 作为可移除 public Skill 参与通用 Skill 重排。
 
 新增 capability 如需专属 runtime replanner，应遵守：
 
@@ -497,7 +493,7 @@ npm run build
 | 能力 | 参考文件 |
 |---|---|
 | 主代理 `main_agent.respond` | `src/capabilities/main_agent/workflow.py`、`src/capabilities/main_agent/executor.py` |
-| SQLQuery public macro `sql_query.query` | `src/capabilities/sql_query/workflow.py`、`src/capabilities/sql_query/executor.py` |
+| 数据查询 Skill `skill.data_lookup` | `skill/<domain-query>/SKILL.md`、`skill/<domain-query>/runtime/`、`skill/<domain-query>/configs/` |
 | Planner payload allowlist 通用实现 | `src/orchestration/planner_payload_policy.py` |
 | Capability registry policy 挂载点 | `src/orchestration/registry.py` |
 | LLM Planner provider | `src/orchestration/llm_workflow_provider.py` |
@@ -505,5 +501,5 @@ npm run build
 | Macro expansion | `src/orchestration/workflow_expander.py` |
 | 显式 capability 路由 | `src/orchestration/workflow_router.py` |
 | 主代理上游结果注入 | `src/capabilities/main_agent/prompt_builder.py` |
-| Runtime replanner 参考 | `src/capabilities/main_agent/runtime_replanner.py`、`src/capabilities/sql_query/runtime_replanner.py` |
+| Runtime replanner 参考 | `src/capabilities/main_agent/runtime_replanner.py` |
 | Runtime 装配 | `src/api/runtime.py` |

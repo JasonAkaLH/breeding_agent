@@ -29,19 +29,19 @@ class WorkflowRouterTest(unittest.TestCase):
         self.assertEqual(plan.nodes[0].metadata["forced_skill_name"], "mini-breedstat-rcbd")
         self.assertEqual(plan.nodes[0].metadata["forced_skill_source"], "explicit_request")
 
-    def test_legacy_sql_query_id_is_not_special_cased_inside_router(self) -> None:
+    def test_unknown_non_skill_id_routes_to_main_agent(self) -> None:
         router = WorkflowRouter(
             default_provider=MainAgentWorkflowProvider(),
             main_agent_provider=MainAgentWorkflowProvider(),
-            skill_provider=SkillWorkflowProvider({"skill.sql_query": "sql-query"}),
+            skill_provider=SkillWorkflowProvider({"skill.generic_data_lookup": "generic-data-lookup"}),
         )
         plan = router.build_plan(
             OrchestrationRequest(
-                task_id="task-legacy-sql",
+                task_id="task-unknown-route",
                 conversation_id="conv-1",
                 root_message_id="msg-1",
                 user_message="查询数据",
-                requested_capability_id="sql_query.query",
+                requested_capability_id="unknown.capability",
             )
         )
         self.assertEqual(plan.metadata["route"], "main_agent")

@@ -612,7 +612,7 @@ cd frontend && npm test -- --run
 - 任务 artifact 列表组件；
 - 下载按钮；
 - 错误态；
-- SQLQuery / Skill 结果卡片统一复用文件附件卡片，不为 Skill 输出文件引入专属 UI。
+- 数据查询 Skill / Skill 结果卡片统一复用文件附件卡片，不为 Skill 输出文件引入专属 UI。
 
 ### Phase C：RCBD Skill 迁移
 

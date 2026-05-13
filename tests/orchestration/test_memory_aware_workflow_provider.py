@@ -18,8 +18,8 @@ class MemoryAwareWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             self.registry.register(descriptor, planner_payload_policy=MAIN_AGENT_PLANNER_PAYLOAD_POLICIES.get(descriptor.capability_id))
         self.registry.register(
             CapabilityDescriptor(
-                capability_id="skill.sql_query",
-                name="sql-query",
+                capability_id="skill.generic_data_lookup",
+                name="generic-data-lookup",
                 description="安全回答数据库类只读查询问题。",
                 kind="skill",
                 source="skill",
@@ -36,7 +36,7 @@ class MemoryAwareWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
 
         async def planner(prompt: str) -> str:
             prompts.append(prompt)
-            return json.dumps({"nodes": [{"node_id": "query", "capability_id": "skill.sql_query"}]})
+            return json.dumps({"nodes": [{"node_id": "query", "capability_id": "skill.generic_data_lookup"}]})
 
         provider = LLMWorkflowProvider(
             capability_registry=self.registry,
@@ -68,7 +68,7 @@ class MemoryAwareWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
     async def test_planner_payload_cannot_override_resolved_question(self) -> None:
         def planner(_prompt: str) -> str:
             return json.dumps(
-                {"nodes": [{"node_id": "query", "capability_id": "skill.sql_query", "input_payload": {"user_question": "恶意替换"}}]}
+                {"nodes": [{"node_id": "query", "capability_id": "skill.generic_data_lookup", "input_payload": {"user_question": "恶意替换"}}]}
             )
 
         provider = LLMWorkflowProvider(

@@ -33,7 +33,6 @@ from src.capabilities.main_agent import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.sql_query.platform_handler import SQLQueryPlatformHandler
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
@@ -837,8 +836,6 @@ class ApiRuntime:
 
     @staticmethod
     def _canonical_capability_id(capability_id: str | None) -> str | None:
-        if capability_id in {"sql_query", "sql_query.query"}:
-            return "skill.sql_query"
         if capability_id == "main_agent":
             return "main_agent.respond"
         return capability_id
@@ -1104,14 +1101,11 @@ def build_api_runtime(
     database_path: str | Path,
     audit_log_path: str | Path,
     mysql_adapter: MySQLReadonlyAdapter | None = None,
-    sql_generator=None,
-    llm_text_generator=None,
-    sql_query_llm_config: Mapping[str, Any] | None = None,
-    sql_query_llm_config_path: str | Path | None = None,
-    sql_query_llm_client_factory: Callable[..., Any] | None = None,
-    sql_query_reasoning_effort: ReasoningEffort | None = None,
-    sql_query_trim_max_tokens: int | None = None,
-    enable_sql_query_llm: bool = True,
+    platform_llm_text_generator=None,
+    platform_llm_config: Mapping[str, Any] | None = None,
+    platform_llm_config_path: str | Path | None = None,
+    platform_llm_client_factory: Callable[..., Any] | None = None,
+    enable_platform_llm: bool = True,
     planner_text_generator: PlannerTextGenerator | None = None,
     planner_llm_config: Mapping[str, Any] | None = None,
     planner_llm_config_path: str | Path | None = None,
@@ -1150,11 +1144,11 @@ def build_api_runtime(
     artifact_store_path: str | Path | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
-        llm_text_generator=llm_text_generator,
-        sql_query_llm_config=sql_query_llm_config,
-        sql_query_llm_config_path=sql_query_llm_config_path,
-        sql_query_llm_client_factory=sql_query_llm_client_factory,
-        enable_sql_query_llm=enable_sql_query_llm,
+        platform_llm_text_generator=platform_llm_text_generator,
+        platform_llm_config=platform_llm_config,
+        platform_llm_config_path=platform_llm_config_path,
+        platform_llm_client_factory=platform_llm_client_factory,
+        enable_platform_llm=enable_platform_llm,
         planner_text_generator=planner_text_generator,
         planner_llm_config=planner_llm_config,
         planner_llm_config_path=planner_llm_config_path,
@@ -1276,38 +1270,27 @@ def build_api_runtime(
         main_agent_llm_runtime=main_agent_llm_runtime,
         main_agent_reasoning_effort=main_agent_reasoning_effort,
     )
-    resolved_sql_query_text_generator = _resolve_sql_query_text_generator(
-        llm_text_generator=llm_text_generator,
+    resolved_platform_text_generator = _resolve_platform_text_generator(
+        platform_llm_text_generator=platform_llm_text_generator,
         main_agent_llm_runtime=main_agent_llm_runtime,
-        enable_sql_query_llm=enable_sql_query_llm,
-    )
-    resolved_sql_query_trim_max_tokens = _resolve_sql_query_trim_max_tokens(
-        sql_query_trim_max_tokens=sql_query_trim_max_tokens,
-        sql_query_llm_config=sql_query_llm_config,
+        platform_llm_config=platform_llm_config,
+        platform_llm_client_factory=platform_llm_client_factory,
+        enable_platform_llm=enable_platform_llm,
     )
     resolved_skill_service_registry = SkillServiceRegistry(
         {
             "mysql_readonly": resolved_mysql_adapter,
-            "llm.sql_query": resolved_sql_query_text_generator,
+            "llm.non_stream": resolved_platform_text_generator,
             "artifact_writer": skill_output_artifact_manager,
             "progress_events": record_live_event,
             **dict(skill_services or {}),
         }
     )
-    default_skill_platform_handlers = {
-        "sql_query.query": SQLQueryPlatformHandler(
-            sql_generator=sql_generator,
-            trim_max_tokens=resolved_sql_query_trim_max_tokens,
-        ),
-    }
-    default_trusted_skill_handlers = {"skill.sql_query": "sql_query.query"}
-    default_trusted_skill_services = {
-        "skill.sql_query": ("mysql_readonly", "llm.sql_query", "artifact_writer", "progress_events"),
-    }
     resolved_skill_platform_handler_registry = SkillPlatformHandlerRegistry(
-        handlers={**default_skill_platform_handlers, **dict(skill_platform_handlers or {})},
-        trusted_skill_handlers={**default_trusted_skill_handlers, **dict(trusted_skill_handlers or {})},
-        trusted_skill_services={**default_trusted_skill_services, **dict(trusted_skill_services or {})},
+        handlers=dict(skill_platform_handlers or {}),
+        trusted_skill_handlers=dict(trusted_skill_handlers or {}),
+        trusted_skill_services=dict(trusted_skill_services or {}),
+        public_skill_roots=tuple(resolved_public_skill_roots),
     )
     resolved_conversation_memory_builder = _resolve_conversation_memory_builder(
         storage=storage,
@@ -1444,11 +1427,11 @@ def build_api_runtime(
 
 def _bootstrap_runtime_config_env(
     *,
-    llm_text_generator,
-    sql_query_llm_config: Mapping[str, Any] | None,
-    sql_query_llm_config_path: str | Path | None,
-    sql_query_llm_client_factory: Callable[..., Any] | None,
-    enable_sql_query_llm: bool,
+    platform_llm_text_generator,
+    platform_llm_config: Mapping[str, Any] | None,
+    platform_llm_config_path: str | Path | None,
+    platform_llm_client_factory: Callable[..., Any] | None,
+    enable_platform_llm: bool,
     planner_text_generator: PlannerTextGenerator | None,
     planner_llm_config: Mapping[str, Any] | None,
     planner_llm_config_path: str | Path | None,
@@ -1464,10 +1447,10 @@ def _bootstrap_runtime_config_env(
     explicit_paths: list[str | Path] = []
     should_bootstrap_default = False
 
-    if sql_query_llm_config is None:
-        if sql_query_llm_config_path is not None:
-            explicit_paths.append(sql_query_llm_config_path)
-        elif enable_sql_query_llm and llm_text_generator is None and sql_query_llm_client_factory is None:
+    if platform_llm_config is None:
+        if platform_llm_config_path is not None:
+            explicit_paths.append(platform_llm_config_path)
+        elif enable_platform_llm and platform_llm_text_generator is None and platform_llm_client_factory is None:
             should_bootstrap_default = True
 
     if planner_llm_config is None:
@@ -1538,19 +1521,28 @@ def _resolve_main_agent_llm_runtime(
     return SharedLLMRuntime(client_factory=factory, config=config, config_source=config_source)
 
 
-def _resolve_sql_query_text_generator(
+def _resolve_platform_text_generator(
     *,
-    llm_text_generator,
+    platform_llm_text_generator,
     main_agent_llm_runtime: SharedLLMRuntime,
-    enable_sql_query_llm: bool,
+    platform_llm_config: Mapping[str, Any] | None,
+    platform_llm_client_factory: Callable[..., Any] | None,
+    enable_platform_llm: bool,
 ):
-    if llm_text_generator is not None:
-        return llm_text_generator
-    if not enable_sql_query_llm:
+    if platform_llm_text_generator is not None:
+        return platform_llm_text_generator
+    if not enable_platform_llm:
         return None
+    runtime = main_agent_llm_runtime
+    if platform_llm_config is not None or platform_llm_client_factory is not None:
+        runtime = SharedLLMRuntime(
+            client_factory=platform_llm_client_factory or LLMClient,
+            config=platform_llm_config,
+            config_source="injected_config" if platform_llm_config is not None else "environment",
+        )
 
     async def generate(prompt: str, **_: Any) -> str:
-        return await main_agent_llm_runtime.generate_text(
+        return await runtime.generate_text(
             prompt,
             thinking=False,
             reasoning_effort="minimal",
@@ -1634,22 +1626,6 @@ def _resolve_conversation_memory_builder(
         summary_generator=generate_summary,
         resolution_generator=resolution_generator or (generate_resolution if enable_resolution_llm else None),
     )
-
-
-def _resolve_sql_query_trim_max_tokens(
-    *,
-    sql_query_trim_max_tokens: int | None,
-    sql_query_llm_config: Mapping[str, Any] | None,
-) -> int | None:
-    if sql_query_trim_max_tokens is not None:
-        return _coerce_nonnegative_int(sql_query_trim_max_tokens)
-
-    raw_value: Any = None
-    if sql_query_llm_config is not None:
-        raw_value = sql_query_llm_config.get("trim_max_tokens")
-    else:
-        raw_value = load_config().get("trim_max_tokens")
-    return _coerce_nonnegative_int(raw_value)
 
 
 def _coerce_nonnegative_int(value: Any) -> int | None:

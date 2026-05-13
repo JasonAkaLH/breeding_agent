@@ -18,7 +18,7 @@ import {
   taskProgressDisplayText,
   type TaskEventState,
 } from './domain/taskEvents';
-import { SqlQueryResultCard } from './components/SqlQueryResultCard';
+import { DataQueryResultCard } from './components/DataQueryResultCard';
 import { MarkdownText } from './components/MarkdownText';
 import './styles.css';
 
@@ -77,10 +77,8 @@ const INTERRUPT_FIELD_LABELS: Record<string, string> = {
   year_range: '年份范围',
 };
 const INTERRUPT_OPTION_LABELS: Record<string, string> = {
-  approval_variety_db: '审定品种库',
   corn: '玉米',
   cotton: '棉花',
-  genotype_db: '基因型数据库',
   rice: '水稻',
   soybean: '大豆',
   wheat: '小麦',
@@ -646,7 +644,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (nextProgressText !== previousProgressText) {
         updateAssistantMessage(assistantId, { activityText: next.assistantText ? undefined : nextProgressText });
       }
-      if (['task.failed', 'node.failed', 'sql_query.sql_guard_blocked'].includes(event.event_type)) {
+      if (['task.failed', 'node.failed'].includes(event.event_type)) {
         subscriptionRef.current?.close();
         taskPresentationModesRef.current.delete(taskId);
       }
@@ -1387,7 +1385,7 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
     && Boolean(message.content.trim());
   return (
     <div className={className}>
-      <div className="message-meta">{message.role === 'user' ? '你' : message.mode === 'sql_query' ? 'SQLQuery' : '主代理'}</div>
+      <div className="message-meta">{message.role === 'user' ? '你' : '主代理'}</div>
       <div className="message-body">
         {shouldShowReasoning ? (
           <ReasoningBox content={message.reasoningContent ?? ''} complete={message.reasoningComplete} />
@@ -1452,8 +1450,8 @@ async function copyTextToClipboard(text: string): Promise<void> {
 }
 
 function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDisplay }) {
-  if (display.kind === 'sql_query') {
-    return <SqlQueryResultCard result={display.result} />;
+  if (display.kind === 'data_query') {
+    return <DataQueryResultCard result={display.result} />;
   }
   if (display.kind === 'file') {
     return <FileArtifactCard result={display.result} />;
@@ -1462,7 +1460,7 @@ function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDispl
 }
 
 function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): string {
-  if (display.kind === 'sql_query') {
+  if (display.kind === 'data_query') {
     return `${display.kind}:${display.result.sourceArtifactIds.join(',')}`;
   }
   if (display.kind === 'file') {

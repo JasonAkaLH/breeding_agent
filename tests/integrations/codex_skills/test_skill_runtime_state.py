@@ -31,7 +31,7 @@ Body.
             state = SkillRuntimeState.from_roots(
                 skill_roots=(root,),
                 public_skill_roots=(root,),
-                reserved_capability_ids=("main_agent.respond", "sql_query.query"),
+                reserved_capability_ids=("main_agent.respond",),
             )
             first_revision = state.active_revision
             state.retain_revision(first_revision)
@@ -55,7 +55,7 @@ Body.
             state = SkillRuntimeState.from_roots(
                 skill_roots=(root,),
                 public_skill_roots=(root,),
-                reserved_capability_ids=("main_agent.respond", "sql_query.query"),
+                reserved_capability_ids=("main_agent.respond",),
             )
             first_revision = state.active_revision
             state.retain_revision(first_revision)
@@ -75,7 +75,7 @@ Body.
             state = SkillRuntimeState.from_roots(
                 skill_roots=(root,),
                 public_skill_roots=(root,),
-                reserved_capability_ids=("main_agent.respond", "sql_query.query"),
+                reserved_capability_ids=("main_agent.respond",),
             )
             first_revision = state.active_revision
 
@@ -97,7 +97,7 @@ Body.
             state = SkillRuntimeState.from_roots(
                 skill_roots=(root,),
                 public_skill_roots=(root,),
-                reserved_capability_ids=("main_agent.respond", "sql_query.query"),
+                reserved_capability_ids=("main_agent.respond",),
             )
             first_revision = state.active_revision
             state.retain_revision(first_revision)

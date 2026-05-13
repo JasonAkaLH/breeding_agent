@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import importlib.util
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from src.core.contracts import CapabilityExecutionError
@@ -30,6 +33,8 @@ class SkillExecutionConfig:
     trust_scope: str = ""
     services: tuple[str, ...] = ()
     handler: str = ""
+    handler_module: str = ""
+    handler_factory: str = "build_handler"
     explicit_answer_mode: bool = False
 
 
@@ -91,6 +96,7 @@ class SkillPlatformHandlerRegistry:
         handlers: Mapping[str, SkillPlatformHandler] | None = None,
         trusted_skill_handlers: Mapping[str, str] | None = None,
         trusted_skill_services: Mapping[str, tuple[str, ...] | list[str] | set[str]] | None = None,
+        public_skill_roots: tuple[str | Path, ...] | list[str | Path] | set[str | Path] = (),
     ) -> None:
         self._handlers = dict(handlers or {})
         self._trusted_skill_handlers = {str(key): str(value) for key, value in dict(trusted_skill_handlers or {}).items()}
@@ -98,15 +104,35 @@ class SkillPlatformHandlerRegistry:
             str(key): tuple(str(item) for item in value)
             for key, value in dict(trusted_skill_services or {}).items()
         }
+        self._public_skill_roots = tuple(_resolve_path(root) for root in public_skill_roots)
+        self._loaded_project_handlers: dict[tuple[str, str, str, int, int], SkillPlatformHandler] = {}
 
-    def resolve(self, *, capability_id: str, config: SkillExecutionConfig, service_registry: SkillServiceRegistry) -> tuple[SkillPlatformHandler, dict[str, Any]]:
+    def resolve(
+        self,
+        *,
+        capability_id: str,
+        manifest: SkillManifest | None = None,
+        config: SkillExecutionConfig,
+        service_registry: SkillServiceRegistry,
+        public_skill_roots: tuple[Path, ...] = (),
+    ) -> tuple[SkillPlatformHandler, dict[str, Any]]:
         expected_handler = self._trusted_skill_handlers.get(capability_id, "")
-        if not expected_handler or expected_handler != config.handler:
+        if expected_handler:
+            if expected_handler != config.handler:
+                raise PermissionError("platform handler is not allowlisted for this skill capability")
+            handler = self._handlers.get(config.handler)
+            if handler is None:
+                raise PermissionError("platform handler is not registered")
+            allowed_services = set(self._trusted_skill_services.get(capability_id, ()))
+        elif manifest is not None and config.trust_scope == "project":
+            handler = self._load_project_handler(
+                manifest=manifest,
+                config=config,
+                public_skill_roots=public_skill_roots,
+            )
+            allowed_services = set(config.services)
+        else:
             raise PermissionError("platform handler is not allowlisted for this skill capability")
-        handler = self._handlers.get(config.handler)
-        if handler is None:
-            raise PermissionError("platform handler is not registered")
-        allowed_services = set(self._trusted_skill_services.get(capability_id, ()))
         requested_services = set(config.services)
         if not requested_services.issubset(allowed_services):
             raise PermissionError("requested services are not allowlisted for this skill capability")
@@ -114,6 +140,76 @@ class SkillPlatformHandlerRegistry:
             return handler, service_registry.bind(tuple(sorted(requested_services)))
         except KeyError as exc:
             raise PermissionError("requested services are not registered in runtime") from exc
+
+    @staticmethod
+    def _bind_services(config: SkillExecutionConfig, service_registry: SkillServiceRegistry) -> dict[str, Any]:
+        try:
+            return service_registry.bind(tuple(sorted(set(config.services))))
+        except KeyError as exc:
+            raise PermissionError("requested services are not registered in runtime") from exc
+
+    def _load_project_handler(
+        self,
+        *,
+        manifest: SkillManifest,
+        config: SkillExecutionConfig,
+        public_skill_roots: tuple[Path, ...],
+    ) -> SkillPlatformHandler:
+        if not self._is_public_project_skill(manifest.source_path, public_skill_roots):
+            raise PermissionError("project platform handler skill is outside public skill roots")
+        module_path = _safe_relative_file(manifest.root_dir, config.handler_module)
+        stat = module_path.stat()
+        key = (config.handler, config.handler_factory, str(module_path.resolve()), stat.st_mtime_ns, stat.st_size)
+        cached = self._loaded_project_handlers.get(key)
+        if cached is not None:
+            return cached
+        module_name = _project_module_name(manifest.root_dir, module_path)
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise PermissionError("platform handler module cannot be loaded")
+        module = importlib.util.module_from_spec(spec)
+        runtime_path = manifest.root_dir / "runtime"
+        sys_path_values = [str(manifest.root_dir), str(runtime_path)]
+        inserted: list[str] = []
+        for sys_path_value in reversed(sys_path_values):
+            if sys_path_value not in sys.path:
+                sys.path.insert(0, sys_path_value)
+                inserted.append(sys_path_value)
+        previous_module = sys.modules.get(module_name)
+        try:
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        finally:
+            if previous_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous_module
+            for sys_path_value in inserted:
+                try:
+                    sys.path.remove(sys_path_value)
+                except ValueError:
+                    pass
+        factory = getattr(module, config.handler_factory, None)
+        if not callable(factory):
+            raise PermissionError("platform handler factory is not callable")
+        handler = _call_handler_factory(factory, manifest)
+        if not callable(handler):
+            raise PermissionError("platform handler factory did not return a callable handler")
+        self._loaded_project_handlers[key] = handler
+        return handler
+
+    def _is_public_project_skill(self, path: Path, public_skill_roots: tuple[Path, ...]) -> bool:
+        roots = tuple(_resolve_path(root) for root in public_skill_roots) or self._public_skill_roots
+        if not roots:
+            return False
+        source = _resolve_path(path)
+        for root in roots:
+            try:
+                source.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
 
 
 class SkillScriptExecutionService:
@@ -202,6 +298,8 @@ def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionCon
         raise SkillExecutionConfigError(f"Unsupported skill execution mode: {mode}")
 
     handler = str(execution.get("handler") or "").strip()
+    handler_module = str(execution.get("handler_module") or "").strip()
+    handler_factory = str(execution.get("handler_factory") or "build_handler").strip()
     trust_scope = str(execution.get("trust_scope") or "").strip().lower()
     services = _string_tuple(execution.get("services"))
 
@@ -218,8 +316,8 @@ def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionCon
     else:
         raise SkillExecutionConfigError("platform_service skills must declare execution.answer_mode explicitly")
 
-    if mode == "platform_service" and not handler:
-        raise SkillExecutionConfigError("platform_service skills must declare execution.handler")
+    if mode == "platform_service" and not handler and not handler_module:
+        raise SkillExecutionConfigError("platform_service skills must declare execution.handler or execution.handler_module")
 
     return SkillExecutionConfig(
         mode=mode,
@@ -227,6 +325,8 @@ def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionCon
         trust_scope=trust_scope,
         services=services,
         handler=handler,
+        handler_module=handler_module,
+        handler_factory=handler_factory,
         explicit_answer_mode=explicit_answer_mode,
     )
 
@@ -301,3 +401,64 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if isinstance(value, list | tuple | set):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return ()
+
+
+def _resolve_path(path: str | Path) -> Path:
+    try:
+        return Path(path).expanduser().resolve()
+    except OSError:
+        return Path(path).expanduser().absolute()
+
+
+def _safe_relative_file(root: Path, relative_path: str) -> Path:
+    raw = Path(relative_path)
+    if not str(relative_path).strip():
+        raise PermissionError("platform handler module is not declared")
+    if raw.is_absolute() or any(part == ".." for part in raw.parts):
+        raise PermissionError("platform handler module must be a relative path inside the skill root")
+    resolved_root = _resolve_path(root)
+    resolved = _resolve_path(resolved_root / raw)
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise PermissionError("platform handler module must stay inside the skill root") from exc
+    if not resolved.is_file():
+        raise PermissionError("platform handler module is missing")
+    if resolved.suffix != ".py":
+        raise PermissionError("platform handler module must be a Python file")
+    return resolved
+
+
+def _project_module_name(root: Path, module_path: Path) -> str:
+    try:
+        relative = module_path.resolve().relative_to((root / "runtime").resolve())
+    except ValueError:
+        try:
+            relative = module_path.resolve().relative_to(root.resolve())
+        except ValueError:
+            return f"_maf_skill_platform_{abs(hash(str(module_path)))}"
+    parts = list(relative.with_suffix("").parts)
+    if not parts:
+        return f"_maf_skill_platform_{abs(hash(str(module_path)))}"
+    return ".".join(parts)
+
+
+def _call_handler_factory(factory: Callable[..., Any], manifest: SkillManifest) -> SkillPlatformHandler:
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return factory()
+    required_parameters = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.default is inspect.Signature.empty
+        and parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+    ]
+    if not required_parameters:
+        return factory()
+    if len(required_parameters) == 1:
+        name = required_parameters[0].name
+        if required_parameters[0].kind is inspect.Parameter.KEYWORD_ONLY:
+            return factory(**{name: manifest})
+        return factory(manifest)
+    raise PermissionError("platform handler factory must accept zero arguments or one manifest argument")
