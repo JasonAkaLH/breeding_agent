@@ -115,6 +115,15 @@ describe('createApiClient', () => {
     expect(fetcher).toHaveBeenLastCalledWith('/api/v1/conversations/conv-1/messages', expect.any(Object));
   });
 
+  it('lists unfinished conversation tasks for the composer stop action', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', tasks: [] }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await api.listConversationTasks('conv-1', 'unfinished');
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/tasks?scope=unfinished', expect.any(Object));
+  });
+
   it('deletes a conversation by conversation id', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       conversation_id: 'conv-1',

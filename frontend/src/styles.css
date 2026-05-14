@@ -874,6 +874,25 @@ body {
   filter: brightness(1.04);
 }
 
+.composer-stop-button {
+  border-color: rgba(201, 74, 74, 0.32) !important;
+  background: rgba(201, 74, 74, 0.12) !important;
+  color: #9f2f2f !important;
+}
+
+.composer-stop-button:not(:disabled):hover,
+.composer-stop-button:not(:disabled):focus-visible {
+  background: rgba(201, 74, 74, 0.18) !important;
+}
+
+.composer-stop-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: currentColor;
+}
+
 .composer-action-button:disabled,
 .composer-send-button:disabled {
   color: rgba(111, 114, 90, 0.42) !important;

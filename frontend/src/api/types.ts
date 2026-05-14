@@ -78,6 +78,11 @@ export interface TaskSummaryResponse {
   updated_at: string | null;
 }
 
+export interface TaskListResponse {
+  conversation_id: string;
+  tasks: TaskSummaryResponse[];
+}
+
 export interface ConversationSummaryResponse {
   conversation_id: string;
   account_id: string;

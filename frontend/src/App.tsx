@@ -703,16 +703,37 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleCancel() {
-    if (!currentTaskId) return;
-    const taskId = currentTaskId;
+    if (!conversationId && !currentTaskId) return;
     const previousPhase = taskState.phase;
-    setTaskState((state) => ({ ...state, phase: 'cancelling', statusText: '取消请求已发送' }));
+    setTaskState((state) => ({
+      ...state,
+      phase: 'cancelling',
+      statusText: '取消请求已发送',
+      currentActivityText: '正在停止当前对话任务',
+    }));
     try {
-      await api.cancelTask(taskId);
+      const taskIds = await collectConversationTaskIdsToCancel();
+      const cancelErrors: unknown[] = [];
+      for (const taskId of taskIds) {
+        try {
+          await api.cancelTask(taskId);
+        } catch (error) {
+          cancelErrors.push(error);
+        }
+      }
+      if (cancelErrors.length > 0) {
+        throw cancelErrors[0];
+      }
       setPendingInterrupt(null);
       setCurrentTaskId(null);
       subscriptionRef.current?.close();
-      setTaskState((state) => ({ ...state, phase: 'cancelled', statusText: '任务已取消', errorMessage: null }));
+      setTaskState((state) => ({
+        ...state,
+        phase: 'cancelled',
+        statusText: taskIds.length > 1 ? '当前对话任务已停止' : '任务已取消',
+        currentActivityText: null,
+        errorMessage: null,
+      }));
     } catch (error) {
       const message = friendlyError(error);
       showTransientNotice(message);
@@ -723,6 +744,24 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         errorMessage: message,
       }));
     }
+  }
+
+  async function collectConversationTaskIdsToCancel(): Promise<string[]> {
+    const orderedIds: string[] = [];
+    const pushTaskId = (taskId: string | null | undefined) => {
+      if (taskId && !orderedIds.includes(taskId)) {
+        orderedIds.push(taskId);
+      }
+    };
+
+    if (conversationId) {
+      const listed = await api.listConversationTasks(conversationId, 'unfinished');
+      for (const task of listed.tasks) {
+        pushTaskId(task.task_id);
+      }
+    }
+    pushTaskId(currentTaskId);
+    return orderedIds;
   }
 
   function updateAssistantMessage(messageId: string, patch: AssistantMessagePatch) {
@@ -965,23 +1004,39 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                         </Button>
                       </span>
                     </Popover>
-                    <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="发送">
-                      <Button
-                        type="primary"
-                        aria-label="发送"
-                        className="composer-send-button composer-image-button"
-                        onClick={handleSubmit}
-                        disabled={!input.trim() || active || uploadingFile}
-                      >
-                        <img
-                          aria-hidden="true"
-                          alt=""
-                          className="composer-button-image"
-                          draggable={false}
-                          src={SEND_BUTTON_IMAGE}
-                        />
-                      </Button>
-                    </span>
+                    {active ? (
+                      <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="停止">
+                        <Button
+                          danger
+                          type="primary"
+                          aria-label="停止"
+                          className="composer-send-button composer-stop-button"
+                          onClick={handleCancel}
+                          loading={taskState.phase === 'cancelling'}
+                          disabled={taskState.phase === 'submitting' && !currentTaskId}
+                        >
+                          <span aria-hidden="true" className="composer-stop-icon" />
+                        </Button>
+                      </span>
+                    ) : (
+                      <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="发送">
+                        <Button
+                          type="primary"
+                          aria-label="发送"
+                          className="composer-send-button composer-image-button"
+                          onClick={handleSubmit}
+                          disabled={!input.trim() || uploadingFile}
+                        >
+                          <img
+                            aria-hidden="true"
+                            alt=""
+                            className="composer-button-image"
+                            draggable={false}
+                            src={SEND_BUTTON_IMAGE}
+                          />
+                        </Button>
+                      </span>
+                    )}
                   </div>
                   <input
                     ref={uploadInputRef}

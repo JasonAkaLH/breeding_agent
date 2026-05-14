@@ -11,6 +11,7 @@ import type {
   DeleteUploadResponse,
   LogoutResponse,
   TaskInterruptsResponse,
+  TaskListResponse,
   MessageAcceptedResponse,
   ReasoningEffort,
   SubmitMessageRequest,
@@ -53,6 +54,7 @@ export interface ApiClient {
   listConversationMessages(conversationId: string): Promise<ConversationMessagesResponse>;
   deleteConversation(conversationId: string): Promise<DeleteConversationResponse>;
   renameConversation(conversationId: string, title: string): Promise<ConversationSummaryResponse>;
+  listConversationTasks(conversationId: string, scope?: 'unfinished' | 'all'): Promise<TaskListResponse>;
   getTask(taskId: string): Promise<TaskSummaryResponse>;
   cancelTask(taskId: string): Promise<CancelTaskResponse>;
   getTaskArtifacts(taskId: string): Promise<TaskArtifactsResponse>;
@@ -179,6 +181,9 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     renameConversation: (conversationId, title) => request<ConversationSummaryResponse>(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}`,
       { method: 'PATCH', body: JSON.stringify({ title }) },
+    ),
+    listConversationTasks: (conversationId, scope = 'unfinished') => request<TaskListResponse>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/tasks?scope=${encodeURIComponent(scope)}`,
     ),
     getTask: (taskId) => request<TaskSummaryResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
     cancelTask: (taskId) => request<CancelTaskResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),

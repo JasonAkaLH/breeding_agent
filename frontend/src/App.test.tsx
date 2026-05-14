@@ -49,6 +49,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       created_at: null,
       updated_at: null,
     })),
+    listConversationTasks: vi.fn(async () => ({ conversation_id: 'conv-test', tasks: [] })),
     listInterrupts: vi.fn(async () => ({ task_id: 'task-1', interrupts: [] })),
     answerInterrupt: vi.fn(async () => ({ interrupt_id: 'interrupt-1', status: 'answered', node_id: 'node-1', answer_payload: {} })),
     getTask: vi.fn(),
@@ -1271,9 +1272,9 @@ describe('App', () => {
     await waitFor(() => expect(api.listInterrupts).toHaveBeenCalled());
     expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('请输入问题')).toBeDisabled();
-    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送' }));
     expect(api.answerInterrupt).not.toHaveBeenCalled();
     expect(api.submitMessage).toHaveBeenCalledTimes(1);
   });
@@ -1294,6 +1295,112 @@ describe('App', () => {
 
     await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
     expect(screen.queryByText('暂无未完成任务')).not.toBeInTheDocument();
+  });
+
+  it('replaces the send button with a stop button while a conversation task is active and cancels all unfinished tasks', async () => {
+    const api = makeApi({
+      listConversationTasks: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        tasks: [
+          {
+            task_id: 'task-1',
+            conversation_id: 'conv-test',
+            status: 'running',
+            root_node_id: 'task-1:main',
+            summary: '第一个任务',
+            requested_capability_id: null,
+            active_node_count: 1,
+            completed_node_count: 0,
+            failed_node_count: 0,
+            cancel_requested: false,
+            created_at: null,
+            updated_at: null,
+          },
+          {
+            task_id: 'task-2',
+            conversation_id: 'conv-test',
+            status: 'accepted',
+            root_node_id: 'task-2:main',
+            summary: '第二个任务',
+            requested_capability_id: null,
+            active_node_count: 0,
+            completed_node_count: 0,
+            failed_node_count: 0,
+            cancel_requested: false,
+            created_at: null,
+            updated_at: null,
+          },
+        ],
+      })),
+      cancelTask: vi.fn(async (taskId) => ({ task_id: taskId, status: 'cancelling', accepted: true })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const stopButton = await screen.findByRole('button', { name: '停止' });
+    expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument();
+    fireEvent.click(stopButton);
+
+    await waitFor(() => expect(api.listConversationTasks).toHaveBeenCalledWith(expect.any(String), 'unfinished'));
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledTimes(2));
+    expect(api.cancelTask).toHaveBeenNthCalledWith(1, 'task-1');
+    expect(api.cancelTask).toHaveBeenNthCalledWith(2, 'task-2');
+  });
+
+  it('continues stopping remaining conversation tasks when one cancel request fails', async () => {
+    const api = makeApi({
+      listConversationTasks: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        tasks: [
+          {
+            task_id: 'task-1',
+            conversation_id: 'conv-test',
+            status: 'running',
+            root_node_id: 'task-1:main',
+            summary: '第一个任务',
+            requested_capability_id: null,
+            active_node_count: 1,
+            completed_node_count: 0,
+            failed_node_count: 0,
+            cancel_requested: false,
+            created_at: null,
+            updated_at: null,
+          },
+          {
+            task_id: 'task-2',
+            conversation_id: 'conv-test',
+            status: 'running',
+            root_node_id: 'task-2:main',
+            summary: '第二个任务',
+            requested_capability_id: null,
+            active_node_count: 1,
+            completed_node_count: 0,
+            failed_node_count: 0,
+            cancel_requested: false,
+            created_at: null,
+            updated_at: null,
+          },
+        ],
+      })),
+      cancelTask: vi.fn(async (taskId) => {
+        if (taskId === 'task-1') {
+          throw new Error('cancel task-1 failed');
+        }
+        return { task_id: taskId, status: 'cancelling', accepted: true };
+      }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledTimes(2));
+    expect(api.cancelTask).toHaveBeenNthCalledWith(1, 'task-1');
+    expect(api.cancelTask).toHaveBeenNthCalledWith(2, 'task-2');
+    expect(await screen.findByText('请求未完成，请稍后重试。')).toBeInTheDocument();
   });
 
 });

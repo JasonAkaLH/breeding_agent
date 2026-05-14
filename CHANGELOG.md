@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+### 2026-05-14 — Composer 发送按钮切换为停止按钮
+
+- 前端发送后在原发送键位置切换为“停止”按钮；任务活跃导致发送不可点击时，用户可直接从同一位置发起停止。
+- 停止操作复用现有 conversation unfinished task 列表与 task cancel API，会取消当前对话下所有未完成任务，并以当前 task id 作为兜底，避免只取消单个前端订阅任务。
+- 补充前端 API client 与 App 回归测试，覆盖 unfinished tasks 拉取、停止按钮替换发送按钮、批量取消当前对话任务。
+
 ### 2026-05-14 — 展示正在执行的 Skill 名称
 
 - 前端任务进度文案从通用 `Skill` 标签改为优先展示后端事件中的 `skill_name`；缺少 `skill_name` 时回退展示 `skill.*` capability id，避免出现“正在执行 Skill：...”但看不出具体 Skill 的情况。
