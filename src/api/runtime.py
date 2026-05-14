@@ -652,6 +652,17 @@ class ApiRuntime:
         )
 
     async def cancel_task(self, task_id: str) -> Task:
+        existing_task = await self.storage.get_task(task_id)
+        if existing_task is not None and self._mcp_runtime_state is not None:
+            for envelope in await self._mcp_runtime_state.cancel_platform_task(task_id):
+                await self._record_event(
+                    self._make_event(
+                        task_id=existing_task.task_id,
+                        conversation_id=existing_task.conversation_id,
+                        event_type=str(envelope.get("event_type") or "mcp.long_task_cancel_requested"),
+                        payload=dict(envelope.get("payload") or {}),
+                    )
+                )
         task = await self.cancellation_service.cancel_task_context(task_id)
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
         return task
@@ -1131,6 +1142,7 @@ def build_api_runtime(
     skill_catalog: SkillCatalog | None = None,
     mcp_config: Mapping[str, Any] | None = None,
     mcp_client_factory: Callable[..., Any] | None = None,
+    mcp_sidecar_client: Any | None = None,
     mcp_runtime_state: MCPRuntimeState | None = None,
     runtime_replanner: RuntimeReplanner | None = None,
     auth_captcha_code_generator: Callable[[], str] | None = None,
@@ -1205,6 +1217,7 @@ def build_api_runtime(
     resolved_mcp_runtime_state = mcp_runtime_state or MCPRuntimeState(
         config=_resolve_mcp_runtime_config(mcp_config),
         client_factory=mcp_client_factory,
+        sidecar_client=mcp_sidecar_client,
         reserved_capability_ids=[descriptor.capability_id for descriptor in capability_registry.list()],
     )
     if resolved_mcp_runtime_state.config.enabled:
@@ -1388,7 +1401,7 @@ def build_api_runtime(
                     platform_handler_registry=resolved_skill_platform_handler_registry,
                     service_registry=resolved_skill_service_registry,
                 ),
-                MCPToolExecutor(runtime_state=resolved_mcp_runtime_state),
+                MCPToolExecutor(runtime_state=resolved_mcp_runtime_state, live_event_recorder=record_live_event),
             ]
         ),
         completion_policy=CompletionPolicy(),

@@ -53,6 +53,16 @@ npm test -- --run
 npm run build
 ```
 
+- Rust MCP sidecar/proto skeleton 当前验证命令：
+
+```bash
+cd native
+cargo fmt --check
+cargo test --workspace --all-features
+cargo check --workspace --all-targets --all-features
+```
+
+
 全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime，会在启动期使用本地 `config.yaml` bootstrap 出环境变量来装配主代理、LLM Planner 与 Skill allowlisted LLM service；需要 UI-only 验证时可加 `--fake-backend`）：
 
 ```bash

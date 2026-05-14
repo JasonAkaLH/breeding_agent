@@ -1,6 +1,14 @@
 from .client import MCPAuthRequiredError, MCPClient, MCPClientError, MCPProtocolError, MCPRemoteError
 from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig
 from .protocol import MCP_PROTOCOL_VERSION, MCPTransportResponse
+from .sidecar import (
+    MCPFeatureUnsupportedError,
+    MCPRustRuntimeSettings,
+    MCPSidecarClient,
+    MCPSidecarCompatibilityError,
+    MCPSidecarMode,
+    MCPSidecarVersionInfo,
+)
 from .runtime_state import (
     MCPRuntimeBundle,
     MCPRuntimeDiagnostic,
@@ -18,6 +26,12 @@ __all__ = [
     "MCPClientError",
     "MCPProtocolError",
     "MCPRemoteError",
+    "MCPFeatureUnsupportedError",
+    "MCPRustRuntimeSettings",
+    "MCPSidecarClient",
+    "MCPSidecarCompatibilityError",
+    "MCPSidecarMode",
+    "MCPSidecarVersionInfo",
     "MCPRuntimeBundle",
     "MCPRuntimeConfig",
     "MCPRuntimeDiagnostic",

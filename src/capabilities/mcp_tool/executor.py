@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from jsonschema import ValidationError, validate
@@ -24,8 +25,9 @@ _URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
 
 
 class MCPToolExecutor(ExecutorPort):
-    def __init__(self, *, runtime_state: MCPRuntimeState) -> None:
+    def __init__(self, *, runtime_state: MCPRuntimeState, live_event_recorder: Callable[[Any], Awaitable[None]] | None = None) -> None:
         self._runtime_state = runtime_state
+        self._live_event_recorder = live_event_recorder
 
     def supports(self, capability_id: str) -> bool:
         try:
@@ -81,6 +83,14 @@ class MCPToolExecutor(ExecutorPort):
         started_at = time.monotonic()
         try:
             result = await self._call_tool(request, binding, arguments)
+        except asyncio.CancelledError:
+            cancel_platform_task = getattr(self._runtime_state, "cancel_platform_task", None)
+            if callable(cancel_platform_task):
+                try:
+                    await cancel_platform_task(request.task_id, reason="platform_cancelled")
+                except Exception:
+                    pass
+            raise
         except Exception as exc:
             error_code, retriable = _map_exception(exc)
             failed_event = make_event(
@@ -201,10 +211,37 @@ class MCPToolExecutor(ExecutorPort):
 
     async def _call_tool(self, request: CapabilityExecutionRequest, binding: MCPToolBinding, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         revision = str(request.metadata.get("mcp_bundle_revision") or "").strip() or None
+        event_callback = self._make_long_task_event_callback(request) if self._live_event_recorder is not None and binding.task_augmented_call else None
+        request_context = {
+            "conversation_id": request.conversation_id,
+            "task_id": request.task_id,
+            "node_id": request.node_id,
+            "capability_id": request.capability_id,
+        }
         try:
-            return await self._runtime_state.call_tool(request.capability_id, arguments, revision=revision)
+            return await self._runtime_state.call_tool(
+                request.capability_id,
+                arguments,
+                revision=revision,
+                event_callback=event_callback,
+                request_context=request_context,
+            )
         except TypeError:
             return await self._runtime_state.call_tool(request.capability_id, arguments)
+
+    def _make_long_task_event_callback(self, request: CapabilityExecutionRequest):
+        async def _record(event_type: str, payload: Mapping[str, Any]) -> None:
+            if self._live_event_recorder is None:
+                return
+            event = make_event(
+                request,
+                event_type=event_type,
+                payload=_sanitize_long_task_event_payload(payload),
+                visibility=EventVisibility.FRONTEND,
+            )
+            await self._live_event_recorder(event)
+
+        return _record
 
     @staticmethod
     def _filter_arguments(payload: Mapping[str, Any], binding: MCPToolBinding) -> dict[str, Any]:
@@ -354,3 +391,37 @@ def _map_exception(exc: Exception) -> tuple[str, bool]:
     if isinstance(exc, MCPClientError):
         return exc.mcp_error_code, exc.retriable
     return "mcp_tool_call_failed", False
+
+_LONG_TASK_ALLOWED_PAYLOAD_FIELDS = frozenset(
+    {
+        "server_id",
+        "tool_name",
+        "capability_id",
+        "safe_ref",
+        "progress",
+        "total",
+        "message",
+        "status",
+        "status_message",
+        "attempt",
+        "duration_ms",
+        "reason",
+        "error_code",
+        "retriable",
+        "output_size_bytes",
+        "truncated",
+    }
+)
+_LONG_TASK_SENSITIVE_FIELD_PATTERN = re.compile(r"(?i)(mcp[_-]?task[_-]?id|session|last[_-]?event|progress[_-]?token|request[_-]?id|arguments|output|authorization|token|secret|endpoint)")
+
+
+def _sanitize_long_task_event_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in dict(payload).items():
+        key_text = str(key)
+        if key_text not in _LONG_TASK_ALLOWED_PAYLOAD_FIELDS:
+            continue
+        if _LONG_TASK_SENSITIVE_FIELD_PATTERN.search(key_text):
+            continue
+        safe[key_text] = _sanitize_external_value(_json_safe_value(value))
+    return safe

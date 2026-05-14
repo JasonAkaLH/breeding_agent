@@ -1,0 +1,11 @@
+{
+  "mcp_spec_version": "2025-11-25",
+  "items": [
+    {"id": "MCP-CONF-001", "phase": 0, "requirement": "JSON-RPC data layer messages are object-only; batch arrays fail closed."},
+    {"id": "MCP-CONF-002", "phase": 0, "requirement": "POST request, notification, and response fixtures exist; notification/response accepts HTTP 202 no body."},
+    {"id": "MCP-CONF-003", "phase": 0, "requirement": "SSE fixtures cover multi-line data, empty priming event, comment, heartbeat, id, retry, malformed and oversized events."},
+    {"id": "MCP-CONF-004", "phase": 0, "requirement": "Session 404 reinitialize and GET/DELETE 405 compatibility paths are fixture-covered."},
+    {"id": "MCP-CONF-005", "phase": 0, "requirement": "Task fixtures cover taskSupport missing as forbidden, related-task metadata, progress token type and monotonicity."},
+    {"id": "MCP-CONF-006", "phase": 0, "requirement": "Frontend event schema contains only safe fields and raw ids/secrets/endpoints are forbidden by redaction snapshots."}
+  ]
+}

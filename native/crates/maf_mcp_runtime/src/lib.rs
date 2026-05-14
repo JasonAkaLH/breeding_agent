@@ -1,0 +1,451 @@
+//! Phase 1 Rust MCP runtime sidecar contract skeleton.
+//!
+//! This crate intentionally exposes only stable health, version, readiness,
+//! feature, and typed-error structures. Full MCP transport, JSON-RPC, tool
+//! execution, task registry, and streaming behavior are reserved for later MCP
+//! phases.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use thiserror::Error;
+
+pub const COMPONENT_ID: &str = "maf_mcp_runtime_sidecar";
+pub const PROTOCOL_VERSION: &str = "maf.mcp.sidecar.v1";
+pub const SCHEMA_HASH: &str = "maf_mcp_v1_phase1_schema_hash_pending_ci";
+pub const ERROR_CODE_TABLE_HASH: &str = "maf_mcp_runtime_error_table_v1_phase1";
+pub const MIN_CLIENT_VERSION: &str = "0.1.0";
+pub const MAX_CLIENT_VERSION: &str = "0.1.x";
+
+pub const FEATURE_HEALTH: &str = "health";
+pub const FEATURE_READINESS: &str = "readiness";
+pub const FEATURE_VERSION: &str = "version";
+pub const FEATURE_COMPATIBILITY_HANDSHAKE: &str = "compatibility_handshake";
+pub const FEATURE_SHORT_CALL: &str = "short_call";
+pub const FEATURE_STREAMABLE_HTTP: &str = "streamable_http";
+pub const FEATURE_SSE_STREAM: &str = "sse_stream";
+pub const FEATURE_SERVER_TO_CLIENT_GET: &str = "server_to_client_get";
+pub const FEATURE_MCP_TASKS: &str = "mcp_tasks";
+pub const FEATURE_TASK_AUGMENTED_TOOLS_CALL: &str = "task_augmented_tools_call";
+pub const FEATURE_REMOTE_CANCEL: &str = "remote_cancel";
+
+pub const SUPPORTED_FEATURES: &[&str] = &[
+    FEATURE_HEALTH,
+    FEATURE_READINESS,
+    FEATURE_VERSION,
+    FEATURE_COMPATIBILITY_HANDSHAKE,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionInfo {
+    pub component: String,
+    pub build_version: String,
+    pub protocol_version: String,
+    pub schema_hash: String,
+    pub error_code_table_hash: String,
+    pub supported_features: Vec<String>,
+    pub min_client_version: String,
+    pub max_client_version: String,
+}
+
+impl VersionInfo {
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            component: COMPONENT_ID.to_owned(),
+            build_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            schema_hash: SCHEMA_HASH.to_owned(),
+            error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
+            supported_features: SUPPORTED_FEATURES
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
+            min_client_version: MIN_CLIENT_VERSION.to_owned(),
+            max_client_version: MAX_CLIENT_VERSION.to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn supports(&self, feature: &str) -> bool {
+        self.supported_features
+            .iter()
+            .any(|supported| supported == feature)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HealthState {
+    Serving,
+    NotServing,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub state: HealthState,
+    pub version: VersionInfo,
+}
+
+#[must_use]
+pub fn health() -> HealthResponse {
+    HealthResponse {
+        state: HealthState::Serving,
+        version: VersionInfo::current(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadinessState {
+    Ready,
+    NotReady,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessResponse {
+    pub state: ReadinessState,
+    pub version: VersionInfo,
+    pub compatibility_handshake_passed: bool,
+    pub error: Option<TypedError>,
+}
+
+#[must_use]
+pub fn readiness(compatibility_handshake_passed: bool) -> ReadinessResponse {
+    let error = (!compatibility_handshake_passed).then(|| {
+        TypedError::new(
+            McpRuntimeErrorCode::CompatibilityHandshakeRequired,
+            "compatibility handshake has not passed",
+        )
+    });
+
+    ReadinessResponse {
+        state: if compatibility_handshake_passed {
+            ReadinessState::Ready
+        } else {
+            ReadinessState::NotReady
+        },
+        version: VersionInfo::current(),
+        compatibility_handshake_passed,
+        error,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompatibilityCheckRequest {
+    pub client_version: String,
+    pub expected_component: String,
+    pub expected_protocol_version: String,
+    pub expected_schema_hash: String,
+    pub expected_error_code_table_hash: String,
+    pub required_features: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompatibilityCheckResponse {
+    pub compatible: bool,
+    pub version: VersionInfo,
+    pub missing_features: Vec<String>,
+    pub error: Option<TypedError>,
+}
+
+#[must_use]
+pub fn check_compatibility(request: &CompatibilityCheckRequest) -> CompatibilityCheckResponse {
+    let version = VersionInfo::current();
+    let missing_features = request
+        .required_features
+        .iter()
+        .filter(|feature| !version.supports(feature))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let incompatible_reason = if request.expected_component != COMPONENT_ID {
+        Some("component mismatch")
+    } else if request.expected_protocol_version != PROTOCOL_VERSION {
+        Some("protocol version mismatch")
+    } else if request.expected_schema_hash != SCHEMA_HASH {
+        Some("schema hash mismatch")
+    } else if request.expected_error_code_table_hash != ERROR_CODE_TABLE_HASH {
+        Some("error code table hash mismatch")
+    } else if !missing_features.is_empty() {
+        Some("required feature is not supported")
+    } else {
+        None
+    };
+
+    CompatibilityCheckResponse {
+        compatible: incompatible_reason.is_none(),
+        version,
+        missing_features,
+        error: incompatible_reason
+            .map(|message| TypedError::new(McpRuntimeErrorCode::ProtocolIncompatible, message)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorCategory {
+    Configuration,
+    Compatibility,
+    Security,
+    ResourceLimit,
+    Protocol,
+    Upstream,
+    Internal,
+    Cancellation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpRuntimeErrorCode {
+    ConfigurationInvalid,
+    ProtocolIncompatible,
+    CompatibilityHandshakeRequired,
+    IdentityMismatch,
+    PublicBindDenied,
+    EndpointNotAllowlisted,
+    QueueFull,
+    PerServerConcurrencyExceeded,
+    DeadlineExceeded,
+    PayloadTooLarge,
+    StreamIdleTimeout,
+    JsonRpcInvalid,
+    SchemaValidationFailed,
+    OutputSanitizationFailed,
+    BundleActivationFailed,
+    RemoteServerError,
+    Cancelled,
+    Internal,
+}
+
+impl McpRuntimeErrorCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfigurationInvalid => "mcp_runtime_configuration_invalid",
+            Self::ProtocolIncompatible => "mcp_runtime_protocol_incompatible",
+            Self::CompatibilityHandshakeRequired => "mcp_runtime_compatibility_handshake_required",
+            Self::IdentityMismatch => "mcp_runtime_identity_mismatch",
+            Self::PublicBindDenied => "mcp_runtime_public_bind_denied",
+            Self::EndpointNotAllowlisted => "mcp_runtime_endpoint_not_allowlisted",
+            Self::QueueFull => "mcp_runtime_queue_full",
+            Self::PerServerConcurrencyExceeded => "mcp_runtime_per_server_concurrency_exceeded",
+            Self::DeadlineExceeded => "mcp_runtime_deadline_exceeded",
+            Self::PayloadTooLarge => "mcp_runtime_payload_too_large",
+            Self::StreamIdleTimeout => "mcp_runtime_stream_idle_timeout",
+            Self::JsonRpcInvalid => "mcp_runtime_json_rpc_invalid",
+            Self::SchemaValidationFailed => "mcp_runtime_schema_validation_failed",
+            Self::OutputSanitizationFailed => "mcp_runtime_output_sanitization_failed",
+            Self::BundleActivationFailed => "mcp_runtime_bundle_activation_failed",
+            Self::RemoteServerError => "mcp_runtime_remote_server_error",
+            Self::Cancelled => "mcp_runtime_cancelled",
+            Self::Internal => "mcp_runtime_internal",
+        }
+    }
+
+    #[must_use]
+    pub const fn category(self) -> ErrorCategory {
+        match self {
+            Self::ConfigurationInvalid => ErrorCategory::Configuration,
+            Self::ProtocolIncompatible | Self::CompatibilityHandshakeRequired => {
+                ErrorCategory::Compatibility
+            }
+            Self::IdentityMismatch | Self::PublicBindDenied | Self::EndpointNotAllowlisted => {
+                ErrorCategory::Security
+            }
+            Self::QueueFull
+            | Self::PerServerConcurrencyExceeded
+            | Self::DeadlineExceeded
+            | Self::PayloadTooLarge
+            | Self::StreamIdleTimeout => ErrorCategory::ResourceLimit,
+            Self::JsonRpcInvalid
+            | Self::SchemaValidationFailed
+            | Self::OutputSanitizationFailed
+            | Self::BundleActivationFailed => ErrorCategory::Protocol,
+            Self::RemoteServerError => ErrorCategory::Upstream,
+            Self::Cancelled => ErrorCategory::Cancellation,
+            Self::Internal => ErrorCategory::Internal,
+        }
+    }
+
+    #[must_use]
+    pub const fn retriable(self) -> bool {
+        matches!(
+            self,
+            Self::QueueFull
+                | Self::PerServerConcurrencyExceeded
+                | Self::DeadlineExceeded
+                | Self::StreamIdleTimeout
+                | Self::RemoteServerError
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedError {
+    pub code: String,
+    pub message: String,
+    pub retriable: bool,
+    pub category: ErrorCategory,
+    pub safe_metadata: BTreeMap<String, String>,
+}
+
+impl TypedError {
+    #[must_use]
+    pub fn new(code: McpRuntimeErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code: code.as_str().to_owned(),
+            message: message.into(),
+            retriable: code.retriable(),
+            category: code.category(),
+            safe_metadata: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_safe_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.safe_metadata.insert(key.into(), value.into());
+        self
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("{typed_error:?}")]
+pub struct McpRuntimeError {
+    pub typed_error: TypedError,
+}
+
+impl From<McpRuntimeErrorCode> for McpRuntimeError {
+    fn from(code: McpRuntimeErrorCode) -> Self {
+        Self {
+            typed_error: TypedError::new(code, code.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalMcpContext {
+    pub external_protocol_version: String,
+    pub server_capabilities: BTreeMap<String, String>,
+    pub tool_execution_task_support: BTreeMap<String, bool>,
+    pub session_id_fingerprint: Option<String>,
+    pub last_event_id_fingerprint: Option<String>,
+    pub progress_token_fingerprint: Option<String>,
+    pub task_safe_ref: Option<String>,
+    pub remote_error_code: Option<String>,
+    pub json_rpc_id_correlation: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matching_request(required_features: Vec<String>) -> CompatibilityCheckRequest {
+        CompatibilityCheckRequest {
+            client_version: MIN_CLIENT_VERSION.to_owned(),
+            expected_component: COMPONENT_ID.to_owned(),
+            expected_protocol_version: PROTOCOL_VERSION.to_owned(),
+            expected_schema_hash: SCHEMA_HASH.to_owned(),
+            expected_error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
+            required_features,
+        }
+    }
+
+    #[test]
+    fn version_contains_required_handshake_fields_and_features() {
+        let version = VersionInfo::current();
+
+        assert_eq!(version.component, COMPONENT_ID);
+        assert_eq!(version.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(version.schema_hash, SCHEMA_HASH);
+        assert_eq!(version.error_code_table_hash, ERROR_CODE_TABLE_HASH);
+        assert_eq!(version.min_client_version, MIN_CLIENT_VERSION);
+        assert_eq!(version.max_client_version, MAX_CLIENT_VERSION);
+
+        for feature in [
+            FEATURE_HEALTH,
+            FEATURE_READINESS,
+            FEATURE_VERSION,
+            FEATURE_COMPATIBILITY_HANDSHAKE,
+        ] {
+            assert!(version.supports(feature), "missing feature {feature}");
+        }
+        assert!(!version.supports(FEATURE_MCP_TASKS));
+        assert!(!version.supports(FEATURE_REMOTE_CANCEL));
+    }
+
+    #[test]
+    fn readiness_is_not_ready_until_compatibility_handshake_passes() {
+        let before = readiness(false);
+        assert_eq!(before.state, ReadinessState::NotReady);
+        assert!(!before.compatibility_handshake_passed);
+        assert_eq!(
+            before.error.as_ref().map(|error| error.code.as_str()),
+            Some("mcp_runtime_compatibility_handshake_required")
+        );
+
+        let after = readiness(true);
+        assert_eq!(after.state, ReadinessState::Ready);
+        assert!(after.compatibility_handshake_passed);
+        assert_eq!(after.error, None);
+    }
+
+    #[test]
+    fn compatibility_check_rejects_protocol_mismatch() {
+        let mut request = matching_request(vec![FEATURE_VERSION.to_owned()]);
+        request.expected_protocol_version = "external-mcp-2025-11-25".to_owned();
+
+        let response = check_compatibility(&request);
+
+        assert!(!response.compatible);
+        assert_eq!(response.missing_features, Vec::<String>::new());
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("mcp_runtime_protocol_incompatible")
+        );
+    }
+
+    #[test]
+    fn compatibility_check_reports_missing_features() {
+        let request = matching_request(vec![FEATURE_MCP_TASKS.to_owned()]);
+        let response = check_compatibility(&request);
+
+        assert!(!response.compatible);
+        assert_eq!(
+            response.missing_features,
+            vec![FEATURE_MCP_TASKS.to_owned()]
+        );
+        assert_eq!(
+            response.error.as_ref().map(|error| error.category),
+            Some(ErrorCategory::Compatibility)
+        );
+    }
+
+    #[test]
+    fn typed_error_codes_are_stable_prefixed_and_categorized() {
+        let error = TypedError::new(McpRuntimeErrorCode::QueueFull, "queue full")
+            .with_safe_metadata("component", COMPONENT_ID);
+
+        assert_eq!(error.code, "mcp_runtime_queue_full");
+        assert!(error.retriable);
+        assert_eq!(error.category, ErrorCategory::ResourceLimit);
+        assert_eq!(
+            error.safe_metadata.get("component").map(String::as_str),
+            Some(COMPONENT_ID)
+        );
+    }
+
+    #[test]
+    fn external_mcp_context_separates_external_protocol_from_sidecar_protocol() {
+        let context = ExternalMcpContext {
+            external_protocol_version: "2025-11-25".to_owned(),
+            server_capabilities: BTreeMap::new(),
+            tool_execution_task_support: BTreeMap::new(),
+            session_id_fingerprint: Some("session-fp".to_owned()),
+            last_event_id_fingerprint: Some("last-event-fp".to_owned()),
+            progress_token_fingerprint: Some("progress-fp".to_owned()),
+            task_safe_ref: Some("task-ref".to_owned()),
+            remote_error_code: Some("remote-error".to_owned()),
+            json_rpc_id_correlation: Some("json-rpc-id-fp".to_owned()),
+        };
+
+        assert_eq!(context.external_protocol_version, "2025-11-25");
+        assert_ne!(context.external_protocol_version, PROTOCOL_VERSION);
+    }
+}

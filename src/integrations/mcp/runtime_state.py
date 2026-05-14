@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -15,9 +16,11 @@ from jsonschema import Draft202012Validator, Draft7Validator, SchemaError
 from src.orchestration.models import CapabilityDescriptor
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 
-from .client import MCPClient
+from .client import MCPClient, MCPClientError
 from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig
 from .protocol import MCP_PROTOCOL_VERSION
+from .sidecar import MCPSidecarMode
+from .tasks import InMemoryMCPTaskRegistry, is_create_task_result, normalize_task_status, validate_related_task_result_metadata
 from .transport_http import StreamableHTTPTransport
 
 MCP_CAPABILITY_KIND = "mcp_tool"
@@ -35,6 +38,11 @@ class MCPToolBinding:
     output_schema: Mapping[str, Any] | None = None
     max_output_bytes: int = 65_536
     risk_level: str = "read_only"
+    task_support: str = "forbidden"
+    task_augmented_mode: str = "disabled"
+    task_augmented_call: bool = False
+    task_ttl_ms: int = 60000
+    task_max_polls: int = 20
 
 
 @dataclass(slots=True, frozen=True)
@@ -75,6 +83,16 @@ class MCPRuntimePendingActivation:
     clients: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True, frozen=True)
+class MCPInflightRequest:
+    platform_task_id: str
+    server_id: str
+    tool_name: str
+    request_id: str | int
+    safe_ref: str
+    client: Any
+
+
 MCPClientFactory = Callable[[MCPServerConfig], Any]
 
 
@@ -86,15 +104,20 @@ class MCPRuntimeState:
         *,
         config: MCPRuntimeConfig | Mapping[str, Any] | None = None,
         client_factory: MCPClientFactory | None = None,
+        sidecar_client: Any | None = None,
+        task_registry: InMemoryMCPTaskRegistry | None = None,
         reserved_capability_ids: tuple[str, ...] | list[str] | set[str] = (),
     ) -> None:
         self._config = config if isinstance(config, MCPRuntimeConfig) else MCPRuntimeConfig.from_mapping(config)
         self._client_factory = client_factory or _default_client_factory(self._config.default_timeout_seconds)
+        self._sidecar_client = sidecar_client
+        self._task_registry = task_registry or InMemoryMCPTaskRegistry()
         self._reserved_capability_ids = tuple(reserved_capability_ids)
         self._revision_counter = 0
         self._retained_counts: dict[str, int] = {}
         self._clients: dict[str, Any] = {}
         self._bundles: dict[str, MCPRuntimeBundle] = {}
+        self._inflight_by_platform_task: dict[str, dict[str, MCPInflightRequest]] = {}
         empty = self._make_bundle(descriptors=(), payload_policies={}, bindings={}, diagnostics=())
         self._active_revision = empty.revision
         self._bundles[empty.revision] = empty
@@ -187,6 +210,15 @@ class MCPRuntimeState:
         discovery_failed = False
         fatal_error_type = ""
 
+        sidecar_gate = await self._check_sidecar_gate(
+            diagnostics=diagnostics,
+            previous=previous,
+            reason=reason,
+            started=started,
+        )
+        if sidecar_gate is not None:
+            return sidecar_gate
+
         try:
             for server in self._config.servers:
                 if not server.enabled:
@@ -213,6 +245,7 @@ class MCPRuntimeState:
                 self._merge_server_tools(
                     server,
                     tool_by_name=tool_by_name,
+                    server_capabilities=_server_capabilities(client),
                     descriptors=descriptors,
                     policies=policies,
                     bindings=bindings,
@@ -265,6 +298,101 @@ class MCPRuntimeState:
         )
         return MCPRuntimePendingActivation(result=result, bundle=bundle, clients=next_clients)
 
+
+    async def _check_sidecar_gate(
+        self,
+        *,
+        diagnostics: list[MCPRuntimeDiagnostic],
+        previous: MCPRuntimeBundle,
+        reason: str,
+        started: float,
+    ) -> MCPRuntimePendingActivation | None:
+        settings = self._config.rust_runtime
+        if settings.mode == MCPSidecarMode.OFF:
+            return None
+
+        config_error = settings.validation_error()
+        if config_error:
+            diagnostics.append(MCPRuntimeDiagnostic(server_id="mcp_sidecar", reason="sidecar_invalid_config", message=config_error))
+            if settings.mode == MCPSidecarMode.ENFORCE:
+                return MCPRuntimePendingActivation(
+                    result=self._refresh_result(
+                        status="failed",
+                        reason=reason,
+                        previous_revision=previous.revision,
+                        active_revision=previous.revision,
+                        started=started,
+                        error_type="MCPSidecarInvalidConfig",
+                    ),
+                    bundle=previous,
+                )
+            return None
+
+        if self._sidecar_client is None:
+            diagnostics.append(
+                MCPRuntimeDiagnostic(
+                    server_id="mcp_sidecar",
+                    reason="sidecar_unavailable",
+                    message="MCP Rust sidecar client is not configured; Python legacy path remains user-visible in shadow mode.",
+                )
+            )
+            if settings.mode == MCPSidecarMode.ENFORCE:
+                return MCPRuntimePendingActivation(
+                    result=self._refresh_result(
+                        status="failed",
+                        reason=reason,
+                        previous_revision=previous.revision,
+                        active_revision=previous.revision,
+                        started=started,
+                        error_type="MCPSidecarUnavailable",
+                    ),
+                    bundle=previous,
+                )
+            return None
+
+        try:
+            await self._sidecar_client.handshake(required_features=settings.required_features)
+        except Exception as exc:
+            diagnostics.append(
+                MCPRuntimeDiagnostic(
+                    server_id="mcp_sidecar",
+                    reason="sidecar_incompatible",
+                    message=type(exc).__name__,
+                )
+            )
+            if settings.mode == MCPSidecarMode.ENFORCE:
+                return MCPRuntimePendingActivation(
+                    result=self._refresh_result(
+                        status="failed",
+                        reason=reason,
+                        previous_revision=previous.revision,
+                        active_revision=previous.revision,
+                        started=started,
+                        error_type=type(exc).__name__,
+                    ),
+                    bundle=previous,
+                )
+        if settings.mode == MCPSidecarMode.ENFORCE and not _sidecar_runtime_operations_available(self._sidecar_client):
+            diagnostics.append(
+                MCPRuntimeDiagnostic(
+                    server_id="mcp_sidecar",
+                    reason="sidecar_runtime_unavailable",
+                    message="MCP Rust sidecar does not expose canonical runtime operations; enforce mode fails closed.",
+                )
+            )
+            return MCPRuntimePendingActivation(
+                result=self._refresh_result(
+                    status="failed",
+                    reason=reason,
+                    previous_revision=previous.revision,
+                    active_revision=previous.revision,
+                    started=started,
+                    error_type="MCPSidecarRuntimeUnavailable",
+                ),
+                bundle=previous,
+            )
+        return None
+
     async def commit_activation(self, pending: MCPRuntimePendingActivation) -> None:
         if pending.result.status != "completed":
             return
@@ -291,6 +419,7 @@ class MCPRuntimeState:
         server: MCPServerConfig,
         *,
         tool_by_name: Mapping[str, Mapping[str, Any]],
+        server_capabilities: Mapping[str, Any],
         descriptors: dict[str, CapabilityDescriptor],
         policies: dict[str, CapabilityPayloadPolicy],
         bindings: dict[str, MCPToolBinding],
@@ -318,6 +447,33 @@ class MCPRuntimeState:
                 diagnostics.append(_diagnostic(server, tool_config, "missing_public_descriptor", "Public MCP capability requires local public_name and public_description.", capability_id))
                 continue
             discovered_tool = tool_by_name[tool_name]
+            task_support = _tool_task_support(discovered_tool)
+            task_decision = _task_augmented_decision(
+                server_capabilities=server_capabilities,
+                task_support=task_support,
+                mode=tool_config.task_augmented_mode,
+            )
+            if task_decision == "fail_closed":
+                diagnostics.append(
+                    _diagnostic(
+                        server,
+                        tool_config,
+                        _task_diagnostic_reason(server_capabilities, task_support, tool_config.task_augmented_mode),
+                        "MCP task augmentation is required but not negotiated for this tool.",
+                        capability_id,
+                    )
+                )
+                continue
+            if task_decision == "plain_call" and tool_config.task_augmented_mode == "preferred":
+                diagnostics.append(
+                    _diagnostic(
+                        server,
+                        tool_config,
+                        "task_augmentation_unavailable",
+                        "MCP task augmentation is preferred but not negotiated; using ordinary tools/call.",
+                        capability_id,
+                    )
+                )
             input_schema = _coerce_schema(tool_config.input_schema or discovered_tool.get("inputSchema") or {"type": "object"})
             output_schema = _coerce_optional_schema(tool_config.output_schema or discovered_tool.get("outputSchema"))
             schema_error = _validate_supported_schema(input_schema)
@@ -343,6 +499,11 @@ class MCPRuntimeState:
                 output_schema=output_schema,
                 max_output_bytes=tool_config.max_output_bytes or server.limits.max_output_bytes,
                 risk_level=tool_config.risk_level,
+                task_support=task_support,
+                task_augmented_mode=tool_config.task_augmented_mode,
+                task_augmented_call=task_decision in {"task_augmented", "task_augmented_preferred"},
+                task_ttl_ms=tool_config.task_ttl_ms,
+                task_max_polls=tool_config.task_max_polls,
             )
             descriptors[capability_id] = CapabilityDescriptor(
                 capability_id=capability_id,
@@ -359,7 +520,7 @@ class MCPRuntimeState:
             bindings[capability_id] = binding
             reserved.add(capability_id)
 
-    async def call_tool(self, capability_id: str, arguments: Mapping[str, Any], revision: str | None = None) -> Mapping[str, Any]:
+    async def call_tool(self, capability_id: str, arguments: Mapping[str, Any], revision: str | None = None, event_callback=None, request_context: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
         binding = self.binding_for_capability(capability_id, revision)
         client = self._clients.get(binding.server_id)
         if client is None:
@@ -370,8 +531,231 @@ class MCPRuntimeState:
             for key, value in dict(arguments).items()
             if key in allowed
         }
-        result = client.call_tool(binding.tool_name, filtered_arguments)
-        return await _maybe_await(result)
+        context = dict(request_context or {})
+        registered_request_ids: list[str | int] = []
+
+        def _register_request(request_id: str | int) -> None:
+            registered_request_ids.append(request_id)
+            self._register_inflight_request(
+                platform_task_id=str(context.get("task_id") or ""),
+                server_id=binding.server_id,
+                tool_name=binding.tool_name,
+                client=client,
+                request_id=request_id,
+            )
+
+        if binding.task_augmented_call:
+            progress_token = self._task_registry.make_progress_token(server_id=binding.server_id, tool_name=binding.tool_name)
+            call_kwargs: dict[str, Any] = {
+                "task_augmented": True,
+                "progress_token": progress_token,
+                "task_ttl_ms": binding.task_ttl_ms,
+            }
+            if _callable_accepts_keyword(getattr(client, "call_tool", None), "request_registered_callback"):
+                call_kwargs["request_registered_callback"] = _register_request
+            try:
+                result = await _maybe_await(
+                    client.call_tool(
+                        binding.tool_name,
+                        filtered_arguments,
+                        **call_kwargs,
+                    )
+                )
+            except asyncio.CancelledError:
+                await self._cancel_registered_inflight_before_reraising(str(context.get("task_id") or ""))
+                raise
+            finally:
+                self._complete_registered_inflight(str(context.get("task_id") or ""), registered_request_ids)
+            if isinstance(result, Mapping) and is_create_task_result(result):
+                return await self._resolve_task_result(client, binding, result, progress_token, event_callback=event_callback, request_context=context)
+            return result
+        call_kwargs: dict[str, Any] = {}
+        if _callable_accepts_keyword(getattr(client, "call_tool", None), "request_registered_callback"):
+            call_kwargs["request_registered_callback"] = _register_request
+        try:
+            result = client.call_tool(binding.tool_name, filtered_arguments, **call_kwargs)
+            return await _maybe_await(result)
+        except asyncio.CancelledError:
+            await self._cancel_registered_inflight_before_reraising(str(context.get("task_id") or ""))
+            raise
+        finally:
+            self._complete_registered_inflight(str(context.get("task_id") or ""), registered_request_ids)
+
+    async def _resolve_task_result(
+        self,
+        client: Any,
+        binding: MCPToolBinding,
+        create_task_result: Mapping[str, Any],
+        progress_token: str | int,
+        event_callback=None,
+        request_context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        raw_task_id = str(create_task_result.get("taskId") or "").strip()
+        record = self._task_registry.create_record(
+            server_id=binding.server_id,
+            tool_name=binding.tool_name,
+            capability_id=binding.capability_id,
+            mcp_task_id=raw_task_id,
+            progress_token=progress_token,
+            status_payload=create_task_result,
+            poll_interval_ms=_positive_int_or_none(create_task_result.get("pollInterval")),
+            platform_task_id=str((request_context or {}).get("task_id") or ""),
+            platform_node_id=str((request_context or {}).get("node_id") or ""),
+            conversation_id=str((request_context or {}).get("conversation_id") or ""),
+        )
+        await _emit_mcp_event(
+            event_callback,
+            "mcp.long_task_started",
+            {
+                "server_id": binding.server_id,
+                "tool_name": binding.tool_name,
+                "capability_id": binding.capability_id,
+                "safe_ref": record.safe_ref,
+            },
+        )
+        record = await self._emit_client_task_notifications(client, record, event_callback)
+        for _ in range(binding.task_max_polls):
+            status_payload = await _maybe_await(client.tasks_get(raw_task_id))
+            record = self._task_registry.update_status(raw_task_id, status_payload)
+            record = await self._emit_client_task_notifications(client, record, event_callback)
+            await _emit_mcp_event(
+                event_callback,
+                "mcp.long_task_status",
+                {"status": record.status, "status_message": record.status_message, "safe_ref": record.safe_ref},
+            )
+            if record.status == "input_required":
+                raise MCPClientError("MCP task input_required is unsupported.", code="mcp_runtime_task_input_required_unsupported", retriable=False)
+            if record.status in {"failed", "cancelled"}:
+                raise MCPClientError(f"MCP task ended with {record.status}.", code=f"mcp_runtime_task_{record.status}", retriable=False)
+            if record.status == "completed":
+                result = await _maybe_await(client.tasks_result(raw_task_id))
+                if isinstance(result, Mapping):
+                    validate_related_task_result_metadata(result, raw_task_id)
+                    self._task_registry.update_status(raw_task_id, {"status": {"state": "completed", "message": record.status_message}})
+                    output_size = len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
+                    await _emit_mcp_event(
+                        event_callback,
+                        "mcp.long_task_completed",
+                        {"safe_ref": record.safe_ref, "duration_ms": 0, "output_size_bytes": output_size, "truncated": False},
+                    )
+                    return result
+                raise MCPClientError("MCP task result is unavailable.", code="mcp_runtime_task_result_unavailable", retriable=True)
+        raise MCPClientError("MCP task result is unavailable.", code="mcp_runtime_task_result_unavailable", retriable=True)
+
+
+    async def cancel_platform_task(self, task_id: str, *, reason: str = "user_requested") -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        inflight = list(self._inflight_by_platform_task.get(task_id, {}).values())
+        for request in inflight:
+            events.append({"event_type": "mcp.long_task_cancel_requested", "payload": {"safe_ref": request.safe_ref, "reason": reason}})
+            try:
+                cancel_request = getattr(request.client, "cancel_request", None)
+                if callable(cancel_request):
+                    await _maybe_await(cancel_request(request.request_id, reason=reason))
+                else:
+                    send_notification = getattr(request.client, "send_notification", None)
+                    if not callable(send_notification):
+                        raise AttributeError("MCP client cannot send cancellation notification.")
+                    await _maybe_await(send_notification("notifications/cancelled", {"requestId": request.request_id, "reason": reason}))
+            except Exception:
+                events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": request.safe_ref, "error_code": "mcp_runtime_request_cancel_failed", "retriable": False}})
+                continue
+            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": request.safe_ref, "status": "cancelled"}})
+        for record in self._task_registry.records_for_platform_task(task_id):
+            if record.status in {"completed", "failed", "cancelled"}:
+                continue
+            events.append({"event_type": "mcp.long_task_cancel_requested", "payload": {"safe_ref": record.safe_ref, "reason": reason}})
+            client = self._clients.get(record.server_id)
+            if client is None:
+                events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": record.safe_ref, "error_code": "mcp_runtime_task_cancel_failed", "retriable": False}})
+                continue
+            try:
+                await _maybe_await(client.tasks_cancel(record.mcp_task_id, reason=reason))
+            except Exception:
+                events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": record.safe_ref, "error_code": "mcp_runtime_task_cancel_failed", "retriable": False}})
+                continue
+            self._task_registry.update_status(record.mcp_task_id, {"status": {"state": "cancelled", "message": reason}})
+            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": record.safe_ref, "status": "cancelled"}})
+        if inflight:
+            self._inflight_by_platform_task.pop(task_id, None)
+        return events
+
+    def _register_inflight_request(
+        self,
+        *,
+        platform_task_id: str,
+        server_id: str,
+        tool_name: str,
+        client: Any,
+        request_id: str | int,
+    ) -> None:
+        if not platform_task_id:
+            return
+        safe_ref = self._task_registry.make_safe_ref(server_id=server_id, tool_name=tool_name)
+        record = MCPInflightRequest(
+            platform_task_id=platform_task_id,
+            server_id=server_id,
+            tool_name=tool_name,
+            request_id=request_id,
+            safe_ref=safe_ref,
+            client=client,
+        )
+        self._inflight_by_platform_task.setdefault(platform_task_id, {})[str(request_id)] = record
+
+    def _complete_registered_inflight(self, platform_task_id: str, request_ids: list[str | int]) -> None:
+        if not platform_task_id or not request_ids:
+            return
+        entries = self._inflight_by_platform_task.get(platform_task_id)
+        if not entries:
+            return
+        for request_id in request_ids:
+            entries.pop(str(request_id), None)
+        if not entries:
+            self._inflight_by_platform_task.pop(platform_task_id, None)
+
+    async def _cancel_registered_inflight_before_reraising(self, platform_task_id: str) -> None:
+        if not platform_task_id:
+            return
+        try:
+            await self.cancel_platform_task(platform_task_id, reason="platform_cancelled")
+        except Exception:
+            return
+
+    async def _emit_client_task_notifications(self, client: Any, record, event_callback) -> Any:
+        notifications = getattr(client, "last_stream_notifications", ())
+        if not notifications:
+            return record
+        current = record
+        for notification in notifications:
+            if not isinstance(notification, Mapping):
+                continue
+            method = str(notification.get("method") or "")
+            params = notification.get("params") if isinstance(notification.get("params"), Mapping) else {}
+            if method == "notifications/progress":
+                if params.get("progressToken") != current.progress_token:
+                    continue
+                progress = params.get("progress")
+                if not isinstance(progress, (int, float)):
+                    continue
+                self._task_registry.record_progress(current.progress_token, progress)
+                payload: dict[str, Any] = {"safe_ref": current.safe_ref, "progress": progress}
+                total = params.get("total")
+                if isinstance(total, (int, float)):
+                    payload["total"] = total
+                message = str(params.get("message") or "").strip()
+                if message:
+                    payload["message"] = message
+                await _emit_mcp_event(event_callback, "mcp.long_task_progress", payload)
+            elif method == "notifications/tasks/status":
+                if str(params.get("taskId") or "") != current.mcp_task_id:
+                    continue
+                current = self._task_registry.update_status(current.mcp_task_id, params)
+                await _emit_mcp_event(
+                    event_callback,
+                    "mcp.long_task_status",
+                    {"safe_ref": current.safe_ref, "status": current.status, "status_message": current.status_message},
+                )
+        return current
 
     async def aclose(self) -> None:
         clients = self._clients
@@ -539,3 +923,80 @@ def _bundle_digest(
         [*(descriptor.capability_id for descriptor in descriptors), *(f"{cap}:{binding.server_id}/{binding.tool_name}" for cap, binding in bindings.items()), *(f"{diag.server_id}:{diag.tool_name}:{diag.reason}" for diag in diagnostics)]
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _server_capabilities(client: Any) -> Mapping[str, Any]:
+    value = getattr(client, "server_capabilities", {})
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _sidecar_runtime_operations_available(client: Any) -> bool:
+    required = ("list_tools", "call_tool", "cancel_platform_task")
+    return all(callable(getattr(client, name, None)) for name in required)
+
+
+def _callable_accepts_keyword(target: Any, keyword: str) -> bool:
+    if not callable(target):
+        return False
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return False
+    return keyword in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _server_supports_task_augmented_tools_call(capabilities: Mapping[str, Any]) -> bool:
+    tasks = capabilities.get("tasks") if isinstance(capabilities.get("tasks"), Mapping) else {}
+    requests = tasks.get("requests") if isinstance(tasks.get("requests"), Mapping) else {}
+    if "tools.call" in requests:
+        return True
+    tools = requests.get("tools") if isinstance(requests.get("tools"), Mapping) else {}
+    return "call" in tools
+
+
+def _tool_task_support(discovered_tool: Mapping[str, Any]) -> str:
+    execution = discovered_tool.get("execution") if isinstance(discovered_tool.get("execution"), Mapping) else {}
+    support = str(execution.get("taskSupport") or "forbidden").strip().lower()
+    return support if support in {"required", "optional", "forbidden"} else "forbidden"
+
+
+def _task_augmented_decision(*, server_capabilities: Mapping[str, Any], task_support: str, mode: str) -> str:
+    normalized_mode = mode if mode in {"required", "preferred", "disabled"} else "disabled"
+    server_support = _server_supports_task_augmented_tools_call(server_capabilities)
+    if not server_support:
+        return "fail_closed" if normalized_mode == "required" else "plain_call"
+    if task_support == "required":
+        return "fail_closed" if normalized_mode == "disabled" else "task_augmented"
+    if task_support == "optional":
+        if normalized_mode == "required":
+            return "task_augmented"
+        if normalized_mode == "preferred":
+            return "task_augmented_preferred"
+        return "plain_call"
+    return "fail_closed" if normalized_mode == "required" else "plain_call"
+
+
+def _task_diagnostic_reason(server_capabilities: Mapping[str, Any], task_support: str, mode: str) -> str:
+    if not _server_supports_task_augmented_tools_call(server_capabilities):
+        return "task_required_unavailable"
+    if task_support == "forbidden":
+        return "task_support_forbidden"
+    if task_support == "required" and mode == "disabled":
+        return "task_required_disabled"
+    return "task_required_unavailable"
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+async def _emit_mcp_event(event_callback, event_type: str, payload: Mapping[str, Any]) -> None:
+    if event_callback is None:
+        return
+    await event_callback(event_type, payload)

@@ -4,7 +4,7 @@
 - **范围**：后端主代理框架
 - **文档状态**：正式版（已补齐至 Rust 化 Runtime 模块评估 PRD；PRD 目录为当前文档基线）
 - **日期**：2026-05-13
-- **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；前端 PRD 后续放在 `docs/prd/frontend/`。
+- **说明**：本文件为后端 PRD 总览入口。后端专题 PRD 统一放在 `docs/prd/backend/`；跨后端与 Rust sidecar 的 MCP 联合实施 Phase PRD 放在 `docs/prd/MCP/`；前端 PRD 放在 `docs/prd/frontend/`。
 
 ## 0. 目录定位
 
@@ -83,7 +83,9 @@
 | Skill 动态加载与热部署 | `docs/prd/backend/13-Skill动态加载与热部署PRD.md` | 新聊天首次任务前动态刷新 Skill runtime bundle，实现公开 Skill 热加载、原子激活与运行中任务保护 |
 | MCP Runtime 实现需求 | `docs/prd/backend/14-MCPRuntime实现需求PRD.md` | 按 MCP latest spec 2025-11-25 设计外部 MCP server / tools 接入、标准通信、capability 包装与安全治理 |
 | Skill Executor 实现需求 | `docs/prd/backend/15-SkillExecutor实现需求PRD.md` | 定义 `skill.*` 一等执行器的职责边界、service binding、安全约束、artifact/event 归一化与 数据查询 Skill 化前置要求 |
-| Rust 化 Runtime 模块评估 | `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` | SQLQuery Skill-only 后，评估 runtime substrate、Skill/MCP、storage/event、artifact 与 deterministic kernel 的 Rust native 下沉边界 |
+| Rust 化 Runtime 模块评估 | `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` | 评估主体 runtime substrate、Skill/MCP、storage/event、artifact 与 deterministic kernel 的 Rust native 下沉边界；不针对单个业务 Skill 做专项优化 |
+| MCP 长任务与流式 SSE | `docs/prd/backend/17-MCP长任务流式SSEPRD.md` | 将 MCP Runtime 从单条 SSE 兼容升级为完整长任务流式 SSE、断线恢复、progress、task status、取消与 API/SSE 事件桥接 |
+| MCP Runtime 联合改造 Phase | `docs/prd/MCP/README.md` | 把 MCP 长任务流式 SSE 与 Rust MCP sidecar 作为同一最终交付目标拆成 Phase PRD |
 
 ## 5. 当前已定的关键决策摘要
 
@@ -178,11 +180,11 @@
 
 ### 5.12 Rust 化 Runtime 决策
 
-- SQLQuery 已归属可移除 `skill/sql-query/` bundle；主体框架 Rust 化不应重新引入 SQLQuery native capability。
-- `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust kernel。
-- 优先 Rust 化确定性、安全敏感、并发敏感和可重放模块：`src/core/` contract、`src/lifecycle/` 状态机、`src/storage/` durable store、Skill runtime trust gate、MCP protocol/runtime、artifact/upload/file safety。
+- 主体框架 Rust 化不应为任何具体业务 Skill 重新引入 native capability、专属 route、专属 executor 或前端协议。
+- `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust sidecar / kernel。
+- 优先 Rust 化确定性、安全敏感、并发敏感和可重放模块：`src/core/` contract、`src/lifecycle/` 状态机、`src/storage/` durable store、通用 Skill runtime trust gate、MCP protocol/runtime、artifact/upload/file safety。
 - LLM provider glue、FastAPI route、DTO、主代理 prompt 产品语义和前端 UI 不应整体 Rust 化；只在 sanitizer、token budget、大 payload 处理等热点处抽小 kernel。
-- SQLQuery 如需 Rust 化，应作为 Skill-owned native runtime 放在 `skill/sql-query/` 内部，并继续只通过 `skill.sql_query` platform-service handler 进入系统。
+- Skill-owned Rust runtime 必须放在各自 Skill bundle 内部，并按 `Codex-Skill构建指南.md` 的 Rust 型 Skill runtime 限制适配框架 contract；框架不反向兼容某个 Skill 的任意 Rust 形态。
 
 ## 6. 当前验收基线与归档证据
 
@@ -224,6 +226,9 @@
 - MCP Runtime 实现需求 PRD：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`
 - Skill Executor 实现需求 PRD：`docs/prd/backend/15-SkillExecutor实现需求PRD.md`
 - Rust 化 Runtime 模块评估 PRD：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`
+- MCP 长任务与流式 SSE PRD：`docs/prd/backend/17-MCP长任务流式SSEPRD.md`
+- Rust 化实施专题拆分入口：`docs/prd/rust/README.md`
+- MCP Runtime 联合改造 Phase PRD：`docs/prd/MCP/README.md`
 
 ## 8. 使用建议
 

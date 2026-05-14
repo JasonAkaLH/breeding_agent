@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .protocol import MCP_PROTOCOL_VERSION, SUPPORTED_MCP_PROTOCOL_VERSIONS
+from .sidecar import MCPRustRuntimeSettings
 
 _SERVER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CAPABILITY_ID_RE = re.compile(r"^mcp\.[a-z0-9_.-]+$")
@@ -102,6 +103,9 @@ class MCPToolConfig:
     input_schema: Mapping[str, Any] | None = None
     output_schema: Mapping[str, Any] | None = None
     max_output_bytes: int | None = None
+    task_augmented_mode: str = "disabled"
+    task_ttl_ms: int = 60000
+    task_max_polls: int = 20
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "MCPToolConfig":
@@ -118,6 +122,9 @@ class MCPToolConfig:
             input_schema=raw.get("input_schema") if isinstance(raw.get("input_schema"), Mapping) else None,
             output_schema=raw.get("output_schema") if isinstance(raw.get("output_schema"), Mapping) else None,
             max_output_bytes=_positive_int_or_none(raw.get("max_output_bytes")),
+            task_augmented_mode=str(raw.get("task_augmented_mode") or "disabled").strip().lower(),
+            task_ttl_ms=_positive_int(raw.get("task_ttl_ms"), 60000),
+            task_max_polls=_positive_int(raw.get("task_max_polls"), 20),
         )
 
     def effective_capability_id(self, server_id: str) -> str:
@@ -207,6 +214,7 @@ class MCPRuntimeConfig:
     enabled: bool = False
     default_timeout_seconds: float = 20
     servers: tuple[MCPServerConfig, ...] = ()
+    rust_runtime: MCPRustRuntimeSettings = field(default_factory=MCPRustRuntimeSettings)
 
     @classmethod
     def disabled(cls) -> "MCPRuntimeConfig":
@@ -225,6 +233,7 @@ class MCPRuntimeConfig:
                 for item in (raw.get("servers") or ())
                 if isinstance(item, Mapping)
             ),
+            rust_runtime=MCPRustRuntimeSettings.from_mapping(raw.get("rust_runtime") if isinstance(raw.get("rust_runtime"), Mapping) else None),
         )
 
     def refreshes_on_conversation_start(self) -> bool:

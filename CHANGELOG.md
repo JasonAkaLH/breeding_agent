@@ -10,6 +10,204 @@
 
 ## [Unreleased]
 
+### 2026-05-14 — 落地 MCP Runtime Phase0-5 联合改造基线
+
+- 新增 MCP PRD Phase0 契约夹具、JSON-RPC / Streamable HTTP / SSE / Tasks / frontend event schema / typed error / sidecar contract artifacts 与 conformance matrix，形成可执行验收基线。
+- 新增 `native/` Rust workspace、`maf_mcp_runtime` sidecar/proto Phase1 骨架、health/readiness/version/compatibility/typed error 结构与 Rust 单元测试；Python 侧新增 MCP Rust sidecar mode、compatibility handshake、feature gate、内部 endpoint 严格 allowlist 与 enforce fail-closed / shadow fallback 逻辑。Phase1 sidecar 只声明已实现的 health/readiness/version/compatibility 能力，完整 MCP runtime RPC 未接入前 enforce 不会回退 Python legacy。
+- 增强 MCP Python runtime：支持多事件 SSE parser、GET stream、Last-Event-ID metadata、session 404 reinitialize、POST notification / response 202 no-body、task-augmented `tools/call`、`tasks/get/result/list/cancel`、taskSupport negotiation、safe ref registry、related-task metadata 校验、long-task live event bridge、API/SSE 持久化事件与 cancel propagation。
+- 新增 shadow/enforce promotion gate 与 side-effecting shadow replay 安全判断；补充 MCP integrations/capability/API/Rust 回归测试并更新 README / AGENTS Rust 验证命令。
+
+### 2026-05-14 — 拆分 MCP Runtime 联合改造 Phase PRD
+
+- 新增 `docs/prd/MCP/` 目录，将 MCP 长任务流式 SSE 与 Rust MCP Runtime sidecar 作为同一最终交付目标拆分为总览、Phase 0 协议契约夹具、Phase 1 sidecar 契约与 Python facade、Phase 2 Streamable HTTP / SSE 内核、Phase 3 Tasks / durable registry、Phase 4 API 事件桥接与取消传播、Phase 5 shadow / enforce / legacy 下线等 PRD。
+- 更新 PRD 总索引、后端总览、MCP 长任务 PRD、Rust MCP sidecar PRD 与 Rust 专题 README，明确 `docs/prd/MCP/` 是两个 MCP Runtime 改造的联合实施入口；Phase 是工程门禁，不是产品降级版本。
+- 按 MCP 2025-11-25 官方规范复审 `docs/prd/MCP/`，补齐 JSON-RPC batch 禁止、POST notification / response 202、GET / DELETE / session 行为、Last-Event-ID 恢复、client capability 声明边界、task related metadata、progress token、cancellation 与 shadow side-effect 安全门禁。
+
+### 2026-05-14 — 新增 MCP 长任务与流式 SSE PRD
+
+- 新增 `docs/prd/backend/17-MCP长任务流式SSEPRD.md`，冻结 MCP Runtime 第 3 档升级目标：完整支持 Streamable HTTP SSE 多事件流、断线恢复、server-to-client notification / request、progress、task status、取消、任务结果获取与 API/SSE 事件桥接。
+- 更新后端 PRD 索引、总览 PRD 与 MCP Runtime PRD，明确现有单条 SSE 兼容不是最终验收，后续长任务实现必须覆盖 `notifications/progress`、`notifications/tasks/status`、`tasks/get`、`tasks/result`、`tasks/cancel`、`notifications/cancelled`、reconnect 与去重。
+- 复审并收口 MCP 长任务流式 SSE PRD，补齐长期交付要求、tool-level `execution.taskSupport` negotiation、durable registry 生产门禁、MCP executor live event bridge、取消传播、前端脱敏事件契约、验收矩阵与显式冻结假设。
+
+### 2026-05-14 — 新增 MCP 服务器开发对接指南
+
+- 新增根目录 `MCP服务器开发对接指南.md`，面向 MCP Server 开发同事说明当前项目支持的 MCP `2025-11-25`、JSON-RPC 2.0、Streamable HTTP 通信格式。
+- 文档补充 `initialize`、`notifications/initialized`、`tools/list`、`tools/call` 请求 / 响应示例、错误格式、HTTP header、鉴权、工具 schema、输出安全边界与联调检查清单。
+
+### 2026-05-14 — 冻结 Rust 最终交付门禁
+
+- 更新 Rust 总览、工具链 PRD、Core/Lifecycle、Dispatcher/Store/Event、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD、Orchestration 条件候选 PRD、总体 Rust 化 PRD 与 `Codex-Skill构建指南.md`，将 Rust 决策清单从 33 项补齐为 38 项，确认剩余事项由实现 PRD / 测试计划承接，不再作为架构开放问题。
+- 冻结 Rust artifact provenance / SBOM / supply-chain：所有 PyO3 wheel、sidecar binary / image、native binary 与 Skill-owned Rust artifact 必须由 CI / 部署流水线预构建，携带 checksum、SBOM、Cargo.lock digest、contract / proto hash 与 provenance；runtime 只加载 allowlist 校验通过的 artifact，请求路径不得编译、下载或替换产物。
+- 冻结 Rust benchmark / SLO、state migration / backup / restore / DR、Python legacy path decommission 与 ops runbook / incident / rollback drill：进入 `enforce` 前必须有性能基线、状态恢复演练、运维告警 / runbook / 演练证据；Rust canonical 稳定后 Python 只保留 facade / client / DTO adapter，重复语义必须下线。
+
+### 2026-05-14 — 冻结 Rust config / secrets / identity 策略
+
+- 更新 Rust 工具链 PRD、Rust 总览、README、Dispatcher/Store/Event、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD、总体 PRD 与 `Codex-Skill构建指南.md`，冻结 Rust sidecar / PyO3 kernel 配置只允许来自部署配置、环境变量、secret manager、只读配置文件或 runtime allowlist；不得来自用户输入、Skill manifest、LLM 输出或外部 tool output。
+- 明确 secret、token、mTLS key、数据库连接串、provider key、session / HMAC key 不得进入 tracked 文件、audit、metrics、structured logs、typed error message 或 `safe_metadata`；只能记录脱敏 secret id、version、fingerprint 或 configured 状态。
+- 冻结身份与轮换策略：跨主机 sidecar 访问必须使用 mTLS 或等价服务身份校验；secret rotation 通过受控 reload 或滚动重启完成；`enforce` 下配置缺失、secret 缺失、identity mismatch、证书过期 / 不受信、client identity 未授权或 reload 失败必须 fail closed。
+
+### 2026-05-14 — 冻结 Rust resource limit / backpressure 策略
+
+- 更新 Rust 工具链 PRD、Rust 总览、README、Dispatcher/Store/Event、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD、总体 PRD 与 `Codex-Skill构建指南.md`，冻结所有 Rust sidecar / kernel 请求必须有 deadline，禁止无界队列、无界 stream、无界 stdout/stderr 与无界 payload。
+- 冻结全局默认生产基线：retry `max_attempts=3`（含 initial attempt）、100ms 起指数退避、最大 1s、±20% jitter；health deadline 1s，readiness / version deadline 2s，shutdown drain 30s，audit / metrics event 单条 64KB，默认 request 1MB、response 4MB，非幂等请求禁止自动重试。
+- 冻结模块级资源限制：Dispatcher / Store / Event 的 max in-flight、queue、写 deadline、event payload、replay page；Skill Sandbox 的并发、per-skill 并发、queue、timeout、stdout/stderr、result、artifact 与 cancel grace；MCP Runtime 的 tool call 并发、deadline、output cap、stream idle timeout；Artifact/Auth/DataAccess/Audit 的 auth、artifact、DB readonly、upload preview 与 archive hard cap。
+
+### 2026-05-14 — 冻结 Rust sidecar network exposure / service discovery 策略
+
+- 更新 Rust 工具链 PRD、Rust 总览、README、Dispatcher/Store/Event、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD 与总体 PRD，冻结 Rust sidecar 不对公网、前端、用户、普通 Skill 或外部系统直连暴露，只允许 Python runtime / 受控内部组件经 Unix domain socket、loopback、同 Pod / 内部网络、私有服务发现或 mTLS 内网访问。
+- 明确 sidecar endpoint 必须来自部署配置、环境变量或 runtime allowlist；不得接受用户输入、Skill manifest、LLM 输出或外部 tool output 指定任意 sidecar 地址、端口、socket path 或 binary path。
+- 冻结安全故障策略：health / readiness / metrics / debug endpoint 只能内部访问；`enforce` 下公网绑定、未授权 client、未配置 mTLS 的跨主机访问、非 allowlist service discovery 或 debug/metrics 外网可达必须 fail closed。
+
+### 2026-05-14 — 冻结 Rust protocol compatibility / rolling upgrade 策略
+
+- 更新 Rust 工具链 PRD、Rust 总览、README、Core/Lifecycle、Dispatcher/Store/Event、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD 与总体 PRD，冻结 Python sidecar client / PyO3 facade 在启动、connect、首次调用、reconnect 和 sidecar version 变化时校验 component、protocol / contract version、schema hash、error code table hash、build version、supported features 与 client version range。
+- 明确 sidecar health / readiness / version response 必须包含 component、build_version、protocol_version、schema_hash、error_code_table_hash、supported_features、min_client_version、max_client_version；readiness 只有在 compatibility handshake 通过后才为 ready。
+- 冻结滚动升级策略：兼容 minor 变更允许滚动升级；breaking change 必须进入 `v2` proto package / contract major version 或显式 dual-stack；`enforce` 下协议 / contract 不兼容必须 fail closed，`shadow` 下可回退 Python legacy path 并写 `rust.protocol_incompatible` audit event。
+
+### 2026-05-14 — 冻结 Rust observability / structured output validation 策略
+
+- 更新 Rust 工具链 PRD、Rust 总览、README、Core/Lifecycle、Dispatcher/Store/Event、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD 与总体 PRD，冻结所有 Rust kernel / sidecar 的 response、typed error、audit event、metrics event、shadow diff、retry event 与 correction event 必须通过 schema / protobuf / contract artifact 校验后才能被 Python、API、audit 或 metrics 消费。
+- 明确结构化输出校验失败必须映射为 typed error，默认按 `contract` 类 fail closed；只有 transient / incomplete transport response、幂等或无副作用操作、retry policy 与脱敏 retry audit 全部满足时，才允许自动重试。
+- 冻结 Rust observability 最低字段与事件类型：Python 必须透传 trace context，Rust structured event 至少覆盖 component、mode、version、duration、error code、retry attempt、input/output fingerprint 与 redaction 状态；禁止记录 raw prompt、完整 rows、secret、真实路径、连接串、base_url 或 raw provider / OS error。
+
+### 2026-05-14 — 冻结 Rust typed error / retry-correction policy
+
+- 更新 Rust 工具链 PRD、Rust 总览、README、Core/Lifecycle、Dispatcher/Store/Event、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD 与总体 PRD，冻结 Rust error code 继续使用 lowercase snake_case string，不改成 dotted code；Rust typed error 必须包含 `code`、`message`、`retriable`、`category`、`safe_metadata`。
+- 冻结自动重试 / 自动修正策略：自动重试只允许在 `retriable=true`、幂等、retry policy 与 retry audit 均满足时执行；自动修正只允许处理系统生成的结构化内容，不得改变用户真实意图或放宽安全规则；权限、auth、service binding、allowlist、MCP sanitizer、artifact path、DB readonly、secret 泄露风险、contract mismatch 与 lifecycle 非法状态转移必须 fail closed。
+- 冻结首批 error code 前缀与 sidecar error：`runtime_store_unavailable`、`dispatcher_unavailable`；Dispatcher / Store / Event `enforce` 写路径失败可对同一个 Rust sidecar 做幂等重试，但重试耗尽后 fail closed，仍不得 fallback 到 Python legacy store。
+
+### 2026-05-14 — 冻结 Python facade 生成策略
+
+- 更新 Core/Lifecycle Rust 专题 PRD、Rust 总览、README 与总体 PRD，冻结 Python facade 采用“生成 contract artifact + 手写薄 facade”的混合策略；Rust 作为 canonical source 生成 / 导出 JSON schema、error code table、enum/value snapshot、transition table snapshot 与 golden fixtures。
+- 明确 Python facade 保持手写薄层，负责现有 import path、dataclass / Pydantic / API DTO 适配、Rust typed error 到现有 Python exception 映射和最小格式转换；禁止承载独立状态机、enum、默认值或 error code 语义，CI 必须校验 facade 与 Rust artifact 一致。
+
+### 2026-05-14 — 冻结 Core / Lifecycle canonical source 策略
+
+- 更新 Core/Lifecycle Rust 专题 PRD、Rust 总览、README 与总体 PRD，冻结 `maf_core_types` 与 `maf_lifecycle` 为唯一 canonical source；Rust 负责 core enums / structs、stable error code、JSON schema / serde contract 以及 task / node / mailbox / interrupt / cancel transition table。
+- 明确 Python `src/core` / `src/lifecycle` 只保留兼容 facade / adapter，不得独立定义与 Rust 冲突的 enum 值、默认值、状态转移规则或 error code 语义；`off` / `shadow` 阶段允许保留 Python legacy，`enforce` 后 Rust 判定为准，稳定后删除重复 Python transition table。
+
+### 2026-05-14 — 冻结 Dispatcher / Store / Event sidecar enforce 故障策略
+
+- 更新 Dispatcher / Store / Event sidecar PRD、Rust 总览、README 与总体 PRD，冻结 sidecar 进入 `enforce` 后 task submit / create、node state transition、event append、lease acquire / renew / release、cancellation token 写入、bundle revision pin / release 等状态写入类操作失败必须 fail closed，不允许自动 fallback 到 Python legacy store。
+- 明确 `enforce` 阶段只允许 health/status、metrics、无副作用 read-only snapshot 等受限只读降级；sidecar unavailable、protocol version 不兼容或写入失败时返回 `runtime_store_unavailable` / `dispatcher_unavailable` 等稳定 typed error，由 API 层暴露为可重试失败。
+
+### 2026-05-14 — 冻结 Rust coverage / fuzz 门禁
+
+- 更新 Rust 工具链 PRD、总览、README、Skill Runtime、MCP Runtime、Artifact/Auth/DataAccess 聚合 PRD 与总体 PRD，冻结 `cargo-llvm-cov` 对所有 Rust crate 必跑并生成 coverage report；普通 Rust crate 最低 line coverage 为 80%，安全敏感 crate 最低 line coverage 为 90%。
+- 冻结 `cargo-fuzz` 对不可信输入边界强制启用，覆盖 Skill manifest / allowlist / sandbox policy、MCP JSON-RPC / schema / output sanitizer、artifact path / archive / filename sanitizer、audit redaction / secret masking、DB readonly policy / row shaping；PR 级别跑 bounded fuzz smoke，nightly / release gate 跑更长 fuzz job，fuzz 可用独立 pinned nightly toolchain，但不得改变生产 stable toolchain。
+
+### 2026-05-14 — 冻结 Rust CI / 发布产物矩阵
+
+- 更新 Rust 工具链 PRD、总览、README 与总体 PRD，冻结任一 Rust 代码进入 `native/` 或 `skill/<skill-name>/native/` 后必须启用 `cargo fmt`、`cargo clippy`、`cargo test`、`cargo nextest`、`cargo audit`、`cargo deny` 必跑门禁。
+- 冻结 PyO3 wheel 使用 `maturin` 构建、sidecar binary 使用 Cargo 构建，生产 sidecar 以 Linux container image / binary 为主；macOS arm64 作为本地开发调试基线、Linux x86_64 作为生产部署基线，Windows 暂不作为必需发布目标，Python 版本跟随 Python 3.13 系列。
+
+### 2026-05-14 — 冻结 Orchestration Rust 化最终归属
+
+- 更新 Rust 总览、工具链 PRD、Orchestration 条件候选 PRD、README 与总体 PRD，冻结 Orchestration deterministic kernel 不进入必做 Rust 化目标集，只保留为条件候选；LLM planner、router glue、provider fallback、prompt 和产品策略继续保留 Python。
+- 明确未来若启动 `maf_orchestration_kernel`，必须另开实施 PRD、提供性能或可靠性证据、只迁移 deterministic DAG / scheduler / payload policy 等可回放规则，并通过 Python baseline shadow compare。
+
+### 2026-05-14 — 冻结 Rust toolchain / edition / MSRV 策略
+
+- 更新 Rust 工具链 PRD、总览、README 与总体 PRD，冻结 `rust-toolchain.toml` 必须固定具体 stable 版本，不使用裸 `stable` channel；Cargo workspace 默认 Rust edition 2024，MSRV 等于 `rust-toolchain.toml` 固定版本，toolchain 升级必须单独 PR、更新 `CHANGELOG.md` 并跑完整 Rust / Python 回归。
+
+### 2026-05-14 — 冻结 Rust dependency 技术栈
+
+- 更新 Rust 工具链 PRD、总览与总体 PRD，冻结 `tokio`、`tonic`、`prost`、`serde`、`serde_json`、`schemars`、`thiserror`、`tracing`、`tracing-subscriber`、`pyo3`、`maturin`、`sqlx`、`uuid`、`time`、`sha2`、`hmac`、`pbkdf2`、`regex`、`jsonschema`、`proptest`、`insta`、`rstest`、`criterion`、`cargo-audit`、`cargo-deny`、`cargo-llvm-cov`、`cargo-nextest` 为 Rust 化长期技术栈；`axum` 仅可选用于本地 health/debug/admin endpoint，`cargo-fuzz` 对不可信输入边界强制启用。
+
+### 2026-05-14 — 冻结 Rust sidecar protobuf 归属与版本策略
+
+- 更新 Rust 工具链 PRD、总览、sidecar 专题 PRD 与总体 PRD，冻结所有生产 sidecar protobuf schema 统一归属 `native/proto/maf/<domain>/v1/`，初始 domain 为 `common`、`runtime`、`skill`、`mcp`；`v1` / `v2` 表示协议 schema 主版本 namespace，breaking change 必须新建 `v2` package，Rust sidecar server 与 Python sidecar client 必须从同一 proto source 生成或校验。
+
+### 2026-05-14 — 冻结 Rust enforce 失败处理策略
+
+- 更新 Rust 工具链 PRD、总览、各专题 PRD 与总体 PRD，冻结 `enforce` 模式下 Rust kernel / sidecar 失败默认 fail closed；仅当对应 PRD 显式声明可 fallback 且 fallback 不放宽安全、权限、数据一致性、路径、secret、外部输入校验或审计约束时，才允许回退 Python legacy path，并必须写 structured audit。
+
+### 2026-05-14 — 冻结 Rust enforce promotion threshold
+
+- 更新 Rust 工具链 PRD、总览、各专题 PRD 与总体 PRD，冻结任一 Rust kernel / sidecar / 子模块从 `shadow` 进入 `enforce` 的全局最低门槛：至少连续 7 天且不少于 1000 次有效 shadow 样本，并满足 contract mismatch rate = 0、panic/crash = 0、P95 latency 不高于 Python legacy 110%、error rate 不高于 legacy、audit/redaction/secret leak 测试 100% 通过、rollback 演练通过以及对应 regression/cargo/clippy/fmt 全部通过。
+
+### 2026-05-14 — 冻结 Rust shadow compare 差异处理策略
+
+- 更新 Rust 工具链 PRD、总览、各专题 PRD 与总体 PRD，冻结 `shadow` 模式下 Python legacy path 始终作为用户可见结果来源；Rust kernel / sidecar 仅旁路对比，差异写入脱敏 structured audit / metrics，不得记录完整 prompt、完整 rows、secret、真实文件路径或敏感 payload，且不得影响用户结果。
+
+### 2026-05-14 — 冻结 Rust sidecar 进程管理方式
+
+- 更新 Rust 工具链 PRD、总览、Dispatcher/Store/Event sidecar、Skill Runtime、MCP Runtime、README 与总体 PRD，冻结 sidecar 进程管理最终方案：生产环境由外部进程管理器 / 容器编排管理，Python runtime 不负责生产 sidecar 生命周期，仅负责 client connect、health/readiness/version check、shutdown drain 协调、protocol compatibility check 与 fallback；dev/test 可提供 launcher。
+
+### 2026-05-14 — 冻结 Rust runtime config 命名规范
+
+- 更新 Rust 工具链 PRD、总览、各专题 PRD 与总体 PRD，冻结所有 Rust kernel / sidecar / 子模块统一使用 `MAF_RUST_<COMPONENT>_MODE=off|shadow|enforce` 命名规则；默认值为 `off`，生产 `enforce` 前必须经过 `shadow`，新增 Rust 模块不得自定义另一套 enable / disable 环境变量。
+
+### 2026-05-14 — 冻结 Audit Sanitizer crate 归属
+
+- 更新 `docs/prd/rust/06-ArtifactUploadAuthDataAccessKernelPRD.md`、Rust 总览、工具链 PRD 与总体 PRD，冻结 Audit / Event sanitizer 的主体 crate 为 `maf_audit_sanitizer`，负责 audit payload sanitizer、event serializer privacy filter、redaction rule 与敏感字段屏蔽；该职责不并入 `maf_core_types`。
+
+### 2026-05-14 — 冻结 Artifact/Auth/DataAccess 聚合 PRD 边界
+
+- 更新 `docs/prd/rust/06-ArtifactUploadAuthDataAccessKernelPRD.md`、Rust 总览、README 与总体 PRD，冻结 Artifact / Upload / File Safety、Auth primitives、DataAccess readonly kernel、Audit / Event sanitizer 继续由一个聚合 PRD 承载；四个子模块可分别实现、分别 feature flag、分别验收，但共享同一安全验收基线。
+
+### 2026-05-14 — 冻结 Skill Runtime Rust 最终方案
+
+- 更新 `docs/prd/rust/04-SkillRuntime与SkillOwnedRust接入PRD.md`、Rust 总览、工具链 PRD 与总体 PRD，冻结通用 Skill Runtime 最终方案为 Rust policy kernel + Rust Skill Sandbox sidecar 双层架构。
+- 明确 `maf_skill_runtime` 通过 PyO3 提供 manifest / fingerprint / trust gate / allowlist / `x_runtime.rust` contract 校验，不可信或进程型执行边界进入 Rust Skill Sandbox sidecar / isolated process manager；Skill-owned Rust runtime 仍由 Skill 在 `skill/<skill-name>/native/` 内按指南适配框架。
+
+### 2026-05-14 — 冻结 MCP Runtime 独立 sidecar 接入方式
+
+- 将 MCP Runtime Rust 专题重命名为 `docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md`，冻结 MCP Runtime Rust 化最终接入方式为独立 Rust sidecar；Python 仅保留 sidecar client、runtime config、capability descriptor 与 executor wrapper。
+- 同步 Rust 总览与总体 PRD，明确 Python ↔ MCP sidecar 生产协议沿用 gRPC / tonic + protobuf，HTTP JSON 不得作为生产 sidecar 协议。
+
+### 2026-05-14 — 冻结 PostgreSQL 延期策略
+
+- 更新 `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md`、`docs/prd/rust/00-Rust化总览与拆分索引PRD.md` 与 Rust 总体 PRD，冻结 Dispatcher / Store / Event sidecar 本专题最终交付边界为 SQLite adapter 与 PostgreSQL-compatible contract；PostgreSQL production adapter 不进入该专题，继续作为独立 PRD / 独立升级项推进。
+
+### 2026-05-14 — 冻结 Rust workspace 与首批 crate 命名
+
+- 更新 `docs/prd/rust/01-Rust工具链构建发布与质量门禁PRD.md`、`docs/prd/rust/00-Rust化总览与拆分索引PRD.md` 与 Rust 总体 PRD，冻结主体 Rust workspace 为 `native/`、Skill-owned Rust runtime 目录为 `skill/<skill-name>/native/`，并冻结首批主体 crate 名称；`maf_orchestration_kernel` 仅作为条件候选 crate 名保留，不进入必做 Rust 化目标集创建。
+
+### 2026-05-14 — 冻结 Core/Lifecycle Rust 接入方式
+
+- 更新 `docs/prd/rust/02-Core与LifecycleKernelPRD.md`、`docs/prd/rust/00-Rust化总览与拆分索引PRD.md` 与 Rust 总体 PRD，冻结 Core types 与 Lifecycle transition table 的 Rust 接入方式为 PyO3 extension；Python 保留 facade 和 feature flag fallback，不以 sidecar service 或 subprocess native binary 作为主路径。
+
+### 2026-05-14 — 冻结 Rust sidecar 正式协议
+
+- 更新 `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md`、`docs/prd/rust/01-Rust工具链构建发布与质量门禁PRD.md` 与 Rust 总体 PRD，冻结 Dispatcher / Store / Event sidecar 的正式生产协议为 gRPC / tonic + protobuf；HTTP JSON 仅允许本地开发或极早期 spike，不得作为生产协议。
+
+### 2026-05-14 — 冻结 Rust 化实施波次顺序
+
+- 更新 `docs/prd/rust/00-Rust化总览与拆分索引PRD.md` 与 `docs/prd/rust/README.md`，冻结 Rust 化实施顺序为 Wave 0 工具链 → Wave 1 Core/Lifecycle → Wave 2 Dispatcher/Store/Event sidecar → Wave 3 Skill/MCP Runtime → Wave 4 Artifact/Auth/DataAccess 与非 orchestration 热点优化；Orchestration deterministic kernel 归属为条件候选，不进入必做 Rust 化目标集。
+
+### 2026-05-14 — 拆分 Rust 化实施专题 PRD
+
+- 新增 `docs/prd/rust/` 专题目录，将 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 拆分为 Rust 化总览、工具链质量门禁、Core/Lifecycle kernel、Dispatcher/Store/Event sidecar、Skill Runtime 与 Skill-owned Rust、MCP Runtime、Artifact/Auth/DataAccess、Orchestration 条件候选热点优化等实施 PRD。
+- 更新 Rust 化总体 PRD、后端总览 PRD 与 PRD 目录索引，明确 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 仍是总决策基线，`docs/prd/rust/` 负责后续实现专题评审与验收。
+
+### 2026-05-14 — 复审 Rust 化 Runtime PRD 决策基线
+
+- 复审 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，补齐通用 Skill Runtime 与 Skill-owned Rust runtime 的术语边界、`x_runtime.rust` / allowlist / 禁止 runtime cargo build 的功能需求，以及后续实现待决项不阻塞当前决策基线的说明。
+- 同步 `docs/prd/backend/00-主代理框架PRD.md` 的 Rust 化 Runtime 专题索引与关键决策摘要，移除该 Rust 决策摘要中针对单一业务 Skill 的旧表述。
+
+### 2026-05-14 — 泛化 Skill Rust runtime 接入规范
+
+- 更新 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，移除针对单一业务 Skill 的 Rust runtime 表述，改为 generic Skill-owned Rust runtime 接入边界：Skill 必须适配框架 contract，框架不为具体 Skill 增加专属 Rust runtime 分支、API route、前端协议或 capability kind。
+- 更新 `Codex-Skill构建指南.md`，新增 Rust 型 Skill runtime 接入限制，明确只接受 `skill/<skill-name>/native/` 下的 shared Rust core + PyO3 wheel / native binary / sidecar adapter 受控形态；禁止运行时编译 Rust、下载依赖、执行任意 native binary 或让普通 Skill 自行启动服务。
+
+### 2026-05-14 — 冻结 Skill-owned Rust runtime 多适配器策略
+
+- 更新 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，冻结 Skill-owned Rust runtime 采用 shared Rust core + PyO3 wheel / native binary / sidecar service 多适配器并存策略；不同 adapter 按场景选择，但必须共享同一 core crate 与 contract tests，禁止复制业务逻辑。
+
+### 2026-05-14 — 延期 PostgreSQL 正式化与 Rust sidecar 合并推进
+
+- 更新 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，将 PostgreSQL 正式化标记为后续升级项：Rust runtime sidecar 设计预留 production adapter、schema ownership 与 migration policy，但不在当前决策中强行合并落地。
+
+### 2026-05-14 — 冻结 Rust dispatcher/store sidecar 决策
+
+- 更新 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，冻结 dispatcher / store / event log 的目标集成方式为 Rust sidecar service，PyO3 仅用于纯规则、小校验器或 Python compatibility facade。
+- 明确本项目按长期交付级 Agent 系统建设，Rust 化目标架构必须考虑生产级完整技术栈，包括 typed protocol、health check、可观测性、灰度开关、版本兼容、CI 构建与故障回退。
+
+### 2026-05-14 — 冻结 Rust native workspace 目录边界
+
+- 更新 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，冻结主体框架 Rust native workspace 使用 `native/`，Skill 自有 Rust runtime 使用 `skill/<skill-name>/native/`；当前仅冻结目录边界，不立即创建 native 目录。
+
 ### 2026-05-13 — 新增 Rust 化 Runtime 模块评估 PRD
 
 - 新增 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md`，在 SQLQuery 已归属 `skill/sql-query/` bundle 的前提下，重新评估后端 runtime substrate、Skill/MCP runtime、storage/event、artifact/file、安全与 deterministic kernel 的 Rust native 下沉边界。

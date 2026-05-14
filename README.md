@@ -18,7 +18,8 @@
 | `src/lifecycle/` | task / node / mailbox / interrupt / cancel / conversation guard 生命周期规则。 |
 | `src/orchestration/` | capability registry、scheduler、workflow plan、主代理 LLM 高层规划、router、validator、expander、运行时受控重编排与编排服务。 |
 | `src/capabilities/main_agent/` | `main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。 |
-| `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
+| `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、MCP Python facade、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
+| `native/` | Rust workspace；当前包含 MCP Runtime sidecar/proto Phase1 骨架，生产 Rust sidecar 后续仍按 PRD phase 门禁推进。 |
 | `skill/<domain-query>/` | 可移除 数据查询 Skill bundle，包含 manifest、领域 runtime、配置与 Skill 专属测试；移除该目录后系统只保留 generic Skill loader。 |
 | `scripts/` | 显式手工 smoke / 维护脚本，包含主代理真实 LLM smoke 与全栈开发启动脚本。 |
 | `tests/` | 后端分层 unittest 回归，包括 core、storage、lifecycle、orchestration、integrations、capabilities、api、e2e、observability。 |
@@ -56,6 +57,16 @@ cd frontend
 npm test -- --run
 npm run build
 ```
+
+- Rust MCP sidecar/proto skeleton 当前验证命令：
+
+```bash
+cd native
+cargo fmt --check
+cargo test --workspace --all-features
+cargo check --workspace --all-targets --all-features
+```
+
 
 - 全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime）：
 

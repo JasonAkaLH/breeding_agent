@@ -1,0 +1,55 @@
+# Rust 化专题 PRD 目录
+
+- **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`
+- **目录状态**：实施专题拆分入口
+- **更新时间**：2026-05-14
+
+本目录把后端 Rust 化 Runtime 模块评估 PRD 拆成可独立评审、实施和验收的专题 PRD。`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 仍是总决策基线；本目录文档负责把该基线拆成后续工程落地单元。
+
+## 拆分原则
+
+1. 以长期交付级 Agent 系统为目标，不按临时 PoC 标准设计 Rust 边界。
+2. 主体框架只 Rust 化 deterministic、并发敏感、安全敏感、可重放、可类型约束的 runtime substrate。
+3. `ApiRuntime`、FastAPI routes、DTO、LLM provider glue、prompt 产品语义和 UI 不整体迁移。
+4. dispatcher / store / event log 的长期目标形态是 Rust sidecar service。
+5. Skill-owned Rust runtime 必须由 Skill 适配框架 contract；框架不为具体 Skill 提供专属 runtime 分支。
+6. 本目录只落 PRD，不创建 `native/`、Cargo workspace 或 Rust 代码。
+7. 生产 sidecar 由外部进程管理器 / 容器编排管理；Python runtime 不负责生产 sidecar 生命周期。
+8. Rust toolchain 固定具体 stable 版本，不使用裸 `stable` channel；Cargo workspace 默认 edition 2024。
+9. Orchestration Rust 化最终归属为条件候选，不属于必做 Rust 化目标集；未来如需启动必须另开实施 PRD 并提供性能或可靠性证据。
+10. Rust CI / 发布产物矩阵已冻结：fmt、clippy、test、nextest、audit、deny 必跑；PyO3 wheel 走 `maturin`，sidecar binary 走 Cargo；macOS arm64 用于本地开发，Linux x86_64 作为生产部署基线，Windows 非必需目标。
+11. Coverage / fuzz 门禁已冻结：所有 Rust crate 跑 `cargo-llvm-cov`；普通 crate line coverage ≥80%，安全敏感 crate ≥90%；不可信输入边界强制启用 `cargo-fuzz`。
+12. Dispatcher / Store / Event sidecar `enforce` 后，状态写入类操作失败必须 fail closed，不允许自动 fallback 到 Python legacy store。
+13. Core / Lifecycle canonical source 策略已冻结：`maf_core_types` / `maf_lifecycle` 是唯一来源，Python 只保留兼容 facade / adapter。
+14. Python facade 生成策略已冻结：Rust 生成 contract artifact，Python 保持手写薄 facade，CI 校验一致。
+15. Rust typed error / retry-correction policy 已冻结：error code 用 lowercase snake_case，自动重试受 `retriable` + 幂等 + retry policy 约束，自动修正只处理系统生成结构化内容。
+16. Rust observability / structured output validation 已冻结：response、audit、metrics、shadow diff、retry/correction event 必须先 schema 校验，出错后按 typed error + retry / fail-closed 策略处理。
+17. Rust protocol compatibility / rolling upgrade 已冻结：Python client / PyO3 facade 必须校验 version、schema hash、error table hash 与 feature flags；breaking change 走 v2 / contract major version 或 dual-stack。
+18. Rust sidecar network exposure 已冻结：sidecar 仅内部可访问，不向公网、前端、用户、普通 Skill 或外部系统直连暴露；endpoint 必须来自部署配置 / runtime allowlist。
+19. Rust resource limit / backpressure 已冻结：所有请求必须有 deadline，禁止无界队列 / stream / stdout-stderr / payload；模块必须声明并测试并发、队列、payload、retry、cancel、shutdown drain 和 overload typed error。
+20. Rust config / secrets / identity 已冻结：配置只来自部署配置 / 环境变量 / secret manager / 只读配置 / runtime allowlist；secret 不进 tracked 文件、日志、audit、metrics、error；跨主机 sidecar 必须 mTLS 或等价身份校验。
+21. Rust build artifact provenance / SBOM / supply-chain 已冻结：所有 Rust 产物由 CI / 部署流水线预构建，必须有 checksum、SBOM、Cargo.lock digest 与 provenance；runtime 只加载 allowlist 产物，请求路径不得编译或下载。
+22. Rust benchmark / performance regression / SLO 已冻结：每个 Rust 模块必须有 Python baseline、Rust baseline、FFI / sidecar overhead 与 P50/P95/P99、CPU、memory、throughput 指标；性能回归阻断发布。
+23. Rust state migration / backup / restore / DR 已冻结：任何 Rust-owned 持久状态或 schema 变更必须有 migration lock、preflight、dry-run、备份、恢复、replay 校验与 rollback / roll-forward runbook。
+24. Python legacy path decommission 已冻结：最终交付版不得长期保留重复 Python 语义；Rust canonical 稳定后 Python 只保留 facade / client / DTO adapter，旧状态机 / 写路径 / 安全策略必须下线。
+25. Rust ops runbook / incident / rollback drill 已冻结：进入 `enforce` 前必须具备 dashboard、alert、SLO、诊断、drain / restart / rollback / restore 操作手册和演练证据。
+
+## PRD 索引
+
+| 编号 | 文档 | 范围 | 状态 |
+|---|---|---|---|
+| 00 | `00-Rust化总览与拆分索引PRD.md` | 总体拆分、实施波次、跨专题验收 | 实施波次已冻结 |
+| 01 | `01-Rust工具链构建发布与质量门禁PRD.md` | rustup / Cargo / PyO3 / sidecar 构建、CI、质量门禁 | 待实现 |
+| 02 | `02-Core与LifecycleKernelPRD.md` | `src/core/` contract 与 `src/lifecycle/` 状态机 Rust kernel | canonical source 已冻结 |
+| 03 | `03-DispatcherStoreEventSidecarPRD.md` | dispatcher / durable store / event log Rust sidecar | 待实现 |
+| 04 | `04-SkillRuntime与SkillOwnedRust接入PRD.md` | Rust policy kernel + Skill Sandbox sidecar + Skill-owned Rust 接入规范 | 最终方案已冻结 |
+| 05 | `05-MCPRuntimeRustSidecarPRD.md` | MCP protocol/runtime 独立 Rust sidecar | 接入方式已冻结 |
+| 06 | `06-ArtifactUploadAuthDataAccessKernelPRD.md` | artifact/upload/file safety、auth primitives、readonly DB access、audit/event sanitizer 聚合 PRD | 聚合边界已冻结 |
+| 07 | `07-OrchestrationDeterministicKernel与热点优化PRD.md` | orchestration deterministic kernel 与热点小 kernel；条件候选专题 | 非必做目标集 |
+
+## 使用规则
+
+- 做 Rust 总体决策时，先读 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 与本目录 `00`。
+- 做 MCP Runtime Rust sidecar 实现时，先读 `docs/prd/MCP/README.md`；MCP 长任务流式 SSE 与 Rust sidecar 必须按联合 Phase PRD 协同实现。
+- 做具体 Rust 实现前，必须先把对应专题 PRD 从“待实现”细化为可开发测试计划。
+- 引入任何 Rust 工具、依赖、构建脚本或 `native/` 目录时，必须同步更新 `README.md`、`AGENTS.md`、`CHANGELOG.md` 与本目录相关 PRD。

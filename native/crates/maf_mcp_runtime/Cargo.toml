@@ -1,0 +1,18 @@
+[package]
+name = "maf_mcp_runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "maf-mcp-runtime-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

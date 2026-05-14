@@ -1,7 +1,7 @@
 # MCP Runtime 实现需求 PRD
 
 - **范围**：后端 / MCP client runtime / capability 接入 / 外部工具治理
-- **文档状态**：Phase 1 已实现（2026-05-12），Phase 2+ 待扩展
+- **文档状态**：Phase 1 已实现（2026-05-12）；长任务 / 完整流式 SSE 扩展见 `docs/prd/backend/17-MCP长任务流式SSEPRD.md`
 - **日期**：2026-05-12
 - **协议参考版本**：Model Context Protocol latest spec 2025-11-25 官方规范
 

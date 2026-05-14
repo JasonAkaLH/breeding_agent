@@ -1,9 +1,9 @@
 # Codex Skill 构建指南（适配本系统）
 
-- **适用对象**：使用 Oh-my-codex / Codex 的 `skill-creator` 创建 Skill，并希望这些 Skill 能被本项目后端 `main_agent.respond` 使用的开发者。
+- **适用对象**：使用 Oh-my-codex / Codex 的 `skill-creator` 创建 Skill，并希望这些 Skill 能被本项目后端 `main_agent.respond` / `SkillExecutor` 使用的开发者。
 - **适配范围**：本系统的 Codex Skill 兼容层，而不是完整 Codex 本地 runtime。
 - **当前实现入口**：`src/integrations/codex_skills/`、`src/capabilities/main_agent/`、`src/capabilities/skill_tool/`、`src/api/runtime.py`。
-- **更新时间**：2026-05-13
+- **更新时间**：2026-05-14
 
 ## 1. 一句话结论
 
@@ -13,7 +13,9 @@
 2. **`python_subprocess` Skill**：受控执行 manifest 声明的 Python 脚本，并把 JSON 输出注入主代理。
 3. **`platform_service` Skill**：仅限项目信任 Skill，通过 runtime 预注册 / allowlist 的 handler 绑定受控服务。
 
-但本系统**不是完整 Codex runtime**：不会自动读取 Skill 的 `references/`，不会执行 Markdown 代码块，不支持 shell 脚本 / plugin runtime，也不会给脚本继承完整本机环境变量或 secret。
+Rust 不是第四种 execution mode；Rust 只能作为 Skill-owned runtime 的内部实现，放在 `skill/<skill-name>/native/`，并通过本指南允许的 PyO3 wheel、native binary 或 sidecar adapter 接回 `platform_service` / 受控 handler contract。
+
+但本系统**不是完整 Codex runtime**：不会自动读取 Skill 的 `references/`，不会执行 Markdown 代码块，不支持 shell 脚本 / plugin runtime，不会在运行时 `cargo build` / 下载 Rust 依赖 / 执行任意 native binary，也不会给脚本继承完整本机环境变量或 secret。
 
 ## 2. Skill 放在哪里
 
@@ -33,11 +35,15 @@ skill/my-skill/
   SKILL.md
   scripts/
     optional_auto_run.py
+  native/                # 可选；仅项目级 trusted Rust Skill 使用
+    Cargo.toml
+    crates/
 ```
 
 说明：
 - `SKILL.md` 是唯一必需文件。
 - `scripts/` 可选，仅当需要确定性处理或结构化预处理时使用。
+- `native/` 可选，仅允许项目级 trusted Skill 放置 Rust source / adapter；普通用户级 Skill 不得要求后端自动编译或执行 Rust。
 - `references/`、`assets/` 可以作为 Codex 人工构建过程的辅助资源，但本系统后端不会自动加载它们给 LLM。
 
 ## 3. 兼容字段
@@ -69,7 +75,7 @@ triggers:
 | `name` | 必填 | 解析必需；也参与匹配打分。 |
 | `description` | 强烈建议 | 参与匹配打分；应写清楚“什么时候使用”。 |
 | `triggers` | 强烈建议 | 按子串命中，分数最高；中文 Skill 必须尽量列出自然触发表达。 |
-| `capability_id` | 公开 Skill 必填 | 公开到 capability pool 的稳定 ID；项目 Skill 使用 `skill.*`，例如 `skill.data_lookup`。 |
+| `capability_id` | 公开 Skill 必填 | 公开到 capability pool 的稳定 ID；项目 Skill 使用 `skill.*`，例如 `skill.report_writer`。 |
 | `inputs` | 可选 | 会被解析；顶层 `inputs.required` 当前不阻塞主代理执行，主要作为契约说明。 |
 | `outputs` | 脚本 / 服务 Skill 建议 | 顶层 `outputs.required` 会用于校验脚本 JSON 输出，也可作为 platform-service 输出契约说明。 |
 | `parameters` / `input_parameters` | 脚本 / 服务 Skill 建议 | 声明执行前需要解析的业务参数；系统先做确定性解析，仍缺少文本型标量参数时才让 LLM 生成候选 JSON，最终只有通过系统校验的值会作为入参注入。 |
@@ -79,6 +85,7 @@ triggers:
 | `execution.answer_mode` | 执行型 Skill 建议 | 支持 `direct`、`requires_finalizer`、`none`；platform-service 必须显式声明。 |
 | `execution.services` | platform-service 可选 | 仅能列出该 Skill allowlist 允许的服务名；普通脚本不能绑定服务。 |
 | `execution.trust_scope` | platform-service 建议 | 标记信任边界；当前项目内服务型 Skill 使用 `project`。 |
+| `x_runtime.rust` | Rust Skill 可选 | 仅作为约定 metadata；不会触发自动编译或自动执行，必须由 platform handler / runtime allowlist 显式支持。 |
 | 其他顶层字段 | 可选 | 会进入 manifest metadata；除非 runtime 显式支持，否则不产生执行能力。 |
 
 ## 4. 匹配规则怎么写才有效
@@ -148,36 +155,140 @@ triggers:
 约束：
 
 - service-bound Skill 必须使用 `execution.mode: platform_service`。
-- `python_subprocess` 不能绑定 MySQL、内部 LLM、secret、完整环境变量或任意平台服务。
+- `python_subprocess` 不能绑定受控 DB、内部 LLM、secret、完整环境变量或任意平台服务。
 - `execution.handler` 是稳定 handler key；`trust_scope: project` 的公开项目 Skill 可额外声明相对 `handler_module`，系统只在 public skill root 内受控加载该文件。
 - `execution.services` 只能请求该 Skill allowlist 内的服务；缺失或越权时 fail closed。
 - 需要主代理汇总结构化结果时，使用 `answer_mode: requires_finalizer`。
 
-数据查询 Skill 是当前 canonical platform-service Skill：
+项目级服务型 Skill 示例：
 
 ```yaml
-name: data-lookup
-capability_id: skill.data_lookup
-description: 通过项目级 Skill platform-service 安全回答数据库类只读查询问题
+name: report-service
+capability_id: skill.report_service
+description: 通过项目级 platform-service 生成结构化报告草稿和受控 artifact
 execution:
   mode: platform_service
   trust_scope: project
-  handler: skill.<name>.platform_handler
-  handler_module: runtime/data_query_skill/platform_handler.py
+  handler: skill.report_service.platform_handler
+  handler_module: runtime/report_service/platform_handler.py
   handler_factory: build_handler
   answer_mode: requires_finalizer
   services:
-    - mysql_readonly
     - llm.non_stream
     - artifact_writer
     - progress_events
 ```
 
-数据查询 Skill 仅以 `skill.data_lookup` 公开；planner/public capability、测试入口与 handler key 均应使用当前 Skill contract。
+服务型 Skill 仅以 `skill.*` capability 公开；planner/public capability、测试入口与 handler key 均应使用当前 Skill contract。框架不会为某个 Skill 额外增加 API route、capability kind、前端协议或 orchestration 特判。
 
-## 7. 脚本型 Skill
 
-### 7.1 支持范围
+## 7. Rust 型 Skill runtime 接入限制
+
+Rust 只能作为 Skill-owned runtime 的内部实现，不能成为新的公开 capability 类型，也不能绕过 `platform_service` / service allowlist / artifact-event-audit contract。
+
+核心原则：**Skill 来兼容框架，不是框架兼容 Skill。**框架定义可接受的 Rust 形态、目录、构建、运行和审计边界；Skill 作者必须按这些边界构建 Skill。若 Skill 需要框架新增专属 route、专属 executor、专属前端协议或专属 secret 注入，则该 Skill 不符合接入要求。
+
+### 7.1 目录与所有权
+
+项目级 Rust Skill 使用固定目录：
+
+```text
+skill/<skill-name>/
+  SKILL.md
+  runtime/
+    <skill_python_adapter>/
+      platform_handler.py
+  native/
+    Cargo.toml
+    crates/
+      <skill_name>_core/
+      <skill_name>_pyo3/       # 可选 adapter
+      <skill_name>_cli/        # 可选 adapter
+      <skill_name>_sidecar/    # 可选 adapter
+```
+
+约束：
+
+- `native/` 只属于该 Skill bundle；移除 Skill 时必须能整体移除 native source、build artifact、sidecar config 与 capability 注册。
+- 业务规则必须集中在 shared Rust core crate；PyO3 / CLI / sidecar adapter 只能做协议转换，不得复制业务逻辑。
+- 普通用户级 Skill 不允许携带需要后端编译、安装或执行的 Rust runtime。
+
+### 7.2 可接受 Rust 形态
+
+| 形态 | 允许场景 | 接入方式 | 必须满足 |
+|---|---|---|---|
+| PyO3 wheel | 低延迟库型 pure kernel、进程内校验 / 转换 | Python platform handler import 已构建 wheel/module | wheel 由 CI/部署预构建；禁止 runtime `cargo build`；panic 必须映射为 Python 错误 |
+| native binary | 一次性离线执行、受控 subprocess、CLI 调试 | platform handler 调用固定 allowlist binary，使用 JSON stdin/stdout 或 typed protocol | binary 路径固定在 Skill bundle/build artifact；有 timeout、size limit、退出码映射和审计 |
+| sidecar service | 长连接池、高并发、强隔离、资源限额、崩溃隔离 | runtime 注册 service endpoint/client，platform handler 只通过 allowlist service 调用 | health/readiness、版本协议、shutdown、tracing/metrics、端口/config 由平台管理；仅内部可访问 |
+
+禁止形态：
+
+- 在 Skill 执行时运行 `cargo build`、`cargo run`、`rustc` 或下载 crates。
+- 让 `python_subprocess` 直接执行任意 Rust binary。
+- 让普通 Skill 自行开放端口、启动常驻进程或读取 secret。
+- 让 Skill sidecar 对公网、前端、用户、普通 Skill 或外部系统直接暴露。
+- 通过 `SKILL.md`、用户输入、LLM 输出或外部 tool output 指定任意 sidecar 地址、端口、socket path 或 service name。
+- 通过 `SKILL.md` 声明任意本地路径、绝对路径 binary、动态库路径或外部下载 URL。
+- 要求框架为该 Skill 新增专属 executor、专属 route、专属 capability id 规则或前端组件。
+
+Skill-owned sidecar 如被 runtime allowlist 接纳，只能通过 Unix domain socket、loopback、同 Pod / 内部网络、私有服务发现或 mTLS 内网访问；endpoint 必须来自部署配置 / runtime allowlist。跨主机访问必须由平台提供 mTLS 或等价服务身份校验，且 health / readiness / metrics / debug endpoint 也不得对公网开放。
+
+Skill-owned sidecar 还必须接受框架 resource limit 基线：max concurrent executions 默认 4、上限 `min(8, cpu)`；per-skill concurrent 为 2；queue size 为 64；queue wait 上限 10s；默认执行 timeout 60s；hard timeout 300s；stdout / stderr 各 1MB；单次 structured result 4MB；输出 artifact 默认上限 32MB，超出必须走 artifact policy；cancel grace 为 5s 后清理进程树。Skill 不得通过 manifest 或 adapter 请求无界队列、无界 stream、无界输出或无 deadline 执行。
+
+Skill-owned Rust adapter 不得在 `SKILL.md`、`x_runtime.rust`、脚本参数、LLM 输出或外部 tool output 中携带 secret value、token、mTLS key、数据库连接串、provider key、session / HMAC key、sidecar endpoint 或任意本地路径。需要 secret 的项目级 Skill 必须通过 runtime allowlist / platform service 获取受控服务；Skill 只能声明非敏感 metadata、contract_version、package / adapter 名称或 secret reference id，不能声明 secret value。secret rotation 由部署系统和 runtime 控制，Skill 不能自行 reload secret 或读取 secret 文件。
+
+Rust Skill 产物供应链规则冻结：PyO3 wheel、native binary、sidecar image / binary 必须由 CI 或部署流水线预构建，具备 artifact id、version、checksum、SBOM、Cargo.lock digest、contract_version、bundle revision 与 provenance 记录；runtime 只能加载 allowlist 中校验通过的 artifact。Skill 执行路径不得编译 Rust、下载 crates、替换 wheel / binary / image、加载任意本地动态库或连接未登记 sidecar。
+
+Rust Skill 性能与运维规则冻结：上线前必须提供 shared core / adapter benchmark，覆盖关键输入规模、P50/P95/P99、CPU、memory、输出大小与 sidecar queue / timeout 行为；sidecar adapter 必须具备 health/readiness/version、dashboard、alert、drain / restart / rollback、artifact quarantine、secret / identity failure 演练证据。没有 provenance、benchmark、runbook 或演练证据的 Rust Skill 不得作为项目级交付 Skill 接入。
+
+### 7.3 Manifest 建议元数据
+
+`x_runtime.rust` 是建议 metadata，不会自动赋予执行能力。只有当 platform handler、runtime allowlist、构建产物和部署配置全部就绪时，才允许使用对应 adapter。
+
+```yaml
+x_runtime:
+  rust:
+    adapter: pyo3        # pyo3 | binary | sidecar
+    core_crate: report_service_core
+    package: report_service_pyo3
+    contract_version: 1
+    artifact_ref: report_service_pyo3@1.0.0   # 可选；非路径，必须由 runtime allowlist 解析
+    artifact_sha256: "<sha256>"             # 可选；不得替代平台 allowlist 校验
+    provenance_ref: ci://report-service/1.0.0  # 可选；不得包含 secret 或本机路径
+```
+
+同时必须使用 `platform_service`：
+
+```yaml
+execution:
+  mode: platform_service
+  trust_scope: project
+  handler: skill.report_service.platform_handler
+  handler_module: runtime/report_service/platform_handler.py
+  handler_factory: build_handler
+  services:
+    - artifact_writer
+    - progress_events
+```
+
+### 7.4 构建、测试与审计
+
+Rust 型 Skill 上线前必须提供：
+
+- Rust core unit tests。
+- adapter contract tests。
+- Python platform handler integration tests。
+- golden tests：同一输入在 PyO3 / binary / sidecar 可比场景下输出一致。
+- `cargo fmt --check`、`cargo clippy -- -D warnings`、`cargo test`。
+- 构建产物来源说明：wheel / binary / sidecar image 不得在业务请求路径中临时生成。
+- 供应链证据：artifact id、version、sha256、SBOM、Cargo.lock digest、contract_version、bundle revision 与 provenance。
+- benchmark 证据：shared core、PyO3 / binary / sidecar adapter 的关键路径 P50/P95/P99、CPU、memory、输出大小与 sidecar queue / timeout 行为。
+- 运维证据：sidecar adapter 的 health/readiness/version、dashboard、alert、drain / restart / rollback、artifact quarantine、secret / identity failure 演练。
+- 审计说明：不读取未授权环境变量、secret、本地路径，不输出真实文件路径、完整 prompt 或敏感配置。
+
+## 8. 脚本型 Skill
+
+### 8.1 支持范围
 
 当前 `SkillScriptRunner` 只支持：
 
@@ -191,17 +302,18 @@ execution:
 不支持：
 
 - shell / bash / node / arbitrary command runtime
+- `runtime: rust` / `runtime: native` 直接声明
 - `runtime: r` / `runtime: R` 直接声明（当前请使用 Python wrapper 调用 Rscript）
 - Markdown 代码块自动执行
 - 绝对路径
 - `..` 路径逃逸
 - symlink 脚本
-- 执行时安装依赖
+- 执行时安装依赖、编译 Rust 或下载 native artifact
 - 继承完整环境变量或 secret
 - 交互式 stdin
 
 
-### 7.2 运行环境与依赖口径
+### 8.2 运行环境与依赖口径
 
 脚本运行在公司后端统一 Python 运行环境中：
 
@@ -440,7 +552,7 @@ cat(toJSON(result, auto_unbox = TRUE, null = "null"))
 ```
 
 
-### 7.3 脚本收到什么输入
+### 8.3 脚本收到什么输入
 
 自动执行脚本的 stdin 是 JSON object：
 
@@ -507,7 +619,7 @@ parameters:
 `source: artifact` 表示该必填参数由 `uploaded_artifacts` 是否存在来满足；脚本仍通过 `uploaded_artifacts` 读取实际文件内容，`material_data` 顶层字段只是可审计的可用性标记。
 `analysis_mode` 是带默认值的可选枚举参数；如果 stdin 中没有该字段，脚本应使用 `anova`，并拒绝不在 `enum` 列表中的其他值。
 
-### 7.4 脚本必须输出什么
+### 8.4 脚本必须输出什么
 
 stdout 必须是 JSON object，例如：
 
@@ -556,7 +668,7 @@ outputs:
       mime_types: [text/html]
 ```
 
-### 7.5 脚本型 Skill 示例
+### 8.5 脚本型 Skill 示例
 
 目录：
 
@@ -620,25 +732,25 @@ result = {
 print(json.dumps(result, ensure_ascii=False))
 ```
 
-## 8. Oh-my-codex `skill-creator` 提示词模板
+## 9. Oh-my-codex `skill-creator` 提示词模板
 
 把下面这段作为创建 Skill 的约束交给 Oh-my-codex `skill-creator`：
 
 ```text
 请创建一个适配 multi_agent_framework 后端的 Codex Skill。必须遵守：
-1. Skill 包只能依赖 SKILL.md；可选 scripts/ 下的 Python 脚本。
+1. Skill 包只能依赖 SKILL.md；可选 scripts/ 下的 Python 脚本；只有项目级 trusted Skill 才能在 native/ 放 Rust runtime。
 2. SKILL.md frontmatter 必须包含 name、description；中文任务必须包含高质量 triggers。
 3. 本系统只会把 SKILL.md body 注入 LLM，不会自动读取 references/ 或 assets/。
-4. 如需脚本，只能声明 scripts[].runtime=python，path 必须是包内相对路径，不能使用绝对路径、..、symlink、shell、node 或任意命令。
+4. 如需脚本，只能声明 scripts[].runtime=python，path 必须是包内相对路径，不能使用绝对路径、..、symlink、shell、node、runtime:rust 或任意命令。
 5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；如需业务参数，必须用 parameters/input_parameters 声明可解析字段，LLM 只会在缺参时生成候选并由系统校验后注入，不要依赖主代理口头承诺传参；stdout 必须是 JSON object。若需要下载文件，写入 MAF_SKILL_OUTPUT_DIR 并用 output_files 声明；若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
-6. 只有项目信任、runtime 已注册 handler/service allowlist 的 Skill 才能声明 execution.mode=platform_service；不要把 platform handler 写成动态 import 路径，不要让 python_subprocess 绑定服务。
+6. 只有项目信任、runtime 已注册 handler/service allowlist 的 Skill 才能声明 execution.mode=platform_service；不要把 platform handler 写成动态 import 路径，不要让 python_subprocess 绑定服务。Rust 只能作为 platform_service 背后的受控实现，不能要求框架自动编译或执行。
 7. 如果声明 outputs.required 或 scripts[].outputs.required，脚本 stdout 必须包含这些字段。
 8. 不要创建 README、安装指南、CHANGELOG 等额外说明文件；除非脚本需要，不要创建 references/ 或 assets/。
 9. Skill 正文保持精简，写 Use when、Workflow、Output、Boundaries；不要放 secret、内网地址、数据库密码或要求模型读取本地路径。
 10. 输出最终文件树和每个文件内容。
 ```
 
-## 9. 构建检查清单
+## 10. 构建检查清单
 
 交付 Skill 前逐项检查：
 
@@ -649,7 +761,7 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] body 非空，且是主代理可直接遵循的操作说明。
 - [ ] 没有把 secret、完整数据库连接串、API key 写进 Skill。
 - [ ] 如果声明 `platform_service`，`capability_id` 使用 `skill.*`，`execution.handler` 是 runtime 预注册 handler key，`answer_mode` 已显式声明。
-- [ ] 如果声明 `platform_service`，`execution.services` 只列出 allowlist 允许的服务；没有把 MySQL、LLM、secret 暴露给普通脚本。
+- [ ] 如果声明 `platform_service`，`execution.services` 只列出 allowlist 允许的服务；没有把 DB、LLM、secret 暴露给普通脚本。
 - [ ] 如果有脚本，`runtime` 是 `python`。
 - [ ] 如果有脚本，`path` 是包内相对路径，不包含 `..`。
 - [ ] 如果有脚本，stdout 是 JSON object。
@@ -663,10 +775,21 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] 不依赖执行时安装新包。
 - [ ] 不依赖 cwd 指向 Skill 目录。
 - [ ] 如果使用 R，Skill 仍通过 Python wrapper 暴露；`.R` 文件在包内，且 R stdout 是 JSON object。
+- [ ] 如果使用 Rust，Rust source 只位于 `skill/<skill-name>/native/`；没有要求运行时 `cargo build` / `cargo run` / 下载 crates。
+- [ ] Rust Skill 使用 shared core + adapter 模式；PyO3 / binary / sidecar 没有复制业务逻辑。
+- [ ] Rust adapter 只能由 `platform_service` handler 或 allowlist service 调用，不能由普通 `python_subprocess` 任意执行。
+- [ ] Rust sidecar adapter 如存在，endpoint 来自部署配置 / runtime allowlist，未在 `SKILL.md` 中声明任意公网地址、端口、socket path 或 service name。
+- [ ] Rust sidecar adapter 如存在，接受框架并发、队列、timeout、stdout/stderr、result size、artifact size、cancel grace 限制；没有声明无界 stream / queue / output。
+- [ ] Rust Skill 未在 `SKILL.md`、`x_runtime.rust`、脚本参数或 adapter metadata 中写入 secret value、token、mTLS key、数据库连接串、provider key、session / HMAC key 或任意本地 secret 路径。
+- [ ] Rust wheel / binary / sidecar image 由 CI / 部署流水线预构建；业务请求路径不会运行 `cargo build`、下载 crates、替换 artifact 或加载任意本地动态库。
+- [ ] Rust artifact 有 artifact id、version、sha256、SBOM、Cargo.lock digest、contract_version、bundle revision 与 provenance，并被 runtime allowlist 接纳。
+- [ ] Rust shared core 与所有 adapter 有 contract tests、golden tests 与 benchmark 证据；P50/P95/P99、CPU、memory、输出大小和 sidecar queue / timeout 行为可审查。
+- [ ] Rust sidecar adapter（如存在）有 health/readiness/version、dashboard、alert、drain / restart / rollback、artifact quarantine、secret / identity failure 演练证据。
+- [ ] Rust Skill 移除后，主体框架不会残留该 Skill 的 PyO3 module、binary、sidecar endpoint、artifact allowlist、capability 注册或专属前端 / API 分支。
 
-## 10. 验证方法
+## 11. 验证方法
 
-### 9.1 验证 parser 能读取 Skill
+### 11.1 验证 parser 能读取 Skill
 
 ```bash
 python - <<'PY'
@@ -680,7 +803,7 @@ print([script.name for script in manifest.scripts])
 PY
 ```
 
-### 9.2 验证 catalog 能发现并匹配 Skill
+### 11.2 验证 catalog 能发现并匹配 Skill
 
 ```bash
 python - <<'PY'
@@ -692,7 +815,7 @@ print([(m.manifest.name, m.score, m.reason) for m in matches])
 PY
 ```
 
-### 9.3 验证脚本能通过受控 runner
+### 11.3 验证脚本能通过受控 runner
 
 ```bash
 python - <<'PY'
@@ -707,14 +830,14 @@ print(result)
 PY
 ```
 
-### 9.4 运行现有回归
+### 11.4 运行现有回归
 
 ```bash
 python -m unittest discover -s tests/integrations/codex_skills -p 'test_*.py'
 python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 ```
 
-## 11. 常见错误
+## 12. 常见错误
 
 | 错误 | 结果 | 修正 |
 |---|---|---|
@@ -724,11 +847,13 @@ python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 | 脚本 path 写绝对路径 | runner 拒绝 | 改为包内相对路径 |
 | 脚本依赖 cwd 读取文件 | 找不到文件 | 用 `Path(__file__).parent` |
 | 写了 shell 脚本 | runner 拒绝 | 改写为 Python |
+| 声明 `runtime: rust` | runner 拒绝 | 改为 `platform_service` + `native/` + 受控 Rust adapter |
+| 在请求路径中 `cargo build` | runner / 评审拒绝 | 在 CI/部署阶段预构建 wheel/binary/sidecar |
 | 直接声明 `runtime: r` | runner 拒绝 | 使用 Python wrapper 调用包内 `.R` 脚本 |
 | 把详细资料放 references/ | 后端 LLM 看不到 | 把必要内容压缩进 SKILL.md body，或用脚本读取并输出摘要 |
 | 输出字段和 `outputs.required` 不一致 | 脚本结果失败 | 对齐 required 字段 |
 
-## 12. 和标准 Codex Skill 的差异
+## 13. 和标准 Codex Skill 的差异
 
 | 能力 | 标准 Codex / Oh-my-codex | 本系统后端当前支持 |
 |---|---|---|
@@ -739,14 +864,16 @@ python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 | `assets/` | Codex 可用于产物 | 当前后端不自动使用 |
 | Python 脚本 | 可作为资源 | 仅 manifest 声明且 auto_run 时受控执行 |
 | Shell / 任意命令 | Codex 环境可能可执行 | 不支持 |
+| Rust runtime | Codex 可在本地自行编译/运行 | 仅项目级 trusted Skill 可通过 `native/` + platform-service + allowlist adapter 接入；不自动编译或执行 |
 | R 脚本 | Codex 可通过本地命令自行运行 | 当前通过 `runtime: python` wrapper 调用 `Rscript`，不支持直接 `runtime: r` |
 | MCP / plugin runtime | Codex 插件可提供 | 不支持 |
 | 本地文件访问 | Codex agent 可读 workspace | 主代理 LLM 不具备；脚本只可读自己包内可定位资源 |
 
-## 13. 给 Skill creator 的推荐默认策略
+## 14. 给 Skill creator 的推荐默认策略
 
 - 首选 prompt-only Skill：简单、稳定、最符合当前主代理注入方式。
 - 只有在需要确定性解析、统计、格式转换时才加 Python 脚本。
+- 只有项目级 trusted Skill 且确需性能、隔离或类型安全时才引入 Rust；Rust 必须适配框架 contract。
 - Skill body 控制在 200 行以内；超过时优先删减，而不是拆 references，因为后端不会自动加载 references。
 - triggers 比 description 更重要；每个 Skill 至少写 3 个真实用户会说的触发表达。
 - 脚本只输出事实和结构化中间结果，最终措辞交给主代理 LLM。

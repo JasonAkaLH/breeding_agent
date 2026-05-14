@@ -90,3 +90,6 @@ build.ninja
 
 # Local runtime data
 /runtime/
+
+# Rust build outputs
+native/target/

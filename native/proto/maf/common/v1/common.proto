@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package maf.common.v1;
+
+// Stable health state shared by production Rust sidecars.
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_SERVING = 1;
+  HEALTH_STATE_NOT_SERVING = 2;
+  HEALTH_STATE_DEGRADED = 3;
+}
+
+// Stable readiness state shared by production Rust sidecars.
+enum ReadinessState {
+  READINESS_STATE_UNSPECIFIED = 0;
+  READINESS_STATE_READY = 1;
+  READINESS_STATE_NOT_READY = 2;
+}
+
+// Stable typed error category. Error codes remain lowercase snake_case strings.
+enum ErrorCategory {
+  ERROR_CATEGORY_UNSPECIFIED = 0;
+  ERROR_CATEGORY_CONFIGURATION = 1;
+  ERROR_CATEGORY_COMPATIBILITY = 2;
+  ERROR_CATEGORY_SECURITY = 3;
+  ERROR_CATEGORY_RESOURCE_LIMIT = 4;
+  ERROR_CATEGORY_PROTOCOL = 5;
+  ERROR_CATEGORY_UPSTREAM = 6;
+  ERROR_CATEGORY_INTERNAL = 7;
+  ERROR_CATEGORY_CANCELLATION = 8;
+}
+
+message TypedError {
+  string code = 1;
+  string message = 2;
+  bool retriable = 3;
+  ErrorCategory category = 4;
+  map<string, string> safe_metadata = 5;
+}
+
+message VersionInfo {
+  string component = 1;
+  string build_version = 2;
+  string protocol_version = 3;
+  string schema_hash = 4;
+  string error_code_table_hash = 5;
+  repeated string supported_features = 6;
+  string min_client_version = 7;
+  string max_client_version = 8;
+}

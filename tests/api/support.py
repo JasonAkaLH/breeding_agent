@@ -86,6 +86,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         public_skill_roots=None,
         mcp_config=None,
         mcp_client_factory=None,
+        mcp_sidecar_client=None,
         mcp_runtime_state=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> ApiRuntime:
@@ -160,6 +161,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             public_skill_roots=effective_public_skill_roots,
             mcp_config=mcp_config,
             mcp_client_factory=mcp_client_factory,
+            mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
@@ -228,6 +230,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         public_skill_roots=None,
         mcp_config=None,
         mcp_client_factory=None,
+        mcp_sidecar_client=None,
         mcp_runtime_state=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> None:
@@ -268,6 +271,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             public_skill_roots=public_skill_roots,
             mcp_config=mcp_config,
             mcp_client_factory=mcp_client_factory,
+            mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
