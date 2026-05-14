@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Iterable
 
@@ -262,6 +263,7 @@ def _reject_unknown_keys(payload: dict[str, Any], allowed_keys: set[str], contex
 
 
 def parse_planner_output(raw_output: str, *, task_id: str) -> WorkflowPlan:
+    raw_output = _strip_markdown_json_fence(raw_output)
     try:
         payload = json.loads(raw_output)
     except json.JSONDecodeError as exc:
@@ -316,3 +318,13 @@ def parse_planner_output(raw_output: str, *, task_id: str) -> WorkflowPlan:
         max_replans=0,
         max_dynamic_nodes=0,
     )
+
+
+_JSON_CODE_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*(?P<body>.*?)\s*```\s*$", re.DOTALL)
+
+
+def _strip_markdown_json_fence(raw_output: str) -> str:
+    match = _JSON_CODE_FENCE_RE.match(raw_output)
+    if not match:
+        return raw_output
+    return match.group("body").strip()

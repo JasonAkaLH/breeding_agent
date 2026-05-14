@@ -56,6 +56,23 @@ class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(PlannerOutputError, "nodes"):
             parse_planner_output('{"plan": []}', task_id="task-1")
 
+    def test_parse_accepts_json_wrapped_in_markdown_code_fence(self) -> None:
+        plan = parse_planner_output(
+            """
+            ```json
+            {
+              "nodes": [
+                {"node_id": "query_data", "capability_id": "skill.sql_query"}
+              ]
+            }
+            ```
+            """,
+            task_id="task-1",
+        )
+
+        self.assertEqual(plan.nodes[0].node_id, "query_data")
+        self.assertEqual(plan.nodes[0].capability_id, "skill.sql_query")
+
     def test_parse_rejects_non_object_node(self) -> None:
         with self.assertRaisesRegex(PlannerOutputError, "node object"):
             parse_planner_output('{"nodes": ["bad"]}', task_id="task-1")

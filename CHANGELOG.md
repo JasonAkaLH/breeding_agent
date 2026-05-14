@@ -10,6 +10,11 @@
 
 ## [Unreleased]
 
+### 2026-05-14 — 修复 LLM Planner Markdown JSON 围栏导致的对话失败
+
+- 修复 LLM Planner 返回 ```json 代码块包裹 JSON 时被误判为非法 JSON 的问题；规划解析现在会在完整 Markdown JSON code fence 场景下剥离围栏后再校验原有 workflow schema。
+- 补充 orchestration 回归测试，覆盖 code-fenced planner JSON，避免普通对话和 SQLQuery Skill 路由在规划阶段因格式包装失败。
+
 ### 2026-05-14 — 落地 MCP Runtime Phase0-5 联合改造基线
 
 - 新增 MCP PRD Phase0 契约夹具、JSON-RPC / Streamable HTTP / SSE / Tasks / frontend event schema / typed error / sidecar contract artifacts 与 conformance matrix，形成可执行验收基线。
