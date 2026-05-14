@@ -41,22 +41,6 @@ _APPROVAL_LIST_COLUMNS = (
     "suitable_area",
 )
 
-_OVERVIEW_APPROVAL_FIELDS = (
-    ("crop_name", ("crop_name",)),
-    ("variety_name", ("variety_name",)),
-    ("approval_num", ("approval_num",)),
-    ("year", ("year",)),
-    ("applicant", ("applicant",)),
-    ("breeder", ("breeder",)),
-    ("variety_source", ("variety_source",)),
-    ("characteristics", ("characteristics", "chars")),
-    ("yield_performance", ("yield_performance", "yield_perf")),
-    ("cultivation_tips", ("cultivation_tips", "cult_tips")),
-    ("suitable_area", ("suitable_area", "suit_area")),
-    ("approval_opinion", ("approval_opinion", "appr_opin")),
-)
-
-
 class SQLQuerySQLGenerateCapability(CapabilityContract):
     capability_id = SQL_QUERY_PUBLIC_CAPABILITY_ID
     version = "1"
@@ -149,7 +133,6 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         self._validate_columns_used(context, columns_used)
         self._validate_sql_column_references(context, sql, tables_used=tables_used)
         self._validate_variety_name_matching_policy(sql)
-        self._validate_variety_overview_recall_policy(context, sql, tables_used=tables_used)
         column_types_used = self._validate_column_types_used(context, llm_payload.get("column_types_used"), columns_used)
 
         output = {
@@ -574,8 +557,6 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         join_hints = list(context.get("join_hints", []))
         user_question = normalize_text(context.get("user_question", ""))
 
-        if context.get("route_id") == "variety_overview":
-            return self._generate_variety_overview_sql(context)
         if context.get("route_id") == "approval_variety_db":
             return self._generate_approval_variety_sql(context)
 
@@ -647,74 +628,6 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         projection = ", ".join(f"{base_table}.{column}" for column in projected) if projected != ["*"] else "*"
         return f"SELECT {projection} FROM {base_table}{where}"
 
-    def _generate_variety_overview_sql(self, context: dict[str, Any]) -> str:
-        allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
-        selected_tables = {str(table) for table in context.get("selected_tables", [])}
-        table_scope = allowed_tables or selected_tables
-        selected_columns = {
-            str(table): {str(column) for column in list(columns)}
-            for table, columns in dict(context.get("selected_columns", {})).items()
-        }
-        term = self._extract_variety_search_term(str(context.get("user_question") or ""))
-        safe_term = self._safe_search_literal(term) if term else None
-
-        approval_tables = self._overview_approval_tables(
-            table_scope,
-            user_question=str(context.get("user_question") or ""),
-            term=term,
-        )
-        selects: list[str] = []
-        for table in approval_tables:
-            approval_projection = self._overview_approval_projection(table, selected_columns.get(table, set()))
-            where = self._where_search_term(safe_term, (f"{table}.variety_name",))
-            selects.append(
-                "SELECT 'approval_variety_db' AS source_library, "
-                f"{approval_projection}, "
-                "NULL AS genotype_variety_id, "
-                "NULL AS all_indica_comp, NULL AS all_japonica_comp, NULL AS indica_japonica_mix_comp "
-                f"FROM {table}"
-                f"{where}"
-            )
-
-        if "variety" in table_scope:
-            has_rice_comp = "rice_comp" in table_scope
-            where_columns = ["variety.variety_name"]
-            where = self._where_search_term(safe_term, tuple(where_columns))
-            rice_comp_projection = (
-                "rice_comp.all_indica_comp, rice_comp.all_japonica_comp, rice_comp.indica_japonica_mix_comp"
-                if has_rice_comp
-                else "NULL AS all_indica_comp, NULL AS all_japonica_comp, NULL AS indica_japonica_mix_comp"
-            )
-            rice_comp_join = " LEFT JOIN rice_comp ON variety.variety_id = rice_comp.variety_id" if has_rice_comp else ""
-            selects.append(
-                "SELECT 'genotype_db' AS source_library, "
-                "NULL AS crop_name, variety.variety_name, NULL AS approval_num, "
-                "NULL AS year, NULL AS applicant, NULL AS breeder, "
-                "NULL AS variety_source, NULL AS characteristics, NULL AS yield_performance, "
-                "NULL AS cultivation_tips, NULL AS suitable_area, NULL AS approval_opinion, "
-                "variety.variety_id AS genotype_variety_id, "
-                f"{rice_comp_projection} "
-                "FROM variety"
-                f"{rice_comp_join}"
-                f"{where}"
-            )
-
-        if not selects:
-            return "SELECT COUNT(*) AS total FROM variety"
-        return " UNION ALL ".join(selects)
-
-    def _overview_approval_projection(self, table: str, available_columns: set[str]) -> str:
-        expressions: list[str] = []
-        for output_name, candidate_columns in _OVERVIEW_APPROVAL_FIELDS:
-            column = next((candidate for candidate in candidate_columns if candidate in available_columns), None)
-            if column is None:
-                expressions.append(f"NULL AS {output_name}")
-            elif column == output_name:
-                expressions.append(f"{table}.{column}")
-            else:
-                expressions.append(f"{table}.{column} AS {output_name}")
-        return ", ".join(expressions)
-
     def _extract_variety_search_term(self, user_question: str) -> str | None:
         normalized = str(user_question or "").replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
         cleaned = normalized
@@ -783,24 +696,6 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         safe = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_-]", "", term)
         return safe[:80]
 
-    def _overview_approval_tables(self, table_scope: set[str], *, user_question: str, term: str | None) -> list[str]:
-        text = f"{user_question} {term or ''}"
-        crop_specific_tables = (
-            ("rice_varieties", ("水稻", "粳", "籼", "稻")),
-            ("corn_varieties", ("玉米",)),
-            ("cotton_varieties", ("棉花", "棉")),
-            ("wheat_varieties", ("小麦", "麦")),
-            ("soybean_varieties", ("大豆", "豆")),
-        )
-        for table_name, hints in crop_specific_tables:
-            if table_name in table_scope and any(hint in text for hint in hints):
-                return [table_name]
-        return [
-            table
-            for table in ("corn_varieties", "rice_varieties", "cotton_varieties", "wheat_varieties", "soybean_varieties")
-            if table in table_scope
-        ]
-
     def _where_search_term(self, safe_term: str | None, columns: tuple[str, ...]) -> str:
         if not safe_term:
             return ""
@@ -815,54 +710,3 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 "validation_failed",
                 "SQL must use LIKE instead of strict equality when filtering variety_name.",
             )
-
-    def _validate_variety_overview_recall_policy(
-        self,
-        context: dict[str, Any],
-        sql: str,
-        *,
-        tables_used: list[str],
-    ) -> None:
-        if context.get("route_id") != "variety_overview":
-            return
-        term = self._extract_variety_search_term(str(context.get("user_question") or ""))
-        if not term:
-            return
-        approval_tables = [table for table in tables_used if str(table).endswith("_varieties")]
-        if not approval_tables:
-            return
-
-        aliases_by_table = self._aliases_by_table(sql)
-        missing_direct_recall = [
-            table
-            for table in approval_tables
-            if not self._has_qualified_variety_name_like(sql, aliases_by_table.get(table, {table}))
-        ]
-        if not missing_direct_recall:
-            return
-
-        raise LLMOutputError(
-            "validation_failed",
-            (
-                "variety_overview SQL must independently recall approval rows through each "
-                "*_varieties.variety_name LIKE predicate; ref_var_id/variety_id joins cannot be the only "
-                f"approval recall path for: {', '.join(missing_direct_recall)}."
-            ),
-        )
-
-    def _aliases_by_table(self, sql: str) -> dict[str, set[str]]:
-        aliases = self._extract_table_aliases(sql)
-        result: dict[str, set[str]] = {}
-        for alias, table in aliases.items():
-            result.setdefault(table, set()).add(alias)
-            result.setdefault(table, set()).add(table)
-        return result
-
-    def _has_qualified_variety_name_like(self, sql: str, qualifiers: set[str]) -> bool:
-        for qualifier in qualifiers:
-            if not qualifier:
-                continue
-            pattern = rf"\b`?{re.escape(qualifier)}`?\.`?variety_name`?\s+like\s+(?:'[^']*'|\"[^\"]*\")"
-            if re.search(pattern, sql, flags=re.I):
-                return True
-        return False

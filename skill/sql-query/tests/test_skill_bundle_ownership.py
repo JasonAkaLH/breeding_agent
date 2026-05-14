@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -83,6 +84,27 @@ class SQLQuerySkillBundleOwnershipTest(unittest.TestCase):
         self.assertIn("handler_factory: build_handler", manifest)
         self.assertIn("- llm.non_stream", manifest)
         self.assertNotIn("llm.sql_query", manifest)
+
+    def test_manifest_triggers_are_domain_specific_not_generic_query_words(self) -> None:
+        manifest = next(yaml.safe_load_all((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")))
+
+        triggers = set(manifest["triggers"])
+
+        self.assertNotIn("查一下", triggers)
+        self.assertNotIn("查询", triggers)
+        self.assertNotIn("数据库查询", triggers)
+        self.assertTrue({"查询品种", "审定信息", "基因型"}.issubset(triggers))
+
+    def test_routing_config_exposes_only_supported_database_routes(self) -> None:
+        routing_rules = yaml.safe_load((SKILL_ROOT / "configs" / "routing_rules.yaml").read_text(encoding="utf-8"))
+        schema_metadata = yaml.safe_load((SKILL_ROOT / "configs" / "schema_metadata.yaml").read_text(encoding="utf-8"))
+
+        route_ids = [route["route_id"] for route in routing_rules["routes"]]
+        profile_route_ids = [profile["route_id"] for profile in schema_metadata["schema_profiles"]]
+
+        self.assertEqual(route_ids, ["approval_variety_db", "genotype_db"])
+        self.assertNotIn("variety_overview", route_ids)
+        self.assertNotIn("variety_overview", profile_route_ids)
 
 
 if __name__ == "__main__":

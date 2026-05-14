@@ -52,8 +52,8 @@ class SQLQueryResultFilteringTest(unittest.TestCase):
                 },
                 "generate": {
                     "user_question": "给我查一下龙粳18的信息",
-                    "route_id": "variety_overview",
-                    "schema_profile_id": "variety_overview_profile",
+                    "route_id": "approval_variety_db",
+                    "schema_profile_id": "approval_variety_profile",
                     "sql": "SELECT variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳18%'",
                 },
             },

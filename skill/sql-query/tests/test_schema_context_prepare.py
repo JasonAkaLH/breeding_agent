@@ -46,39 +46,6 @@ class SQLQuerySchemaContextPrepareTest(unittest.TestCase):
             )
             self.assertTrue(all(column.get("sql_type") for column in columns))
 
-    def test_builds_broad_variety_overview_context_across_approval_and_genotype_tables(self) -> None:
-        capability = SQLQuerySchemaContextPrepareCapability()
-        request = make_request(
-            "skill.sql_query",
-            dependency_outputs={
-                "intent": {
-                    "route_id": "variety_overview",
-                    "schema_profile_id": "variety_overview_profile",
-                    "sql_policy_profile": "strict_readonly_mysql",
-                    "allowed_tables": [
-                        "corn_varieties",
-                        "rice_varieties",
-                        "cotton_varieties",
-                        "wheat_varieties",
-                        "soybean_varieties",
-                        "variety",
-                        "rice_comp",
-                    ],
-                    "user_question": "查一下龙粳33",
-                    "route_resolution_strategy": "first_principles_broad_variety_overview",
-                }
-            },
-        )
-
-        result = asyncio.run(capability.execute(request))
-
-        self.assertIsNone(result.error)
-        selected_tables = set(result.output_payload["selected_tables"])
-        self.assertIn("rice_varieties", selected_tables)
-        self.assertIn("variety", selected_tables)
-        self.assertIn("rice_comp", selected_tables)
-        self.assertIn("variety_overview", result.output_payload["metadata"]["route_notes"][0])
-
     def test_approval_variety_detail_context_keeps_business_detail_columns(self) -> None:
         capability = SQLQuerySchemaContextPrepareCapability()
         request = make_request(

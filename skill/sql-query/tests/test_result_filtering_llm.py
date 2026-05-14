@@ -12,10 +12,10 @@ from support import make_request
 
 
 GENERATE_OUTPUT = {
-    "route_id": "variety_overview",
-    "schema_profile_id": "variety_overview_profile",
-    "user_question": "查一下龙粳33",
-    "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳33%'",
+    "route_id": "approval_variety_db",
+    "schema_profile_id": "approval_variety_profile",
+    "user_question": "查询龙粳33审定信息",
+    "sql": "SELECT source_db, variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳33%'",
     "generation_source": "llm",
 }
 
@@ -30,7 +30,7 @@ def request_for_filtering(*, rows: list[dict] | None = None, row_count: int | No
         "skill.sql_query",
         dependency_outputs={
             "execute": {
-                "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳33%'",
+                "sql": "SELECT source_db, variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳33%'",
                 "columns": ["source_db", "variety_name"],
                 "rows": rows,
                 "row_count": len(rows) if row_count is None else row_count,
@@ -44,7 +44,7 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
     def test_uses_llm_keep_row_indexes_to_filter_mismatched_names(self) -> None:
         async def llm_text_generator(prompt: str) -> str:
             self.assertIn('"stage": "result_filtering"', prompt)
-            self.assertIn("查一下龙粳33", prompt)
+            self.assertIn("查询龙粳33审定信息", prompt)
             self.assertIn("LIKE", prompt)
             return json.dumps({"keep_row_indexes": [0, 2], "filter_reason": "保留品种名精确对应龙粳33的候选行。"})
 
@@ -79,7 +79,7 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
                     "skill.sql_query",
                     dependency_outputs={
                         "execute": {
-                            "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳18%'",
+                            "sql": "SELECT source_db, variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳18%'",
                             "columns": ["source_db", "variety_name"],
                             "rows": [
                                 {"source_db": "approval", "variety_name": "龙粳18号"},
@@ -89,10 +89,10 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
                             "row_count": 3,
                         },
                         "generate": {
-                            "route_id": "variety_overview",
-                            "schema_profile_id": "variety_overview_profile",
-                            "user_question": "查一下龙粳18",
-                            "sql": "SELECT source_db, variety_name FROM variety_overview WHERE variety_name LIKE '%龙粳18%'",
+                            "route_id": "approval_variety_db",
+                            "schema_profile_id": "approval_variety_profile",
+                            "user_question": "查询龙粳18审定信息",
+                            "sql": "SELECT source_db, variety_name FROM rice_varieties WHERE variety_name LIKE '%龙粳18%'",
                         },
                     },
                 )

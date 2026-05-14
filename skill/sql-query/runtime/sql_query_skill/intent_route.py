@@ -38,20 +38,26 @@ class SQLQueryIntentRouteCapability(CapabilityContract):
         subtask_label = self._optional_string(request.input_payload.get("subtask_label"))
         parent_question = self._optional_string(request.input_payload.get("parent_question"))
         semantic_fallback_reason: str | None = None
+        understanding = self._understanding.understand(
+            user_question,
+            route_hint=route_hint,
+            subtask_label=subtask_label,
+            parent_question=parent_question,
+        )
         semantic_understanding = None
-        if route_hint is None and self._semantic_text_generator is not None:
+        if (
+            route_hint is None
+            and understanding.route is None
+            and self._semantic_text_generator is not None
+        ):
             semantic_understanding, semantic_fallback_reason = await self._try_semantic_route_understanding(
                 user_question,
                 request=request,
                 subtask_label=subtask_label,
                 parent_question=parent_question,
             )
-        understanding = semantic_understanding or self._understanding.understand(
-            user_question,
-            route_hint=route_hint,
-            subtask_label=subtask_label,
-            parent_question=parent_question,
-        )
+            if semantic_understanding is not None:
+                understanding = semantic_understanding
         route = understanding.route
         if route is None:
             return CapabilityExecutionResult(

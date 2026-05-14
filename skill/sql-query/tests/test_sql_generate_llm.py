@@ -28,43 +28,6 @@ SCHEMA_CONTEXT = {
     "user_question": "查询品种龙粳33的基因型信息",
 }
 
-OVERVIEW_SCHEMA_CONTEXT = {
-    "route_id": "variety_overview",
-    "schema_profile_id": "variety_overview_profile",
-    "sql_policy_profile": "strict_readonly_mysql",
-    "allowed_tables": [
-        "corn_varieties",
-        "rice_varieties",
-        "cotton_varieties",
-        "wheat_varieties",
-        "soybean_varieties",
-        "variety",
-        "rice_comp",
-    ],
-    "selected_tables": [
-        "corn_varieties",
-        "rice_varieties",
-        "cotton_varieties",
-        "wheat_varieties",
-        "soybean_varieties",
-        "variety",
-        "rice_comp",
-    ],
-    "selected_columns": {
-        "corn_varieties": ["crop_name", "variety_name", "approval_num", "year", "applicant", "breeder"],
-        "rice_varieties": ["crop_name", "variety_name", "approval_num", "year", "applicant", "breeder", "ref_var_id"],
-        "cotton_varieties": ["crop_name", "variety_name", "approval_num", "year", "applicant", "breeder"],
-        "wheat_varieties": ["crop_name", "variety_name", "approval_num", "year", "applicant", "breeder"],
-        "soybean_varieties": ["crop_name", "variety_name", "approval_num", "year", "applicant", "breeder"],
-        "variety": ["variety_id", "variety_name"],
-        "rice_comp": ["variety_id", "variety_name", "all_indica_comp", "all_japonica_comp", "indica_japonica_mix_comp"],
-    },
-    "selected_column_details": {},
-    "join_hints": [],
-    "context_summary": "品种综合概览",
-    "user_question": "查一下龙粳33",
-}
-
 APPROVAL_DETAIL_SCHEMA_CONTEXT = {
     "route_id": "approval_variety_db",
     "schema_profile_id": "approval_variety_profile",
@@ -115,12 +78,6 @@ def request_for_sql_generate() -> object:
         dependency_outputs={"schema": SCHEMA_CONTEXT},
     )
 
-
-def request_for_overview_sql_generate() -> object:
-    return make_request(
-        "skill.sql_query",
-        dependency_outputs={"schema": OVERVIEW_SCHEMA_CONTEXT},
-    )
 
 def request_for_approval_detail_sql_generate() -> object:
     return make_request(
@@ -391,108 +348,6 @@ class SQLQuerySQLGenerateLLMTest(unittest.TestCase):
         sql = result.output_payload["sql"]
         self.assertIn("variety_name LIKE '%龙粳33%'", sql)
         self.assertNotIn("variety_name =", sql)
-
-    def test_fallback_generates_broad_overview_sql_across_approval_and_genotype_sources(self) -> None:
-        capability = SQLQuerySQLGenerateCapability()
-
-        result = asyncio.run(capability.execute(request_for_overview_sql_generate()))
-
-        sql = result.output_payload["sql"]
-        self.assertIsNone(result.interrupt)
-        self.assertEqual(result.output_payload["route_id"], "variety_overview")
-        self.assertIn("UNION ALL", sql)
-        self.assertIn("rice_varieties", sql)
-        self.assertNotIn("corn_varieties", sql)
-        self.assertIn("variety", sql)
-        self.assertIn("rice_comp", sql)
-        self.assertIn("龙粳33", sql)
-        self.assertIn("LIKE '%龙粳33%'", sql)
-        self.assertNotIn("variety_name = '龙粳33'", sql)
-        self.assertNotIn("LIMIT", sql)
-
-    def test_llm_overview_sql_cannot_use_id_join_as_only_approval_recall(self) -> None:
-        async def llm_text_generator(_: str) -> str:
-            return json.dumps(
-                {
-                    "mode": "answer",
-                    "route_id": "variety_overview",
-                    "schema_profile_id": "variety_overview_profile",
-                    "sql": (
-                        "SELECT v.variety_name, rv.year, rv.approval_num, rc.all_japonica_comp "
-                        "FROM variety v "
-                        "LEFT JOIN rice_varieties rv ON v.variety_id = rv.ref_var_id "
-                        "LEFT JOIN rice_comp rc ON v.variety_id = rc.variety_id "
-                        "WHERE v.variety_name LIKE '%龙粳33%'"
-                    ),
-                    "tables_used": ["variety", "rice_varieties", "rice_comp"],
-                    "columns_used": [
-                        "variety.variety_name",
-                        "variety.variety_id",
-                        "rice_varieties.ref_var_id",
-                        "rice_varieties.year",
-                        "rice_varieties.approval_num",
-                        "rice_comp.variety_id",
-                        "rice_comp.all_japonica_comp",
-                    ],
-                    "column_types_used": {
-                        "variety.variety_name": "varchar(100)",
-                        "variety.variety_id": "int(11)",
-                        "rice_varieties.ref_var_id": "int(11)",
-                        "rice_varieties.year": "int(11)",
-                        "rice_varieties.approval_num": "varchar(100)",
-                        "rice_comp.variety_id": "int(11)",
-                        "rice_comp.all_japonica_comp": "decimal(12,8)",
-                    },
-                },
-                ensure_ascii=False,
-            )
-
-        context = {
-            **OVERVIEW_SCHEMA_CONTEXT,
-            "selected_column_details": {
-                "variety": [
-                    {"name": "variety_id", "sql_type": "int(11)", "description": "自增ID"},
-                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
-                ],
-                "rice_varieties": [
-                    {"name": "ref_var_id", "sql_type": "int(11)", "description": "品种ID，外键，指向variety表"},
-                    {"name": "year", "sql_type": "int(11)", "description": "年份"},
-                    {"name": "approval_num", "sql_type": "varchar(100)", "description": "审定编号"},
-                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
-                    {"name": "crop_name", "sql_type": "varchar(20)", "description": "作物名称"},
-                    {"name": "applicant", "sql_type": "varchar(200)", "description": "申请者"},
-                    {"name": "breeder", "sql_type": "varchar(200)", "description": "育种者"},
-                ],
-                "rice_comp": [
-                    {"name": "variety_id", "sql_type": "int(11)", "description": "品种ID"},
-                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
-                    {"name": "all_japonica_comp", "sql_type": "decimal(12,8)", "description": "总粳稻成分"},
-                    {"name": "all_indica_comp", "sql_type": "decimal(12,8)", "description": "总籼稻成分"},
-                    {"name": "indica_japonica_mix_comp", "sql_type": "decimal(12,8)", "description": "籼粳混合成分"},
-                ],
-            },
-        }
-        capability = SQLQuerySQLGenerateCapability(llm_text_generator=llm_text_generator)
-
-        result = asyncio.run(
-            capability.execute(
-                make_request(
-                    "skill.sql_query",
-                    dependency_outputs={"schema": context},
-                )
-            )
-        )
-
-        sql = result.output_payload["sql"]
-        self.assertEqual(result.output_payload["generation_source"], "fallback")
-        self.assertEqual(result.output_payload["llm_mode"], "validation_failed")
-        self.assertIn("UNION ALL", sql)
-        self.assertIn("FROM rice_varieties", sql)
-        self.assertIn("rice_varieties.variety_name LIKE '%龙粳33%'", sql)
-        self.assertIn("FROM variety", sql)
-        self.assertIn("rice_comp", sql)
-        self.assertNotIn("FROM variety v LEFT JOIN rice_varieties", " ".join(sql.split()))
-        self.assertNotIn("rice_varieties.ref_var_id = variety.variety_id", sql)
 
     def test_fallback_generates_rich_approval_detail_sql_for_single_variety(self) -> None:
         capability = SQLQuerySQLGenerateCapability()

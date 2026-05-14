@@ -21,25 +21,65 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
         self.assertEqual(result.output_payload["route_id"], "genotype_db")
         self.assertEqual(result.output_payload["schema_profile_id"], "genotype_profile")
 
-    def test_broad_variety_question_routes_to_overview_without_clarification(self) -> None:
-        capability = SQLQueryIntentRouteCapability()
-        request = make_request("skill.sql_query", input_payload={"user_question": "查一下龙粳33"})
+    def test_genotype_intent_keyword_routes_without_llm_call(self) -> None:
+        async def semantic_router(_prompt: str) -> str:
+            raise AssertionError("intent keyword hit must not call LLM router")
+
+        capability = SQLQueryIntentRouteCapability(semantic_text_generator=semantic_router)
+        request = make_request("skill.sql_query", input_payload={"user_question": "查询某个品种的基因型信息"})
 
         result = asyncio.run(capability.execute(request))
 
         self.assertIsNone(result.interrupt)
-        self.assertEqual(result.output_payload["route_id"], "variety_overview")
-        self.assertEqual(result.output_payload["schema_profile_id"], "variety_overview_profile")
-        self.assertEqual(result.output_payload["route_resolution_strategy"], "first_principles_broad_variety_overview")
+        self.assertEqual(result.output_payload["route_id"], "genotype_db")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "intent_keywords")
+        self.assertFalse(result.output_payload["llm_router_used"])
 
-    def test_generic_variety_name_routes_to_overview_instead_of_single_library(self) -> None:
-        capability = SQLQueryIntentRouteCapability()
-        request = make_request("skill.sql_query", input_payload={"user_question": "查询品种龙粳33"})
+    def test_approval_intent_keyword_routes_without_llm_call(self) -> None:
+        async def semantic_router(_prompt: str) -> str:
+            raise AssertionError("intent keyword hit must not call LLM router")
+
+        capability = SQLQueryIntentRouteCapability(semantic_text_generator=semantic_router)
+        request = make_request("skill.sql_query", input_payload={"user_question": "查询近五年审定品种有哪些"})
 
         result = asyncio.run(capability.execute(request))
 
         self.assertIsNone(result.interrupt)
-        self.assertEqual(result.output_payload["route_id"], "variety_overview")
+        self.assertEqual(result.output_payload["route_id"], "approval_variety_db")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "intent_keywords")
+        self.assertFalse(result.output_payload["llm_router_used"])
+
+    def test_generic_variety_query_uses_llm_when_no_intent_keyword_matches(self) -> None:
+        prompts: list[str] = []
+
+        async def semantic_router(prompt: str) -> str:
+            prompts.append(prompt)
+            return json.dumps({"intent": "database", "route_id": "approval_variety_db"}, ensure_ascii=False)
+
+        capability = SQLQueryIntentRouteCapability(semantic_text_generator=semantic_router)
+        request = make_request("skill.sql_query", input_payload={"user_question": "查询龙粳33"})
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.interrupt)
+        self.assertEqual(result.output_payload["route_id"], "approval_variety_db")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "llm_semantic")
+        self.assertTrue(result.output_payload["llm_router_used"])
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("variety_overview", prompts[0])
+
+    def test_generic_variety_query_without_llm_requires_route_clarification(self) -> None:
+        capability = SQLQueryIntentRouteCapability()
+        request = make_request("skill.sql_query", input_payload={"user_question": "查询龙粳33"})
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNotNone(result.interrupt)
+        self.assertEqual(result.interrupt.reason_code, "route_not_resolved")
+        self.assertEqual(
+            result.interrupt.required_fields,
+            {"route_id": {"options": ["approval_variety_db", "genotype_db"]}},
+        )
 
     def test_explicit_approval_database_display_name_wins_over_broad_lookup(self) -> None:
         capability = SQLQueryIntentRouteCapability()
@@ -89,7 +129,7 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
         self.assertIsNone(result.interrupt)
         self.assertEqual(result.output_payload["route_id"], "approval_variety_db")
         self.assertIsNone(result.output_payload["inferred_crop"])
-        self.assertEqual(result.output_payload["route_resolution_strategy"], "no_crop_approval_broad")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "intent_keywords")
         self.assertTrue(result.output_payload["no_crop_broad_query"])
         self.assertEqual(
             set(result.output_payload["allowed_tables"]),
@@ -106,17 +146,8 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
 
         result = asyncio.run(capability.execute(request))
 
-        self.assertIsNone(result.interrupt)
-        self.assertTrue(result.output_payload["needs_decomposition"])
-        self.assertEqual(result.output_payload["route_resolution_strategy"], "composite_multi_route")
-        self.assertEqual(
-            [subtask["user_question"] for subtask in result.output_payload["subquestions"]],
-            ["查询龙粳33的审定信息", "查询龙粳33的基因型信息"],
-        )
-        self.assertEqual(
-            [subtask["route_hint"] for subtask in result.output_payload["subquestions"]],
-            ["approval_variety_db", "genotype_db"],
-        )
+        self.assertIsNotNone(result.interrupt)
+        self.assertEqual(result.interrupt.reason_code, "route_not_resolved")
 
     def test_variety_info_and_gene_info_question_marks_decomposition(self) -> None:
         capability = SQLQueryIntentRouteCapability()
@@ -127,13 +158,8 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
 
         result = asyncio.run(capability.execute(request))
 
-        self.assertIsNone(result.interrupt)
-        self.assertTrue(result.output_payload["needs_decomposition"])
-        self.assertEqual(result.output_payload["route_resolution_strategy"], "composite_multi_route")
-        self.assertEqual(
-            [subtask["route_hint"] for subtask in result.output_payload["subquestions"]],
-            ["approval_variety_db", "genotype_db"],
-        )
+        self.assertIsNotNone(result.interrupt)
+        self.assertEqual(result.interrupt.reason_code, "route_not_resolved")
 
     def test_route_hint_can_select_public_macro_subtask_route(self) -> None:
         capability = SQLQueryIntentRouteCapability()
@@ -207,6 +233,5 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
 
         self.assertIsNone(result.interrupt)
         self.assertEqual(result.output_payload["route_id"], "genotype_db")
-        self.assertEqual(result.output_payload["route_resolution_strategy"], "keyword_score")
+        self.assertEqual(result.output_payload["route_resolution_strategy"], "intent_keywords")
         self.assertFalse(result.output_payload["llm_router_used"])
-        self.assertEqual(result.output_payload["llm_router_fallback_reason"], "unsupported_route_id")

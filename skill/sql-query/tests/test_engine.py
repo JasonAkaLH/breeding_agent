@@ -67,16 +67,14 @@ class SQLQueryEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output_payload["domain_kind"], "sql_query")
         self.assertEqual(result.output_payload["capability_id"], "skill.sql_query")
         self.assertEqual(result.output_payload["filtered_query_result"]["row_count"], 1)
-        self.assertEqual(len(prompts), 3)
+        self.assertEqual(len(prompts), 2)
         self.assertTrue(seen_metadata)
         blocked_keys = {"conversation_memory", "memory_context", "history_summary", "resolved_user_message"}
         for metadata in seen_metadata:
             self.assertFalse(blocked_keys & set(metadata))
             self.assertEqual(metadata["main_agent_reasoning_effort"], "high")
-        self.assertEqual(seen_metadata[0]["deep_thinking"], False)
-        self.assertEqual(seen_metadata[0]["main_agent_thinking_enabled"], False)
+        self.assertEqual(seen_metadata[0]["deep_thinking"], True)
         self.assertEqual(seen_metadata[1]["deep_thinking"], True)
-        self.assertEqual(seen_metadata[2]["deep_thinking"], True)
         self.assertTrue(any(event.event_type == "skill.progress" for event in result.events))
         self.assertTrue(all(artifact.producer_node_id == "task-1:skill_execute" for artifact in result.artifacts))
 

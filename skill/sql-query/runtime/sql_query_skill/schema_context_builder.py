@@ -238,10 +238,6 @@ class SchemaContextBuilder:
             route_notes.append(f"restricted by explicit table hints: {', '.join(explicit_tables)}")
             return explicit_tables, route_notes, None
 
-        if route.get("route_id") == "variety_overview":
-            route_notes.append("variety_overview broad first-principles lookup retained approval and genotype tables")
-            return list(candidate_tables), route_notes, None
-
         crop_mapping = route.get("crop_table_mapping")
         if not isinstance(crop_mapping, Mapping):
             return list(candidate_tables), route_notes, None
@@ -344,10 +340,6 @@ class SchemaContextBuilder:
         if route_id == "approval_variety_db" and len(candidate_tables) > 1:
             for table_name in candidate_tables:
                 add(table_name, "approval broad route seed: all approval crop tables retained")
-
-        if route_id == "variety_overview":
-            for table_name in candidate_tables:
-                add(table_name, "variety_overview seed: broad first-principles lookup keeps approval and genotype sources")
 
         if route_id == "genotype_db":
             for table_name in candidate_tables:

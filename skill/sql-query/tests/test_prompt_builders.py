@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import _bootstrap  # noqa: F401
+import json
 import unittest
 
 from sql_query_skill.prompt_builders import (
@@ -111,53 +112,30 @@ class SQLQueryPromptBuildersTest(unittest.TestCase):
         self.assertIn("不要自动添加 LIMIT", prompt)
         self.assertIn("只需要输出SQL语句", prompt)
 
-    def test_overview_prompt_requires_independent_variety_name_recall(self) -> None:
+    def test_sql_generation_payload_does_not_reference_removed_overview_route(self) -> None:
         context = {
-            "route_id": "variety_overview",
-            "schema_profile_id": "variety_overview_profile",
-            "allowed_tables": ["rice_varieties", "variety", "rice_comp"],
-            "selected_tables": ["rice_varieties", "variety", "rice_comp"],
-            "selected_columns": {
-                "rice_varieties": ["ref_var_id", "year", "approval_num", "variety_name"],
-                "variety": ["variety_id", "variety_name"],
-                "rice_comp": ["variety_id", "variety_name", "all_japonica_comp"],
-            },
+            "route_id": "approval_variety_db",
+            "schema_profile_id": "approval_variety_profile",
+            "allowed_tables": ["rice_varieties"],
+            "selected_tables": ["rice_varieties"],
+            "selected_columns": {"rice_varieties": ["year", "variety_name"]},
             "selected_column_details": {
                 "rice_varieties": [
-                    {"name": "ref_var_id", "sql_type": "int(11)", "description": "品种ID，外键，指向variety表"},
                     {"name": "year", "sql_type": "int(11)", "description": "年份"},
-                    {"name": "approval_num", "sql_type": "varchar(100)", "description": "审定编号"},
                     {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
-                ],
-                "variety": [
-                    {"name": "variety_id", "sql_type": "int(11)", "description": "自增ID"},
-                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
-                ],
-                "rice_comp": [
-                    {"name": "variety_id", "sql_type": "int(11)", "description": "品种ID"},
-                    {"name": "variety_name", "sql_type": "varchar(100)", "description": "品种名称"},
-                    {"name": "all_japonica_comp", "sql_type": "decimal(12,8)", "description": "总粳稻成分"},
                 ],
             },
-            "join_hints": [
-                {
-                    "left_table": "rice_varieties",
-                    "left_column": "ref_var_id",
-                    "right_table": "variety",
-                    "right_column": "variety_id",
-                    "description": "弱关联，仅用于补充基因型品种信息",
-                }
-            ],
-            "user_question": "查一下龙粳33的品种信息",
+            "schema_ddl": "CREATE TABLE `rice_varieties` (`year` int(11), `variety_name` varchar(100));",
+            "user_question": "查询龙粳33审定信息",
         }
 
+        payload = build_sql_generation_prompt_payload(context)
         prompt = build_sql_generation_prompt(context)
 
-        self.assertIn("品种综合概览", prompt)
-        self.assertIn("独立召回", prompt)
-        self.assertIn("*_varieties.variety_name LIKE", prompt)
-        self.assertIn("ref_var_id", prompt)
-        self.assertIn("不能作为唯一召回条件", prompt)
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("variety_overview", serialized_payload)
+        self.assertNotIn("品种综合概览", prompt)
+        self.assertNotIn("独立召回", prompt)
 
     def test_result_filtering_prompt_uses_all_rows_after_token_trim(self) -> None:
         execute_context = {
@@ -167,9 +145,9 @@ class SQLQueryPromptBuildersTest(unittest.TestCase):
             "row_count": 5,
         }
         question_context = {
-            "user_question": "查一下龙粳33",
-            "route_id": "variety_overview",
-            "schema_profile_id": "variety_overview_profile",
+            "user_question": "查询龙粳33审定信息",
+            "route_id": "approval_variety_db",
+            "schema_profile_id": "approval_variety_profile",
         }
 
         payload = build_result_filtering_prompt_payload(execute_context, question_context=question_context)

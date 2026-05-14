@@ -73,8 +73,8 @@ class SQLQueryLLMRuntimeAPITest(SQLQueryAPITestCase):
 
         self.assertEqual(terminal["status"], "completed")
         prompt_names = [_sqlquery_prompt_name(call["prompt"]) for call in main_calls]
-        self.assertEqual(prompt_names, ["intent_route", "sql_generate", "result_filtering"])
-        self.assertEqual([call["thinking"] for call in main_calls], [False, False, False])
+        self.assertEqual(prompt_names, ["sql_generate", "result_filtering"])
+        self.assertEqual([call["thinking"] for call in main_calls], [False, False])
         self.assertTrue(all(call["reasoning_effort"] == "minimal" for call in main_calls))
 
         artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)

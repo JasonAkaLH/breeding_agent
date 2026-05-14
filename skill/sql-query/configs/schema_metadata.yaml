@@ -12,16 +12,6 @@ schema_profiles:
   - cotton_varieties
   - wheat_varieties
   - soybean_varieties
-- profile_id: variety_overview_profile
-  route_id: variety_overview
-  tables:
-  - corn_varieties
-  - rice_varieties
-  - cotton_varieties
-  - wheat_varieties
-  - soybean_varieties
-  - variety
-  - rice_comp
 - profile_id: genotype_profile
   route_id: genotype_db
   tables:
@@ -1351,7 +1341,8 @@ join_hints:
   left_column: ref_var_id
   right_table: variety
   right_column: variety_id
-  description: 弱关联/辅助富化关系；查询审定品种记录应优先使用 rice_varieties.variety_name LIKE，不能把 ref_var_id = variety.variety_id 作为唯一召回条件
+  description: 弱关联/辅助富化关系；查询审定品种记录应优先使用 rice_varieties.variety_name LIKE，不能把 ref_var_id
+    = variety.variety_id 作为唯一召回条件
 llm_context_rules:
   max_tables_per_request: 8
   prefer_route_scoped_schema: true

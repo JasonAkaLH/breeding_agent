@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -23,7 +22,6 @@ DATA_ACTION_KEYWORDS = (
     "对应",
 )
 GENERIC_DATA_SOURCE_KEYWORDS = ("sql", "数据库", "数据表")
-COMPOSITE_ROUTE_IDS = ("approval_variety_db", "genotype_db")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,17 +124,9 @@ class QueryUnderstandingService:
             if explicit_route is not None:
                 route = explicit_route
                 strategy = "explicit_route_alias"
-            elif self._is_composite_database_question(candidates, normalized_question=normalized_question):
-                route = self._route_by_id("variety_overview") or self._route_by_id(candidates[0].route_id)
-                strategy = "composite_multi_route"
-                needs_decomposition = True
-                subquestions = self._build_subquestions(question)
-            elif self._looks_like_broad_variety_lookup(question):
-                route = self._route_by_id("variety_overview")
-                strategy = "first_principles_broad_variety_overview"
-            elif candidates:
+            elif self._has_single_candidate(candidates):
                 route = self._route_by_id(candidates[0].route_id)
-                strategy = "keyword_score"
+                strategy = "intent_keywords"
 
         inferred_crop = self._infer_crop(route, normalized_question) if route is not None else None
         no_crop_broad_query = bool(
@@ -145,9 +135,6 @@ class QueryUnderstandingService:
             and inferred_crop is None
             and route.get("supports_no_crop_broad_query", False)
         )
-        if no_crop_broad_query and strategy not in {"route_hint", "explicit_route_alias"}:
-            strategy = "no_crop_approval_broad"
-
         should_use_sql_query = self._should_use_sql_query(
             normalized_question=normalized_question,
             route=route,
@@ -182,7 +169,7 @@ class QueryUnderstandingService:
             return False
         if needs_decomposition or route_hint:
             return True
-        if strategy in {"explicit_route_alias", "first_principles_broad_variety_overview", "composite_multi_route"}:
+        if strategy in {"explicit_route_alias", "intent_keywords"}:
             return True
         if any(keyword in normalized_question for keyword in DATA_ACTION_KEYWORDS):
             return True
@@ -194,8 +181,6 @@ class QueryUnderstandingService:
         candidates: list[RouteCandidate] = []
         for route in self._routes:
             route_id = str(route.get("route_id"))
-            if route_id == "variety_overview":
-                continue
             score = 0
             matched_keywords: list[str] = []
             reasons: list[str] = []
@@ -221,77 +206,9 @@ class QueryUnderstandingService:
                 )
         return tuple(sorted(candidates, key=lambda item: (-item.score, item.route_id)))
 
-    def _is_composite_database_question(
-        self,
-        candidates: Sequence[RouteCandidate],
-        *,
-        normalized_question: str,
-    ) -> bool:
-        candidate_by_id = {candidate.route_id: candidate for candidate in candidates if candidate.score > 0}
-        if not all(route_id in candidate_by_id for route_id in COMPOSITE_ROUTE_IDS):
-            return False
-        approval_keywords = set(candidate_by_id["approval_variety_db"].matched_keywords)
-        genotype_keywords = set(candidate_by_id["genotype_db"].matched_keywords)
-        has_specific_approval_intent = bool(approval_keywords - {"品种"}) or self._has_approval_info_phrase(
-            normalized_question
-        )
-        has_specific_genotype_intent = bool(genotype_keywords)
-        return has_specific_approval_intent and has_specific_genotype_intent
-
     @staticmethod
-    def _has_approval_info_phrase(normalized_question: str) -> bool:
-        if not any(
-            phrase in normalized_question
-            for phrase in ("品种信息", "品种资料", "品种详情", "基本信息", "品种情况")
-        ):
-            return False
-        return any(connector in normalized_question for connector in ("和", "及", "以及", "并", "同时", "都"))
-
-    def _build_subquestions(self, user_question: str) -> tuple[QuerySubquestion, ...]:
-        entity = self._extract_primary_entity(user_question)
-        if entity:
-            approval_question = f"查询{entity}的审定信息"
-            genotype_question = f"查询{entity}的基因型信息"
-        else:
-            approval_question = f"{user_question}（审定品种库）"
-            genotype_question = f"{user_question}（基因型数据库）"
-        return (
-            QuerySubquestion(
-                user_question=approval_question,
-                route_hint="approval_variety_db",
-                subtask_label="审定信息",
-                parent_question=user_question,
-            ),
-            QuerySubquestion(
-                user_question=genotype_question,
-                route_hint="genotype_db",
-                subtask_label="基因型信息",
-                parent_question=user_question,
-            ),
-        )
-
-    @staticmethod
-    def _extract_primary_entity(user_question: str) -> str | None:
-        for match in re.finditer(r"[\u4e00-\u9fffA-Za-z]{1,12}\d+[A-Za-z0-9_-]*", user_question):
-            candidate = QueryUnderstandingService._clean_entity_candidate(match.group(0))
-            if candidate:
-                return candidate
-        return None
-
-    @staticmethod
-    def _clean_entity_candidate(candidate: str) -> str | None:
-        cleaned = str(candidate or "").strip()
-        if not cleaned:
-            return None
-        for marker in ("查询一下", "查一下", "了解一下", "看一下", "查询", "查查", "看看", "检索", "搜索", "查", "找"):
-            marker_index = cleaned.rfind(marker)
-            if marker_index >= 0:
-                cleaned = cleaned[marker_index + len(marker) :].strip()
-                break
-        cleaned = re.sub(r"^(?:请|帮我|你帮我|你给我|给我|我想|想|要|一下)+", "", cleaned).strip()
-        if not re.search(r"\d", cleaned):
-            return None
-        return cleaned or None
+    def _has_single_candidate(candidates: Sequence[RouteCandidate]) -> bool:
+        return len(candidates) == 1
 
     def _explicit_route_alias_match(self, normalized_question: str) -> Mapping[str, Any] | None:
         matched_routes: dict[str, Mapping[str, Any]] = {}
@@ -326,43 +243,6 @@ class QueryUnderstandingService:
             if normalized_current.replace("_", "") == normalized_route_id:
                 return route
         return None
-
-    def _looks_like_broad_variety_lookup(self, user_question: str) -> bool:
-        normalized_question = normalize_text(user_question)
-        if not normalized_question or self._has_specific_route_intent(normalized_question):
-            return False
-        has_lookup_verb = any(
-            keyword in normalized_question
-            for keyword in ("查一下", "看一下", "了解一下", "查询", "查查", "看看", "品种", "信息")
-        )
-        has_variety_like_entity = bool(self._extract_primary_entity(user_question))
-        return has_lookup_verb and has_variety_like_entity
-
-    @staticmethod
-    def _has_specific_route_intent(normalized_question: str) -> bool:
-        specific_keywords = (
-            "审定",
-            "公告",
-            "申请者",
-            "育种者",
-            "特征",
-            "产量",
-            "适种",
-            "区域",
-            "审定编号",
-            "基因",
-            "基因型",
-            "qtn",
-            "变异",
-            "位点",
-            "成分",
-            "比例",
-            "籼稻",
-            "粳稻",
-            "籼型",
-            "粳型",
-        )
-        return any(keyword in normalized_question for keyword in specific_keywords)
 
     def _infer_crop(self, route: Mapping[str, Any] | None, normalized_question: str) -> str | None:
         if route is None:

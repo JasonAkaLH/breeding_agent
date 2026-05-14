@@ -12,7 +12,7 @@
 ## 2. 目标
 
 SQLQuery LLM 增强的目标是：
-- 让 intent route 阶段可调用 LLM 在已配置 route 集合内判断具体查询审定品种库、基因型数据库或品种综合概览；
+- 让 intent route 阶段先用各数据库 route 的 intent_keywords 做确定性判断；未命中或无法单一路由时，再调用 LLM 在已配置 route 集合内判断审定品种库或基因型数据库；
 - 让 SQL generation 阶段可在裁剪后的 schema 上下文内调用 LLM 生成只读 SQL；
 - 让 result filtering 阶段可在已执行结果上调用 LLM 判断候选行是否符合用户真实需求，并返回筛选后的表格；
 - 保留确定性 fallback，确保 provider 不可用、输出非法或未配置时仍有可测试的降级路径；

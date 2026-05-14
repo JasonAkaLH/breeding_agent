@@ -1,34 +1,6 @@
 version: 1
 default_route: clarify
 routes:
-- route_id: variety_overview
-  display_name: 品种综合概览
-  enabled: true
-  description: 用户只给出品种名或宽泛“查一下”诉求时，同步从审定品种库与基因型数据库抽取可用概览信息。
-  intent_keywords:
-  - 综合查询
-  - 概览
-  - 查一下
-  - 看一下
-  - 了解一下
-  semantic_hints:
-  - 用户不清楚该选审定品种库还是基因型数据库
-  - 根据品种名同时查询审定信息和基因型基础信息
-  - 对宽泛品种问题先返回有用概览再暴露结果边界
-  allowed_tables:
-  - corn_varieties
-  - rice_varieties
-  - cotton_varieties
-  - wheat_varieties
-  - soybean_varieties
-  - variety
-  - rice_comp
-  schema_profile_id: variety_overview_profile
-  sql_policy_profile: strict_readonly_mysql
-  ambiguity_strategy: first_principles_broad_overview
-  examples:
-  - 查一下龙粳33
-  - 查询品种龙粳33
 - route_id: approval_variety_db
   display_name: 审定品种库
   enabled: true
@@ -43,10 +15,12 @@ routes:
   - 品种审定库
   - 审定品种
   - 审定
-  - 品种
   - 品种审定
   - 品种审定公告
   - 申请审定
+  - 品种信息
+  - 品种详情
+  - 品种资料
   semantic_hints:
   - 查询某个品种的审定信息
   - 查询某作物品种的特征特性
