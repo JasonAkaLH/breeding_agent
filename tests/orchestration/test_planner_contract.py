@@ -62,7 +62,7 @@ class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
             ```json
             {
               "nodes": [
-                {"node_id": "query_data", "capability_id": "skill.sql_query"}
+                {"node_id": "query_data", "capability_id": "skill.generic_data_lookup"}
               ]
             }
             ```
@@ -71,7 +71,7 @@ class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(plan.nodes[0].node_id, "query_data")
-        self.assertEqual(plan.nodes[0].capability_id, "skill.sql_query")
+        self.assertEqual(plan.nodes[0].capability_id, "skill.generic_data_lookup")
 
     def test_parse_rejects_non_object_node(self) -> None:
         with self.assertRaisesRegex(PlannerOutputError, "node object"):

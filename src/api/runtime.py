@@ -176,6 +176,7 @@ class ApiRuntime:
         )
 
     async def _record_event(self, event: EventRecord) -> None:
+        event = _ensure_event_created_at(event)
         await self.storage.append_event(event)
         await self.event_broker.publish(event)
 
@@ -1249,6 +1250,7 @@ def build_api_runtime(
     event_broker = InMemoryEventBroker(audit_sink=audit_sink)
 
     async def record_live_event(event: EventRecord) -> None:
+        event = _ensure_event_created_at(event)
         await storage.append_event(event)
         await event_broker.publish(event)
 
@@ -1822,6 +1824,12 @@ def _record_skill_capability_startup_audit(
                 "source_path": diagnostic.source_path_summary,
             },
         )
+
+
+def _ensure_event_created_at(event: EventRecord) -> EventRecord:
+    if event.created_at is not None:
+        return event
+    return replace(event, created_at=datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 def _resolve_planner_text_generator(

@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
+from src.core.contracts import CapabilityExecutionResult
 from src.core.enums import TaskStatus
-from src.core.models import Task
+from src.core.models import EventRecord, Task
 from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.models import CapabilityDescriptor, ExecutionInstance, InstanceState, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
@@ -58,6 +59,48 @@ class FakeCapabilityFlowTest(OrchestrationSQLiteTestCase):
         self.assertEqual(stored_task.status, TaskStatus.COMPLETED)
         self.assertEqual([node.status for node in stored_nodes], ["completed", "completed"])
         self.assertGreaterEqual(len(stored_events), 4)
+
+    def test_executor_events_without_timestamp_are_persisted_with_created_at(self) -> None:
+        capability_registry = CapabilityRegistry()
+        capability_registry.register(CapabilityDescriptor(capability_id="cap.respond", name="respond", description="respond"))
+
+        instance_registry = InstanceRegistry()
+        instance_registry.register(ExecutionInstance(instance_id="inst-1", supported_capabilities=("cap.respond",), state=InstanceState.ONLINE, load_score=0))
+
+        def handler(request):
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={"answer": "done"},
+                events=(EventRecord(
+                    event_id="custom-progress",
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    node_id=request.node_id,
+                    event_type="custom.progress",
+                    payload={"step": "working"},
+                ),),
+            )
+
+        service = OrchestrationService(
+            storage=self.storage,
+            capability_registry=capability_registry,
+            instance_registry=instance_registry,
+            scheduler=Scheduler(instance_registry),
+            executor=FakeExecutor({"cap.respond": handler}),
+            completion_policy=CompletionPolicy(),
+            backpressure=BackpressureGuard(max_active_tasks=2),
+        )
+
+        request = OrchestrationRequest(task_id="task-event-time", conversation_id="conv-1", root_message_id="msg-1", user_message="hello")
+        plan = WorkflowPlan(task_id="task-event-time", nodes=(WorkflowNodePlan(node_id="node-1", capability_id="cap.respond"),))
+
+        asyncio.run(service.execute_request(request, plan, active_task_count=0))
+        stored_events = asyncio.run(self.storage.list_events_for_task("task-event-time"))
+
+        custom = next(event for event in stored_events if event.event_id == "custom-progress")
+        self.assertIsNotNone(custom.created_at)
 
     def test_required_failure_does_not_complete_task(self) -> None:
         capability_registry = CapabilityRegistry()

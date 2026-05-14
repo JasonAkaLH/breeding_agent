@@ -86,9 +86,15 @@ class OrchestrationService:
         )
 
     async def _record_event(self, event: EventRecord) -> None:
+        event = self._ensure_event_created_at(event)
         await self._storage.append_event(event)
         if self._event_sink is not None:
             await self._event_sink.publish(event)
+
+    def _ensure_event_created_at(self, event: EventRecord) -> EventRecord:
+        if event.created_at is not None:
+            return event
+        return replace(event, created_at=self._utcnow_naive())
 
     async def _initialize_task(self, request: OrchestrationRequest, plan: WorkflowPlan) -> Task:
         now = self._utcnow_naive()

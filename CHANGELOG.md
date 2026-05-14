@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+### 2026-05-14 — 修复 SQLQuery Skill 长任务进度与 SSE 事件时间戳
+
+- 修复 SQLQuery platform-service Skill 内部阶段进度只在 handler 完成后才批量返回的问题；SQLQuery 现在会通过 runtime `progress_events` 服务实时持久化并发布 `skill.progress` frontend 事件，长查询期间前端可见“理解意图 / 准备查询 / 生成 SQL / 检索数据库 / 筛选结果”等阶段。
+- 统一补齐 runtime / orchestration 记录事件时缺失的 `created_at`，避免 `main_agent.output_delta`、`skill.progress` 等 live / executor 事件在 SSE 历史回放中因空时间戳出现顺序错乱。
+- 补充 API、orchestration 与 SQLQuery Skill 回归测试，覆盖 live stream event 时间戳、executor 事件时间戳补齐以及 SQLQuery progress live recorder 行为。
+
 ### 2026-05-14 — 修复 LLM Planner Markdown JSON 围栏导致的对话失败
 
 - 修复 LLM Planner 返回 ```json 代码块包裹 JSON 时被误判为非法 JSON 的问题；规划解析现在会在完整 Markdown JSON code fence 场景下剥离围栏后再校验原有 workflow schema。

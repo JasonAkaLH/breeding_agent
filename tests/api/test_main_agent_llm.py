@@ -78,6 +78,13 @@ class MainAgentLLMAPITest(APITestCase):
 
         self.assertEqual(frontend_reasoning, ["先分析"])
         self.assertEqual(frontend_answer, ["最终回答"])
+        self.assertTrue(
+            all(
+                event.created_at is not None
+                for event in events
+                if event.event_type in {"main_agent.reasoning_delta", "main_agent.output_delta", "main_agent.output_final"}
+            )
+        )
 
     async def test_explicit_generic_data_lookup_capability_runs_internal_filtering_node(self) -> None:
         response = await self.submit_message(content="查询品种龙粳33的基因型信息", capability_id="skill.generic_data_lookup")

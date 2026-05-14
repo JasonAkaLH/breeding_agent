@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -63,7 +64,9 @@ class SQLQueryEngine:
         llm_text_generator=None,
         sql_generator: Callable[[dict[str, Any]], str] | None = None,
         trim_max_tokens: int | None = None,
+        progress_event_recorder: Callable[[EventRecord], Awaitable[None] | None] | None = None,
     ) -> None:
+        self._progress_event_recorder = progress_event_recorder
         self._capabilities = {
             "intent_route": SQLQueryIntentRouteCapability(semantic_text_generator=llm_text_generator),
             "schema_context_prepare": SQLQuerySchemaContextPrepareCapability(),
@@ -82,7 +85,13 @@ class SQLQueryEngine:
 
         for stage, label in self._STAGES:
             stage_node_id = f"{request.node_id}:{stage}"
-            events.append(self._progress_event(request, stage=stage, label=label))
+            progress_event = self._progress_event(request, stage=stage, label=label)
+            if self._progress_event_recorder is not None:
+                maybe_result = self._progress_event_recorder(progress_event)
+                if inspect.isawaitable(maybe_result):
+                    await maybe_result
+            else:
+                events.append(progress_event)
             capability = self._capabilities[stage]
             input_payload: dict[str, Any] = {}
             if stage == "intent_route":

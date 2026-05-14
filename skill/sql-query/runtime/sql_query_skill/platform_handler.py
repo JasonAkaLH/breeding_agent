@@ -30,11 +30,13 @@ class SQLQueryPlatformHandler:
                 error=CapabilityExecutionError(code="skill_service_invalid", message="mysql_readonly service is invalid.", retriable=False),
             )
         llm_text_generator = context.services.get("llm.non_stream")
+        progress_event_recorder = context.services.get("progress_events")
         engine = SQLQueryEngine(
             mysql_adapter=mysql_adapter,
             llm_text_generator=llm_text_generator,
             sql_generator=self._sql_generator,
             trim_max_tokens=self._trim_max_tokens,
+            progress_event_recorder=progress_event_recorder if callable(progress_event_recorder) else None,
         )
         result = await engine.execute(
             SQLQueryEngineRequest(
