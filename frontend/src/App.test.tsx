@@ -992,14 +992,14 @@ describe('App', () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
-      event('node.started', { capability_id: 'skill.data_query' }, 'sql-skill-started'),
-      event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'execute_query' }, 'sql-execute-progress'),
+      event('node.started', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'sql-skill-started'),
+      event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'sql-execute-progress'),
     ])} />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    const progressText = await screen.findByText('正在执行 Skill：正在检索数据');
+    const progressText = await screen.findByText('正在执行 data-query：正在检索数据');
     const assistantBubble = progressText.closest('.message-assistant') as HTMLElement;
     expect(assistantBubble).not.toBeNull();
     expect(assistantBubble.querySelector('.activity-notice')).not.toBeNull();
@@ -1144,7 +1144,7 @@ describe('App', () => {
         [event('task.accepted', {}, 'accepted-before-interrupt')],
         [
           event('task.accepted', {}, 'accepted-after-interrupt'),
-          event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'execute_query' }, 'execute-after-interrupt'),
+          event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'execute-after-interrupt'),
         ],
       ])}
       waitingInputCheckDelayMs={1}
@@ -1166,7 +1166,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { crop: '水稻' }));
-    const resumedProgress = await screen.findByText('正在执行 Skill：正在检索数据');
+    const resumedProgress = await screen.findByText('正在执行 data-query：正在检索数据');
     const resumedBubble = resumedProgress.closest('.message-assistant') as HTMLElement;
     expect(resumedBubble).not.toBeNull();
     expect(resumedBubble.querySelector('.activity-notice')).not.toBeNull();

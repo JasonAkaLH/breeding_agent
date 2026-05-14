@@ -102,6 +102,39 @@ class FakeCapabilityFlowTest(OrchestrationSQLiteTestCase):
         custom = next(event for event in stored_events if event.event_id == "custom-progress")
         self.assertIsNotNone(custom.created_at)
 
+    def test_node_started_frontend_event_exposes_skill_name_from_plan_metadata(self) -> None:
+        capability_registry = CapabilityRegistry()
+        capability_registry.register(CapabilityDescriptor(capability_id="skill.demo_query", name="demo", description="demo"))
+
+        instance_registry = InstanceRegistry()
+        instance_registry.register(ExecutionInstance(instance_id="inst-1", supported_capabilities=("skill.demo_query",), state=InstanceState.ONLINE, load_score=0))
+
+        service = OrchestrationService(
+            storage=self.storage,
+            capability_registry=capability_registry,
+            instance_registry=instance_registry,
+            scheduler=Scheduler(instance_registry),
+            executor=FakeExecutor({"skill.demo_query": success_result(output_payload={"answer": "done"})}),
+            completion_policy=CompletionPolicy(),
+            backpressure=BackpressureGuard(max_active_tasks=2),
+        )
+
+        request = OrchestrationRequest(task_id="task-skill-name", conversation_id="conv-1", root_message_id="msg-1", user_message="hello")
+        plan = WorkflowPlan(
+            task_id="task-skill-name",
+            nodes=(WorkflowNodePlan(node_id="node-1", capability_id="skill.demo_query", metadata={"skill_name": "demo-query"}),),
+        )
+
+        asyncio.run(service.execute_request(request, plan, active_task_count=0))
+        stored_events = asyncio.run(self.storage.list_events_for_task("task-skill-name"))
+
+        started = next(event for event in stored_events if event.event_type == "node.started")
+        completed = next(event for event in stored_events if event.event_type == "node.completed")
+        self.assertEqual(started.payload["capability_id"], "skill.demo_query")
+        self.assertEqual(started.payload["skill_name"], "demo-query")
+        self.assertEqual(completed.payload["capability_id"], "skill.demo_query")
+        self.assertEqual(completed.payload["skill_name"], "demo-query")
+
     def test_required_failure_does_not_complete_task(self) -> None:
         capability_registry = CapabilityRegistry()
         capability_registry.register(CapabilityDescriptor(capability_id="cap.route", name="route", description="route"))

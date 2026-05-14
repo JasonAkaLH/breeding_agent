@@ -17,7 +17,7 @@ from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequ
 from src.core.enums import EventVisibility
 from src.core.models import Artifact, EventRecord, Interrupt
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
-from .helpers import SQL_QUERY_DOMAIN_KIND, SQL_QUERY_PUBLIC_CAPABILITY_ID
+from .helpers import SQL_QUERY_DOMAIN_KIND, SQL_QUERY_PUBLIC_CAPABILITY_ID, SQL_QUERY_SKILL_NAME
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,6 +29,7 @@ class SQLQueryEngineRequest:
     metadata: Mapping[str, Any]
     subtask_label: str | None = None
     parent_question: str | None = None
+    skill_name: str = SQL_QUERY_SKILL_NAME
 
 
 @dataclass(slots=True, frozen=True)
@@ -171,6 +172,7 @@ class SQLQueryEngine:
         payload = {
             "domain_kind": SQL_QUERY_DOMAIN_KIND,
             "capability_id": SQL_QUERY_PUBLIC_CAPABILITY_ID,
+            "skill_name": request.skill_name or SQL_QUERY_SKILL_NAME,
             "stage": stage,
             "label": label,
         }

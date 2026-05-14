@@ -12,6 +12,7 @@ from src.core.enums import ArtifactType, EventVisibility
 from src.core.models import Artifact, EventRecord
 
 SQL_QUERY_PUBLIC_CAPABILITY_ID = "skill.sql_query"
+SQL_QUERY_SKILL_NAME = "sql-query"
 SQL_QUERY_DOMAIN_KIND = "sql_query"
 SQL_QUERY_AUDIT_LLM_CALL_EVENT = "skill.llm_call"
 SQL_QUERY_AUDIT_LLM_FALLBACK_EVENT = "skill.llm_fallback"

@@ -22,12 +22,12 @@ describe('applyTaskEvent', () => {
     expect(state.statusText).toContain('已提交');
     expect(taskProgressDisplayText(state)).toBe('任务已提交');
 
-    state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'execute_query' }, 'node-1'));
+    state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'node-1'));
     expect(state.phase).toBe('running');
     expect(state.statusText).toContain('检索数据');
-    expect(state.currentActivityText).toBe('正在执行 Skill：正在检索数据');
-    expect(state.currentCapabilityLabel).toBe('Skill');
-    expect(taskProgressDisplayText(state)).toBe('正在执行 Skill：正在检索数据');
+    expect(state.currentActivityText).toBe('正在执行 data-query：正在检索数据');
+    expect(state.currentCapabilityLabel).toBe('data-query');
+    expect(taskProgressDisplayText(state)).toBe('正在执行 data-query：正在检索数据');
 
     state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.data_query', domain_kind: 'data_query', stage: 'filter_results' }, 'node-filter'));
     expect(state.statusText).toContain('筛选查询结果');
@@ -39,6 +39,20 @@ describe('applyTaskEvent', () => {
     expect(state.phase).toBe('running');
     expect(state.currentActivityText).toBe('正在执行 report.generate：正在处理');
     expect(state.currentCapabilityLabel).toBe('report.generate');
+  });
+
+  it('falls back to the skill capability id when a skill event has no skill name', () => {
+    const state = applyTaskEvent(createInitialTaskEventState(), event('skill.progress', { capability_id: 'skill.data_query', stage: 'execute_query' }, 'skill-progress'));
+
+    expect(state.currentActivityText).toBe('正在执行 skill.data_query：正在检索数据');
+    expect(state.currentCapabilityLabel).toBe('skill.data_query');
+  });
+
+  it('uses skill_name from node activity payload when available', () => {
+    const state = applyTaskEvent(createInitialTaskEventState(), event('node.started', { capability_id: 'skill.report_query', skill_name: 'report-query' }, 'skill-node-started'));
+
+    expect(state.currentActivityText).toBe('正在执行 report-query：正在处理');
+    expect(state.currentCapabilityLabel).toBe('report-query');
   });
 
   it('appends main-agent deltas once by event id', () => {

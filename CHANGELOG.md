@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+### 2026-05-14 — 展示正在执行的 Skill 名称
+
+- 前端任务进度文案从通用 `Skill` 标签改为优先展示后端事件中的 `skill_name`；缺少 `skill_name` 时回退展示 `skill.*` capability id，避免出现“正在执行 Skill：...”但看不出具体 Skill 的情况。
+- 后端 `node.started` / `node.completed` frontend 事件透出计划 metadata 中的 `skill_name` / `forced_skill_name`；SQLQuery Skill 的 `skill.progress` 事件补充 `skill_name=sql-query`。
+- 补充 orchestration、SQLQuery Skill 与前端进度展示回归测试，覆盖节点事件与 progress 事件的 Skill 名称展示。
+
 ### 2026-05-14 — 修复 SQLQuery Skill 长任务进度与 SSE 事件时间戳
 
 - 修复 SQLQuery platform-service Skill 内部阶段进度只在 handler 完成后才批量返回的问题；SQLQuery 现在会通过 runtime `progress_events` 服务实时持久化并发布 `skill.progress` frontend 事件，长查询期间前端可见“理解意图 / 准备查询 / 生成 SQL / 检索数据库 / 筛选结果”等阶段。

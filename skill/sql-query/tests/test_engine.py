@@ -130,6 +130,7 @@ class SQLQueryEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.error)
         self.assertGreaterEqual(len(recorded_progress), 6)
         self.assertEqual(recorded_progress[0].payload["stage"], "intent_route")
+        self.assertEqual(recorded_progress[0].payload["skill_name"], "sql-query")
         self.assertFalse(any(event.event_type == "skill.progress" for event in result.events))
 
     async def test_unsafe_llm_generated_sql_still_flows_through_guard(self) -> None:

@@ -96,6 +96,18 @@ class OrchestrationService:
             return event
         return replace(event, created_at=self._utcnow_naive())
 
+    @staticmethod
+    def _node_activity_payload(node_plan: WorkflowNodePlan, *, instance_id: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"capability_id": node_plan.capability_id}
+        if instance_id is not None:
+            payload["instance_id"] = instance_id
+        for key in ("skill_name", "forced_skill_name"):
+            skill_name = node_plan.metadata.get(key)
+            if isinstance(skill_name, str) and skill_name.strip():
+                payload["skill_name"] = skill_name.strip()
+                break
+        return payload
+
     async def _initialize_task(self, request: OrchestrationRequest, plan: WorkflowPlan) -> Task:
         now = self._utcnow_naive()
         root_node_id = next((node.node_id for node in plan.nodes if not node.depends_on), None)
@@ -423,7 +435,7 @@ class OrchestrationService:
                 conversation_id=request.conversation_id,
                 node_id=task_node.node_id,
                 event_type="node.started",
-                payload={"capability_id": node_plan.capability_id, "instance_id": instance.instance_id},
+                payload=self._node_activity_payload(node_plan, instance_id=instance.instance_id),
             )
         )
 
@@ -493,7 +505,7 @@ class OrchestrationService:
                 conversation_id=request.conversation_id,
                 node_id=task_node.node_id,
                 event_type="node.completed",
-                payload={"capability_id": node_plan.capability_id},
+                payload=self._node_activity_payload(node_plan),
             )
         )
         return completed, dict(result.output_payload)

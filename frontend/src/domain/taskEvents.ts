@@ -91,7 +91,7 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
         errorMessage: null,
       };
     case 'node.started': {
-      const activity = nodeActivity(event.payload.capability_id);
+      const activity = nodeActivity(event.payload);
       return {
         ...withEvent,
         phase: 'running',
@@ -103,7 +103,7 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
       };
     }
     case 'node.completed': {
-      const activity = nodeActivity(event.payload.capability_id);
+      const activity = nodeActivity(event.payload);
       return {
         ...withEvent,
         phase: state.phase === 'streaming' ? 'streaming' : 'running',
@@ -160,18 +160,20 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
   }
 }
 
-function nodeActivity(value: unknown): { capabilityId: string; capabilityLabel: string; stepText: string } {
-  const capabilityId = typeof value === 'string' ? value : '';
+function nodeActivity(payload: Record<string, unknown>): { capabilityId: string; capabilityLabel: string; stepText: string } {
+  const capabilityId = typeof payload.capability_id === 'string' ? payload.capability_id : '';
   return {
     capabilityId,
-    capabilityLabel: capabilityLabel(capabilityId),
+    capabilityLabel: capabilityLabel(capabilityId, payload),
     stepText: nodeStatusText(capabilityId),
   };
 }
 
-function capabilityLabel(capabilityId: string): string {
+function capabilityLabel(capabilityId: string, payload: Record<string, unknown> = {}): string {
+  const skillName = typeof payload.skill_name === 'string' ? payload.skill_name.trim() : '';
+  if (skillName) return skillName;
   if (capabilityId.startsWith('main_agent.')) return '主代理';
-  if (capabilityId.startsWith('skill.')) return 'Skill';
+  if (capabilityId.startsWith('skill.')) return capabilityId;
   return capabilityId || '能力';
 }
 
@@ -179,7 +181,7 @@ function skillProgressActivity(payload: Record<string, unknown>): { capabilityId
   const capabilityId = typeof payload.capability_id === 'string' ? payload.capability_id : 'skill';
   const stage = typeof payload.stage === 'string' ? payload.stage : '';
   const label = typeof payload.label === 'string' && payload.label.trim() ? payload.label.trim() : dataQueryStageText(stage);
-  return { capabilityId, capabilityLabel: capabilityLabel(capabilityId), stepText: label };
+  return { capabilityId, capabilityLabel: capabilityLabel(capabilityId, payload), stepText: label };
 }
 
 function dataQueryStageText(stage: string): string {

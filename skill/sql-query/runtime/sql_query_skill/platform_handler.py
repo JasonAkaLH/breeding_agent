@@ -47,6 +47,7 @@ class SQLQueryPlatformHandler:
                 metadata=context.safe_metadata,
                 subtask_label=_optional_str(context.input_payload.get("subtask_label")),
                 parent_question=_optional_str(context.input_payload.get("parent_question")),
+                skill_name=context.manifest.name if context.manifest is not None else "sql-query",
             )
         )
         return SkillPlatformHandlerResult(
