@@ -30,6 +30,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       CARGO_TERM_COLOR: always
+      PYO3_PYTHON: python
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +39,11 @@ jobs:
         with:
           toolchain: 1.95.0
           components: clippy,rustfmt
+
+      - name: Set up Python 3.13 for PyO3 workspace gates
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Install Rust quality tools
         run: |

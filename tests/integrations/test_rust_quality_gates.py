@@ -95,6 +95,7 @@ class RustQualityGateTest(unittest.TestCase):
             "cargo +nightly fuzz run skill_runtime_policy",
             "python scripts/run_rust_coverage_thresholds.py --run",
             "python scripts/rust_artifact_provenance.py self-test",
+            "Set up Python 3.13 for PyO3 workspace gates",
             "cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml",
             "mapfile -t WHEELS",
             '"${#WHEELS[@]}" -ne 1',
@@ -123,6 +124,7 @@ class RustQualityGateTest(unittest.TestCase):
         self.assertEqual(cargo_fuzz_install_lines, ["cargo install cargo-fuzz --version 0.13.1"])
         self.assertNotIn("--locked", cargo_fuzz_install_lines[0])
         self.assertIn("CARGO_BUILD_JOBS: \"1\"", text)
+        self.assertIn("PYO3_PYTHON: python", text)
         self.assertIn("Python 3.13", text)
 
     def test_docs_reference_quality_gate_runner_and_non_default_wheel_smoke(self) -> None:

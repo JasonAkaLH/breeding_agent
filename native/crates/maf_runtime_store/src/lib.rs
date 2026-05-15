@@ -264,13 +264,14 @@ impl LeaseRegistry {
     ) -> Result<TaskLease, RuntimeSidecarError> {
         let task_id = task_id.into();
         let owner_id = owner_id.into();
-        if let Some(existing) = self.leases.get(&task_id) {
-            if existing.expires_at_ms > now_ms && existing.owner_id != owner_id {
-                return Err(RuntimeSidecarError::new(
-                    RuntimeSidecarErrorCode::RuntimeStoreLeaseConflict,
-                    "task lease is owned by another active owner",
-                ));
-            }
+        if let Some(existing) = self.leases.get(&task_id)
+            && existing.expires_at_ms > now_ms
+            && existing.owner_id != owner_id
+        {
+            return Err(RuntimeSidecarError::new(
+                RuntimeSidecarErrorCode::RuntimeStoreLeaseConflict,
+                "task lease is owned by another active owner",
+            ));
         }
         let revision = self
             .leases
