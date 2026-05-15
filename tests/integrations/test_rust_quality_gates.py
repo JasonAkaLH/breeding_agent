@@ -135,6 +135,7 @@ class RustQualityGateTest(unittest.TestCase):
         for required in [
             '[licenses]',
             'unused-allowed-license = "warn"',
+            'private = { ignore = true }',
             '"Apache-2.0"',
             '"Apache-2.0 WITH LLVM-exception"',
             '"BSD-3-Clause"',
@@ -142,15 +143,29 @@ class RustQualityGateTest(unittest.TestCase):
             '"Unicode-3.0"',
             '"Unlicense"',
             '"Zlib"',
-            '[licenses.private]',
-            'ignore = true',
         ]:
             self.assertIn(required, text)
+        metadata_result = subprocess.run(
+            ["cargo", "metadata", "--locked", "--format-version", "1"],
+            cwd="native",
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        metadata = json.loads(metadata_result.stdout)
+        workspace_ids = set(metadata["workspace_members"])
+        workspace_packages = [
+            package for package in metadata["packages"] if package["id"] in workspace_ids
+        ]
+        self.assertTrue(workspace_packages)
+        for package in workspace_packages:
+            self.assertEqual(package.get("publish"), [], package["name"])
         for removed in [
             "unlicensed",
             "copyleft",
             "allow-osi-fsf-free",
             "default =",
+            "[licenses.private]",
         ]:
             self.assertNotIn(removed, text)
 
