@@ -1,7 +1,7 @@
 # Phase 0：协议契约、夹具与验收基线 PRD
 
 - **范围**：MCP 2025-11-25 fixtures / fake MCP server / Python-Rust contract / typed error / event schema / TDD baseline
-- **状态**：待实现
+- **状态**：基线已落地（仍仅表示验收基线具备，不代表运行时能力）
 - **日期**：2026-05-14
 - **前置依赖**：PRD 14、PRD 17、Rust MCP sidecar PRD 已冻结
 

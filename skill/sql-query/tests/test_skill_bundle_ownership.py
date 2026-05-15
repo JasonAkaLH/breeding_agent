@@ -9,6 +9,14 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SKILL_ROOT = REPO_ROOT / "skill" / "sql-query"
+LEGACY_MANIFEST_TRIGGERS = (
+    "查询品种",
+    "查询审定品种",
+    "查询基因型",
+    "审定信息",
+    "基因型",
+    "表型数据",
+)
 FORBIDDEN_SYSTEM_PATTERNS = (
     "SQLQuery",
     "sql-query",
@@ -85,15 +93,25 @@ class SQLQuerySkillBundleOwnershipTest(unittest.TestCase):
         self.assertIn("- llm.non_stream", manifest)
         self.assertNotIn("llm.sql_query", manifest)
 
-    def test_manifest_triggers_are_domain_specific_not_generic_query_words(self) -> None:
+    def test_manifest_triggers_keep_legacy_entries_and_include_route_intent_keywords(self) -> None:
         manifest = next(yaml.safe_load_all((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")))
+        routing_rules = yaml.safe_load((SKILL_ROOT / "configs" / "routing_rules.yaml").read_text(encoding="utf-8"))
 
-        triggers = set(manifest["triggers"])
+        route_ids = [route["route_id"] for route in routing_rules["routes"]]
+        expected_triggers: list[str] = []
+        for keyword in LEGACY_MANIFEST_TRIGGERS:
+            if keyword not in expected_triggers:
+                expected_triggers.append(keyword)
+        for route in routing_rules["routes"]:
+            for keyword in route["intent_keywords"]:
+                if keyword not in expected_triggers:
+                    expected_triggers.append(keyword)
 
-        self.assertNotIn("查一下", triggers)
-        self.assertNotIn("查询", triggers)
-        self.assertNotIn("数据库查询", triggers)
-        self.assertTrue({"查询品种", "审定信息", "基因型"}.issubset(triggers))
+        self.assertEqual(route_ids, ["approval_variety_db", "genotype_db"])
+        self.assertEqual(manifest["triggers"], expected_triggers)
+        self.assertNotIn("查一下", manifest["triggers"])
+        self.assertNotIn("查询", manifest["triggers"])
+        self.assertNotIn("数据库查询", manifest["triggers"])
 
     def test_routing_config_exposes_only_supported_database_routes(self) -> None:
         routing_rules = yaml.safe_load((SKILL_ROOT / "configs" / "routing_rules.yaml").read_text(encoding="utf-8"))

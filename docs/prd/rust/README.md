@@ -2,7 +2,7 @@
 
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`
 - **目录状态**：实施专题拆分入口
-- **更新时间**：2026-05-14
+- **更新时间**：2026-05-15
 
 本目录把后端 Rust 化 Runtime 模块评估 PRD 拆成可独立评审、实施和验收的专题 PRD。`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 仍是总决策基线；本目录文档负责把该基线拆成后续工程落地单元。
 
@@ -39,17 +39,17 @@
 | 编号 | 文档 | 范围 | 状态 |
 |---|---|---|---|
 | 00 | `00-Rust化总览与拆分索引PRD.md` | 总体拆分、实施波次、跨专题验收 | 实施波次已冻结 |
-| 01 | `01-Rust工具链构建发布与质量门禁PRD.md` | rustup / Cargo / PyO3 / sidecar 构建、CI、质量门禁 | 待实现 |
+| 01 | `01-Rust工具链构建发布与质量门禁PRD.md` | rustup / Cargo / PyO3 / sidecar 构建、CI、质量门禁 | 工具链 / MCP skeleton 部分落地；CI / 发布门禁待完成 |
 | 02 | `02-Core与LifecycleKernelPRD.md` | `src/core/` contract 与 `src/lifecycle/` 状态机 Rust kernel | canonical source 已冻结 |
 | 03 | `03-DispatcherStoreEventSidecarPRD.md` | dispatcher / durable store / event log Rust sidecar | 待实现 |
 | 04 | `04-SkillRuntime与SkillOwnedRust接入PRD.md` | Rust policy kernel + Skill Sandbox sidecar + Skill-owned Rust 接入规范 | 最终方案已冻结 |
-| 05 | `05-MCPRuntimeRustSidecarPRD.md` | MCP protocol/runtime 独立 Rust sidecar | 接入方式已冻结 |
+| 05 | `05-MCPRuntimeRustSidecarPRD.md` | MCP protocol/runtime 独立 Rust sidecar | Phase 0 / 1 基线已落地；Phase 2-5 待完成 |
 | 06 | `06-ArtifactUploadAuthDataAccessKernelPRD.md` | artifact/upload/file safety、auth primitives、readonly DB access、audit/event sanitizer 聚合 PRD | 聚合边界已冻结 |
 | 07 | `07-OrchestrationDeterministicKernel与热点优化PRD.md` | orchestration deterministic kernel 与热点小 kernel；条件候选专题 | 非必做目标集 |
 
 ## 使用规则
 
 - 做 Rust 总体决策时，先读 `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 与本目录 `00`。
-- 做 MCP Runtime Rust sidecar 实现时，先读 `docs/prd/MCP/README.md`；MCP 长任务流式 SSE 与 Rust sidecar 必须按联合 Phase PRD 协同实现。
+- 做 MCP Runtime Rust sidecar 实现时，先读 `docs/prd/MCP/README.md`；MCP 长任务流式 SSE 与 Rust sidecar 必须按联合 Phase PRD 协同实现。当前只允许宣称 Phase 0 / Phase 1 接入基线已落地，完整生产级 MCP Runtime 必须等 Phase 5 enforce / legacy 下线门禁通过后才能宣称。
 - 做具体 Rust 实现前，必须先把对应专题 PRD 从“待实现”细化为可开发测试计划。
 - 引入任何 Rust 工具、依赖、构建脚本或 `native/` 目录时，必须同步更新 `README.md`、`AGENTS.md`、`CHANGELOG.md` 与本目录相关 PRD。

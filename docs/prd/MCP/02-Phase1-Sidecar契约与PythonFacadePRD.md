@@ -1,7 +1,7 @@
 # Phase 1：Sidecar 契约与 Python Facade PRD
 
 - **范围**：Rust MCP sidecar skeleton / Python sidecar client / protobuf / compatibility handshake / mode flag / facade
-- **状态**：待实现
+- **状态**：基线已落地（sidecar 接入骨架可用，不具备完整 MCP 长任务能力）
 - **日期**：2026-05-14
 - **前置依赖**：Phase 0
 

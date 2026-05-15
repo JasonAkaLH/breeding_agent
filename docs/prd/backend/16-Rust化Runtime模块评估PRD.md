@@ -1,7 +1,7 @@
 # Rust 化 Runtime 模块评估 PRD
 
 - **范围**：后端 / Runtime substrate / Rust native kernel / Python-Rust 边界 / Skill-owned native runtime
-- **文档状态**：决策基线已冻结（后续实施需拆分实现 PRD / 测试计划）
+- **文档状态**：决策基线已冻结；MCP Runtime 已进入联合 Phase 实施，MCP 细节以 `docs/prd/MCP/` 与 `docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md` 为准
 - **日期**：2026-05-14
 - **触发背景**：业务能力已收口为可移除 Skill / MCP 形态，主体框架不应为具体业务能力保留 native capability；需要重新评估成熟 Agent 系统中哪些后端模块应 Rust 化。
 - **关联文档**：
@@ -12,7 +12,10 @@
   - `docs/prd/backend/12-Skill一等Capability能力池PRD.md`
   - `docs/prd/backend/13-Skill动态加载与热部署PRD.md`
   - `docs/prd/backend/14-MCPRuntime实现需求PRD.md`
+  - `docs/prd/backend/17-MCP长任务流式SSEPRD.md`
   - `docs/prd/backend/15-SkillExecutor实现需求PRD.md`
+  - `docs/prd/MCP/README.md`
+  - `docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md`
 - **外部参考**：
   - Rust 安装与 toolchain：<https://www.rust-lang.org/tools/install>
   - PyO3：<https://pyo3.rs/>
@@ -56,6 +59,16 @@
 | `src/auth/` | password hash、captcha、session | 安全原语与 token/session 规则 |
 | `src/orchestration/` | registry、scheduler、workflow plan、router、LLM planner、validator | deterministic DAG kernel 与 LLM glue 分离 |
 | `skill/<skill-name>/runtime/` | Skill-owned domain flow | Skill-owned Rust core / adapter / domain validation / result shaping |
+
+### 2.3 MCP Runtime 专项状态口径（2026-05-15）
+
+MCP Runtime 已不再只是本总评估 PRD 中的抽象 Rust 化候选项，而是已经进入 `docs/prd/MCP/` 定义的联合 Phase 实施范围。当前口径如下：
+
+1. `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 继续作为全局 Rust 化边界、非目标、安全原则、sidecar 策略与最终交付门禁的决策基线。
+2. MCP 的具体功能范围、Phase 顺序、退出门禁、长任务 / Streamable HTTP / SSE / Tasks / API 事件桥接 / shadow enforce / legacy 下线要求，以 `docs/prd/MCP/` 为实施权威。
+3. `docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md` 继续作为 MCP Rust sidecar 专题 PRD，但其状态必须反映 Phase 0 / Phase 1 基线已落地、Phase 2-5 与最终 `enforce` canonical path 尚未完成。
+4. 当前已具备 Rust workspace、`maf_mcp_runtime` sidecar/proto 骨架、health/readiness/version/compatibility handshake、Python sidecar facade、mode gate 与 shadow/enforce fail-closed gate；不得据此宣称完整 Rust MCP Runtime、完整 MCP 长任务流式 SSE 或 production enforce 已完成。
+5. 完整生产口径只有在 `docs/prd/MCP/06-Phase5-ShadowEnforce生产门禁与Legacy下线PRD.md` 通过后才能宣称：Rust sidecar 承载 MCP protocol / transport / long-task durable registry / sanitizer，Python 只保留 facade / API / event bridge / capability wrapper。
 
 ## 3. 目标
 
@@ -132,7 +145,7 @@
 | RUST-P0-004 | `src/api/runtime.py` 内 dispatcher | task dispatcher、running task registry、cancellation token、bundle revision pin/release、active task lease | `ApiRuntime` composition root、FastAPI dependency | 消除 in-memory fragile runtime，支持生产化 |
 | RUST-P0-005 | `src/integrations/codex_skills/` | Skill manifest parser、bundle fingerprint、public root guard、trust gate、handler allowlist、script sandbox policy | Python handler 兼容、Skill 作者接口 | Skill 安全边界可审计 |
 | RUST-P0-006 | `src/capabilities/skill_tool/` | execution mode、answer_mode、service binding、result normalization、error mapping | final answer glue、Python handler call bridge | `skill.*` 一等执行器稳定化 |
-| RUST-P0-007 | `src/integrations/mcp/` + `src/capabilities/mcp_tool/` | JSON-RPC、transport state、schema validation、tool binding、output truncation/sanitization | runtime config 注入、业务 capability 包装 | 外部 tool 输出不可信边界稳定化 |
+| RUST-P0-007 | `src/integrations/mcp/` + `src/capabilities/mcp_tool/` | JSON-RPC、transport state、schema validation、tool binding、output truncation/sanitization | runtime config 注入、业务 capability 包装 | 已进入 `docs/prd/MCP/` 联合 Phase 实施；最终以 Rust sidecar 稳定外部 tool 不可信边界 |
 | RUST-P0-008 | artifact/upload/file store | storage key、path normalization、hash、quota、retention、zip/archive safety | API download response、auth dependency | 防路径穿透、防大文件资源泄漏 |
 
 ### 7.2 P1：独立专题与条件候选
@@ -327,6 +340,10 @@ Rust workspace 目录命名已冻结：主体框架 Rust native workspace 使用
 
 ### 9.5 MCP Runtime
 
+本节只保留 MCP Runtime Rust 化的全局功能约束。MCP 的详细实施范围、Phase 依赖、验收与退出门禁以 `docs/prd/MCP/` 为准；`docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md` 负责承接 Rust sidecar 专题状态。
+
+当前状态：Phase 0 / Phase 1 基线已落地，包含 contract fixture / proto 草案、`native/` workspace、`maf_mcp_runtime` sidecar 骨架、Python facade、compatibility handshake、mode gate 与 fail-closed / shadow fallback 逻辑。Phase 2-5 仍是未完成生产范围，包括 Rust sidecar 内 Streamable HTTP / 多事件 SSE、MCP Tasks durable registry、executor/API/SSE 完整桥接、shadow promotion、production enforce 与 Python legacy 下线。
+
 - RUST-FR-040：MCP JSON-RPC request / response / error 必须由 Rust protocol layer 校验。
 - RUST-FR-041：tool input 必须按 planner allowlist 与 JSON Schema fail-closed 校验。
 - RUST-FR-042：tool output 必须支持 size limit、schema validation、secret redaction、untrusted external content notice。
@@ -398,7 +415,7 @@ Rust workspace 目录命名已冻结：主体框架 Rust native workspace 使用
 ### 10.5 兼容性
 
 - Python 3.13 / Conda `multi_agent` 环境必须可构建和运行 Rust sidecar client / PyO3 extension。
-- 当前仓库尚未引入 Rust toolchain 文件、Cargo workspace 或 Python Rust build dependency；任何实现 PRD / PR 引入这些内容时，必须同步更新 `README.md`、`AGENTS.md`、`requirements.txt` 或独立 Rust build 文档。
+- 当前仓库已因 MCP Phase 1 引入 `native/` Rust workspace、`rust-toolchain.toml` 与 `maf_mcp_runtime` skeleton；任何后续 Rust crate、PyO3 wheel、sidecar binary、Python Rust build dependency 或 CI 门禁扩展，仍必须同步更新 `README.md`、`AGENTS.md`、`requirements.txt` 或独立 Rust build 文档。
 - Rust sidecar health / readiness / version response 必须包含 component、build_version、protocol_version、schema_hash、error_code_table_hash、supported_features、min_client_version、max_client_version；readiness 只有在 compatibility handshake 通过后才为 ready。
 - PyO3 kernel / Python facade 必须在 import / 初始化 / 首次调用前校验 contract artifact；校验字段至少包含 component、contract_version、schema_hash、error_code_table_hash 与 supported_features。
 - 兼容 minor 变更允许滚动升级；breaking change 必须进入 `v2` proto package / contract major version，或显式实现 dual-stack client / server 并提供兼容矩阵测试。
@@ -423,22 +440,22 @@ Rust workspace 目录命名已冻结：主体框架 Rust native workspace 使用
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# 具体版本由创建 native/ workspace 的实现 PRD 决定，并写入 rust-toolchain.toml。
-rustup toolchain install <pinned-stable-version>
-rustup component add --toolchain <pinned-stable-version> rustfmt clippy
+# 当前 native/rust-toolchain.toml 固定 Rust 1.95.0；后续升级必须单独 PR。
+rustup toolchain install 1.95.0
+rustup component add --toolchain 1.95.0 rustfmt clippy
 cargo --version
 rustc --version
 ```
 
-仓库应新增或规划：
+仓库当前已具备或仍需按专题补齐：
 
 ```text
-rust-toolchain.toml（固定具体 stable 版本；不得使用裸 stable channel）
-Cargo.toml workspace（默认 Rust edition 2024；MSRV 等于 rust-toolchain.toml 固定版本）
-.cargo/config.toml（如需要）
+native/rust-toolchain.toml（已存在，固定 Rust 1.95.0；不得使用裸 stable channel）
+native/Cargo.toml workspace（已存在，默认 Rust edition 2024；MSRV 等于 rust-toolchain.toml 固定版本）
+.cargo/config.toml（如后续专题需要）
 ```
 
-Toolchain 升级必须单独 PR，更新 `CHANGELOG.md`，并跑完整 Rust / Python 回归。当前文档只冻结策略，不硬写具体版本号；具体版本在创建 `native/` workspace 的实现 PRD 中一次性确定。
+Toolchain 升级必须单独 PR，更新 `CHANGELOG.md` 与相关 Rust PRD，并跑完整 Rust / Python 回归。本文以当前已落地的 `native/rust-toolchain.toml` 为准：Rust `1.95.0`、edition 2024、MSRV 1.95。
 
 ### 11.2 Python bridge 依赖
 
@@ -481,7 +498,7 @@ Toolchain 升级必须单独 PR，更新 `CHANGELOG.md`，并跑完整 Rust / Py
 
 ### 11.5 Rust toolchain / edition / MSRV 策略冻结
 
-Rust toolchain 策略冻结为：`rust-toolchain.toml` 固定具体 stable 版本，不使用裸 `stable` channel；Cargo workspace 默认使用 Rust edition 2024；MSRV 等于 `rust-toolchain.toml` 固定版本。toolchain 升级必须单独 PR，更新 `CHANGELOG.md`，并跑完整 Rust / Python 回归。具体版本在创建 `native/` workspace 的实现 PRD 中确定。
+Rust toolchain 策略冻结为：`native/rust-toolchain.toml` 固定具体 stable 版本，不使用裸 `stable` channel；Cargo workspace 默认使用 Rust edition 2024；MSRV 等于 `rust-toolchain.toml` 固定版本。当前已落地版本为 Rust `1.95.0` / MSRV 1.95。toolchain 升级必须单独 PR，更新 `CHANGELOG.md` 与相关 Rust PRD，并跑完整 Rust / Python 回归。
 
 ### 11.6 Rust dependency 技术栈冻结
 
@@ -651,7 +668,8 @@ Rust dependency 技术栈冻结为 `tokio`、`tonic`、`prost`、`serde`、`serd
 - `src/lifecycle/task_state_machine.py` 当前承载可 Rust 化的状态转移规则。
 - `src/storage/sqlite/repositories.py` 当前通过 `asyncio.to_thread` 包装同步 SQLAlchemy session，是后续 durable store / async Rust store 的候选边界。
 - `src/integrations/codex_skills/execution.py` 当前承载 Skill trust gate、public root、handler allowlist 与 service binding。
-- `src/integrations/mcp/` 与 `src/capabilities/mcp_tool/` 当前承载 MCP Runtime 与 generic MCP executor。
+- `src/integrations/mcp/` 与 `src/capabilities/mcp_tool/` 当前承载 MCP Python facade / generic MCP executor；MCP Rust sidecar 的 Phase 0 / Phase 1 骨架已进入 `native/crates/maf_mcp_runtime/`，完整 canonical MCP runtime 仍以 `docs/prd/MCP/` Phase 2-5 为后续实施范围。
+- `docs/prd/MCP/README.md` 与 `docs/prd/MCP/00-MCPRuntime联合改造总览PRD.md` 当前承载 MCP 长任务流式 SSE 与 Rust sidecar 的联合实施门禁。
 
 
 ## 18. 拆分后的实施专题 PRD
@@ -665,7 +683,7 @@ Rust dependency 技术栈冻结为 `tokio`、`tonic`、`prost`、`serde`、`serd
 | Core 与 Lifecycle kernel | `docs/prd/rust/02-Core与LifecycleKernelPRD.md` | 对应 RUST-P0-001 / RUST-P0-002 |
 | Dispatcher / Store / Event sidecar | `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md` | 对应 RUST-P0-003 / RUST-P0-004 |
 | Skill Runtime 与 Skill-owned Rust 接入 | `docs/prd/rust/04-SkillRuntime与SkillOwnedRust接入PRD.md` | 对应 RUST-P0-005 / RUST-P0-006 / RUST-P1-004 |
-| MCP Runtime Rust sidecar | `docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md` | 对应 RUST-P0-007；最终独立 sidecar |
+| MCP Runtime Rust sidecar | `docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md` + `docs/prd/MCP/` | 对应 RUST-P0-007；Phase 0 / Phase 1 基线已落地，完整生产能力以 MCP Phase 2-5 与 Phase 5 enforce 门禁为准 |
 | Artifact / Upload / Auth / DataAccess / Audit kernel | `docs/prd/rust/06-ArtifactUploadAuthDataAccessKernelPRD.md` | 聚合 PRD，对应 RUST-P0-008 / RUST-P1-001 / RUST-P1-003 / RUST-P1-005 |
 | Orchestration deterministic kernel 与热点优化 | `docs/prd/rust/07-OrchestrationDeterministicKernel与热点优化PRD.md` | 条件候选；不属于必做 Rust 化目标集，对应 RUST-P1-002 与 P2 热点 |
 

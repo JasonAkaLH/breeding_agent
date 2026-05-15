@@ -1,7 +1,7 @@
 # MCP Runtime 联合改造总览 PRD
 
 - **范围**：MCP Runtime / Rust sidecar / Python facade / 长任务流式 SSE / API 事件桥接 / 生产门禁
-- **状态**：Phase 拆分已冻结，待实现
+- **状态**：Phase 拆分已冻结；Phase 0 / Phase 1 基线已落地，Phase 2-5 待完成
 - **日期**：2026-05-14
 - **基线 PRD**：
   - `docs/prd/backend/14-MCPRuntime实现需求PRD.md`
@@ -13,6 +13,8 @@
 MCP 长任务流式 SSE 与 MCP Runtime Rust sidecar 必须作为同一个最终交付目标联合实现：`17-MCP长任务流式SSEPRD.md` 定义“必须支持什么 MCP 行为”，`05-MCPRuntimeRustSidecarPRD.md` 定义“最终生产边界由 Rust sidecar 承担”。
 
 Phase 只表达工程顺序，不允许把任一中间 Phase 包装成完整 MCP 长任务能力。
+
+截至 2026-05-15，Phase 0 / Phase 1 的契约夹具、proto 草案、Rust sidecar skeleton、Python facade、mode gate 与 compatibility handshake 基线已落地；Phase 2-5 仍是未完成范围。当前不得宣称完整 MCP 长任务流式 SSE Runtime 或 production enforce 已完成。
 
 ## 2. 问题陈述
 

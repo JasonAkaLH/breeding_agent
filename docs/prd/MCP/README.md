@@ -17,8 +17,8 @@ Phase 是工程落地顺序和验收门禁，不是产品版本、降级目标�
 
 | Phase | PRD | 目标 | 完成后允许宣称 |
 |---|---|---|---|
-| Phase 0 | `01-Phase0-协议契约夹具与验收基线PRD.md` | 固定 MCP 2025-11-25 fixtures、proto / error / event contract、fake server 与失败测试 | 具备可执行验收基线，不具备运行时能力 |
-| Phase 1 | `02-Phase1-Sidecar契约与PythonFacadePRD.md` | 建立 Python ↔ Rust MCP sidecar gRPC / protobuf 契约、facade、mode 与 compatibility handshake | 具备 sidecar 接入骨架，不具备完整 MCP 长任务能力 |
+| Phase 0 | `01-Phase0-协议契约夹具与验收基线PRD.md` | 固定 MCP 2025-11-25 fixtures、proto / error / event contract、fake server 与失败测试 | 已落地：具备可执行验收基线，不具备运行时能力 |
+| Phase 1 | `02-Phase1-Sidecar契约与PythonFacadePRD.md` | 建立 Python ↔ Rust MCP sidecar gRPC / protobuf 契约、facade、mode 与 compatibility handshake | 已落地：具备 sidecar 接入骨架，不具备完整 MCP 长任务能力 |
 | Phase 2 | `03-Phase2-StreamableHTTP与SSE内核PRD.md` | 在 Rust sidecar 中实现 Streamable HTTP、多事件 SSE、router、tracker、GET stream、reconnect | 具备流式协议内核，不具备完整 task 状态治理 |
 | Phase 3 | `04-Phase3-Tasks长任务状态与DurableRegistryPRD.md` | 实现 task-augmented tools/call、tasks/get/result/list/cancel、durable registry 与恢复 | 具备 MCP 长任务状态治理内核，不代表前端已完整可见 |
 | Phase 4 | `05-Phase4-API事件桥接取消与Executor集成PRD.md` | 接入 MCP executor、live event bridge、API/SSE、取消传播、CapabilityExecutionResult 映射 | 具备用户可见长任务闭环，可进入 shadow |

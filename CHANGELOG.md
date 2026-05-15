@@ -10,9 +10,15 @@
 
 ## [Unreleased]
 
+### 2026-05-15 — 收口 Rust / MCP PRD 实施口径
+
+- 更新 Rust 化总体 PRD、Rust 专题索引与 MCP Rust Sidecar PRD，明确 MCP Runtime 已从 Rust 化候选进入 `docs/prd/MCP/` 联合 Phase 实施：Phase 0 / Phase 1 基线已落地，Phase 2-5、production enforce 与 Python legacy 下线仍未完成。
+- 同步调整 MCP Phase 总览与 Phase 0 / Phase 1 状态，避免把 sidecar 接入骨架误表述为完整 MCP 长任务流式 SSE Runtime。
+- 复审 Rust 工具链 PRD，修正“尚未引入 `native/` workspace”的过期表述，改为工具链 / MCP skeleton 部分落地、CI / 发布 / coverage / fuzz / provenance 门禁待完成。
+
 ### 2026-05-15 — 收敛 SQLQuery Skill 路由与触发词
 
-- SQLQuery Skill manifest 移除“查一下”“数据库查询”等泛查询触发词，保留品种、审定、基因型、表型相关领域触发词，避免抢占后续其他查询类 Skill。
+- SQLQuery Skill manifest 移除“查一下”“数据库查询”等泛查询触发词，保留原有领域触发词，并追加 `approval_variety_db` / `genotype_db` 两个 route 的 `intent_keywords` 去重合集，避免 Skill 入口触发词与内部 route 判断分叉。
 - SQLQuery Skill 路由配置移除 `variety_overview` route / schema profile，只保留 `approval_variety_db` 与 `genotype_db` 两个数据库 route。
 - `intent_route` 改为先按 route 自身 `intent_keywords` 做确定性单路由判断；未命中时才调用 LLM 在已配置 route 中选择，未配置 / 未成功选择时返回审定品种库或基因型数据库的澄清中断。
 - 清理 SQL 生成、schema context、prompt 与测试中的品种综合概览专属逻辑，并补充 Skill ownership / intent route 回归测试。

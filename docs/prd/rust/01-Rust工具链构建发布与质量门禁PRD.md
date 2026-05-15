@@ -1,13 +1,13 @@
 # Rust 工具链、构建发布与质量门禁 PRD
 
-- **状态**：待实现（workspace、首批 crate、CI / 发布产物矩阵、coverage / fuzz、typed error、observability、resource limit、config/secret 门禁已冻结）
+- **状态**：部分落地（`native/` workspace、Rust 1.95.0 toolchain、`maf_mcp_runtime` Phase 1 骨架已落地；CI / 发布产物矩阵、coverage / fuzz、SBOM / provenance、ops 门禁仍待实现）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 第 8、10、11、12、14、15 节
-- **影响范围**：仓库根目录、未来 `native/` workspace、CI、本地开发环境、Python/Rust bridge
+- **影响范围**：仓库根目录、现有 `native/` workspace、CI、本地开发环境、Python/Rust bridge
 
 ## 1. 问题陈述
 
-当前仓库尚未引入 Rust toolchain 文件、Cargo workspace、PyO3 build dependency 或 sidecar 构建流程。若直接在功能 PR 中引入 Rust，会造成构建路径、依赖来源、质量门禁和回滚策略不统一。
+当前仓库已因 MCP Runtime Phase 1 引入 `native/` Rust workspace、`rust-toolchain.toml`、`maf_mcp_runtime` crate / sidecar binary 骨架与基础 Cargo 构建能力；但完整 CI、发布产物、coverage、fuzz、audit / deny、SBOM、provenance、跨平台 build、runbook 与 production gate 尚未全部落地。后续 Rust 专题如果继续按单功能 PR 自行扩展工具链，会造成构建路径、依赖来源、质量门禁和回滚策略漂移。
 
 ## 2. 目标
 
@@ -18,15 +18,15 @@
 
 ## 3. 非目标
 
-1. 不在本 PRD 中选择首个业务功能模块。
-2. 不创建具体 crate 代码。
+1. 不在本 PRD 中选择新的业务功能模块；既有 MCP Phase 1 skeleton 的范围由 `docs/prd/MCP/` 与 `05-MCPRuntimeRustSidecarPRD.md` 承接。
+2. 不创建新的具体 crate 代码；本文只记录工具链与质量门禁要求。
 3. 不强制所有 Rust 模块都用 PyO3；dispatcher/store/event 长期目标是 sidecar。
 4. 不替代 Conda `multi_agent` Python 环境约定。
 
 ## 4. 功能需求
 
 - RUST-TOOL-FR-001：仓库必须通过 `rust-toolchain.toml` 固定具体 stable 版本，不得使用裸 `stable` channel；Cargo workspace 默认使用 Rust edition 2024，MSRV 等于 `rust-toolchain.toml` 固定版本。
-- RUST-TOOL-FR-002：主体框架 Rust workspace 必须位于仓库根目录 `native/`，新增前必须经过对应实现 PRD 和评审。
+- RUST-TOOL-FR-002：主体框架 Rust workspace 必须位于仓库根目录 `native/`；新增或扩展 crate 前必须经过对应实现 PRD 和评审，既有 `maf_mcp_runtime` Phase 1 骨架不得被外推为其他 crate 已获准创建。
 - RUST-TOOL-FR-003：Skill-owned Rust source 必须位于 `skill/<skill-name>/native/`，不得混入主体 workspace 的业务 crate。
 - RUST-TOOL-FR-004：PyO3 wheel 必须由 CI 或部署流程预构建；runtime 启动和请求处理不得触发 `cargo build`。
 - RUST-TOOL-FR-005：native binary 必须来自固定构建产物路径和 allowlist，不得由 Skill 或用户输入指定任意路径。
@@ -95,7 +95,7 @@
 | `maf_event_log` | Event append、replay、cursor、SSE snapshot support | Wave 2 | 首批冻结 |
 | `maf_task_dispatcher` | Task queue、active registry、cancellation token、bundle revision pinning | Wave 2 | 首批冻结 |
 | `maf_skill_runtime` | Skill manifest、bundle fingerprint、trust gate、PyO3 policy kernel、Skill Sandbox sidecar binary target | Wave 3 | 首批冻结 |
-| `maf_mcp_runtime` | MCP protocol、transport state、tool binding、schema validation | Wave 3 | 首批冻结 |
+| `maf_mcp_runtime` | MCP protocol、transport state、tool binding、schema validation | Wave 3；MCP Phase 0 / 1 已先行 | Phase 1 skeleton 已落地；Phase 2-5 待完成 |
 | `maf_artifact_store` | Artifact/upload/file path、hash、quota、retention、archive safety | Wave 4 | 首批冻结 |
 | `maf_auth_core` | Password / HMAC / session / captcha primitives | Wave 4 | 首批冻结 |
 | `maf_data_access` | Readonly DB adapter、row shape、timeouts | Wave 4 | 首批冻结 |
@@ -151,7 +151,7 @@ Rust toolchain 最终策略冻结为：
 2. Cargo workspace 默认使用 Rust edition 2024。
 3. MSRV 等于 `rust-toolchain.toml` 固定版本。
 4. Toolchain 升级必须单独 PR，更新 `CHANGELOG.md`，并跑完整 Rust / Python 回归。
-5. 当前文档只冻结策略，不在 PRD 中硬写具体版本号；具体版本在创建 `native/` workspace 的实现 PRD 中一次性确定。
+5. 当前已落地 workspace 使用 `native/rust-toolchain.toml` 固定 Rust `1.95.0`、edition 2024、MSRV 1.95；后续 toolchain 升级必须单独 PR，更新 PRD / CHANGELOG，并跑完整 Rust / Python 回归。本文不再为未来 workspace 预留另一个待定版本号。
 
 ### 8.1 CI / 发布产物矩阵冻结
 
@@ -854,7 +854,7 @@ cargo llvm-cov --workspace --all-features --summary-only
 
 ## 21. Rollout / rollback
 
-1. 先引入工具链和空 workspace 之前必须有实现 PRD，不提交空 crate 或空测试。
+1. 已存在的 `native/` workspace 与 `maf_mcp_runtime` skeleton 只代表 MCP Phase 1 基线；后续新增 crate、空 workspace 扩展或占位测试仍必须先有实现 PRD，不得提交空 crate 或空测试。
 2. 每个 crate / sidecar / 子模块使用统一 `MAF_RUST_<COMPONENT>_MODE=off|shadow|enforce` runtime config 控制启用。
 3. `shadow` / dev 阶段 PyO3 import 失败、sidecar health 失败或 protocol / contract 不兼容时，可回退 Python legacy path；`enforce` 阶段默认 fail closed，只有对应 PRD 显式允许且不放宽安全 / 权限 / 数据一致性约束时才可 fallback。
 4. 稳定期前旧 Python implementation 保留。

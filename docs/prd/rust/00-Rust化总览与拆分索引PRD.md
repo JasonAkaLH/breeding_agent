@@ -1,6 +1,6 @@
 # Rust 化总览与拆分索引 PRD
 
-- **状态**：决策拆分（实施波次已冻结）
+- **状态**：决策拆分（实施波次已冻结；MCP Phase 0 / Phase 1 基线已落地）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`
 - **目标读者**：后端维护者、Rust 实施负责人、测试负责人、运维负责人、Skill 平台维护者
@@ -8,6 +8,8 @@
 ## 1. 问题陈述
 
 原 Rust 化 Runtime 模块评估 PRD 已冻结总体方向，但单个总文档不足以直接指导后续工程实施。Rust 化涉及工具链、跨语言 contract、sidecar、storage/event、Skill/MCP sandbox、artifact/file safety、auth/data access 与 rollout，各专题的风险、测试和验收方式不同，需要拆成独立 PRD。
+
+截至 2026-05-15，MCP Runtime 已按 `docs/prd/MCP/` 进入联合 Phase 实施：Phase 0 / Phase 1 的 contract、proto、Rust sidecar skeleton、Python facade、mode gate 与 compatibility handshake 基线已落地；Phase 2-5 的 Rust Streamable HTTP / SSE、Tasks durable registry、API 事件桥接、shadow / enforce 与 Python legacy 下线仍未完成。该状态更新不改变 Rust 总体范围，也不代表其他 Wave 自动完成。
 
 ## 2. 总体目标
 
@@ -18,8 +20,8 @@
 
 ## 3. 非目标
 
-1. 本目录不直接实现 Rust 代码。
-2. 本目录不创建 `native/`、Cargo workspace、PyO3 wheel、sidecar binary 或 CI 配置。
+1. 本目录不直接实现 Rust 代码；已经由 MCP Phase 1 创建的 `native/` workspace 与 `maf_mcp_runtime` 骨架只作为实施状态证据，不由本目录文档本身创建。
+2. 本目录不创建新的 Cargo crate、PyO3 wheel、sidecar binary 或 CI 配置；新增 / 扩展 Rust artifact 必须进入对应专题实现 PRD 与测试计划。
 3. 本目录不把 `ApiRuntime`、FastAPI route、DTO、LLM provider glue、prompt 产品语义或 UI 整体迁移为 Rust。
 4. 本目录不为任何具体业务 Skill 设计专属 Rust 运行分支。
 
@@ -31,7 +33,7 @@
 | Core + Lifecycle kernel | `02-Core与LifecycleKernelPRD.md` | canonical types、状态机 transition table、Python facade | 工具链；canonical source 策略已冻结 |
 | Dispatcher / Store / Event sidecar | `03-DispatcherStoreEventSidecarPRD.md` | durable runtime sidecar、event replay、lease、cursor | 工具链、Core types |
 | Skill Runtime 与 Skill-owned Rust | `04-SkillRuntime与SkillOwnedRust接入PRD.md` | PyO3 policy kernel、Rust Skill Sandbox sidecar、Skill Rust adapter contract | 工具链、Core types |
-| MCP Runtime sidecar | `05-MCPRuntimeRustSidecarPRD.md` | JSON-RPC、transport state、schema validation、sanitization | 工具链、Core types |
+| MCP Runtime sidecar | `05-MCPRuntimeRustSidecarPRD.md` + `docs/prd/MCP/` | Phase 0 / 1 sidecar 接入基线已落地；后续交付 Rust Streamable HTTP / SSE、Tasks、API bridge、shadow/enforce 与 legacy 下线 | 工具链、Core types |
 | Artifact / Auth / DataAccess / Audit kernels | `06-ArtifactUploadAuthDataAccessKernelPRD.md` | path/hash/quota、auth primitives、readonly DB adapter、audit/event sanitizer | 工具链、Core types |
 | Orchestration deterministic 与热点优化 | `07-OrchestrationDeterministicKernel与热点优化PRD.md` | DAG validator、scheduler policy、token/payload small kernels | 条件候选；不属于必做目标集 |
 
@@ -46,6 +48,8 @@
 | Wave 2 | Dispatcher / Store / Event sidecar | event replay、lease、cancellation、bundle revision pinning 可 shadow compare |
 | Wave 3 | Skill Runtime 与 MCP Runtime | untrusted input fail-closed；service binding 与 schema validation 保持双重授权 |
 | Wave 4 | Artifact/Auth/DataAccess 与非 orchestration 热点优化 | path/auth/DB row shaping 等安全热点纳入 Rust；orchestration 仍为条件候选 |
+
+MCP Runtime 因与长任务流式 SSE 共同构成最终生产能力，已经单独进入 `docs/prd/MCP/` 联合 Phase。Wave 表仍表示总体 Rust 化依赖顺序：MCP Phase 0 / 1 的提前落地不代表 Skill Runtime、Dispatcher / Store / Event、Core / Lifecycle 或 Artifact/Auth/DataAccess 已完成，也不允许跳过 MCP Phase 2-5 的退出门禁直接宣称 production enforce。
 
 ## 6. 跨专题统一要求
 
