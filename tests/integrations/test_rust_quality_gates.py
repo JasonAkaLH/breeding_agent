@@ -127,12 +127,36 @@ class RustQualityGateTest(unittest.TestCase):
         self.assertIn("PYO3_PYTHON: python", text)
         self.assertIn("Python 3.13", text)
 
+    def test_cargo_deny_policy_allows_only_frozen_prd01_license_set(self) -> None:
+        deny_policy = Path("native/deny.toml")
+        self.assertTrue(deny_policy.exists())
+        text = deny_policy.read_text(encoding="utf-8")
+
+        for required in [
+            '[licenses]',
+            'unlicensed = "deny"',
+            'copyleft = "deny"',
+            'default = "deny"',
+            'unused-allowed-license = "warn"',
+            '"Apache-2.0"',
+            '"Apache-2.0 WITH LLVM-exception"',
+            '"BSD-3-Clause"',
+            '"MIT"',
+            '"Unicode-3.0"',
+            '"Unlicense"',
+            '"Zlib"',
+            '[licenses.private]',
+            'ignore = true',
+        ]:
+            self.assertIn(required, text)
+
     def test_docs_reference_quality_gate_runner_and_non_default_wheel_smoke(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
         agents = Path("AGENTS.md").read_text(encoding="utf-8")
 
         for document in [readme, agents]:
             self.assertIn("scripts/run_rust_quality_gates.py", document)
+            self.assertIn("native/deny.toml", document)
             self.assertIn("Skill Runtime PyO3 wheel 本地 smoke", document)
             self.assertIn("Ubuntu 22.04", document)
             self.assertIn("manylinux_2_35", document)
