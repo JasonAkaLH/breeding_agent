@@ -98,9 +98,9 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.1
 
-      - name: cargo fuzz run skill_runtime_policy
+      - name: cargo +nightly fuzz run skill_runtime_policy
         working-directory: native/fuzz
-        run: cargo fuzz run skill_runtime_policy -- -max_total_time=30
+        run: cargo +nightly fuzz run skill_runtime_policy -- -max_total_time=30
 
   skill-runtime-pyo3-wheel-smoke:
     name: Skill Runtime PyO3 wheel smoke / Ubuntu 22.04 x86_64 / Python 3.13

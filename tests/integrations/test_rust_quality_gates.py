@@ -65,7 +65,7 @@ class RustQualityGateTest(unittest.TestCase):
         self.assertIn("native/fuzz/Cargo.toml", gates["fuzz_cargo_check"]["command"])
         self.assertEqual(
             gates["cargo_fuzz_smoke"]["command"],
-            ["cargo", "fuzz", "run", "skill_runtime_policy", "--", "-max_total_time=30"],
+            ["cargo", "+nightly", "fuzz", "run", "skill_runtime_policy", "--", "-max_total_time=30"],
         )
         self.assertEqual(
             gates["rust_artifact_provenance_self_check"]["command"],
@@ -92,6 +92,7 @@ class RustQualityGateTest(unittest.TestCase):
             "cargo deny check",
             "cargo llvm-cov --workspace --all-features --summary-only",
             "cargo install cargo-fuzz --version 0.13.1",
+            "cargo +nightly fuzz run skill_runtime_policy",
             "python scripts/run_rust_coverage_thresholds.py --run",
             "python scripts/rust_artifact_provenance.py self-test",
             "cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml",

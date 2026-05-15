@@ -106,7 +106,7 @@ def build_gates() -> list[Gate]:
         ),
         Gate(
             name="cargo_fuzz_smoke",
-            command=["cargo", "fuzz", "run", "skill_runtime_policy", "--", "-max_total_time=30"],
+            command=["cargo", "+nightly", "fuzz", "run", "skill_runtime_policy", "--", "-max_total_time=30"],
             cwd=REPO_ROOT / "native" / "fuzz",
             required_tools=("cargo", "cargo-fuzz"),
             description="Bounded PRD01 fuzz smoke for the Skill Runtime policy boundary.",

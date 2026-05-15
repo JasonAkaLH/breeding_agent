@@ -15,7 +15,7 @@
 - 扩展 `scripts/rust_artifact_provenance.py`，新增 `write-sbom` 与 `write-provenance` 子命令，可从 `cargo metadata` 与预构建 artifact 生成脱敏 SBOM / provenance JSON，再由既有 `generate` 命令汇总 checksum、Cargo.lock digest、SBOM digest、provenance digest 与 contract/proto hash。
 - 更新 Rust quality GitHub Actions 的 Ubuntu 22.04 x86_64 / Python 3.13 Skill Runtime PyO3 wheel job，在 `maturin` + `auditwheel check` 后生成 SBOM、provenance 与 manifest，并上传 wheel release evidence artifact；当前仍未宣称远端 CI 已实际产出或生产 allowlist 已验证。
 - Rust quality workflow 的 push 触发分支补充 `rust_branch`，避免开发分支验证推送后没有远端 CI run 可观察；真实 GitHub Actions 通过状态仍以后续 run 结果为准。
-- 根据远端 GitHub Actions run `25912752831` 的失败日志，修复 `cargo install cargo-fuzz --locked` 在 Ubuntu 22.04 nightly 2026-05-15 上因 locked `rustix 0.36.5` / `rustc_*` 保留 attribute 失败的问题，改为安装顶层固定的 `cargo-fuzz 0.13.1` 并让 Cargo 解析兼容依赖；该 run 的 PyO3 Ubuntu wheel evidence job 已通过，但整体 run 因 fuzz job 失败后被取消，需后续重新触发验证。
+- 根据远端 GitHub Actions run `25912752831` / `25913275197` 的失败日志，修复 `cargo install cargo-fuzz --locked` 在 Ubuntu 22.04 nightly 2026-05-15 上因 locked `rustix 0.36.5` / `rustc_*` 保留 attribute 失败的问题，改为安装顶层固定的 `cargo-fuzz 0.13.1` 并让 Cargo 解析兼容依赖；同时将 bounded fuzz smoke 显式改为 `cargo +nightly fuzz run`，避免 `native/rust-toolchain.toml` 的 stable override 导致 `-Zsanitizer` 被稳定版 rustc 拒绝。上述 run 的 PyO3 Ubuntu wheel evidence job 已通过，但整体 run 仍需后续重新触发验证。
 - 补充 integration 回归测试和 README / AGENTS / Rust PRD 状态说明，继续明确真实 production provenance、coverage 报告、长时 fuzz、ops / promotion 证据仍是后续门禁。
 
 ### 2026-05-15 — 补充目标运行环境约束
