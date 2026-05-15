@@ -13,6 +13,11 @@ path = "src/lib.rs"
 name = "maf-mcp-runtime-sidecar"
 path = "src/main.rs"
 
+[[bin]]
+name = "export-mcp-runtime-contract"
+path = "src/bin/export_mcp_runtime_contract.rs"
+
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true

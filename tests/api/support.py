@@ -88,6 +88,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_client_factory=None,
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
+        runtime_sidecar_client=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
@@ -163,6 +164,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mcp_client_factory=mcp_client_factory,
             mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
+            runtime_sidecar_client=runtime_sidecar_client,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
 
@@ -232,6 +234,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_client_factory=None,
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
+        runtime_sidecar_client=None,
         auth_captcha_code_generator=lambda: "1234",
     ) -> None:
         await self.client.aclose()
@@ -273,6 +276,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mcp_client_factory=mcp_client_factory,
             mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
+            runtime_sidecar_client=runtime_sidecar_client,
             auth_captcha_code_generator=auth_captcha_code_generator,
         )
         await self._bind_client()

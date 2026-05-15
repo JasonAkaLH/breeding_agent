@@ -94,3 +94,25 @@ class TaskCancellationTest(LifecycleSQLiteTestCase):
         self.assertEqual(reloaded_delivery.status, MailboxDeliveryStatus.CANCELLED)
         self.assertEqual(reloaded_checkpoint.invalidated_at, datetime(2026, 4, 23, 17, 0, 30))
         self.assertFalse(asyncio.run(service.can_accept_late_result("task-1")))
+
+    def test_cancel_task_context_preserves_terminal_task_statuses(self) -> None:
+        service = CancellationService(self.storage)
+
+        for status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            task_id = f"task-terminal-{status.value}"
+            task = Task(
+                task_id=task_id,
+                conversation_id="conv-1",
+                root_message_id=f"msg-{status.value}",
+                status=status,
+                created_at=datetime(2026, 4, 23, 18, 0, 0),
+                updated_at=datetime(2026, 4, 23, 18, 1, 0),
+            )
+            asyncio.run(self.storage.save_task(task))
+
+            unchanged = asyncio.run(service.cancel_task_context(task_id, now=datetime(2026, 4, 23, 18, 2, 0)))
+            reloaded = asyncio.run(self.storage.get_task(task_id))
+
+            self.assertEqual(unchanged.status, status)
+            self.assertEqual(reloaded.status, status)
+            self.assertIsNone(reloaded.cancel_requested_at)

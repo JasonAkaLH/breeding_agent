@@ -1,0 +1,166 @@
+{
+  "component": "maf_lifecycle",
+  "contract_version": "lifecycle.v1",
+  "transition_table_hash": "maf_lifecycle_transition_table_v1_20260515",
+  "error_code_table_hash": "maf_lifecycle_error_table_v1_20260515",
+  "transitions": {
+    "interrupt.answer": {
+      "from": [
+        "open"
+      ],
+      "to": "answered"
+    },
+    "interrupt.cancel": {
+      "from": [
+        "open",
+        "answered"
+      ],
+      "to": "cancelled"
+    },
+    "mailbox_delivery.acknowledge": {
+      "from": [
+        "delivered"
+      ],
+      "to": "acknowledged"
+    },
+    "mailbox_delivery.cancel": {
+      "from": [
+        "pending",
+        "delivered",
+        "acknowledged"
+      ],
+      "to": "cancelled"
+    },
+    "mailbox_delivery.expire_timeout": {
+      "from": [
+        "pending",
+        "delivered",
+        "acknowledged"
+      ],
+      "to": "expired"
+    },
+    "mailbox_delivery.mark_delivered": {
+      "from": [
+        "pending"
+      ],
+      "to": "delivered"
+    },
+    "mailbox_delivery.resolve_light": {
+      "from": [
+        "delivered",
+        "acknowledged"
+      ],
+      "to": "resolved"
+    },
+    "mailbox_delivery.resolve_strong": {
+      "from": [
+        "acknowledged"
+      ],
+      "to": "resolved"
+    },
+    "mailbox_delivery.retry_timeout": {
+      "from": [
+        "pending",
+        "delivered",
+        "acknowledged"
+      ],
+      "to": "pending"
+    },
+    "node.answer_interrupt": {
+      "from": [
+        "waiting_for_input"
+      ],
+      "to": "ready_to_resume"
+    },
+    "node.begin_resume": {
+      "from": [
+        "ready_to_resume"
+      ],
+      "to": "resuming"
+    },
+    "node.open_interrupt": {
+      "from": [
+        "pending",
+        "ready",
+        "running",
+        "waiting_for_dependency"
+      ],
+      "to": "waiting_for_input"
+    },
+    "task.begin_cancellation": {
+      "from": [
+        "accepted",
+        "planning",
+        "running",
+        "cancelling"
+      ],
+      "to": "cancelling"
+    },
+    "task.finalize_cancellation": {
+      "from": [
+        "cancelling",
+        "cancelled"
+      ],
+      "to": "cancelled"
+    }
+  },
+  "cancel_node_targets": {
+    "cancelling": "cancelled",
+    "pending": "blocked_by_cancellation",
+    "ready": "blocked_by_cancellation",
+    "ready_to_resume": "cancelled",
+    "resuming": "cancelled",
+    "running": "cancelled",
+    "waiting_for_dependency": "cancelled",
+    "waiting_for_input": "cancelled"
+  },
+  "active_task_statuses": [
+    "accepted",
+    "planning",
+    "running",
+    "cancelling"
+  ],
+  "cancel_interrupt_terminal_statuses": [
+    "cancelled",
+    "expired"
+  ],
+  "interrupt_reopen_guard_terminal_statuses": [
+    "answered",
+    "cancelled",
+    "expired"
+  ],
+  "interrupt_open_status": "open",
+  "delivery_timeout_terminal_statuses": [
+    "resolved",
+    "cancelled",
+    "expired"
+  ],
+  "delivery_timeout_error_code": "ttl_expired",
+  "delivery_timeout_error_message": "delivery exceeded ttl window",
+  "task_cancellation_noop_statuses": [
+    "cancelled",
+    "completed",
+    "failed"
+  ],
+  "late_result_rejected_task_statuses": [
+    "cancelling",
+    "cancelled"
+  ],
+  "error_codes": [
+    {
+      "code": "lifecycle_transition_denied",
+      "category": "lifecycle",
+      "retriable": false
+    },
+    {
+      "code": "lifecycle_contract_mismatch",
+      "category": "lifecycle",
+      "retriable": false
+    },
+    {
+      "code": "lifecycle_structured_output_invalid",
+      "category": "lifecycle",
+      "retriable": false
+    }
+  ]
+}

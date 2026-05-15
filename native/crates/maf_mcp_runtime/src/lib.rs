@@ -27,6 +27,7 @@ pub const FEATURE_SERVER_TO_CLIENT_GET: &str = "server_to_client_get";
 pub const FEATURE_MCP_TASKS: &str = "mcp_tasks";
 pub const FEATURE_TASK_AUGMENTED_TOOLS_CALL: &str = "task_augmented_tools_call";
 pub const FEATURE_REMOTE_CANCEL: &str = "remote_cancel";
+pub const RELATED_TASK_META_KEY: &str = "io.modelcontextprotocol/related-task";
 
 pub const SUPPORTED_FEATURES: &[&str] = &[
     FEATURE_HEALTH,
@@ -45,6 +46,53 @@ pub struct VersionInfo {
     pub supported_features: Vec<String>,
     pub min_client_version: String,
     pub max_client_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpRuntimeContractArtifact {
+    pub component: String,
+    pub protocol_version: String,
+    pub schema_hash: String,
+    pub error_code_table_hash: String,
+    pub task_terminal_states: Vec<String>,
+    pub task_cancelled_state: String,
+    pub task_completed_state: String,
+    pub task_failed_state: String,
+    pub task_input_required_state: String,
+    pub task_default_state: String,
+    pub related_task_meta_key: String,
+}
+
+fn string_values(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+#[must_use]
+pub fn task_terminal_states() -> Vec<String> {
+    string_values(&["completed", "failed", "cancelled"])
+}
+
+#[must_use]
+pub fn mcp_runtime_contract_artifact() -> McpRuntimeContractArtifact {
+    McpRuntimeContractArtifact {
+        component: COMPONENT_ID.to_owned(),
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        schema_hash: SCHEMA_HASH.to_owned(),
+        error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
+        task_terminal_states: task_terminal_states(),
+        task_cancelled_state: "cancelled".to_owned(),
+        task_completed_state: "completed".to_owned(),
+        task_failed_state: "failed".to_owned(),
+        task_input_required_state: "input_required".to_owned(),
+        task_default_state: "working".to_owned(),
+        related_task_meta_key: RELATED_TASK_META_KEY.to_owned(),
+    }
+}
+
+pub fn mcp_runtime_contract_json() -> Result<String, serde_json::Error> {
+    let mut json = serde_json::to_string_pretty(&mcp_runtime_contract_artifact())?;
+    json.push('\n');
+    Ok(json)
 }
 
 impl VersionInfo {
@@ -332,6 +380,223 @@ pub struct ExternalMcpContext {
     pub json_rpc_id_correlation: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonRpcRequestEnvelope {
+    pub jsonrpc: String,
+    pub method: String,
+    pub id: Option<serde_json::Value>,
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcRawEnvelope {
+    jsonrpc: Option<String>,
+    method: Option<String>,
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+    result: Option<serde_json::Value>,
+    error: Option<serde_json::Value>,
+}
+
+pub const MAX_JSON_RPC_BYTES: usize = 1024 * 1024;
+pub const MAX_RAW_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_SANITIZED_TOOL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+pub fn validate_json_rpc_request(
+    payload: &[u8],
+) -> Result<JsonRpcRequestEnvelope, McpRuntimeError> {
+    if payload.len() > MAX_JSON_RPC_BYTES {
+        return Err(McpRuntimeError {
+            typed_error: TypedError::new(
+                McpRuntimeErrorCode::PayloadTooLarge,
+                "JSON-RPC payload exceeds limit",
+            ),
+        });
+    }
+    let raw: JsonRpcRawEnvelope = serde_json::from_slice(payload).map_err(|_| McpRuntimeError {
+        typed_error: TypedError::new(
+            McpRuntimeErrorCode::JsonRpcInvalid,
+            "invalid JSON-RPC payload",
+        ),
+    })?;
+    if raw.jsonrpc.as_deref() != Some("2.0") {
+        return Err(McpRuntimeError {
+            typed_error: TypedError::new(
+                McpRuntimeErrorCode::JsonRpcInvalid,
+                "JSON-RPC version must be 2.0",
+            ),
+        });
+    }
+    if raw.result.is_some() || raw.error.is_some() {
+        return Err(McpRuntimeError {
+            typed_error: TypedError::new(
+                McpRuntimeErrorCode::JsonRpcInvalid,
+                "request cannot contain result or error",
+            ),
+        });
+    }
+    let method = raw
+        .method
+        .filter(|method| !method.trim().is_empty())
+        .ok_or_else(|| McpRuntimeError {
+            typed_error: TypedError::new(
+                McpRuntimeErrorCode::JsonRpcInvalid,
+                "request method is required",
+            ),
+        })?;
+    Ok(JsonRpcRequestEnvelope {
+        jsonrpc: "2.0".to_owned(),
+        method,
+        id: raw.id,
+        params: raw.params,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SanitizedToolOutput {
+    pub text: String,
+    pub truncated: bool,
+    pub redaction_count: usize,
+}
+
+fn redact_authority_tokens(raw: &str) -> (String, usize) {
+    let mut output = Vec::new();
+    let mut redactions = 0usize;
+    for token in raw.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        if lower.starts_with("token=")
+            || lower.starts_with("secret=")
+            || lower.starts_with("api_key=")
+            || lower.starts_with("authorization:")
+        {
+            output.push("[REDACTED]");
+            redactions += 1;
+        } else {
+            output.push(token);
+        }
+    }
+    (output.join(" "), redactions)
+}
+
+pub fn sanitize_tool_output(raw: &str) -> Result<SanitizedToolOutput, McpRuntimeError> {
+    if raw.len() > MAX_RAW_TOOL_OUTPUT_BYTES {
+        return Err(McpRuntimeError {
+            typed_error: TypedError::new(
+                McpRuntimeErrorCode::PayloadTooLarge,
+                "raw tool output exceeds limit",
+            ),
+        });
+    }
+    let (mut text, redaction_count) = redact_authority_tokens(raw);
+    let truncated = text.len() > MAX_SANITIZED_TOOL_OUTPUT_BYTES;
+    if truncated {
+        text.truncate(MAX_SANITIZED_TOOL_OUTPUT_BYTES);
+    }
+    Ok(SanitizedToolOutput {
+        text,
+        truncated,
+        redaction_count,
+    })
+}
+
+#[must_use]
+pub fn can_retry_tool_call(read_only: bool, idempotent: bool, side_effecting: bool) -> bool {
+    !side_effecting && (read_only || idempotent)
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleRegistry {
+    pub active_revision: Option<String>,
+    pub pending_revision: Option<String>,
+}
+
+impl BundleRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn begin_activation(&mut self, revision: impl Into<String>) {
+        self.pending_revision = Some(revision.into());
+    }
+
+    pub fn commit_pending(
+        &mut self,
+        validation_passed: bool,
+    ) -> Result<Option<String>, McpRuntimeError> {
+        if !validation_passed {
+            self.pending_revision = None;
+            return Err(McpRuntimeError {
+                typed_error: TypedError::new(
+                    McpRuntimeErrorCode::BundleActivationFailed,
+                    "bundle validation failed",
+                ),
+            });
+        }
+        self.active_revision = self.pending_revision.take();
+        Ok(self.active_revision.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpTaskState {
+    Pending,
+    Running,
+    Cancelled,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpTaskRecord {
+    pub task_id: String,
+    pub state: McpTaskState,
+}
+
+#[derive(Debug, Default)]
+pub struct McpTaskRegistry {
+    tasks: BTreeMap<String, McpTaskRecord>,
+}
+
+impl McpTaskRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn create_task(&mut self, task_id: impl Into<String>) -> McpTaskRecord {
+        let task_id = task_id.into();
+        let record = McpTaskRecord {
+            task_id: task_id.clone(),
+            state: McpTaskState::Pending,
+        };
+        self.tasks.insert(task_id, record.clone());
+        record
+    }
+
+    pub fn cancel_task(&mut self, task_id: &str) -> Result<McpTaskRecord, McpRuntimeError> {
+        let record = self.tasks.get_mut(task_id).ok_or_else(|| McpRuntimeError {
+            typed_error: TypedError::new(
+                McpRuntimeErrorCode::Cancelled,
+                "task is unknown or already gone",
+            ),
+        })?;
+        if matches!(
+            record.state,
+            McpTaskState::Completed | McpTaskState::Failed | McpTaskState::Cancelled
+        ) {
+            return Err(McpRuntimeError {
+                typed_error: TypedError::new(
+                    McpRuntimeErrorCode::Cancelled,
+                    "terminal task cannot be cancelled",
+                ),
+            });
+        }
+        record.state = McpTaskState::Cancelled;
+        Ok(record.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +712,70 @@ mod tests {
 
         assert_eq!(context.external_protocol_version, "2025-11-25");
         assert_ne!(context.external_protocol_version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn json_rpc_request_validation_fails_closed_on_malformed_payload() {
+        let invalid = validate_json_rpc_request(br#"{"jsonrpc":"2.0","result":{}}"#)
+            .expect_err("request carrying result must fail");
+        assert_eq!(invalid.typed_error.code, "mcp_runtime_json_rpc_invalid");
+
+        let valid = validate_json_rpc_request(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}"#,
+        )
+        .expect("valid request");
+        assert_eq!(valid.method, "tools/call");
+    }
+
+    #[test]
+    fn tool_output_sanitizer_redacts_authority_tokens() {
+        let sanitized = sanitize_tool_output("hello token=abc secret=def api_key=ghi world")
+            .expect("sanitize output");
+        assert_eq!(sanitized.redaction_count, 3);
+        assert!(!sanitized.text.contains("abc"));
+        assert!(sanitized.text.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn side_effecting_tool_calls_are_not_retried_by_default() {
+        assert!(can_retry_tool_call(true, false, false));
+        assert!(can_retry_tool_call(false, true, false));
+        assert!(!can_retry_tool_call(true, true, true));
+        assert!(!can_retry_tool_call(false, false, false));
+    }
+
+    #[test]
+    fn bundle_activation_failure_preserves_active_revision() {
+        let mut registry = BundleRegistry::new();
+        registry.begin_activation("rev-1");
+        assert_eq!(
+            registry.commit_pending(true).expect("commit"),
+            Some("rev-1".to_owned())
+        );
+        registry.begin_activation("bad-rev");
+        assert!(registry.commit_pending(false).is_err());
+        assert_eq!(registry.active_revision, Some("rev-1".to_owned()));
+        assert_eq!(registry.pending_revision, None);
+    }
+
+    #[test]
+    fn task_registry_cancels_non_terminal_tasks() {
+        let mut registry = McpTaskRegistry::new();
+        registry.create_task("task-1");
+        let cancelled = registry.cancel_task("task-1").expect("cancel task");
+        assert_eq!(cancelled.state, McpTaskState::Cancelled);
+    }
+
+    #[test]
+    fn mcp_runtime_contract_artifact_matches_checked_in_copy() {
+        let artifact = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../src/integrations/mcp/rust_contracts/mcp_runtime_contract.json"),
+        )
+        .expect("checked-in mcp runtime contract artifact must exist");
+        assert_eq!(
+            artifact,
+            mcp_runtime_contract_json().expect("serialize mcp runtime contract")
+        );
     }
 }

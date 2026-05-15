@@ -33,6 +33,7 @@ json-rpc==1.15.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 lxml==6.1.0
+maturin==1.13.3
 mcp==1.27.0
 numpy==2.4.4
 openai==2.32.0
@@ -82,4 +83,3 @@ uvicorn==0.45.0
 w3lib==2.4.1
 wheel==0.46.3
 zope.interface==8.3
-

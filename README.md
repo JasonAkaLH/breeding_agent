@@ -19,7 +19,7 @@
 | `src/orchestration/` | capability registry、scheduler、workflow plan、主代理 LLM 高层规划、router、validator、expander、运行时受控重编排与编排服务。 |
 | `src/capabilities/main_agent/` | `main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。 |
 | `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、MCP Python facade、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
-| `native/` | Rust workspace；当前包含 MCP Runtime sidecar/proto Phase1 骨架，生产 Rust sidecar 后续仍按 PRD phase 门禁推进。 |
+| `native/` | Rust workspace；当前包含 Core/Lifecycle、Runtime Store/Event/Dispatcher、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter、Skill Runtime policy / SkillSandboxService + tonic gRPC binding + `maf-skill-sandbox` 二进制入口与受限进程执行基线（client version / handler allowlist、相对 argv、sandbox root、timeout、stdin 上限、stdout/stderr 并发有界 drain、`env_clear` 最小环境、process-group cleanup）、MCP Runtime、Artifact/Auth/DataAccess/Audit 等 Rust contract/kernel crates 与 sidecar proto。部分 Python facade 已消费 Rust contract resource limits；RuntimeSidecar / SkillSandbox Python h2c gRPC client 已可连接外部 Rust sidecar binary 做 runtime store/event/dispatcher RPC 与 Skill policy/sandbox RPC；Skill Runtime policy 也已具备预构建 PyO3 module 加载 facade、Rust JSON bridge、`maturin` wheel build/import smoke 路径，以及 Rust-owned artifact provenance / benchmark / promotion / ops / decommission gate contract + Python fail-closed validator；真实 provenance 产物发布与 production evidence 仍按 PRD phase 门禁推进。 |
 | `skill/<domain-query>/` | 可移除 数据查询 Skill bundle，包含 manifest、领域 runtime、配置与 Skill 专属测试；移除该目录后系统只保留 generic Skill loader。 |
 | `scripts/` | 显式手工 smoke / 维护脚本，包含主代理真实 LLM smoke 与全栈开发启动脚本。 |
 | `tests/` | 后端分层 unittest 回归，包括 core、storage、lifecycle、orchestration、integrations、capabilities、api、e2e、observability。 |
@@ -28,6 +28,7 @@
 ## 当前最小开发基线
 
 - 当前默认开发环境：`conda activate multi_agent`
+- 目标部署/运行环境：Ubuntu 22.04.5 LTS（`GNU/Linux 6.8.0-49-generic x86_64`）、CUDA 12.6、NVIDIA V100 GPU。当前 Rust/PyO3 policy wheel 与 sidecar 基线未直接链接 CUDA；CUDA/V100 仅约束后续如引入 GPU/native 推理依赖时的 build/runtime 兼容性。macOS arm64 只作为本地开发 smoke，不能替代 Ubuntu 22.04 x86_64 生产 wheel / sidecar 证据。
 - 当前已落地的最小测试命令：
 
 ```bash
@@ -58,13 +59,23 @@ npm test -- --run
 npm run build
 ```
 
-- Rust MCP sidecar/proto skeleton 当前验证命令：
+- Rust runtime contract/kernel workspace 当前验证命令：
 
 ```bash
+conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only cargo_fmt --only cargo_test --skip-unavailable
 cd native
 cargo fmt --check
 cargo test --workspace --all-features
 cargo check --workspace --all-targets --all-features
+```
+
+- Skill Runtime PyO3 wheel 本地 smoke（非默认回归；产物仍需 CI / 部署 provenance 后才能进入生产 allowlist；生产目标 wheel 必须在 Ubuntu 22.04 x86_64 / Python 3.13 上生成 `manylinux_2_35` 产物，本机 macOS wheel 仅限开发验证）：
+
+```bash
+CARGO_BUILD_JOBS=1 conda run -n multi_agent python -m maturin build --release --locked --manifest-path native/crates/maf_skill_runtime_pyo3/Cargo.toml --interpreter /opt/miniconda3/envs/multi_agent/bin/python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels
+conda run -n multi_agent python -m pip install --force-reinstall --no-deps native/target/wheels/maf_skill_runtime_pyo3-*.whl
+conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
+conda run -n multi_agent python scripts/rust_artifact_provenance.py self-test
 ```
 
 
@@ -79,3 +90,5 @@ python scripts/run_fullstack_dev.py
 运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、Skill runtime 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 仍可通过显式 `config` dict 注入覆盖，不应在业务节点执行阶段重复读取 `config.yaml`。
 MySQL 只读连接配置也放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
 同一个 API runtime 中的 `*_config_path` 必须指向同一个启动配置文件；默认生产路径使用一个主代理 LLM runtime；Skill 内部 LLM service 只能通过受控 allowlisted adapter 复用该 runtime。显式组件级 `config` dict、client factory 或 fake generator 仍作为测试/定制 seam 保留。
+RuntimeSidecar 连接配置当前通过部署环境变量 `MAF_RUNTIME_SIDECAR_ENDPOINT` 注入；可选 `MAF_RUNTIME_SIDECAR_ALLOWED_HOSTS` 与 `MAF_RUNTIME_SIDECAR_MTLS_ENABLED` 用于 endpoint allowlist / 身份门禁。当前 Python client 仅覆盖本地/内部 plaintext h2c gRPC 验证路径，生产 mTLS、Unix socket 与 artifact provenance allowlist 仍按 Rust PRD 门禁推进。
+SkillSandbox 连接配置当前通过部署环境变量 `MAF_SKILL_SANDBOX_ENDPOINT` 与 `MAF_SKILL_SANDBOX_ROOT` 注入；Python `SkillSandboxGrpcClient` 会校验 h2c gRPC payload 精确长度、拒绝缺失/短头/多余/截断消息，并按 Rust contract 校验 server 返回的 client version range。Skill policy trust gate 会优先尝试加载 `MAF_SKILL_POLICY_PYO3_MODULE`（默认 `maf_skill_runtime_pyo3`）指向的预构建 PyO3 policy module，校验 contract 后再调用 Rust policy；未安装该 module 时继续使用已配置 SkillSandbox policy client。`native/crates/maf_skill_runtime_pyo3` 只提供 CI / 部署预构建用 wheel source 与本地 smoke 路径，runtime 启动和请求路径不得调用 `maturin` / Cargo。Skill Runtime 生产 promotion 证据现在可通过 Rust contract 驱动的 Python validator 校验 artifact provenance、benchmark、shadow/enforce threshold、ops readiness 与 legacy decommission readiness；这些 validator 只作为进入 `enforce` / 下线 legacy 的 fail-closed 门禁，不代表当前仓库已经具备真实 production provenance 或生产观测证据。`MAF_RUST_SKILL_RUNTIME_MODE=enforce` 时平台服务 trust gate 与脚本型 Skill 都必须配置 Rust policy / SkillSandbox client，否则 fail closed，不回退 Python trust gate / subprocess legacy。`shadow` 模式下平台服务仍以 Python legacy 结果为准，并记录不含用户输入正文、secret 或真实 payload 的 Rust policy diff 审计事件。

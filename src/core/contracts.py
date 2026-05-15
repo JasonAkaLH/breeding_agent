@@ -130,6 +130,14 @@ class StoragePort(Protocol):
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]: ...
 
+    async def list_event_page_for_task(
+        self,
+        task_id: str,
+        *,
+        after_event_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[EventRecord]: ...
+
     async def save_mailbox_message(self, message: MailboxMessage) -> MailboxMessage: ...
 
     async def get_mailbox_message(self, message_id: str) -> MailboxMessage | None: ...

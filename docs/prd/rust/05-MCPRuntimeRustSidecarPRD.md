@@ -1,6 +1,6 @@
 # MCP Runtime Rust Sidecar PRD
 
-- **状态**：实施中（接入方式已冻结为独立 Rust sidecar；Phase 0 / Phase 1 基线已落地；Phase 2-5 与 production enforce 待完成）
+- **状态**：实施中（接入方式已冻结为独立 Rust sidecar；Phase 0 / Phase 1 基线已落地，并补充 JSON-RPC validation、output sanitizer、bundle activation 与 task registry Rust kernels；Phase 2-5 与 production enforce 待完成）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` RUST-P0-007、9.5；`docs/prd/backend/14-MCPRuntime实现需求PRD.md`；`docs/prd/backend/17-MCP长任务流式SSEPRD.md`
 - **联合实施 Phase**：`docs/prd/MCP/README.md`

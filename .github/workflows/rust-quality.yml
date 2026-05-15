@@ -1,0 +1,130 @@
+name: Rust quality gates
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - "src/**/rust_contract*.py"
+      - "src/**/rust_contracts/**"
+      - "scripts/run_rust_quality_gates.py"
+      - "scripts/rust_artifact_provenance.py"
+      - "requirements.txt"
+      - ".github/workflows/rust-quality.yml"
+  push:
+    branches: [main]
+    paths:
+      - "native/**"
+      - "src/**/rust_contract*.py"
+      - "src/**/rust_contracts/**"
+      - "scripts/run_rust_quality_gates.py"
+      - "scripts/rust_artifact_provenance.py"
+      - "requirements.txt"
+      - ".github/workflows/rust-quality.yml"
+  workflow_dispatch:
+
+jobs:
+  rust-quality:
+    name: Rust PRD01 quality gates / Ubuntu 22.04 x86_64
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain from native/rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+
+      - name: Install Rust quality tools
+        run: |
+          cargo install cargo-nextest --locked
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+          cargo install cargo-llvm-cov --locked
+
+      - name: cargo fmt --check
+        working-directory: native
+        run: cargo fmt --check
+
+      - name: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        working-directory: native
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo test --workspace --all-features
+        working-directory: native
+        run: cargo test --workspace --all-features
+
+      - name: cargo nextest run --workspace --all-features
+        working-directory: native
+        run: cargo nextest run --workspace --all-features
+
+      - name: cargo audit
+        working-directory: native
+        run: cargo audit
+
+      - name: cargo deny check
+        working-directory: native
+        run: cargo deny check
+
+      - name: cargo llvm-cov --workspace --all-features --summary-only
+        working-directory: native
+        run: cargo llvm-cov --workspace --all-features --summary-only
+
+      - name: Check fuzz target manifest readiness
+        run: python scripts/run_rust_quality_gates.py --check-fuzz-targets
+
+      - name: Compile PRD01 fuzz harnesses
+        run: cargo check --manifest-path native/fuzz/Cargo.toml --bins
+
+      - name: python scripts/rust_artifact_provenance.py self-test
+        run: python scripts/rust_artifact_provenance.py self-test
+
+  rust-fuzz-smoke:
+    name: Rust bounded fuzz smoke / Ubuntu 22.04 x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust for cargo-fuzz only
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: cargo fuzz run skill_runtime_policy
+        working-directory: native/fuzz
+        run: cargo fuzz run skill_runtime_policy -- -max_total_time=30
+
+  skill-runtime-pyo3-wheel-smoke:
+    name: Skill Runtime PyO3 wheel smoke / Ubuntu 22.04 x86_64 / Python 3.13
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain from native/rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python build dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: python -m maturin build --release --manifest-path native/crates/maf_skill_runtime_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check
+        run: python -m maturin build --release --locked --manifest-path native/crates/maf_skill_runtime_pyo3/Cargo.toml --interpreter python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels
+
+      - name: Install built Skill Runtime PyO3 wheel
+        run: python -m pip install --force-reinstall --no-deps native/target/wheels/maf_skill_runtime_pyo3-*.whl
+
+      - name: test_installed_pyo3_module_matches_rust_contract_when_available
+        run: python -m unittest tests.integrations.codex_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available

@@ -1,0 +1,84 @@
+{
+  "component": "maf_safety_kernels",
+  "crates": [
+    "maf_artifact_store",
+    "maf_auth_core",
+    "maf_data_access",
+    "maf_audit_sanitizer"
+  ],
+  "modes": [
+    "off",
+    "shadow",
+    "enforce"
+  ],
+  "mode_env": {
+    "artifact_store": "MAF_RUST_ARTIFACT_STORE_MODE",
+    "audit_sanitizer": "MAF_RUST_AUDIT_SANITIZER_MODE",
+    "auth_core": "MAF_RUST_AUTH_CORE_MODE",
+    "data_access": "MAF_RUST_DATA_ACCESS_MODE"
+  },
+  "resource_limits": {
+    "archive_hard_cap_ms": 60000,
+    "artifact_deadline_ms": 5000,
+    "audit_event_bytes": 65536,
+    "auth_deadline_ms": 1000,
+    "db_column_limit": 100,
+    "db_deadline_ms": 10000,
+    "db_hard_cap_ms": 30000,
+    "db_result_bytes": 10485760,
+    "db_row_limit": 500,
+    "upload_preview_bytes": 10485760
+  },
+  "error_codes": [
+    {
+      "code": "artifact_path_escape",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "artifact_upload_too_large",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "auth_token_invalid",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "auth_secret_missing",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "data_access_write_denied",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "data_access_row_limit_exceeded",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "data_access_column_limit_exceeded",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "data_access_result_too_large",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "audit_sanitizer_secret_redacted",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "audit_sanitizer_event_too_large",
+      "category": "resource_limit",
+      "retriable": false
+    }
+  ]
+}

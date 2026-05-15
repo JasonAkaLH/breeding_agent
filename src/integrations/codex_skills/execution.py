@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import inspect
 import importlib.util
+import hashlib
+import json
+import os
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -13,11 +17,12 @@ from src.core.models import Artifact, Interrupt
 from .input_resolution import SkillInputResolutionContext, SkillInputResolutionResult, SkillInputTextGenerator, resolve_skill_inputs_with_llm
 from .internal_keys import SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY, SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY
 from .manifest import SkillManifest
+from .rust_contract import load_skill_runtime_contract
+from .rust_contract import contract_mapping as skill_runtime_contract_mapping
+from .rust_contract import status_list as skill_runtime_status_list
 from .script_manifest import SkillScriptEntrypoint
 from .script_runner import SkillScriptError, SkillScriptRunner
 
-_EXECUTION_MODES = frozenset({"delegated_main_agent", "python_subprocess", "platform_service"})
-_ANSWER_MODES = frozenset({"direct", "requires_finalizer", "none"})
 _SAFE_ARTIFACT_KEYS = frozenset({"artifact_id", "upload_id", "filename", "mime_type", "content_type", "size", "row_count", "columns", "preview", "summary"})
 _BLOCKED_METADATA_KEYS = frozenset({"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"})
 
@@ -97,6 +102,9 @@ class SkillPlatformHandlerRegistry:
         trusted_skill_handlers: Mapping[str, str] | None = None,
         trusted_skill_services: Mapping[str, tuple[str, ...] | list[str] | set[str]] | None = None,
         public_skill_roots: tuple[str | Path, ...] | list[str | Path] | set[str | Path] = (),
+        rust_policy_client: Any | None = None,
+        rust_policy_mode: str | None = None,
+        rust_policy_shadow_diff_sink: Callable[[Mapping[str, str]], None] | None = None,
     ) -> None:
         self._handlers = dict(handlers or {})
         self._trusted_skill_handlers = {str(key): str(value) for key, value in dict(trusted_skill_handlers or {}).items()}
@@ -106,6 +114,10 @@ class SkillPlatformHandlerRegistry:
         }
         self._public_skill_roots = tuple(_resolve_path(root) for root in public_skill_roots)
         self._loaded_project_handlers: dict[tuple[str, str, str, int, int], SkillPlatformHandler] = {}
+        self._rust_policy_client = rust_policy_client
+        self._rust_policy_mode = _resolve_rust_policy_mode(rust_policy_mode)
+        self._rust_policy_shadow_diff_sink = rust_policy_shadow_diff_sink
+        self.rust_policy_shadow_diffs: list[dict[str, str]] = []
 
     def resolve(
         self,
@@ -116,30 +128,135 @@ class SkillPlatformHandlerRegistry:
         service_registry: SkillServiceRegistry,
         public_skill_roots: tuple[Path, ...] = (),
     ) -> tuple[SkillPlatformHandler, dict[str, Any]]:
-        expected_handler = self._trusted_skill_handlers.get(capability_id, "")
-        if expected_handler:
-            if expected_handler != config.handler:
-                raise PermissionError("platform handler is not allowlisted for this skill capability")
-            handler = self._handlers.get(config.handler)
-            if handler is None:
-                raise PermissionError("platform handler is not registered")
-            allowed_services = set(self._trusted_skill_services.get(capability_id, ()))
-        elif manifest is not None and config.trust_scope == "project":
-            handler = self._load_project_handler(
-                manifest=manifest,
-                config=config,
-                public_skill_roots=public_skill_roots,
-            )
-            allowed_services = set(config.services)
-        else:
-            raise PermissionError("platform handler is not allowlisted for this skill capability")
-        requested_services = set(config.services)
-        if not requested_services.issubset(allowed_services):
-            raise PermissionError("requested services are not allowlisted for this skill capability")
+        rust_policy_response = self._validate_rust_policy(
+            capability_id=capability_id,
+            manifest=manifest,
+            config=config,
+        )
         try:
-            return handler, service_registry.bind(tuple(sorted(requested_services)))
-        except KeyError as exc:
-            raise PermissionError("requested services are not registered in runtime") from exc
+            expected_handler = self._trusted_skill_handlers.get(capability_id, "")
+            if expected_handler:
+                if expected_handler != config.handler:
+                    raise PermissionError("platform handler is not allowlisted for this skill capability")
+                handler = self._handlers.get(config.handler)
+                if handler is None:
+                    raise PermissionError("platform handler is not registered")
+                allowed_services = set(self._trusted_skill_services.get(capability_id, ()))
+            elif manifest is not None and config.trust_scope == "project":
+                handler = self._load_project_handler(
+                    manifest=manifest,
+                    config=config,
+                    public_skill_roots=public_skill_roots,
+                )
+                allowed_services = set(config.services)
+            else:
+                raise PermissionError("platform handler is not allowlisted for this skill capability")
+            requested_services = set(config.services)
+            if not requested_services.issubset(allowed_services):
+                raise PermissionError("requested services are not allowlisted for this skill capability")
+            services = service_registry.bind(tuple(sorted(requested_services)))
+        except (KeyError, PermissionError) as exc:
+            self._record_rust_policy_shadow_diff(
+                capability_id=capability_id,
+                manifest=manifest,
+                response=rust_policy_response,
+                legacy_allowed=False,
+            )
+            if isinstance(exc, KeyError):
+                raise PermissionError("requested services are not registered in runtime") from exc
+            raise
+        self._record_rust_policy_shadow_diff(
+            capability_id=capability_id,
+            manifest=manifest,
+            response=rust_policy_response,
+            legacy_allowed=True,
+        )
+        return handler, services
+
+    def _validate_rust_policy(
+        self,
+        *,
+        capability_id: str,
+        manifest: SkillManifest | None,
+        config: SkillExecutionConfig,
+    ) -> dict[str, Any] | None:
+        if self._rust_policy_mode == "off":
+            return None
+        if self._rust_policy_client is None:
+            if self._rust_policy_mode == "enforce":
+                raise PermissionError("Rust Skill Runtime policy client is required in enforce mode")
+            return None
+        policy_request = {
+            "skill_name": manifest.name if manifest is not None else capability_id,
+            "capability_id": capability_id,
+            "execution_mode": config.mode,
+            "trust_scope": config.trust_scope,
+            "handler": config.handler,
+            "manifest_services": config.services,
+            "runtime_allowlist_services": self._trusted_skill_services.get(capability_id, ()),
+            "requested_services": config.services,
+            "runtime_allowlist_handlers": _runtime_allowlist_handlers(
+                self._trusted_skill_handlers,
+                capability_id,
+            ),
+            "x_runtime_rust": _skill_owned_rust_metadata(manifest),
+        }
+        started_at = time.perf_counter()
+        try:
+            response = self._rust_policy_client.validate_policy(**policy_request)
+        except Exception as exc:  # noqa: BLE001 - policy client failures are fail-closed in enforce, audit-only in shadow.
+            if self._rust_policy_mode == "enforce":
+                raise PermissionError(f"Rust Skill Runtime policy validation failed: {exc}") from exc
+            return {
+                "allowed": False,
+                "bundle_fingerprint": "",
+                "error": {"code": "skill_runtime_policy_unavailable", "message": str(exc)},
+                "_duration_ms": _elapsed_ms(started_at),
+                "_input_fingerprint": _fingerprint(policy_request),
+            }
+        response = dict(response)
+        response["_duration_ms"] = _elapsed_ms(started_at)
+        response["_input_fingerprint"] = _fingerprint(policy_request)
+        if self._rust_policy_mode == "enforce":
+            _raise_if_rust_policy_denied(response)
+        return response
+
+    def _record_rust_policy_shadow_diff(
+        self,
+        *,
+        capability_id: str,
+        manifest: SkillManifest | None,
+        response: Mapping[str, Any] | None,
+        legacy_allowed: bool,
+    ) -> None:
+        if self._rust_policy_mode != "shadow" or response is None:
+            return
+        rust_allowed = bool(response.get("allowed"))
+        if rust_allowed == legacy_allowed:
+            return
+        error = response.get("error") if isinstance(response.get("error"), Mapping) else {}
+        event = {
+            "component": "maf_skill_runtime",
+            "capability_id": capability_id,
+            "skill_name": manifest.name if manifest is not None else capability_id,
+            "legacy_allowed": str(legacy_allowed).lower(),
+            "rust_allowed": str(rust_allowed).lower(),
+            "error_code": str(error.get("code") or ""),
+            "input_fingerprint": str(response.get("_input_fingerprint") or ""),
+            "legacy_output_fingerprint": _fingerprint({"allowed": legacy_allowed}),
+            "rust_output_fingerprint": _fingerprint(
+                {"allowed": rust_allowed, "error_code": str(error.get("code") or "")}
+            ),
+            "duration_ms": str(response.get("_duration_ms") or "0"),
+        }
+        self.rust_policy_shadow_diffs.append(event)
+        if self._rust_policy_shadow_diff_sink is not None:
+            try:
+                self._rust_policy_shadow_diff_sink(event)
+            except Exception:
+                # Shadow compare is audit-only by contract: audit/metrics sink
+                # failures must never change the legacy user-visible result.
+                pass
 
     @staticmethod
     def _bind_services(config: SkillExecutionConfig, service_registry: SkillServiceRegistry) -> dict[str, Any]:
@@ -293,8 +410,9 @@ def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionCon
     execution = manifest.metadata.get("execution") if isinstance(manifest.metadata.get("execution"), Mapping) else {}
     mode = str(execution.get("mode") or "").strip().lower()
     if not mode:
-        mode = "python_subprocess" if manifest.scripts else "delegated_main_agent"
-    if mode not in _EXECUTION_MODES:
+        default_execution_modes = skill_runtime_contract_mapping("default_execution_modes")
+        mode = default_execution_modes["scripted" if manifest.scripts else "instruction_only"]
+    if mode not in skill_runtime_status_list("allowed_execution_modes"):
         raise SkillExecutionConfigError(f"Unsupported skill execution mode: {mode}")
 
     handler = str(execution.get("handler") or "").strip()
@@ -306,13 +424,11 @@ def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionCon
     answer_raw = str(execution.get("answer_mode") or "").strip().lower()
     explicit_answer_mode = bool(answer_raw)
     if answer_raw:
-        if answer_raw not in _ANSWER_MODES:
+        if answer_raw not in skill_runtime_status_list("allowed_answer_modes"):
             raise SkillExecutionConfigError(f"Unsupported skill answer mode: {answer_raw}")
         answer_mode = answer_raw
-    elif mode == "delegated_main_agent":
-        answer_mode = "direct"
-    elif mode == "python_subprocess":
-        answer_mode = "requires_finalizer"
+    elif mode in skill_runtime_contract_mapping("default_answer_mode_by_execution_mode"):
+        answer_mode = skill_runtime_contract_mapping("default_answer_mode_by_execution_mode")[mode]
     else:
         raise SkillExecutionConfigError("platform_service skills must declare execution.answer_mode explicitly")
 
@@ -401,6 +517,49 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if isinstance(value, list | tuple | set):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return ()
+
+
+def _resolve_rust_policy_mode(mode: str | None) -> str:
+    contract = load_skill_runtime_contract()
+    resolved = str(mode if mode is not None else os.environ.get(str(contract["mode_env"]), "off")).strip().lower()
+    if resolved not in skill_runtime_status_list("modes"):
+        raise SkillExecutionConfigError(f"Unsupported Rust Skill Runtime policy mode: {resolved}")
+    return resolved
+
+
+def _runtime_allowlist_handlers(trusted_skill_handlers: Mapping[str, str], capability_id: str) -> tuple[str, ...]:
+    handler = str(trusted_skill_handlers.get(capability_id, "")).strip()
+    return (handler,) if handler else ()
+
+
+def _skill_owned_rust_metadata(manifest: SkillManifest | None) -> dict[str, str]:
+    if manifest is None:
+        return {}
+    x_runtime = manifest.metadata.get("x_runtime")
+    if not isinstance(x_runtime, Mapping):
+        return {}
+    rust = x_runtime.get("rust")
+    if not isinstance(rust, Mapping):
+        return {}
+    return {str(key): str(value) for key, value in rust.items()}
+
+
+def _raise_if_rust_policy_denied(response: Mapping[str, Any]) -> None:
+    if response.get("allowed") is True and response.get("error") is None:
+        return
+    error = response.get("error") if isinstance(response.get("error"), Mapping) else {}
+    code = str(error.get("code") or "skill_runtime_policy_denied")
+    message = str(error.get("message") or "Rust Skill Runtime policy denied platform binding")
+    raise PermissionError(f"{code}: {message}")
+
+
+def _elapsed_ms(started_at: float) -> str:
+    return str(max(0, round((time.perf_counter() - started_at) * 1000)))
+
+
+def _fingerprint(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _resolve_path(path: str | Path) -> Path:

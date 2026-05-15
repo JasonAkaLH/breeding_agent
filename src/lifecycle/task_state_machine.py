@@ -7,6 +7,7 @@ from src.core.enums import AckPolicy, InterruptStatus, MailboxDeliveryStatus, No
 from src.core.models import Checkpoint, Interrupt, InterruptAnswer, MailboxDelivery, MailboxMessage, Task, TaskNode
 
 from .errors import LifecycleTransitionError
+from .rust_contract import cancel_node_target, contract_value, status_list, transition_allowed, transition_target
 
 
 def _ensure(condition: bool, message: str) -> None:
@@ -14,29 +15,31 @@ def _ensure(condition: bool, message: str) -> None:
         raise LifecycleTransitionError(message)
 
 
+def _target(enum_cls: type, operation: str):
+    return enum_cls(transition_target(operation))
+
+
 def mark_delivery_delivered(delivery: MailboxDelivery, *, now: datetime) -> MailboxDelivery:
-    _ensure(delivery.status == MailboxDeliveryStatus.PENDING, "Only pending deliveries can be marked delivered.")
-    return replace(delivery, status=MailboxDeliveryStatus.DELIVERED, delivered_at=now, updated_at=now)
+    operation = "mailbox_delivery.mark_delivered"
+    _ensure(transition_allowed(operation, delivery.status), "Only pending deliveries can be marked delivered.")
+    return replace(delivery, status=_target(MailboxDeliveryStatus, operation), delivered_at=now, updated_at=now)
 
 
 def acknowledge_delivery(message: MailboxMessage, delivery: MailboxDelivery, *, now: datetime) -> MailboxDelivery:
+    operation = "mailbox_delivery.acknowledge"
     _ensure(message.ack_policy == AckPolicy.STRONG, "Only strong-ACK messages can be explicitly acknowledged.")
-    _ensure(delivery.status == MailboxDeliveryStatus.DELIVERED, "Only delivered messages can be acknowledged.")
-    return replace(delivery, status=MailboxDeliveryStatus.ACKNOWLEDGED, acknowledged_at=now, updated_at=now)
+    _ensure(transition_allowed(operation, delivery.status), "Only delivered messages can be acknowledged.")
+    return replace(delivery, status=_target(MailboxDeliveryStatus, operation), acknowledged_at=now, updated_at=now)
 
 
 def resolve_delivery(message: MailboxMessage, delivery: MailboxDelivery, *, now: datetime) -> MailboxDelivery:
+    operation = "mailbox_delivery.resolve_strong" if message.ack_policy == AckPolicy.STRONG else "mailbox_delivery.resolve_light"
     if message.ack_policy == AckPolicy.STRONG:
-        _ensure(
-            delivery.status == MailboxDeliveryStatus.ACKNOWLEDGED,
-            "Strong-ACK deliveries must be acknowledged before resolve.",
-        )
+        message_for_error = "Strong-ACK deliveries must be acknowledged before resolve."
     else:
-        _ensure(
-            delivery.status in {MailboxDeliveryStatus.DELIVERED, MailboxDeliveryStatus.ACKNOWLEDGED},
-            "Light-ACK deliveries must be delivered before resolve.",
-        )
-    return replace(delivery, status=MailboxDeliveryStatus.RESOLVED, resolved_at=now, updated_at=now)
+        message_for_error = "Light-ACK deliveries must be delivered before resolve."
+    _ensure(transition_allowed(operation, delivery.status), message_for_error)
+    return replace(delivery, status=_target(MailboxDeliveryStatus, operation), resolved_at=now, updated_at=now)
 
 
 def handle_delivery_timeout(
@@ -47,17 +50,19 @@ def handle_delivery_timeout(
 ) -> MailboxDelivery:
     if delivery.expires_at is None or now < delivery.expires_at:
         return delivery
-    if delivery.status in {MailboxDeliveryStatus.RESOLVED, MailboxDeliveryStatus.CANCELLED, MailboxDeliveryStatus.EXPIRED}:
+    if str(delivery.status) in status_list("delivery_timeout_terminal_statuses"):
         return delivery
 
     next_attempt_count = delivery.attempt_count + 1
-    ttl_error_code = "ttl_expired"
-    ttl_error_message = "delivery exceeded ttl window"
+    ttl_error_code = contract_value("delivery_timeout_error_code")
+    ttl_error_message = contract_value("delivery_timeout_error_message")
     if next_attempt_count < delivery.max_attempts:
+        operation = "mailbox_delivery.retry_timeout"
+        _ensure(transition_allowed(operation, delivery.status), "Delivery cannot be retried from its current status.")
         next_expiry = now + timedelta(seconds=delivery.ttl_seconds or 0) if delivery.ttl_seconds is not None else None
         return replace(
             delivery,
-            status=MailboxDeliveryStatus.PENDING,
+            status=_target(MailboxDeliveryStatus, operation),
             attempt_count=next_attempt_count,
             expires_at=next_expiry,
             next_retry_at=now + retry_delay,
@@ -66,9 +71,11 @@ def handle_delivery_timeout(
             updated_at=now,
         )
 
+    operation = "mailbox_delivery.expire_timeout"
+    _ensure(transition_allowed(operation, delivery.status), "Delivery cannot expire from its current status.")
     return replace(
         delivery,
-        status=MailboxDeliveryStatus.EXPIRED,
+        status=_target(MailboxDeliveryStatus, operation),
         attempt_count=next_attempt_count,
         next_retry_at=None,
         last_error_code=ttl_error_code,
@@ -78,13 +85,11 @@ def handle_delivery_timeout(
 
 
 def open_interrupt(interrupt: Interrupt, node: TaskNode, *, now: datetime) -> tuple[Interrupt, TaskNode]:
-    _ensure(
-        node.status in {NodeStatus.PENDING, NodeStatus.READY, NodeStatus.RUNNING, NodeStatus.WAITING_FOR_DEPENDENCY},
-        "Node cannot enter waiting_for_input from its current status.",
-    )
+    operation = "node.open_interrupt"
+    _ensure(transition_allowed(operation, node.status), "Node cannot enter waiting_for_input from its current status.")
     return (
         replace(interrupt, status=InterruptStatus.OPEN, created_at=interrupt.created_at or now),
-        replace(node, status=NodeStatus.WAITING_FOR_INPUT),
+        replace(node, status=_target(NodeStatus, operation)),
     )
 
 
@@ -95,56 +100,71 @@ def answer_interrupt(
     *,
     now: datetime,
 ) -> tuple[Interrupt, InterruptAnswer, TaskNode]:
-    _ensure(interrupt.status == InterruptStatus.OPEN, "Only open interrupts can be answered.")
-    _ensure(node.status == NodeStatus.WAITING_FOR_INPUT, "Node must be waiting_for_input to accept an interrupt answer.")
+    _ensure(transition_allowed("interrupt.answer", interrupt.status), "Only open interrupts can be answered.")
+    _ensure(
+        transition_allowed("node.answer_interrupt", node.status),
+        "Node must be waiting_for_input to accept an interrupt answer.",
+    )
     normalized_answer = replace(
         answer,
         accepted=True,
         accepted_at=answer.accepted_at or now,
     )
     return (
-        replace(interrupt, status=InterruptStatus.ANSWERED, answered_at=normalized_answer.accepted_at),
+        replace(interrupt, status=_target(InterruptStatus, "interrupt.answer"), answered_at=normalized_answer.accepted_at),
         normalized_answer,
-        replace(node, status=NodeStatus.READY_TO_RESUME),
+        replace(node, status=_target(NodeStatus, "node.answer_interrupt")),
     )
 
 
 def begin_resume(node: TaskNode) -> TaskNode:
-    _ensure(node.status == NodeStatus.READY_TO_RESUME, "Only ready_to_resume nodes can enter resuming.")
-    return replace(node, status=NodeStatus.RESUMING)
+    operation = "node.begin_resume"
+    _ensure(transition_allowed(operation, node.status), "Only ready_to_resume nodes can enter resuming.")
+    return replace(node, status=_target(NodeStatus, operation))
 
 
 def begin_task_cancellation(task: Task, *, now: datetime) -> Task:
-    if task.status in {TaskStatus.CANCELLED, TaskStatus.COMPLETED, TaskStatus.FAILED}:
+    if is_task_cancellation_noop(task):
         return task
-    return replace(task, status=TaskStatus.CANCELLING, cancel_requested_at=task.cancel_requested_at or now, updated_at=now)
+    operation = "task.begin_cancellation"
+    _ensure(transition_allowed(operation, task.status), "Task cannot enter cancelling from its current status.")
+    return replace(task, status=_target(TaskStatus, operation), cancel_requested_at=task.cancel_requested_at or now, updated_at=now)
+
+
+def is_task_cancellation_noop(task: Task) -> bool:
+    return str(task.status) in status_list("task_cancellation_noop_statuses")
 
 
 def finalize_task_cancellation(task: Task, *, now: datetime) -> Task:
-    if task.status == TaskStatus.CANCELLED:
-        return task
-    return replace(task, status=TaskStatus.CANCELLED, updated_at=now)
+    operation = "task.finalize_cancellation"
+    _ensure(transition_allowed(operation, task.status), "Task cannot be finalized as cancelled from its current status.")
+    return replace(task, status=_target(TaskStatus, operation), updated_at=now)
 
 
 def cancel_node(node: TaskNode) -> TaskNode:
-    if node.status in {NodeStatus.PENDING, NodeStatus.READY}:
-        return replace(node, status=NodeStatus.BLOCKED_BY_CANCELLATION)
-    if node.status in {
-        NodeStatus.RUNNING,
-        NodeStatus.WAITING_FOR_DEPENDENCY,
-        NodeStatus.WAITING_FOR_INPUT,
-        NodeStatus.READY_TO_RESUME,
-        NodeStatus.RESUMING,
-        NodeStatus.CANCELLING,
-    }:
-        return replace(node, status=NodeStatus.CANCELLED)
-    return node
+    target = cancel_node_target(node.status)
+    if target is None:
+        return node
+    return replace(node, status=NodeStatus(target))
 
 
 def cancel_interrupt(interrupt: Interrupt, *, now: datetime) -> Interrupt:
-    if interrupt.status in {InterruptStatus.CANCELLED, InterruptStatus.EXPIRED}:
+    operation = "interrupt.cancel"
+    if not transition_allowed(operation, interrupt.status):
         return interrupt
-    return replace(interrupt, status=InterruptStatus.CANCELLED, cancelled_at=now)
+    return replace(interrupt, status=_target(InterruptStatus, operation), cancelled_at=now)
+
+
+def cancel_mailbox_delivery(delivery: MailboxDelivery, *, now: datetime) -> MailboxDelivery:
+    operation = "mailbox_delivery.cancel"
+    if not transition_allowed(operation, delivery.status):
+        return delivery
+    return replace(
+        delivery,
+        status=_target(MailboxDeliveryStatus, operation),
+        resolved_at=delivery.resolved_at or now,
+        updated_at=now,
+    )
 
 
 def invalidate_checkpoint(checkpoint: Checkpoint, *, now: datetime) -> Checkpoint:
@@ -156,4 +176,4 @@ def invalidate_checkpoint(checkpoint: Checkpoint, *, now: datetime) -> Checkpoin
 def can_accept_late_result(task: Task | None) -> bool:
     if task is None:
         return False
-    return task.status not in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}
+    return str(task.status) not in status_list("late_result_rejected_task_statuses")

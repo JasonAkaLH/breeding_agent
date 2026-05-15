@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 from collections.abc import Callable, Iterable
+from typing import Any
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -26,6 +29,13 @@ from src.core.models import (
     TaskEdge,
     TaskNode,
 )
+from src.lifecycle.rust_contract import contract_value as lifecycle_contract_value
+from src.lifecycle.rust_contract import status_list as lifecycle_status_list
+from src.storage.rust_contract import error_policy as runtime_error_policy
+from src.storage.rust_contract import mode_for_component as runtime_mode_for_component
+from src.storage.rust_contract import operation_policy as runtime_operation_policy
+from src.storage.rust_contract import resource_limit as runtime_resource_limit
+from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
 
 from .base import build_task_edge_id
 from .models import (
@@ -283,6 +293,59 @@ def _row_to_checkpoint(row: CheckpointRow) -> Checkpoint:
     )
 
 
+def _ensure_event_append_payload_within_rust_contract(event: EventRecord) -> None:
+    ensure_sidecar_write_allowed(
+        component="event_log",
+        operation_name="event_append",
+        unavailable_error_code="event_log_unavailable",
+    )
+    payload_size = len(json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"))
+    limit = runtime_resource_limit("event_payload_bytes")
+    if payload_size > limit:
+        error_code = runtime_error_policy("event_log_payload_too_large")["code"]
+        raise ValueError(f"{error_code}: event payload exceeds Rust runtime sidecar limit of {limit} bytes")
+
+
+def _ensure_event_replay_policy_compatible_with_rust_contract() -> tuple[int, int]:
+    policy = runtime_operation_policy("event_replay")
+    if policy.get("kind") != "read" or policy.get("python_legacy_write_fallback") is not False:
+        raise RuntimeError("Rust runtime sidecar event_replay policy is incompatible")
+    return (
+        runtime_resource_limit("replay_page_events"),
+        runtime_resource_limit("replay_page_bytes"),
+    )
+
+
+def _resolve_event_replay_page_limit(requested_limit: int | None, event_limit: int) -> int:
+    if requested_limit is None:
+        return event_limit
+    if requested_limit < 1 or requested_limit > event_limit:
+        error_code = runtime_error_policy("event_log_replay_page_exceeded")["code"]
+        raise ValueError(f"{error_code}: requested event replay page exceeds Rust runtime sidecar limit")
+    return requested_limit
+
+
+def _ensure_event_replay_page_within_rust_contract(events: list[EventRecord], event_limit: int, byte_limit: int) -> None:
+    if len(events) > event_limit:
+        error_code = runtime_error_policy("event_log_replay_page_exceeded")["code"]
+        raise ValueError(f"{error_code}: event replay exceeds Rust runtime sidecar page limit")
+    payload_bytes = sum(
+        len(json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"))
+        for event in events
+    )
+    if payload_bytes > byte_limit:
+        error_code = runtime_error_policy("event_log_replay_page_exceeded")["code"]
+        raise ValueError(f"{error_code}: event replay exceeds Rust runtime sidecar page limit")
+
+
+def _ensure_runtime_store_write_allowed_by_rust_contract(operation_name: str) -> None:
+    ensure_sidecar_write_allowed(
+        component="runtime_store",
+        operation_name=operation_name,
+        unavailable_error_code="runtime_store_unavailable",
+    )
+
+
 class SQLiteStateRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -531,6 +594,7 @@ class SQLiteStateRepository:
         return [_row_to_message(row) for row in rows]
 
     def save_task(self, task: Task) -> Task:
+        _ensure_runtime_store_write_allowed_by_rust_contract("task_submit")
         row = TaskRow(
             task_id=task.task_id,
             conversation_id=task.conversation_id,
@@ -557,7 +621,7 @@ class SQLiteStateRepository:
             select(TaskRow)
             .where(
                 TaskRow.conversation_id == conversation_id,
-                TaskRow.status.in_(("accepted", "planning", "running", "cancelling")),
+                TaskRow.status.in_(lifecycle_status_list("active_task_statuses")),
             )
             .order_by(TaskRow.created_at.desc(), TaskRow.task_id.desc())
         )
@@ -575,6 +639,7 @@ class SQLiteStateRepository:
         return [_row_to_task(row) for row in rows]
 
     def save_task_node(self, node: TaskNode) -> TaskNode:
+        _ensure_runtime_store_write_allowed_by_rust_contract("node_state_transition")
         row = TaskNodeRow(
             node_id=node.node_id,
             task_id=node.task_id,
@@ -606,6 +671,7 @@ class SQLiteStateRepository:
         return [_row_to_task_node(row) for row in rows]
 
     def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
+        _ensure_runtime_store_write_allowed_by_rust_contract("task_submit")
         row = TaskEdgeRow(
             edge_id=build_task_edge_id(task_id, edge.from_node_id, edge.to_node_id),
             task_id=task_id,
@@ -625,6 +691,7 @@ class SQLiteStateRepository:
         return [_row_to_task_edge(row) for row in rows]
 
     def save_artifact(self, artifact: Artifact) -> Artifact:
+        _ensure_runtime_store_write_allowed_by_rust_contract("node_state_transition")
         row = ArtifactRow(
             artifact_id=artifact.artifact_id,
             task_id=artifact.task_id,
@@ -655,6 +722,7 @@ class SQLiteCollaborationRepository:
         self._session = session
 
     def save_event_record(self, event: EventRecord) -> EventRecord:
+        _ensure_event_append_payload_within_rust_contract(event)
         row = EventRecordRow(
             event_id=event.event_id,
             conversation_id=event.conversation_id,
@@ -675,10 +743,53 @@ class SQLiteCollaborationRepository:
         return None if row is None else _row_to_event_record(row)
 
     def list_events_for_task(self, task_id: str) -> list[EventRecord]:
+        event_limit, byte_limit = _ensure_event_replay_policy_compatible_with_rust_contract()
         rows = self._session.scalars(
-            select(EventRecordRow).where(EventRecordRow.task_id == task_id).order_by(EventRecordRow.created_at, EventRecordRow.event_id)
+            select(EventRecordRow)
+            .where(EventRecordRow.task_id == task_id)
+            .order_by(EventRecordRow.created_at, EventRecordRow.event_id)
+            .limit(event_limit + 1)
         ).all()
-        return [_row_to_event_record(row) for row in rows]
+        events = [_row_to_event_record(row) for row in rows]
+        _ensure_event_replay_page_within_rust_contract(events, event_limit, byte_limit)
+        return events
+
+    def list_event_page_for_task(
+        self,
+        task_id: str,
+        *,
+        after_event_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[EventRecord]:
+        event_limit, byte_limit = _ensure_event_replay_policy_compatible_with_rust_contract()
+        resolved_limit = _resolve_event_replay_page_limit(limit, event_limit)
+        query = (
+            select(EventRecordRow)
+            .where(EventRecordRow.task_id == task_id)
+            .order_by(EventRecordRow.created_at, EventRecordRow.event_id)
+            .limit(resolved_limit)
+        )
+        if after_event_id is not None:
+            cursor = self._session.get(EventRecordRow, after_event_id)
+            if cursor is None or cursor.task_id != task_id:
+                raise ValueError(f"Unknown event replay cursor: {after_event_id}")
+            if cursor.created_at is None:
+                query = query.where(
+                    or_(
+                        EventRecordRow.created_at.is_not(None),
+                        (EventRecordRow.created_at.is_(None)) & (EventRecordRow.event_id > after_event_id),
+                    )
+                )
+            else:
+                query = query.where(
+                    or_(
+                        EventRecordRow.created_at > cursor.created_at,
+                        (EventRecordRow.created_at == cursor.created_at) & (EventRecordRow.event_id > after_event_id),
+                    )
+                )
+        events = [_row_to_event_record(row) for row in self._session.scalars(query).all()]
+        _ensure_event_replay_page_within_rust_contract(events, event_limit, byte_limit)
+        return events
 
     def save_mailbox_message(self, message: MailboxMessage) -> MailboxMessage:
         row = MailboxMessageRow(
@@ -779,7 +890,11 @@ class SQLiteCollaborationRepository:
     def save_interrupt(self, interrupt: Interrupt) -> Interrupt:
         existing = self._session.get(InterruptRow, interrupt.interrupt_id)
         incoming_status = str(interrupt.status)
-        if existing is not None and str(existing.status) in {"answered", "cancelled", "expired"} and incoming_status == "open":
+        if (
+            existing is not None
+            and str(existing.status) in lifecycle_status_list("interrupt_reopen_guard_terminal_statuses")
+            and incoming_status == lifecycle_contract_value("interrupt_open_status")
+        ):
             return _row_to_interrupt(existing)
         row = InterruptRow(
             interrupt_id=interrupt.interrupt_id,
@@ -882,8 +997,9 @@ class SQLiteCollaborationRepository:
 
 
 class SQLiteStorage(StoragePort):
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(self, session_factory: sessionmaker[Session], *, runtime_sidecar_client: Any | None = None) -> None:
         self._session_factory = session_factory
+        self._runtime_sidecar_client = runtime_sidecar_client
 
     async def _run(
         self,
@@ -963,6 +1079,21 @@ class SQLiteStorage(StoragePort):
         return await self._run(lambda state, collab: state.list_messages_for_conversation(conversation_id))
 
     async def save_task(self, task: Task) -> Task:
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_submit",
+            unavailable_error_code="runtime_store_unavailable",
+        )
+        if sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                sidecar_client.submit_task(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                idempotency_key=task.task_id,
+                )
+            )
+            _consume_runtime_sidecar_response("task_submit", response)
+            return task
         return await self._run(lambda state, collab: state.save_task(task))
 
     async def get_task(self, task_id: str) -> Task | None:
@@ -979,6 +1110,22 @@ class SQLiteStorage(StoragePort):
         return await self._run(lambda state, collab: state.list_tasks_for_conversation(conversation_id, statuses=statuses))
 
     async def save_task_node(self, node: TaskNode) -> TaskNode:
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="node_state_transition",
+            unavailable_error_code="runtime_store_unavailable",
+        )
+        if sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                sidecar_client.transition_node(
+                task_id=node.task_id,
+                node_id=node.node_id,
+                to_status=str(node.status),
+                idempotency_key=_runtime_sidecar_idempotency_key(node.node_id, str(node.status)),
+                )
+            )
+            _consume_runtime_sidecar_response("node_state_transition", response)
+            return node
         return await self._run(lambda state, collab: state.save_task_node(node))
 
     async def get_task_node(self, node_id: str) -> TaskNode | None:
@@ -1003,10 +1150,43 @@ class SQLiteStorage(StoragePort):
         return await self._run(lambda state, collab: state.list_artifacts_for_task(task_id))
 
     async def append_event(self, event: EventRecord) -> EventRecord:
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="event_log",
+            operation_name="event_append",
+            unavailable_error_code="event_log_unavailable",
+        )
+        if sidecar_client is not None:
+            _ensure_event_append_payload_within_rust_limit(event)
+            response = await _resolve_runtime_sidecar_call(
+                sidecar_client.append_event(
+                conversation_id=event.conversation_id,
+                task_id=event.task_id,
+                event_type=event.event_type,
+                payload_json=json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"),
+                idempotency_key=event.event_id,
+                )
+            )
+            _consume_runtime_sidecar_response("event_append", response)
+            return event
         return await self._run(lambda state, collab: collab.save_event_record(event))
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]:
         return await self._run(lambda state, collab: collab.list_events_for_task(task_id))
+
+    async def list_event_page_for_task(
+        self,
+        task_id: str,
+        *,
+        after_event_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[EventRecord]:
+        return await self._run(
+            lambda state, collab: collab.list_event_page_for_task(
+                task_id,
+                after_event_id=after_event_id,
+                limit=limit,
+            )
+        )
 
     async def save_mailbox_message(self, message: MailboxMessage) -> MailboxMessage:
         return await self._run(lambda state, collab: collab.save_mailbox_message(message))
@@ -1058,3 +1238,53 @@ class SQLiteStorage(StoragePort):
 
     async def list_checkpoints_for_task(self, task_id: str) -> list[Checkpoint]:
         return await self._run(lambda state, collab: collab.list_checkpoints_for_task(task_id))
+
+    def _runtime_sidecar_client_for(
+        self,
+        *,
+        component: str,
+        operation_name: str,
+        unavailable_error_code: str,
+    ) -> Any | None:
+        if runtime_mode_for_component(component) != "enforce":
+            return None
+        if self._runtime_sidecar_client is None:
+            ensure_sidecar_write_allowed(
+                component=component,
+                operation_name=operation_name,
+                unavailable_error_code=unavailable_error_code,
+            )
+        return self._runtime_sidecar_client
+
+
+def _runtime_sidecar_idempotency_key(*parts: str) -> str:
+    return ":".join(parts)
+
+
+def _consume_runtime_sidecar_response(operation_name: str, response: Any) -> None:
+    envelope = validate_runtime_sidecar_response(operation_name, _normalize_runtime_sidecar_response(operation_name, response))
+    error = envelope.get("error")
+    if isinstance(error, dict):
+        raise RuntimeError(f"{error['code']}: {error['message']}")
+
+
+def _normalize_runtime_sidecar_response(operation_name: str, response: Any) -> Any:
+    if not isinstance(response, dict) or response.get("operation") == operation_name:
+        return response
+    if operation_name == "event_append":
+        return {"operation": operation_name, "cursor": response, "error": None}
+    return response
+
+
+async def _resolve_runtime_sidecar_call(result: Any) -> Any:
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _ensure_event_append_payload_within_rust_limit(event: EventRecord) -> None:
+    payload_size = len(json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"))
+    limit = runtime_resource_limit("event_payload_bytes")
+    if payload_size > limit:
+        error_code = runtime_error_policy("event_log_payload_too_large")["code"]
+        raise ValueError(f"{error_code}: event payload exceeds Rust runtime sidecar limit of {limit} bytes")

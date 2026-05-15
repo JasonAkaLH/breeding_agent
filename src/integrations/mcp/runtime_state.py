@@ -19,6 +19,8 @@ from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from .client import MCPClient, MCPClientError
 from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig
 from .protocol import MCP_PROTOCOL_VERSION
+from .rust_contract import contract_value as mcp_contract_value
+from .rust_contract import status_list as mcp_status_list
 from .sidecar import MCPSidecarMode
 from .tasks import InMemoryMCPTaskRegistry, is_create_task_result, normalize_task_status, validate_related_task_result_metadata
 from .transport_http import StreamableHTTPTransport
@@ -614,6 +616,10 @@ class MCPRuntimeState:
             },
         )
         record = await self._emit_client_task_notifications(client, record, event_callback)
+        cancelled_status = mcp_contract_value("task_cancelled_state")
+        completed_status = mcp_contract_value("task_completed_state")
+        failed_status = mcp_contract_value("task_failed_state")
+        input_required_status = mcp_contract_value("task_input_required_state")
         for _ in range(binding.task_max_polls):
             status_payload = await _maybe_await(client.tasks_get(raw_task_id))
             record = self._task_registry.update_status(raw_task_id, status_payload)
@@ -623,15 +629,18 @@ class MCPRuntimeState:
                 "mcp.long_task_status",
                 {"status": record.status, "status_message": record.status_message, "safe_ref": record.safe_ref},
             )
-            if record.status == "input_required":
+            if record.status == input_required_status:
                 raise MCPClientError("MCP task input_required is unsupported.", code="mcp_runtime_task_input_required_unsupported", retriable=False)
-            if record.status in {"failed", "cancelled"}:
+            if record.status in {failed_status, cancelled_status}:
                 raise MCPClientError(f"MCP task ended with {record.status}.", code=f"mcp_runtime_task_{record.status}", retriable=False)
-            if record.status == "completed":
+            if record.status == completed_status:
                 result = await _maybe_await(client.tasks_result(raw_task_id))
                 if isinstance(result, Mapping):
                     validate_related_task_result_metadata(result, raw_task_id)
-                    self._task_registry.update_status(raw_task_id, {"status": {"state": "completed", "message": record.status_message}})
+                    self._task_registry.update_status(
+                        raw_task_id,
+                        {"status": {"state": completed_status, "message": record.status_message}},
+                    )
                     output_size = len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
                     await _emit_mcp_event(
                         event_callback,
@@ -646,6 +655,7 @@ class MCPRuntimeState:
     async def cancel_platform_task(self, task_id: str, *, reason: str = "user_requested") -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         inflight = list(self._inflight_by_platform_task.get(task_id, {}).values())
+        cancelled_status = mcp_contract_value("task_cancelled_state")
         for request in inflight:
             events.append({"event_type": "mcp.long_task_cancel_requested", "payload": {"safe_ref": request.safe_ref, "reason": reason}})
             try:
@@ -660,9 +670,9 @@ class MCPRuntimeState:
             except Exception:
                 events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": request.safe_ref, "error_code": "mcp_runtime_request_cancel_failed", "retriable": False}})
                 continue
-            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": request.safe_ref, "status": "cancelled"}})
+            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": request.safe_ref, "status": cancelled_status}})
         for record in self._task_registry.records_for_platform_task(task_id):
-            if record.status in {"completed", "failed", "cancelled"}:
+            if record.status in mcp_status_list("task_terminal_states"):
                 continue
             events.append({"event_type": "mcp.long_task_cancel_requested", "payload": {"safe_ref": record.safe_ref, "reason": reason}})
             client = self._clients.get(record.server_id)
@@ -674,8 +684,8 @@ class MCPRuntimeState:
             except Exception:
                 events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": record.safe_ref, "error_code": "mcp_runtime_task_cancel_failed", "retriable": False}})
                 continue
-            self._task_registry.update_status(record.mcp_task_id, {"status": {"state": "cancelled", "message": reason}})
-            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": record.safe_ref, "status": "cancelled"}})
+            self._task_registry.update_status(record.mcp_task_id, {"status": {"state": cancelled_status, "message": reason}})
+            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": record.safe_ref, "status": cancelled_status}})
         if inflight:
             self._inflight_by_platform_task.pop(task_id, None)
         return events

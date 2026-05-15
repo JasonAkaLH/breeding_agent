@@ -1,0 +1,195 @@
+syntax = "proto3";
+
+package maf.runtime.v1;
+
+import "maf/common/v1/common.proto";
+
+service RuntimeSidecar {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Readiness(ReadinessRequest) returns (ReadinessResponse);
+  rpc Version(VersionRequest) returns (VersionResponse);
+  rpc CheckCompatibility(CompatibilityCheckRequest) returns (CompatibilityCheckResponse);
+  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+  rpc TransitionNode(TransitionNodeRequest) returns (TransitionNodeResponse);
+  rpc AppendEvent(AppendEventRequest) returns (AppendEventResponse);
+  rpc ReplayEvents(ReplayEventsRequest) returns (ReplayEventsResponse);
+  rpc AcquireLease(AcquireLeaseRequest) returns (LeaseResponse);
+  rpc RenewLease(RenewLeaseRequest) returns (LeaseResponse);
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+  rpc WriteCancellationToken(WriteCancellationTokenRequest) returns (WriteCancellationTokenResponse);
+  rpc PinBundleRevision(PinBundleRevisionRequest) returns (BundleRevisionResponse);
+  rpc ReleaseBundleRevision(ReleaseBundleRevisionRequest) returns (BundleRevisionResponse);
+}
+
+message HealthRequest {}
+message ReadinessRequest {}
+message VersionRequest {}
+
+message HealthResponse {
+  maf.common.v1.HealthState state = 1;
+  maf.common.v1.VersionInfo version = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message ReadinessResponse {
+  maf.common.v1.ReadinessState state = 1;
+  maf.common.v1.VersionInfo version = 2;
+  bool compatibility_handshake_passed = 3;
+  maf.common.v1.TypedError error = 4;
+}
+
+message VersionResponse {
+  maf.common.v1.VersionInfo version = 1;
+}
+
+message CompatibilityCheckRequest {
+  string client_version = 1;
+  string expected_component = 2;
+  string expected_protocol_version = 3;
+  string expected_schema_hash = 4;
+  string expected_error_code_table_hash = 5;
+  repeated string required_features = 6;
+}
+
+message CompatibilityCheckResponse {
+  bool compatible = 1;
+  maf.common.v1.VersionInfo version = 2;
+  repeated string missing_features = 3;
+  maf.common.v1.TypedError error = 4;
+}
+
+message Idempotency {
+  string key = 1;
+  string owner = 2;
+  int64 deadline_ms = 3;
+}
+
+message EventCursor {
+  string conversation_id = 1;
+  string task_id = 2;
+  uint64 sequence = 3;
+  int64 created_at_ms = 4;
+}
+
+message SubmitTaskRequest {
+  string task_id = 1;
+  string conversation_id = 2;
+  Idempotency idempotency = 3;
+}
+
+message SubmitTaskResponse {
+  string task_id = 1;
+  bool duplicate = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message TransitionNodeRequest {
+  string task_id = 1;
+  string node_id = 2;
+  string from_status = 3;
+  string to_status = 4;
+  Idempotency idempotency = 5;
+}
+
+message TransitionNodeResponse {
+  string node_id = 1;
+  string status = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message AppendEventRequest {
+  string conversation_id = 1;
+  string task_id = 2;
+  string event_type = 3;
+  bytes payload_json = 4;
+  Idempotency idempotency = 5;
+}
+
+message AppendEventResponse {
+  EventCursor cursor = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message ReplayEventsRequest {
+  string conversation_id = 1;
+  string task_id = 2;
+  uint64 after_sequence = 3;
+  uint32 page_limit = 4;
+  uint32 byte_limit = 5;
+}
+
+message ReplayEventsResponse {
+  repeated EventCursor cursors = 1;
+  bool truncated = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message AcquireLeaseRequest {
+  string task_id = 1;
+  string owner_id = 2;
+  int64 now_ms = 3;
+  int64 ttl_ms = 4;
+  Idempotency idempotency = 5;
+}
+
+message RenewLeaseRequest {
+  string task_id = 1;
+  string renew_token = 2;
+  int64 now_ms = 3;
+  int64 ttl_ms = 4;
+}
+
+message ReleaseLeaseRequest {
+  string task_id = 1;
+  string renew_token = 2;
+}
+
+message LeaseResponse {
+  string task_id = 1;
+  string owner_id = 2;
+  uint64 revision = 3;
+  int64 expires_at_ms = 4;
+  string renew_token = 5;
+  maf.common.v1.TypedError error = 6;
+}
+
+message ReleaseLeaseResponse {
+  bool released = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message WriteCancellationTokenRequest {
+  string task_id = 1;
+  int64 requested_at_ms = 2;
+  string reason = 3;
+  string terminal_policy = 4;
+  Idempotency idempotency = 5;
+}
+
+message WriteCancellationTokenResponse {
+  bool written = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message PinBundleRevisionRequest {
+  string task_id = 1;
+  string bundle_kind = 2;
+  string revision = 3;
+  Idempotency idempotency = 4;
+}
+
+message ReleaseBundleRevisionRequest {
+  string task_id = 1;
+  string bundle_kind = 2;
+  string revision = 3;
+  int64 released_at_ms = 4;
+  Idempotency idempotency = 5;
+}
+
+message BundleRevisionResponse {
+  string task_id = 1;
+  string bundle_kind = 2;
+  string revision = 3;
+  bool released = 4;
+  maf.common.v1.TypedError error = 5;
+}

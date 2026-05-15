@@ -1,0 +1,30 @@
+[package]
+name = "maf_runtime_sidecar"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "maf-runtime-sidecar"
+path = "src/main.rs"
+
+[build-dependencies]
+protoc-bin-vendored.workspace = true
+tonic-prost-build.workspace = true
+
+[dependencies]
+maf_event_log = { path = "../maf_event_log" }
+maf_runtime_store = { path = "../maf_runtime_store" }
+maf_task_dispatcher = { path = "../maf_task_dispatcher" }
+prost.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true

@@ -4,11 +4,13 @@ import csv
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Literal
 from uuid import uuid4
+
+from src.integrations.rust_safety_contract import resource_limit
 
 
 SUPPORTED_UPLOAD_EXTENSIONS: dict[str, Literal["json", "csv"]] = {".json": "json", ".csv": "csv"}
@@ -64,14 +66,16 @@ class InMemoryUploadStore:
         self,
         *,
         max_file_bytes: int = DEFAULT_MAX_UPLOAD_FILE_BYTES,
+        max_preview_bytes: int | None = None,
         ttl_seconds: int = 30 * 60,
         max_files_per_account: int = 20,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self.max_file_bytes = max_file_bytes
+        self.max_preview_bytes = resource_limit("upload_preview_bytes") if max_preview_bytes is None else max_preview_bytes
         self.ttl_seconds = ttl_seconds
         self.max_files_per_account = max_files_per_account
-        self._now_fn = now_fn or datetime.utcnow
+        self._now_fn = now_fn or _utcnow_naive
         self._records: dict[str, UploadedFileRecord] = {}
 
     def save(
@@ -87,6 +91,8 @@ class InMemoryUploadStore:
         normalized_filename = _normalize_filename(filename)
         if len(content) > self.max_file_bytes:
             raise UploadValidationError(f"Uploaded file exceeds {self.max_file_bytes} bytes")
+        if len(content) > self.max_preview_bytes:
+            raise UploadValidationError(f"Uploaded file exceeds preview limit of {self.max_preview_bytes} bytes")
         file_type = _detect_file_type(normalized_filename, content_type)
         if file_type is None:
             raise UploadValidationError("Only JSON and CSV files are supported")
@@ -160,6 +166,10 @@ class InMemoryUploadStore:
 def _normalize_filename(filename: str) -> str:
     normalized = Path(filename or "upload").name.strip()
     return normalized or "upload"
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _detect_file_type(filename: str, content_type: str | None) -> Literal["json", "csv"] | None:

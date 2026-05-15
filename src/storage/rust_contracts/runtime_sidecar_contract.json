@@ -1,0 +1,374 @@
+{
+  "component": "maf_runtime_sidecar",
+  "protocol_version": "maf.runtime.v1",
+  "schema_hash": "maf_runtime_v1_schema_20260515",
+  "error_code_table_hash": "maf_runtime_error_table_v1_decommission_policy_20260515",
+  "supported_features": [
+    "runtime_store",
+    "event_log",
+    "task_dispatcher"
+  ],
+  "modes": [
+    "off",
+    "shadow",
+    "enforce"
+  ],
+  "mode_env": {
+    "event_log": "MAF_RUST_EVENT_LOG_MODE",
+    "runtime_store": "MAF_RUST_RUNTIME_STORE_MODE",
+    "task_dispatcher": "MAF_RUST_TASK_DISPATCHER_MODE"
+  },
+  "operations": [
+    {
+      "name": "task_submit",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "node_state_transition",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "event_append",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "lease_acquire",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "lease_renew",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "lease_release",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "cancellation_token_write",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "bundle_revision_pin",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "bundle_revision_release",
+      "kind": "write",
+      "enforce_failure": "fail_closed",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": true
+    },
+    {
+      "name": "event_replay",
+      "kind": "read",
+      "enforce_failure": "read_only_degraded_error",
+      "python_legacy_write_fallback": false,
+      "idempotency_required": false
+    }
+  ],
+  "error_codes": [
+    {
+      "code": "runtime_store_unavailable",
+      "category": "internal",
+      "retriable": true
+    },
+    {
+      "code": "runtime_store_protocol_incompatible",
+      "category": "compatibility",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_response_invalid",
+      "category": "protocol",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_config_untrusted",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_artifact_untrusted",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_benchmark_invalid",
+      "category": "quality_gate",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_promotion_blocked",
+      "category": "quality_gate",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_migration_blocked",
+      "category": "state",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_ops_readiness_blocked",
+      "category": "quality_gate",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_decommission_blocked",
+      "category": "quality_gate",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_lease_conflict",
+      "category": "state",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_lease_expired",
+      "category": "state",
+      "retriable": false
+    },
+    {
+      "code": "runtime_store_write_failed",
+      "category": "state",
+      "retriable": false
+    },
+    {
+      "code": "event_log_unavailable",
+      "category": "internal",
+      "retriable": true
+    },
+    {
+      "code": "event_log_payload_too_large",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "event_log_replay_page_exceeded",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "dispatcher_unavailable",
+      "category": "internal",
+      "retriable": true
+    },
+    {
+      "code": "dispatcher_queue_full",
+      "category": "resource_limit",
+      "retriable": true
+    },
+    {
+      "code": "dispatcher_deadline_exceeded",
+      "category": "resource_limit",
+      "retriable": true
+    }
+  ],
+  "resource_limits": {
+    "event_append_deadline_ms": 2000,
+    "event_payload_bytes": 262144,
+    "event_replay_deadline_ms": 10000,
+    "lease_deadline_ms": 1000,
+    "max_in_flight_cap": 64,
+    "max_in_flight_cpu_multiplier": 4,
+    "max_in_flight_min": 8,
+    "queue_size": 1024,
+    "queue_wait_ms": 2000,
+    "replay_page_bytes": 1048576,
+    "replay_page_events": 1000,
+    "shutdown_drain_ms": 30000,
+    "state_transition_deadline_ms": 2000,
+    "task_submit_deadline_ms": 3000
+  },
+  "retry_policy": {
+    "max_attempts": 3,
+    "initial_backoff_ms": 100,
+    "max_backoff_ms": 1000,
+    "jitter_percent": 20,
+    "same_sidecar_only": true,
+    "requires_idempotency_key": true
+  },
+  "config_policy": {
+    "allowed_sources": [
+      "deployment_config",
+      "environment_variable",
+      "secret_manager",
+      "readonly_config_file",
+      "runtime_allowlist"
+    ],
+    "forbidden_sources": [
+      "user_input",
+      "skill_manifest",
+      "llm_output",
+      "external_tool_output"
+    ],
+    "cross_host_requires_mtls": true,
+    "secret_safe_metadata_only": true
+  },
+  "artifact_policy": {
+    "allowed_sources": [
+      "ci_pipeline",
+      "deployment_pipeline",
+      "runtime_allowlist"
+    ],
+    "required_fields": [
+      "source",
+      "artifact_kind",
+      "checksum_sha256",
+      "sbom_digest",
+      "cargo_lock_digest",
+      "proto_hash",
+      "schema_hash",
+      "provenance_attestation"
+    ],
+    "expected_proto_hash": "maf_runtime_proto_v1_20260515",
+    "require_schema_hash_match": true,
+    "require_checksum_allowlist": true,
+    "require_cargo_lock_digest_allowlist": true,
+    "require_sbom": true,
+    "require_provenance_attestation": true
+  },
+  "benchmark_policy": {
+    "required_baselines": [
+      "python_baseline",
+      "rust_sidecar_baseline"
+    ],
+    "required_operations": [
+      "task_submit",
+      "node_state_transition",
+      "event_append",
+      "lease_acquire",
+      "event_replay",
+      "sse_snapshot"
+    ],
+    "required_metrics": [
+      "p50_ms",
+      "p95_ms",
+      "p99_ms",
+      "queue_wait_ms",
+      "cpu_percent",
+      "memory_mb",
+      "throughput_per_sec"
+    ]
+  },
+  "promotion_policy": {
+    "min_shadow_days": 7,
+    "min_shadow_samples": 1000,
+    "max_contract_mismatch_rate_ppm": 0,
+    "max_panic_count": 0,
+    "max_crash_count": 0,
+    "max_p95_latency_ratio_percent": 110,
+    "error_rate_must_not_exceed_legacy": true,
+    "allowed_scopes": [
+      "single_task",
+      "single_conversation",
+      "single_instance"
+    ],
+    "required_evidence": [
+      "artifact_provenance",
+      "benchmark_report",
+      "audit_redaction_secret_leak",
+      "rollback_drill",
+      "ops_runbook",
+      "regression_tests",
+      "cargo_tests",
+      "cargo_clippy",
+      "cargo_fmt"
+    ]
+  },
+  "migration_policy": {
+    "required_components": [
+      "sqlite_schema",
+      "event_log",
+      "lease",
+      "cursor",
+      "bundle_pin"
+    ],
+    "required_evidence": [
+      "schema_version",
+      "migration_lock",
+      "preflight",
+      "dry_run",
+      "backup",
+      "restore",
+      "event_replay_validation",
+      "rollback_runbook",
+      "roll_forward_runbook"
+    ],
+    "require_target_schema_version": true
+  },
+  "ops_policy": {
+    "required_observability": [
+      "dashboard",
+      "alert",
+      "slo"
+    ],
+    "required_runbooks": [
+      "drain",
+      "restart",
+      "rollback",
+      "restore",
+      "replay"
+    ],
+    "required_drills": [
+      "unavailable",
+      "protocol_mismatch",
+      "queue_full",
+      "deadline_spike",
+      "secret_identity_mismatch",
+      "migration_failure",
+      "crash_recovery",
+      "restore_replay"
+    ]
+  },
+  "decommission_policy": {
+    "required_removed_legacy_paths": [
+      "python_storage_task_write",
+      "python_storage_node_write",
+      "python_event_append_write",
+      "python_bundle_pin_write",
+      "python_cancellation_token_write",
+      "python_lease_state"
+    ],
+    "required_facade_only_paths": [
+      "runtime_store_client",
+      "dispatcher_client",
+      "event_log_client",
+      "api_dto_adapter"
+    ],
+    "required_evidence": [
+      "promotion_threshold_passed",
+      "ops_readiness_passed",
+      "migration_dr_passed",
+      "legacy_write_architecture_guard",
+      "decommission_regression_tests"
+    ],
+    "allowed_rollback_paths": [
+      "deployment_or_restore",
+      "sidecar_artifact_rollback"
+    ]
+  }
+}

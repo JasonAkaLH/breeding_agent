@@ -1,0 +1,20 @@
+[package]
+name = "maf_skill_runtime_pyo3"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "maf_skill_runtime_pyo3"
+crate-type = ["rlib", "cdylib"]
+test = false
+bench = false
+
+[dependencies]
+maf_skill_runtime = { path = "../maf_skill_runtime" }
+pyo3 = { workspace = true, features = ["abi3-py313"] }
+
+[build-dependencies]
+pyo3-build-config.workspace = true

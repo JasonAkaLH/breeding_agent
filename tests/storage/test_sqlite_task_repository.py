@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import inspect
 from datetime import datetime
 
 from src.core.enums import ArtifactType, DependencyType, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
 from src.core.models import Artifact, Task, TaskEdge, TaskNode
+from src.lifecycle.rust_contract import status_list
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
+    def test_active_task_lookup_uses_rust_lifecycle_contract_statuses(self) -> None:
+        source = inspect.getsource(SQLiteStateRepository.get_active_task_for_conversation)
+        self.assertIn("active_task_statuses", source)
+        self.assertNotIn("accepted", source)
+        self.assertEqual(status_list("active_task_statuses"), frozenset({"accepted", "planning", "running", "cancelling"}))
+
     def test_task_node_edge_and_artifact_round_trip(self) -> None:
         task = Task(
             task_id="task-1",

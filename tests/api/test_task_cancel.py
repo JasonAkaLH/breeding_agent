@@ -4,6 +4,9 @@ import asyncio
 
 from httpx_sse import aconnect_sse
 
+from src.core.enums import TaskStatus
+from src.core.models import Conversation, Task
+
 from tests.api.support import APITestCase, blocking_mysql_adapter
 
 
@@ -41,3 +44,21 @@ class TaskCancelAPITest(APITestCase):
         audit_log = (self.workspace / "audit.jsonl").read_text(encoding="utf-8")
         self.assertIn("task.context_terminated", audit_log)
         self.assertIn("task.cancelled", audit_log)
+
+    async def test_cancel_terminal_task_is_idempotent_and_does_not_rewrite_status(self) -> None:
+        await self.runtime.storage.save_conversation(Conversation(conversation_id="conv-1", account_id="acc-1"))
+        task = Task(
+            task_id="task-terminal-api",
+            conversation_id="conv-1",
+            root_message_id="msg-terminal-api",
+            status=TaskStatus.COMPLETED,
+        )
+        await self.runtime.storage.save_task(task)
+
+        cancel_response = await self.client.post("/api/v1/tasks/task-terminal-api/cancel")
+
+        self.assertEqual(cancel_response.status_code, 202)
+        self.assertEqual(cancel_response.json()["status"], "completed")
+        reloaded = await self.runtime.storage.get_task("task-terminal-api")
+        self.assertEqual(reloaded.status, TaskStatus.COMPLETED)
+        self.assertIsNone(reloaded.cancel_requested_at)

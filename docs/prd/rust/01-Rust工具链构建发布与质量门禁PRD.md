@@ -1,6 +1,6 @@
 # Rust 工具链、构建发布与质量门禁 PRD
 
-- **状态**：部分落地（`native/` workspace、Rust 1.95.0 toolchain、`maf_mcp_runtime` Phase 1 骨架已落地；CI / 发布产物矩阵、coverage / fuzz、SBOM / provenance、ops 门禁仍待实现）
+- **状态**：部分落地（`native/` workspace、Rust 1.95.0 toolchain、首批 runtime contract/kernel crates、Runtime sidecar tonic/prost binding / binary entrypoint、Skill Runtime PyO3 `maturin` 本地 wheel build / import smoke、PRD01 Rust quality workflow、本地 gate runner、Ubuntu 22.04 x86_64 / Python 3.13 `manylinux_2_35` wheel CI 目标、artifact provenance self-check、fuzz harness manifest / compile smoke 与 MCP Phase 1 骨架已落地；真实 CI 运行结果、coverage 阈值强制、长时 fuzz、真实 SBOM / provenance 产物、ops 门禁仍待实现）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 第 8、10、11、12、14、15 节
 - **影响范围**：仓库根目录、现有 `native/` workspace、CI、本地开发环境、Python/Rust bridge
@@ -45,7 +45,7 @@
 - RUST-TOOL-FR-018：Rust toolchain 升级必须单独 PR，更新 `CHANGELOG.md`，并跑完整 Rust / Python 回归。
 - RUST-TOOL-FR-019：任一 Rust 代码进入 `native/` 或 `skill/<skill-name>/native/` 时，CI 必须启用冻结的 Rust 必跑门禁：`cargo fmt`、`cargo clippy`、`cargo test`、`cargo nextest`、`cargo audit`、`cargo deny`。
 - RUST-TOOL-FR-020：PyO3 wheel 必须通过 `maturin` 构建；sidecar binary 必须通过 Cargo 构建；生产 sidecar 交付形态以 Linux container image / binary 为主。
-- RUST-TOOL-FR-021：Rust CI / 发布平台基线冻结为 macOS arm64 支持本地开发与调试、Linux x86_64 支持生产部署；Windows 暂不作为必需发布目标。
+- RUST-TOOL-FR-021：Rust CI / 发布平台基线冻结为 macOS arm64 支持本地开发与调试、Ubuntu 22.04.5 LTS（`GNU/Linux 6.8.0-49-generic x86_64`）支持生产部署；Windows 暂不作为必需发布目标。
 - RUST-TOOL-FR-022：Python 版本基线跟随当前 Conda `multi_agent` 环境，即 Python 3.13 系列；PyO3 wheel 与 Python client smoke 必须覆盖该版本。
 - RUST-TOOL-FR-023：`cargo-llvm-cov` 必须对所有 Rust crate 生成覆盖率报告并执行阈值门禁；普通 Rust crate 最低 line coverage 为 80%，安全敏感 crate 最低 line coverage 为 90%。
 - RUST-TOOL-FR-024：`cargo-fuzz` 必须对不可信输入边界强制启用；PR 级别运行 bounded fuzz smoke，nightly / release gate 运行更长 fuzz job。
@@ -164,7 +164,8 @@ Rust toolchain 最终策略冻结为：
 | sidecar binary | Cargo build | binary 必须来自固定构建产物路径和 allowlist |
 | 生产 sidecar 交付 | Linux container image / binary 为主 | 由外部进程管理器或容器编排管理 |
 | 本地开发平台 | macOS arm64 | 用于开发、调试、smoke；不代表生产基线 |
-| 生产部署平台 | Linux x86_64 | 生产部署基线与 sidecar image / binary 主目标 |
+| 生产部署平台 | Ubuntu 22.04.5 LTS / Linux x86_64 | 生产部署基线与 sidecar image / binary 主目标；当前目标服务器为 `GNU/Linux 6.8.0-49-generic x86_64` |
+| GPU / CUDA | CUDA 12.6 / NVIDIA V100 | 当前 Rust policy wheel 与 sidecar 不直接链接 CUDA；后续如引入 GPU/native 推理依赖，必须补 CUDA 12.6 / V100 build 与 runtime 验证 |
 | 非必需平台 | Windows | 暂不作为必需发布目标；后续如需支持必须另行补 PRD / CI |
 | Python 版本 | Python 3.13 系列 | 跟随当前 Conda `multi_agent` 环境；PyO3 wheel 与 Python sidecar client smoke 必须覆盖 |
 
@@ -882,7 +883,7 @@ cargo llvm-cov --workspace --all-features --summary-only
 | RUST-TOOL-AC-008 | protobuf schema 使用统一 `native/proto/maf/<domain>/v1/` 归属与版本策略 | proto tree review + compatibility tests |
 | RUST-TOOL-AC-009 | 核心依赖使用冻结技术栈，替代依赖有 PRD 依据 | dependency review + cargo deny/audit |
 | RUST-TOOL-AC-010 | `rust-toolchain.toml` 固定具体 stable 版本、edition 2024、MSRV 一致 | toolchain file review + CI output |
-| RUST-TOOL-AC-011 | macOS arm64 开发 smoke、Linux x86_64 生产构建基线、Python 3.13 PyO3/client smoke 明确覆盖 | CI / 本地 smoke evidence |
+| RUST-TOOL-AC-011 | macOS arm64 开发 smoke、Ubuntu 22.04 x86_64 生产构建基线、Python 3.13 PyO3/client smoke 明确覆盖；PyO3 生产 wheel 使用 `manylinux_2_35` / `auditwheel check` | CI / 本地 smoke evidence |
 | RUST-TOOL-AC-012 | Windows 未被列为必需发布目标 | CI matrix / release 文档审查 |
 | RUST-TOOL-AC-013 | 所有 Rust crate 生成 `cargo-llvm-cov` 覆盖率报告并满足 80% / 90% line coverage 阈值 | coverage report / CI gate |
 | RUST-TOOL-AC-014 | 不可信输入边界启用 `cargo-fuzz`，PR bounded smoke 与 nightly / release 长跑 job 均有证据 | fuzz logs / CI artifacts |

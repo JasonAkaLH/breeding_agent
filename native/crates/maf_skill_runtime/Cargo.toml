@@ -1,0 +1,32 @@
+[package]
+name = "maf_skill_runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "export-skill-runtime-contract"
+path = "src/bin/export_skill_runtime_contract.rs"
+
+[[bin]]
+name = "maf-skill-sandbox"
+path = "src/main.rs"
+
+[build-dependencies]
+protoc-bin-vendored.workspace = true
+tonic-prost-build.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true

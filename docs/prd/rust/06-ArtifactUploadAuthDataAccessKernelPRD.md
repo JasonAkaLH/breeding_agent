@@ -1,6 +1,6 @@
 # Artifact / Upload / Auth / DataAccess Rust Kernel PRD
 
-- **状态**：待实现（聚合 PRD、四个子模块边界、coverage / fuzz 门禁已冻结）
+- **状态**：部分落地（`maf_artifact_store` / `maf_auth_core` / `maf_data_access` / `maf_audit_sanitizer` safety kernel 与聚合 contract artifact 基线已落地；PyO3/facade 接入、coverage/fuzz、enforce 与 legacy 下线仍待完成）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` RUST-P0-008、RUST-P1-001、RUST-P1-003、RUST-P1-005、9.6、10.3
 - **影响范围**：`src/storage/artifact_files.py`、`src/api/upload_store.py`、`src/auth/`、`src/integrations/mysql_readonly.py`、`src/mysql_engine.py`、audit/event serialization

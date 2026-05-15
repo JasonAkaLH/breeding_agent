@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import inspect
 from datetime import datetime
 
 from src.core.enums import InterruptStatus
 from src.core.models import Checkpoint, Interrupt, InterruptAnswer
+from src.lifecycle.rust_contract import contract_value, status_list
 from src.storage.sqlite.repositories import SQLiteCollaborationRepository
 from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteInterruptRepositoryTest(SQLiteStorageTestCase):
+    def test_interrupt_reopen_guard_uses_rust_lifecycle_contract_statuses(self) -> None:
+        source = inspect.getsource(SQLiteCollaborationRepository.save_interrupt)
+        self.assertIn("interrupt_reopen_guard_terminal_statuses", source)
+        self.assertIn("interrupt_open_status", source)
+        self.assertNotIn('{"answered", "cancelled", "expired"}', source)
+        self.assertNotIn("incoming_status == \"open\"", source)
+        self.assertEqual(status_list("interrupt_reopen_guard_terminal_statuses"), frozenset({"answered", "cancelled", "expired"}))
+        self.assertEqual(contract_value("interrupt_open_status"), "open")
+
     def test_interrupt_answer_and_checkpoint_round_trip(self) -> None:
         interrupt = Interrupt(
             interrupt_id="interrupt-1",

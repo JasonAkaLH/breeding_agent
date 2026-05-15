@@ -1,0 +1,261 @@
+use maf_runtime_sidecar::pb::common::v1 as common_pb;
+use maf_runtime_sidecar::pb::runtime::v1 as runtime_pb;
+use maf_runtime_sidecar::{
+    COMPONENT_ID, RuntimeSidecarGrpcService, RuntimeSidecarServeConfig,
+    RuntimeSidecarSqliteAdapter, runtime_sidecar_service_from_config,
+    serve_runtime_sidecar_with_incoming,
+};
+use runtime_pb::runtime_sidecar_server::RuntimeSidecar;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tonic::Request;
+
+#[tokio::test]
+async fn tonic_service_maps_pb_requests_to_rust_adapter_envelopes() {
+    let service = RuntimeSidecarGrpcService::new();
+
+    let version = service
+        .version(Request::new(runtime_pb::VersionRequest {}))
+        .await
+        .expect("version")
+        .into_inner()
+        .version
+        .expect("version info");
+    assert_eq!(version.component, COMPONENT_ID);
+
+    let compatibility = service
+        .check_compatibility(Request::new(runtime_pb::CompatibilityCheckRequest {
+            client_version: "python-client-1".to_owned(),
+            expected_component: version.component.clone(),
+            expected_protocol_version: version.protocol_version.clone(),
+            expected_schema_hash: version.schema_hash.clone(),
+            expected_error_code_table_hash: version.error_code_table_hash.clone(),
+            required_features: version.supported_features.clone(),
+        }))
+        .await
+        .expect("compatibility")
+        .into_inner();
+    assert!(compatibility.compatible);
+    assert!(compatibility.error.is_none());
+
+    let append = service
+        .append_event(Request::new(runtime_pb::AppendEventRequest {
+            conversation_id: "conv".to_owned(),
+            task_id: "task".to_owned(),
+            event_type: "task.accepted".to_owned(),
+            payload_json: b"{}".to_vec(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "event-1".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 2_000,
+            }),
+        }))
+        .await
+        .expect("append")
+        .into_inner();
+    assert!(append.error.is_none());
+    assert_eq!(append.cursor.expect("cursor").sequence, 1);
+
+    service.begin_shutdown_drain(100);
+    let rejected = service
+        .append_event(Request::new(runtime_pb::AppendEventRequest {
+            conversation_id: "conv".to_owned(),
+            task_id: "task".to_owned(),
+            event_type: "during-drain".to_owned(),
+            payload_json: b"{}".to_vec(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "event-2".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 2_000,
+            }),
+        }))
+        .await
+        .expect("append rejected in response envelope")
+        .into_inner();
+    let error = rejected.error.expect("typed error");
+    assert_eq!(error.code, "runtime_store_unavailable");
+    assert_eq!(error.category, common_pb::ErrorCategory::Internal as i32);
+    assert!(error.retriable);
+    assert!(rejected.cursor.is_none());
+}
+
+#[tokio::test]
+async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
+    let db_path = temp_db_path("grpc-sqlite");
+    {
+        let service = RuntimeSidecarGrpcService::with_sqlite_adapter(
+            RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter"),
+        );
+        let append = service
+            .append_event(Request::new(runtime_pb::AppendEventRequest {
+                conversation_id: "conv".to_owned(),
+                task_id: "task".to_owned(),
+                event_type: "task.accepted".to_owned(),
+                payload_json: b"{}".to_vec(),
+                idempotency: Some(runtime_pb::Idempotency {
+                    key: "event-1".to_owned(),
+                    owner: "python-runtime".to_owned(),
+                    deadline_ms: 2_000,
+                }),
+            }))
+            .await
+            .expect("append")
+            .into_inner();
+        assert_eq!(append.cursor.expect("cursor").sequence, 1);
+    }
+
+    let reopened = RuntimeSidecarGrpcService::with_sqlite_adapter(
+        RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen sqlite adapter"),
+    );
+    let replay = reopened
+        .replay_events(Request::new(runtime_pb::ReplayEventsRequest {
+            conversation_id: "conv".to_owned(),
+            task_id: "task".to_owned(),
+            after_sequence: 0,
+            page_limit: 10,
+            byte_limit: 1024,
+        }))
+        .await
+        .expect("replay")
+        .into_inner();
+    assert_eq!(replay.cursors.len(), 1);
+    assert_eq!(replay.cursors[0].sequence, 1);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn serve_config_can_construct_sqlite_backed_grpc_service() {
+    let db_path = temp_db_path("serve-config-sqlite");
+    let config =
+        RuntimeSidecarServeConfig::from_listen_addr_with_sqlite_path("127.0.0.1:50051", &db_path)
+            .expect("sqlite-backed serve config");
+    assert_eq!(config.sqlite_path.as_deref(), Some(db_path.as_path()));
+
+    let service = runtime_sidecar_service_from_config(&config).expect("build sqlite service");
+    let append = service
+        .append_event(Request::new(runtime_pb::AppendEventRequest {
+            conversation_id: "conv".to_owned(),
+            task_id: "task".to_owned(),
+            event_type: "task.accepted".to_owned(),
+            payload_json: b"{}".to_vec(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "event-1".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 2_000,
+            }),
+        }))
+        .await
+        .expect("append")
+        .into_inner();
+    assert_eq!(append.cursor.expect("cursor").sequence, 1);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn serve_config_builds_sqlite_backed_service_from_configured_path() {
+    let db_path = temp_db_path("serve-config-sqlite");
+    {
+        let config = RuntimeSidecarServeConfig::from_listen_addr_with_sqlite_path(
+            "127.0.0.1:50051",
+            &db_path,
+        )
+        .expect("sqlite-backed serve config");
+        let service = config.build_service().expect("build sqlite-backed service");
+        let append = service
+            .append_event(Request::new(runtime_pb::AppendEventRequest {
+                conversation_id: "conv".to_owned(),
+                task_id: "task".to_owned(),
+                event_type: "task.accepted".to_owned(),
+                payload_json: b"{}".to_vec(),
+                idempotency: Some(runtime_pb::Idempotency {
+                    key: "event-1".to_owned(),
+                    owner: "python-runtime".to_owned(),
+                    deadline_ms: 2_000,
+                }),
+            }))
+            .await
+            .expect("append")
+            .into_inner();
+        assert_eq!(append.cursor.expect("cursor").sequence, 1);
+    }
+
+    let reopened =
+        RuntimeSidecarServeConfig::from_listen_addr_with_sqlite_path("127.0.0.1:50051", &db_path)
+            .expect("reopen sqlite-backed serve config")
+            .build_service()
+            .expect("rebuild sqlite-backed service");
+    let replay = reopened
+        .replay_events(Request::new(runtime_pb::ReplayEventsRequest {
+            conversation_id: "conv".to_owned(),
+            task_id: "task".to_owned(),
+            after_sequence: 0,
+            page_limit: 10,
+            byte_limit: 1024,
+        }))
+        .await
+        .expect("replay")
+        .into_inner();
+    assert_eq!(replay.cursors.len(), 1);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn serve_config_rejects_public_bind_without_mtls_support() {
+    let config = RuntimeSidecarServeConfig::from_listen_addr("127.0.0.1:50051")
+        .expect("loopback bind is allowed");
+    assert_eq!(config.listen_addr.to_string(), "127.0.0.1:50051");
+
+    let error = RuntimeSidecarServeConfig::from_listen_addr("0.0.0.0:50051")
+        .expect_err("public bind must fail closed until mTLS is implemented");
+    assert_eq!(error.code, "runtime_store_config_untrusted");
+}
+
+#[tokio::test]
+async fn sidecar_listener_accepts_generated_grpc_client_on_loopback() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let service = RuntimeSidecarGrpcService::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        serve_runtime_sidecar_with_incoming(service, incoming, async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .expect("serve runtime sidecar")
+    });
+
+    let endpoint = format!("http://{addr}");
+    let mut client = runtime_pb::runtime_sidecar_client::RuntimeSidecarClient::connect(endpoint)
+        .await
+        .expect("connect generated client");
+    let response = client
+        .version(runtime_pb::VersionRequest {})
+        .await
+        .expect("version")
+        .into_inner();
+    assert_eq!(
+        response.version.expect("version info").component,
+        COMPONENT_ID
+    );
+
+    let _ = shutdown_tx.send(());
+    server.await.expect("server task");
+}
+
+fn temp_db_path(test_name: &str) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "maf-runtime-sidecar-{test_name}-{}-{timestamp}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}

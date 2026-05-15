@@ -7,9 +7,9 @@ from typing import Any
 from uuid import uuid4
 
 from .client import MCPClientError
+from .rust_contract import contract_value, status_list
 
-_RELATED_TASK_META_KEY = "io.modelcontextprotocol/related-task"
-_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+_RELATED_TASK_META_KEY = contract_value("related_task_meta_key")
 
 
 @dataclass(slots=True, frozen=True)
@@ -69,7 +69,7 @@ class InMemoryMCPTaskRegistry:
             capability_id=capability_id,
             mcp_task_id=mcp_task_id,
             progress_token=progress_token,
-            status=state or "working",
+            status=state or contract_value("task_default_state"),
             status_message=message,
             poll_interval_ms=poll_interval_ms,
             platform_task_id=platform_task_id,
@@ -83,7 +83,7 @@ class InMemoryMCPTaskRegistry:
     def update_status(self, mcp_task_id: str, status_payload: Mapping[str, Any]) -> MCPTaskRecord:
         record = self._records_by_task_id[mcp_task_id]
         next_state, message = normalize_task_status(status_payload)
-        if record.status in _TERMINAL_STATES and next_state not in {"", record.status}:
+        if record.status in status_list("task_terminal_states") and next_state not in {"", record.status}:
             return record
         updated = replace(record, status=next_state or record.status, status_message=message)
         self._records_by_ref[updated.safe_ref] = updated

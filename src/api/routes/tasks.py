@@ -133,7 +133,7 @@ async def cancel_task(task_id: str, request: Request) -> CancelTaskResponse:
         task = await runtime.cancel_task(task_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return CancelTaskResponse(task_id=task.task_id, status="cancelling", accepted=True)
+    return CancelTaskResponse(task_id=task.task_id, status=str(task.status), accepted=True)
 
 
 @router.get("/api/v1/tasks/{task_id}/interrupts", response_model=TaskInterruptsResponse)

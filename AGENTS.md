@@ -13,6 +13,7 @@
 - `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、LLM 上下文 token 计数等外部适配 / 运行时辅助能力。
 - `skill/<domain-query>/`：可移除 数据查询 Skill bundle；manifest、领域 runtime、配置与 Skill 专属测试物理归属此目录，runtime 只通过 generic Skill loader / allowlisted platform-service handler 接入。
 - `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、通用 data-query / file artifact 渲染与 Vitest 测试。
+- `native/`：Rust workspace；当前承载 runtime contract/kernel crates、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter 与 sidecar proto，生产 enforce / Python RPC client / PyO3 wheel / legacy 下线仍需按 Rust PRD 门禁推进。
 - `tests/`：后端按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
 - `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。
 - `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归；`run_fullstack_dev.py` 可拉起前后端用于人工验证。
@@ -53,13 +54,23 @@ npm test -- --run
 npm run build
 ```
 
-- Rust MCP sidecar/proto skeleton 当前验证命令：
+- Rust runtime contract/kernel workspace 当前验证命令：
 
 ```bash
+conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only cargo_fmt --only cargo_test --skip-unavailable
 cd native
 cargo fmt --check
 cargo test --workspace --all-features
 cargo check --workspace --all-targets --all-features
+```
+
+Skill Runtime PyO3 wheel 本地 smoke（非默认回归；产物仍需 CI / 部署 provenance 后才能进入生产 allowlist；生产目标 wheel 必须在 Ubuntu 22.04 x86_64 / Python 3.13 上生成 `manylinux_2_35` 产物，本机 macOS wheel 仅限开发验证）：
+
+```bash
+CARGO_BUILD_JOBS=1 conda run -n multi_agent python -m maturin build --release --locked --manifest-path native/crates/maf_skill_runtime_pyo3/Cargo.toml --interpreter /opt/miniconda3/envs/multi_agent/bin/python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels
+conda run -n multi_agent python -m pip install --force-reinstall --no-deps native/target/wheels/maf_skill_runtime_pyo3-*.whl
+conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
+conda run -n multi_agent python scripts/rust_artifact_provenance.py self-test
 ```
 
 
@@ -86,6 +97,8 @@ cmake --build build
 
 ## 开发环境
 本项目统一在 Conda 环境 `multi_agent` 中开发，当前确认的 Python 版本为 `3.13.13`。
+
+项目目标运行环境为 Ubuntu 22.04.5 LTS（`GNU/Linux 6.8.0-49-generic x86_64`）、CUDA 12.6 与 NVIDIA V100 GPU。涉及系统依赖、GPU/CUDA、Rust/Python 原生扩展、模型推理、性能或部署行为的实现与验证，应以该目标环境为兼容基线；当前本地环境可作为开发期测试与回归验证环境，但不得替代目标环境兼容性判断。
 
 常用命令示例：
 

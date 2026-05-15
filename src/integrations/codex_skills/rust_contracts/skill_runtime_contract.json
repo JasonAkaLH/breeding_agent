@@ -1,0 +1,265 @@
+{
+  "component": "maf_skill_runtime",
+  "protocol_version": "maf.skill.v1",
+  "contract_version": "skill_runtime.v1",
+  "client_version": "0.1.0",
+  "min_client_version": "0.1.0",
+  "max_client_version": "0.1.x",
+  "schema_hash": "maf_skill_runtime_schema_gates_20260515",
+  "error_code_table_hash": "maf_skill_runtime_error_table_v1_gates_20260515",
+  "mode_env": "MAF_RUST_SKILL_RUNTIME_MODE",
+  "modes": [
+    "off",
+    "shadow",
+    "enforce"
+  ],
+  "supported_features": [
+    "policy_kernel",
+    "pyo3_policy_facade",
+    "sandbox_sidecar",
+    "skill_owned_rust_metadata"
+  ],
+  "allowed_execution_modes": [
+    "delegated_main_agent",
+    "platform_service",
+    "python_subprocess"
+  ],
+  "default_execution_modes": {
+    "instruction_only": "delegated_main_agent",
+    "scripted": "python_subprocess"
+  },
+  "allowed_answer_modes": [
+    "direct",
+    "requires_finalizer",
+    "none"
+  ],
+  "default_answer_mode_by_execution_mode": {
+    "delegated_main_agent": "direct",
+    "python_subprocess": "requires_finalizer"
+  },
+  "answer_mode_required_execution_modes": [
+    "platform_service"
+  ],
+  "allowed_rust_adapters": [
+    "pyo3",
+    "binary",
+    "sidecar"
+  ],
+  "forbidden_x_runtime_rust_keys": [
+    "secret",
+    "endpoint",
+    "socket_path",
+    "mtls_key",
+    "download_url",
+    "local_path"
+  ],
+  "sandbox_limits": {
+    "artifact_bytes": 33554432,
+    "default_timeout_ms": 60000,
+    "hard_timeout_ms": 300000,
+    "max_concurrent_executions": 4,
+    "per_skill_concurrent": 2,
+    "queue_size": 64,
+    "queue_wait_ms": 10000,
+    "stderr_bytes": 1048576,
+    "stdin_bytes": 1048576,
+    "stdout_bytes": 1048576,
+    "structured_result_bytes": 4194304
+  },
+  "artifact_policy": {
+    "allowed_sources": [
+      "ci_pipeline",
+      "deployment_pipeline",
+      "runtime_allowlist"
+    ],
+    "allowed_artifact_kinds": [
+      "skill_policy_pyo3_wheel",
+      "skill_sandbox_sidecar_binary",
+      "skill_owned_rust_artifact"
+    ],
+    "required_fields": [
+      "source",
+      "artifact_kind",
+      "checksum_sha256",
+      "cargo_lock_digest",
+      "contract_version",
+      "bundle_revision",
+      "schema_hash",
+      "sbom_digest",
+      "provenance_attestation"
+    ],
+    "require_contract_version_match": true,
+    "require_schema_hash_match": true,
+    "require_checksum_allowlist": true,
+    "require_cargo_lock_digest_allowlist": true,
+    "require_sbom": true,
+    "require_provenance_attestation": true
+  },
+  "benchmark_policy": {
+    "required_baselines": [
+      "python_legacy",
+      "rust_skill_runtime"
+    ],
+    "required_operations": [
+      "manifest_parse",
+      "bundle_fingerprint",
+      "allowlist_decision",
+      "sandbox_execution",
+      "stdout_stderr_handling",
+      "artifact_handoff",
+      "process_cleanup"
+    ],
+    "required_metrics": [
+      "p50_ms",
+      "p95_ms",
+      "p99_ms",
+      "queue_wait_ms",
+      "cpu_percent",
+      "memory_mb"
+    ]
+  },
+  "promotion_policy": {
+    "min_shadow_days": 7,
+    "min_shadow_samples": 1000,
+    "max_contract_mismatch_rate_ppm": 0,
+    "max_panic_count": 0,
+    "max_crash_count": 0,
+    "max_p95_latency_ratio_percent": 110,
+    "error_rate_must_not_exceed_legacy": true,
+    "allowed_scopes": [
+      "skill_policy",
+      "skill_sandbox"
+    ],
+    "required_evidence": [
+      "artifact_provenance",
+      "benchmark_report",
+      "audit_redaction",
+      "rollback_runbook",
+      "ops_runbook",
+      "regression_tests",
+      "cargo_tests",
+      "cargo_fmt",
+      "cargo_clippy",
+      "secret_leak_tests",
+      "process_cleanup_drill"
+    ]
+  },
+  "ops_policy": {
+    "required_observability": [
+      "dashboard",
+      "alerts",
+      "slo"
+    ],
+    "required_runbooks": [
+      "drain",
+      "restart",
+      "rollback",
+      "artifact_quarantine",
+      "secret_rotation"
+    ],
+    "required_drills": [
+      "sandbox_unavailable",
+      "queue_full",
+      "timeout",
+      "process_cleanup_failure",
+      "artifact_handoff_failure",
+      "secret_identity_mismatch",
+      "public_endpoint_denial"
+    ]
+  },
+  "decommission_policy": {
+    "required_removed_legacy_paths": [
+      "python_trust_gate",
+      "python_subprocess_sandbox_policy"
+    ],
+    "required_facade_only_paths": [
+      "python_facade",
+      "platform_handler_adapter"
+    ],
+    "required_evidence": [
+      "promotion_threshold_passed",
+      "ops_readiness_passed",
+      "benchmark_passed",
+      "architecture_guard",
+      "regression_tests",
+      "decommission_grep"
+    ],
+    "allowed_rollback_paths": [
+      "deployment_rollback",
+      "artifact_rollback",
+      "sandbox_restore"
+    ]
+  },
+  "error_codes": [
+    {
+      "code": "skill_runtime_manifest_invalid",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_public_root_escape",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_service_not_allowlisted",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_handler_not_allowlisted",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_rust_adapter_invalid",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_sandbox_policy_denied",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_sandbox_timeout",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_output_too_large",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_contract_mismatch",
+      "category": "compatibility",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_artifact_untrusted",
+      "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_benchmark_invalid",
+      "category": "quality_gate",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_promotion_blocked",
+      "category": "quality_gate",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_ops_readiness_blocked",
+      "category": "quality_gate",
+      "retriable": false
+    },
+    {
+      "code": "skill_runtime_decommission_blocked",
+      "category": "quality_gate",
+      "retriable": false
+    }
+  ]
+}

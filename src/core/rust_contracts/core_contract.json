@@ -1,0 +1,519 @@
+{
+  "component": "maf_core_types",
+  "contract_version": "core.v1",
+  "schema_hash": "maf_core_types_core_v1_schema_20260515",
+  "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
+  "enums": {
+    "AckPolicy": [
+      {
+        "name": "STRONG",
+        "value": "strong"
+      },
+      {
+        "name": "LIGHT",
+        "value": "light"
+      }
+    ],
+    "ArtifactType": [
+      {
+        "name": "TEXT",
+        "value": "text"
+      },
+      {
+        "name": "JSON",
+        "value": "json"
+      },
+      {
+        "name": "FILE",
+        "value": "file"
+      },
+      {
+        "name": "DATASET",
+        "value": "dataset"
+      },
+      {
+        "name": "SUMMARY",
+        "value": "summary"
+      }
+    ],
+    "ConversationStatus": [
+      {
+        "name": "ACTIVE",
+        "value": "active"
+      },
+      {
+        "name": "ARCHIVED",
+        "value": "archived"
+      },
+      {
+        "name": "LOCKED",
+        "value": "locked"
+      }
+    ],
+    "DependencyType": [
+      {
+        "name": "HARD",
+        "value": "hard"
+      },
+      {
+        "name": "SOFT",
+        "value": "soft"
+      }
+    ],
+    "EdgeType": [
+      {
+        "name": "DATA",
+        "value": "data"
+      },
+      {
+        "name": "CONTROL",
+        "value": "control"
+      },
+      {
+        "name": "FALLBACK",
+        "value": "fallback"
+      }
+    ],
+    "EventVisibility": [
+      {
+        "name": "FRONTEND",
+        "value": "frontend"
+      },
+      {
+        "name": "INTERNAL",
+        "value": "internal"
+      },
+      {
+        "name": "AUDIT_ONLY",
+        "value": "audit_only"
+      }
+    ],
+    "InterruptStatus": [
+      {
+        "name": "OPEN",
+        "value": "open"
+      },
+      {
+        "name": "ANSWERED",
+        "value": "answered"
+      },
+      {
+        "name": "EXPIRED",
+        "value": "expired"
+      },
+      {
+        "name": "CANCELLED",
+        "value": "cancelled"
+      }
+    ],
+    "MailboxChannel": [
+      {
+        "name": "ORCHESTRATOR_CONTROL",
+        "value": "orchestrator_control"
+      },
+      {
+        "name": "PEER_COLLABORATION",
+        "value": "peer_collaboration"
+      },
+      {
+        "name": "INTERRUPT_RESUME",
+        "value": "interrupt_resume"
+      }
+    ],
+    "MailboxDeliveryStatus": [
+      {
+        "name": "PENDING",
+        "value": "pending"
+      },
+      {
+        "name": "DELIVERED",
+        "value": "delivered"
+      },
+      {
+        "name": "ACKNOWLEDGED",
+        "value": "acknowledged"
+      },
+      {
+        "name": "RESOLVED",
+        "value": "resolved"
+      },
+      {
+        "name": "EXPIRED",
+        "value": "expired"
+      },
+      {
+        "name": "CANCELLED",
+        "value": "cancelled"
+      }
+    ],
+    "MessageRole": [
+      {
+        "name": "USER",
+        "value": "user"
+      },
+      {
+        "name": "ASSISTANT",
+        "value": "assistant"
+      },
+      {
+        "name": "SYSTEM",
+        "value": "system"
+      }
+    ],
+    "NodeCriticality": [
+      {
+        "name": "REQUIRED",
+        "value": "required"
+      },
+      {
+        "name": "OPTIONAL",
+        "value": "optional"
+      },
+      {
+        "name": "FALLBACK",
+        "value": "fallback"
+      }
+    ],
+    "NodeStatus": [
+      {
+        "name": "PENDING",
+        "value": "pending"
+      },
+      {
+        "name": "READY",
+        "value": "ready"
+      },
+      {
+        "name": "RUNNING",
+        "value": "running"
+      },
+      {
+        "name": "WAITING_FOR_DEPENDENCY",
+        "value": "waiting_for_dependency"
+      },
+      {
+        "name": "WAITING_FOR_INPUT",
+        "value": "waiting_for_input"
+      },
+      {
+        "name": "READY_TO_RESUME",
+        "value": "ready_to_resume"
+      },
+      {
+        "name": "RESUMING",
+        "value": "resuming"
+      },
+      {
+        "name": "CANCELLING",
+        "value": "cancelling"
+      },
+      {
+        "name": "COMPLETED",
+        "value": "completed"
+      },
+      {
+        "name": "FAILED",
+        "value": "failed"
+      },
+      {
+        "name": "CANCELLED",
+        "value": "cancelled"
+      },
+      {
+        "name": "BLOCKED_BY_CANCELLATION",
+        "value": "blocked_by_cancellation"
+      },
+      {
+        "name": "ORPHANED",
+        "value": "orphaned"
+      }
+    ],
+    "RoutingMode": [
+      {
+        "name": "AUTO",
+        "value": "auto"
+      },
+      {
+        "name": "HINT",
+        "value": "hint"
+      },
+      {
+        "name": "FORCE_CAPABILITY",
+        "value": "force_capability"
+      }
+    ],
+    "TaskStatus": [
+      {
+        "name": "ACCEPTED",
+        "value": "accepted"
+      },
+      {
+        "name": "PLANNING",
+        "value": "planning"
+      },
+      {
+        "name": "RUNNING",
+        "value": "running"
+      },
+      {
+        "name": "CANCELLING",
+        "value": "cancelling"
+      },
+      {
+        "name": "CANCELLED",
+        "value": "cancelled"
+      },
+      {
+        "name": "COMPLETED",
+        "value": "completed"
+      },
+      {
+        "name": "FAILED",
+        "value": "failed"
+      }
+    ]
+  },
+  "models": {
+    "Artifact": [
+      "artifact_id",
+      "task_id",
+      "producer_node_id",
+      "artifact_type",
+      "storage_ref",
+      "summary",
+      "is_complete",
+      "created_at"
+    ],
+    "AuthSession": [
+      "session_id",
+      "username",
+      "expires_at",
+      "revoked_at",
+      "created_at"
+    ],
+    "AuthUser": [
+      "username",
+      "password_hash",
+      "password_salt",
+      "password_scheme",
+      "status",
+      "created_at",
+      "updated_at",
+      "last_login_at"
+    ],
+    "CapabilityExecutionError": [
+      "code",
+      "message",
+      "retriable",
+      "metadata"
+    ],
+    "CapabilityExecutionRequest": [
+      "capability_id",
+      "conversation_id",
+      "task_id",
+      "node_id",
+      "input_payload",
+      "context_refs",
+      "dependency_outputs",
+      "metadata"
+    ],
+    "CapabilityExecutionResult": [
+      "capability_id",
+      "task_id",
+      "node_id",
+      "output_payload",
+      "artifacts",
+      "events",
+      "interrupt",
+      "error",
+      "metadata"
+    ],
+    "CaptchaChallenge": [
+      "captcha_id",
+      "code_hash",
+      "expires_at",
+      "attempt_count",
+      "consumed_at",
+      "created_at"
+    ],
+    "Checkpoint": [
+      "checkpoint_id",
+      "task_id",
+      "node_id",
+      "agent_id",
+      "snapshot_ref",
+      "snapshot_kind",
+      "resume_token",
+      "source_message_id",
+      "created_at",
+      "invalidated_at"
+    ],
+    "Conversation": [
+      "conversation_id",
+      "account_id",
+      "status",
+      "current_task_id",
+      "title",
+      "created_at",
+      "updated_at"
+    ],
+    "ConversationMemorySummary": [
+      "summary_id",
+      "conversation_id",
+      "account_id",
+      "covered_until_turn_id",
+      "covered_until_message_id",
+      "covered_until_created_at",
+      "summary_text",
+      "source_message_count",
+      "source_message_ids_hash",
+      "estimated_tokens",
+      "summary_version",
+      "compression_policy_version",
+      "model_metadata_safe",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ],
+    "EventRecord": [
+      "event_id",
+      "conversation_id",
+      "task_id",
+      "node_id",
+      "agent_id",
+      "event_type",
+      "payload",
+      "visibility",
+      "created_at"
+    ],
+    "Interrupt": [
+      "interrupt_id",
+      "conversation_id",
+      "task_id",
+      "node_id",
+      "source_agent",
+      "source_message_id",
+      "question",
+      "reason_code",
+      "required_fields",
+      "status",
+      "expires_at",
+      "created_at",
+      "answered_at",
+      "cancelled_at"
+    ],
+    "InterruptAnswer": [
+      "interrupt_answer_id",
+      "interrupt_id",
+      "answer_payload",
+      "source_message_id",
+      "accepted",
+      "created_at",
+      "accepted_at"
+    ],
+    "MailboxDelivery": [
+      "delivery_id",
+      "message_id",
+      "recipient_agent",
+      "recipient_role",
+      "status",
+      "attempt_count",
+      "max_attempts",
+      "ttl_seconds",
+      "expires_at",
+      "delivered_at",
+      "acknowledged_at",
+      "resolved_at",
+      "next_retry_at",
+      "last_error_code",
+      "last_error_message",
+      "created_at",
+      "updated_at"
+    ],
+    "MailboxMessage": [
+      "message_id",
+      "conversation_id",
+      "task_id",
+      "node_id",
+      "parent_message_id",
+      "correlation_id",
+      "from_agent",
+      "to_agent",
+      "to_role",
+      "channel",
+      "message_type",
+      "ack_policy",
+      "priority",
+      "payload",
+      "payload_schema_version",
+      "created_at",
+      "resolved_at"
+    ],
+    "Message": [
+      "message_id",
+      "conversation_id",
+      "role",
+      "content",
+      "task_id",
+      "stream_status",
+      "created_at"
+    ],
+    "Task": [
+      "task_id",
+      "conversation_id",
+      "root_message_id",
+      "status",
+      "routing_mode",
+      "requested_capability_id",
+      "root_node_id",
+      "summary",
+      "cancel_requested_at",
+      "created_at",
+      "updated_at"
+    ],
+    "TaskEdge": [
+      "from_node_id",
+      "to_node_id",
+      "edge_type",
+      "condition"
+    ],
+    "TaskNode": [
+      "node_id",
+      "task_id",
+      "capability_id",
+      "assigned_instance_id",
+      "status",
+      "criticality",
+      "dependency_type",
+      "retry_policy",
+      "timeout_policy",
+      "resource_class",
+      "input_refs",
+      "output_refs",
+      "started_at",
+      "finished_at"
+    ]
+  },
+  "error_codes": [
+    {
+      "code": "core_contract_validation_failed",
+      "category": "contract",
+      "retriable": false
+    },
+    {
+      "code": "core_boundary_violation",
+      "category": "boundary",
+      "retriable": false
+    },
+    {
+      "code": "core_contract_mismatch",
+      "category": "contract",
+      "retriable": false
+    },
+    {
+      "code": "core_structured_output_invalid",
+      "category": "contract",
+      "retriable": false
+    }
+  ]
+}

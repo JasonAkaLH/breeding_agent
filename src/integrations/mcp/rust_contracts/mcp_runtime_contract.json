@@ -1,0 +1,17 @@
+{
+  "component": "maf_mcp_runtime_sidecar",
+  "protocol_version": "maf.mcp.sidecar.v1",
+  "schema_hash": "maf_mcp_v1_phase1_schema_hash_pending_ci",
+  "error_code_table_hash": "maf_mcp_runtime_error_table_v1_phase1",
+  "task_terminal_states": [
+    "completed",
+    "failed",
+    "cancelled"
+  ],
+  "task_cancelled_state": "cancelled",
+  "task_completed_state": "completed",
+  "task_failed_state": "failed",
+  "task_input_required_state": "input_required",
+  "task_default_state": "working",
+  "related_task_meta_key": "io.modelcontextprotocol/related-task"
+}

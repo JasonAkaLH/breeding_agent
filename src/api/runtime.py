@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -46,6 +47,8 @@ from src.integrations.codex_skills import (
     SkillRuntimeState,
     SkillScriptRunner,
 )
+from src.integrations.codex_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
+from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcClient
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState
@@ -68,6 +71,9 @@ from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_router import WorkflowRouter
+from src.storage.rust_contract import mode_for_component as runtime_sidecar_mode_for_component
+from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
+from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
 from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
 
@@ -116,6 +122,7 @@ class ApiRuntime:
         audit_sink: JsonlAuditSink | None = None,
         skill_runtime_state: SkillRuntimeState | None = None,
         mcp_runtime_state: MCPRuntimeState | None = None,
+        runtime_sidecar_client: Any | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -137,6 +144,7 @@ class ApiRuntime:
         self._audit_sink = audit_sink
         self._skill_runtime_state = skill_runtime_state
         self._mcp_runtime_state = mcp_runtime_state
+        self._runtime_sidecar_client = runtime_sidecar_client
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
@@ -179,6 +187,16 @@ class ApiRuntime:
         event = _ensure_event_created_at(event)
         await self.storage.append_event(event)
         await self.event_broker.publish(event)
+
+    async def _iter_event_replay_pages(self, task_id: str):
+        after_event_id: str | None = None
+        while True:
+            page = await self.storage.list_event_page_for_task(task_id, after_event_id=after_event_id)
+            if not page:
+                return
+            for event in page:
+                yield event
+            after_event_id = page[-1].event_id
 
     async def create_user(self, username: str, password: str, *, status: str = "active") -> AuthUser:
         username = validate_username(username)
@@ -794,8 +812,7 @@ class ApiRuntime:
         yielded_event_ids: set[str] = set()
         terminal_event_types = {"task.completed", "task.failed", "task.cancelled"}
         terminal_event_seen = False
-        history = await self.storage.list_events_for_task(task_id)
-        for event in history:
+        async for event in self._iter_event_replay_pages(task_id):
             if is_frontend_event(event):
                 yielded_event_ids.add(event.event_id)
                 terminal_event_seen = terminal_event_seen or event.event_type in terminal_event_types
@@ -807,8 +824,7 @@ class ApiRuntime:
                 deadline = asyncio.get_running_loop().time() + 0.25
                 while asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(0.01)
-                    late_history = await self.storage.list_events_for_task(task_id)
-                    for event in late_history:
+                    async for event in self._iter_event_replay_pages(task_id):
                         if event.event_id in yielded_event_ids:
                             continue
                         if not is_frontend_event(event):
@@ -1033,6 +1049,11 @@ class ApiRuntime:
         revision = str(raw_revision).strip()
         if not revision:
             return
+        self._pin_bundle_revision_with_sidecar_if_enforced(
+            task_id=request.task_id,
+            bundle_kind="skill",
+            revision=revision,
+        )
         self._skill_runtime_state.retain_revision(revision)
         self._task_skill_bundle_revisions[request.task_id] = revision
 
@@ -1043,6 +1064,11 @@ class ApiRuntime:
         revision = str(raw_revision).strip()
         if not revision:
             return
+        self._pin_bundle_revision_with_sidecar_if_enforced(
+            task_id=request.task_id,
+            bundle_kind="mcp",
+            revision=revision,
+        )
         self._mcp_runtime_state.retain_revision(revision)
         self._task_mcp_bundle_revisions[request.task_id] = revision
 
@@ -1052,8 +1078,14 @@ class ApiRuntime:
         task = await self.storage.get_task(task_id)
         if task is None or task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
             return
-        revision = self._task_skill_bundle_revisions.pop(task_id, None)
+        revision = self._task_skill_bundle_revisions.get(task_id)
         if revision:
+            self._release_bundle_revision_with_sidecar_if_enforced(
+                task_id=task_id,
+                bundle_kind="skill",
+                revision=revision,
+            )
+            self._task_skill_bundle_revisions.pop(task_id, None)
             self._skill_runtime_state.release_revision(revision)
 
     async def _release_task_mcp_revision_if_terminal(self, task_id: str) -> None:
@@ -1062,9 +1094,62 @@ class ApiRuntime:
         task = await self.storage.get_task(task_id)
         if task is None or task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
             return
-        revision = self._task_mcp_bundle_revisions.pop(task_id, None)
+        revision = self._task_mcp_bundle_revisions.get(task_id)
         if revision:
+            self._release_bundle_revision_with_sidecar_if_enforced(
+                task_id=task_id,
+                bundle_kind="mcp",
+                revision=revision,
+            )
+            self._task_mcp_bundle_revisions.pop(task_id, None)
             self._mcp_runtime_state.release_revision(revision)
+
+    def _pin_bundle_revision_with_sidecar_if_enforced(
+        self,
+        *,
+        task_id: str,
+        bundle_kind: str,
+        revision: str,
+    ) -> None:
+        sidecar_client = self._task_dispatcher_sidecar_client_for("bundle_revision_pin")
+        if sidecar_client is None:
+            _ensure_task_dispatcher_write_allowed_by_rust_contract("bundle_revision_pin")
+            return
+        response = sidecar_client.pin_bundle_revision(
+            task_id=task_id,
+            bundle_kind=bundle_kind,
+            revision=revision,
+            idempotency_key=f"{task_id}:{bundle_kind}:{revision}:pin",
+        )
+        _consume_runtime_sidecar_response("bundle_revision_pin", response)
+
+    def _release_bundle_revision_with_sidecar_if_enforced(
+        self,
+        *,
+        task_id: str,
+        bundle_kind: str,
+        revision: str,
+    ) -> None:
+        sidecar_client = self._task_dispatcher_sidecar_client_for("bundle_revision_release")
+        if sidecar_client is None:
+            _ensure_task_dispatcher_write_allowed_by_rust_contract("bundle_revision_release")
+            return
+        response = sidecar_client.release_bundle_revision(
+            task_id=task_id,
+            bundle_kind=bundle_kind,
+            revision=revision,
+            released_at_ms=int(self._utcnow_naive().timestamp() * 1000),
+            idempotency_key=f"{task_id}:{bundle_kind}:{revision}:release",
+        )
+        _consume_runtime_sidecar_response("bundle_revision_release", response)
+
+    def _task_dispatcher_sidecar_client_for(self, operation_name: str) -> Any | None:
+        if runtime_sidecar_mode_for_component("task_dispatcher") != "enforce":
+            return None
+        if self._runtime_sidecar_client is None:
+            _ensure_task_dispatcher_write_allowed_by_rust_contract(operation_name)
+            return None
+        return self._runtime_sidecar_client
 
     def _resume_skill_revision_metadata(self, task_id: str) -> dict[str, object]:
         revision = self._task_skill_bundle_revisions.get(task_id)
@@ -1155,6 +1240,8 @@ def build_api_runtime(
     conversation_memory_resolution_generator: ResolutionGenerator | None = None,
     enable_conversation_memory_resolution_llm: bool = True,
     artifact_store_path: str | Path | None = None,
+    runtime_sidecar_client: Any | None = None,
+    skill_sandbox_client: Any | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
         platform_llm_text_generator=platform_llm_text_generator,
@@ -1177,7 +1264,11 @@ def build_api_runtime(
 
     engine = create_sqlite_engine(database_path)
     bootstrap_sqlite_database(engine)
-    storage = SQLiteStorage(create_sqlite_session_factory(engine))
+    resolved_runtime_sidecar_client = runtime_sidecar_client or _resolve_runtime_sidecar_client_from_env()
+    storage = SQLiteStorage(
+        create_sqlite_session_factory(engine),
+        runtime_sidecar_client=resolved_runtime_sidecar_client,
+    )
     artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
     password_hasher = PasswordHasher()
     captcha_service = CaptchaService(
@@ -1279,7 +1370,14 @@ def build_api_runtime(
         file_store=artifact_file_store,
         now_fn=ApiRuntime._utcnow_naive,
     )
-    skill_script_runner = SkillScriptRunner(output_processor=skill_output_artifact_manager.process_for_runner)
+    resolved_skill_sandbox_client = skill_sandbox_client or _resolve_skill_sandbox_client_from_env()
+    resolved_skill_policy_client = _resolve_skill_policy_client(resolved_skill_sandbox_client)
+    skill_script_runner = SkillScriptRunner(
+        output_processor=skill_output_artifact_manager.process_for_runner,
+        rust_sandbox_client=resolved_skill_sandbox_client,
+        rust_sandbox_mode=os.environ.get("MAF_RUST_SKILL_RUNTIME_MODE", "off"),
+        rust_sandbox_root=os.environ.get("MAF_SKILL_SANDBOX_ROOT") or None,
+    )
     resolved_main_agent_stream_generator, main_agent_stream_metadata = _resolve_main_agent_stream_binding(
         main_agent_stream_generator=main_agent_stream_generator,
         main_agent_llm_runtime=main_agent_llm_runtime,
@@ -1306,6 +1404,9 @@ def build_api_runtime(
         trusted_skill_handlers=dict(trusted_skill_handlers or {}),
         trusted_skill_services=dict(trusted_skill_services or {}),
         public_skill_roots=tuple(resolved_public_skill_roots),
+        rust_policy_client=resolved_skill_policy_client,
+        rust_policy_mode=os.environ.get("MAF_RUST_SKILL_RUNTIME_MODE", "off"),
+        rust_policy_shadow_diff_sink=_build_skill_policy_shadow_diff_sink(audit_sink),
     )
     resolved_conversation_memory_builder = _resolve_conversation_memory_builder(
         storage=storage,
@@ -1376,7 +1477,12 @@ def build_api_runtime(
     ]
     resolved_runtime_replanner = runtime_replanner or CompositeRuntimeReplanner(default_replanners)
 
-    cancellation_service = CancellationService(storage, event_sink=event_broker, audit_sink=audit_sink)
+    cancellation_service = CancellationService(
+        storage,
+        event_sink=event_broker,
+        audit_sink=audit_sink,
+        runtime_sidecar_client=resolved_runtime_sidecar_client,
+    )
     interrupt_service = InterruptService(storage, event_sink=event_broker, audit_sink=audit_sink)
     orchestration_service = OrchestrationService(
         storage=storage,
@@ -1437,6 +1543,7 @@ def build_api_runtime(
         audit_sink=audit_sink,
         skill_runtime_state=skill_runtime_state,
         mcp_runtime_state=resolved_mcp_runtime_state,
+        runtime_sidecar_client=resolved_runtime_sidecar_client,
     )
 
 
@@ -1508,6 +1615,42 @@ def _bootstrap_runtime_config_env(
     if explicit_paths or not should_bootstrap_default:
         return
     bootstrap_config_env(DEFAULT_CONFIG_PATH, strict=False)
+
+
+def _resolve_runtime_sidecar_client_from_env() -> RuntimeSidecarGrpcClient | None:
+    endpoint = os.environ.get("MAF_RUNTIME_SIDECAR_ENDPOINT", "").strip()
+    if not endpoint:
+        return None
+    allowed_hosts = tuple(
+        host.strip()
+        for host in os.environ.get("MAF_RUNTIME_SIDECAR_ALLOWED_HOSTS", "").split(",")
+        if host.strip()
+    )
+    mtls_enabled = os.environ.get("MAF_RUNTIME_SIDECAR_MTLS_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    return RuntimeSidecarGrpcClient(
+        endpoint,
+        config_source="environment_variable",
+        allowed_hosts=allowed_hosts,
+        mtls_enabled=mtls_enabled,
+    )
+
+
+def _resolve_skill_sandbox_client_from_env() -> SkillSandboxGrpcClient | None:
+    endpoint = os.environ.get("MAF_SKILL_SANDBOX_ENDPOINT", "").strip()
+    if not endpoint:
+        return None
+    return SkillSandboxGrpcClient(endpoint)
+
+
+def _resolve_skill_policy_client(fallback_client: Any | None) -> Any | None:
+    module_name = os.environ.get("MAF_SKILL_POLICY_PYO3_MODULE", "").strip() or "maf_skill_runtime_pyo3"
+    pyo3_client = try_load_skill_runtime_pyo3_policy_client(module_name=module_name)
+    return pyo3_client or fallback_client
 
 
 def _resolve_main_agent_llm_runtime(
@@ -1830,6 +1973,33 @@ def _ensure_event_created_at(event: EventRecord) -> EventRecord:
     if event.created_at is not None:
         return event
     return replace(event, created_at=datetime.now(timezone.utc).replace(tzinfo=None))
+
+
+def _ensure_task_dispatcher_write_allowed_by_rust_contract(operation_name: str) -> None:
+    ensure_sidecar_write_allowed(
+        component="task_dispatcher",
+        operation_name=operation_name,
+        unavailable_error_code="dispatcher_unavailable",
+    )
+
+
+def _consume_runtime_sidecar_response(operation_name: str, response: Mapping[str, Any]) -> None:
+    envelope = validate_runtime_sidecar_response(operation_name, response)
+    error = envelope.get("error")
+    if isinstance(error, Mapping):
+        raise RuntimeError(f"{error['code']}: {error['message']}")
+
+
+def _build_skill_policy_shadow_diff_sink(
+    audit_sink: JsonlAuditSink | None,
+) -> Callable[[Mapping[str, str]], None] | None:
+    if audit_sink is None:
+        return None
+
+    def record_shadow_diff(payload: Mapping[str, str]) -> None:
+        audit_sink.record_sync("skill.runtime_policy_shadow_diff", payload)
+
+    return record_shadow_diff
 
 
 def _resolve_planner_text_generator(
