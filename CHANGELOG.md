@@ -17,6 +17,7 @@
 - Rust quality workflow 的 push 触发分支补充 `rust_branch`，避免开发分支验证推送后没有远端 CI run 可观察；真实 GitHub Actions 通过状态仍以后续 run 结果为准。
 - 根据远端 GitHub Actions run `25912752831` / `25913275197` 的失败日志，修复 `cargo install cargo-fuzz --locked` 在 Ubuntu 22.04 nightly 2026-05-15 上因 locked `rustix 0.36.5` / `rustc_*` 保留 attribute 失败的问题，改为安装顶层固定的 `cargo-fuzz 0.13.1` 并让 Cargo 解析兼容依赖；同时将 bounded fuzz smoke 显式改为 `cargo +nightly fuzz run`，避免 `native/rust-toolchain.toml` 的 stable override 导致 `-Zsanitizer` 被稳定版 rustc 拒绝。上述 run 的 PyO3 Ubuntu wheel evidence job 已通过，但整体 run 仍需后续重新触发验证。
 - 根据后续 Rust quality 主 job 失败日志，补齐主 job 的 Python 3.13 / `PYO3_PYTHON=python` 配置，避免 workspace `cargo clippy` / `cargo test` 构建 `abi3-py313` PyO3 crate 时落到 Ubuntu runner 默认 Python 3.10；同时修复 `maf_runtime_store` 在 Rust 1.95 `-D warnings` 下触发的 `clippy::collapsible_if`。
+- 交接口径：最新已推送提交为 `2166488`（`origin/rust_branch`），对应 GitHub Actions run `25914331342`；后续任务应先查看该 run 的 `Rust PRD01 quality gates / Ubuntu 22.04 x86_64`、`Rust bounded fuzz smoke / Ubuntu 22.04 x86_64` 与 `Skill Runtime PyO3 wheel smoke / Ubuntu 22.04 x86_64 / Python 3.13` 三个 job。若 run 失败，优先抓取失败 job 最后 50-100 行日志并按日志修复；若仍长时间停在 `Install Rust quality tools` 或 wheel build，下一步应优化 CI 工具安装 / 缓存策略，而不是跳过 PRD01 复用门禁。只有 `25914331342` 或后续同等 Ubuntu run 全绿后，才可把 PRD01 远端 CI 证据标记为通过并继续补长时 fuzz、coverage artifact、release allowlist / promotion 证据。
 - 补充 integration 回归测试和 README / AGENTS / Rust PRD 状态说明，继续明确真实 production provenance、coverage 报告、长时 fuzz、ops / promotion 证据仍是后续门禁。
 
 ### 2026-05-15 — 补充目标运行环境约束
