@@ -210,6 +210,48 @@ fn serve_config_rejects_public_bind_without_mtls_support() {
     assert_eq!(error.code, "runtime_store_config_untrusted");
 }
 
+#[test]
+fn serve_config_accepts_public_bind_only_with_complete_mtls_paths() {
+    let cert_path = temp_db_path("runtime-sidecar-server").with_extension("crt");
+    let key_path = temp_db_path("runtime-sidecar-server").with_extension("key");
+    let client_ca_path = temp_db_path("runtime-sidecar-ca").with_extension("crt");
+
+    let config = RuntimeSidecarServeConfig::from_listen_addr_with_mtls_paths(
+        "0.0.0.0:50051",
+        &cert_path,
+        &key_path,
+        &client_ca_path,
+    )
+    .expect("public TCP bind is allowed only when complete mTLS config is present");
+
+    assert_eq!(config.listen_addr.to_string(), "0.0.0.0:50051");
+    let tls = config
+        .tls_config
+        .as_ref()
+        .expect("mTLS config is recorded for the server");
+    assert_eq!(tls.identity_cert_path, cert_path);
+    assert_eq!(tls.identity_key_path, key_path);
+    assert_eq!(tls.client_ca_path, client_ca_path);
+
+    let error = RuntimeSidecarServeConfig::from_listen_addr_with_mtls_paths(
+        "unix:///tmp/runtime-sidecar.sock",
+        &tls.identity_cert_path,
+        &tls.identity_key_path,
+        &tls.client_ca_path,
+    )
+    .expect_err("Unix sockets must not accept redundant mTLS config");
+    assert_eq!(error.code, "runtime_store_config_untrusted");
+
+    let error = RuntimeSidecarServeConfig::from_listen_addr_with_mtls_paths(
+        "127.0.0.1:50051",
+        "relative-server.crt",
+        &tls.identity_key_path,
+        &tls.client_ca_path,
+    )
+    .expect_err("mTLS material must come from absolute deployment/secret paths");
+    assert_eq!(error.code, "runtime_store_config_untrusted");
+}
+
 #[cfg(unix)]
 #[test]
 fn serve_config_accepts_unix_socket_endpoint_for_internal_runtime_access() {

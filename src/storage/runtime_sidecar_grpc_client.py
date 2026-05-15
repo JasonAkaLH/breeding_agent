@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import ssl
 import struct
 from collections.abc import Mapping
 from ipaddress import ip_address
@@ -31,8 +32,9 @@ class RuntimeSidecarGrpcClient:
     """Minimal dependency-free gRPC/h2c client for the Rust runtime sidecar.
 
     The project intentionally has no grpcio dependency yet. This client only
-    implements the unary plaintext loopback subset needed by
-    `maf-runtime-sidecar` for PRD 03 validation; it is not a general gRPC stack.
+    implements the unary RuntimeSidecar subset needed by `maf-runtime-sidecar`
+    for PRD 03 validation over loopback h2c, Unix sockets, or mTLS TCP; it is
+    not a general gRPC stack.
     """
 
     def __init__(
@@ -42,6 +44,10 @@ class RuntimeSidecarGrpcClient:
         config_source: str = "environment_variable",
         allowed_hosts: tuple[str, ...] = (),
         mtls_enabled: bool = False,
+        tls_ca_path: str | None = None,
+        tls_cert_path: str | None = None,
+        tls_key_path: str | None = None,
+        tls_server_name: str | None = None,
     ) -> None:
         validated_endpoint = validate_runtime_sidecar_endpoint(
             endpoint,
@@ -51,6 +57,9 @@ class RuntimeSidecarGrpcClient:
         )
         parsed = urlparse(validated_endpoint)
         self._unix_socket_path: str | None = None
+        self._tls_context: ssl.SSLContext | None = None
+        self._tls_server_name: str | None = None
+        self._scheme = "http"
         if parsed.scheme == "unix" and parsed.path:
             if not hasattr(socket, "AF_UNIX"):
                 raise ValueError("runtime sidecar Unix socket endpoints are unavailable on this platform")
@@ -66,18 +75,35 @@ class RuntimeSidecarGrpcClient:
                 mtls_enabled=mtls_enabled,
             )
             return
-        if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
-            raise ValueError("runtime sidecar gRPC endpoint must be http://host:port or unix:///path")
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
+            raise ValueError(
+                "runtime sidecar gRPC endpoint must be http://host:port, https://host:port, or unix:///path"
+            )
+        if parsed.scheme == "https":
+            if not mtls_enabled:
+                raise ValueError("runtime sidecar https endpoint requires mTLS to be enabled")
+            if not tls_ca_path or not tls_cert_path or not tls_key_path:
+                raise ValueError("runtime sidecar mTLS requires CA, client certificate, and client key paths")
+        cross_host = _is_cross_host(parsed.hostname)
+        if parsed.scheme == "http" and cross_host:
+            raise ValueError("runtime sidecar cross-host endpoints must use https mTLS")
         validate_runtime_sidecar_config_authority(
             "runtime_sidecar_endpoint",
             config_source,
             component="runtime_store",
-            cross_host=_is_cross_host(parsed.hostname),
+            cross_host=cross_host,
             mtls_enabled=mtls_enabled,
         )
         self._host = parsed.hostname
         self._port = parsed.port
         self._authority = f"{self._host}:{self._port}"
+        self._scheme = parsed.scheme
+        if parsed.scheme == "https":
+            context = ssl.create_default_context(cafile=tls_ca_path)
+            context.load_cert_chain(certfile=tls_cert_path, keyfile=tls_key_path)
+            context.set_alpn_protocols(["h2"])
+            self._tls_context = context
+            self._tls_server_name = tls_server_name or self._host
 
     def version(self, *, timeout_seconds: float = 5) -> dict[str, Any]:
         payload = self._unary("Version", b"", timeout_seconds=timeout_seconds)
@@ -391,7 +417,7 @@ class RuntimeSidecarGrpcClient:
             header_block = _encode_headers(
                 [
                     (":method", "POST"),
-                    (":scheme", "http"),
+                    (":scheme", self._scheme),
                     (":path", path),
                     (":authority", self._authority),
                     ("content-type", "application/grpc"),
@@ -415,7 +441,14 @@ class RuntimeSidecarGrpcClient:
             return sock
         if self._port is None:
             raise RuntimeError("runtime sidecar TCP port is not configured")
-        return socket.create_connection((self._host, self._port), timeout=timeout_seconds)
+        raw_sock = socket.create_connection((self._host, self._port), timeout=timeout_seconds)
+        if self._tls_context is None:
+            return raw_sock
+        try:
+            return self._tls_context.wrap_socket(raw_sock, server_hostname=self._tls_server_name)
+        except BaseException:
+            raw_sock.close()
+            raise
 
 
 def _consume_response(operation_name: str, response: Mapping[str, Any]) -> None:

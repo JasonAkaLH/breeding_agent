@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -15,6 +16,14 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
     def test_client_rejects_public_endpoint_before_connecting(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "runtime_store_unavailable"):
             RuntimeSidecarGrpcClient("http://example.com:50051")
+
+    def test_client_requires_complete_mtls_material_for_https_endpoint(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cross-host endpoints must use https mTLS"):
+            RuntimeSidecarGrpcClient("http://10.0.0.5:50051", mtls_enabled=True)
+        with self.assertRaisesRegex(ValueError, "requires mTLS"):
+            RuntimeSidecarGrpcClient("https://127.0.0.1:50051", mtls_enabled=False)
+        with self.assertRaisesRegex(ValueError, "requires CA, client certificate, and client key"):
+            RuntimeSidecarGrpcClient("https://127.0.0.1:50051", mtls_enabled=True)
 
     def test_python_client_appends_and_replays_against_rust_sidecar_binary(self) -> None:
         binary = _ensure_runtime_sidecar_binary()
@@ -185,16 +194,90 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                 if socket_path.exists():
                     os.unlink(socket_path)
 
+    @unittest.skipUnless(shutil.which("openssl"), "openssl is required to generate local mTLS fixtures")
+    def test_python_client_connects_to_rust_sidecar_binary_over_mtls(self) -> None:
+        binary = _ensure_runtime_sidecar_binary()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            certs = _generate_mtls_certs(root)
+            db_path = root / "runtime-sidecar.sqlite"
+            last_startup_error: Exception | None = None
+            for _ in range(5):
+                port = _free_loopback_port()
+                endpoint = f"https://127.0.0.1:{port}"
+                process = subprocess.Popen(
+                    [
+                        str(binary),
+                        "--serve",
+                        f"127.0.0.1:{port}",
+                        "--sqlite",
+                        str(db_path),
+                        "--tls-cert",
+                        str(certs["server_cert"]),
+                        "--tls-key",
+                        str(certs["server_key"]),
+                        "--client-ca",
+                        str(certs["ca_cert"]),
+                    ],
+                    cwd=_repo_root(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    try:
+                        client = _connect_with_retry(
+                            endpoint,
+                            process=process,
+                            mtls_enabled=True,
+                            tls_ca_path=str(certs["ca_cert"]),
+                            tls_cert_path=str(certs["client_cert"]),
+                            tls_key_path=str(certs["client_key"]),
+                            tls_server_name="localhost",
+                        )
+                    except AssertionError as exc:
+                        last_startup_error = exc
+                        continue
+
+                    version = client.version()
+                    self.assertEqual(version["component"], "maf_runtime_sidecar")
+                    cursor = client.append_event(
+                        conversation_id="conv",
+                        task_id="task",
+                        event_type="task.accepted",
+                        payload_json=b"{}",
+                        idempotency_key="mtls-event-1",
+                        owner="python-runtime",
+                    )
+                    self.assertEqual(cursor["sequence"], 1)
+                    return
+                finally:
+                    _terminate_process(process)
+            self.fail(f"Rust runtime sidecar did not become ready over mTLS: {last_startup_error}")
+
 
 def _connect_with_retry(
     endpoint: str,
     *,
     process: subprocess.Popen[str] | None = None,
+    mtls_enabled: bool = False,
+    tls_ca_path: str | None = None,
+    tls_cert_path: str | None = None,
+    tls_key_path: str | None = None,
+    tls_server_name: str | None = None,
 ) -> RuntimeSidecarGrpcClient:
     last_error: Exception | None = None
     for _ in range(100):
         try:
-            client = RuntimeSidecarGrpcClient(endpoint)
+            client = RuntimeSidecarGrpcClient(
+                endpoint,
+                mtls_enabled=mtls_enabled,
+                tls_ca_path=tls_ca_path,
+                tls_cert_path=tls_cert_path,
+                tls_key_path=tls_key_path,
+                tls_server_name=tls_server_name,
+            )
             client.version(timeout_seconds=1)
             return client
         except Exception as exc:  # noqa: BLE001 - retry startup race against Rust binary.
@@ -216,6 +299,178 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
+    try:
+        process.communicate(timeout=1)
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+
+
+def _generate_mtls_certs(root: Path) -> dict[str, Path]:
+    ca_cert = root / "ca.crt"
+    ca_key = root / "ca.key"
+    ca_conf = root / "ca.cnf"
+    server_cert = root / "server.crt"
+    server_key = root / "server.key"
+    server_csr = root / "server.csr"
+    server_conf = root / "server.cnf"
+    client_cert = root / "client.crt"
+    client_key = root / "client.key"
+    client_csr = root / "client.csr"
+    client_conf = root / "client.cnf"
+
+    ca_conf.write_text(
+        "\n".join(
+            [
+                "[req]",
+                "prompt = no",
+                "distinguished_name = dn",
+                "x509_extensions = v3_ca",
+                "[dn]",
+                "CN = MAF Runtime Test CA",
+                "[v3_ca]",
+                "basicConstraints = critical,CA:true",
+                "keyUsage = critical,keyCertSign,cRLSign",
+                "subjectKeyIdentifier = hash",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _run_openssl(
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        str(ca_key),
+        "-out",
+        str(ca_cert),
+        "-days",
+        "1",
+        "-config",
+        str(ca_conf),
+    )
+    server_conf.write_text(
+        "\n".join(
+            [
+                "[req]",
+                "prompt = no",
+                "distinguished_name = dn",
+                "req_extensions = v3_req",
+                "[dn]",
+                "CN = localhost",
+                "[v3_req]",
+                "subjectAltName = @alt_names",
+                "keyUsage = critical,digitalSignature,keyEncipherment",
+                "extendedKeyUsage = serverAuth",
+                "[alt_names]",
+                "DNS.1 = localhost",
+                "IP.1 = 127.0.0.1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _run_openssl(
+        "req",
+        "-new",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        str(server_key),
+        "-out",
+        str(server_csr),
+        "-config",
+        str(server_conf),
+    )
+    _run_openssl(
+        "x509",
+        "-req",
+        "-in",
+        str(server_csr),
+        "-CA",
+        str(ca_cert),
+        "-CAkey",
+        str(ca_key),
+        "-CAcreateserial",
+        "-out",
+        str(server_cert),
+        "-days",
+        "1",
+        "-sha256",
+        "-extensions",
+        "v3_req",
+        "-extfile",
+        str(server_conf),
+    )
+    client_conf.write_text(
+        "\n".join(
+            [
+                "[req]",
+                "prompt = no",
+                "distinguished_name = dn",
+                "req_extensions = v3_req",
+                "[dn]",
+                "CN = maf-python-runtime-client",
+                "[v3_req]",
+                "keyUsage = critical,digitalSignature",
+                "extendedKeyUsage = clientAuth",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _run_openssl(
+        "req",
+        "-new",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        str(client_key),
+        "-out",
+        str(client_csr),
+        "-config",
+        str(client_conf),
+    )
+    _run_openssl(
+        "x509",
+        "-req",
+        "-in",
+        str(client_csr),
+        "-CA",
+        str(ca_cert),
+        "-CAkey",
+        str(ca_key),
+        "-CAcreateserial",
+        "-out",
+        str(client_cert),
+        "-days",
+        "1",
+        "-sha256",
+        "-extensions",
+        "v3_req",
+        "-extfile",
+        str(client_conf),
+    )
+    return {
+        "ca_cert": ca_cert,
+        "server_cert": server_cert,
+        "server_key": server_key,
+        "client_cert": client_cert,
+        "client_key": client_key,
+    }
+
+
+def _run_openssl(*args: str) -> None:
+    subprocess.run(
+        ["openssl", *args],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def _ensure_runtime_sidecar_binary() -> Path:

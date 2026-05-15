@@ -130,6 +130,41 @@ class RuntimeSidecarContractAPITest(APITestCase):
             config_source="environment_variable",
             allowed_hosts=(),
             mtls_enabled=False,
+            tls_ca_path=None,
+            tls_cert_path=None,
+            tls_key_path=None,
+            tls_server_name=None,
+        )
+
+    async def test_runtime_configures_mtls_grpc_sidecar_client_from_deployment_env(self) -> None:
+        sentinel_client = object()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_RUNTIME_SIDECAR_ENDPOINT": "https://runtime.internal:50051",
+                    "MAF_RUNTIME_SIDECAR_ALLOWED_HOSTS": "runtime.internal",
+                    "MAF_RUNTIME_SIDECAR_MTLS_ENABLED": "true",
+                    "MAF_RUNTIME_SIDECAR_TLS_CA_PATH": "/etc/maf/ca.pem",
+                    "MAF_RUNTIME_SIDECAR_TLS_CERT_PATH": "/etc/maf/client.pem",
+                    "MAF_RUNTIME_SIDECAR_TLS_KEY_PATH": "/etc/maf/client.key",
+                    "MAF_RUNTIME_SIDECAR_TLS_SERVER_NAME": "runtime.internal",
+                },
+            ),
+            patch("src.api.runtime.RuntimeSidecarGrpcClient", return_value=sentinel_client) as client_factory,
+        ):
+            await self.reconfigure_runtime(enable_conversation_memory=False)
+
+        self.assertIs(self.runtime.storage._runtime_sidecar_client, sentinel_client)  # noqa: SLF001
+        client_factory.assert_called_once_with(
+            "https://runtime.internal:50051",
+            config_source="environment_variable",
+            allowed_hosts=("runtime.internal",),
+            mtls_enabled=True,
+            tls_ca_path="/etc/maf/ca.pem",
+            tls_cert_path="/etc/maf/client.pem",
+            tls_key_path="/etc/maf/client.key",
+            tls_server_name="runtime.internal",
         )
 
     async def test_dispatcher_enforce_routes_bundle_revision_to_configured_sidecar(self) -> None:

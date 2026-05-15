@@ -17,6 +17,7 @@ use maf_task_dispatcher::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_stream::wrappers::TcpListenerStream;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 
 mod sqlite_adapter;
 pub use sqlite_adapter::RuntimeSidecarSqliteAdapter;
@@ -300,13 +302,64 @@ pub struct RuntimeSidecarServeConfig {
     pub listen_addr: SocketAddr,
     pub unix_socket_path: Option<PathBuf>,
     pub sqlite_path: Option<PathBuf>,
+    pub tls_config: Option<RuntimeSidecarTlsConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSidecarTlsConfig {
+    pub identity_cert_path: PathBuf,
+    pub identity_key_path: PathBuf,
+    pub client_ca_path: PathBuf,
+}
+
+impl RuntimeSidecarTlsConfig {
+    pub fn from_paths(
+        identity_cert_path: impl AsRef<Path>,
+        identity_key_path: impl AsRef<Path>,
+        client_ca_path: impl AsRef<Path>,
+    ) -> Result<Self, RuntimeSidecarError> {
+        Ok(Self {
+            identity_cert_path: validate_mtls_path(
+                identity_cert_path.as_ref(),
+                "identity certificate",
+            )?,
+            identity_key_path: validate_mtls_path(identity_key_path.as_ref(), "identity key")?,
+            client_ca_path: validate_mtls_path(client_ca_path.as_ref(), "client CA")?,
+        })
+    }
+
+    fn to_server_tls_config(&self) -> Result<ServerTlsConfig, Box<dyn Error + Send + Sync>> {
+        let cert = fs::read(&self.identity_cert_path)?;
+        let key = fs::read(&self.identity_key_path)?;
+        let client_ca = fs::read(&self.client_ca_path)?;
+        Ok(ServerTlsConfig::new()
+            .identity(Identity::from_pem(cert, key))
+            .client_ca_root(Certificate::from_pem(client_ca)))
+    }
 }
 
 impl RuntimeSidecarServeConfig {
     pub fn from_env_or_default() -> Result<Self, RuntimeSidecarError> {
         let listen_addr = std::env::var("MAF_RUNTIME_SIDECAR_LISTEN_ADDR")
             .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_owned());
-        let mut config = Self::from_listen_addr(&listen_addr)?;
+        let tls_cert_path = std::env::var("MAF_RUNTIME_SIDECAR_TLS_CERT_PATH").ok();
+        let tls_key_path = std::env::var("MAF_RUNTIME_SIDECAR_TLS_KEY_PATH").ok();
+        let tls_client_ca_path = std::env::var("MAF_RUNTIME_SIDECAR_TLS_CLIENT_CA_PATH").ok();
+        let mut config = match (
+            tls_cert_path.as_deref(),
+            tls_key_path.as_deref(),
+            tls_client_ca_path.as_deref(),
+        ) {
+            (Some(cert), Some(key), Some(client_ca)) => {
+                Self::from_listen_addr_with_mtls_paths(&listen_addr, cert, key, client_ca)?
+            }
+            (None, None, None) => Self::from_listen_addr(&listen_addr)?,
+            _ => {
+                return Err(config_untrusted(
+                    "runtime sidecar mTLS env config requires certificate, key, and client CA",
+                ));
+            }
+        };
         if let Ok(sqlite_path) = std::env::var("MAF_RUNTIME_SIDECAR_SQLITE_PATH") {
             config = config.with_sqlite_path(sqlite_path)?;
         }
@@ -330,10 +383,32 @@ impl RuntimeSidecarServeConfig {
         Self::from_listen_addr(listen_addr)?.with_sqlite_path(sqlite_path)
     }
 
+    pub fn from_listen_addr_with_mtls_paths(
+        listen_addr: &str,
+        identity_cert_path: impl AsRef<Path>,
+        identity_key_path: impl AsRef<Path>,
+        client_ca_path: impl AsRef<Path>,
+    ) -> Result<Self, RuntimeSidecarError> {
+        if listen_addr.strip_prefix("unix://").is_some() {
+            return Err(config_untrusted(
+                "runtime sidecar Unix sockets must not be combined with mTLS config",
+            ));
+        }
+        let tls_config = RuntimeSidecarTlsConfig::from_paths(
+            identity_cert_path,
+            identity_key_path,
+            client_ca_path,
+        )?;
+        let listen_addr = listen_addr
+            .parse::<SocketAddr>()
+            .map_err(|_| config_untrusted("runtime sidecar listen address is invalid"))?;
+        Self::from_socket_addr_with_mtls_config(listen_addr, tls_config)
+    }
+
     pub fn from_socket_addr(listen_addr: SocketAddr) -> Result<Self, RuntimeSidecarError> {
         if !listen_addr.ip().is_loopback() {
             let mut error = config_untrusted(
-                "runtime sidecar listener must bind loopback until mTLS endpoint support is implemented",
+                "runtime sidecar listener must bind loopback unless mTLS endpoint support is configured",
             );
             error
                 .safe_metadata
@@ -344,6 +419,19 @@ impl RuntimeSidecarServeConfig {
             listen_addr,
             unix_socket_path: None,
             sqlite_path: None,
+            tls_config: None,
+        })
+    }
+
+    pub fn from_socket_addr_with_mtls_config(
+        listen_addr: SocketAddr,
+        tls_config: RuntimeSidecarTlsConfig,
+    ) -> Result<Self, RuntimeSidecarError> {
+        Ok(Self {
+            listen_addr,
+            unix_socket_path: None,
+            sqlite_path: None,
+            tls_config: Some(tls_config),
         })
     }
 
@@ -361,6 +449,7 @@ impl RuntimeSidecarServeConfig {
                 .expect("default listen addr is valid"),
             unix_socket_path: Some(path.to_path_buf()),
             sqlite_path: None,
+            tls_config: None,
         })
     }
 
@@ -385,6 +474,19 @@ impl RuntimeSidecarServeConfig {
         Ok(self)
     }
 
+    pub fn with_tls_config(
+        mut self,
+        tls_config: RuntimeSidecarTlsConfig,
+    ) -> Result<Self, RuntimeSidecarError> {
+        if self.unix_socket_path.is_some() {
+            return Err(config_untrusted(
+                "runtime sidecar Unix sockets must not be combined with mTLS config",
+            ));
+        }
+        self.tls_config = Some(tls_config);
+        Ok(self)
+    }
+
     pub fn build_service(&self) -> Result<RuntimeSidecarGrpcService, RuntimeSidecarError> {
         match self.sqlite_path.as_ref() {
             Some(sqlite_path) => Ok(RuntimeSidecarGrpcService::with_sqlite_adapter(
@@ -393,6 +495,15 @@ impl RuntimeSidecarServeConfig {
             None => Ok(RuntimeSidecarGrpcService::new()),
         }
     }
+}
+
+fn validate_mtls_path(path: &Path, label: &str) -> Result<PathBuf, RuntimeSidecarError> {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err(config_untrusted(&format!(
+            "runtime sidecar mTLS {label} path must be absolute and non-empty"
+        )));
+    }
+    Ok(path.to_path_buf())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1577,7 +1688,7 @@ pub async fn serve_runtime_sidecar(
     if let Some(path) = config.unix_socket_path.as_ref() {
         serve_runtime_sidecar_unix_socket(path, service).await?;
     } else {
-        serve_runtime_sidecar_service(config.listen_addr, service).await?;
+        serve_runtime_sidecar_tcp(config.listen_addr, service, config.tls_config.as_ref()).await?;
     }
     Ok(())
 }
@@ -1590,6 +1701,22 @@ pub async fn serve_runtime_sidecar_service(
         .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
         .serve(listen_addr)
         .await
+}
+
+pub async fn serve_runtime_sidecar_tcp(
+    listen_addr: SocketAddr,
+    service: RuntimeSidecarGrpcService,
+    tls_config: Option<&RuntimeSidecarTlsConfig>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut builder = tonic::transport::Server::builder();
+    if let Some(tls_config) = tls_config {
+        builder = builder.tls_config(tls_config.to_server_tls_config()?)?;
+    }
+    builder
+        .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
+        .serve(listen_addr)
+        .await?;
+    Ok(())
 }
 
 #[cfg(unix)]

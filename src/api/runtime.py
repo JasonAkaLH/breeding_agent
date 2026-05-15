@@ -1637,6 +1637,10 @@ def _resolve_runtime_sidecar_client_from_env() -> RuntimeSidecarGrpcClient | Non
         config_source="environment_variable",
         allowed_hosts=allowed_hosts,
         mtls_enabled=mtls_enabled,
+        tls_ca_path=os.environ.get("MAF_RUNTIME_SIDECAR_TLS_CA_PATH", "").strip() or None,
+        tls_cert_path=os.environ.get("MAF_RUNTIME_SIDECAR_TLS_CERT_PATH", "").strip() or None,
+        tls_key_path=os.environ.get("MAF_RUNTIME_SIDECAR_TLS_KEY_PATH", "").strip() or None,
+        tls_server_name=os.environ.get("MAF_RUNTIME_SIDECAR_TLS_SERVER_NAME", "").strip() or None,
     )
 
 

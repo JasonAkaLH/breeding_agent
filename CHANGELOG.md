@@ -10,6 +10,14 @@
 
 ## [Unreleased]
 
+### 2026-05-15 — 推进 PRD03 Runtime sidecar mTLS transport
+
+- 在 PRD03 Unix socket 远端全绿后继续同一 PRD：`maf_runtime_sidecar` 启用 tonic `tls-ring` transport feature，`RuntimeSidecarServeConfig` 新增 server certificate / private key / client CA mTLS 配置；非 loopback TCP bind 只有在完整 mTLS 配置存在时才允许，Unix socket 与 mTLS 组合继续 fail-closed；随 rustls/ring 传递依赖同步将 `ISC` 加入 `native/deny.toml` 允许许可证集合。
+- `maf-runtime-sidecar --serve <addr> --sqlite <path> --tls-cert <cert> --tls-key <key> --client-ca <ca>` 或 server-side `MAF_RUNTIME_SIDECAR_TLS_CERT_PATH` / `MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` / `MAF_RUNTIME_SIDECAR_TLS_CLIENT_CA_PATH` 可由外部进程管理器启动 mTLS gRPC sidecar；生产请求路径仍不由 Python spawn / restart / kill sidecar。
+- `RuntimeSidecarGrpcClient` 支持 `https://host:port` mTLS endpoint，使用 Python stdlib `ssl` 包装现有 HTTP/2 unary client，不新增 `grpcio` 等 Python 依赖；`build_api_runtime()` 可从 `MAF_RUNTIME_SIDECAR_TLS_CA_PATH` / `MAF_RUNTIME_SIDECAR_TLS_CERT_PATH` / `MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` / `MAF_RUNTIME_SIDECAR_TLS_SERVER_NAME` 装配 client-side mTLS 配置。
+- 补充 mTLS 配置与真实 binary 集成测试：Rust config 测试覆盖 public bind 只有完整 mTLS 路径才放行，Python API 测试覆盖部署环境变量透传，integration 测试用临时 OpenSSL fixture 启动 Rust sidecar 并通过 Python mTLS client 完成 version / event append RPC。
+- 本轮本地验证通过：`cd native && cargo test -p maf_runtime_sidecar --test runtime_sidecar_grpc serve_config_accepts_public_bind_only_with_complete_mtls_paths --all-features`、`conda run -n multi_agent python -m unittest tests.integrations.test_runtime_sidecar_grpc_client.RuntimeSidecarGrpcClientIntegrationTest.test_python_client_connects_to_rust_sidecar_binary_over_mtls`、`cd native && cargo fmt --check && cargo +stable clippy -p maf_runtime_sidecar --all-targets --all-features -- -D warnings && cargo test -p maf_runtime_sidecar --all-features && cargo check --workspace --all-targets --all-features`、`cd native && cargo test --workspace --all-features`、`cd native && cargo +stable clippy --workspace --all-targets --all-features -- -D warnings`、`conda run -n multi_agent python -m unittest tests.integrations.test_runtime_sidecar_grpc_client`、`conda run -n multi_agent python -m unittest tests.api.test_runtime_sidecar_contract`、`conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'`、`conda run -n multi_agent python -m compileall -q src/api src/storage tests/api tests/storage tests/integrations`、`git diff --check`。
+
 ### 2026-05-15 — 推进 PRD03 Runtime sidecar Unix socket transport
 
 - 按 `docs/prd/rust` 顺序在 PRD02 远端全绿后继续 PRD03：`maf-runtime-sidecar --serve unix:///absolute/path --sqlite <path>` 现在可通过 Rust `RuntimeSidecarServeConfig` 进入 Unix domain socket 监听，TCP public bind 仍在缺少 production mTLS / 内网身份前 fail-closed。
