@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use maf_skill_runtime::{
@@ -298,7 +298,7 @@ fn temp_sandbox_root(label: &str) -> PathBuf {
     root
 }
 
-fn write_script(root: &PathBuf, name: &str, content: &str) {
+fn write_script(root: &Path, name: &str, content: &str) {
     let path = root.join(name);
     fs::write(&path, content).expect("write script");
     let mut permissions = fs::metadata(&path).expect("metadata").permissions();

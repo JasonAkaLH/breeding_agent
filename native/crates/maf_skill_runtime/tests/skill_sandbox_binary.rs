@@ -3,7 +3,7 @@ use maf_skill_runtime::{COMPONENT_ID, SkillSandboxServeConfig};
 use skill_pb::skill_sandbox_server::SkillSandbox;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -71,7 +71,7 @@ fn temp_sandbox_root(label: &str) -> PathBuf {
     root
 }
 
-fn write_script(root: &PathBuf, name: &str, content: &str) {
+fn write_script(root: &Path, name: &str, content: &str) {
     let path = root.join(name);
     fs::write(&path, content).expect("write script");
     let mut permissions = fs::metadata(&path).expect("metadata").permissions();
