@@ -73,6 +73,29 @@ class _RecordingDispatcherSidecarClient:
         }
 
 
+class _FailingDispatcherSidecarClient(_RecordingDispatcherSidecarClient):
+    def pin_bundle_revision(
+        self,
+        *,
+        task_id: str,
+        bundle_kind: str,
+        revision: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "bundle_revision_pin",
+                {
+                    "bundle_kind": bundle_kind,
+                    "idempotency_key": idempotency_key,
+                    "revision": revision,
+                    "task_id": task_id,
+                },
+            )
+        )
+        raise RuntimeError("dispatcher_unavailable: simulated shadow sidecar outage")
+
+
 class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
     def append_event(
         self,
@@ -254,3 +277,59 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(shadow_records[-1]["payload"]["legacy_status"], "ok")
         self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "ok")
         self.assertNotIn("do-not-log", json.dumps(shadow_records[-1], ensure_ascii=False))
+
+    async def test_dispatcher_shadow_records_bundle_pin_release_audit_after_legacy_revision(self) -> None:
+        sidecar = _RecordingDispatcherSidecarClient()
+        await self.reconfigure_runtime(runtime_sidecar_client=sidecar, enable_conversation_memory=False)
+        request = self._request("task-bundle-shadow")
+
+        with patch.dict(os.environ, {"MAF_RUST_TASK_DISPATCHER_MODE": "shadow"}):
+            self.runtime._retain_task_skill_revision(request)  # noqa: SLF001 - validates shadow routing
+            await self.runtime.storage.save_task(
+                Task(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    root_message_id=request.root_message_id,
+                    status=TaskStatus.COMPLETED,
+                )
+            )
+            await self.runtime._release_task_skill_revision_if_terminal(request.task_id)  # noqa: SLF001
+
+        audit_records = [
+            json.loads(line)
+            for line in (self.workspace / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        shadow_records = [
+            record for record in audit_records if record["event_type"] == "runtime.sidecar_shadow_diff"
+        ]
+
+        self.assertEqual([call[0] for call in sidecar.calls], ["bundle_revision_pin", "bundle_revision_release"])
+        self.assertNotIn(request.task_id, self.runtime._task_skill_bundle_revisions)  # noqa: SLF001
+        self.assertEqual(
+            [record["payload"]["operation"] for record in shadow_records[-2:]],
+            ["bundle_revision_pin", "bundle_revision_release"],
+        )
+        self.assertTrue(all(record["payload"]["component"] == "task_dispatcher" for record in shadow_records[-2:]))
+        self.assertTrue(all(record["payload"]["rust_status"] == "ok" for record in shadow_records[-2:]))
+
+    async def test_dispatcher_shadow_sidecar_error_does_not_block_legacy_revision_retain(self) -> None:
+        sidecar = _FailingDispatcherSidecarClient()
+        await self.reconfigure_runtime(runtime_sidecar_client=sidecar, enable_conversation_memory=False)
+        request = self._request("task-bundle-shadow-error")
+
+        with patch.dict(os.environ, {"MAF_RUST_TASK_DISPATCHER_MODE": "shadow"}):
+            self.runtime._retain_task_skill_revision(request)  # noqa: SLF001 - validates non-blocking shadow
+
+        audit_records = [
+            json.loads(line)
+            for line in (self.workspace / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        shadow_records = [
+            record for record in audit_records if record["event_type"] == "runtime.sidecar_shadow_diff"
+        ]
+
+        self.assertIn(request.task_id, self.runtime._task_skill_bundle_revisions)  # noqa: SLF001
+        self.assertEqual(sidecar.calls[0][0], "bundle_revision_pin")
+        self.assertEqual(shadow_records[-1]["payload"]["operation"], "bundle_revision_pin")
+        self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "error")
+        self.assertEqual(shadow_records[-1]["payload"]["error_code"], "dispatcher_unavailable")

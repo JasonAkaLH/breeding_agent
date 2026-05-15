@@ -9,6 +9,7 @@ from src.core.enums import EventVisibility
 from src.core.models import EventRecord
 from src.storage.rust_contract import mode_for_component
 from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
+from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write
 
 from . import task_state_machine
 
@@ -69,13 +70,22 @@ class CancellationService:
 
         await self._write_cancellation_token(task_id=task_id, requested_at=current_time)
         cancelling_task = task_state_machine.begin_task_cancellation(task, now=current_time)
-        await self._storage.save_task(cancelling_task)
+        saved_cancelling_task = await self._storage.save_task(cancelling_task)
+        await self._record_cancellation_token_shadow(
+            task_id=task_id,
+            requested_at=current_time,
+            legacy_output={
+                "cancel_requested_at_ms": str(int(current_time.timestamp() * 1000)),
+                "status": str(saved_cancelling_task.status),
+                "task_id": saved_cancelling_task.task_id,
+            },
+        )
         await self._record_event(
             self._make_event(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 event_type="task.cancellation_requested",
-                payload={"status": str(cancelling_task.status)},
+                payload={"status": str(saved_cancelling_task.status)},
                 now=current_time,
             )
         )
@@ -116,7 +126,7 @@ class CancellationService:
                 if updated_delivery != delivery:
                     await self._storage.save_mailbox_delivery(updated_delivery)
 
-        cancelled_task = task_state_machine.finalize_task_cancellation(cancelling_task, now=current_time)
+        cancelled_task = task_state_machine.finalize_task_cancellation(saved_cancelling_task, now=current_time)
         saved_task = await self._storage.save_task(cancelled_task)
         await self._record_event(
             self._make_event(
@@ -159,6 +169,45 @@ class CancellationService:
         error = envelope.get("error")
         if isinstance(error, dict):
             raise RuntimeError(f"{error['code']}: {error['message']}")
+
+    async def _record_cancellation_token_shadow(
+        self,
+        *,
+        task_id: str,
+        requested_at: datetime,
+        legacy_output: dict[str, Any],
+    ) -> None:
+        requested_at_ms = int(requested_at.timestamp() * 1000)
+
+        async def record_shadow_diff(payload: dict[str, str]) -> None:
+            if self._audit_sink is None:
+                return
+            await self._audit_sink.record("runtime.sidecar_shadow_diff", payload, task_id=task_id)
+
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="cancellation_token_write",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=record_shadow_diff if self._audit_sink is not None else None,
+            input_payload={
+                "reason": "user_cancel",
+                "requested_at_ms": requested_at_ms,
+                "task_id": task_id,
+                "terminal_policy": "terminal-noop",
+            },
+            legacy_output=legacy_output,
+            rust_call=lambda: self._runtime_sidecar_client.write_cancellation_token(
+                task_id=task_id,
+                requested_at_ms=requested_at_ms,
+                reason="user_cancel",
+                terminal_policy="terminal-noop",
+                idempotency_key=f"{task_id}:cancellation_token",
+            ),
+            rust_output=lambda envelope: {
+                "task_id": str(envelope.get("task_id", "")),
+                "written": str(envelope.get("written", "")),
+            },
+        )
 
 
 def _ensure_cancellation_token_write_allowed_by_rust_contract() -> None:

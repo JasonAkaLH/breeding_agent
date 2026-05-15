@@ -10,6 +10,13 @@
 
 ## [Unreleased]
 
+### 2026-05-15 — 扩展 PRD03 Runtime sidecar shadow 覆盖面
+
+- 按 `docs/prd/rust` 顺序继续停留在 PRD03：新增 `src/storage/runtime_sidecar_shadow.py` 作为 RuntimeSidecar shadow compare / audit 共用 helper，统一 response envelope 校验、fingerprint 生成、typed error code allowlist 与 sidecar / audit 失败不阻断用户可见 legacy 结果的规则。
+- `ApiRuntime` 的 Skill / MCP bundle revision pin/release 在 `MAF_RUST_TASK_DISPATCHER_MODE=shadow` 且已配置 sidecar client / audit sink 时，会先完成 Python legacy retain / release，再旁路调用 Rust RuntimeSidecar 并写入 `runtime.sidecar_shadow_diff`；sidecar 失败只记录脱敏 error code，不影响进程内 revision map 的 legacy 可见结果。
+- `CancellationService.cancel_task_context()` 在 `MAF_RUST_RUNTIME_STORE_MODE=shadow` 下会先写入 Python task cancellation 状态，再旁路调用 Rust `cancellation_token_write` 并写入 `runtime.sidecar_shadow_diff`；shadow sidecar 故障不会阻断取消流程。edge / artifact 当前仍无独立 sidecar RPC，后续需在 PRD03 内冻结 shadow 覆盖口径或补协议。
+- 本轮新增 TDD 覆盖 bundle revision shadow pin/release、bundle shadow sidecar error、cancellation token shadow audit 与 cancellation sidecar error；当前本地已通过定向 4 测、`conda run -n multi_agent python -m unittest tests.storage.test_rust_runtime_sidecar_contract tests.api.test_runtime_sidecar_contract`、`conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'`、`conda run -n multi_agent python -m compileall -q src/api src/lifecycle src/storage tests/api tests/storage` 与 `git diff --check`。全量 API discover 期间两次出现既有 5 秒 terminal wait 超时类 flake，相关单测孤立重跑均通过，随后全量 API discover 通过。
+
 ### 2026-05-15 — 推进 PRD03 Runtime sidecar shadow compare audit
 
 - 按 `docs/prd/rust` 顺序继续 PRD03：`SQLiteStorage` 新增 `runtime_sidecar_shadow_sink`，在 `MAF_RUST_RUNTIME_STORE_MODE=shadow` / `MAF_RUST_EVENT_LOG_MODE=shadow` 且已配置 sidecar client 与 audit sink 时，task submit、node transition 与 event append 仍以 Python SQLite legacy 写入作为用户可见结果，同时旁路调用 Rust RuntimeSidecar 并校验 response envelope。
@@ -17,7 +24,7 @@
 - `build_api_runtime()` 现在把 JSONL audit sink 接入 RuntimeSidecar shadow sink；API 层回归测试覆盖 shadow event append 会产生脱敏 audit 且不会泄漏 payload secret。
 - 本轮本地验证通过：六个 shadow 定向测试、`conda run -n multi_agent python -m unittest tests.storage.test_rust_runtime_sidecar_contract tests.api.test_runtime_sidecar_contract`、`conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'`、`conda run -n multi_agent python -m compileall -q src/api src/storage tests/api tests/storage` 与 `git diff --check`。首次全量 API discover 曾在 `test_upload_csv_returns_preview_and_submit_resolves_for_skill` 因 5 秒 terminal wait 超时失败；单测重跑通过，随后全量 API discover 通过，未发现本轮 shadow slice 回归。
 - 推送提交 `c442384` 后，因 Rust workflow path filter 不覆盖普通 `src/api` / `src/storage/sqlite` Python 改动，本轮手动触发 GitHub Actions `Rust quality gates` workflow_dispatch run `25930888802`（commit `c442384c3e6b571a468319a58a90ab723250bf6d`，<https://github.com/JasonAkaLH/multi_agent_framework/actions/runs/25930888802>）并通过；`Rust PRD01 quality gates / Ubuntu 22.04 x86_64`、`Rust bounded fuzz smoke / Ubuntu 22.04 x86_64` 与 `Rust PyO3 wheel smoke / Ubuntu 22.04 x86_64 / Python 3.13` 三个 job 均为 success。
-- PRD03 仍未完成：bundle revision / cancellation token / edge / artifact 等 shadow 覆盖面扩展、enforce rollout、ops / migration / promotion 真实生产证据与 Python legacy 写路径最终下线仍需继续按 PRD03 轨迹推进，完成后才能进入 PRD04。
+- PRD03 仍未完成：edge / artifact shadow 覆盖口径、enforce rollout、ops / migration / promotion 真实生产证据与 Python legacy 写路径最终下线仍需继续按 PRD03 轨迹推进，完成后才能进入 PRD04。
 
 ### 2026-05-15 — 推进 PRD03 Runtime sidecar mTLS transport
 

@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import inspect
 import json
-import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -38,6 +37,11 @@ from src.storage.rust_contract import mode_for_component as runtime_mode_for_com
 from src.storage.rust_contract import operation_policy as runtime_operation_policy
 from src.storage.rust_contract import resource_limit as runtime_resource_limit
 from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
+from src.storage.runtime_sidecar_shadow import (
+    RuntimeSidecarShadowSink,
+    normalize_runtime_sidecar_response,
+    record_runtime_sidecar_shadow_write,
+)
 
 from .base import build_task_edge_id
 from .models import (
@@ -58,9 +62,6 @@ from .models import (
     TaskNodeRow,
     TaskRow,
 )
-
-RuntimeSidecarShadowSink = Callable[[Mapping[str, str]], None]
-
 
 def _row_to_conversation(row: ConversationRow) -> Conversation:
     return Conversation(
@@ -1106,9 +1107,11 @@ class SQLiteStorage(StoragePort):
             _consume_runtime_sidecar_response("task_submit", response)
             return task
         saved = await self._run(lambda state, collab: state.save_task(task))
-        await self._record_runtime_sidecar_shadow_write(
+        await record_runtime_sidecar_shadow_write(
             component="runtime_store",
             operation_name="task_submit",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
             input_payload={
                 "conversation_id": task.conversation_id,
                 "task_id": task.task_id,
@@ -1158,9 +1161,11 @@ class SQLiteStorage(StoragePort):
             _consume_runtime_sidecar_response("node_state_transition", response)
             return node
         saved = await self._run(lambda state, collab: state.save_task_node(node))
-        await self._record_runtime_sidecar_shadow_write(
+        await record_runtime_sidecar_shadow_write(
             component="runtime_store",
             operation_name="node_state_transition",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
             input_payload={
                 "node_id": node.node_id,
                 "status": str(node.status),
@@ -1225,9 +1230,11 @@ class SQLiteStorage(StoragePort):
             return event
         saved = await self._run(lambda state, collab: collab.save_event_record(event))
         payload_json = json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8")
-        await self._record_runtime_sidecar_shadow_write(
+        await record_runtime_sidecar_shadow_write(
             component="event_log",
             operation_name="event_append",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
             input_payload={
                 "conversation_id": event.conversation_id,
                 "event_id": event.event_id,
@@ -1341,107 +1348,18 @@ class SQLiteStorage(StoragePort):
             )
         return self._runtime_sidecar_client
 
-    async def _record_runtime_sidecar_shadow_write(
-        self,
-        *,
-        component: str,
-        operation_name: str,
-        input_payload: Mapping[str, Any],
-        legacy_output: Mapping[str, Any],
-        rust_call: Callable[[], Any],
-        rust_output: Callable[[Mapping[str, Any]], Mapping[str, Any]],
-    ) -> None:
-        if (
-            runtime_mode_for_component(component) != "shadow"
-            or self._runtime_sidecar_client is None
-            or self._runtime_sidecar_shadow_sink is None
-        ):
-            return
-
-        started = time.perf_counter()
-        payload = {
-            "component": component,
-            "operation": operation_name,
-            "input_fingerprint": _runtime_sidecar_fingerprint(input_payload),
-            "legacy_output_fingerprint": _runtime_sidecar_fingerprint(legacy_output),
-            "legacy_status": "ok",
-            "rust_status": "unknown",
-        }
-        try:
-            response = await _resolve_runtime_sidecar_call(rust_call())
-            envelope = validate_runtime_sidecar_response(
-                operation_name,
-                _normalize_runtime_sidecar_response(operation_name, response),
-            )
-            error = envelope.get("error")
-            if isinstance(error, Mapping):
-                payload.update(
-                    {
-                        "rust_status": "error",
-                        "error_code": str(error["code"]),
-                        "rust_output_fingerprint": "",
-                    }
-                )
-            else:
-                payload.update(
-                    {
-                        "rust_status": "ok",
-                        "error_code": "",
-                        "rust_output_fingerprint": _runtime_sidecar_fingerprint(rust_output(envelope)),
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001 - shadow mode must preserve the Python-visible result.
-            payload.update(
-                {
-                    "rust_status": "error",
-                    "error_code": _runtime_sidecar_error_code(exc),
-                    "rust_output_fingerprint": "",
-                }
-            )
-        finally:
-            payload["duration_ms"] = str(max(0, int((time.perf_counter() - started) * 1000)))
-            try:
-                self._runtime_sidecar_shadow_sink(payload)
-            except Exception:  # noqa: BLE001 - audit sink failure must not affect shadow-mode user results.
-                return
-
-
 def _runtime_sidecar_idempotency_key(*parts: str) -> str:
     return ":".join(parts)
-
-
-def _runtime_sidecar_fingerprint(payload: Mapping[str, Any]) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _runtime_sidecar_error_code(error: Exception) -> str:
-    message = str(error)
-    code, separator, _ = message.partition(":")
-    if separator:
-        try:
-            return str(runtime_error_policy(code)["code"])
-        except KeyError:
-            pass
-    return type(error).__name__
 
 
 def _consume_runtime_sidecar_response(operation_name: str, response: Any) -> None:
     envelope = validate_runtime_sidecar_response(
         operation_name,
-        _normalize_runtime_sidecar_response(operation_name, response),
+        normalize_runtime_sidecar_response(operation_name, response),
     )
     error = envelope.get("error")
     if isinstance(error, dict):
         raise RuntimeError(f"{error['code']}: {error['message']}")
-
-
-def _normalize_runtime_sidecar_response(operation_name: str, response: Any) -> Any:
-    if not isinstance(response, dict) or response.get("operation") == operation_name:
-        return response
-    if operation_name == "event_append":
-        return {"operation": operation_name, "cursor": response, "error": None}
-    return response
 
 
 async def _resolve_runtime_sidecar_call(result: Any) -> Any:

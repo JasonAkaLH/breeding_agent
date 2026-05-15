@@ -74,6 +74,7 @@ from src.orchestration.workflow_router import WorkflowRouter
 from src.storage.rust_contract import mode_for_component as runtime_sidecar_mode_for_component
 from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
 from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
+from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write_sync
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
 from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
 
@@ -145,6 +146,7 @@ class ApiRuntime:
         self._skill_runtime_state = skill_runtime_state
         self._mcp_runtime_state = mcp_runtime_state
         self._runtime_sidecar_client = runtime_sidecar_client
+        self._runtime_sidecar_shadow_sink = _build_runtime_sidecar_shadow_diff_sink(audit_sink)
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
@@ -1056,6 +1058,13 @@ class ApiRuntime:
         )
         self._skill_runtime_state.retain_revision(revision)
         self._task_skill_bundle_revisions[request.task_id] = revision
+        self._record_bundle_revision_shadow(
+            operation_name="bundle_revision_pin",
+            task_id=request.task_id,
+            bundle_kind="skill",
+            revision=revision,
+            legacy_output={"retained": "true", "task_id": request.task_id},
+        )
 
     def _retain_task_mcp_revision(self, request: OrchestrationRequest) -> None:
         if self._mcp_runtime_state is None or request.task_id in self._task_mcp_bundle_revisions:
@@ -1071,6 +1080,13 @@ class ApiRuntime:
         )
         self._mcp_runtime_state.retain_revision(revision)
         self._task_mcp_bundle_revisions[request.task_id] = revision
+        self._record_bundle_revision_shadow(
+            operation_name="bundle_revision_pin",
+            task_id=request.task_id,
+            bundle_kind="mcp",
+            revision=revision,
+            legacy_output={"retained": "true", "task_id": request.task_id},
+        )
 
     async def _release_task_skill_revision_if_terminal(self, task_id: str) -> None:
         if self._skill_runtime_state is None:
@@ -1087,6 +1103,13 @@ class ApiRuntime:
             )
             self._task_skill_bundle_revisions.pop(task_id, None)
             self._skill_runtime_state.release_revision(revision)
+            self._record_bundle_revision_shadow(
+                operation_name="bundle_revision_release",
+                task_id=task_id,
+                bundle_kind="skill",
+                revision=revision,
+                legacy_output={"released": "true", "task_id": task_id},
+            )
 
     async def _release_task_mcp_revision_if_terminal(self, task_id: str) -> None:
         if self._mcp_runtime_state is None:
@@ -1103,6 +1126,13 @@ class ApiRuntime:
             )
             self._task_mcp_bundle_revisions.pop(task_id, None)
             self._mcp_runtime_state.release_revision(revision)
+            self._record_bundle_revision_shadow(
+                operation_name="bundle_revision_release",
+                task_id=task_id,
+                bundle_kind="mcp",
+                revision=revision,
+                legacy_output={"released": "true", "task_id": task_id},
+            )
 
     def _pin_bundle_revision_with_sidecar_if_enforced(
         self,
@@ -1142,6 +1172,53 @@ class ApiRuntime:
             idempotency_key=f"{task_id}:{bundle_kind}:{revision}:release",
         )
         _consume_runtime_sidecar_response("bundle_revision_release", response)
+
+    def _record_bundle_revision_shadow(
+        self,
+        *,
+        operation_name: str,
+        task_id: str,
+        bundle_kind: str,
+        revision: str,
+        legacy_output: Mapping[str, Any],
+    ) -> None:
+        released_at_ms = int(self._utcnow_naive().timestamp() * 1000)
+
+        def call_sidecar() -> Any:
+            if operation_name == "bundle_revision_pin":
+                return self._runtime_sidecar_client.pin_bundle_revision(
+                    task_id=task_id,
+                    bundle_kind=bundle_kind,
+                    revision=revision,
+                    idempotency_key=f"{task_id}:{bundle_kind}:{revision}:pin",
+                )
+            return self._runtime_sidecar_client.release_bundle_revision(
+                task_id=task_id,
+                bundle_kind=bundle_kind,
+                revision=revision,
+                released_at_ms=released_at_ms,
+                idempotency_key=f"{task_id}:{bundle_kind}:{revision}:release",
+            )
+
+        record_runtime_sidecar_shadow_write_sync(
+            component="task_dispatcher",
+            operation_name=operation_name,
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={
+                "bundle_kind": bundle_kind,
+                "operation": operation_name,
+                "revision": revision,
+                "task_id": task_id,
+            },
+            legacy_output=legacy_output,
+            rust_call=call_sidecar,
+            rust_output=lambda envelope: {
+                "bundle_kind": str(envelope.get("bundle_kind", "")),
+                "revision": str(envelope.get("revision", "")),
+                "task_id": str(envelope.get("task_id", "")),
+            },
+        )
 
     def _task_dispatcher_sidecar_client_for(self, operation_name: str) -> Any | None:
         if runtime_sidecar_mode_for_component("task_dispatcher") != "enforce":

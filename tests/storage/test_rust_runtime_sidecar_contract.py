@@ -223,6 +223,38 @@ class _RecordingRuntimeSidecarClient:
         }
 
 
+class _RecordingAuditSink:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, dict[str, object]]] = []
+
+    async def record(self, event_type: str, payload: dict[str, object], **_kwargs: object) -> None:
+        self.records.append((event_type, dict(payload)))
+
+
+class _FailingCancellationRuntimeSidecarClient(_RecordingRuntimeSidecarClient):
+    async def write_cancellation_token(
+        self,
+        *,
+        task_id: str,
+        requested_at_ms: int,
+        reason: str,
+        terminal_policy: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "cancellation_token_write",
+                {
+                    "idempotency_key": idempotency_key,
+                    "reason": reason,
+                    "task_id": task_id,
+                    "terminal_policy": terminal_policy,
+                },
+            )
+        )
+        raise RuntimeError("runtime_store_unavailable: simulated shadow sidecar outage")
+
+
 class _FailingRuntimeSidecarClient(_RecordingRuntimeSidecarClient):
     def __init__(self, error_message: str = "event_log_unavailable: simulated shadow sidecar outage") -> None:
         super().__init__()
@@ -644,6 +676,54 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
         self.assertEqual(sidecar.calls[0][0], "cancellation_token_write")
         self.assertEqual(sidecar.calls[0][1]["task_id"], task.task_id)
+
+    def test_cancellation_token_shadow_records_sidecar_audit_after_legacy_write(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        audit_sink = _RecordingAuditSink()
+        storage = SQLiteStorage(self.session_factory)
+        service = CancellationService(storage, audit_sink=audit_sink, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-cancel-shadow",
+            conversation_id="conv-cancel-shadow",
+            root_message_id="msg-cancel-shadow",
+            status=TaskStatus.RUNNING,
+        )
+        asyncio.run(storage.save_task(task))
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
+            cancelled = asyncio.run(service.cancel_task_context(task.task_id))
+
+        shadow_records = [record for record in audit_sink.records if record[0] == "runtime.sidecar_shadow_diff"]
+        reloaded = asyncio.run(storage.get_task(task.task_id))
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertIsNotNone(reloaded.cancel_requested_at)
+        self.assertEqual(sidecar.calls[0][0], "cancellation_token_write")
+        self.assertEqual(shadow_records[-1][1]["component"], "runtime_store")
+        self.assertEqual(shadow_records[-1][1]["operation"], "cancellation_token_write")
+        self.assertEqual(shadow_records[-1][1]["legacy_status"], "ok")
+        self.assertEqual(shadow_records[-1][1]["rust_status"], "ok")
+
+    def test_cancellation_token_shadow_sidecar_error_does_not_block_legacy_cancel(self) -> None:
+        sidecar = _FailingCancellationRuntimeSidecarClient()
+        audit_sink = _RecordingAuditSink()
+        storage = SQLiteStorage(self.session_factory)
+        service = CancellationService(storage, audit_sink=audit_sink, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-cancel-shadow-error",
+            conversation_id="conv-cancel-shadow-error",
+            root_message_id="msg-cancel-shadow-error",
+            status=TaskStatus.RUNNING,
+        )
+        asyncio.run(storage.save_task(task))
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
+            cancelled = asyncio.run(service.cancel_task_context(task.task_id))
+
+        shadow_records = [record for record in audit_sink.records if record[0] == "runtime.sidecar_shadow_diff"]
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertEqual(sidecar.calls[0][0], "cancellation_token_write")
+        self.assertEqual(shadow_records[-1][1]["rust_status"], "error")
+        self.assertEqual(shadow_records[-1][1]["error_code"], "runtime_store_unavailable")
 
     def test_lease_operations_have_no_python_legacy_fallback_without_sidecar(self) -> None:
         facade = RuntimeLeaseFacade()
