@@ -32,6 +32,7 @@ pub struct LifecycleContractArtifact {
     pub contract_version: String,
     pub transition_table_hash: String,
     pub error_code_table_hash: String,
+    pub supported_features: Vec<String>,
     pub transitions: BTreeMap<String, TransitionRule>,
     pub cancel_node_targets: BTreeMap<String, String>,
     pub active_task_statuses: Vec<String>,
@@ -96,6 +97,17 @@ fn rule(from: &[&str], to: &str) -> TransitionRule {
         from: values(from),
         to: to.to_owned(),
     }
+}
+
+#[must_use]
+pub fn supported_features() -> Vec<String> {
+    values(&[
+        "lifecycle_transition_table",
+        "lifecycle_cancel_policy",
+        "lifecycle_late_result_policy",
+        "lifecycle_typed_error_table",
+        "pyo3_lifecycle_facade",
+    ])
 }
 
 #[must_use]
@@ -200,6 +212,7 @@ pub fn lifecycle_contract_artifact() -> LifecycleContractArtifact {
         contract_version: CONTRACT_VERSION.to_owned(),
         transition_table_hash: TRANSITION_TABLE_HASH.to_owned(),
         error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
+        supported_features: supported_features(),
         transitions: transition_table(),
         cancel_node_targets: cancel_node_targets(),
         active_task_statuses: values(&["accepted", "planning", "running", "cancelling"]),
@@ -320,6 +333,13 @@ mod tests {
                 .all(|entry| entry.code.starts_with("lifecycle_"))
         );
         assert!(codes.iter().all(|entry| !entry.retriable));
+    }
+
+    #[test]
+    fn supported_features_include_pyo3_facade_contract() {
+        let features = supported_features();
+        assert!(features.contains(&"lifecycle_transition_table".to_owned()));
+        assert!(features.contains(&"pyo3_lifecycle_facade".to_owned()));
     }
 
     #[test]

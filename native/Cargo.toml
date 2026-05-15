@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/maf_core_types", "crates/maf_lifecycle", "crates/maf_runtime_store", "crates/maf_event_log", "crates/maf_task_dispatcher", "crates/maf_runtime_sidecar", "crates/maf_skill_runtime", "crates/maf_skill_runtime_pyo3", "crates/maf_artifact_store", "crates/maf_auth_core", "crates/maf_data_access", "crates/maf_audit_sanitizer", "crates/maf_mcp_runtime"]
+members = ["crates/maf_core_types", "crates/maf_lifecycle", "crates/maf_core_lifecycle_pyo3", "crates/maf_runtime_store", "crates/maf_event_log", "crates/maf_task_dispatcher", "crates/maf_runtime_sidecar", "crates/maf_skill_runtime", "crates/maf_skill_runtime_pyo3", "crates/maf_artifact_store", "crates/maf_auth_core", "crates/maf_data_access", "crates/maf_audit_sanitizer", "crates/maf_mcp_runtime"]
 resolver = "3"
 
 [workspace.package]

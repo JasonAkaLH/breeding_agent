@@ -3,6 +3,13 @@
   "contract_version": "core.v1",
   "schema_hash": "maf_core_types_core_v1_schema_20260515",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
+  "supported_features": [
+    "core_contract_artifact",
+    "core_enum_snapshot",
+    "core_model_snapshot",
+    "core_typed_error_table",
+    "pyo3_core_facade"
+  ],
   "enums": {
     "AckPolicy": [
       {

@@ -549,6 +549,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "maf_core_lifecycle_pyo3"
+version = "0.1.0"
+dependencies = [
+ "maf_core_types",
+ "maf_lifecycle",
+ "pyo3",
+ "pyo3-build-config",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "maf_core_types"
 version = "0.1.0"
 dependencies = [

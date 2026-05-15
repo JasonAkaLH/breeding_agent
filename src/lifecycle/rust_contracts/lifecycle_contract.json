@@ -3,6 +3,13 @@
   "contract_version": "lifecycle.v1",
   "transition_table_hash": "maf_lifecycle_transition_table_v1_20260515",
   "error_code_table_hash": "maf_lifecycle_error_table_v1_20260515",
+  "supported_features": [
+    "lifecycle_transition_table",
+    "lifecycle_cancel_policy",
+    "lifecycle_late_result_policy",
+    "lifecycle_typed_error_table",
+    "pyo3_lifecycle_facade"
+  ],
   "transitions": {
     "interrupt.answer": {
       "from": [

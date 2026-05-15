@@ -10,6 +10,14 @@
 
 ## [Unreleased]
 
+### 2026-05-15 — 推进 PRD02 Core/Lifecycle PyO3 facade
+
+- 按 `docs/prd/rust` 顺序在 PRD01 远端全绿后进入 PRD02：新增 `maf_core_lifecycle_pyo3` workspace crate，暴露 Core / Lifecycle contract JSON 与 lifecycle transition、target、cancel-node、late-result JSON bridge；crate 使用 `abi3-py313`，只作为 CI / 部署预构建 wheel source，不在 runtime 路径编译或下载。
+- Core / Lifecycle contract artifact 新增 `supported_features`，Python facade 增加 `MAF_RUST_CORE_MODE` / `MAF_RUST_LIFECYCLE_MODE=off|shadow|enforce` 与 `MAF_CORE_LIFECYCLE_PYO3_MODULE` 加载门禁；`enforce` 下缺少预构建 PyO3 module 或 component / version / hash / features 不匹配会 fail closed，`shadow` 继续以 checked-in Rust contract artifact / Python facade 结果为用户可见路径。
+- Lifecycle facade 在 `enforce` 下通过 PyO3 JSON bridge 调用 Rust transition 判定、transition target、cancel-node target 与 late-result policy；非法 / malformed Rust response 映射为 typed lifecycle contract error，不回退 Python 状态机。
+- Rust quality workflow 与本地 gate plan 新增 Core/Lifecycle PyO3 wheel smoke；Ubuntu 22.04 x86_64 / Python 3.13 CI wheel job 会为 `maf_core_lifecycle_pyo3` 生成 SBOM / provenance / manifest 并运行 installed-module contract smoke。当前本地已完成 macOS 开发 wheel build/import smoke；最终生产证据仍以后续 Ubuntu CI artifact 与 allowlist / provenance 门禁为准。
+- 本轮本地验证通过：`conda run -n multi_agent python -m unittest discover -s tests/core -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'`、`conda run -n multi_agent python -m compileall -q src/core src/lifecycle tests/core tests/lifecycle tests/integrations scripts`、`cd native && cargo fmt --check && cargo +stable clippy --workspace --all-targets --all-features -- -D warnings`、`cd native && cargo test --workspace --all-features`、`cd native && cargo check --workspace --all-targets --all-features`、`conda run -n multi_agent python scripts/run_rust_coverage_thresholds.py --run`、`git diff --check`、`maturin build` + installed `maf_core_lifecycle_pyo3` contract smoke。
+
 ### 2026-05-15 — 补齐 Rust release provenance 生成入口
 
 - 根据 GitHub Actions run `25919136293`，PRD01 主 quality job 已通过 fmt / clippy / cargo test / nextest / audit / deny / workspace coverage，但在 `python scripts/run_rust_coverage_thresholds.py --run` 的安全敏感 crate 阈值处失败：`maf_skill_runtime` 包级 line coverage 85.51% 未达 90%；本轮补齐 Skill Runtime policy / sandbox preflight / stdio helper / binary contract export 覆盖，并将 lingering descendant stdio 测试改为验证有界 drain 而非依赖平台进程组 kill 时序。

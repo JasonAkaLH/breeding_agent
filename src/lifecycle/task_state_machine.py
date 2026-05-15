@@ -7,7 +7,14 @@ from src.core.enums import AckPolicy, InterruptStatus, MailboxDeliveryStatus, No
 from src.core.models import Checkpoint, Interrupt, InterruptAnswer, MailboxDelivery, MailboxMessage, Task, TaskNode
 
 from .errors import LifecycleTransitionError
-from .rust_contract import cancel_node_target, contract_value, status_list, transition_allowed, transition_target
+from .rust_contract import (
+    can_accept_late_result_status,
+    cancel_node_target,
+    contract_value,
+    status_list,
+    transition_allowed,
+    transition_target,
+)
 
 
 def _ensure(condition: bool, message: str) -> None:
@@ -176,4 +183,4 @@ def invalidate_checkpoint(checkpoint: Checkpoint, *, now: datetime) -> Checkpoin
 def can_accept_late_result(task: Task | None) -> bool:
     if task is None:
         return False
-    return str(task.status) not in status_list("late_result_rejected_task_statuses")
+    return can_accept_late_result_status(task.status)

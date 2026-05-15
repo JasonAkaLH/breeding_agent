@@ -31,6 +31,7 @@ pub struct CoreContractArtifact {
     pub contract_version: String,
     pub schema_hash: String,
     pub error_code_table_hash: String,
+    pub supported_features: Vec<String>,
     pub enums: BTreeMap<String, Vec<NamedValue>>,
     pub models: BTreeMap<String, Vec<String>>,
     pub error_codes: Vec<ErrorCodeEntry>,
@@ -101,6 +102,17 @@ fn named(values: &[(&str, &str)]) -> Vec<NamedValue> {
 
 fn fields(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+#[must_use]
+pub fn supported_features() -> Vec<String> {
+    fields(&[
+        "core_contract_artifact",
+        "core_enum_snapshot",
+        "core_model_snapshot",
+        "core_typed_error_table",
+        "pyo3_core_facade",
+    ])
 }
 
 #[must_use]
@@ -529,6 +541,7 @@ pub fn core_contract_artifact() -> CoreContractArtifact {
         contract_version: CONTRACT_VERSION.to_owned(),
         schema_hash: SCHEMA_HASH.to_owned(),
         error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
+        supported_features: supported_features(),
         enums: enum_contracts(),
         models: model_contracts(),
         error_codes: error_code_table(),
@@ -589,6 +602,13 @@ mod tests {
         let codes = error_code_table();
         assert!(codes.iter().all(|entry| entry.code.starts_with("core_")));
         assert!(codes.iter().all(|entry| !entry.retriable));
+    }
+
+    #[test]
+    fn supported_features_include_pyo3_facade_contract() {
+        let features = supported_features();
+        assert!(features.contains(&"core_contract_artifact".to_owned()));
+        assert!(features.contains(&"pyo3_core_facade".to_owned()));
     }
 
     #[test]

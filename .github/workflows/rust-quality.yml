@@ -109,7 +109,7 @@ jobs:
         run: cargo +nightly fuzz run skill_runtime_policy -- -max_total_time=30
 
   skill-runtime-pyo3-wheel-smoke:
-    name: Skill Runtime PyO3 wheel smoke / Ubuntu 22.04 x86_64 / Python 3.13
+    name: Rust PyO3 wheel smoke / Ubuntu 22.04 x86_64 / Python 3.13
     runs-on: ubuntu-22.04
     env:
       CARGO_BUILD_JOBS: "1"
@@ -186,13 +186,73 @@ jobs:
       - name: test_installed_pyo3_module_matches_rust_contract_when_available
         run: python -m unittest tests.integrations.codex_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
 
-      - name: Upload Skill Runtime PyO3 wheel release evidence
+      - name: python -m maturin build --release --manifest-path native/crates/maf_core_lifecycle_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check
+        run: python -m maturin build --release --locked --manifest-path native/crates/maf_core_lifecycle_pyo3/Cargo.toml --interpreter python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels
+
+      - name: Generate Core/Lifecycle PyO3 wheel SBOM / provenance / manifest
+        run: |
+          set -euo pipefail
+          mapfile -t CORE_LIFECYCLE_WHEELS < <(find native/target/wheels -maxdepth 1 -type f -name 'maf_core_lifecycle_pyo3-*.whl' | sort)
+          if [ "${#CORE_LIFECYCLE_WHEELS[@]}" -ne 1 ]; then
+            echo "expected exactly one Core/Lifecycle PyO3 wheel, got ${#CORE_LIFECYCLE_WHEELS[@]}" >&2
+            printf '%s\n' "${CORE_LIFECYCLE_WHEELS[@]}" >&2
+            exit 1
+          fi
+          WHEEL="${CORE_LIFECYCLE_WHEELS[0]}"
+          RUSTC_VERSION="$(rustc --version)"
+          python scripts/rust_artifact_provenance.py write-sbom \
+            --component maf_core_lifecycle \
+            --cargo-metadata native/target/wheels/cargo-metadata.json \
+            --output native/target/wheels/maf_core_lifecycle_pyo3.sbom.json
+          python scripts/rust_artifact_provenance.py write-provenance \
+            --component maf_core_lifecycle \
+            --artifact-id maf_core_lifecycle_pyo3 \
+            --artifact-kind pyo3_wheel \
+            --artifact-path "$WHEEL" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash core=maf_core_types_core_v1_schema_20260515 \
+            --contract-hash lifecycle=maf_lifecycle_transition_table_v1_20260515 \
+            --output native/target/wheels/maf_core_lifecycle_pyo3.provenance.json
+          python scripts/rust_artifact_provenance.py generate \
+            --component maf_core_lifecycle \
+            --artifact-id maf_core_lifecycle_pyo3 \
+            --artifact-kind pyo3_wheel \
+            --artifact-path "$WHEEL" \
+            --cargo-lock native/Cargo.lock \
+            --sbom native/target/wheels/maf_core_lifecycle_pyo3.sbom.json \
+            --provenance native/target/wheels/maf_core_lifecycle_pyo3.provenance.json \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash core=maf_core_types_core_v1_schema_20260515 \
+            --contract-hash lifecycle=maf_lifecycle_transition_table_v1_20260515 \
+            --output native/target/wheels/maf_core_lifecycle_pyo3.manifest.json
+
+      - name: Install built Core/Lifecycle PyO3 wheel
+        run: python -m pip install --force-reinstall --no-deps native/target/wheels/maf_core_lifecycle_pyo3-*.whl
+
+      - name: test_installed_pyo3_module_matches_core_lifecycle_contract_when_available
+        run: python -m unittest tests.integrations.test_core_lifecycle_pyo3_wheel_contract.CoreLifecyclePyo3WheelContractTest.test_installed_pyo3_module_matches_core_lifecycle_contract_when_available
+
+      - name: Upload Rust PyO3 wheel release evidence
         uses: actions/upload-artifact@v4
         with:
-          name: skill-runtime-pyo3-wheel-linux-x86_64
+          name: rust-pyo3-wheel-linux-x86_64
           if-no-files-found: error
           path: |
             native/target/wheels/maf_skill_runtime_pyo3-*.whl
             native/target/wheels/maf_skill_runtime_pyo3.sbom.json
             native/target/wheels/maf_skill_runtime_pyo3.provenance.json
             native/target/wheels/maf_skill_runtime_pyo3.manifest.json
+            native/target/wheels/maf_core_lifecycle_pyo3-*.whl
+            native/target/wheels/maf_core_lifecycle_pyo3.sbom.json
+            native/target/wheels/maf_core_lifecycle_pyo3.provenance.json
+            native/target/wheels/maf_core_lifecycle_pyo3.manifest.json

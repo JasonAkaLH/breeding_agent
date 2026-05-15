@@ -1,0 +1,24 @@
+[package]
+name = "maf_core_lifecycle_pyo3"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "maf_core_lifecycle_pyo3"
+crate-type = ["rlib", "cdylib"]
+test = false
+bench = false
+
+[dependencies]
+maf_core_types = { path = "../maf_core_types" }
+maf_lifecycle = { path = "../maf_lifecycle" }
+pyo3 = { workspace = true, features = ["abi3-py313"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+pyo3-build-config.workspace = true

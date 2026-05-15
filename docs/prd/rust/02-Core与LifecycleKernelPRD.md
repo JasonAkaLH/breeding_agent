@@ -1,6 +1,6 @@
 # Core 与 Lifecycle Rust Kernel PRD
 
-- **状态**：部分落地（`maf_core_types` / `maf_lifecycle` contract artifact、Python facade artifact 校验与 lifecycle transition artifact 驱动已落地；PyO3 extension、enforce、benchmark、ops 与 legacy 下线仍待完成）
+- **状态**：部分落地（`maf_core_types` / `maf_lifecycle` contract artifact、Python facade artifact 校验、lifecycle transition artifact 驱动、`maf_core_lifecycle_pyo3` 预构建 wheel source、Core/Lifecycle PyO3 contract handshake 与 lifecycle enforce JSON bridge 已落地；真实 CI / 部署 provenance、benchmark、ops 与 legacy 下线仍待完成）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` RUST-P0-001、RUST-P0-002、9.1、9.2
 - **影响范围**：`src/core/`、`src/lifecycle/`、Python facade、跨模块 contract tests

@@ -13,7 +13,7 @@
 - `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、LLM 上下文 token 计数等外部适配 / 运行时辅助能力。
 - `skill/<domain-query>/`：可移除 数据查询 Skill bundle；manifest、领域 runtime、配置与 Skill 专属测试物理归属此目录，runtime 只通过 generic Skill loader / allowlisted platform-service handler 接入。
 - `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、通用 data-query / file artifact 渲染与 Vitest 测试。
-- `native/`：Rust workspace；当前承载 runtime contract/kernel crates、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter 与 sidecar proto，生产 enforce / Python RPC client / PyO3 wheel / legacy 下线仍需按 Rust PRD 门禁推进。
+- `native/`：Rust workspace；当前承载 runtime contract/kernel crates、Core/Lifecycle PyO3 facade crate、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter 与 sidecar proto，production provenance / enforce / legacy 下线仍需按 Rust PRD 门禁推进。
 - `tests/`：后端按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
 - `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。
 - `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归；`run_fullstack_dev.py` 可拉起前后端用于人工验证。
@@ -72,6 +72,16 @@ conda run -n multi_agent python -m pip install --force-reinstall --no-deps nativ
 conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
 conda run -n multi_agent python scripts/rust_artifact_provenance.py self-test
 ```
+
+Core/Lifecycle PyO3 wheel 本地 smoke（非默认回归；与 Skill Runtime 使用同一 Ubuntu 22.04 x86_64 / Python 3.13 / `manylinux_2_35` CI wheel 目标）：
+
+```bash
+CARGO_BUILD_JOBS=1 conda run -n multi_agent python -m maturin build --release --locked --manifest-path native/crates/maf_core_lifecycle_pyo3/Cargo.toml --interpreter /opt/miniconda3/envs/multi_agent/bin/python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels
+conda run -n multi_agent python -m pip install --force-reinstall --no-deps native/target/wheels/maf_core_lifecycle_pyo3-*.whl
+conda run -n multi_agent python -m unittest tests.integrations.test_core_lifecycle_pyo3_wheel_contract.CoreLifecyclePyo3WheelContractTest.test_installed_pyo3_module_matches_core_lifecycle_contract_when_available
+```
+
+Core/Lifecycle PyO3 runtime 约定：`MAF_RUST_CORE_MODE` / `MAF_RUST_LIFECYCLE_MODE` 控制 `off|shadow|enforce`，默认 `off`；预构建 module 名可用 `MAF_CORE_LIFECYCLE_PYO3_MODULE` 覆盖，默认 `maf_core_lifecycle_pyo3`。`enforce` 下缺 module 或 contract/hash/features 不匹配必须 fail closed；runtime 路径不得调用 `maturin` / Cargo。
 
 CI 中的 Ubuntu 22.04 x86_64 / Python 3.13 wheel job 还会用 `cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml` 生成依赖元数据，并通过 `scripts/rust_artifact_provenance.py write-sbom`、`write-provenance` 与 `generate` 产出脱敏 SBOM、provenance 与 manifest 后上传 artifact；`cargo deny check` 使用 `native/deny.toml` 中冻结的 license allowlist 与 private workspace crate 规则。当前仅表示命令面和工作流配置已落地，真实远端 CI artifact、生产 allowlist 与部署 promotion 证据仍需后续流水线验证。
 

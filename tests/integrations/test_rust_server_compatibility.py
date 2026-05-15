@@ -30,12 +30,16 @@ class RustServerCompatibilityTest(unittest.TestCase):
         self.assertIn("--auditwheel check", workflow)
         self.assertNotIn("runs-on: macos-14", workflow)
 
-    def test_skill_runtime_pyo3_crate_uses_stable_python_abi_without_cuda_dependency(self) -> None:
-        manifest = tomllib.loads(Path("native/crates/maf_skill_runtime_pyo3/Cargo.toml").read_text(encoding="utf-8"))
-        pyo3 = manifest["dependencies"]["pyo3"]
-        self.assertIn("abi3-py313", pyo3["features"])
-        self.assertNotIn("extension-module", pyo3["features"])
-        self.assertEqual(manifest["lib"]["crate-type"], ["rlib", "cdylib"])
+    def test_pyo3_crates_use_stable_python_abi_without_cuda_dependency(self) -> None:
+        for manifest_path in [
+            Path("native/crates/maf_skill_runtime_pyo3/Cargo.toml"),
+            Path("native/crates/maf_core_lifecycle_pyo3/Cargo.toml"),
+        ]:
+            manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+            pyo3 = manifest["dependencies"]["pyo3"]
+            self.assertIn("abi3-py313", pyo3["features"])
+            self.assertNotIn("extension-module", pyo3["features"])
+            self.assertEqual(manifest["lib"]["crate-type"], ["rlib", "cdylib"])
 
         workspace = tomllib.loads(Path("native/Cargo.toml").read_text(encoding="utf-8"))
         dependency_names = set(workspace["workspace"]["dependencies"])
