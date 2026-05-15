@@ -96,7 +96,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.1
 
       - name: cargo fuzz run skill_runtime_policy
         working-directory: native/fuzz

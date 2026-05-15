@@ -91,6 +91,7 @@ class RustQualityGateTest(unittest.TestCase):
             "cargo audit",
             "cargo deny check",
             "cargo llvm-cov --workspace --all-features --summary-only",
+            "cargo install cargo-fuzz --version 0.13.1",
             "python scripts/run_rust_coverage_thresholds.py --run",
             "python scripts/rust_artifact_provenance.py self-test",
             "cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml",
@@ -112,6 +113,14 @@ class RustQualityGateTest(unittest.TestCase):
 
         for tool in ["cargo-nextest", "cargo-audit", "cargo-deny", "cargo-llvm-cov"]:
             self.assertIn(tool, text)
+        self.assertNotIn("cargo install cargo-fuzz --locked", text)
+        cargo_fuzz_install_lines = [
+            line.strip().removeprefix("run:").strip()
+            for line in text.splitlines()
+            if line.strip().removeprefix("run:").strip().startswith("cargo install cargo-fuzz")
+        ]
+        self.assertEqual(cargo_fuzz_install_lines, ["cargo install cargo-fuzz --version 0.13.1"])
+        self.assertNotIn("--locked", cargo_fuzz_install_lines[0])
         self.assertIn("CARGO_BUILD_JOBS: \"1\"", text)
         self.assertIn("Python 3.13", text)
 
