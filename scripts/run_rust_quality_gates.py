@@ -91,6 +91,13 @@ def build_gates() -> list[Gate]:
             description="PRD01 coverage summary gate; release CI must enforce thresholds.",
         ),
         Gate(
+            name="rust_coverage_thresholds",
+            command=[sys.executable, "scripts/run_rust_coverage_thresholds.py", "--run"],
+            cwd=REPO_ROOT,
+            required_tools=("cargo", "cargo-llvm-cov"),
+            description="PRD01 line coverage gate: workspace >=80%, security-sensitive crates >=90%.",
+        ),
+        Gate(
             name="fuzz_cargo_check",
             command=["cargo", "check", "--manifest-path", "native/fuzz/Cargo.toml", "--bins"],
             cwd=REPO_ROOT,

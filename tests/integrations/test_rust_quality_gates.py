@@ -30,6 +30,7 @@ class RustQualityGateTest(unittest.TestCase):
             "cargo_audit",
             "cargo_deny",
             "cargo_llvm_cov",
+            "rust_coverage_thresholds",
             "fuzz_cargo_check",
             "cargo_fuzz_smoke",
             "rust_artifact_provenance_self_check",
@@ -57,6 +58,10 @@ class RustQualityGateTest(unittest.TestCase):
         self.assertEqual(gates["cargo_audit"]["command"], ["cargo", "audit"])
         self.assertEqual(gates["cargo_deny"]["command"], ["cargo", "deny", "check"])
         self.assertIn("llvm-cov", gates["cargo_llvm_cov"]["command"])
+        self.assertEqual(
+            gates["rust_coverage_thresholds"]["command"],
+            [sys.executable, "scripts/run_rust_coverage_thresholds.py", "--run"],
+        )
         self.assertIn("native/fuzz/Cargo.toml", gates["fuzz_cargo_check"]["command"])
         self.assertEqual(
             gates["cargo_fuzz_smoke"]["command"],
@@ -86,6 +91,7 @@ class RustQualityGateTest(unittest.TestCase):
             "cargo audit",
             "cargo deny check",
             "cargo llvm-cov --workspace --all-features --summary-only",
+            "python scripts/run_rust_coverage_thresholds.py --run",
             "python scripts/rust_artifact_provenance.py self-test",
             "python -m maturin build --release --manifest-path native/crates/maf_skill_runtime_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check",
             "test_installed_pyo3_module_matches_rust_contract_when_available",
@@ -106,4 +112,32 @@ class RustQualityGateTest(unittest.TestCase):
         for document in [readme, agents]:
             self.assertIn("scripts/run_rust_quality_gates.py", document)
             self.assertIn("Skill Runtime PyO3 wheel 本地 smoke", document)
+            self.assertIn("Ubuntu 22.04", document)
+            self.assertIn("manylinux_2_35", document)
             self.assertIn("非默认回归", document)
+
+    def test_coverage_threshold_runner_encodes_prd01_80_90_policy(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_rust_coverage_thresholds.py",
+                "--plan-json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        plan = json.loads(result.stdout)
+        self.assertEqual(plan["workspace_threshold"]["line_coverage"], 80)
+        self.assertEqual(plan["security_threshold"]["line_coverage"], 90)
+        self.assertIn("--fail-under-lines", plan["workspace_threshold"]["command"])
+        self.assertIn("80", plan["workspace_threshold"]["command"])
+        for crate in [
+            "maf_skill_runtime",
+            "maf_mcp_runtime",
+            "maf_artifact_store",
+            "maf_auth_core",
+            "maf_data_access",
+            "maf_audit_sanitizer",
+        ]:
+            self.assertIn(crate, plan["security_threshold"]["crates"])

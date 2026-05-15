@@ -57,7 +57,7 @@ npm run build
 - Rust runtime contract/kernel workspace 当前验证命令：
 
 ```bash
-conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only cargo_fmt --only cargo_test --skip-unavailable
+conda run -n multi_agent python scripts/run_rust_quality_gates.py --run --only cargo_fmt --only cargo_test --only rust_coverage_thresholds --skip-unavailable
 cd native
 cargo fmt --check
 cargo test --workspace --all-features

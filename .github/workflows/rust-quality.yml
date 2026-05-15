@@ -7,6 +7,7 @@ on:
       - "src/**/rust_contract*.py"
       - "src/**/rust_contracts/**"
       - "scripts/run_rust_quality_gates.py"
+      - "scripts/run_rust_coverage_thresholds.py"
       - "scripts/rust_artifact_provenance.py"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
@@ -17,6 +18,7 @@ on:
       - "src/**/rust_contract*.py"
       - "src/**/rust_contracts/**"
       - "scripts/run_rust_quality_gates.py"
+      - "scripts/run_rust_coverage_thresholds.py"
       - "scripts/rust_artifact_provenance.py"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
@@ -71,6 +73,9 @@ jobs:
       - name: cargo llvm-cov --workspace --all-features --summary-only
         working-directory: native
         run: cargo llvm-cov --workspace --all-features --summary-only
+
+      - name: python scripts/run_rust_coverage_thresholds.py --run
+        run: python scripts/run_rust_coverage_thresholds.py --run
 
       - name: Check fuzz target manifest readiness
         run: python scripts/run_rust_quality_gates.py --check-fuzz-targets

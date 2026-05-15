@@ -1,6 +1,6 @@
 # Rust 工具链、构建发布与质量门禁 PRD
 
-- **状态**：部分落地（`native/` workspace、Rust 1.95.0 toolchain、首批 runtime contract/kernel crates、Runtime sidecar tonic/prost binding / binary entrypoint、Skill Runtime PyO3 `maturin` 本地 wheel build / import smoke、PRD01 Rust quality workflow、本地 gate runner、Ubuntu 22.04 x86_64 / Python 3.13 `manylinux_2_35` wheel CI 目标、artifact provenance self-check、fuzz harness manifest / compile smoke 与 MCP Phase 1 骨架已落地；真实 CI 运行结果、coverage 阈值强制、长时 fuzz、真实 SBOM / provenance 产物、ops 门禁仍待实现）
+- **状态**：部分落地（`native/` workspace、Rust 1.95.0 toolchain、首批 runtime contract/kernel crates、Runtime sidecar tonic/prost binding / binary entrypoint、Skill Runtime PyO3 `maturin` 本地 wheel build / import smoke、PRD01 Rust quality workflow、本地 gate runner、Ubuntu 22.04 x86_64 / Python 3.13 `manylinux_2_35` wheel CI 目标、artifact provenance self-check、80% / 90% `cargo-llvm-cov` threshold runner、fuzz harness manifest / compile smoke 与 MCP Phase 1 骨架已落地；真实 CI 运行结果、coverage 阈值实际报告、长时 fuzz、真实 SBOM / provenance 产物、ops 门禁仍待实现）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 第 8、10、11、12、14、15 节
 - **影响范围**：仓库根目录、现有 `native/` workspace、CI、本地开发环境、Python/Rust bridge
@@ -844,6 +844,7 @@ cargo nextest run --workspace --all-features
 cargo audit
 cargo deny check
 cargo llvm-cov --workspace --all-features --summary-only
+python scripts/run_rust_coverage_thresholds.py --run
 ```
 
 按模块补充：
