@@ -21,6 +21,53 @@ fn skill_sandbox_binary_exposes_version_without_starting_python() {
 }
 
 #[test]
+fn skill_sandbox_binary_defaults_to_version_and_rejects_bad_args() {
+    let binary = std::env::var("CARGO_BIN_EXE_maf-skill-sandbox").expect("binary path");
+    let default_output = Command::new(&binary)
+        .output()
+        .expect("run default skill sandbox binary");
+    assert!(default_output.status.success());
+    let default_stdout = String::from_utf8(default_output.stdout).expect("utf8 stdout");
+    assert!(default_stdout.contains(COMPONENT_ID));
+
+    let unknown = Command::new(&binary)
+        .arg("--unknown")
+        .output()
+        .expect("run unknown arg");
+    assert!(!unknown.status.success());
+    let unknown_stderr = String::from_utf8(unknown.stderr).expect("utf8 stderr");
+    assert!(unknown_stderr.contains("unknown maf-skill-sandbox argument"));
+
+    let missing_root = Command::new(&binary)
+        .args(["--serve", "--sandbox-root"])
+        .output()
+        .expect("run missing root");
+    assert!(!missing_root.status.success());
+    let missing_root_stderr = String::from_utf8(missing_root.stderr).expect("utf8 stderr");
+    assert!(missing_root_stderr.contains("missing value for maf-skill-sandbox --sandbox-root"));
+
+    let public_bind = Command::new(&binary)
+        .args(["--serve", "0.0.0.0:50052"])
+        .output()
+        .expect("run public bind");
+    assert!(!public_bind.status.success());
+    let public_bind_stderr = String::from_utf8(public_bind.stderr).expect("utf8 stderr");
+    assert!(public_bind_stderr.contains("listener must bind loopback"));
+}
+
+#[test]
+fn export_skill_runtime_contract_binary_prints_contract_json() {
+    let binary = std::env::var("CARGO_BIN_EXE_export-skill-runtime-contract").expect("binary path");
+    let output = Command::new(binary)
+        .output()
+        .expect("run contract export binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("\"component\": \"maf_skill_runtime\""));
+    assert!(stdout.contains("\"protocol_version\": \"maf.skill.v1\""));
+}
+
+#[test]
 fn skill_sandbox_serve_config_rejects_public_bind_until_mtls_lands() {
     let config = SkillSandboxServeConfig::from_listen_addr("127.0.0.1:50052")
         .expect("loopback bind is allowed");

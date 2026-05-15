@@ -652,6 +652,15 @@ mod tests {
     }
 
     #[test]
+    fn health_reports_serving_version_without_python_runtime() {
+        let response = health();
+
+        assert_eq!(response.state, HealthState::Serving);
+        assert_eq!(response.version.component, COMPONENT_ID);
+        assert_eq!(response.version.protocol_version, PROTOCOL_VERSION);
+    }
+
+    #[test]
     fn compatibility_check_rejects_protocol_mismatch() {
         let mut request = matching_request(vec![FEATURE_VERSION.to_owned()]);
         request.expected_protocol_version = "external-mcp-2025-11-25".to_owned();
@@ -664,6 +673,35 @@ mod tests {
             response.error.as_ref().map(|error| error.code.as_str()),
             Some("mcp_runtime_protocol_incompatible")
         );
+    }
+
+    #[test]
+    fn compatibility_check_covers_all_mismatch_reasons_and_success() {
+        for mutate in [
+            |request: &mut CompatibilityCheckRequest| {
+                request.expected_component = "wrong-component".to_owned();
+            },
+            |request: &mut CompatibilityCheckRequest| {
+                request.expected_schema_hash = "wrong-schema".to_owned();
+            },
+            |request: &mut CompatibilityCheckRequest| {
+                request.expected_error_code_table_hash = "wrong-error-table".to_owned();
+            },
+        ] {
+            let mut request = matching_request(vec![FEATURE_VERSION.to_owned()]);
+            mutate(&mut request);
+            let response = check_compatibility(&request);
+            assert!(!response.compatible);
+            assert_eq!(
+                response.error.as_ref().map(|error| error.code.as_str()),
+                Some("mcp_runtime_protocol_incompatible")
+            );
+        }
+
+        let response = check_compatibility(&matching_request(vec![FEATURE_VERSION.to_owned()]));
+        assert!(response.compatible);
+        assert!(response.error.is_none());
+        assert!(response.missing_features.is_empty());
     }
 
     #[test]
@@ -680,6 +718,130 @@ mod tests {
             response.error.as_ref().map(|error| error.category),
             Some(ErrorCategory::Compatibility)
         );
+    }
+
+    #[test]
+    fn typed_error_table_covers_all_stable_codes() {
+        let expected = [
+            (
+                McpRuntimeErrorCode::ConfigurationInvalid,
+                "mcp_runtime_configuration_invalid",
+                ErrorCategory::Configuration,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::ProtocolIncompatible,
+                "mcp_runtime_protocol_incompatible",
+                ErrorCategory::Compatibility,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::CompatibilityHandshakeRequired,
+                "mcp_runtime_compatibility_handshake_required",
+                ErrorCategory::Compatibility,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::IdentityMismatch,
+                "mcp_runtime_identity_mismatch",
+                ErrorCategory::Security,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::PublicBindDenied,
+                "mcp_runtime_public_bind_denied",
+                ErrorCategory::Security,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::EndpointNotAllowlisted,
+                "mcp_runtime_endpoint_not_allowlisted",
+                ErrorCategory::Security,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::QueueFull,
+                "mcp_runtime_queue_full",
+                ErrorCategory::ResourceLimit,
+                true,
+            ),
+            (
+                McpRuntimeErrorCode::PerServerConcurrencyExceeded,
+                "mcp_runtime_per_server_concurrency_exceeded",
+                ErrorCategory::ResourceLimit,
+                true,
+            ),
+            (
+                McpRuntimeErrorCode::DeadlineExceeded,
+                "mcp_runtime_deadline_exceeded",
+                ErrorCategory::ResourceLimit,
+                true,
+            ),
+            (
+                McpRuntimeErrorCode::PayloadTooLarge,
+                "mcp_runtime_payload_too_large",
+                ErrorCategory::ResourceLimit,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::StreamIdleTimeout,
+                "mcp_runtime_stream_idle_timeout",
+                ErrorCategory::ResourceLimit,
+                true,
+            ),
+            (
+                McpRuntimeErrorCode::JsonRpcInvalid,
+                "mcp_runtime_json_rpc_invalid",
+                ErrorCategory::Protocol,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::SchemaValidationFailed,
+                "mcp_runtime_schema_validation_failed",
+                ErrorCategory::Protocol,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::OutputSanitizationFailed,
+                "mcp_runtime_output_sanitization_failed",
+                ErrorCategory::Protocol,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::BundleActivationFailed,
+                "mcp_runtime_bundle_activation_failed",
+                ErrorCategory::Protocol,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::RemoteServerError,
+                "mcp_runtime_remote_server_error",
+                ErrorCategory::Upstream,
+                true,
+            ),
+            (
+                McpRuntimeErrorCode::Cancelled,
+                "mcp_runtime_cancelled",
+                ErrorCategory::Cancellation,
+                false,
+            ),
+            (
+                McpRuntimeErrorCode::Internal,
+                "mcp_runtime_internal",
+                ErrorCategory::Internal,
+                false,
+            ),
+        ];
+
+        for (code, stable_code, category, retriable) in expected {
+            let error = TypedError::new(code, "message");
+            assert_eq!(error.code, stable_code);
+            assert_eq!(error.category, category);
+            assert_eq!(error.retriable, retriable);
+        }
+
+        let runtime_error = McpRuntimeError::from(McpRuntimeErrorCode::Internal);
+        assert_eq!(runtime_error.typed_error.code, "mcp_runtime_internal");
     }
 
     #[test]
@@ -720,6 +882,20 @@ mod tests {
             .expect_err("request carrying result must fail");
         assert_eq!(invalid.typed_error.code, "mcp_runtime_json_rpc_invalid");
 
+        for payload in [
+            vec![b'x'; MAX_JSON_RPC_BYTES + 1],
+            b"{not-json".to_vec(),
+            br#"{"jsonrpc":"1.0","method":"tools/call"}"#.to_vec(),
+            br#"{"jsonrpc":"2.0","method":"   "}"#.to_vec(),
+        ] {
+            let error =
+                validate_json_rpc_request(&payload).expect_err("bad JSON-RPC must fail closed");
+            assert!(
+                error.typed_error.code == "mcp_runtime_json_rpc_invalid"
+                    || error.typed_error.code == "mcp_runtime_payload_too_large"
+            );
+        }
+
         let valid = validate_json_rpc_request(
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}"#,
         )
@@ -734,6 +910,22 @@ mod tests {
         assert_eq!(sanitized.redaction_count, 3);
         assert!(!sanitized.text.contains("abc"));
         assert!(sanitized.text.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn tool_output_sanitizer_enforces_size_limits_and_truncation() {
+        let oversized = "x".repeat(MAX_RAW_TOOL_OUTPUT_BYTES + 1);
+        let error = sanitize_tool_output(&oversized).expect_err("raw output limit");
+        assert_eq!(error.typed_error.code, "mcp_runtime_payload_too_large");
+
+        let truncated_input = format!(
+            "{} token=secret",
+            "x".repeat(MAX_SANITIZED_TOOL_OUTPUT_BYTES)
+        );
+        let sanitized = sanitize_tool_output(&truncated_input).expect("sanitize truncated output");
+        assert!(sanitized.truncated);
+        assert_eq!(sanitized.text.len(), MAX_SANITIZED_TOOL_OUTPUT_BYTES);
+        assert_eq!(sanitized.redaction_count, 1);
     }
 
     #[test]
@@ -764,6 +956,27 @@ mod tests {
         registry.create_task("task-1");
         let cancelled = registry.cancel_task("task-1").expect("cancel task");
         assert_eq!(cancelled.state, McpTaskState::Cancelled);
+    }
+
+    #[test]
+    fn task_registry_rejects_unknown_and_terminal_cancellation() {
+        let mut registry = McpTaskRegistry::new();
+        let unknown = registry
+            .cancel_task("missing")
+            .expect_err("unknown task cancellation must fail");
+        assert_eq!(unknown.typed_error.code, "mcp_runtime_cancelled");
+
+        registry.tasks.insert(
+            "completed".to_owned(),
+            McpTaskRecord {
+                task_id: "completed".to_owned(),
+                state: McpTaskState::Completed,
+            },
+        );
+        let terminal = registry
+            .cancel_task("completed")
+            .expect_err("terminal task cancellation must fail");
+        assert_eq!(terminal.typed_error.code, "mcp_runtime_cancelled");
     }
 
     #[test]

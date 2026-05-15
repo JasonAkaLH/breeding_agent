@@ -1721,7 +1721,9 @@ fn missing_features_from_error(error: &SkillRuntimeError) -> Vec<String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io;
     use std::path::PathBuf;
+    use std::sync::mpsc;
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
@@ -1834,6 +1836,235 @@ mod tests {
             response.error.expect("typed error").code,
             "skill_runtime_contract_mismatch"
         );
+    }
+
+    #[test]
+    fn compatibility_errors_preserve_safe_metadata() {
+        let service = SkillSandboxService::new();
+        let version = service.version();
+
+        let mismatch = service
+            .check_compatibility(CompatibilityCheck {
+                client_version: MIN_CLIENT_VERSION.to_owned(),
+                expected_component: "wrong_component".to_owned(),
+                expected_protocol_version: version.protocol_version.clone(),
+                expected_schema_hash: version.schema_hash.clone(),
+                expected_error_code_table_hash: version.error_code_table_hash.clone(),
+                required_features: Vec::new(),
+            })
+            .expect_err("component mismatch must fail closed");
+        assert_eq!(
+            mismatch.code,
+            SkillRuntimeErrorCode::ContractMismatch.as_str()
+        );
+
+        let missing = service
+            .check_compatibility(CompatibilityCheck {
+                client_version: MIN_CLIENT_VERSION.to_owned(),
+                expected_component: version.component,
+                expected_protocol_version: version.protocol_version,
+                expected_schema_hash: version.schema_hash,
+                expected_error_code_table_hash: version.error_code_table_hash,
+                required_features: vec!["sandbox_sidecar".to_owned(), "future_feature".to_owned()],
+            })
+            .expect_err("unknown required feature must fail closed");
+        assert_eq!(
+            missing.safe_metadata.get("missing_features"),
+            Some(&"future_feature".to_owned())
+        );
+        assert_eq!(
+            missing_features_from_error(&missing),
+            vec!["future_feature".to_owned()]
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unknown_modes_and_rust_adapters() {
+        let mut input = policy_input();
+        input.execution_mode = "shell".to_owned();
+        let mode_error = validate_policy(&input).expect_err("unknown mode must fail closed");
+        assert_eq!(
+            mode_error.code,
+            SkillRuntimeErrorCode::ManifestInvalid.as_str()
+        );
+
+        let metadata = BTreeMap::from([("adapter".to_owned(), "python_import".to_owned())]);
+        let adapter_error =
+            validate_rust_metadata(&metadata).expect_err("unknown adapter must fail closed");
+        assert_eq!(
+            adapter_error.code,
+            SkillRuntimeErrorCode::RustAdapterInvalid.as_str()
+        );
+    }
+
+    #[test]
+    fn sandbox_config_and_service_preflight_errors_are_fail_closed() {
+        let invalid_addr =
+            SkillSandboxServeConfig::from_listen_addr("not-a-socket").expect_err("invalid addr");
+        assert_eq!(
+            invalid_addr.code,
+            SkillRuntimeErrorCode::SandboxPolicyDenied.as_str()
+        );
+
+        let empty_root =
+            SkillSandboxServeConfig::from_listen_addr(DEFAULT_SKILL_SANDBOX_LISTEN_ADDR)
+                .expect("loopback")
+                .with_sandbox_root("")
+                .expect_err("empty sandbox root must fail closed");
+        assert_eq!(
+            empty_root.code,
+            SkillRuntimeErrorCode::SandboxPolicyDenied.as_str()
+        );
+
+        let service = SkillSandboxService::new();
+        let escape = service.execute_sandboxed(ExecuteSandboxedRequest {
+            skill_name: "example".to_owned(),
+            execution_mode: "python_subprocess".to_owned(),
+            cwd_under_public_root: "../escape".to_owned(),
+            argv: vec!["./handler.sh".to_owned()],
+            timeout_ms: 1_000,
+            stdout_limit_bytes: 1024,
+            stderr_limit_bytes: 1024,
+            stdin_payload: Vec::new(),
+        });
+        assert_eq!(
+            escape.error.expect("escape error").code,
+            SkillRuntimeErrorCode::PublicRootEscape.as_str()
+        );
+
+        let invalid_mode = service.execute_sandboxed(ExecuteSandboxedRequest {
+            skill_name: "example".to_owned(),
+            execution_mode: "shell".to_owned(),
+            cwd_under_public_root: ".".to_owned(),
+            argv: vec!["./handler.sh".to_owned()],
+            timeout_ms: 1_000,
+            stdout_limit_bytes: 1024,
+            stderr_limit_bytes: 1024,
+            stdin_payload: Vec::new(),
+        });
+        assert_eq!(
+            invalid_mode.error.expect("mode error").code,
+            SkillRuntimeErrorCode::ManifestInvalid.as_str()
+        );
+    }
+
+    #[test]
+    fn sandbox_private_helpers_report_typed_errors() {
+        let missing_root = std::env::temp_dir().join("maf-skill-runtime-missing-root-for-coverage");
+        let missing_path =
+            checked_join_under_root(&missing_root, "missing").expect_err("missing path");
+        assert_eq!(
+            missing_path.code,
+            SkillRuntimeErrorCode::PublicRootEscape.as_str()
+        );
+
+        let stream_limit = requested_stream_limit("stdout_bytes", 1024 * 1024 + 1)
+            .expect_err("stream limit above hard cap must fail");
+        assert_eq!(
+            stream_limit.code,
+            SkillRuntimeErrorCode::SandboxPolicyDenied.as_str()
+        );
+
+        let missing_limit = sandbox_limit("missing_limit").expect_err("unknown limit");
+        assert_eq!(
+            missing_limit.code,
+            SkillRuntimeErrorCode::ContractMismatch.as_str()
+        );
+
+        assert!(receive_stdin_writer(None, Instant::now()).is_ok());
+        assert_eq!(
+            receive_limited_reader(None, Instant::now()).expect("empty reader"),
+            (Vec::new(), false)
+        );
+
+        let (_sender, receiver) = mpsc::channel::<Result<(), SkillRuntimeError>>();
+        let timeout = receive_before_deadline(receiver, Instant::now())
+            .expect_err("missing stdio completion must timeout");
+        assert_eq!(timeout.code, SkillRuntimeErrorCode::SandboxTimeout.as_str());
+
+        let (_done_sender, done_receiver) = mpsc::channel();
+        let poisoned_reader = LimitedReaderHandle {
+            state: Arc::new(Mutex::new(LimitedReaderState {
+                prefix: b"partial".to_vec(),
+                truncated: true,
+                error: Some(SkillRuntimeError::new(
+                    SkillRuntimeErrorCode::SandboxPolicyDenied,
+                    "reader failed",
+                )),
+                done: true,
+            })),
+            done: done_receiver,
+        };
+        let reader_error =
+            snapshot_limited_reader(&poisoned_reader).expect_err("reader error must propagate");
+        assert_eq!(
+            reader_error.code,
+            SkillRuntimeErrorCode::SandboxPolicyDenied.as_str()
+        );
+    }
+
+    #[test]
+    fn limited_reader_reports_io_errors_and_truncation() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("boom"))
+            }
+        }
+
+        let failing = spawn_limited_reader(FailingReader, 8, "stdout");
+        let error =
+            receive_reader_before_deadline(failing, Instant::now() + Duration::from_millis(1_000))
+                .expect_err("read errors must be reported");
+        assert_eq!(
+            error.code,
+            SkillRuntimeErrorCode::SandboxPolicyDenied.as_str()
+        );
+
+        let state = Arc::new(Mutex::new(LimitedReaderState {
+            prefix: Vec::new(),
+            truncated: false,
+            error: None,
+            done: false,
+        }));
+        let mut buffer = [0_u8; 8192];
+        let mut input = io::Cursor::new(b"abcdef".to_vec());
+        read_limited_prefix(&mut input, &state, &mut buffer, 3, "stdout").expect("read prefix");
+        let state = state.lock().expect("state");
+        assert_eq!(state.prefix, b"abc".to_vec());
+        assert!(state.truncated);
+    }
+
+    #[test]
+    fn protobuf_mapping_helpers_cover_all_error_categories() {
+        assert_eq!(
+            health_state_to_pb(HealthState::Serving),
+            common_pb::HealthState::Serving
+        );
+        assert_eq!(
+            health_state_to_pb(HealthState::NotServing),
+            common_pb::HealthState::NotServing
+        );
+        assert_eq!(
+            health_state_to_pb(HealthState::Degraded),
+            common_pb::HealthState::Degraded
+        );
+        assert_eq!(
+            readiness_state_to_pb(ReadinessState::NotReady),
+            common_pb::ReadinessState::NotReady
+        );
+
+        for (category, expected) in [
+            ("configuration", common_pb::ErrorCategory::Configuration),
+            ("compatibility", common_pb::ErrorCategory::Compatibility),
+            ("resource_limit", common_pb::ErrorCategory::ResourceLimit),
+            ("protocol", common_pb::ErrorCategory::Protocol),
+            ("upstream", common_pb::ErrorCategory::Upstream),
+            ("cancellation", common_pb::ErrorCategory::Cancellation),
+            ("unknown", common_pb::ErrorCategory::Internal),
+        ] {
+            assert_eq!(error_category_to_pb(category), expected);
+        }
     }
 
     #[test]

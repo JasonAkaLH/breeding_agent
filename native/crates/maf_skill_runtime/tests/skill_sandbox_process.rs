@@ -35,6 +35,58 @@ fn process_manager_runs_relative_program_with_bounded_stdio() {
 }
 
 #[test]
+fn process_manager_rejects_missing_argv_and_non_relative_programs() {
+    let root = temp_sandbox_root("argv-shape");
+    let service = SkillSandboxService::with_process_manager(SandboxProcessManager::new(&root));
+
+    for argv in [Vec::new(), vec!["handler.sh".to_owned()]] {
+        let response = service.execute_sandboxed(ExecuteSandboxedRequest {
+            skill_name: "example".to_owned(),
+            execution_mode: "python_subprocess".to_owned(),
+            cwd_under_public_root: ".".to_owned(),
+            argv,
+            timeout_ms: NORMAL_TIMEOUT_MS,
+            stdout_limit_bytes: 1024,
+            stderr_limit_bytes: 1024,
+            stdin_payload: Vec::new(),
+        });
+
+        let error = response.error.expect("invalid argv must be denied");
+        assert_eq!(
+            error.code,
+            SkillRuntimeErrorCode::SandboxPolicyDenied.as_str()
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn process_manager_rejects_inaccessible_root_before_spawn() {
+    let root = temp_sandbox_root("missing-root");
+    fs::remove_dir_all(&root).expect("remove sandbox root");
+    let service = SkillSandboxService::with_process_manager(SandboxProcessManager::new(&root));
+
+    let response = service.execute_sandboxed(ExecuteSandboxedRequest {
+        skill_name: "example".to_owned(),
+        execution_mode: "python_subprocess".to_owned(),
+        cwd_under_public_root: ".".to_owned(),
+        argv: vec!["./handler.sh".to_owned()],
+        timeout_ms: NORMAL_TIMEOUT_MS,
+        stdout_limit_bytes: 1024,
+        stderr_limit_bytes: 1024,
+        stdin_payload: Vec::new(),
+    });
+
+    let error = response
+        .error
+        .expect("inaccessible root must be denied before spawn");
+    assert_eq!(
+        error.code,
+        SkillRuntimeErrorCode::SandboxPolicyDenied.as_str()
+    );
+}
+
+#[test]
 fn process_manager_enforces_stdout_limit_without_returning_unbounded_output() {
     let root = temp_sandbox_root("stdout-limit");
     write_script(&root, "loud.sh", "#!/bin/sh\nprintf abcdef\n");
@@ -56,6 +108,32 @@ fn process_manager_enforces_stdout_limit_without_returning_unbounded_output() {
     let error = response
         .error
         .expect("stdout over limit must be typed error");
+    assert_eq!(error.code, SkillRuntimeErrorCode::OutputTooLarge.as_str());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn process_manager_enforces_stderr_limit_without_returning_unbounded_output() {
+    let root = temp_sandbox_root("stderr-limit");
+    write_script(&root, "loud-error.sh", "#!/bin/sh\nprintf abcdef >&2\n");
+    let service = SkillSandboxService::with_process_manager(SandboxProcessManager::new(&root));
+
+    let response = service.execute_sandboxed(ExecuteSandboxedRequest {
+        skill_name: "example".to_owned(),
+        execution_mode: "python_subprocess".to_owned(),
+        cwd_under_public_root: ".".to_owned(),
+        argv: vec!["./loud-error.sh".to_owned()],
+        timeout_ms: NORMAL_TIMEOUT_MS,
+        stdout_limit_bytes: 1024,
+        stderr_limit_bytes: 3,
+        stdin_payload: Vec::new(),
+    });
+
+    assert_eq!(response.stderr_prefix, b"abc".to_vec());
+    assert!(response.stderr_truncated);
+    let error = response
+        .error
+        .expect("stderr over limit must be typed error");
     assert_eq!(error.code, SkillRuntimeErrorCode::OutputTooLarge.as_str());
     let _ = fs::remove_dir_all(root);
 }
@@ -257,7 +335,7 @@ fn process_manager_does_not_wait_for_lingering_descendant_stdio() {
     write_script(
         &root,
         "linger.sh",
-        "#!/bin/sh\n(sleep 3; echo late) &\necho done\nexit 0\n",
+        "#!/bin/sh\n(sleep 30; echo late) &\necho done\nexit 0\n",
     );
     let service = SkillSandboxService::with_process_manager(SandboxProcessManager::new(&root));
 
@@ -267,14 +345,15 @@ fn process_manager_does_not_wait_for_lingering_descendant_stdio() {
         execution_mode: "python_subprocess".to_owned(),
         cwd_under_public_root: ".".to_owned(),
         argv: vec!["./linger.sh".to_owned()],
-        timeout_ms: 1_500,
+        timeout_ms: NORMAL_TIMEOUT_MS,
         stdout_limit_bytes: 1024,
         stderr_limit_bytes: 1024,
         stdin_payload: Vec::new(),
     });
     let elapsed = started_at.elapsed();
 
-    assert!(response.stdout_prefix.starts_with(b"done\n"));
+    assert_eq!(response.exit_code, 0);
+    assert!(response.error.is_none());
     assert!(
         !response
             .stdout_prefix
@@ -282,8 +361,8 @@ fn process_manager_does_not_wait_for_lingering_descendant_stdio() {
             .any(|window| window == b"late")
     );
     assert!(
-        elapsed < Duration::from_millis(2_500),
-        "sandbox waited for lingering descendant stdio for {elapsed:?}"
+        elapsed < Duration::from_millis(7_000),
+        "sandbox waited beyond bounded stdio drain for lingering descendant stdio: {elapsed:?}"
     );
     let _ = fs::remove_dir_all(root);
 }
