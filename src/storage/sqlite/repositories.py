@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
-from collections.abc import Callable, Iterable
+import time
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from sqlalchemy import delete, or_, select
@@ -56,6 +58,8 @@ from .models import (
     TaskNodeRow,
     TaskRow,
 )
+
+RuntimeSidecarShadowSink = Callable[[Mapping[str, str]], None]
 
 
 def _row_to_conversation(row: ConversationRow) -> Conversation:
@@ -997,9 +1001,16 @@ class SQLiteCollaborationRepository:
 
 
 class SQLiteStorage(StoragePort):
-    def __init__(self, session_factory: sessionmaker[Session], *, runtime_sidecar_client: Any | None = None) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        runtime_sidecar_client: Any | None = None,
+        runtime_sidecar_shadow_sink: RuntimeSidecarShadowSink | None = None,
+    ) -> None:
         self._session_factory = session_factory
         self._runtime_sidecar_client = runtime_sidecar_client
+        self._runtime_sidecar_shadow_sink = runtime_sidecar_shadow_sink
 
     async def _run(
         self,
@@ -1087,14 +1098,34 @@ class SQLiteStorage(StoragePort):
         if sidecar_client is not None:
             response = await _resolve_runtime_sidecar_call(
                 sidecar_client.submit_task(
-                task_id=task.task_id,
-                conversation_id=task.conversation_id,
-                idempotency_key=task.task_id,
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    idempotency_key=task.task_id,
                 )
             )
             _consume_runtime_sidecar_response("task_submit", response)
             return task
-        return await self._run(lambda state, collab: state.save_task(task))
+        saved = await self._run(lambda state, collab: state.save_task(task))
+        await self._record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="task_submit",
+            input_payload={
+                "conversation_id": task.conversation_id,
+                "task_id": task.task_id,
+            },
+            legacy_output={
+                "task_id": saved.task_id,
+            },
+            rust_call=lambda: self._runtime_sidecar_client.submit_task(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                idempotency_key=task.task_id,
+            ),
+            rust_output=lambda envelope: {
+                "task_id": str(envelope.get("task_id", "")),
+            },
+        )
+        return saved
 
     async def get_task(self, task_id: str) -> Task | None:
         return await self._run(lambda state, collab: state.get_task(task_id))
@@ -1118,15 +1149,39 @@ class SQLiteStorage(StoragePort):
         if sidecar_client is not None:
             response = await _resolve_runtime_sidecar_call(
                 sidecar_client.transition_node(
-                task_id=node.task_id,
-                node_id=node.node_id,
-                to_status=str(node.status),
-                idempotency_key=_runtime_sidecar_idempotency_key(node.node_id, str(node.status)),
+                    task_id=node.task_id,
+                    node_id=node.node_id,
+                    to_status=str(node.status),
+                    idempotency_key=_runtime_sidecar_idempotency_key(node.node_id, str(node.status)),
                 )
             )
             _consume_runtime_sidecar_response("node_state_transition", response)
             return node
-        return await self._run(lambda state, collab: state.save_task_node(node))
+        saved = await self._run(lambda state, collab: state.save_task_node(node))
+        await self._record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="node_state_transition",
+            input_payload={
+                "node_id": node.node_id,
+                "status": str(node.status),
+                "task_id": node.task_id,
+            },
+            legacy_output={
+                "node_id": saved.node_id,
+                "status": str(saved.status),
+            },
+            rust_call=lambda: self._runtime_sidecar_client.transition_node(
+                task_id=node.task_id,
+                node_id=node.node_id,
+                to_status=str(node.status),
+                idempotency_key=_runtime_sidecar_idempotency_key(node.node_id, str(node.status)),
+            ),
+            rust_output=lambda envelope: {
+                "node_id": str(envelope.get("node_id", "")),
+                "status": str(envelope.get("status", "")),
+            },
+        )
+        return saved
 
     async def get_task_node(self, node_id: str) -> TaskNode | None:
         return await self._run(lambda state, collab: state.get_task_node(node_id))
@@ -1159,16 +1214,46 @@ class SQLiteStorage(StoragePort):
             _ensure_event_append_payload_within_rust_limit(event)
             response = await _resolve_runtime_sidecar_call(
                 sidecar_client.append_event(
-                conversation_id=event.conversation_id,
-                task_id=event.task_id,
-                event_type=event.event_type,
-                payload_json=json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"),
-                idempotency_key=event.event_id,
+                    conversation_id=event.conversation_id,
+                    task_id=event.task_id,
+                    event_type=event.event_type,
+                    payload_json=json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8"),
+                    idempotency_key=event.event_id,
                 )
             )
             _consume_runtime_sidecar_response("event_append", response)
             return event
-        return await self._run(lambda state, collab: collab.save_event_record(event))
+        saved = await self._run(lambda state, collab: collab.save_event_record(event))
+        payload_json = json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8")
+        await self._record_runtime_sidecar_shadow_write(
+            component="event_log",
+            operation_name="event_append",
+            input_payload={
+                "conversation_id": event.conversation_id,
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "payload_sha256": hashlib.sha256(payload_json).hexdigest(),
+                "task_id": event.task_id,
+            },
+            legacy_output={
+                "accepted": "true",
+                "conversation_id": saved.conversation_id,
+                "task_id": saved.task_id,
+            },
+            rust_call=lambda: self._runtime_sidecar_client.append_event(
+                conversation_id=event.conversation_id,
+                task_id=event.task_id,
+                event_type=event.event_type,
+                payload_json=payload_json,
+                idempotency_key=event.event_id,
+            ),
+            rust_output=lambda envelope: {
+                "accepted": "true",
+                "conversation_id": str(envelope.get("cursor", {}).get("conversation_id", "")),
+                "task_id": str(envelope.get("cursor", {}).get("task_id", "")),
+            },
+        )
+        return saved
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]:
         return await self._run(lambda state, collab: collab.list_events_for_task(task_id))
@@ -1256,13 +1341,96 @@ class SQLiteStorage(StoragePort):
             )
         return self._runtime_sidecar_client
 
+    async def _record_runtime_sidecar_shadow_write(
+        self,
+        *,
+        component: str,
+        operation_name: str,
+        input_payload: Mapping[str, Any],
+        legacy_output: Mapping[str, Any],
+        rust_call: Callable[[], Any],
+        rust_output: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+    ) -> None:
+        if (
+            runtime_mode_for_component(component) != "shadow"
+            or self._runtime_sidecar_client is None
+            or self._runtime_sidecar_shadow_sink is None
+        ):
+            return
+
+        started = time.perf_counter()
+        payload = {
+            "component": component,
+            "operation": operation_name,
+            "input_fingerprint": _runtime_sidecar_fingerprint(input_payload),
+            "legacy_output_fingerprint": _runtime_sidecar_fingerprint(legacy_output),
+            "legacy_status": "ok",
+            "rust_status": "unknown",
+        }
+        try:
+            response = await _resolve_runtime_sidecar_call(rust_call())
+            envelope = validate_runtime_sidecar_response(
+                operation_name,
+                _normalize_runtime_sidecar_response(operation_name, response),
+            )
+            error = envelope.get("error")
+            if isinstance(error, Mapping):
+                payload.update(
+                    {
+                        "rust_status": "error",
+                        "error_code": str(error["code"]),
+                        "rust_output_fingerprint": "",
+                    }
+                )
+            else:
+                payload.update(
+                    {
+                        "rust_status": "ok",
+                        "error_code": "",
+                        "rust_output_fingerprint": _runtime_sidecar_fingerprint(rust_output(envelope)),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - shadow mode must preserve the Python-visible result.
+            payload.update(
+                {
+                    "rust_status": "error",
+                    "error_code": _runtime_sidecar_error_code(exc),
+                    "rust_output_fingerprint": "",
+                }
+            )
+        finally:
+            payload["duration_ms"] = str(max(0, int((time.perf_counter() - started) * 1000)))
+            try:
+                self._runtime_sidecar_shadow_sink(payload)
+            except Exception:  # noqa: BLE001 - audit sink failure must not affect shadow-mode user results.
+                return
+
 
 def _runtime_sidecar_idempotency_key(*parts: str) -> str:
     return ":".join(parts)
 
 
+def _runtime_sidecar_fingerprint(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _runtime_sidecar_error_code(error: Exception) -> str:
+    message = str(error)
+    code, separator, _ = message.partition(":")
+    if separator:
+        try:
+            return str(runtime_error_policy(code)["code"])
+        except KeyError:
+            pass
+    return type(error).__name__
+
+
 def _consume_runtime_sidecar_response(operation_name: str, response: Any) -> None:
-    envelope = validate_runtime_sidecar_response(operation_name, _normalize_runtime_sidecar_response(operation_name, response))
+    envelope = validate_runtime_sidecar_response(
+        operation_name,
+        _normalize_runtime_sidecar_response(operation_name, response),
+    )
     error = envelope.get("error")
     if isinstance(error, dict):
         raise RuntimeError(f"{error['code']}: {error['message']}")

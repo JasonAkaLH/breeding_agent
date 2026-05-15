@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 from unittest.mock import patch
 
 from src.core.enums import TaskStatus
-from src.core.models import Task
+from src.core.models import EventRecord, Task
 from src.orchestration.models import OrchestrationRequest
 from src.storage.rust_contract import mode_for_component
 from tests.api.support import APITestCase
@@ -68,6 +69,40 @@ class _RecordingDispatcherSidecarClient:
             "bundle_kind": bundle_kind,
             "revision": revision,
             "released": True,
+            "error": None,
+        }
+
+
+class _RecordingRuntimeStoreSidecarClient(_RecordingDispatcherSidecarClient):
+    def append_event(
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        event_type: str,
+        payload_json: bytes,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "event_append",
+                {
+                    "conversation_id": conversation_id,
+                    "event_type": event_type,
+                    "idempotency_key": idempotency_key,
+                    "payload_bytes": str(len(payload_json)),
+                    "task_id": task_id,
+                },
+            )
+        )
+        return {
+            "operation": "event_append",
+            "cursor": {
+                "conversation_id": conversation_id,
+                "created_at_ms": 1,
+                "sequence": 1,
+                "task_id": task_id,
+            },
             "error": None,
         }
 
@@ -188,3 +223,34 @@ class RuntimeSidecarContractAPITest(APITestCase):
             [call[0] for call in sidecar.calls],
             ["bundle_revision_pin", "bundle_revision_release"],
         )
+
+    async def test_runtime_shadow_event_append_records_sanitized_audit(self) -> None:
+        sidecar = _RecordingRuntimeStoreSidecarClient()
+        await self.reconfigure_runtime(runtime_sidecar_client=sidecar, enable_conversation_memory=False)
+        event = EventRecord(
+            event_id="evt-api-shadow",
+            conversation_id="conv-api-shadow",
+            task_id="task-api-shadow",
+            event_type="shadow",
+            payload={"secret": "do-not-log", "safe": True},
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "shadow"}):
+            saved = await self.runtime.storage.append_event(event)
+
+        audit_records = [
+            json.loads(line)
+            for line in (self.workspace / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        shadow_records = [
+            record for record in audit_records if record["event_type"] == "runtime.sidecar_shadow_diff"
+        ]
+
+        self.assertEqual(saved, event)
+        self.assertEqual([call[0] for call in sidecar.calls], ["event_append"])
+        self.assertEqual(len(await self.runtime.storage.list_event_page_for_task(event.task_id)), 1)
+        self.assertEqual(shadow_records[-1]["payload"]["component"], "event_log")
+        self.assertEqual(shadow_records[-1]["payload"]["operation"], "event_append")
+        self.assertEqual(shadow_records[-1]["payload"]["legacy_status"], "ok")
+        self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "ok")
+        self.assertNotIn("do-not-log", json.dumps(shadow_records[-1], ensure_ascii=False))

@@ -223,6 +223,34 @@ class _RecordingRuntimeSidecarClient:
         }
 
 
+class _FailingRuntimeSidecarClient(_RecordingRuntimeSidecarClient):
+    def __init__(self, error_message: str = "event_log_unavailable: simulated shadow sidecar outage") -> None:
+        super().__init__()
+        self.error_message = error_message
+
+    async def append_event(
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        event_type: str,
+        payload_json: bytes,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "event_append",
+                {
+                    "conversation_id": conversation_id,
+                    "event_type": event_type,
+                    "idempotency_key": idempotency_key,
+                    "task_id": task_id,
+                },
+            )
+        )
+        raise RuntimeError(self.error_message)
+
+
 class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
     def test_runtime_sidecar_contract_artifact_lists_components_and_modes(self) -> None:
         contract = load_runtime_sidecar_contract()
@@ -331,6 +359,110 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         self.assertEqual(asyncio.run(SQLiteStorage(self.session_factory).list_event_page_for_task("task-sidecar")), [])
 
+    def test_event_log_shadow_keeps_python_visible_write_and_records_sidecar_audit(self) -> None:
+        audit_events: list[dict[str, str]] = []
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=audit_events.append,
+        )
+        event = EventRecord(
+            event_id="evt-shadow",
+            conversation_id="conv-shadow",
+            task_id="task-shadow",
+            event_type="shadow",
+            payload={"secret": "do-not-log"},
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "shadow"}):
+            saved = asyncio.run(storage.append_event(event))
+
+        self.assertEqual(saved, event)
+        self.assertEqual(len(asyncio.run(storage.list_event_page_for_task("task-shadow"))), 1)
+        self.assertEqual(sidecar.calls[0][0], "event_append")
+        self.assertEqual(audit_events[0]["component"], "event_log")
+        self.assertEqual(audit_events[0]["operation"], "event_append")
+        self.assertEqual(audit_events[0]["legacy_status"], "ok")
+        self.assertEqual(audit_events[0]["rust_status"], "ok")
+        self.assertNotIn("do-not-log", str(audit_events[0]))
+
+    def test_event_log_shadow_sidecar_error_does_not_block_python_legacy_write(self) -> None:
+        audit_events: list[dict[str, str]] = []
+        sidecar = _FailingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=audit_events.append,
+        )
+        event = EventRecord(
+            event_id="evt-shadow-error",
+            conversation_id="conv-shadow-error",
+            task_id="task-shadow-error",
+            event_type="shadow",
+            payload={"ok": True},
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "shadow"}):
+            saved = asyncio.run(storage.append_event(event))
+
+        self.assertEqual(saved, event)
+        self.assertEqual(len(asyncio.run(storage.list_event_page_for_task("task-shadow-error"))), 1)
+        self.assertEqual(sidecar.calls[0][0], "event_append")
+        self.assertEqual(audit_events[0]["rust_status"], "error")
+        self.assertEqual(audit_events[0]["error_code"], "event_log_unavailable")
+
+    def test_event_log_shadow_error_code_does_not_parse_secret_exception_prefix(self) -> None:
+        audit_events: list[dict[str, str]] = []
+        sidecar = _FailingRuntimeSidecarClient("sk-secret-token: connection failed")
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=audit_events.append,
+        )
+        event = EventRecord(
+            event_id="evt-shadow-secret-error",
+            conversation_id="conv-shadow-secret-error",
+            task_id="task-shadow-secret-error",
+            event_type="shadow",
+            payload={"ok": True},
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "shadow"}):
+            saved = asyncio.run(storage.append_event(event))
+
+        self.assertEqual(saved, event)
+        self.assertEqual(len(asyncio.run(storage.list_event_page_for_task("task-shadow-secret-error"))), 1)
+        self.assertEqual(audit_events[0]["rust_status"], "error")
+        self.assertEqual(audit_events[0]["error_code"], "RuntimeError")
+        self.assertNotIn("sk-secret-token", str(audit_events[0]))
+
+    def test_event_log_shadow_audit_error_does_not_block_python_legacy_write(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+
+        def failing_audit_sink(_payload: dict[str, str]) -> None:
+            raise RuntimeError("audit sink unavailable")
+
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=failing_audit_sink,
+        )
+        event = EventRecord(
+            event_id="evt-shadow-audit-error",
+            conversation_id="conv-shadow-audit-error",
+            task_id="task-shadow-audit-error",
+            event_type="shadow",
+            payload={"ok": True},
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "shadow"}):
+            saved = asyncio.run(storage.append_event(event))
+
+        self.assertEqual(saved, event)
+        self.assertEqual(len(asyncio.run(storage.list_event_page_for_task("task-shadow-audit-error"))), 1)
+        self.assertEqual(sidecar.calls[0][0], "event_append")
+
     def test_runtime_store_enforce_mode_rejects_python_legacy_task_writes_without_sidecar(self) -> None:
         storage = SQLiteStorage(self.session_factory)
         task = Task(
@@ -408,6 +540,39 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task(task.task_id)))
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
+
+    def test_runtime_store_shadow_routes_to_sidecar_and_keeps_python_visible_write(self) -> None:
+        audit_events: list[dict[str, str]] = []
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=audit_events.append,
+        )
+        task = Task(
+            task_id="task-shadow-store",
+            conversation_id="conv-shadow-store",
+            root_message_id="msg-shadow-store",
+            status=TaskStatus.ACCEPTED,
+        )
+        node = TaskNode(
+            node_id="node-shadow-store",
+            task_id=task.task_id,
+            capability_id="main_agent.respond",
+            status=NodeStatus.RUNNING,
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
+            saved_task = asyncio.run(storage.save_task(task))
+            saved_node = asyncio.run(storage.save_task_node(node))
+
+        self.assertEqual(saved_task, task)
+        self.assertEqual(saved_node, node)
+        self.assertIsNotNone(asyncio.run(storage.get_task(task.task_id)))
+        self.assertIsNotNone(asyncio.run(storage.get_task_node(node.node_id)))
+        self.assertEqual([call[0] for call in sidecar.calls], ["task_submit", "node_state_transition"])
+        self.assertEqual([event["operation"] for event in audit_events], ["task_submit", "node_state_transition"])
+        self.assertTrue(all(event["rust_status"] == "ok" for event in audit_events))
 
     def test_runtime_store_enforce_mode_rejects_python_legacy_graph_writes_without_sidecar(self) -> None:
         storage = SQLiteStorage(self.session_factory)

@@ -1265,9 +1265,11 @@ def build_api_runtime(
     engine = create_sqlite_engine(database_path)
     bootstrap_sqlite_database(engine)
     resolved_runtime_sidecar_client = runtime_sidecar_client or _resolve_runtime_sidecar_client_from_env()
+    audit_sink = JsonlAuditSink(audit_log_path)
     storage = SQLiteStorage(
         create_sqlite_session_factory(engine),
         runtime_sidecar_client=resolved_runtime_sidecar_client,
+        runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
     )
     artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
     password_hasher = PasswordHasher()
@@ -1304,7 +1306,6 @@ def build_api_runtime(
     instance_registry.register(build_local_main_agent_instance())
     _sync_skill_capability_registry(capability_registry, instance_registry, skill_runtime_state)
 
-    audit_sink = JsonlAuditSink(audit_log_path)
     _record_skill_capability_startup_audit(audit_sink, skill_runtime_state.active_bundle.skill_capabilities)
     resolved_mcp_runtime_state = mcp_runtime_state or MCPRuntimeState(
         config=_resolve_mcp_runtime_config(mcp_config),
@@ -2002,6 +2003,18 @@ def _build_skill_policy_shadow_diff_sink(
 
     def record_shadow_diff(payload: Mapping[str, str]) -> None:
         audit_sink.record_sync("skill.runtime_policy_shadow_diff", payload)
+
+    return record_shadow_diff
+
+
+def _build_runtime_sidecar_shadow_diff_sink(
+    audit_sink: JsonlAuditSink | None,
+) -> Callable[[Mapping[str, str]], None] | None:
+    if audit_sink is None:
+        return None
+
+    def record_shadow_diff(payload: Mapping[str, str]) -> None:
+        audit_sink.record_sync("runtime.sidecar_shadow_diff", payload)
 
     return record_shadow_diff
 
