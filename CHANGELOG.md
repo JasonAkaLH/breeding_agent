@@ -10,6 +10,14 @@
 
 ## [Unreleased]
 
+### 2026-05-15 — 推进 PRD03 Runtime sidecar Unix socket transport
+
+- 按 `docs/prd/rust` 顺序在 PRD02 远端全绿后继续 PRD03：`maf-runtime-sidecar --serve unix:///absolute/path --sqlite <path>` 现在可通过 Rust `RuntimeSidecarServeConfig` 进入 Unix domain socket 监听，TCP public bind 仍在缺少 production mTLS / 内网身份前 fail-closed。
+- `RuntimeSidecarGrpcClient` 支持 `unix:///absolute/path` endpoint，复用现有 h2c unary client、endpoint allowlist、config source 与 compatibility handshake，不新增 Python 依赖；loopback TCP 路径保持不变。
+- 补充真实外部 sidecar binary 集成测试：同一测试文件覆盖 loopback TCP 与 Unix socket 两种 transport；同时加固 loopback 端口启动重试，避免临时端口竞争导致的偶发 `Connection refused`；Python endpoint allowlist 也新增非绝对 Unix socket endpoint 负向校验。
+- 同步更新 `README.md`、`AGENTS.md`、`docs/prd/rust/README.md` 与 `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md`，将 Unix socket 从待完成项移动到当前 PRD03 实现基线；production mTLS、shadow promotion 与 Python legacy 写路径最终下线仍未完成。
+- 本轮本地验证通过：`conda run -n multi_agent python -m unittest tests.integrations.test_runtime_sidecar_grpc_client`、`conda run -n multi_agent python -m compileall -q src/storage tests/integrations`、`cd native && cargo fmt --check && cargo +stable clippy -p maf_runtime_sidecar --all-targets --all-features -- -D warnings && cargo test -p maf_runtime_sidecar --all-features && cargo check --workspace --all-targets --all-features`、`git diff --check`、`conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'`、`conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_*.py'`、`cd native && cargo test --workspace --all-features`。
+
 ### 2026-05-15 — 推进 PRD02 Core/Lifecycle PyO3 facade
 
 - 按 `docs/prd/rust` 顺序在 PRD01 远端全绿后进入 PRD02：新增 `maf_core_lifecycle_pyo3` workspace crate，暴露 Core / Lifecycle contract JSON 与 lifecycle transition、target、cancel-node、late-result JSON bridge；crate 使用 `abi3-py313`，只作为 CI / 部署预构建 wheel source，不在 runtime 路径编译或下载。

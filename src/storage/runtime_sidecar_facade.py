@@ -488,7 +488,7 @@ def validate_runtime_sidecar_endpoint(
     mode_for_component(component)
     normalized_endpoint = endpoint.strip()
     parsed = urlparse(normalized_endpoint)
-    if parsed.scheme == "unix" and parsed.path:
+    if parsed.scheme == "unix" and parsed.path.startswith("/"):
         return normalized_endpoint
     if parsed.scheme in {"http", "https"} and parsed.hostname:
         hostname = parsed.hostname.lower()

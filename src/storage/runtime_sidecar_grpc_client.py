@@ -50,8 +50,24 @@ class RuntimeSidecarGrpcClient:
             allowed_hosts=allowed_hosts,
         )
         parsed = urlparse(validated_endpoint)
+        self._unix_socket_path: str | None = None
+        if parsed.scheme == "unix" and parsed.path:
+            if not hasattr(socket, "AF_UNIX"):
+                raise ValueError("runtime sidecar Unix socket endpoints are unavailable on this platform")
+            self._host = "localhost"
+            self._port = None
+            self._authority = "localhost"
+            self._unix_socket_path = parsed.path
+            validate_runtime_sidecar_config_authority(
+                "runtime_sidecar_endpoint",
+                config_source,
+                component="runtime_store",
+                cross_host=False,
+                mtls_enabled=mtls_enabled,
+            )
+            return
         if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
-            raise ValueError("runtime sidecar gRPC endpoint must be http://host:port")
+            raise ValueError("runtime sidecar gRPC endpoint must be http://host:port or unix:///path")
         validate_runtime_sidecar_config_authority(
             "runtime_sidecar_endpoint",
             config_source,
@@ -368,7 +384,7 @@ class RuntimeSidecarGrpcClient:
     def _unary(self, method: str, protobuf_payload: bytes, *, timeout_seconds: float) -> bytes:
         path = f"/maf.runtime.v1.RuntimeSidecar/{method}"
         grpc_payload = b"\x00" + struct.pack(">I", len(protobuf_payload)) + protobuf_payload
-        with socket.create_connection((self._host, self._port), timeout=timeout_seconds) as sock:
+        with self._connect(timeout_seconds=timeout_seconds) as sock:
             sock.settimeout(timeout_seconds)
             sock.sendall(_HTTP2_PREFACE)
             sock.sendall(_frame(_FRAME_SETTINGS, 0, 0, b""))
@@ -386,6 +402,20 @@ class RuntimeSidecarGrpcClient:
             sock.sendall(_frame(_FRAME_HEADERS, _FLAG_END_HEADERS, 1, header_block))
             sock.sendall(_frame(_FRAME_DATA, _FLAG_END_STREAM, 1, grpc_payload))
             return _read_grpc_response(sock)
+
+    def _connect(self, *, timeout_seconds: float) -> socket.socket:
+        if self._unix_socket_path is not None:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(timeout_seconds)
+                sock.connect(self._unix_socket_path)
+            except BaseException:
+                sock.close()
+                raise
+            return sock
+        if self._port is None:
+            raise RuntimeError("runtime sidecar TCP port is not configured")
+        return socket.create_connection((self._host, self._port), timeout=timeout_seconds)
 
 
 def _consume_response(operation_name: str, response: Mapping[str, Any]) -> None:

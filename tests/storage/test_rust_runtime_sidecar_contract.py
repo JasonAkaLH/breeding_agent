@@ -591,6 +591,16 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             ),
             "unix:///var/run/maf-runtime.sock",
         )
+        for endpoint in ("unix:relative.sock", "unix://runtime-sidecar.sock"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime_store_unavailable: Rust runtime sidecar endpoint is not internally allowlisted",
+            ):
+                validate_runtime_sidecar_endpoint(
+                    endpoint,
+                    component="runtime_store",
+                    unavailable_error_code="runtime_store_unavailable",
+                )
         self.assertEqual(
             validate_runtime_sidecar_endpoint(
                 "http://127.0.0.1:38481",

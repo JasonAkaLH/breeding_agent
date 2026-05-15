@@ -13,7 +13,7 @@
 - `src/integrations/`：LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、LLM 上下文 token 计数等外部适配 / 运行时辅助能力。
 - `skill/<domain-query>/`：可移除 数据查询 Skill bundle；manifest、领域 runtime、配置与 Skill 专属测试物理归属此目录，runtime 只通过 generic Skill loader / allowlisted platform-service handler 接入。
 - `frontend/`：React + TypeScript + Vite + Ant Design 前端业务对话台；包含 API/SSE client、状态 reducer、通用 data-query / file artifact 渲染与 Vitest 测试。
-- `native/`：Rust workspace；当前承载 runtime contract/kernel crates、Core/Lifecycle PyO3 facade crate、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter 与 sidecar proto，production provenance / enforce / legacy 下线仍需按 Rust PRD 门禁推进。
+- `native/`：Rust workspace；当前承载 runtime contract/kernel crates、Core/Lifecycle PyO3 facade crate、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter、loopback/Unix socket sidecar transport 与 sidecar proto，production provenance / enforce / legacy 下线仍需按 Rust PRD 门禁推进。
 - `tests/`：后端按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
 - `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。
 - `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归；`run_fullstack_dev.py` 可拉起前后端用于人工验证。

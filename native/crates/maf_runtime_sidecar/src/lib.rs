@@ -22,6 +22,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_stream::wrappers::TcpListenerStream;
+#[cfg(unix)]
+use tokio_stream::wrappers::UnixListenerStream;
 
 mod sqlite_adapter;
 pub use sqlite_adapter::RuntimeSidecarSqliteAdapter;
@@ -296,6 +298,7 @@ pub struct BundleRevisionResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSidecarServeConfig {
     pub listen_addr: SocketAddr,
+    pub unix_socket_path: Option<PathBuf>,
     pub sqlite_path: Option<PathBuf>,
 }
 
@@ -311,6 +314,9 @@ impl RuntimeSidecarServeConfig {
     }
 
     pub fn from_listen_addr(listen_addr: &str) -> Result<Self, RuntimeSidecarError> {
+        if let Some(path) = listen_addr.strip_prefix("unix://") {
+            return Self::from_unix_socket_path(path);
+        }
         let listen_addr = listen_addr
             .parse::<SocketAddr>()
             .map_err(|_| config_untrusted("runtime sidecar listen address is invalid"))?;
@@ -336,8 +342,33 @@ impl RuntimeSidecarServeConfig {
         }
         Ok(Self {
             listen_addr,
+            unix_socket_path: None,
             sqlite_path: None,
         })
+    }
+
+    #[cfg(unix)]
+    pub fn from_unix_socket_path(path: impl AsRef<Path>) -> Result<Self, RuntimeSidecarError> {
+        let path = path.as_ref();
+        if path.as_os_str().is_empty() || !path.is_absolute() {
+            return Err(config_untrusted(
+                "runtime sidecar unix socket path must be absolute and non-empty",
+            ));
+        }
+        Ok(Self {
+            listen_addr: DEFAULT_LISTEN_ADDR
+                .parse::<SocketAddr>()
+                .expect("default listen addr is valid"),
+            unix_socket_path: Some(path.to_path_buf()),
+            sqlite_path: None,
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn from_unix_socket_path(_path: impl AsRef<Path>) -> Result<Self, RuntimeSidecarError> {
+        Err(config_untrusted(
+            "runtime sidecar unix sockets are unavailable on this platform",
+        ))
     }
 
     pub fn with_sqlite_path(
@@ -1543,7 +1574,11 @@ pub async fn serve_runtime_sidecar(
     config: RuntimeSidecarServeConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let service = runtime_sidecar_service_from_config(&config)?;
-    serve_runtime_sidecar_service(config.listen_addr, service).await?;
+    if let Some(path) = config.unix_socket_path.as_ref() {
+        serve_runtime_sidecar_unix_socket(path, service).await?;
+    } else {
+        serve_runtime_sidecar_service(config.listen_addr, service).await?;
+    }
     Ok(())
 }
 
@@ -1555,6 +1590,28 @@ pub async fn serve_runtime_sidecar_service(
         .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
         .serve(listen_addr)
         .await
+}
+
+#[cfg(unix)]
+pub async fn serve_runtime_sidecar_unix_socket(
+    socket_path: &Path,
+    service: RuntimeSidecarGrpcService,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let listener = tokio::net::UnixListener::bind(socket_path)?;
+    let incoming = UnixListenerStream::new(listener);
+    tonic::transport::Server::builder()
+        .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
+        .serve_with_incoming(incoming)
+        .await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub async fn serve_runtime_sidecar_unix_socket(
+    _socket_path: &Path,
+    _service: RuntimeSidecarGrpcService,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    Err("runtime sidecar unix sockets are unavailable on this platform".into())
 }
 
 pub async fn serve_runtime_sidecar_with_incoming<F>(

@@ -210,6 +210,22 @@ fn serve_config_rejects_public_bind_without_mtls_support() {
     assert_eq!(error.code, "runtime_store_config_untrusted");
 }
 
+#[cfg(unix)]
+#[test]
+fn serve_config_accepts_unix_socket_endpoint_for_internal_runtime_access() {
+    let socket_path = temp_db_path("runtime-sidecar").with_extension("sock");
+    let endpoint = format!("unix://{}", socket_path.display());
+
+    let config = RuntimeSidecarServeConfig::from_listen_addr(&endpoint)
+        .expect("unix socket endpoint is an allowed internal runtime sidecar endpoint");
+
+    assert_eq!(
+        config.unix_socket_path.as_deref(),
+        Some(socket_path.as_path())
+    );
+    assert!(config.listen_addr.ip().is_loopback());
+}
+
 #[tokio::test]
 async fn sidecar_listener_accepts_generated_grpc_client_on_loopback() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
