@@ -302,13 +302,14 @@ impl RuntimeSidecarSqliteAdapter {
         }
 
         let existing = fetch_lease(&transaction, task_id)?;
-        if let Some(existing) = existing.as_ref() {
-            if existing.expires_at_ms > now_ms && existing.owner_id != owner_id {
-                return Err(RuntimeSidecarError::new(
-                    RuntimeSidecarErrorCode::RuntimeStoreLeaseConflict,
-                    "task lease is owned by another active owner",
-                ));
-            }
+        if let Some(existing) = existing.as_ref()
+            && existing.expires_at_ms > now_ms
+            && existing.owner_id != owner_id
+        {
+            return Err(RuntimeSidecarError::new(
+                RuntimeSidecarErrorCode::RuntimeStoreLeaseConflict,
+                "task lease is owned by another active owner",
+            ));
         }
         let revision = existing.as_ref().map_or(1, |lease| lease.revision + 1);
         let lease = TaskLease {

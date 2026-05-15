@@ -995,13 +995,13 @@ pub fn validate_rust_metadata(
             ));
         }
     }
-    if let Some(adapter) = metadata.get("adapter") {
-        if !allowed_rust_adapters().contains(adapter) {
-            return Err(SkillRuntimeError::new(
-                SkillRuntimeErrorCode::RustAdapterInvalid,
-                "x_runtime.rust adapter is not supported",
-            ));
-        }
+    if let Some(adapter) = metadata.get("adapter")
+        && !allowed_rust_adapters().contains(adapter)
+    {
+        return Err(SkillRuntimeError::new(
+            SkillRuntimeErrorCode::RustAdapterInvalid,
+            "x_runtime.rust adapter is not supported",
+        ));
     }
     Ok(())
 }
@@ -1504,10 +1504,9 @@ where
             &mut buffer,
             limit,
             stream_name,
-        ) {
-            if let Ok(mut state) = state_for_thread.lock() {
-                state.error = Some(error);
-            }
+        ) && let Ok(mut state) = state_for_thread.lock()
+        {
+            state.error = Some(error);
         }
         if let Ok(mut state) = state_for_thread.lock() {
             state.done = true;
