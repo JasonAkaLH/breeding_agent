@@ -106,6 +106,7 @@ class RustQualityGateTest(unittest.TestCase):
             "actions/upload-artifact@v4",
             "runs-on: ubuntu-22.04",
             "Ubuntu 22.04 x86_64",
+            "branches: [main, rust_branch]",
         ]:
             self.assertIn(required, text)
 

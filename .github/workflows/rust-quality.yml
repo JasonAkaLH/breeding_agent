@@ -12,7 +12,7 @@ on:
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
   push:
-    branches: [main]
+    branches: [main, rust_branch]
     paths:
       - "native/**"
       - "src/**/rust_contract*.py"
