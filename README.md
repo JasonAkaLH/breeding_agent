@@ -78,6 +78,8 @@ conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test
 conda run -n multi_agent python scripts/rust_artifact_provenance.py self-test
 ```
 
+CI 中的 Ubuntu 22.04 x86_64 / Python 3.13 wheel job 还会用 `cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml` 生成依赖元数据，并通过 `scripts/rust_artifact_provenance.py write-sbom`、`write-provenance` 与 `generate` 产出脱敏 SBOM、provenance 与 manifest 后上传 artifact；当前仅表示命令面和工作流配置已落地，真实远端 CI artifact、生产 allowlist 与部署 promotion 证据仍需后续流水线验证。
+
 
 - 全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime）：
 

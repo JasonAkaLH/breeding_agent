@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+### 2026-05-15 — 补齐 Rust release provenance 生成入口
+
+- 扩展 `scripts/rust_artifact_provenance.py`，新增 `write-sbom` 与 `write-provenance` 子命令，可从 `cargo metadata` 与预构建 artifact 生成脱敏 SBOM / provenance JSON，再由既有 `generate` 命令汇总 checksum、Cargo.lock digest、SBOM digest、provenance digest 与 contract/proto hash。
+- 更新 Rust quality GitHub Actions 的 Ubuntu 22.04 x86_64 / Python 3.13 Skill Runtime PyO3 wheel job，在 `maturin` + `auditwheel check` 后生成 SBOM、provenance 与 manifest，并上传 wheel release evidence artifact；当前仍未宣称远端 CI 已实际产出或生产 allowlist 已验证。
+- 补充 integration 回归测试和 README / AGENTS / Rust PRD 状态说明，继续明确真实 production provenance、coverage 报告、长时 fuzz、ops / promotion 证据仍是后续门禁。
+
 ### 2026-05-15 — 补充目标运行环境约束
 
 - 更新 `README.md`、`AGENTS.md` 与 Rust PRD 状态说明，明确项目目标运行环境为 Ubuntu 22.04.5 LTS（`GNU/Linux 6.8.0-49-generic x86_64`）、CUDA 12.6 与 NVIDIA V100 GPU；当前本地环境仅作为开发期测试与回归验证环境，macOS wheel 不能替代生产 wheel / sidecar 证据。

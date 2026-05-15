@@ -12,6 +12,8 @@ from typing import Any
 
 SCHEMA_VERSION = "maf.rust_artifact_provenance.v1"
 ALLOWLIST_SCHEMA_VERSION = "maf.rust_artifact_allowlist.v1"
+SBOM_SCHEMA_VERSION = "maf.rust_sbom.v1"
+PROVENANCE_SCHEMA_VERSION = "maf.rust_provenance.v1"
 TRUSTED_SOURCES = {
     "ci_pipeline",
     "deployment_pipeline",
@@ -122,6 +124,142 @@ def ensure_existing_file(path: Path, field_name: str) -> Path:
     return path
 
 
+def normalize_cargo_source(value: Any) -> str:
+    if value is None:
+        return "workspace"
+    if not isinstance(value, str):
+        return "other"
+    if value.startswith("registry+"):
+        return "registry"
+    if value.startswith("git+"):
+        return "git"
+    if value.startswith(("path+", "file:")):
+        return "workspace"
+    return "other"
+
+
+def normalize_dependency_kind(value: Any) -> str:
+    if value is None:
+        return "normal"
+    if isinstance(value, str) and value:
+        return value
+    return "normal"
+
+
+def dependency_summary(dependency: dict[str, Any]) -> dict[str, str]:
+    name = dependency.get("name")
+    if not isinstance(name, str) or not name:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "cargo metadata dependency is missing a string name",
+        )
+    req = dependency.get("req")
+    summary = {
+        "name": name,
+        "kind": normalize_dependency_kind(dependency.get("kind")),
+        "req": req if isinstance(req, str) and req else "*",
+        "source": normalize_cargo_source(dependency.get("source")),
+    }
+    return summary
+
+
+def package_summary(package: dict[str, Any]) -> dict[str, Any]:
+    name = package.get("name")
+    version = package.get("version")
+    if not isinstance(name, str) or not name:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "cargo metadata package is missing a string name",
+        )
+    if not isinstance(version, str) or not version:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            f"cargo metadata package {name!r} is missing a string version",
+        )
+    dependencies = package.get("dependencies", [])
+    if not isinstance(dependencies, list):
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            f"cargo metadata package {name!r} has non-list dependencies",
+        )
+    dependency_summaries: list[dict[str, str]] = []
+    for dependency in dependencies:
+        if not isinstance(dependency, dict):
+            raise ProvenanceError(
+                "rust_artifact_provenance_invalid",
+                f"cargo metadata package {name!r} contains a non-object dependency",
+            )
+        dependency_summaries.append(dependency_summary(dependency))
+    summary: dict[str, Any] = {
+        "name": name,
+        "version": version,
+        "source": normalize_cargo_source(package.get("source")),
+        "dependencies": dependency_summaries,
+    }
+    license_value = package.get("license")
+    if isinstance(license_value, str) and license_value:
+        summary["license"] = license_value
+    return summary
+
+
+def generate_sbom(args: argparse.Namespace) -> dict[str, Any]:
+    metadata = load_json(ensure_existing_file(args.cargo_metadata, "cargo_metadata"))
+    packages = metadata.get("packages")
+    if not isinstance(packages, list):
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "cargo metadata packages must be a list",
+        )
+    package_summaries: list[dict[str, Any]] = []
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ProvenanceError(
+                "rust_artifact_provenance_invalid",
+                "cargo metadata packages must contain objects",
+            )
+        package_summaries.append(package_summary(package))
+    sbom = {
+        "schema_version": SBOM_SCHEMA_VERSION,
+        "component": args.component,
+        "package_source": "cargo_metadata",
+        "packages": package_summaries,
+    }
+    validate_sbom_shape(sbom)
+    return sbom
+
+
+def generate_provenance(args: argparse.Namespace) -> dict[str, Any]:
+    artifact = ensure_existing_file(args.artifact_path, "artifact_path")
+    if args.source not in TRUSTED_SOURCES:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            f"source {args.source!r} is not an approved Rust artifact source",
+        )
+    if args.artifact_kind not in ARTIFACT_KINDS:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            f"artifact_kind {args.artifact_kind!r} is not supported",
+        )
+    provenance = {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "component": args.component,
+        "artifact_id": args.artifact_id,
+        "artifact_kind": args.artifact_kind,
+        "artifact_name": artifact.name,
+        "artifact_sha256": sha256_uri(artifact),
+        "source": args.source,
+        "git_commit": args.git_commit,
+        "toolchain": args.toolchain,
+        "target_triple": args.target_triple,
+        "build_profile": args.build_profile,
+        "cargo_features": sorted(set(args.cargo_feature or [])),
+        "contract_hashes": parse_key_value(args.contract_hash or []),
+        "proto_hashes": parse_key_value(args.proto_hash or []),
+    }
+    validate_provenance_shape(provenance)
+    return provenance
+
+
 def generate_manifest(args: argparse.Namespace) -> dict[str, Any]:
     artifact = ensure_existing_file(args.artifact_path, "artifact_path")
     cargo_lock = ensure_existing_file(args.cargo_lock, "cargo_lock")
@@ -227,6 +365,116 @@ def validate_manifest_shape(manifest: dict[str, Any]) -> None:
     reject_sensitive_metadata(manifest)
 
 
+def validate_sbom_shape(sbom: dict[str, Any]) -> None:
+    if sbom.get("schema_version") != SBOM_SCHEMA_VERSION:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "SBOM schema_version is not supported",
+        )
+    if not isinstance(sbom.get("component"), str) or not sbom["component"]:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "SBOM component must be a non-empty string",
+        )
+    packages = sbom.get("packages")
+    if not isinstance(packages, list):
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "SBOM packages must be a list",
+        )
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ProvenanceError(
+                "rust_artifact_provenance_invalid",
+                "SBOM packages must contain objects",
+            )
+        for field in ("name", "version", "source"):
+            if not isinstance(package.get(field), str) or not package[field]:
+                raise ProvenanceError(
+                    "rust_artifact_provenance_invalid",
+                    f"SBOM package field {field} must be a non-empty string",
+                )
+        dependencies = package.get("dependencies")
+        if not isinstance(dependencies, list):
+            raise ProvenanceError(
+                "rust_artifact_provenance_invalid",
+                "SBOM package dependencies must be a list",
+            )
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                raise ProvenanceError(
+                    "rust_artifact_provenance_invalid",
+                    "SBOM dependencies must contain objects",
+                )
+            for field in ("name", "kind", "req", "source"):
+                if not isinstance(dependency.get(field), str) or not dependency[field]:
+                    raise ProvenanceError(
+                        "rust_artifact_provenance_invalid",
+                        f"SBOM dependency field {field} must be a non-empty string",
+                    )
+    reject_sensitive_metadata(sbom)
+
+
+def validate_provenance_shape(provenance: dict[str, Any]) -> None:
+    required = (
+        "schema_version",
+        "component",
+        "artifact_id",
+        "artifact_kind",
+        "artifact_name",
+        "artifact_sha256",
+        "source",
+        "git_commit",
+        "toolchain",
+        "target_triple",
+        "build_profile",
+        "cargo_features",
+        "contract_hashes",
+        "proto_hashes",
+    )
+    missing = [field for field in required if field not in provenance]
+    if missing:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "provenance missing required field(s): " + ", ".join(missing),
+        )
+    if provenance["schema_version"] != PROVENANCE_SCHEMA_VERSION:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "provenance schema_version is not supported",
+        )
+    if provenance["artifact_kind"] not in ARTIFACT_KINDS:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "provenance artifact_kind is not supported",
+        )
+    if provenance["source"] not in TRUSTED_SOURCES:
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "provenance source is not trusted",
+        )
+    if not isinstance(provenance["artifact_sha256"], str) or not provenance["artifact_sha256"].startswith("sha256:"):
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "provenance artifact_sha256 must be a sha256: URI",
+        )
+    if not isinstance(provenance["cargo_features"], list) or not all(
+        isinstance(item, str) for item in provenance["cargo_features"]
+    ):
+        raise ProvenanceError(
+            "rust_artifact_provenance_invalid",
+            "provenance cargo_features must be a list of strings",
+        )
+    for field in ("contract_hashes", "proto_hashes"):
+        value = provenance[field]
+        if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            raise ProvenanceError(
+                "rust_artifact_provenance_invalid",
+                f"provenance {field} must be an object of string hashes",
+            )
+    reject_sensitive_metadata(provenance)
+
+
 def reject_sensitive_metadata(payload: Any, *, path: str = "$") -> None:
     if isinstance(payload, dict):
         for key, value in payload.items():
@@ -306,10 +554,60 @@ def run_self_test() -> None:
         cargo_lock = root / "Cargo.lock"
         sbom = root / "sbom.json"
         provenance = root / "provenance.json"
+        cargo_metadata = root / "cargo-metadata.json"
         artifact.write_bytes(b"artifact")
         cargo_lock.write_text("[[package]]\nname = \"maf\"\n", encoding="utf-8")
-        sbom.write_text("{\"bomFormat\":\"CycloneDX\"}\n", encoding="utf-8")
-        provenance.write_text("{\"builder\":\"ci\"}\n", encoding="utf-8")
+        cargo_metadata.write_text(
+            json.dumps(
+                {
+                    "packages": [
+                        {
+                            "name": "maf_skill_runtime",
+                            "version": "0.1.0",
+                            "source": None,
+                            "manifest_path": str(root / "native/Cargo.toml"),
+                            "dependencies": [
+                                {
+                                    "name": "serde",
+                                    "req": "^1",
+                                    "kind": None,
+                                    "source": "registry+https://github.com/rust-lang/crates.io-index",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        write_json(
+            sbom,
+            generate_sbom(
+                argparse.Namespace(
+                    component="maf_skill_runtime",
+                    cargo_metadata=cargo_metadata,
+                )
+            ),
+        )
+        write_json(
+            provenance,
+            generate_provenance(
+                argparse.Namespace(
+                    component="maf_skill_runtime",
+                    artifact_id="maf_skill_runtime_pyo3",
+                    artifact_kind="pyo3_wheel",
+                    artifact_path=artifact,
+                    source="ci_pipeline",
+                    git_commit="abcdef123456",
+                    toolchain="rustc 1.95.0",
+                    target_triple="x86_64-unknown-linux-gnu",
+                    build_profile="release",
+                    cargo_feature=["default"],
+                    contract_hash=["skill_runtime=maf_skill_runtime_schema_gates_20260515"],
+                    proto_hash=[],
+                )
+            ),
+        )
         args = argparse.Namespace(
             component="maf_skill_runtime",
             artifact_id="maf_skill_runtime_pyo3",
@@ -369,6 +667,29 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--proto-hash", action="append", default=[])
     generate.add_argument("--output", required=True, type=Path)
 
+    write_sbom = subparsers.add_parser("write-sbom", help="Write sanitized SBOM metadata from cargo metadata.")
+    write_sbom.add_argument("--component", required=True)
+    write_sbom.add_argument("--cargo-metadata", required=True, type=Path)
+    write_sbom.add_argument("--output", required=True, type=Path)
+
+    write_provenance = subparsers.add_parser(
+        "write-provenance",
+        help="Write sanitized build provenance for a prebuilt Rust artifact.",
+    )
+    write_provenance.add_argument("--component", required=True)
+    write_provenance.add_argument("--artifact-id", required=True)
+    write_provenance.add_argument("--artifact-kind", required=True, choices=sorted(ARTIFACT_KINDS))
+    write_provenance.add_argument("--artifact-path", required=True, type=Path)
+    write_provenance.add_argument("--source", required=True, choices=sorted(TRUSTED_SOURCES))
+    write_provenance.add_argument("--git-commit", required=True)
+    write_provenance.add_argument("--toolchain", required=True)
+    write_provenance.add_argument("--target-triple", required=True)
+    write_provenance.add_argument("--build-profile", required=True)
+    write_provenance.add_argument("--cargo-feature", action="append", default=[])
+    write_provenance.add_argument("--contract-hash", action="append", default=[])
+    write_provenance.add_argument("--proto-hash", action="append", default=[])
+    write_provenance.add_argument("--output", required=True, type=Path)
+
     validate = subparsers.add_parser("validate", help="Validate a Rust artifact manifest against an allowlist.")
     validate.add_argument("--manifest", required=True, type=Path)
     validate.add_argument("--allowlist", required=True, type=Path)
@@ -386,6 +707,16 @@ def main() -> int:
             manifest = generate_manifest(args)
             write_json(args.output, manifest)
             print("rust_artifact_provenance_manifest_generated")
+            return 0
+        if args.command == "write-sbom":
+            sbom = generate_sbom(args)
+            write_json(args.output, sbom)
+            print("rust_sbom_generated")
+            return 0
+        if args.command == "write-provenance":
+            provenance = generate_provenance(args)
+            write_json(args.output, provenance)
+            print("rust_provenance_generated")
             return 0
         if args.command == "validate":
             manifest = load_json(args.manifest)

@@ -1,6 +1,6 @@
 # Rust 工具链、构建发布与质量门禁 PRD
 
-- **状态**：部分落地（`native/` workspace、Rust 1.95.0 toolchain、首批 runtime contract/kernel crates、Runtime sidecar tonic/prost binding / binary entrypoint、Skill Runtime PyO3 `maturin` 本地 wheel build / import smoke、PRD01 Rust quality workflow、本地 gate runner、Ubuntu 22.04 x86_64 / Python 3.13 `manylinux_2_35` wheel CI 目标、artifact provenance self-check、80% / 90% `cargo-llvm-cov` threshold runner、fuzz harness manifest / compile smoke 与 MCP Phase 1 骨架已落地；真实 CI 运行结果、coverage 阈值实际报告、长时 fuzz、真实 SBOM / provenance 产物、ops 门禁仍待实现）
+- **状态**：部分落地（`native/` workspace、Rust 1.95.0 toolchain、首批 runtime contract/kernel crates、Runtime sidecar tonic/prost binding / binary entrypoint、Skill Runtime PyO3 `maturin` 本地 wheel build / import smoke、PRD01 Rust quality workflow、本地 gate runner、Ubuntu 22.04 x86_64 / Python 3.13 `manylinux_2_35` wheel CI 目标、artifact provenance self-check、SBOM / provenance / manifest 生成命令面、CI wheel artifact 上传配置、80% / 90% `cargo-llvm-cov` threshold runner、fuzz harness manifest / compile smoke 与 MCP Phase 1 骨架已落地；真实远端 CI 运行结果、coverage 阈值实际报告、长时 fuzz、真实发布 SBOM / provenance artifact allowlist、ops 门禁仍待实现）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` 第 8、10、11、12、14、15 节
 - **影响范围**：仓库根目录、现有 `native/` workspace、CI、本地开发环境、Python/Rust bridge
@@ -850,6 +850,7 @@ python scripts/run_rust_coverage_thresholds.py --run
 按模块补充：
 
 - PyO3：`maturin` wheel build smoke、Python 3.13 import smoke、panic boundary tests。
+- PyO3 release metadata：Ubuntu 22.04 x86_64 / Python 3.13 wheel job 必须在 wheel build 后执行 `cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml`，并通过 `scripts/rust_artifact_provenance.py write-sbom`、`write-provenance` 与 `generate` 生成脱敏 SBOM、provenance 与 manifest 后上传 artifact；这些命令只提供 release gate 产物生成面，进入生产仍需远端 CI artifact、allowlist 与部署 promotion 证据。
 - sidecar：Cargo binary build、Linux x86_64 image / binary smoke、binary start/health/shutdown smoke、client compatibility tests、external process manager / dev launcher smoke、proto compatibility tests、rolling upgrade compatibility matrix、golden fixtures、structured output validation tests、resource limit / backpressure / deadline / cancellation tests、config / secret / identity tests、artifact checksum / SBOM / provenance verification、benchmark / performance regression gate、runbook / alert / rollback drill evidence。
 - storage：migration fixture、SQLite compatibility tests、future PostgreSQL adapter contract tests、backup / restore / replay / migration lock drill。
 - security/path：property tests、bounded fuzz smoke、nightly / release fuzz、coverage threshold gate。
