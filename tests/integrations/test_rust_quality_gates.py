@@ -134,9 +134,6 @@ class RustQualityGateTest(unittest.TestCase):
 
         for required in [
             '[licenses]',
-            'unlicensed = "deny"',
-            'copyleft = "deny"',
-            'default = "deny"',
             'unused-allowed-license = "warn"',
             '"Apache-2.0"',
             '"Apache-2.0 WITH LLVM-exception"',
@@ -149,6 +146,13 @@ class RustQualityGateTest(unittest.TestCase):
             'ignore = true',
         ]:
             self.assertIn(required, text)
+        for removed in [
+            "unlicensed",
+            "copyleft",
+            "allow-osi-fsf-free",
+            "default =",
+        ]:
+            self.assertNotIn(removed, text)
 
     def test_docs_reference_quality_gate_runner_and_non_default_wheel_smoke(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
