@@ -747,7 +747,7 @@ fn lease_for_idempotency(
             WHERE idempotency_key = ?1
             ",
             rusqlite::params![idempotency_key],
-            |row| lease_from_row(row),
+            lease_from_row,
         )
         .optional()
         .map_err(|error| sqlite_error("select task lease idempotency key failed", error))
@@ -765,7 +765,7 @@ fn fetch_lease(
             WHERE task_id = ?1
             ",
             rusqlite::params![task_id],
-            |row| lease_from_row(row),
+            lease_from_row,
         )
         .optional()
         .map_err(|error| sqlite_error("select task lease failed", error))

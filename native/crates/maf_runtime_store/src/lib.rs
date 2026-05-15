@@ -355,8 +355,8 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
         "bundle_revision_pin",
         "bundle_revision_release",
     ]
-    .iter()
-    .map(|name| write_operation(name))
+    .into_iter()
+    .map(write_operation)
     .chain([OperationPolicy {
         name: "event_replay".to_owned(),
         kind: "read".to_owned(),
