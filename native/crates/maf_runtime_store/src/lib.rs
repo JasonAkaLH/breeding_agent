@@ -6,12 +6,14 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260515";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260515_edge_artifact";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_decommission_policy_20260515";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260515";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260515_edge_artifact";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
+pub const FEATURE_TASK_GRAPH: &str = "task_graph";
+pub const FEATURE_ARTIFACT_METADATA: &str = "artifact_metadata";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
 pub const MAX_IN_FLIGHT_CPU_MULTIPLIER: u64 = 4;
@@ -347,6 +349,8 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
     [
         "task_submit",
         "node_state_transition",
+        "task_edge_save",
+        "artifact_save",
         "event_append",
         "lease_acquire",
         "lease_renew",
@@ -357,13 +361,22 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
     ]
     .into_iter()
     .map(write_operation)
-    .chain([OperationPolicy {
-        name: "event_replay".to_owned(),
-        kind: "read".to_owned(),
-        enforce_failure: "read_only_degraded_error".to_owned(),
-        python_legacy_write_fallback: false,
-        idempotency_required: false,
-    }])
+    .chain(
+        [
+            "task_edge_list",
+            "artifact_get",
+            "artifact_list",
+            "event_replay",
+        ]
+        .into_iter()
+        .map(|name| OperationPolicy {
+            name: name.to_owned(),
+            kind: "read".to_owned(),
+            enforce_failure: "read_only_degraded_error".to_owned(),
+            python_legacy_write_fallback: false,
+            idempotency_required: false,
+        }),
+    )
     .collect()
 }
 
@@ -489,6 +502,8 @@ pub fn benchmark_policy() -> BenchmarkPolicy {
         required_operations: [
             "task_submit",
             "node_state_transition",
+            "task_edge_save",
+            "artifact_save",
             "event_append",
             "lease_acquire",
             "event_replay",
@@ -551,6 +566,8 @@ pub fn migration_policy() -> MigrationPolicy {
             "event_log",
             "lease",
             "cursor",
+            "task_edge",
+            "artifact_metadata",
             "bundle_pin",
         ]
         .iter()
@@ -607,6 +624,8 @@ pub fn decommission_policy() -> DecommissionPolicy {
         required_removed_legacy_paths: [
             "python_storage_task_write",
             "python_storage_node_write",
+            "python_storage_task_edge_write",
+            "python_storage_artifact_write",
             "python_event_append_write",
             "python_bundle_pin_write",
             "python_cancellation_token_write",
@@ -652,6 +671,8 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             FEATURE_RUNTIME_STORE.to_owned(),
             FEATURE_EVENT_LOG.to_owned(),
             FEATURE_TASK_DISPATCHER.to_owned(),
+            FEATURE_TASK_GRAPH.to_owned(),
+            FEATURE_ARTIFACT_METADATA.to_owned(),
         ],
         modes: vec!["off".to_owned(), "shadow".to_owned(), "enforce".to_owned()],
         mode_env: BTreeMap::from([
@@ -678,6 +699,8 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             ("queue_wait_ms".to_owned(), 2_000),
             ("task_submit_deadline_ms".to_owned(), 3_000),
             ("state_transition_deadline_ms".to_owned(), 2_000),
+            ("task_edge_deadline_ms".to_owned(), 2_000),
+            ("artifact_metadata_deadline_ms".to_owned(), 2_000),
             ("event_append_deadline_ms".to_owned(), 2_000),
             ("lease_deadline_ms".to_owned(), 1_000),
             ("event_replay_deadline_ms".to_owned(), 10_000),
@@ -766,6 +789,11 @@ mod tests {
             artifact.resource_limits["state_transition_deadline_ms"],
             2_000
         );
+        assert_eq!(artifact.resource_limits["task_edge_deadline_ms"], 2_000);
+        assert_eq!(
+            artifact.resource_limits["artifact_metadata_deadline_ms"],
+            2_000
+        );
         assert_eq!(artifact.resource_limits["event_append_deadline_ms"], 2_000);
         assert_eq!(artifact.resource_limits["lease_deadline_ms"], 1_000);
         assert_eq!(artifact.resource_limits["event_replay_deadline_ms"], 10_000);
@@ -850,6 +878,16 @@ mod tests {
         assert!(
             policy
                 .required_operations
+                .contains(&"task_edge_save".to_owned())
+        );
+        assert!(
+            policy
+                .required_operations
+                .contains(&"artifact_save".to_owned())
+        );
+        assert!(
+            policy
+                .required_operations
                 .contains(&"event_replay".to_owned())
         );
         assert!(
@@ -919,6 +957,8 @@ mod tests {
                 "event_log".to_owned(),
                 "lease".to_owned(),
                 "cursor".to_owned(),
+                "task_edge".to_owned(),
+                "artifact_metadata".to_owned(),
                 "bundle_pin".to_owned(),
             ]
         );
@@ -1021,6 +1061,8 @@ mod tests {
             vec![
                 "python_storage_task_write".to_owned(),
                 "python_storage_node_write".to_owned(),
+                "python_storage_task_edge_write".to_owned(),
+                "python_storage_artifact_write".to_owned(),
                 "python_event_append_write".to_owned(),
                 "python_bundle_pin_write".to_owned(),
                 "python_cancellation_token_write".to_owned(),

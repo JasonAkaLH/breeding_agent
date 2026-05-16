@@ -10,10 +10,11 @@
 
 ### 当前开发焦点：Rust Runtime 迁移按 `docs/prd/rust` 顺序推进
 
-- 当前恢复锚点是 `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md`；后续应继续 PRD03，不要跳到 PRD04。
-- PRD03 下一个待收口切片是 **edge / artifact sidecar coverage posture / implementation**：当前 Rust RuntimeSidecar 已覆盖 task submit、node transition、event append、lease、cancellation token、bundle revision 等写路径；edge / artifact 仍需在 PRD03 内明确是补独立 RPC，还是冻结为由既有 task/node 写策略覆盖的非独立 sidecar 操作。
+- 当前恢复锚点仍是 `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md`；后续应继续 PRD03，不要跳到 PRD04。
+- PRD03 的 **edge / artifact sidecar coverage posture / implementation** 已明确为补独立 RuntimeSidecar RPC，并已在本地落地 task edge save/list 与 artifact metadata save/get/list：Rust proto / service kernel / SQLite adapter、Python `RuntimeSidecarGrpcClient`、`SQLiteStorage` enforce routing / shadow audit、contract artifact 与 storage/integration 回归均已接入。
+- PRD03 剩余待收口项转为 production enforce rollout / 7 天 shadow promotion 证据、ops / migration / rollback drill 证据、远端 CI artifact / provenance 证据与 Python legacy 写路径最终下线；完成这些之前不要进入 PRD04。
 - 最新远端绿灯证据：GitHub Actions `Rust quality gates` workflow_dispatch run `25933538373`（commit `5ddbf14082baf4d8149f5f98622a96aa9eea0966`）已通过；随后证据提交 `db077bc` 已推送。
-- 当前 goal 曾被暂停；后续继续时请先读取 `CHANGELOG.md`、OMX/Ralph 状态与 `docs/prd/rust`，并以本节恢复锚点覆盖历史状态中混杂的 PRD04 残留字段。
+- 当前 Ralph goal 已按本节恢复锚点继续推进；后续若再次中断，请先读取 `CHANGELOG.md`、OMX/Ralph 状态与 `docs/prd/rust`，并以本节恢复锚点覆盖历史状态中混杂的 PRD04 残留字段。
 
 ### Rust Runtime 迁移最新进展
 
@@ -22,7 +23,7 @@
 - **PRD03 / RuntimeSidecar transport 已推进**：Rust sidecar 支持 loopback TCP、Unix domain socket 与 mTLS gRPC 入口；Python `RuntimeSidecarGrpcClient` 支持 loopback、`unix://` 与 `https://` mTLS endpoint，生产跨主机访问继续要求 mTLS / allowlist / fail-closed。
 - **PRD03 / RuntimeSidecar shadow compare 已扩展**：`SQLiteStorage` 与 API runtime 在 shadow 模式下保留 Python legacy 用户可见结果，同时旁路调用 Rust sidecar 并写入 `runtime.sidecar_shadow_diff`；审计 payload 只保留 component、operation、fingerprint、duration、状态与 allowlisted error code，避免 secret / raw payload 泄漏。
 - **PRD03 / 新增 shadow 覆盖**：cancellation token 与 Skill / MCP bundle revision pin/release 已接入 RuntimeSidecar shadow helper；sidecar 或 audit sink 失败不阻断 legacy 可见结果，enforce 路径仍保持 fail-closed。
-- **仍未完成**：PRD03 edge / artifact 口径、enforce rollout、生产 shadow promotion 证据、ops / migration / rollback drill、以及 Rust canonical 稳定后的 Python legacy 写路径下线。完成这些之前不要进入 PRD04。
+- **仍未完成**：PRD03 enforce rollout、生产 shadow promotion 证据、ops / migration / rollback drill、远端 artifact/provenance 证据，以及 Rust canonical 稳定后的 Python legacy 写路径下线。完成这些之前不要进入 PRD04。
 
 ### Rust / MCP / Skill 架构口径已冻结
 

@@ -1,6 +1,6 @@
 use crate::{
-    BundleRevisionResult, CancellationToken, EventCursor, NodeTransitionResult,
-    require_idempotency_key,
+    ArtifactRecord, BundleRevisionResult, CancellationToken, EventCursor, NodeTransitionResult,
+    TaskEdgeRecord, require_idempotency_key,
 };
 use maf_runtime_store::{RuntimeSidecarError, RuntimeSidecarErrorCode, TaskLease};
 use maf_task_dispatcher::TaskSubmitResult;
@@ -139,6 +139,232 @@ impl RuntimeSidecarSqliteAdapter {
             node_id: node_id.to_owned(),
             status: to_status.to_owned(),
         })
+    }
+
+    pub fn save_task_edge(
+        &self,
+        edge: TaskEdgeRecord,
+        idempotency_key: &str,
+    ) -> Result<TaskEdgeRecord, RuntimeSidecarError> {
+        let idempotency_key = require_idempotency_key(idempotency_key)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| sqlite_error("begin task edge save transaction failed", error))?;
+        if let Some(edge) = task_edge_for_idempotency(&transaction, &idempotency_key)? {
+            transaction
+                .commit()
+                .map_err(|error| sqlite_error("commit idempotent task edge save failed", error))?;
+            return Ok(edge);
+        }
+        transaction
+            .execute(
+                r"
+                INSERT INTO task_edges (
+                    task_id,
+                    from_node_id,
+                    to_node_id,
+                    edge_type,
+                    condition
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(task_id, from_node_id, to_node_id) DO UPDATE SET
+                    edge_type = excluded.edge_type,
+                    condition = excluded.condition
+                ",
+                rusqlite::params![
+                    &edge.task_id,
+                    &edge.from_node_id,
+                    &edge.to_node_id,
+                    &edge.edge_type,
+                    &edge.condition,
+                ],
+            )
+            .map_err(|error| sqlite_error("upsert task edge failed", error))?;
+        transaction
+            .execute(
+                r"
+                INSERT INTO task_edge_idempotency (
+                    idempotency_key,
+                    task_id,
+                    from_node_id,
+                    to_node_id,
+                    edge_type,
+                    condition
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ",
+                rusqlite::params![
+                    &idempotency_key,
+                    &edge.task_id,
+                    &edge.from_node_id,
+                    &edge.to_node_id,
+                    &edge.edge_type,
+                    &edge.condition,
+                ],
+            )
+            .map_err(|error| sqlite_error("insert task edge idempotency key failed", error))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit task edge save failed", error))?;
+        Ok(edge)
+    }
+
+    pub fn list_task_edges(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<TaskEdgeRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                r"
+                SELECT task_id, from_node_id, to_node_id, edge_type, condition
+                FROM task_edges
+                WHERE task_id = ?1
+                ORDER BY from_node_id, to_node_id
+                ",
+            )
+            .map_err(|error| sqlite_error("prepare task edge list failed", error))?;
+        let rows = statement
+            .query_map(rusqlite::params![task_id], task_edge_from_row)
+            .map_err(|error| sqlite_error("query task edge list failed", error))?;
+        let mut edges = Vec::new();
+        for row in rows {
+            edges.push(row.map_err(|error| sqlite_error("read task edge row failed", error))?);
+        }
+        Ok(edges)
+    }
+
+    pub fn save_artifact(
+        &self,
+        artifact: ArtifactRecord,
+        idempotency_key: &str,
+    ) -> Result<ArtifactRecord, RuntimeSidecarError> {
+        let idempotency_key = require_idempotency_key(idempotency_key)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| sqlite_error("begin artifact save transaction failed", error))?;
+        if let Some(artifact) = artifact_for_idempotency(&transaction, &idempotency_key)? {
+            transaction
+                .commit()
+                .map_err(|error| sqlite_error("commit idempotent artifact save failed", error))?;
+            return Ok(artifact);
+        }
+        transaction
+            .execute(
+                r"
+                INSERT INTO artifacts (
+                    artifact_id,
+                    task_id,
+                    producer_node_id,
+                    artifact_type,
+                    storage_ref,
+                    summary,
+                    is_complete,
+                    created_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(artifact_id) DO UPDATE SET
+                    task_id = excluded.task_id,
+                    producer_node_id = excluded.producer_node_id,
+                    artifact_type = excluded.artifact_type,
+                    storage_ref = excluded.storage_ref,
+                    summary = excluded.summary,
+                    is_complete = excluded.is_complete,
+                    created_at = excluded.created_at
+                ",
+                rusqlite::params![
+                    &artifact.artifact_id,
+                    &artifact.task_id,
+                    &artifact.producer_node_id,
+                    &artifact.artifact_type,
+                    &artifact.storage_ref,
+                    &artifact.summary,
+                    if artifact.is_complete { 1 } else { 0 },
+                    &artifact.created_at,
+                ],
+            )
+            .map_err(|error| sqlite_error("upsert artifact failed", error))?;
+        transaction
+            .execute(
+                r"
+                INSERT INTO artifact_idempotency (
+                    idempotency_key,
+                    artifact_id,
+                    task_id,
+                    producer_node_id,
+                    artifact_type,
+                    storage_ref,
+                    summary,
+                    is_complete,
+                    created_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                ",
+                rusqlite::params![
+                    &idempotency_key,
+                    &artifact.artifact_id,
+                    &artifact.task_id,
+                    &artifact.producer_node_id,
+                    &artifact.artifact_type,
+                    &artifact.storage_ref,
+                    &artifact.summary,
+                    if artifact.is_complete { 1 } else { 0 },
+                    &artifact.created_at,
+                ],
+            )
+            .map_err(|error| sqlite_error("insert artifact idempotency key failed", error))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit artifact save failed", error))?;
+        Ok(artifact)
+    }
+
+    pub fn get_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<ArtifactRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                r"
+                SELECT artifact_id, task_id, producer_node_id, artifact_type, storage_ref,
+                       summary, is_complete, created_at
+                FROM artifacts
+                WHERE artifact_id = ?1
+                ",
+                rusqlite::params![artifact_id],
+                artifact_from_row,
+            )
+            .optional()
+            .map_err(|error| sqlite_error("select artifact failed", error))
+    }
+
+    pub fn list_artifacts_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<ArtifactRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                r"
+                SELECT artifact_id, task_id, producer_node_id, artifact_type, storage_ref,
+                       summary, is_complete, created_at
+                FROM artifacts
+                WHERE task_id = ?1
+                ORDER BY created_at, artifact_id
+                ",
+            )
+            .map_err(|error| sqlite_error("prepare artifact list failed", error))?;
+        let rows = statement
+            .query_map(rusqlite::params![task_id], artifact_from_row)
+            .map_err(|error| sqlite_error("query artifact list failed", error))?;
+        let mut artifacts = Vec::new();
+        for row in rows {
+            artifacts.push(row.map_err(|error| sqlite_error("read artifact row failed", error))?);
+        }
+        Ok(artifacts)
     }
 
     pub fn append_event(
@@ -607,6 +833,43 @@ impl RuntimeSidecarSqliteAdapter {
                     node_id TEXT NOT NULL,
                     status TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS task_edges (
+                    task_id TEXT NOT NULL,
+                    from_node_id TEXT NOT NULL,
+                    to_node_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    condition TEXT NOT NULL,
+                    PRIMARY KEY (task_id, from_node_id, to_node_id)
+                );
+                CREATE TABLE IF NOT EXISTS task_edge_idempotency (
+                    idempotency_key TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    from_node_id TEXT NOT NULL,
+                    to_node_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    condition TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    producer_node_id TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    storage_ref TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    is_complete INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS artifact_idempotency (
+                    idempotency_key TEXT PRIMARY KEY,
+                    artifact_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    producer_node_id TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    storage_ref TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    is_complete INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS runtime_events (
                     conversation_id TEXT NOT NULL,
                     task_id TEXT NOT NULL,
@@ -708,6 +971,66 @@ fn node_transition_for_idempotency(
         )
         .optional()
         .map_err(|error| sqlite_error("select node transition idempotency key failed", error))
+}
+
+fn task_edge_for_idempotency(
+    connection: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<TaskEdgeRecord>, RuntimeSidecarError> {
+    connection
+        .query_row(
+            r"
+            SELECT task_id, from_node_id, to_node_id, edge_type, condition
+            FROM task_edge_idempotency
+            WHERE idempotency_key = ?1
+            ",
+            rusqlite::params![idempotency_key],
+            task_edge_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("select task edge idempotency key failed", error))
+}
+
+fn task_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEdgeRecord> {
+    Ok(TaskEdgeRecord {
+        task_id: row.get(0)?,
+        from_node_id: row.get(1)?,
+        to_node_id: row.get(2)?,
+        edge_type: row.get(3)?,
+        condition: row.get(4)?,
+    })
+}
+
+fn artifact_for_idempotency(
+    connection: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<ArtifactRecord>, RuntimeSidecarError> {
+    connection
+        .query_row(
+            r"
+            SELECT artifact_id, task_id, producer_node_id, artifact_type, storage_ref,
+                   summary, is_complete, created_at
+            FROM artifact_idempotency
+            WHERE idempotency_key = ?1
+            ",
+            rusqlite::params![idempotency_key],
+            artifact_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("select artifact idempotency key failed", error))
+}
+
+fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRecord> {
+    Ok(ArtifactRecord {
+        artifact_id: row.get(0)?,
+        task_id: row.get(1)?,
+        producer_node_id: row.get(2)?,
+        artifact_type: row.get(3)?,
+        storage_ref: row.get(4)?,
+        summary: row.get(5)?,
+        is_complete: row.get::<_, i64>(6)? != 0,
+        created_at: row.get(7)?,
+    })
 }
 
 fn event_cursor_for_idempotency(

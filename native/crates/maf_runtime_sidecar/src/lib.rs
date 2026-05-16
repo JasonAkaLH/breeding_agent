@@ -6,10 +6,10 @@
 
 use maf_event_log::EventLog;
 use maf_runtime_store::{
-    ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_EVENT_LOG,
-    FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER, LeaseRegistry,
-    PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError, RuntimeSidecarErrorCode,
-    SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
+    ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_ARTIFACT_METADATA,
+    FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER, FEATURE_TASK_GRAPH,
+    LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError,
+    RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
 };
 use maf_task_dispatcher::{
     TaskDispatcher, TaskSubmitRequest as DispatcherTaskSubmitRequest, TaskSubmitResult,
@@ -158,6 +158,79 @@ pub struct TransitionNodeRequest {
 pub struct TransitionNodeResponse {
     pub node_id: String,
     pub status: String,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskEdgeRecord {
+    pub task_id: String,
+    pub from_node_id: String,
+    pub to_node_id: String,
+    pub edge_type: String,
+    pub condition: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaveTaskEdgeRequest {
+    pub edge: TaskEdgeRecord,
+    pub idempotency: Option<Idempotency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskEdgeResponse {
+    pub edge: Option<TaskEdgeRecord>,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListTaskEdgesRequest {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListTaskEdgesResponse {
+    pub edges: Vec<TaskEdgeRecord>,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRecord {
+    pub artifact_id: String,
+    pub task_id: String,
+    pub producer_node_id: String,
+    pub artifact_type: String,
+    pub storage_ref: String,
+    pub summary: String,
+    pub is_complete: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaveArtifactRequest {
+    pub artifact: ArtifactRecord,
+    pub idempotency: Option<Idempotency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetArtifactRequest {
+    pub artifact_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactResponse {
+    pub artifact: Option<ArtifactRecord>,
+    pub found: bool,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListArtifactsForTaskRequest {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListArtifactsForTaskResponse {
+    pub artifacts: Vec<ArtifactRecord>,
     pub error: Option<TypedErrorEnvelope>,
 }
 
@@ -518,12 +591,16 @@ pub struct RuntimeSidecarKernel {
     event_log: EventLog,
     leases: LeaseRegistry,
     node_statuses: BTreeMap<(String, String), String>,
+    task_edges: BTreeMap<(String, String, String), TaskEdgeRecord>,
+    artifacts: BTreeMap<String, ArtifactRecord>,
     cancellation_tokens: BTreeMap<String, CancellationToken>,
     bundle_pins: BTreeMap<(String, String), BundlePin>,
     event_append_idempotency: BTreeMap<String, EventCursor>,
     lease_acquire_idempotency: BTreeMap<String, TaskLease>,
     task_submit_idempotency: BTreeMap<String, TaskSubmitResult>,
     node_transition_idempotency: BTreeMap<String, NodeTransitionResult>,
+    task_edge_idempotency: BTreeMap<String, TaskEdgeRecord>,
+    artifact_idempotency: BTreeMap<String, ArtifactRecord>,
     cancellation_idempotency: BTreeMap<String, bool>,
     bundle_revision_idempotency: BTreeMap<String, BundleRevisionResult>,
     compatibility_handshake_passed: bool,
@@ -544,12 +621,16 @@ impl RuntimeSidecarKernel {
             event_log: EventLog::new(),
             leases: LeaseRegistry::new(),
             node_statuses: BTreeMap::new(),
+            task_edges: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
             cancellation_tokens: BTreeMap::new(),
             bundle_pins: BTreeMap::new(),
             event_append_idempotency: BTreeMap::new(),
             lease_acquire_idempotency: BTreeMap::new(),
             task_submit_idempotency: BTreeMap::new(),
             node_transition_idempotency: BTreeMap::new(),
+            task_edge_idempotency: BTreeMap::new(),
+            artifact_idempotency: BTreeMap::new(),
             cancellation_idempotency: BTreeMap::new(),
             bundle_revision_idempotency: BTreeMap::new(),
             compatibility_handshake_passed: false,
@@ -710,6 +791,67 @@ impl RuntimeSidecarKernel {
         self.node_transition_idempotency
             .insert(idempotency_key, result.clone());
         Ok(result)
+    }
+
+    pub fn save_task_edge(
+        &mut self,
+        edge: TaskEdgeRecord,
+        idempotency_key: impl Into<String>,
+    ) -> Result<TaskEdgeRecord, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        let idempotency_key = require_idempotency_key(idempotency_key)?;
+        if let Some(result) = self.task_edge_idempotency.get(&idempotency_key) {
+            return Ok(result.clone());
+        }
+        let key = (
+            edge.task_id.clone(),
+            edge.from_node_id.clone(),
+            edge.to_node_id.clone(),
+        );
+        self.task_edges.insert(key, edge.clone());
+        self.task_edge_idempotency
+            .insert(idempotency_key, edge.clone());
+        Ok(edge)
+    }
+
+    #[must_use]
+    pub fn list_task_edges(&self, task_id: &str) -> Vec<TaskEdgeRecord> {
+        self.task_edges
+            .values()
+            .filter(|edge| edge.task_id == task_id)
+            .cloned()
+            .collect()
+    }
+
+    pub fn save_artifact(
+        &mut self,
+        artifact: ArtifactRecord,
+        idempotency_key: impl Into<String>,
+    ) -> Result<ArtifactRecord, RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        let idempotency_key = require_idempotency_key(idempotency_key)?;
+        if let Some(result) = self.artifact_idempotency.get(&idempotency_key) {
+            return Ok(result.clone());
+        }
+        self.artifacts
+            .insert(artifact.artifact_id.clone(), artifact.clone());
+        self.artifact_idempotency
+            .insert(idempotency_key, artifact.clone());
+        Ok(artifact)
+    }
+
+    #[must_use]
+    pub fn get_artifact(&self, artifact_id: &str) -> Option<ArtifactRecord> {
+        self.artifacts.get(artifact_id).cloned()
+    }
+
+    #[must_use]
+    pub fn list_artifacts_for_task(&self, task_id: &str) -> Vec<ArtifactRecord> {
+        self.artifacts
+            .values()
+            .filter(|artifact| artifact.task_id == task_id)
+            .cloned()
+            .collect()
     }
 
     pub fn append_event(
@@ -955,6 +1097,10 @@ impl RuntimeSidecarService {
         self.kernel.begin_shutdown_drain(now_ms);
     }
 
+    fn ensure_accepting_writes(&self) -> Result<(), RuntimeSidecarError> {
+        self.kernel.ensure_accepting_writes()
+    }
+
     pub fn check_compatibility(
         &mut self,
         request: CompatibilityCheckRequest,
@@ -1012,6 +1158,66 @@ impl RuntimeSidecarService {
                 status: String::new(),
                 error: Some(TypedErrorEnvelope::from(error)),
             },
+        }
+    }
+
+    pub fn save_task_edge(&mut self, request: SaveTaskEdgeRequest) -> TaskEdgeResponse {
+        match self
+            .kernel
+            .save_task_edge(request.edge, idempotency_key(request.idempotency))
+        {
+            Ok(edge) => TaskEdgeResponse {
+                edge: Some(edge),
+                error: None,
+            },
+            Err(error) => TaskEdgeResponse {
+                edge: None,
+                error: Some(TypedErrorEnvelope::from(error)),
+            },
+        }
+    }
+
+    pub fn list_task_edges(&self, request: ListTaskEdgesRequest) -> ListTaskEdgesResponse {
+        ListTaskEdgesResponse {
+            edges: self.kernel.list_task_edges(&request.task_id),
+            error: None,
+        }
+    }
+
+    pub fn save_artifact(&mut self, request: SaveArtifactRequest) -> ArtifactResponse {
+        match self
+            .kernel
+            .save_artifact(request.artifact, idempotency_key(request.idempotency))
+        {
+            Ok(artifact) => ArtifactResponse {
+                artifact: Some(artifact),
+                found: true,
+                error: None,
+            },
+            Err(error) => ArtifactResponse {
+                artifact: None,
+                found: false,
+                error: Some(TypedErrorEnvelope::from(error)),
+            },
+        }
+    }
+
+    pub fn get_artifact(&self, request: GetArtifactRequest) -> ArtifactResponse {
+        let artifact = self.kernel.get_artifact(&request.artifact_id);
+        ArtifactResponse {
+            found: artifact.is_some(),
+            artifact,
+            error: None,
+        }
+    }
+
+    pub fn list_artifacts_for_task(
+        &self,
+        request: ListArtifactsForTaskRequest,
+    ) -> ListArtifactsForTaskResponse {
+        ListArtifactsForTaskResponse {
+            artifacts: self.kernel.list_artifacts_for_task(&request.task_id),
+            error: None,
         }
     }
 
@@ -1222,6 +1428,19 @@ impl RuntimeSidecarGrpcService {
             .lock()
             .map_err(|_| tonic::Status::internal("runtime sidecar service lock is poisoned"))
     }
+
+    fn run_sqlite_write<T>(
+        &self,
+        write: impl FnOnce() -> Result<T, RuntimeSidecarError>,
+    ) -> Result<Result<T, RuntimeSidecarError>, tonic::Status> {
+        let inner = self.lock()?;
+        if let Err(error) = inner.ensure_accepting_writes() {
+            return Ok(Err(error));
+        }
+        let result = write();
+        drop(inner);
+        Ok(result)
+    }
 }
 
 #[tonic::async_trait]
@@ -1292,11 +1511,13 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::SubmitTaskResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.submit_task(
-                &request.task_id,
-                &request.conversation_id,
-                &pb_idempotency_key(request.idempotency),
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.submit_task(
+                    &request.task_id,
+                    &request.conversation_id,
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
                 Ok(result) => SubmitTaskResponse {
                     task_id: result.task_id,
                     duplicate: result.duplicate,
@@ -1332,12 +1553,14 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::TransitionNodeResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.transition_node(
-                &request.task_id,
-                &request.node_id,
-                &request.to_status,
-                &pb_idempotency_key(request.idempotency),
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.transition_node(
+                    &request.task_id,
+                    &request.node_id,
+                    &request.to_status,
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
                 Ok(result) => TransitionNodeResponse {
                     node_id: result.node_id,
                     status: result.status,
@@ -1368,20 +1591,167 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
         }))
     }
 
+    async fn save_task_edge(
+        &self,
+        request: tonic::Request<runtime_pb::SaveTaskEdgeRequest>,
+    ) -> Result<tonic::Response<runtime_pb::TaskEdgeResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let edge = request.edge.map(task_edge_from_pb).unwrap_or_default();
+        if let Some(adapter) = &self.sqlite_adapter {
+            let response = match self.run_sqlite_write(|| {
+                adapter.save_task_edge(
+                    edge.clone(),
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
+                Ok(edge) => TaskEdgeResponse {
+                    edge: Some(edge),
+                    error: None,
+                },
+                Err(error) => TaskEdgeResponse {
+                    edge: None,
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            };
+            return Ok(tonic::Response::new(task_edge_response_to_pb(response)));
+        }
+        let response = self.lock()?.save_task_edge(SaveTaskEdgeRequest {
+            edge,
+            idempotency: request.idempotency.map(idempotency_from_pb),
+        });
+        Ok(tonic::Response::new(task_edge_response_to_pb(response)))
+    }
+
+    async fn list_task_edges(
+        &self,
+        request: tonic::Request<runtime_pb::ListTaskEdgesRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ListTaskEdgesResponse>, tonic::Status> {
+        let request = request.into_inner();
+        if let Some(adapter) = &self.sqlite_adapter {
+            let response = match adapter.list_task_edges(&request.task_id) {
+                Ok(edges) => ListTaskEdgesResponse { edges, error: None },
+                Err(error) => ListTaskEdgesResponse {
+                    edges: Vec::new(),
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            };
+            return Ok(tonic::Response::new(list_task_edges_response_to_pb(
+                response,
+            )));
+        }
+        let response = self.lock()?.list_task_edges(ListTaskEdgesRequest {
+            task_id: request.task_id,
+        });
+        Ok(tonic::Response::new(list_task_edges_response_to_pb(
+            response,
+        )))
+    }
+
+    async fn save_artifact(
+        &self,
+        request: tonic::Request<runtime_pb::SaveArtifactRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ArtifactResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let artifact = request.artifact.map(artifact_from_pb).unwrap_or_default();
+        if let Some(adapter) = &self.sqlite_adapter {
+            let response = match self.run_sqlite_write(|| {
+                adapter.save_artifact(
+                    artifact.clone(),
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
+                Ok(artifact) => ArtifactResponse {
+                    artifact: Some(artifact),
+                    found: true,
+                    error: None,
+                },
+                Err(error) => ArtifactResponse {
+                    artifact: None,
+                    found: false,
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            };
+            return Ok(tonic::Response::new(artifact_response_to_pb(response)));
+        }
+        let response = self.lock()?.save_artifact(SaveArtifactRequest {
+            artifact,
+            idempotency: request.idempotency.map(idempotency_from_pb),
+        });
+        Ok(tonic::Response::new(artifact_response_to_pb(response)))
+    }
+
+    async fn get_artifact(
+        &self,
+        request: tonic::Request<runtime_pb::GetArtifactRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ArtifactResponse>, tonic::Status> {
+        let request = request.into_inner();
+        if let Some(adapter) = &self.sqlite_adapter {
+            let response = match adapter.get_artifact(&request.artifact_id) {
+                Ok(artifact) => ArtifactResponse {
+                    found: artifact.is_some(),
+                    artifact,
+                    error: None,
+                },
+                Err(error) => ArtifactResponse {
+                    artifact: None,
+                    found: false,
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            };
+            return Ok(tonic::Response::new(artifact_response_to_pb(response)));
+        }
+        let response = self.lock()?.get_artifact(GetArtifactRequest {
+            artifact_id: request.artifact_id,
+        });
+        Ok(tonic::Response::new(artifact_response_to_pb(response)))
+    }
+
+    async fn list_artifacts_for_task(
+        &self,
+        request: tonic::Request<runtime_pb::ListArtifactsForTaskRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ListArtifactsForTaskResponse>, tonic::Status> {
+        let request = request.into_inner();
+        if let Some(adapter) = &self.sqlite_adapter {
+            let response = match adapter.list_artifacts_for_task(&request.task_id) {
+                Ok(artifacts) => ListArtifactsForTaskResponse {
+                    artifacts,
+                    error: None,
+                },
+                Err(error) => ListArtifactsForTaskResponse {
+                    artifacts: Vec::new(),
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            };
+            return Ok(tonic::Response::new(list_artifacts_response_to_pb(
+                response,
+            )));
+        }
+        let response = self
+            .lock()?
+            .list_artifacts_for_task(ListArtifactsForTaskRequest {
+                task_id: request.task_id,
+            });
+        Ok(tonic::Response::new(list_artifacts_response_to_pb(
+            response,
+        )))
+    }
+
     async fn append_event(
         &self,
         request: tonic::Request<runtime_pb::AppendEventRequest>,
     ) -> Result<tonic::Response<runtime_pb::AppendEventResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.append_event(
-                &request.conversation_id,
-                &request.task_id,
-                &request.event_type,
-                request.payload_json,
-                0,
-                &pb_idempotency_key(request.idempotency),
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.append_event(
+                    &request.conversation_id,
+                    &request.task_id,
+                    &request.event_type,
+                    request.payload_json.clone(),
+                    0,
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
                 Ok(cursor) => AppendEventResponse {
                     cursor: Some(cursor),
                     error: None,
@@ -1461,13 +1831,15 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::LeaseResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.acquire_lease(
-                &request.task_id,
-                &request.owner_id,
-                request.now_ms,
-                request.ttl_ms,
-                &pb_idempotency_key(request.idempotency),
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.acquire_lease(
+                    &request.task_id,
+                    &request.owner_id,
+                    request.now_ms,
+                    request.ttl_ms,
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
                 Ok(lease) => LeaseResponse {
                     lease: Some(lease),
                     error: None,
@@ -1495,12 +1867,14 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::LeaseResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.renew_lease(
-                &request.task_id,
-                &request.renew_token,
-                request.now_ms,
-                request.ttl_ms,
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.renew_lease(
+                    &request.task_id,
+                    &request.renew_token,
+                    request.now_ms,
+                    request.ttl_ms,
+                )
+            })? {
                 Ok(lease) => LeaseResponse {
                     lease: Some(lease),
                     error: None,
@@ -1527,7 +1901,9 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::ReleaseLeaseResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.release_lease(&request.task_id, &request.renew_token) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.release_lease(&request.task_id, &request.renew_token)
+            })? {
                 Ok(released) => ReleaseLeaseResponse {
                     released,
                     error: None,
@@ -1558,13 +1934,15 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::WriteCancellationTokenResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.write_cancellation_token(
-                &request.task_id,
-                request.requested_at_ms,
-                &request.reason,
-                &request.terminal_policy,
-                &pb_idempotency_key(request.idempotency),
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.write_cancellation_token(
+                    &request.task_id,
+                    request.requested_at_ms,
+                    &request.reason,
+                    &request.terminal_policy,
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
                 Ok(written) => WriteCancellationTokenResponse {
                     written,
                     error: None,
@@ -1604,12 +1982,14 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::BundleRevisionResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.pin_bundle_revision(
-                &request.task_id,
-                &request.bundle_kind,
-                &request.revision,
-                &pb_idempotency_key(request.idempotency),
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.pin_bundle_revision(
+                    &request.task_id,
+                    &request.bundle_kind,
+                    &request.revision,
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
                 Ok(result) => BundleRevisionResponse {
                     result: Some(result),
                     error: None,
@@ -1640,13 +2020,15 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::BundleRevisionResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match adapter.release_bundle_revision(
-                &request.task_id,
-                &request.bundle_kind,
-                &request.revision,
-                request.released_at_ms,
-                &pb_idempotency_key(request.idempotency),
-            ) {
+            let response = match self.run_sqlite_write(|| {
+                adapter.release_bundle_revision(
+                    &request.task_id,
+                    &request.bundle_kind,
+                    &request.revision,
+                    request.released_at_ms,
+                    &pb_idempotency_key(request.idempotency.clone()),
+                )
+            })? {
                 Ok(result) => BundleRevisionResponse {
                     result: Some(result),
                     error: None,
@@ -1761,6 +2143,8 @@ pub fn supported_features() -> Vec<String> {
         FEATURE_RUNTIME_STORE.to_owned(),
         FEATURE_EVENT_LOG.to_owned(),
         FEATURE_TASK_DISPATCHER.to_owned(),
+        FEATURE_TASK_GRAPH.to_owned(),
+        FEATURE_ARTIFACT_METADATA.to_owned(),
     ]
 }
 
@@ -1851,6 +2235,85 @@ fn cursor_to_pb(cursor: EventCursor) -> runtime_pb::EventCursor {
         task_id: cursor.task_id,
         sequence: cursor.sequence,
         created_at_ms: cursor.created_at_ms,
+    }
+}
+
+fn task_edge_from_pb(edge: runtime_pb::TaskEdgeRecord) -> TaskEdgeRecord {
+    TaskEdgeRecord {
+        task_id: edge.task_id,
+        from_node_id: edge.from_node_id,
+        to_node_id: edge.to_node_id,
+        edge_type: edge.edge_type,
+        condition: edge.condition,
+    }
+}
+
+fn task_edge_to_pb(edge: TaskEdgeRecord) -> runtime_pb::TaskEdgeRecord {
+    runtime_pb::TaskEdgeRecord {
+        task_id: edge.task_id,
+        from_node_id: edge.from_node_id,
+        to_node_id: edge.to_node_id,
+        edge_type: edge.edge_type,
+        condition: edge.condition,
+    }
+}
+
+fn task_edge_response_to_pb(response: TaskEdgeResponse) -> runtime_pb::TaskEdgeResponse {
+    runtime_pb::TaskEdgeResponse {
+        edge: response.edge.map(task_edge_to_pb),
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+fn list_task_edges_response_to_pb(
+    response: ListTaskEdgesResponse,
+) -> runtime_pb::ListTaskEdgesResponse {
+    runtime_pb::ListTaskEdgesResponse {
+        edges: response.edges.into_iter().map(task_edge_to_pb).collect(),
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+fn artifact_from_pb(artifact: runtime_pb::ArtifactRecord) -> ArtifactRecord {
+    ArtifactRecord {
+        artifact_id: artifact.artifact_id,
+        task_id: artifact.task_id,
+        producer_node_id: artifact.producer_node_id,
+        artifact_type: artifact.artifact_type,
+        storage_ref: artifact.storage_ref,
+        summary: artifact.summary,
+        is_complete: artifact.is_complete,
+        created_at: artifact.created_at,
+    }
+}
+
+fn artifact_to_pb(artifact: ArtifactRecord) -> runtime_pb::ArtifactRecord {
+    runtime_pb::ArtifactRecord {
+        artifact_id: artifact.artifact_id,
+        task_id: artifact.task_id,
+        producer_node_id: artifact.producer_node_id,
+        artifact_type: artifact.artifact_type,
+        storage_ref: artifact.storage_ref,
+        summary: artifact.summary,
+        is_complete: artifact.is_complete,
+        created_at: artifact.created_at,
+    }
+}
+
+fn artifact_response_to_pb(response: ArtifactResponse) -> runtime_pb::ArtifactResponse {
+    runtime_pb::ArtifactResponse {
+        artifact: response.artifact.map(artifact_to_pb),
+        found: response.found,
+        error: response.error.map(typed_error_to_pb),
+    }
+}
+
+fn list_artifacts_response_to_pb(
+    response: ListArtifactsForTaskResponse,
+) -> runtime_pb::ListArtifactsForTaskResponse {
+    runtime_pb::ListArtifactsForTaskResponse {
+        artifacts: response.artifacts.into_iter().map(artifact_to_pb).collect(),
+        error: response.error.map(typed_error_to_pb),
     }
 }
 

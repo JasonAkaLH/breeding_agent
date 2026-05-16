@@ -80,6 +80,115 @@ async fn tonic_service_maps_pb_requests_to_rust_adapter_envelopes() {
 }
 
 #[tokio::test]
+async fn sqlite_backed_tonic_service_rejects_writes_after_shutdown_drain() {
+    let db_path = temp_db_path("grpc-sqlite-drain");
+    let service = RuntimeSidecarGrpcService::with_sqlite_adapter(
+        RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter"),
+    );
+
+    let before_drain = service
+        .append_event(Request::new(runtime_pb::AppendEventRequest {
+            conversation_id: "conv".to_owned(),
+            task_id: "task".to_owned(),
+            event_type: "task.accepted".to_owned(),
+            payload_json: b"{}".to_vec(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "event-before-drain".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 2_000,
+            }),
+        }))
+        .await
+        .expect("append before drain")
+        .into_inner();
+    assert!(before_drain.error.is_none());
+
+    service.begin_shutdown_drain(100);
+
+    let submit = service
+        .submit_task(Request::new(runtime_pb::SubmitTaskRequest {
+            task_id: "task-after-drain".to_owned(),
+            conversation_id: "conv".to_owned(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "task-after-drain".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 3_000,
+            }),
+        }))
+        .await
+        .expect("submit rejected in envelope")
+        .into_inner();
+    assert_runtime_unavailable(submit.error);
+    assert!(submit.task_id.is_empty());
+
+    let edge = service
+        .save_task_edge(Request::new(runtime_pb::SaveTaskEdgeRequest {
+            edge: Some(runtime_pb::TaskEdgeRecord {
+                task_id: "task".to_owned(),
+                from_node_id: "node-a".to_owned(),
+                to_node_id: "node-b".to_owned(),
+                edge_type: "data".to_owned(),
+                condition: "".to_owned(),
+            }),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "edge-after-drain".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 2_000,
+            }),
+        }))
+        .await
+        .expect("edge rejected in envelope")
+        .into_inner();
+    assert_runtime_unavailable(edge.error);
+    assert!(edge.edge.is_none());
+
+    let artifact = service
+        .save_artifact(Request::new(runtime_pb::SaveArtifactRequest {
+            artifact: Some(runtime_pb::ArtifactRecord {
+                artifact_id: "artifact-after-drain".to_owned(),
+                task_id: "task".to_owned(),
+                producer_node_id: "node-b".to_owned(),
+                artifact_type: "json".to_owned(),
+                storage_ref: "opaque://artifact".to_owned(),
+                summary: "summary".to_owned(),
+                is_complete: true,
+                created_at: "".to_owned(),
+            }),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "artifact-after-drain".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 2_000,
+            }),
+        }))
+        .await
+        .expect("artifact rejected in envelope")
+        .into_inner();
+    assert_runtime_unavailable(artifact.error);
+    assert!(artifact.artifact.is_none());
+    assert!(!artifact.found);
+
+    let append = service
+        .append_event(Request::new(runtime_pb::AppendEventRequest {
+            conversation_id: "conv".to_owned(),
+            task_id: "task".to_owned(),
+            event_type: "during-drain".to_owned(),
+            payload_json: b"{}".to_vec(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "event-after-drain".to_owned(),
+                owner: "python-runtime".to_owned(),
+                deadline_ms: 2_000,
+            }),
+        }))
+        .await
+        .expect("append rejected in envelope")
+        .into_inner();
+    assert_runtime_unavailable(append.error);
+    assert!(append.cursor.is_none());
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
     let db_path = temp_db_path("grpc-sqlite");
     {
@@ -102,6 +211,49 @@ async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
             .expect("append")
             .into_inner();
         assert_eq!(append.cursor.expect("cursor").sequence, 1);
+
+        let edge = service
+            .save_task_edge(Request::new(runtime_pb::SaveTaskEdgeRequest {
+                edge: Some(runtime_pb::TaskEdgeRecord {
+                    task_id: "task".to_owned(),
+                    from_node_id: "node-a".to_owned(),
+                    to_node_id: "node-b".to_owned(),
+                    edge_type: "data".to_owned(),
+                    condition: "".to_owned(),
+                }),
+                idempotency: Some(runtime_pb::Idempotency {
+                    key: "edge-1".to_owned(),
+                    owner: "python-runtime".to_owned(),
+                    deadline_ms: 2_000,
+                }),
+            }))
+            .await
+            .expect("save edge")
+            .into_inner();
+        assert_eq!(edge.edge.expect("edge").from_node_id, "node-a");
+
+        let artifact = service
+            .save_artifact(Request::new(runtime_pb::SaveArtifactRequest {
+                artifact: Some(runtime_pb::ArtifactRecord {
+                    artifact_id: "artifact".to_owned(),
+                    task_id: "task".to_owned(),
+                    producer_node_id: "node-b".to_owned(),
+                    artifact_type: "json".to_owned(),
+                    storage_ref: "opaque://artifact".to_owned(),
+                    summary: "summary".to_owned(),
+                    is_complete: true,
+                    created_at: "".to_owned(),
+                }),
+                idempotency: Some(runtime_pb::Idempotency {
+                    key: "artifact-1".to_owned(),
+                    owner: "python-runtime".to_owned(),
+                    deadline_ms: 2_000,
+                }),
+            }))
+            .await
+            .expect("save artifact")
+            .into_inner();
+        assert!(artifact.found);
     }
 
     let reopened = RuntimeSidecarGrpcService::with_sqlite_adapter(
@@ -120,6 +272,27 @@ async fn tonic_service_can_use_sqlite_adapter_for_durable_event_replay() {
         .into_inner();
     assert_eq!(replay.cursors.len(), 1);
     assert_eq!(replay.cursors[0].sequence, 1);
+    let edges = reopened
+        .list_task_edges(Request::new(runtime_pb::ListTaskEdgesRequest {
+            task_id: "task".to_owned(),
+        }))
+        .await
+        .expect("list edges")
+        .into_inner();
+    assert_eq!(edges.edges.len(), 1);
+    assert_eq!(edges.edges[0].to_node_id, "node-b");
+    let artifact = reopened
+        .get_artifact(Request::new(runtime_pb::GetArtifactRequest {
+            artifact_id: "artifact".to_owned(),
+        }))
+        .await
+        .expect("get artifact")
+        .into_inner();
+    assert!(artifact.found);
+    assert_eq!(
+        artifact.artifact.expect("artifact").storage_ref,
+        "opaque://artifact"
+    );
     let _ = std::fs::remove_file(db_path);
 }
 
@@ -316,4 +489,11 @@ fn temp_db_path(test_name: &str) -> PathBuf {
     ));
     let _ = std::fs::remove_file(&path);
     path
+}
+
+fn assert_runtime_unavailable(error: Option<common_pb::TypedError>) {
+    let error = error.expect("typed error");
+    assert_eq!(error.code, "runtime_store_unavailable");
+    assert_eq!(error.category, common_pb::ErrorCategory::Internal as i32);
+    assert!(error.retriable);
 }

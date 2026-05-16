@@ -110,6 +110,36 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
         if not _non_empty_string(response.get("node_id")) or not _non_empty_string(response.get("status")):
             _raise_response_invalid()
         return
+    if operation_name == "task_edge_save":
+        _validate_task_edge_record(response.get("edge"))
+        return
+    if operation_name == "task_edge_list":
+        edges = response.get("edges")
+        if not isinstance(edges, list):
+            _raise_response_invalid()
+        for edge in edges:
+            _validate_task_edge_record(edge)
+        return
+    if operation_name == "artifact_save":
+        _validate_artifact_record(response.get("artifact"))
+        return
+    if operation_name == "artifact_get":
+        found = response.get("found")
+        if not isinstance(found, bool):
+            _raise_response_invalid()
+        artifact = response.get("artifact")
+        if found:
+            _validate_artifact_record(artifact)
+        elif artifact is not None:
+            _raise_response_invalid()
+        return
+    if operation_name == "artifact_list":
+        artifacts = response.get("artifacts")
+        if not isinstance(artifacts, list):
+            _raise_response_invalid()
+        for artifact in artifacts:
+            _validate_artifact_record(artifact)
+        return
     if operation_name == "cancellation_token_write":
         if not isinstance(response.get("written"), bool):
             _raise_response_invalid()
@@ -146,6 +176,35 @@ def _validate_lease_response(response: Mapping[str, Any]) -> None:
         and response["revision"] > 0
         and isinstance(response.get("expires_at_ms"), int)
         and _non_empty_string(response.get("renew_token"))
+    ):
+        _raise_response_invalid()
+
+
+def _validate_task_edge_record(edge: Any) -> None:
+    if not isinstance(edge, Mapping):
+        _raise_response_invalid()
+    if not (
+        _non_empty_string(edge.get("task_id"))
+        and _non_empty_string(edge.get("from_node_id"))
+        and _non_empty_string(edge.get("to_node_id"))
+        and _non_empty_string(edge.get("edge_type"))
+        and isinstance(edge.get("condition"), str)
+    ):
+        _raise_response_invalid()
+
+
+def _validate_artifact_record(artifact: Any) -> None:
+    if not isinstance(artifact, Mapping):
+        _raise_response_invalid()
+    if not (
+        _non_empty_string(artifact.get("artifact_id"))
+        and _non_empty_string(artifact.get("task_id"))
+        and _non_empty_string(artifact.get("producer_node_id"))
+        and _non_empty_string(artifact.get("artifact_type"))
+        and isinstance(artifact.get("storage_ref"), str)
+        and isinstance(artifact.get("summary"), str)
+        and isinstance(artifact.get("is_complete"), bool)
+        and isinstance(artifact.get("created_at"), str)
     ):
         _raise_response_invalid()
 

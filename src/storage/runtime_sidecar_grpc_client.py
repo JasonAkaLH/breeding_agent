@@ -225,6 +225,110 @@ class RuntimeSidecarGrpcClient:
         _consume_response("node_state_transition", response)
         return response
 
+    def save_task_edge(
+        self,
+        *,
+        task_id: str,
+        from_node_id: str,
+        to_node_id: str,
+        edge_type: str,
+        condition: str,
+        idempotency_key: str,
+        owner: str = "python-runtime",
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        edge = _task_edge_record(
+            task_id=task_id,
+            from_node_id=from_node_id,
+            to_node_id=to_node_id,
+            edge_type=edge_type,
+            condition=condition,
+        )
+        request = _field_bytes(1, edge) + _field_bytes(2, _idempotency(idempotency_key, owner))
+        payload = self._unary("SaveTaskEdge", request, timeout_seconds=timeout_seconds)
+        response = _task_edge_response("task_edge_save", _decode_message(payload))
+        _consume_response("task_edge_save", response)
+        return response["edge"]
+
+    def list_task_edges(
+        self,
+        *,
+        task_id: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary("ListTaskEdges", _field_string(1, task_id), timeout_seconds=timeout_seconds)
+        fields = _decode_message(payload)
+        response = {
+            "operation": "task_edge_list",
+            "edges": [_decode_task_edge_record(value) for value in fields.get(1, [])],
+            "error": _optional_typed_error(fields, 2),
+        }
+        _consume_response("task_edge_list", response)
+        return response
+
+    def save_artifact(
+        self,
+        *,
+        artifact_id: str,
+        task_id: str,
+        producer_node_id: str,
+        artifact_type: str,
+        storage_ref: str,
+        summary: str,
+        is_complete: bool,
+        created_at: str,
+        idempotency_key: str,
+        owner: str = "python-runtime",
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        artifact = _artifact_record(
+            artifact_id=artifact_id,
+            task_id=task_id,
+            producer_node_id=producer_node_id,
+            artifact_type=artifact_type,
+            storage_ref=storage_ref,
+            summary=summary,
+            is_complete=is_complete,
+            created_at=created_at,
+        )
+        request = _field_bytes(1, artifact) + _field_bytes(2, _idempotency(idempotency_key, owner))
+        payload = self._unary("SaveArtifact", request, timeout_seconds=timeout_seconds)
+        response = _artifact_response("artifact_save", _decode_message(payload))
+        _consume_response("artifact_save", response)
+        return response["artifact"]
+
+    def get_artifact(
+        self,
+        *,
+        artifact_id: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary("GetArtifact", _field_string(1, artifact_id), timeout_seconds=timeout_seconds)
+        response = _artifact_response("artifact_get", _decode_message(payload))
+        _consume_response("artifact_get", response)
+        return response
+
+    def list_artifacts_for_task(
+        self,
+        *,
+        task_id: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary("ListArtifactsForTask", _field_string(1, task_id), timeout_seconds=timeout_seconds)
+        fields = _decode_message(payload)
+        response = {
+            "operation": "artifact_list",
+            "artifacts": [_decode_artifact_record(value) for value in fields.get(1, [])],
+            "error": _optional_typed_error(fields, 2),
+        }
+        _consume_response("artifact_list", response)
+        return response
+
     def replay_events(
         self,
         *,
@@ -639,6 +743,94 @@ def _decode_event_cursor(payload: bytes) -> dict[str, Any]:
 def _optional_event_cursor(fields: dict[int, list[Any]], field_number: int) -> dict[str, Any] | None:
     values = fields.get(field_number, [])
     return _decode_event_cursor(values[0]) if values else None
+
+
+def _task_edge_record(
+    *,
+    task_id: str,
+    from_node_id: str,
+    to_node_id: str,
+    edge_type: str,
+    condition: str,
+) -> bytes:
+    return b"".join(
+        [
+            _field_string(1, task_id),
+            _field_string(2, from_node_id),
+            _field_string(3, to_node_id),
+            _field_string(4, edge_type),
+            _field_string(5, condition),
+        ]
+    )
+
+
+def _decode_task_edge_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    return {
+        "task_id": _first_string(fields, 1),
+        "from_node_id": _first_string(fields, 2),
+        "to_node_id": _first_string(fields, 3),
+        "edge_type": _first_string(fields, 4),
+        "condition": _first_string(fields, 5),
+    }
+
+
+def _task_edge_response(operation: str, fields: dict[int, list[Any]]) -> dict[str, Any]:
+    edge_payload = _first_message(fields, 1)
+    return {
+        "operation": operation,
+        "edge": _decode_task_edge_record(edge_payload) if edge_payload else None,
+        "error": _optional_typed_error(fields, 2),
+    }
+
+
+def _artifact_record(
+    *,
+    artifact_id: str,
+    task_id: str,
+    producer_node_id: str,
+    artifact_type: str,
+    storage_ref: str,
+    summary: str,
+    is_complete: bool,
+    created_at: str,
+) -> bytes:
+    return b"".join(
+        [
+            _field_string(1, artifact_id),
+            _field_string(2, task_id),
+            _field_string(3, producer_node_id),
+            _field_string(4, artifact_type),
+            _field_string(5, storage_ref),
+            _field_string(6, summary),
+            _field_varint(7, 1 if is_complete else 0),
+            _field_string(8, created_at),
+        ]
+    )
+
+
+def _decode_artifact_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    return {
+        "artifact_id": _first_string(fields, 1),
+        "task_id": _first_string(fields, 2),
+        "producer_node_id": _first_string(fields, 3),
+        "artifact_type": _first_string(fields, 4),
+        "storage_ref": _first_string(fields, 5),
+        "summary": _first_string(fields, 6),
+        "is_complete": _first_bool(fields, 7, default=False),
+        "created_at": _first_string(fields, 8),
+    }
+
+
+def _artifact_response(operation: str, fields: dict[int, list[Any]]) -> dict[str, Any]:
+    artifact_payload = _first_message(fields, 1)
+    return {
+        "operation": operation,
+        "artifact": _decode_artifact_record(artifact_payload) if artifact_payload else None,
+        "found": _first_bool(fields, 2, default=bool(artifact_payload)),
+        "error": _optional_typed_error(fields, 3),
+    }
 
 
 def _lease_response(operation: str, fields: dict[int, list[Any]]) -> dict[str, Any]:

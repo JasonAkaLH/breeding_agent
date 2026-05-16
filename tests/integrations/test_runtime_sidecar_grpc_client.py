@@ -104,6 +104,34 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     )
                     self.assertEqual(transitioned["status"], "running")
 
+                    edge = client.save_task_edge(
+                        task_id="task",
+                        from_node_id="node",
+                        to_node_id="node-next",
+                        edge_type="data",
+                        condition="",
+                        idempotency_key="edge-1",
+                        owner="python-runtime",
+                    )
+                    self.assertEqual(edge["from_node_id"], "node")
+                    self.assertEqual(client.list_task_edges(task_id="task")["edges"], [edge])
+
+                    artifact = client.save_artifact(
+                        artifact_id="artifact",
+                        task_id="task",
+                        producer_node_id="node",
+                        artifact_type="json",
+                        storage_ref="opaque://artifact",
+                        summary="summary",
+                        is_complete=True,
+                        created_at="",
+                        idempotency_key="artifact-1",
+                        owner="python-runtime",
+                    )
+                    self.assertEqual(artifact["artifact_id"], "artifact")
+                    self.assertEqual(client.get_artifact(artifact_id="artifact")["artifact"], artifact)
+                    self.assertEqual(client.list_artifacts_for_task(task_id="task")["artifacts"], [artifact])
+
                     lease = client.acquire_lease(
                         task_id="task",
                         owner_id="worker",

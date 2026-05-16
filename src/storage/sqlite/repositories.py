@@ -5,13 +5,14 @@ import hashlib
 import inspect
 import json
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.contracts import StoragePort
-from src.core.enums import TaskStatus
+from src.core.enums import ArtifactType, EdgeType, TaskStatus
 from src.core.models import (
     Artifact,
     AuthSession,
@@ -676,7 +677,7 @@ class SQLiteStateRepository:
         return [_row_to_task_node(row) for row in rows]
 
     def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
-        _ensure_runtime_store_write_allowed_by_rust_contract("task_submit")
+        _ensure_runtime_store_write_allowed_by_rust_contract("task_edge_save")
         row = TaskEdgeRow(
             edge_id=build_task_edge_id(task_id, edge.from_node_id, edge.to_node_id),
             task_id=task_id,
@@ -696,7 +697,7 @@ class SQLiteStateRepository:
         return [_row_to_task_edge(row) for row in rows]
 
     def save_artifact(self, artifact: Artifact) -> Artifact:
-        _ensure_runtime_store_write_allowed_by_rust_contract("node_state_transition")
+        _ensure_runtime_store_write_allowed_by_rust_contract("artifact_save")
         row = ArtifactRow(
             artifact_id=artifact.artifact_id,
             task_id=artifact.task_id,
@@ -1195,18 +1196,127 @@ class SQLiteStorage(StoragePort):
         return await self._run(lambda state, collab: state.list_task_nodes_for_task(task_id))
 
     async def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
-        return await self._run(lambda state, collab: state.save_task_edge(task_id, edge))
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_edge_save",
+            unavailable_error_code="runtime_store_unavailable",
+        )
+        idempotency_key = build_task_edge_id(task_id, edge.from_node_id, edge.to_node_id)
+        if sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                sidecar_client.save_task_edge(
+                    task_id=task_id,
+                    from_node_id=edge.from_node_id,
+                    to_node_id=edge.to_node_id,
+                    edge_type=str(edge.edge_type),
+                    condition=edge.condition or "",
+                    idempotency_key=idempotency_key,
+                )
+            )
+            _consume_runtime_sidecar_response("task_edge_save", response)
+            return edge
+        saved = await self._run(lambda state, collab: state.save_task_edge(task_id, edge))
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="task_edge_save",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload=_task_edge_shadow_payload(task_id, edge),
+            legacy_output=_task_edge_shadow_payload(task_id, saved),
+            rust_call=lambda: self._runtime_sidecar_client.save_task_edge(
+                task_id=task_id,
+                from_node_id=edge.from_node_id,
+                to_node_id=edge.to_node_id,
+                edge_type=str(edge.edge_type),
+                condition=edge.condition or "",
+                idempotency_key=idempotency_key,
+            ),
+            rust_output=lambda envelope: _task_edge_shadow_payload_from_record(envelope["edge"]),
+        )
+        return saved
 
     async def list_task_edges(self, task_id: str) -> list[TaskEdge]:
+        if runtime_mode_for_component("runtime_store") == "enforce" and self._runtime_sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                self._runtime_sidecar_client.list_task_edges(task_id=task_id)
+            )
+            envelope = validate_runtime_sidecar_response(
+                "task_edge_list",
+                normalize_runtime_sidecar_response("task_edge_list", response),
+            )
+            return [_task_edge_from_sidecar_record(record) for record in envelope["edges"]]
         return await self._run(lambda state, collab: state.list_task_edges(task_id))
 
     async def save_artifact(self, artifact: Artifact) -> Artifact:
-        return await self._run(lambda state, collab: state.save_artifact(artifact))
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="artifact_save",
+            unavailable_error_code="runtime_store_unavailable",
+        )
+        record = _artifact_to_sidecar_record(artifact)
+        if sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                sidecar_client.save_artifact(
+                    artifact_id=artifact.artifact_id,
+                    task_id=artifact.task_id,
+                    producer_node_id=artifact.producer_node_id,
+                    artifact_type=str(artifact.artifact_type),
+                    storage_ref=artifact.storage_ref,
+                    summary=artifact.summary or "",
+                    is_complete=artifact.is_complete,
+                    created_at=record["created_at"],
+                    idempotency_key=artifact.artifact_id,
+                )
+            )
+            _consume_runtime_sidecar_response("artifact_save", response)
+            return artifact
+        saved = await self._run(lambda state, collab: state.save_artifact(artifact))
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="artifact_save",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload=_artifact_shadow_payload(artifact),
+            legacy_output=_artifact_shadow_payload(saved),
+            rust_call=lambda: self._runtime_sidecar_client.save_artifact(
+                artifact_id=artifact.artifact_id,
+                task_id=artifact.task_id,
+                producer_node_id=artifact.producer_node_id,
+                artifact_type=str(artifact.artifact_type),
+                storage_ref=artifact.storage_ref,
+                summary=artifact.summary or "",
+                is_complete=artifact.is_complete,
+                created_at=record["created_at"],
+                idempotency_key=artifact.artifact_id,
+            ),
+            rust_output=lambda envelope: _artifact_shadow_payload_from_record(envelope["artifact"]),
+        )
+        return saved
 
     async def get_artifact(self, artifact_id: str) -> Artifact | None:
+        if runtime_mode_for_component("runtime_store") == "enforce" and self._runtime_sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                self._runtime_sidecar_client.get_artifact(artifact_id=artifact_id)
+            )
+            envelope = validate_runtime_sidecar_response(
+                "artifact_get",
+                normalize_runtime_sidecar_response("artifact_get", response),
+            )
+            if not envelope["found"]:
+                return None
+            return _artifact_from_sidecar_record(envelope["artifact"])
         return await self._run(lambda state, collab: state.get_artifact(artifact_id))
 
     async def list_artifacts_for_task(self, task_id: str) -> list[Artifact]:
+        if runtime_mode_for_component("runtime_store") == "enforce" and self._runtime_sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                self._runtime_sidecar_client.list_artifacts_for_task(task_id=task_id)
+            )
+            envelope = validate_runtime_sidecar_response(
+                "artifact_list",
+                normalize_runtime_sidecar_response("artifact_list", response),
+            )
+            return [_artifact_from_sidecar_record(record) for record in envelope["artifacts"]]
         return await self._run(lambda state, collab: state.list_artifacts_for_task(task_id))
 
     async def append_event(self, event: EventRecord) -> EventRecord:
@@ -1350,6 +1460,89 @@ class SQLiteStorage(StoragePort):
 
 def _runtime_sidecar_idempotency_key(*parts: str) -> str:
     return ":".join(parts)
+
+
+def _task_edge_from_sidecar_record(record: Mapping[str, Any]) -> TaskEdge:
+    condition = str(record.get("condition", ""))
+    return TaskEdge(
+        from_node_id=str(record["from_node_id"]),
+        to_node_id=str(record["to_node_id"]),
+        edge_type=EdgeType(str(record["edge_type"])),
+        condition=condition or None,
+    )
+
+
+def _task_edge_shadow_payload(task_id: str, edge: TaskEdge) -> dict[str, str]:
+    return {
+        "task_id": task_id,
+        "from_node_id": edge.from_node_id,
+        "to_node_id": edge.to_node_id,
+        "edge_type": str(edge.edge_type),
+        "condition_sha256": hashlib.sha256((edge.condition or "").encode("utf-8")).hexdigest(),
+    }
+
+
+def _task_edge_shadow_payload_from_record(record: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "task_id": str(record.get("task_id", "")),
+        "from_node_id": str(record.get("from_node_id", "")),
+        "to_node_id": str(record.get("to_node_id", "")),
+        "edge_type": str(record.get("edge_type", "")),
+        "condition_sha256": hashlib.sha256(str(record.get("condition", "")).encode("utf-8")).hexdigest(),
+    }
+
+
+def _artifact_to_sidecar_record(artifact: Artifact) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "task_id": artifact.task_id,
+        "producer_node_id": artifact.producer_node_id,
+        "artifact_type": str(artifact.artifact_type),
+        "storage_ref": artifact.storage_ref,
+        "summary": artifact.summary or "",
+        "is_complete": artifact.is_complete,
+        "created_at": artifact.created_at.isoformat() if artifact.created_at is not None else "",
+    }
+
+
+def _artifact_from_sidecar_record(record: Mapping[str, Any]) -> Artifact:
+    created_at = str(record.get("created_at", ""))
+    return Artifact(
+        artifact_id=str(record["artifact_id"]),
+        task_id=str(record["task_id"]),
+        producer_node_id=str(record["producer_node_id"]),
+        artifact_type=ArtifactType(str(record["artifact_type"])),
+        storage_ref=str(record["storage_ref"]),
+        summary=str(record.get("summary", "")) or None,
+        is_complete=bool(record["is_complete"]),
+        created_at=datetime.fromisoformat(created_at) if created_at else None,
+    )
+
+
+def _artifact_shadow_payload(artifact: Artifact) -> dict[str, str]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "task_id": artifact.task_id,
+        "producer_node_id": artifact.producer_node_id,
+        "artifact_type": str(artifact.artifact_type),
+        "storage_ref_sha256": hashlib.sha256(artifact.storage_ref.encode("utf-8")).hexdigest(),
+        "summary_sha256": hashlib.sha256((artifact.summary or "").encode("utf-8")).hexdigest(),
+        "is_complete": str(artifact.is_complete),
+    }
+
+
+def _artifact_shadow_payload_from_record(record: Mapping[str, Any]) -> dict[str, str]:
+    storage_ref = str(record.get("storage_ref", ""))
+    summary = str(record.get("summary", ""))
+    return {
+        "artifact_id": str(record.get("artifact_id", "")),
+        "task_id": str(record.get("task_id", "")),
+        "producer_node_id": str(record.get("producer_node_id", "")),
+        "artifact_type": str(record.get("artifact_type", "")),
+        "storage_ref_sha256": hashlib.sha256(storage_ref.encode("utf-8")).hexdigest(),
+        "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+        "is_complete": str(bool(record.get("is_complete", False))),
+    }
 
 
 def _consume_runtime_sidecar_response(operation_name: str, response: Any) -> None:

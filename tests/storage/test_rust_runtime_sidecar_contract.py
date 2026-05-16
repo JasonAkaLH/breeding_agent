@@ -48,6 +48,8 @@ from tests.storage.support import SQLiteStorageTestCase
 class _RecordingRuntimeSidecarClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self.edges: dict[str, list[dict[str, object]]] = {}
+        self.artifacts: dict[str, dict[str, object]] = {}
 
     async def submit_task(self, *, task_id: str, conversation_id: str, idempotency_key: str) -> dict[str, object]:
         self.calls.append(
@@ -92,6 +94,96 @@ class _RecordingRuntimeSidecarClient:
             "status": to_status,
             "error": None,
         }
+
+    async def save_task_edge(
+        self,
+        *,
+        task_id: str,
+        from_node_id: str,
+        to_node_id: str,
+        edge_type: str,
+        condition: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "task_edge_save",
+                {
+                    "edge_type": edge_type,
+                    "from_node_id": from_node_id,
+                    "idempotency_key": idempotency_key,
+                    "task_id": task_id,
+                    "to_node_id": to_node_id,
+                },
+            )
+        )
+        edge = {
+            "task_id": task_id,
+            "from_node_id": from_node_id,
+            "to_node_id": to_node_id,
+            "edge_type": edge_type,
+            "condition": condition,
+        }
+        self.edges.setdefault(task_id, [])
+        self.edges[task_id] = [
+            existing
+            for existing in self.edges[task_id]
+            if not (existing["from_node_id"] == from_node_id and existing["to_node_id"] == to_node_id)
+        ]
+        self.edges[task_id].append(edge)
+        return {"operation": "task_edge_save", "edge": edge, "error": None}
+
+    async def list_task_edges(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_edge_list", {"task_id": task_id}))
+        return {"operation": "task_edge_list", "edges": list(self.edges.get(task_id, [])), "error": None}
+
+    async def save_artifact(
+        self,
+        *,
+        artifact_id: str,
+        task_id: str,
+        producer_node_id: str,
+        artifact_type: str,
+        storage_ref: str,
+        summary: str,
+        is_complete: bool,
+        created_at: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "artifact_save",
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_type": artifact_type,
+                    "idempotency_key": idempotency_key,
+                    "producer_node_id": producer_node_id,
+                    "task_id": task_id,
+                },
+            )
+        )
+        artifact = {
+            "artifact_id": artifact_id,
+            "task_id": task_id,
+            "producer_node_id": producer_node_id,
+            "artifact_type": artifact_type,
+            "storage_ref": storage_ref,
+            "summary": summary,
+            "is_complete": is_complete,
+            "created_at": created_at,
+        }
+        self.artifacts[artifact_id] = artifact
+        return {"operation": "artifact_save", "artifact": artifact, "error": None}
+
+    async def get_artifact(self, *, artifact_id: str) -> dict[str, object]:
+        self.calls.append(("artifact_get", {"artifact_id": artifact_id}))
+        artifact = self.artifacts.get(artifact_id)
+        return {"operation": "artifact_get", "artifact": artifact, "found": artifact is not None, "error": None}
+
+    async def list_artifacts_for_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("artifact_list", {"task_id": task_id}))
+        artifacts = [artifact for artifact in self.artifacts.values() if artifact["task_id"] == task_id]
+        return {"operation": "artifact_list", "artifacts": artifacts, "error": None}
 
     async def append_event(
         self,
@@ -308,6 +400,8 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         for name in [
             "task_submit",
             "node_state_transition",
+            "task_edge_save",
+            "artifact_save",
             "event_append",
             "lease_acquire",
             "lease_renew",
@@ -632,6 +726,71 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         self.assertEqual(asyncio.run(storage.list_task_edges("task-enforce-store")), [])
         self.assertIsNone(asyncio.run(storage.get_artifact(artifact.artifact_id)))
 
+    def test_runtime_store_enforce_routes_graph_writes_to_configured_sidecar_without_python_sqlite_write(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        edge = TaskEdge(from_node_id="node-from", to_node_id="node-to")
+        artifact = Artifact(
+            artifact_id="artifact-sidecar-store",
+            task_id="task-sidecar-store",
+            producer_node_id="node-from",
+            artifact_type=ArtifactType.JSON,
+            storage_ref="memory://artifact/sidecar",
+            summary="sidecar artifact",
+            is_complete=True,
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            saved_edge = asyncio.run(storage.save_task_edge("task-sidecar-store", edge))
+            saved_artifact = asyncio.run(storage.save_artifact(artifact))
+            listed_edges = asyncio.run(storage.list_task_edges("task-sidecar-store"))
+            loaded_artifact = asyncio.run(storage.get_artifact(artifact.artifact_id))
+            listed_artifacts = asyncio.run(storage.list_artifacts_for_task(artifact.task_id))
+
+        self.assertEqual(saved_edge, edge)
+        self.assertEqual(saved_artifact, artifact)
+        self.assertEqual(listed_edges, [edge])
+        self.assertEqual(loaded_artifact, artifact)
+        self.assertEqual(listed_artifacts, [artifact])
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            ["task_edge_save", "artifact_save", "task_edge_list", "artifact_get", "artifact_list"],
+        )
+        self.assertEqual(asyncio.run(SQLiteStorage(self.session_factory).list_task_edges("task-sidecar-store")), [])
+        self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_artifact(artifact.artifact_id)))
+
+    def test_runtime_store_shadow_records_graph_sidecar_audit_without_leaking_artifact_ref(self) -> None:
+        audit_events: list[dict[str, str]] = []
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            runtime_sidecar_shadow_sink=audit_events.append,
+        )
+        edge = TaskEdge(from_node_id="node-shadow-from", to_node_id="node-shadow-to")
+        artifact = Artifact(
+            artifact_id="artifact-shadow-store",
+            task_id="task-shadow-graph",
+            producer_node_id="node-shadow-from",
+            artifact_type=ArtifactType.JSON,
+            storage_ref="memory://artifact/do-not-log",
+            summary="shadow artifact",
+            is_complete=True,
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
+            saved_edge = asyncio.run(storage.save_task_edge(artifact.task_id, edge))
+            saved_artifact = asyncio.run(storage.save_artifact(artifact))
+
+        self.assertEqual(saved_edge, edge)
+        self.assertEqual(saved_artifact, artifact)
+        self.assertEqual(asyncio.run(storage.list_task_edges(artifact.task_id)), [edge])
+        self.assertEqual(asyncio.run(storage.get_artifact(artifact.artifact_id)), artifact)
+        self.assertEqual([call[0] for call in sidecar.calls], ["task_edge_save", "artifact_save"])
+        self.assertEqual([event["operation"] for event in audit_events], ["task_edge_save", "artifact_save"])
+        self.assertTrue(all(event["rust_status"] == "ok" for event in audit_events))
+        self.assertNotIn("memory://artifact/do-not-log", str(audit_events))
+
     def test_cancellation_token_write_consumes_runtime_sidecar_contract(self) -> None:
         storage = SQLiteStorage(self.session_factory)
         service = CancellationService(storage)
@@ -893,6 +1052,41 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         self.assertEqual(accepted["cursor"]["sequence"], 1)
 
+        edge_accepted = validate_runtime_sidecar_response(
+            "task_edge_save",
+            {
+                "operation": "task_edge_save",
+                "edge": {
+                    "task_id": "task-response",
+                    "from_node_id": "node-a",
+                    "to_node_id": "node-b",
+                    "edge_type": "data",
+                    "condition": "",
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(edge_accepted["edge"]["from_node_id"], "node-a")
+
+        artifact_accepted = validate_runtime_sidecar_response(
+            "artifact_save",
+            {
+                "operation": "artifact_save",
+                "artifact": {
+                    "artifact_id": "artifact-response",
+                    "task_id": "task-response",
+                    "producer_node_id": "node-b",
+                    "artifact_type": "json",
+                    "storage_ref": "opaque://artifact",
+                    "summary": "",
+                    "is_complete": True,
+                    "created_at": "",
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(artifact_accepted["artifact"]["artifact_id"], "artifact-response")
+
         typed_error = validate_runtime_sidecar_response(
             "event_append",
             {
@@ -911,6 +1105,8 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         for invalid_response in [
             {"operation": "lease_acquire", "cursor": {"task_id": "task-response", "sequence": 1}},
             {"operation": "event_append", "cursor": {"task_id": "task-response", "sequence": 1}},
+            {"operation": "task_edge_save", "edge": {"task_id": "task-response"}},
+            {"operation": "artifact_save", "artifact": {"artifact_id": "artifact-response"}},
             {
                 "operation": "event_append",
                 "error": {
@@ -1003,6 +1199,8 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
 
         self.assertEqual(resource_limit("task_submit_deadline_ms"), 3000)
         self.assertEqual(resource_limit("state_transition_deadline_ms"), 2000)
+        self.assertEqual(resource_limit("task_edge_deadline_ms"), 2000)
+        self.assertEqual(resource_limit("artifact_metadata_deadline_ms"), 2000)
         self.assertEqual(resource_limit("event_append_deadline_ms"), 2000)
         self.assertEqual(resource_limit("lease_deadline_ms"), 1000)
         self.assertEqual(resource_limit("event_replay_deadline_ms"), 10000)
@@ -1127,6 +1325,8 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             [
                 "task_submit",
                 "node_state_transition",
+                "task_edge_save",
+                "artifact_save",
                 "event_append",
                 "lease_acquire",
                 "event_replay",
@@ -1212,7 +1412,15 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         policy = migration_policy()
         self.assertEqual(
             policy["required_components"],
-            ["sqlite_schema", "event_log", "lease", "cursor", "bundle_pin"],
+            [
+                "sqlite_schema",
+                "event_log",
+                "lease",
+                "cursor",
+                "task_edge",
+                "artifact_metadata",
+                "bundle_pin",
+            ],
         )
         component_evidence = {
             component: {evidence: True for evidence in policy["required_evidence"]}
@@ -1275,6 +1483,8 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             [
                 "python_storage_task_write",
                 "python_storage_node_write",
+                "python_storage_task_edge_write",
+                "python_storage_artifact_write",
                 "python_event_append_write",
                 "python_bundle_pin_write",
                 "python_cancellation_token_write",

@@ -1,4 +1,4 @@
-use maf_runtime_sidecar::RuntimeSidecarSqliteAdapter;
+use maf_runtime_sidecar::{ArtifactRecord, RuntimeSidecarSqliteAdapter, TaskEdgeRecord};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -141,6 +141,92 @@ fn sqlite_adapter_persists_task_node_cancellation_and_bundle_across_reopen() {
         .expect("idempotent bundle release after reopen");
     assert_eq!(duplicate_release.revision, "rev-1");
     assert!(duplicate_release.released);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn sqlite_adapter_persists_task_edges_and_artifacts_across_reopen() {
+    let db_path = temp_db_path("edge-artifact");
+
+    {
+        let adapter = RuntimeSidecarSqliteAdapter::open(&db_path).expect("open sqlite adapter");
+        let edge = adapter
+            .save_task_edge(
+                TaskEdgeRecord {
+                    task_id: "task".to_owned(),
+                    from_node_id: "node-a".to_owned(),
+                    to_node_id: "node-b".to_owned(),
+                    edge_type: "data".to_owned(),
+                    condition: "ok".to_owned(),
+                },
+                "edge-1",
+            )
+            .expect("save task edge");
+        assert_eq!(edge.from_node_id, "node-a");
+
+        let duplicate_edge = adapter
+            .save_task_edge(
+                TaskEdgeRecord {
+                    task_id: "task".to_owned(),
+                    from_node_id: "changed".to_owned(),
+                    to_node_id: "node-b".to_owned(),
+                    edge_type: "control".to_owned(),
+                    condition: "changed".to_owned(),
+                },
+                "edge-1",
+            )
+            .expect("idempotent task edge");
+        assert_eq!(duplicate_edge, edge);
+
+        let artifact = adapter
+            .save_artifact(
+                ArtifactRecord {
+                    artifact_id: "artifact".to_owned(),
+                    task_id: "task".to_owned(),
+                    producer_node_id: "node-b".to_owned(),
+                    artifact_type: "json".to_owned(),
+                    storage_ref: "opaque://artifact".to_owned(),
+                    summary: "summary".to_owned(),
+                    is_complete: true,
+                    created_at: "2026-05-15T00:00:00".to_owned(),
+                },
+                "artifact-1",
+            )
+            .expect("save artifact");
+        assert_eq!(artifact.artifact_id, "artifact");
+
+        let duplicate_artifact = adapter
+            .save_artifact(
+                ArtifactRecord {
+                    artifact_id: "changed".to_owned(),
+                    task_id: "task".to_owned(),
+                    producer_node_id: "node-b".to_owned(),
+                    artifact_type: "text".to_owned(),
+                    storage_ref: "opaque://changed".to_owned(),
+                    summary: "changed".to_owned(),
+                    is_complete: false,
+                    created_at: "".to_owned(),
+                },
+                "artifact-1",
+            )
+            .expect("idempotent artifact");
+        assert_eq!(duplicate_artifact, artifact);
+    }
+
+    let reopened = RuntimeSidecarSqliteAdapter::open(&db_path).expect("reopen sqlite adapter");
+    let edges = reopened.list_task_edges("task").expect("list task edges");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].to_node_id, "node-b");
+
+    let artifact = reopened
+        .get_artifact("artifact")
+        .expect("get artifact")
+        .expect("artifact persisted");
+    assert_eq!(artifact.storage_ref, "opaque://artifact");
+    let artifacts = reopened
+        .list_artifacts_for_task("task")
+        .expect("list artifacts");
+    assert_eq!(artifacts, vec![artifact]);
     let _ = std::fs::remove_file(db_path);
 }
 

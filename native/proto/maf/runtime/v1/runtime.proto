@@ -11,6 +11,11 @@ service RuntimeSidecar {
   rpc CheckCompatibility(CompatibilityCheckRequest) returns (CompatibilityCheckResponse);
   rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
   rpc TransitionNode(TransitionNodeRequest) returns (TransitionNodeResponse);
+  rpc SaveTaskEdge(SaveTaskEdgeRequest) returns (TaskEdgeResponse);
+  rpc ListTaskEdges(ListTaskEdgesRequest) returns (ListTaskEdgesResponse);
+  rpc SaveArtifact(SaveArtifactRequest) returns (ArtifactResponse);
+  rpc GetArtifact(GetArtifactRequest) returns (ArtifactResponse);
+  rpc ListArtifactsForTask(ListArtifactsForTaskRequest) returns (ListArtifactsForTaskResponse);
   rpc AppendEvent(AppendEventRequest) returns (AppendEventResponse);
   rpc ReplayEvents(ReplayEventsRequest) returns (ReplayEventsResponse);
   rpc AcquireLease(AcquireLeaseRequest) returns (LeaseResponse);
@@ -95,6 +100,68 @@ message TransitionNodeResponse {
   string node_id = 1;
   string status = 2;
   maf.common.v1.TypedError error = 3;
+}
+
+message TaskEdgeRecord {
+  string task_id = 1;
+  string from_node_id = 2;
+  string to_node_id = 3;
+  string edge_type = 4;
+  string condition = 5;
+}
+
+message SaveTaskEdgeRequest {
+  TaskEdgeRecord edge = 1;
+  Idempotency idempotency = 2;
+}
+
+message TaskEdgeResponse {
+  TaskEdgeRecord edge = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message ListTaskEdgesRequest {
+  string task_id = 1;
+}
+
+message ListTaskEdgesResponse {
+  repeated TaskEdgeRecord edges = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message ArtifactRecord {
+  string artifact_id = 1;
+  string task_id = 2;
+  string producer_node_id = 3;
+  string artifact_type = 4;
+  string storage_ref = 5;
+  string summary = 6;
+  bool is_complete = 7;
+  string created_at = 8;
+}
+
+message SaveArtifactRequest {
+  ArtifactRecord artifact = 1;
+  Idempotency idempotency = 2;
+}
+
+message GetArtifactRequest {
+  string artifact_id = 1;
+}
+
+message ListArtifactsForTaskRequest {
+  string task_id = 1;
+}
+
+message ArtifactResponse {
+  ArtifactRecord artifact = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message ListArtifactsForTaskResponse {
+  repeated ArtifactRecord artifacts = 1;
+  maf.common.v1.TypedError error = 2;
 }
 
 message AppendEventRequest {
