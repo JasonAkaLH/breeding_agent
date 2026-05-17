@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .rust_contract import load_skill_runtime_contract
+from .skill_runtime_gates import validate_skill_runtime_artifact_provenance
 
 _HTTP2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 _FRAME_DATA = 0x0
@@ -29,12 +30,25 @@ class SkillSandboxGrpcClient:
     validation and local runtime wiring. It is not a general gRPC stack.
     """
 
-    def __init__(self, endpoint: str) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        artifact_provenance: dict[str, Any] | None = None,
+        allowed_artifact_checksums: tuple[str, ...] = (),
+        allowed_cargo_lock_digests: tuple[str, ...] = (),
+    ) -> None:
         parsed = urlparse(endpoint)
         if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
             raise RuntimeError("skill_runtime_sandbox_unavailable: Skill sandbox endpoint must be http://host:port")
         if not _is_loopback_host(parsed.hostname):
             raise RuntimeError("skill_runtime_sandbox_unavailable: Skill sandbox endpoint must be loopback")
+        if artifact_provenance is not None:
+            validate_skill_runtime_artifact_provenance(
+                artifact_provenance,
+                allowed_checksums=set(allowed_artifact_checksums),
+                allowed_cargo_lock_digests=set(allowed_cargo_lock_digests),
+            )
         self._host = parsed.hostname
         self._port = parsed.port
         self._authority = f"{self._host}:{self._port}"

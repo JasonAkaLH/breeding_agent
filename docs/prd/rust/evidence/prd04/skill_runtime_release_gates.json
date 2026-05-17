@@ -1,0 +1,34 @@
+{
+  "schema_version": "maf.prd04.skill_runtime_evidence.v1",
+  "status": "pending_external_production_evidence",
+  "last_updated": "2026-05-17",
+  "ci_release_evidence": {
+    "status": "pending_next_push",
+    "note": "The Rust quality workflow now defines Skill Sandbox binary SBOM / provenance / manifest upload; record the concrete GitHub Actions run after the next push completes."
+  },
+  "artifact_provenance": {
+    "status": "pending"
+  },
+  "allowed_artifact_checksums": [],
+  "allowed_cargo_lock_digests": [],
+  "benchmark_report": {
+    "status": "pending"
+  },
+  "promotion_readiness": {
+    "status": "pending"
+  },
+  "ops_readiness": {
+    "status": "pending"
+  },
+  "decommission_readiness": {
+    "status": "pending"
+  },
+  "blockers": [
+    "skill_policy_and_sandbox_artifacts_not_promoted_by_deployment_allowlist",
+    "skill_sandbox_binary_release_ci_artifact_not_recorded_yet",
+    "skill_runtime_shadow_7_days_not_collected",
+    "skill_runtime_benchmark_report_not_collected",
+    "skill_runtime_ops_drills_not_executed",
+    "python_legacy_skill_trust_and_subprocess_paths_not_decommissioned"
+  ]
+}

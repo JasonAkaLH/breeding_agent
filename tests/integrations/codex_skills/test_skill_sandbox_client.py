@@ -209,6 +209,37 @@ class SkillSandboxClientIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "client version"):
             sandbox_module._validate_handshake(version)  # noqa: SLF001 - contract-level regression.
 
+
+    def test_client_constructor_validates_configured_artifact_provenance(self) -> None:
+        contract = sandbox_module.load_skill_runtime_contract()
+        metadata = {
+            "source": "ci_pipeline",
+            "artifact_kind": "skill_sandbox_sidecar_binary",
+            "checksum_sha256": "sha256:skill-sandbox",
+            "cargo_lock_digest": "sha256:cargo-lock",
+            "contract_version": contract["contract_version"],
+            "bundle_revision": "skill-runtime-20260517.1",
+            "schema_hash": contract["schema_hash"],
+            "sbom_digest": "sha256:sbom",
+            "provenance_attestation": "sha256:provenance",
+        }
+
+        client = SkillSandboxGrpcClient(
+            "http://127.0.0.1:65535",
+            artifact_provenance=metadata,
+            allowed_artifact_checksums=("sha256:skill-sandbox",),
+            allowed_cargo_lock_digests=("sha256:cargo-lock",),
+        )
+
+        self.assertEqual(client._authority, "127.0.0.1:65535")  # noqa: SLF001
+        with self.assertRaisesRegex(RuntimeError, "skill_runtime_artifact_untrusted"):
+            SkillSandboxGrpcClient(
+                "http://127.0.0.1:65535",
+                artifact_provenance={**metadata, "checksum_sha256": "sha256:tampered"},
+                allowed_artifact_checksums=("sha256:skill-sandbox",),
+                allowed_cargo_lock_digests=("sha256:cargo-lock",),
+            )
+
     def test_python_client_executes_against_rust_skill_sandbox_binary(self) -> None:
         binary = _ensure_skill_sandbox_binary()
         port = _free_loopback_port()

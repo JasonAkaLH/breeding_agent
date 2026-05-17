@@ -10,6 +10,7 @@ on:
       - "scripts/run_rust_coverage_thresholds.py"
       - "scripts/rust_artifact_provenance.py"
       - "scripts/validate_prd03_runtime_sidecar_evidence.py"
+      - "scripts/validate_prd04_skill_runtime_evidence.py"
       - "docs/prd/rust/**"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
@@ -23,6 +24,7 @@ on:
       - "scripts/run_rust_coverage_thresholds.py"
       - "scripts/rust_artifact_provenance.py"
       - "scripts/validate_prd03_runtime_sidecar_evidence.py"
+      - "scripts/validate_prd04_skill_runtime_evidence.py"
       - "docs/prd/rust/**"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
@@ -161,6 +163,72 @@ jobs:
             native/target/runtime-sidecar-release/maf_runtime_sidecar.sbom.json
             native/target/runtime-sidecar-release/maf_runtime_sidecar.provenance.json
             native/target/runtime-sidecar-release/maf_runtime_sidecar.manifest.json
+
+      - name: Build maf-skill-sandbox release binary
+        working-directory: native
+        run: cargo build --release -p maf_skill_runtime --bin maf-skill-sandbox
+
+      - name: Generate Skill Sandbox binary SBOM / provenance / manifest
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="native/target/skill-sandbox-release"
+          mkdir -p "$RELEASE_DIR"
+          SANDBOX_SOURCE="native/target/release/maf-skill-sandbox"
+          SANDBOX_ARTIFACT="$RELEASE_DIR/maf-skill-sandbox-linux-x86_64"
+          test -x "$SANDBOX_SOURCE"
+          cp "$SANDBOX_SOURCE" "$SANDBOX_ARTIFACT"
+          chmod +x "$SANDBOX_ARTIFACT"
+          RUSTC_VERSION="$(rustc --version)"
+          cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml > "$RELEASE_DIR/cargo-metadata.json"
+          python scripts/rust_artifact_provenance.py write-sbom \
+            --component maf_skill_runtime \
+            --cargo-metadata "$RELEASE_DIR/cargo-metadata.json" \
+            --output "$RELEASE_DIR/maf_skill_sandbox.sbom.json"
+          python scripts/rust_artifact_provenance.py write-provenance \
+            --component maf_skill_runtime \
+            --artifact-id maf_skill_sandbox \
+            --artifact-kind sidecar_binary \
+            --artifact-path "$SANDBOX_ARTIFACT" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash skill_runtime=maf_skill_runtime_schema_gates_20260515 \
+            --proto-hash skill=maf_skill_proto_v1_20260515 \
+            --output "$RELEASE_DIR/maf_skill_sandbox.provenance.json"
+          python scripts/rust_artifact_provenance.py generate \
+            --component maf_skill_runtime \
+            --artifact-id maf_skill_sandbox \
+            --artifact-kind sidecar_binary \
+            --artifact-path "$SANDBOX_ARTIFACT" \
+            --cargo-lock native/Cargo.lock \
+            --sbom "$RELEASE_DIR/maf_skill_sandbox.sbom.json" \
+            --provenance "$RELEASE_DIR/maf_skill_sandbox.provenance.json" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash skill_runtime=maf_skill_runtime_schema_gates_20260515 \
+            --proto-hash skill=maf_skill_proto_v1_20260515 \
+            --output "$RELEASE_DIR/maf_skill_sandbox.manifest.json"
+
+      - name: Check PRD04 Skill Runtime evidence manifest remains fail-closed
+        run: python scripts/validate_prd04_skill_runtime_evidence.py --allow-pending
+
+      - name: Upload Skill Sandbox binary release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-skill-sandbox-linux-x86_64
+          if-no-files-found: error
+          path: |
+            native/target/skill-sandbox-release/maf-skill-sandbox-linux-x86_64
+            native/target/skill-sandbox-release/maf_skill_sandbox.sbom.json
+            native/target/skill-sandbox-release/maf_skill_sandbox.provenance.json
+            native/target/skill-sandbox-release/maf_skill_sandbox.manifest.json
 
   rust-fuzz-smoke:
     name: Rust bounded fuzz smoke / Ubuntu 22.04 x86_64

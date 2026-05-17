@@ -10,11 +10,10 @@
 
 ### 当前开发焦点：Rust Runtime 迁移按 `docs/prd/rust` 顺序推进
 
-- 当前恢复锚点仍是 `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md`；后续应继续 PRD03，不要跳到 PRD04。
-- PRD03 的 **edge / artifact sidecar coverage posture / implementation** 已明确为补独立 RuntimeSidecar RPC，并已在本地落地 task edge save/list 与 artifact metadata save/get/list：Rust proto / service kernel / SQLite adapter、Python `RuntimeSidecarGrpcClient`、`SQLiteStorage` enforce routing / shadow audit、contract artifact 与 storage/integration 回归均已接入。
-- PRD03 剩余待收口项转为 production enforce rollout / 7 天 shadow promotion 证据、ops / migration / rollback drill 实际执行证据、部署 allowlist promotion 与 Python legacy 写路径最终下线；RuntimeSidecar binary 的 CI SBOM / provenance / manifest 上传口径、PRD03 evidence ledger 与 fail-closed 校验脚本已进入当前收口分支，完成真实生产证据前不要进入 PRD04。
-- 最新远端绿灯证据：GitHub Actions `Rust quality gates` push run `25948082624`（commit `ed44653a9fb591da5be82366cf5f87e4458030ad`）已通过；该 run 覆盖 Ubuntu 22.04 x86_64 / Python 3.13 的 Rust quality gates、bounded fuzz smoke 与 PyO3 wheel smoke。
-- 当前 Ralph goal 已按本节恢复锚点继续推进；后续若再次中断，请先读取 `CHANGELOG.md`、OMX/Ralph 状态与 `docs/prd/rust`，并以本节恢复锚点覆盖历史状态中混杂的 PRD04 残留字段。
+- PRD03 的仓库内实现与远端 CI 收口已完成：最新远端绿灯证据为 GitHub Actions `Rust quality gates` push run `25987197322`（commit `865339e73cd1e947d2e9d0ab997f5301c74a812a`），覆盖 Ubuntu 22.04 x86_64 / Python 3.13 的 Rust quality gates、bounded fuzz smoke、PyO3 wheel smoke 与 RuntimeSidecar binary artifact 上传。PRD03 剩余 production enforce / 7 天 shadow / benchmark / ops / deployment allowlist / legacy 下线仍作为真实外部证据 pending gate，不阻塞进入 PRD04 repo-local 实施。
+- 当前恢复锚点切换为 `docs/prd/rust/04-SkillRuntime与SkillOwnedRust接入PRD.md`；本轮 PRD04 目标是完成仓库内 Skill Runtime / Skill Sandbox release evidence、enforce artifact allowlist、fail-closed evidence ledger、测试与文档闭环。
+- PRD04 已新增 Skill Sandbox binary CI 产物口径、`docs/prd/rust/evidence/prd04/skill_runtime_release_gates.json`、`scripts/validate_prd04_skill_runtime_evidence.py` 与 `MAF_SKILL_SANDBOX_ARTIFACT_MANIFEST_PATH` / `MAF_SKILL_SANDBOX_ARTIFACT_ALLOWLIST_PATH` enforce artifact trust gate；真实 deployment allowlist promotion、7 天 shadow、benchmark、ops drill、跨平台/容器级 process cleanup 强化与 Python legacy trust/subprocess 下线仍不得用本地合成证据替代。
+- 当前 Ralph context：`.omx/context/prd04-skill-runtime-20260517T100614Z.md`；计划与测试规格为 `.omx/plans/prd-20260517-prd04-skill-runtime-wrapup.md` 与 `.omx/plans/test-spec-20260517-prd04-skill-runtime-wrapup.md`。
 
 ### Rust Runtime 迁移最新进展
 

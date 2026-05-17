@@ -30,3 +30,26 @@ class RustQualityWorkflowTest(unittest.TestCase):
 
         self.assertIn('"docs/prd/rust/**"', workflow)
         self.assertIn('"scripts/validate_prd03_runtime_sidecar_evidence.py"', workflow)
+
+    def test_skill_sandbox_binary_release_evidence_is_uploaded(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        for required in (
+            "Build maf-skill-sandbox release binary",
+            "Generate Skill Sandbox binary SBOM / provenance / manifest",
+            "Upload Skill Sandbox binary release evidence",
+            "cargo build --release -p maf_skill_runtime --bin maf-skill-sandbox",
+            "--component maf_skill_runtime",
+            "--artifact-id maf_skill_sandbox",
+            "--artifact-kind sidecar_binary",
+            "--contract-hash skill_runtime=maf_skill_runtime_schema_gates_20260515",
+            "--proto-hash skill=maf_skill_proto_v1_20260515",
+            "rust-skill-sandbox-linux-x86_64",
+        ):
+            self.assertIn(required, workflow)
+
+    def test_prd04_evidence_changes_trigger_quality_gates(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn('"scripts/validate_prd04_skill_runtime_evidence.py"', workflow)
+        self.assertIn('"docs/prd/rust/**"', workflow)

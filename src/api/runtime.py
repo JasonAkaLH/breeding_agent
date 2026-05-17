@@ -48,7 +48,12 @@ from src.integrations.codex_skills import (
     SkillScriptRunner,
 )
 from src.integrations.codex_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
+from src.integrations.codex_skills.rust_contract import (
+    error_policy as skill_runtime_error_policy,
+    load_skill_runtime_contract,
+)
 from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcClient
+from src.integrations.codex_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState
@@ -1864,7 +1869,141 @@ def _resolve_skill_sandbox_client_from_env() -> SkillSandboxGrpcClient | None:
     endpoint = os.environ.get("MAF_SKILL_SANDBOX_ENDPOINT", "").strip()
     if not endpoint:
         return None
-    return SkillSandboxGrpcClient(endpoint)
+    artifact_provenance, allowed_artifact_checksums, allowed_cargo_lock_digests = (
+        _resolve_skill_sandbox_artifact_trust_from_env()
+    )
+    return SkillSandboxGrpcClient(
+        endpoint,
+        artifact_provenance=artifact_provenance,
+        allowed_artifact_checksums=allowed_artifact_checksums,
+        allowed_cargo_lock_digests=allowed_cargo_lock_digests,
+    )
+
+
+def _resolve_skill_sandbox_artifact_trust_from_env() -> tuple[dict[str, Any] | None, tuple[str, ...], tuple[str, ...]]:
+    manifest_path = os.environ.get("MAF_SKILL_SANDBOX_ARTIFACT_MANIFEST_PATH", "").strip()
+    allowlist_path = os.environ.get("MAF_SKILL_SANDBOX_ARTIFACT_ALLOWLIST_PATH", "").strip()
+    if not manifest_path and not allowlist_path:
+        if os.environ.get("MAF_RUST_SKILL_RUNTIME_MODE", "off").strip().lower() == "enforce":
+            _raise_skill_runtime_artifact_untrusted(
+                "Rust Skill Sandbox enforce mode requires an artifact manifest and allowlist"
+            )
+        return None, (), ()
+    if not manifest_path or not allowlist_path:
+        _raise_skill_runtime_artifact_untrusted(
+            "Rust Skill Sandbox artifact trust requires both manifest and allowlist paths"
+        )
+
+    manifest = _load_skill_sandbox_json_file(manifest_path, "Skill Sandbox artifact manifest")
+    allowlist = _load_skill_sandbox_json_file(allowlist_path, "Skill Sandbox artifact allowlist")
+    metadata = _skill_sandbox_artifact_metadata_from_manifest(manifest)
+    allowed_checksums, allowed_cargo_lock_digests = _skill_sandbox_allowlist_digests(
+        allowlist,
+        required_manifest=manifest,
+    )
+    validate_skill_runtime_artifact_provenance(
+        metadata,
+        allowed_checksums=set(allowed_checksums),
+        allowed_cargo_lock_digests=set(allowed_cargo_lock_digests),
+    )
+    return metadata, allowed_checksums, allowed_cargo_lock_digests
+
+
+def _load_skill_sandbox_json_file(path: str, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _raise_skill_runtime_artifact_untrusted(f"Rust {label} is unavailable or invalid")
+        raise AssertionError("unreachable") from exc
+    if not isinstance(payload, dict):
+        _raise_skill_runtime_artifact_untrusted(f"Rust {label} must be a JSON object")
+    return payload
+
+
+def _skill_sandbox_artifact_metadata_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    contract_hashes = manifest.get("contract_hashes")
+    if not isinstance(contract_hashes, Mapping):
+        _raise_skill_runtime_artifact_untrusted(
+            "Rust Skill Sandbox artifact manifest must include contract hashes"
+        )
+    contract = load_skill_runtime_contract()
+    artifact_kind = manifest.get("artifact_kind")
+    artifact_id = manifest.get("artifact_id")
+    if artifact_id == "maf_skill_sandbox" and artifact_kind == "sidecar_binary":
+        artifact_kind = "skill_sandbox_sidecar_binary"
+    return {
+        "source": manifest.get("source"),
+        "artifact_kind": artifact_kind,
+        "checksum_sha256": manifest.get("artifact_sha256"),
+        "cargo_lock_digest": manifest.get("cargo_lock_sha256"),
+        "contract_version": contract["contract_version"],
+        "bundle_revision": manifest.get("git_commit") or manifest.get("artifact_name"),
+        "schema_hash": contract_hashes.get("skill_runtime"),
+        "sbom_digest": manifest.get("sbom_sha256"),
+        "provenance_attestation": manifest.get("provenance_sha256"),
+    }
+
+
+def _skill_sandbox_allowlist_digests(
+    allowlist: Mapping[str, Any],
+    *,
+    required_manifest: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    entries = allowlist.get("allowed_artifacts")
+    if not isinstance(entries, list):
+        _raise_skill_runtime_artifact_untrusted(
+            "Rust Skill Sandbox artifact allowlist must contain allowed_artifacts"
+        )
+    checksums: list[str] = []
+    cargo_lock_digests: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            _raise_skill_runtime_artifact_untrusted("Rust Skill Sandbox artifact allowlist entry is invalid")
+        checksum = entry.get("artifact_sha256") or entry.get("checksum_sha256")
+        cargo_lock = entry.get("cargo_lock_sha256") or entry.get("cargo_lock_digest")
+        if isinstance(checksum, str) and checksum:
+            checksums.append(checksum)
+        if isinstance(cargo_lock, str) and cargo_lock:
+            cargo_lock_digests.append(cargo_lock)
+    if not any(_skill_sandbox_allowlist_entry_matches_manifest(entry, required_manifest) for entry in entries):
+        _raise_skill_runtime_artifact_untrusted(
+            "Rust Skill Sandbox artifact manifest is not present in the allowlist"
+        )
+    if not checksums or not cargo_lock_digests:
+        _raise_skill_runtime_artifact_untrusted(
+            "Rust Skill Sandbox artifact allowlist must include checksums and Cargo.lock digests"
+        )
+    return tuple(sorted(set(checksums))), tuple(sorted(set(cargo_lock_digests)))
+
+
+def _skill_sandbox_allowlist_entry_matches_manifest(entry: object, manifest: Mapping[str, Any]) -> bool:
+    if not isinstance(entry, Mapping):
+        return False
+    exact_fields = (
+        "component",
+        "artifact_id",
+        "artifact_kind",
+        "artifact_sha256",
+        "cargo_lock_sha256",
+        "sbom_sha256",
+        "provenance_sha256",
+        "source",
+        "git_commit",
+        "toolchain",
+        "target_triple",
+        "build_profile",
+    )
+    if any(entry.get(field) != manifest.get(field) for field in exact_fields):
+        return False
+    for field in ("cargo_features", "contract_hashes", "proto_hashes"):
+        if entry.get(field) != manifest.get(field):
+            return False
+    return True
+
+
+def _raise_skill_runtime_artifact_untrusted(message: str) -> None:
+    error_code = skill_runtime_error_policy("skill_runtime_artifact_untrusted")["code"]
+    raise RuntimeError(f"{error_code}: {message}")
 
 
 def _resolve_skill_policy_client(fallback_client: Any | None) -> Any | None:
