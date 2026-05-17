@@ -11,6 +11,8 @@ on:
       - "scripts/rust_artifact_provenance.py"
       - "scripts/validate_prd03_runtime_sidecar_evidence.py"
       - "scripts/validate_prd04_skill_runtime_evidence.py"
+      - "scripts/validate_prd05_mcp_runtime_evidence.py"
+      - "src/integrations/mcp/**"
       - "docs/prd/rust/**"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
@@ -25,6 +27,8 @@ on:
       - "scripts/rust_artifact_provenance.py"
       - "scripts/validate_prd03_runtime_sidecar_evidence.py"
       - "scripts/validate_prd04_skill_runtime_evidence.py"
+      - "scripts/validate_prd05_mcp_runtime_evidence.py"
+      - "src/integrations/mcp/**"
       - "docs/prd/rust/**"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
@@ -229,6 +233,74 @@ jobs:
             native/target/skill-sandbox-release/maf_skill_sandbox.sbom.json
             native/target/skill-sandbox-release/maf_skill_sandbox.provenance.json
             native/target/skill-sandbox-release/maf_skill_sandbox.manifest.json
+
+      - name: Build maf-mcp-runtime-sidecar release binary
+        working-directory: native
+        run: cargo build --release -p maf_mcp_runtime --bin maf-mcp-runtime-sidecar
+
+      - name: Generate MCP Runtime sidecar binary SBOM / provenance / manifest
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="native/target/mcp-runtime-release"
+          mkdir -p "$RELEASE_DIR"
+          MCP_SOURCE="native/target/release/maf-mcp-runtime-sidecar"
+          MCP_ARTIFACT="$RELEASE_DIR/maf-mcp-runtime-sidecar-linux-x86_64"
+          test -x "$MCP_SOURCE"
+          cp "$MCP_SOURCE" "$MCP_ARTIFACT"
+          chmod +x "$MCP_ARTIFACT"
+          RUSTC_VERSION="$(rustc --version)"
+          cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml > "$RELEASE_DIR/cargo-metadata.json"
+          python scripts/rust_artifact_provenance.py write-sbom \
+            --component maf_mcp_runtime \
+            --cargo-metadata "$RELEASE_DIR/cargo-metadata.json" \
+            --output "$RELEASE_DIR/maf_mcp_runtime_sidecar.sbom.json"
+          python scripts/rust_artifact_provenance.py write-provenance \
+            --component maf_mcp_runtime \
+            --artifact-id maf_mcp_runtime_sidecar \
+            --artifact-kind sidecar_binary \
+            --artifact-path "$MCP_ARTIFACT" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash mcp_runtime=maf_mcp_v1_phase1_schema_hash_pending_ci \
+            --contract-hash mcp_runtime_errors=maf_mcp_runtime_error_table_v1_phase1 \
+            --proto-hash mcp=maf_mcp_proto_v1_20260517 \
+            --output "$RELEASE_DIR/maf_mcp_runtime_sidecar.provenance.json"
+          python scripts/rust_artifact_provenance.py generate \
+            --component maf_mcp_runtime \
+            --artifact-id maf_mcp_runtime_sidecar \
+            --artifact-kind sidecar_binary \
+            --artifact-path "$MCP_ARTIFACT" \
+            --cargo-lock native/Cargo.lock \
+            --sbom "$RELEASE_DIR/maf_mcp_runtime_sidecar.sbom.json" \
+            --provenance "$RELEASE_DIR/maf_mcp_runtime_sidecar.provenance.json" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash mcp_runtime=maf_mcp_v1_phase1_schema_hash_pending_ci \
+            --contract-hash mcp_runtime_errors=maf_mcp_runtime_error_table_v1_phase1 \
+            --proto-hash mcp=maf_mcp_proto_v1_20260517 \
+            --output "$RELEASE_DIR/maf_mcp_runtime_sidecar.manifest.json"
+
+      - name: Check PRD05 MCP Runtime evidence manifest remains fail-closed
+        run: python scripts/validate_prd05_mcp_runtime_evidence.py --allow-pending
+
+      - name: Upload MCP Runtime sidecar binary release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-mcp-runtime-linux-x86_64
+          if-no-files-found: error
+          path: |
+            native/target/mcp-runtime-release/maf-mcp-runtime-sidecar-linux-x86_64
+            native/target/mcp-runtime-release/maf_mcp_runtime_sidecar.sbom.json
+            native/target/mcp-runtime-release/maf_mcp_runtime_sidecar.provenance.json
+            native/target/mcp-runtime-release/maf_mcp_runtime_sidecar.manifest.json
 
   rust-fuzz-smoke:
     name: Rust bounded fuzz smoke / Ubuntu 22.04 x86_64

@@ -1,6 +1,6 @@
 # MCP Runtime Rust Sidecar PRD
 
-- **状态**：实施中（接入方式已冻结为独立 Rust sidecar；Phase 0 / Phase 1 基线已落地，并补充 JSON-RPC validation、output sanitizer、bundle activation 与 task registry Rust kernels；Phase 2-5 与 production enforce 待完成）
+- **状态**：实施中（接入方式已冻结为独立 Rust sidecar；Phase 0 / Phase 1 基线已落地，并补充 JSON-RPC validation、output sanitizer、bundle activation 与 task registry Rust kernels；MCP Runtime sidecar binary SBOM/provenance/manifest CI 口径、PRD05 evidence ledger / fail-closed 校验与 enforce artifact allowlist 门禁已补齐；Phase 2-5 canonical runtime operations、production enforce、真实 shadow/benchmark/ops/decommission evidence 待完成）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` RUST-P0-007、9.5；`docs/prd/backend/14-MCPRuntime实现需求PRD.md`；`docs/prd/backend/17-MCP长任务流式SSEPRD.md`
 - **联合实施 Phase**：`docs/prd/MCP/README.md`
@@ -12,7 +12,7 @@ MCP Runtime 需要处理外部 server / tools 的协议输入输出。外部 too
 
 本专题 PRD 不再单独承载 MCP Rust 化的全部实施细节。MCP 长任务流式 SSE 与 Rust sidecar 的最终交付范围已拆入 `docs/prd/MCP/`：该目录的 Phase 0-5 是具体工程顺序、退出门禁与验收矩阵；本文保留 Rust sidecar 架构边界、Python facade 分工、非目标、安全要求与生产门禁。
 
-## 1.1 当前实施状态口径（2026-05-15）
+## 1.1 当前实施状态口径（2026-05-17）
 
 已落地基线：
 
@@ -21,6 +21,9 @@ MCP Runtime 需要处理外部 server / tools 的协议输入输出。外部 too
 3. health、readiness、version、compatibility handshake、typed error 与 supported features 的 Phase 1 contract skeleton。
 4. Python sidecar facade、`MAF_RUST_MCP_RUNTIME_MODE=off|shadow|enforce` mode gate、endpoint allowlist、compatibility 校验、shadow fallback 与 enforce fail-closed gate。
 5. Phase 0 contract artifacts / conformance matrix 与 Phase 1 facade 回归测试入口。
+6. MCP Runtime release evidence ledger：`docs/prd/rust/evidence/prd05/mcp_runtime_release_gates.json` 与 `scripts/validate_prd05_mcp_runtime_evidence.py` 已落地；`--allow-pending` 仅允许 repo-local CI 证明 ledger 仍处于 pending，严格模式在 artifact / conformance / benchmark / promotion / ops / recovery / decommission 真实证据未齐时 fail closed。
+7. MCP Runtime artifact trust gate：`MAF_RUST_MCP_RUNTIME_ARTIFACT_MANIFEST_PATH` 与 `MAF_RUST_MCP_RUNTIME_ARTIFACT_ALLOWLIST_PATH` 已接入 Python MCP sidecar settings / client；`enforce` 且配置 sidecar endpoint 时缺少 manifest/allowlist 或 exact allowlist 不匹配会以 `mcp_runtime_artifact_untrusted` fail closed。
+8. Rust quality workflow 已增加 `maf-mcp-runtime-sidecar` Linux x86_64 release binary 的 SBOM / provenance / manifest 生成与 artifact 上传口径。
 
 未完成范围：
 
@@ -28,6 +31,7 @@ MCP Runtime 需要处理外部 server / tools 的协议输入输出。外部 too
 2. Rust sidecar 内 MCP Tasks、durable long-task registry、task recovery、remote cancellation 与 final result retrieval。
 3. `MCPToolExecutor` 对 Rust sidecar canonical runtime operations 的完整调用、API/SSE live event bridge 与 cancel propagation。
 4. shadow 样本、promotion report、production enforce、ops runbook / rollback drill 与 Python legacy MCP duplicate semantics 下线。
+5. Phase 2-5 canonical runtime operations 仍未在 Rust sidecar 中成为主执行面；当前 MCP tool 真实执行仍由 Python MCP client / transport / task registry 承担。
 
 因此，当前只能宣称“Rust MCP sidecar 接入骨架 / Phase 0-1 基线已落地”；不得宣称完整 Rust MCP Runtime、完整长任务流式 SSE、production enforce 或 Python legacy 下线已完成。
 

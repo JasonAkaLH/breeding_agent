@@ -7,6 +7,10 @@ from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
+from .mcp_runtime_gates import (
+    load_mcp_runtime_artifact_trust,
+    validate_mcp_runtime_artifact_provenance,
+)
 from .protocol import MCP_PROTOCOL_VERSION
 
 MCP_SIDECAR_COMPONENT = "maf_mcp_runtime_sidecar"
@@ -36,6 +40,8 @@ class MCPRustRuntimeSettings:
     expected_schema_hash: str = ""
     expected_error_code_table_hash: str = ""
     required_features: frozenset[str] = frozenset()
+    artifact_manifest_path: str = ""
+    artifact_allowlist_path: str = ""
     connect_timeout_seconds: float = 2.0
     request_timeout_seconds: float = 30.0
 
@@ -49,6 +55,8 @@ class MCPRustRuntimeSettings:
                 "expected_schema_hash": env.get("MAF_RUST_MCP_RUNTIME_SCHEMA_HASH", ""),
                 "expected_error_code_table_hash": env.get("MAF_RUST_MCP_RUNTIME_ERROR_CODE_TABLE_HASH", ""),
                 "required_features": _split_csv(env.get("MAF_RUST_MCP_RUNTIME_REQUIRED_FEATURES", "")),
+                "artifact_manifest_path": env.get("MAF_RUST_MCP_RUNTIME_ARTIFACT_MANIFEST_PATH", ""),
+                "artifact_allowlist_path": env.get("MAF_RUST_MCP_RUNTIME_ARTIFACT_ALLOWLIST_PATH", ""),
                 "connect_timeout_seconds": env.get("MAF_RUST_MCP_RUNTIME_CONNECT_TIMEOUT_SECONDS", "2"),
                 "request_timeout_seconds": env.get("MAF_RUST_MCP_RUNTIME_REQUEST_TIMEOUT_SECONDS", "30"),
             }
@@ -62,8 +70,14 @@ class MCPRustRuntimeSettings:
             mode=mode,
             endpoint=str(raw.get("endpoint") or "").strip(),
             expected_schema_hash=str(raw.get("expected_schema_hash") or raw.get("schema_hash") or "").strip(),
-            expected_error_code_table_hash=str(raw.get("expected_error_code_table_hash") or raw.get("error_code_table_hash") or "").strip(),
-            required_features=frozenset(str(item).strip() for item in raw.get("required_features") or () if str(item).strip()),
+            expected_error_code_table_hash=str(
+                raw.get("expected_error_code_table_hash") or raw.get("error_code_table_hash") or ""
+            ).strip(),
+            required_features=frozenset(
+                str(item).strip() for item in raw.get("required_features") or () if str(item).strip()
+            ),
+            artifact_manifest_path=str(raw.get("artifact_manifest_path") or "").strip(),
+            artifact_allowlist_path=str(raw.get("artifact_allowlist_path") or "").strip(),
             connect_timeout_seconds=_positive_float(raw.get("connect_timeout_seconds"), 2.0),
             request_timeout_seconds=_positive_float(raw.get("request_timeout_seconds"), 30.0),
         )
@@ -75,6 +89,31 @@ class MCPRustRuntimeSettings:
             return "MAF_RUST_MCP_RUNTIME_ENDPOINT is required when MCP Rust runtime mode is shadow or enforce."
         if not _is_allowed_internal_endpoint(self.endpoint):
             return "MCP Rust sidecar endpoint must be an internal unix:// or loopback endpoint."
+        artifact_error = self.artifact_trust_error()
+        if artifact_error:
+            return artifact_error
+        return ""
+
+    def artifact_trust_error(self) -> str:
+        if not self.artifact_manifest_path and not self.artifact_allowlist_path:
+            if self.mode == MCPSidecarMode.ENFORCE:
+                return (
+                    "mcp_runtime_artifact_untrusted: MCP Rust sidecar enforce mode requires an artifact manifest "
+                    "and allowlist."
+                )
+            return ""
+        if not self.artifact_manifest_path or not self.artifact_allowlist_path:
+            return (
+                "mcp_runtime_artifact_untrusted: MCP Rust sidecar artifact trust requires both manifest "
+                "and allowlist paths."
+            )
+        try:
+            load_mcp_runtime_artifact_trust(
+                manifest_path=self.artifact_manifest_path,
+                allowlist_path=self.artifact_allowlist_path,
+            )
+        except RuntimeError as exc:
+            return str(exc)
         return ""
 
 
@@ -196,7 +235,16 @@ class MCPSidecarClient:
         client_version: str = MCP_SIDECAR_CLIENT_VERSION,
         expected_schema_hash: str = "",
         expected_error_code_table_hash: str = "",
+        artifact_provenance: Mapping[str, Any] | None = None,
+        allowed_artifact_checksums: tuple[str, ...] = (),
+        allowed_cargo_lock_digests: tuple[str, ...] = (),
     ) -> None:
+        if artifact_provenance is not None:
+            validate_mcp_runtime_artifact_provenance(
+                artifact_provenance,
+                allowed_checksums=set(allowed_artifact_checksums),
+                allowed_cargo_lock_digests=set(allowed_cargo_lock_digests),
+            )
         self._transport = transport
         self._client_version = client_version
         self._expected_schema_hash = expected_schema_hash
