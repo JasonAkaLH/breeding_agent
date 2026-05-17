@@ -1751,12 +1751,22 @@ def _resolve_runtime_sidecar_artifact_trust_from_env() -> tuple[dict[str, Any] |
             "Rust runtime sidecar artifact trust requires both manifest and allowlist paths"
         )
 
-    manifest = _load_runtime_sidecar_json_file(manifest_path, "runtime sidecar artifact manifest")
-    allowlist = _load_runtime_sidecar_json_file(allowlist_path, "runtime sidecar artifact allowlist")
+    manifest = _load_artifact_trust_json_file(
+        manifest_path,
+        "runtime sidecar artifact manifest",
+        _raise_runtime_sidecar_artifact_untrusted,
+    )
+    allowlist = _load_artifact_trust_json_file(
+        allowlist_path,
+        "runtime sidecar artifact allowlist",
+        _raise_runtime_sidecar_artifact_untrusted,
+    )
     metadata = _runtime_sidecar_artifact_metadata_from_manifest(manifest)
-    allowed_checksums, allowed_cargo_lock_digests = _runtime_sidecar_allowlist_digests(
+    allowed_checksums, allowed_cargo_lock_digests = _artifact_allowlist_digests(
         allowlist,
         required_manifest=manifest,
+        artifact_label="Rust runtime sidecar",
+        raise_untrusted=_raise_runtime_sidecar_artifact_untrusted,
     )
     validate_runtime_sidecar_artifact_provenance(
         metadata,
@@ -1771,17 +1781,6 @@ def _runtime_sidecar_enforce_enabled() -> bool:
         runtime_sidecar_mode_for_component(component) == "enforce"
         for component in ("runtime_store", "event_log", "task_dispatcher")
     )
-
-
-def _load_runtime_sidecar_json_file(path: str, label: str) -> dict[str, Any]:
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        _raise_runtime_sidecar_artifact_untrusted(f"{label} is unavailable or invalid")
-        raise AssertionError("unreachable") from exc
-    if not isinstance(payload, dict):
-        _raise_runtime_sidecar_artifact_untrusted(f"{label} must be a JSON object")
-    return payload
 
 
 def _runtime_sidecar_artifact_metadata_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -1801,63 +1800,6 @@ def _runtime_sidecar_artifact_metadata_from_manifest(manifest: Mapping[str, Any]
         "schema_hash": contract_hashes.get("runtime_sidecar"),
         "provenance_attestation": manifest.get("provenance_sha256"),
     }
-
-
-def _runtime_sidecar_allowlist_digests(
-    allowlist: Mapping[str, Any],
-    *,
-    required_manifest: Mapping[str, Any],
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    entries = allowlist.get("allowed_artifacts")
-    if not isinstance(entries, list):
-        _raise_runtime_sidecar_artifact_untrusted(
-            "Rust runtime sidecar artifact allowlist must contain allowed_artifacts"
-        )
-    checksums: list[str] = []
-    cargo_lock_digests: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            _raise_runtime_sidecar_artifact_untrusted("Rust runtime sidecar artifact allowlist entry is invalid")
-        checksum = entry.get("artifact_sha256") or entry.get("checksum_sha256")
-        cargo_lock = entry.get("cargo_lock_sha256") or entry.get("cargo_lock_digest")
-        if isinstance(checksum, str) and checksum:
-            checksums.append(checksum)
-        if isinstance(cargo_lock, str) and cargo_lock:
-            cargo_lock_digests.append(cargo_lock)
-    if not any(_runtime_sidecar_allowlist_entry_matches_manifest(entry, required_manifest) for entry in entries):
-        _raise_runtime_sidecar_artifact_untrusted(
-            "Rust runtime sidecar artifact manifest is not present in the allowlist"
-        )
-    if not checksums or not cargo_lock_digests:
-        _raise_runtime_sidecar_artifact_untrusted(
-            "Rust runtime sidecar artifact allowlist must include checksums and Cargo.lock digests"
-        )
-    return tuple(sorted(set(checksums))), tuple(sorted(set(cargo_lock_digests)))
-
-
-def _runtime_sidecar_allowlist_entry_matches_manifest(entry: object, manifest: Mapping[str, Any]) -> bool:
-    if not isinstance(entry, Mapping):
-        return False
-    exact_fields = (
-        "component",
-        "artifact_id",
-        "artifact_kind",
-        "artifact_sha256",
-        "cargo_lock_sha256",
-        "sbom_sha256",
-        "provenance_sha256",
-        "source",
-        "git_commit",
-        "toolchain",
-        "target_triple",
-        "build_profile",
-    )
-    if any(entry.get(field) != manifest.get(field) for field in exact_fields):
-        return False
-    for field in ("cargo_features", "contract_hashes", "proto_hashes"):
-        if entry.get(field) != manifest.get(field):
-            return False
-    return True
 
 
 def _raise_runtime_sidecar_artifact_untrusted(message: str) -> None:
@@ -1894,12 +1836,22 @@ def _resolve_skill_sandbox_artifact_trust_from_env() -> tuple[dict[str, Any] | N
             "Rust Skill Sandbox artifact trust requires both manifest and allowlist paths"
         )
 
-    manifest = _load_skill_sandbox_json_file(manifest_path, "Skill Sandbox artifact manifest")
-    allowlist = _load_skill_sandbox_json_file(allowlist_path, "Skill Sandbox artifact allowlist")
+    manifest = _load_artifact_trust_json_file(
+        manifest_path,
+        "Rust Skill Sandbox artifact manifest",
+        _raise_skill_runtime_artifact_untrusted,
+    )
+    allowlist = _load_artifact_trust_json_file(
+        allowlist_path,
+        "Rust Skill Sandbox artifact allowlist",
+        _raise_skill_runtime_artifact_untrusted,
+    )
     metadata = _skill_sandbox_artifact_metadata_from_manifest(manifest)
-    allowed_checksums, allowed_cargo_lock_digests = _skill_sandbox_allowlist_digests(
+    allowed_checksums, allowed_cargo_lock_digests = _artifact_allowlist_digests(
         allowlist,
         required_manifest=manifest,
+        artifact_label="Rust Skill Sandbox",
+        raise_untrusted=_raise_skill_runtime_artifact_untrusted,
     )
     validate_skill_runtime_artifact_provenance(
         metadata,
@@ -1907,17 +1859,6 @@ def _resolve_skill_sandbox_artifact_trust_from_env() -> tuple[dict[str, Any] | N
         allowed_cargo_lock_digests=set(allowed_cargo_lock_digests),
     )
     return metadata, allowed_checksums, allowed_cargo_lock_digests
-
-
-def _load_skill_sandbox_json_file(path: str, label: str) -> dict[str, Any]:
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        _raise_skill_runtime_artifact_untrusted(f"Rust {label} is unavailable or invalid")
-        raise AssertionError("unreachable") from exc
-    if not isinstance(payload, dict):
-        _raise_skill_runtime_artifact_untrusted(f"Rust {label} must be a JSON object")
-    return payload
 
 
 def _skill_sandbox_artifact_metadata_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -1944,39 +1885,50 @@ def _skill_sandbox_artifact_metadata_from_manifest(manifest: Mapping[str, Any]) 
     }
 
 
-def _skill_sandbox_allowlist_digests(
+def _load_artifact_trust_json_file(
+    path: str,
+    label: str,
+    raise_untrusted: Callable[[str], None],
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise_untrusted(f"{label} is unavailable or invalid")
+        raise AssertionError("unreachable") from exc
+    if not isinstance(payload, dict):
+        raise_untrusted(f"{label} must be a JSON object")
+    return payload
+
+
+def _artifact_allowlist_digests(
     allowlist: Mapping[str, Any],
     *,
     required_manifest: Mapping[str, Any],
+    artifact_label: str,
+    raise_untrusted: Callable[[str], None],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     entries = allowlist.get("allowed_artifacts")
     if not isinstance(entries, list):
-        _raise_skill_runtime_artifact_untrusted(
-            "Rust Skill Sandbox artifact allowlist must contain allowed_artifacts"
-        )
+        raise_untrusted(f"{artifact_label} artifact allowlist must contain allowed_artifacts")
     checksums: list[str] = []
     cargo_lock_digests: list[str] = []
     for entry in entries:
         if not isinstance(entry, Mapping):
-            _raise_skill_runtime_artifact_untrusted("Rust Skill Sandbox artifact allowlist entry is invalid")
+            raise_untrusted(f"{artifact_label} artifact allowlist entry is invalid")
         checksum = entry.get("artifact_sha256") or entry.get("checksum_sha256")
         cargo_lock = entry.get("cargo_lock_sha256") or entry.get("cargo_lock_digest")
         if isinstance(checksum, str) and checksum:
             checksums.append(checksum)
         if isinstance(cargo_lock, str) and cargo_lock:
             cargo_lock_digests.append(cargo_lock)
-    if not any(_skill_sandbox_allowlist_entry_matches_manifest(entry, required_manifest) for entry in entries):
-        _raise_skill_runtime_artifact_untrusted(
-            "Rust Skill Sandbox artifact manifest is not present in the allowlist"
-        )
+    if not any(_artifact_allowlist_entry_matches_manifest(entry, required_manifest) for entry in entries):
+        raise_untrusted(f"{artifact_label} artifact manifest is not present in the allowlist")
     if not checksums or not cargo_lock_digests:
-        _raise_skill_runtime_artifact_untrusted(
-            "Rust Skill Sandbox artifact allowlist must include checksums and Cargo.lock digests"
-        )
+        raise_untrusted(f"{artifact_label} artifact allowlist must include checksums and Cargo.lock digests")
     return tuple(sorted(set(checksums))), tuple(sorted(set(cargo_lock_digests)))
 
 
-def _skill_sandbox_allowlist_entry_matches_manifest(entry: object, manifest: Mapping[str, Any]) -> bool:
+def _artifact_allowlist_entry_matches_manifest(entry: object, manifest: Mapping[str, Any]) -> bool:
     if not isinstance(entry, Mapping):
         return False
     exact_fields = (
