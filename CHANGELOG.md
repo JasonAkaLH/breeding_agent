@@ -16,6 +16,7 @@
 - PRD04 CI 收口追加修复：`scripts/validate_prd04_skill_runtime_evidence.py` 改为轻量加载 stdlib-only 的 Skill Runtime gate helper，避免 Rust quality workflow 在未安装 PyYAML 等 Python app 依赖时因 `src.integrations.__init__` 副作用失败；新增 `python -S` 回归覆盖该场景。
 - PRD01-PRD04 cleanup：`src/api/runtime.py` 中 RuntimeSidecar 与 Skill Sandbox artifact trust 的 JSON 加载、allowlist digest 收集与 exact manifest 匹配已收敛为共享 helper，并新增 API 层 allowlist helper 回归；PRD03/PRD04 的 pending external evidence fail-safe 语义保持不变。
 - PRD05 已新增 MCP Runtime sidecar binary CI 产物口径、`docs/prd/rust/evidence/prd05/mcp_runtime_release_gates.json`、`scripts/validate_prd05_mcp_runtime_evidence.py`、`src/integrations/mcp/mcp_runtime_gates.py` 与 `MAF_RUST_MCP_RUNTIME_ARTIFACT_MANIFEST_PATH` / `MAF_RUST_MCP_RUNTIME_ARTIFACT_ALLOWLIST_PATH` enforce artifact trust gate；真实 Phase 2-5 Rust canonical operations、7 天 shadow、benchmark、ops / recovery drill、deployment allowlist promotion 与 Python legacy MCP protocol/sanitizer/activation 下线仍不得用本地合成证据替代。
+- PRD05 远端 CI 收口中发现 `maf_runtime_sidecar` SQLite gRPC 测试在 coverage 并发执行下临时文件名存在纳秒时间戳碰撞风险；RuntimeSidecar gRPC / SQLite 测试 helper 已追加进程内 atomic counter，避免并发测试互相删除 SQLite 文件。
 - 当前 Ralph context：`.omx/context/prd05-mcp-runtime-20260517T123946Z.md`；计划与测试规格为 `.omx/plans/prd-20260517-prd05-mcp-runtime-wrapup.md` 与 `.omx/plans/test-spec-20260517-prd05-mcp-runtime-wrapup.md`。
 
 ### Rust Runtime 迁移最新进展

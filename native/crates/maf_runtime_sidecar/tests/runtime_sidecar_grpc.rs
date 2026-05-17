@@ -7,8 +7,11 @@ use maf_runtime_sidecar::{
 };
 use runtime_pb::runtime_sidecar_server::RuntimeSidecar;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::Request;
+
+static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test]
 async fn tonic_service_maps_pb_requests_to_rust_adapter_envelopes() {
@@ -482,9 +485,10 @@ fn temp_db_path(test_name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
         .as_nanos();
+    let unique = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "maf-runtime-sidecar-{test_name}-{}-{timestamp}.sqlite",
+        "maf-runtime-sidecar-{test_name}-{}-{timestamp}-{unique}.sqlite",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
