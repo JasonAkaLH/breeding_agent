@@ -13,6 +13,7 @@
 - PRD03 的仓库内实现与远端 CI 收口已完成：最新远端绿灯证据为 GitHub Actions `Rust quality gates` push run `25987197322`（commit `865339e73cd1e947d2e9d0ab997f5301c74a812a`），覆盖 Ubuntu 22.04 x86_64 / Python 3.13 的 Rust quality gates、bounded fuzz smoke、PyO3 wheel smoke 与 RuntimeSidecar binary artifact 上传。PRD03 剩余 production enforce / 7 天 shadow / benchmark / ops / deployment allowlist / legacy 下线仍作为真实外部证据 pending gate，不阻塞进入 PRD04 repo-local 实施。
 - 当前恢复锚点切换为 `docs/prd/rust/04-SkillRuntime与SkillOwnedRust接入PRD.md`；本轮 PRD04 目标是完成仓库内 Skill Runtime / Skill Sandbox release evidence、enforce artifact allowlist、fail-closed evidence ledger、测试与文档闭环。
 - PRD04 已新增 Skill Sandbox binary CI 产物口径、`docs/prd/rust/evidence/prd04/skill_runtime_release_gates.json`、`scripts/validate_prd04_skill_runtime_evidence.py` 与 `MAF_SKILL_SANDBOX_ARTIFACT_MANIFEST_PATH` / `MAF_SKILL_SANDBOX_ARTIFACT_ALLOWLIST_PATH` enforce artifact trust gate；真实 deployment allowlist promotion、7 天 shadow、benchmark、ops drill、跨平台/容器级 process cleanup 强化与 Python legacy trust/subprocess 下线仍不得用本地合成证据替代。
+- PRD04 CI 收口追加修复：`scripts/validate_prd04_skill_runtime_evidence.py` 改为轻量加载 stdlib-only 的 Skill Runtime gate helper，避免 Rust quality workflow 在未安装 PyYAML 等 Python app 依赖时因 `src.integrations.__init__` 副作用失败；新增 `python -S` 回归覆盖该场景。
 - 当前 Ralph context：`.omx/context/prd04-skill-runtime-20260517T100614Z.md`；计划与测试规格为 `.omx/plans/prd-20260517-prd04-skill-runtime-wrapup.md` 与 `.omx/plans/test-spec-20260517-prd04-skill-runtime-wrapup.md`。
 
 ### Rust Runtime 迁移最新进展

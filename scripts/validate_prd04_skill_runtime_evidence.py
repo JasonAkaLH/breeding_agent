@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
+import types
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -12,14 +14,47 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.integrations.codex_skills.rust_contract import load_skill_runtime_contract
-from src.integrations.codex_skills.skill_runtime_gates import (
-    validate_skill_runtime_artifact_provenance,
-    validate_skill_runtime_benchmark_report,
-    validate_skill_runtime_decommission_readiness,
-    validate_skill_runtime_ops_readiness,
-    validate_skill_runtime_promotion_readiness,
-)
+_CODEX_SKILLS_DIR = REPO_ROOT / "src" / "integrations" / "codex_skills"
+_LIGHTWEIGHT_PACKAGE = "_maf_prd04_codex_skills"
+
+
+def _load_lightweight_module(name: str) -> Any:
+    """Load Skill Runtime gate helpers without importing optional integration deps.
+
+    The GitHub Rust quality job intentionally runs this validator before Python
+    application dependencies such as PyYAML are installed. Importing
+    ``src.integrations.codex_skills`` would execute ``src.integrations`` package
+    initializers and pull those optional dependencies in. These gate helpers are
+    stdlib-only, so load just the two files under a private package namespace.
+    """
+
+    package = sys.modules.get(_LIGHTWEIGHT_PACKAGE)
+    if package is None:
+        package = types.ModuleType(_LIGHTWEIGHT_PACKAGE)
+        package.__path__ = [str(_CODEX_SKILLS_DIR)]  # type: ignore[attr-defined]
+        sys.modules[_LIGHTWEIGHT_PACKAGE] = package
+
+    module_name = f"{_LIGHTWEIGHT_PACKAGE}.{name}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, _CODEX_SKILLS_DIR / f"{name}.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load Skill Runtime helper module: {name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_rust_contract = _load_lightweight_module("rust_contract")
+_skill_runtime_gates = _load_lightweight_module("skill_runtime_gates")
+
+load_skill_runtime_contract = _rust_contract.load_skill_runtime_contract
+validate_skill_runtime_artifact_provenance = _skill_runtime_gates.validate_skill_runtime_artifact_provenance
+validate_skill_runtime_benchmark_report = _skill_runtime_gates.validate_skill_runtime_benchmark_report
+validate_skill_runtime_decommission_readiness = _skill_runtime_gates.validate_skill_runtime_decommission_readiness
+validate_skill_runtime_ops_readiness = _skill_runtime_gates.validate_skill_runtime_ops_readiness
+validate_skill_runtime_promotion_readiness = _skill_runtime_gates.validate_skill_runtime_promotion_readiness
 
 DEFAULT_EVIDENCE = Path("docs/prd/rust/evidence/prd04/skill_runtime_release_gates.json")
 SCHEMA_VERSION = "maf.prd04.skill_runtime_evidence.v1"

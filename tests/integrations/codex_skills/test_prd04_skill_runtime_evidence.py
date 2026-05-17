@@ -43,6 +43,27 @@ class PRD04SkillRuntimeEvidenceTest(unittest.TestCase):
         self.assertNotEqual(strict.returncode, 0)
         self.assertIn("prd04_skill_runtime_evidence_pending", strict.stderr)
 
+    def test_validator_runs_without_optional_python_application_dependencies(self) -> None:
+        evidence_path = Path("docs/prd/rust/evidence/prd04/skill_runtime_release_gates.json")
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "scripts/validate_prd04_skill_runtime_evidence.py",
+                "--evidence",
+                str(evidence_path),
+                "--allow-pending",
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "pending")
+
     def test_complete_synthetic_evidence_validates_all_prd04_gates(self) -> None:
         contract = load_skill_runtime_contract()
         payload = {
