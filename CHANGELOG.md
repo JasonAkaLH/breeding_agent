@@ -12,8 +12,8 @@
 
 - 当前恢复锚点仍是 `docs/prd/rust/03-DispatcherStoreEventSidecarPRD.md`；后续应继续 PRD03，不要跳到 PRD04。
 - PRD03 的 **edge / artifact sidecar coverage posture / implementation** 已明确为补独立 RuntimeSidecar RPC，并已在本地落地 task edge save/list 与 artifact metadata save/get/list：Rust proto / service kernel / SQLite adapter、Python `RuntimeSidecarGrpcClient`、`SQLiteStorage` enforce routing / shadow audit、contract artifact 与 storage/integration 回归均已接入。
-- PRD03 剩余待收口项转为 production enforce rollout / 7 天 shadow promotion 证据、ops / migration / rollback drill 证据、远端 CI artifact / provenance 证据与 Python legacy 写路径最终下线；完成这些之前不要进入 PRD04。
-- 最新远端绿灯证据：GitHub Actions `Rust quality gates` workflow_dispatch run `25933538373`（commit `5ddbf14082baf4d8149f5f98622a96aa9eea0966`）已通过；随后证据提交 `db077bc` 已推送。
+- PRD03 剩余待收口项转为 production enforce rollout / 7 天 shadow promotion 证据、ops / migration / rollback drill 实际执行证据、部署 allowlist promotion 与 Python legacy 写路径最终下线；RuntimeSidecar binary 的 CI SBOM / provenance / manifest 上传口径、PRD03 evidence ledger 与 fail-closed 校验脚本已进入当前收口分支，完成真实生产证据前不要进入 PRD04。
+- 最新远端绿灯证据：GitHub Actions `Rust quality gates` push run `25948082624`（commit `ed44653a9fb591da5be82366cf5f87e4458030ad`）已通过；该 run 覆盖 Ubuntu 22.04 x86_64 / Python 3.13 的 Rust quality gates、bounded fuzz smoke 与 PyO3 wheel smoke。
 - 当前 Ralph goal 已按本节恢复锚点继续推进；后续若再次中断，请先读取 `CHANGELOG.md`、OMX/Ralph 状态与 `docs/prd/rust`，并以本节恢复锚点覆盖历史状态中混杂的 PRD04 残留字段。
 
 ### Rust Runtime 迁移最新进展

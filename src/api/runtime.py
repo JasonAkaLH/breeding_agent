@@ -71,8 +71,12 @@ from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_router import WorkflowRouter
-from src.storage.rust_contract import mode_for_component as runtime_sidecar_mode_for_component
-from src.storage.runtime_sidecar_facade import ensure_sidecar_write_allowed, validate_runtime_sidecar_response
+from src.storage.rust_contract import error_policy, mode_for_component as runtime_sidecar_mode_for_component
+from src.storage.runtime_sidecar_facade import (
+    ensure_sidecar_write_allowed,
+    validate_runtime_sidecar_artifact_provenance,
+    validate_runtime_sidecar_response,
+)
 from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
 from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write_sync
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
@@ -1699,6 +1703,9 @@ def _resolve_runtime_sidecar_client_from_env() -> RuntimeSidecarGrpcClient | Non
     endpoint = os.environ.get("MAF_RUNTIME_SIDECAR_ENDPOINT", "").strip()
     if not endpoint:
         return None
+    artifact_provenance, allowed_artifact_checksums, allowed_cargo_lock_digests = (
+        _resolve_runtime_sidecar_artifact_trust_from_env()
+    )
     allowed_hosts = tuple(
         host.strip()
         for host in os.environ.get("MAF_RUNTIME_SIDECAR_ALLOWED_HOSTS", "").split(",")
@@ -1719,7 +1726,138 @@ def _resolve_runtime_sidecar_client_from_env() -> RuntimeSidecarGrpcClient | Non
         tls_cert_path=os.environ.get("MAF_RUNTIME_SIDECAR_TLS_CERT_PATH", "").strip() or None,
         tls_key_path=os.environ.get("MAF_RUNTIME_SIDECAR_TLS_KEY_PATH", "").strip() or None,
         tls_server_name=os.environ.get("MAF_RUNTIME_SIDECAR_TLS_SERVER_NAME", "").strip() or None,
+        artifact_provenance=artifact_provenance,
+        allowed_artifact_checksums=allowed_artifact_checksums,
+        allowed_cargo_lock_digests=allowed_cargo_lock_digests,
     )
+
+
+def _resolve_runtime_sidecar_artifact_trust_from_env() -> tuple[dict[str, Any] | None, tuple[str, ...], tuple[str, ...]]:
+    manifest_path = os.environ.get("MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH", "").strip()
+    allowlist_path = os.environ.get("MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH", "").strip()
+    if not manifest_path and not allowlist_path:
+        if _runtime_sidecar_enforce_enabled():
+            _raise_runtime_sidecar_artifact_untrusted(
+                "Rust runtime sidecar enforce mode requires an artifact manifest and allowlist"
+            )
+        return None, (), ()
+    if not manifest_path or not allowlist_path:
+        _raise_runtime_sidecar_artifact_untrusted(
+            "Rust runtime sidecar artifact trust requires both manifest and allowlist paths"
+        )
+
+    manifest = _load_runtime_sidecar_json_file(manifest_path, "runtime sidecar artifact manifest")
+    allowlist = _load_runtime_sidecar_json_file(allowlist_path, "runtime sidecar artifact allowlist")
+    metadata = _runtime_sidecar_artifact_metadata_from_manifest(manifest)
+    allowed_checksums, allowed_cargo_lock_digests = _runtime_sidecar_allowlist_digests(
+        allowlist,
+        required_manifest=manifest,
+    )
+    validate_runtime_sidecar_artifact_provenance(
+        metadata,
+        allowed_checksums=set(allowed_checksums),
+        allowed_cargo_lock_digests=set(allowed_cargo_lock_digests),
+    )
+    return metadata, allowed_checksums, allowed_cargo_lock_digests
+
+
+def _runtime_sidecar_enforce_enabled() -> bool:
+    return any(
+        runtime_sidecar_mode_for_component(component) == "enforce"
+        for component in ("runtime_store", "event_log", "task_dispatcher")
+    )
+
+
+def _load_runtime_sidecar_json_file(path: str, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _raise_runtime_sidecar_artifact_untrusted(f"{label} is unavailable or invalid")
+        raise AssertionError("unreachable") from exc
+    if not isinstance(payload, dict):
+        _raise_runtime_sidecar_artifact_untrusted(f"{label} must be a JSON object")
+    return payload
+
+
+def _runtime_sidecar_artifact_metadata_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    contract_hashes = manifest.get("contract_hashes")
+    proto_hashes = manifest.get("proto_hashes")
+    if not isinstance(contract_hashes, Mapping) or not isinstance(proto_hashes, Mapping):
+        _raise_runtime_sidecar_artifact_untrusted(
+            "Rust runtime sidecar artifact manifest must include contract and proto hashes"
+        )
+    return {
+        "source": manifest.get("source"),
+        "artifact_kind": manifest.get("artifact_kind"),
+        "checksum_sha256": manifest.get("artifact_sha256"),
+        "sbom_digest": manifest.get("sbom_sha256"),
+        "cargo_lock_digest": manifest.get("cargo_lock_sha256"),
+        "proto_hash": proto_hashes.get("runtime"),
+        "schema_hash": contract_hashes.get("runtime_sidecar"),
+        "provenance_attestation": manifest.get("provenance_sha256"),
+    }
+
+
+def _runtime_sidecar_allowlist_digests(
+    allowlist: Mapping[str, Any],
+    *,
+    required_manifest: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    entries = allowlist.get("allowed_artifacts")
+    if not isinstance(entries, list):
+        _raise_runtime_sidecar_artifact_untrusted(
+            "Rust runtime sidecar artifact allowlist must contain allowed_artifacts"
+        )
+    checksums: list[str] = []
+    cargo_lock_digests: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            _raise_runtime_sidecar_artifact_untrusted("Rust runtime sidecar artifact allowlist entry is invalid")
+        checksum = entry.get("artifact_sha256") or entry.get("checksum_sha256")
+        cargo_lock = entry.get("cargo_lock_sha256") or entry.get("cargo_lock_digest")
+        if isinstance(checksum, str) and checksum:
+            checksums.append(checksum)
+        if isinstance(cargo_lock, str) and cargo_lock:
+            cargo_lock_digests.append(cargo_lock)
+    if not any(_runtime_sidecar_allowlist_entry_matches_manifest(entry, required_manifest) for entry in entries):
+        _raise_runtime_sidecar_artifact_untrusted(
+            "Rust runtime sidecar artifact manifest is not present in the allowlist"
+        )
+    if not checksums or not cargo_lock_digests:
+        _raise_runtime_sidecar_artifact_untrusted(
+            "Rust runtime sidecar artifact allowlist must include checksums and Cargo.lock digests"
+        )
+    return tuple(sorted(set(checksums))), tuple(sorted(set(cargo_lock_digests)))
+
+
+def _runtime_sidecar_allowlist_entry_matches_manifest(entry: object, manifest: Mapping[str, Any]) -> bool:
+    if not isinstance(entry, Mapping):
+        return False
+    exact_fields = (
+        "component",
+        "artifact_id",
+        "artifact_kind",
+        "artifact_sha256",
+        "cargo_lock_sha256",
+        "sbom_sha256",
+        "provenance_sha256",
+        "source",
+        "git_commit",
+        "toolchain",
+        "target_triple",
+        "build_profile",
+    )
+    if any(entry.get(field) != manifest.get(field) for field in exact_fields):
+        return False
+    for field in ("cargo_features", "contract_hashes", "proto_hashes"):
+        if entry.get(field) != manifest.get(field):
+            return False
+    return True
+
+
+def _raise_runtime_sidecar_artifact_untrusted(message: str) -> None:
+    error_code = error_policy("runtime_store_artifact_untrusted")["code"]
+    raise RuntimeError(f"{error_code}: {message}")
 
 
 def _resolve_skill_sandbox_client_from_env() -> SkillSandboxGrpcClient | None:

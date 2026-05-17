@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 from src.core.enums import TaskStatus
 from src.core.models import EventRecord, Task
 from src.orchestration.models import OrchestrationRequest
-from src.storage.rust_contract import mode_for_component
+from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract, mode_for_component
 from tests.api.support import APITestCase
 
 
@@ -192,6 +193,9 @@ class RuntimeSidecarContractAPITest(APITestCase):
             tls_cert_path=None,
             tls_key_path=None,
             tls_server_name=None,
+            artifact_provenance=None,
+            allowed_artifact_checksums=(),
+            allowed_cargo_lock_digests=(),
         )
 
     async def test_runtime_configures_mtls_grpc_sidecar_client_from_deployment_env(self) -> None:
@@ -223,7 +227,87 @@ class RuntimeSidecarContractAPITest(APITestCase):
             tls_cert_path="/etc/maf/client.pem",
             tls_key_path="/etc/maf/client.key",
             tls_server_name="runtime.internal",
+            artifact_provenance=None,
+            allowed_artifact_checksums=(),
+            allowed_cargo_lock_digests=(),
         )
+
+    async def test_runtime_enforce_requires_allowlisted_sidecar_artifact_manifest(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
+                    "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                    "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": "",
+                    "MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH": "",
+                },
+            ),
+            patch("src.api.runtime.RuntimeSidecarGrpcClient") as client_factory,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime_store_artifact_untrusted: Rust runtime sidecar enforce mode requires",
+            ):
+                await self.reconfigure_runtime(enable_conversation_memory=False)
+
+        client_factory.assert_not_called()
+
+    async def test_runtime_enforce_validates_sidecar_artifact_allowlist_before_client_use(self) -> None:
+        sentinel_client = object()
+        manifest, allowlist, metadata = self._write_runtime_sidecar_artifact_trust_files()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
+                    "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                    "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": str(manifest),
+                    "MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH": str(allowlist),
+                },
+            ),
+            patch("src.api.runtime.RuntimeSidecarGrpcClient", return_value=sentinel_client) as client_factory,
+        ):
+            await self.reconfigure_runtime(enable_conversation_memory=False)
+
+        self.assertIs(self.runtime.storage._runtime_sidecar_client, sentinel_client)  # noqa: SLF001
+        client_factory.assert_called_once_with(
+            "http://127.0.0.1:65535",
+            config_source="environment_variable",
+            allowed_hosts=(),
+            mtls_enabled=False,
+            tls_ca_path=None,
+            tls_cert_path=None,
+            tls_key_path=None,
+            tls_server_name=None,
+            artifact_provenance=metadata,
+            allowed_artifact_checksums=("sha256:runtime-sidecar",),
+            allowed_cargo_lock_digests=("sha256:cargo-lock",),
+        )
+
+    async def test_runtime_enforce_rejects_manifest_not_exactly_present_in_allowlist(self) -> None:
+        manifest, allowlist, _metadata = self._write_runtime_sidecar_artifact_trust_files(
+            allowlist_overrides={"git_commit": "different-commit"}
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
+                    "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                    "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": str(manifest),
+                    "MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH": str(allowlist),
+                },
+            ),
+            patch("src.api.runtime.RuntimeSidecarGrpcClient") as client_factory,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "runtime_store_artifact_untrusted: Rust runtime sidecar artifact manifest is not present",
+            ):
+                await self.reconfigure_runtime(enable_conversation_memory=False)
+
+        client_factory.assert_not_called()
 
     async def test_dispatcher_enforce_routes_bundle_revision_to_configured_sidecar(self) -> None:
         sidecar = _RecordingDispatcherSidecarClient()
@@ -333,3 +417,52 @@ class RuntimeSidecarContractAPITest(APITestCase):
         self.assertEqual(shadow_records[-1]["payload"]["operation"], "bundle_revision_pin")
         self.assertEqual(shadow_records[-1]["payload"]["rust_status"], "error")
         self.assertEqual(shadow_records[-1]["payload"]["error_code"], "dispatcher_unavailable")
+
+    def _write_runtime_sidecar_artifact_trust_files(
+        self,
+        *,
+        allowlist_overrides: dict[str, object] | None = None,
+    ) -> tuple[Path, Path, dict[str, str]]:
+        contract = load_runtime_sidecar_contract()
+        proto_hash = artifact_policy()["expected_proto_hash"]
+        manifest_payload = {
+            "schema_version": "maf.rust_artifact_provenance.v1",
+            "component": "maf_runtime_sidecar",
+            "artifact_id": "maf_runtime_sidecar",
+            "artifact_kind": "sidecar_binary",
+            "artifact_name": "maf-runtime-sidecar-linux-x86_64",
+            "artifact_sha256": "sha256:runtime-sidecar",
+            "cargo_lock_sha256": "sha256:cargo-lock",
+            "sbom_sha256": "sha256:sbom",
+            "provenance_sha256": "sha256:provenance",
+            "source": "ci_pipeline",
+            "git_commit": "abcdef123456",
+            "toolchain": "rustc 1.95.0",
+            "target_triple": "x86_64-unknown-linux-gnu",
+            "build_profile": "release",
+            "cargo_features": ["default"],
+            "contract_hashes": {"runtime_sidecar": contract["schema_hash"]},
+            "proto_hashes": {"runtime": proto_hash},
+        }
+        allowlist_entry = dict(manifest_payload)
+        if allowlist_overrides:
+            allowlist_entry.update(allowlist_overrides)
+        allowlist_payload = {
+            "schema_version": "maf.rust_artifact_allowlist.v1",
+            "allowed_artifacts": [allowlist_entry],
+        }
+        manifest_path = self.workspace / "runtime-sidecar.manifest.json"
+        allowlist_path = self.workspace / "runtime-sidecar.allowlist.json"
+        manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+        allowlist_path.write_text(json.dumps(allowlist_payload), encoding="utf-8")
+        metadata = {
+            "source": "ci_pipeline",
+            "artifact_kind": "sidecar_binary",
+            "checksum_sha256": "sha256:runtime-sidecar",
+            "sbom_digest": "sha256:sbom",
+            "cargo_lock_digest": "sha256:cargo-lock",
+            "proto_hash": proto_hash,
+            "schema_hash": contract["schema_hash"],
+            "provenance_attestation": "sha256:provenance",
+        }
+        return manifest_path, allowlist_path, metadata

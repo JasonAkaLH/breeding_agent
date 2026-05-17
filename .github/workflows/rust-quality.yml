@@ -9,6 +9,8 @@ on:
       - "scripts/run_rust_quality_gates.py"
       - "scripts/run_rust_coverage_thresholds.py"
       - "scripts/rust_artifact_provenance.py"
+      - "scripts/validate_prd03_runtime_sidecar_evidence.py"
+      - "docs/prd/rust/**"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
   push:
@@ -20,6 +22,8 @@ on:
       - "scripts/run_rust_quality_gates.py"
       - "scripts/run_rust_coverage_thresholds.py"
       - "scripts/rust_artifact_provenance.py"
+      - "scripts/validate_prd03_runtime_sidecar_evidence.py"
+      - "docs/prd/rust/**"
       - "requirements.txt"
       - ".github/workflows/rust-quality.yml"
   workflow_dispatch:
@@ -91,6 +95,72 @@ jobs:
 
       - name: python scripts/rust_artifact_provenance.py self-test
         run: python scripts/rust_artifact_provenance.py self-test
+
+      - name: Build maf-runtime-sidecar release binary
+        working-directory: native
+        run: cargo build --release -p maf_runtime_sidecar --bin maf-runtime-sidecar
+
+      - name: Generate RuntimeSidecar binary SBOM / provenance / manifest
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="native/target/runtime-sidecar-release"
+          mkdir -p "$RELEASE_DIR"
+          SIDECAR_SOURCE="native/target/release/maf-runtime-sidecar"
+          SIDECAR_ARTIFACT="$RELEASE_DIR/maf-runtime-sidecar-linux-x86_64"
+          test -x "$SIDECAR_SOURCE"
+          cp "$SIDECAR_SOURCE" "$SIDECAR_ARTIFACT"
+          chmod +x "$SIDECAR_ARTIFACT"
+          RUSTC_VERSION="$(rustc --version)"
+          cargo metadata --locked --format-version 1 --manifest-path native/Cargo.toml > "$RELEASE_DIR/cargo-metadata.json"
+          python scripts/rust_artifact_provenance.py write-sbom \
+            --component maf_runtime_sidecar \
+            --cargo-metadata "$RELEASE_DIR/cargo-metadata.json" \
+            --output "$RELEASE_DIR/maf_runtime_sidecar.sbom.json"
+          python scripts/rust_artifact_provenance.py write-provenance \
+            --component maf_runtime_sidecar \
+            --artifact-id maf_runtime_sidecar \
+            --artifact-kind sidecar_binary \
+            --artifact-path "$SIDECAR_ARTIFACT" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash runtime_sidecar=maf_runtime_v1_schema_20260515_edge_artifact \
+            --proto-hash runtime=maf_runtime_proto_v1_20260515_edge_artifact \
+            --output "$RELEASE_DIR/maf_runtime_sidecar.provenance.json"
+          python scripts/rust_artifact_provenance.py generate \
+            --component maf_runtime_sidecar \
+            --artifact-id maf_runtime_sidecar \
+            --artifact-kind sidecar_binary \
+            --artifact-path "$SIDECAR_ARTIFACT" \
+            --cargo-lock native/Cargo.lock \
+            --sbom "$RELEASE_DIR/maf_runtime_sidecar.sbom.json" \
+            --provenance "$RELEASE_DIR/maf_runtime_sidecar.provenance.json" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash runtime_sidecar=maf_runtime_v1_schema_20260515_edge_artifact \
+            --proto-hash runtime=maf_runtime_proto_v1_20260515_edge_artifact \
+            --output "$RELEASE_DIR/maf_runtime_sidecar.manifest.json"
+
+      - name: Check PRD03 RuntimeSidecar evidence manifest remains fail-closed
+        run: python scripts/validate_prd03_runtime_sidecar_evidence.py --allow-pending
+
+      - name: Upload RuntimeSidecar binary release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-runtime-sidecar-linux-x86_64
+          if-no-files-found: error
+          path: |
+            native/target/runtime-sidecar-release/maf-runtime-sidecar-linux-x86_64
+            native/target/runtime-sidecar-release/maf_runtime_sidecar.sbom.json
+            native/target/runtime-sidecar-release/maf_runtime_sidecar.provenance.json
+            native/target/runtime-sidecar-release/maf_runtime_sidecar.manifest.json
 
   rust-fuzz-smoke:
     name: Rust bounded fuzz smoke / Ubuntu 22.04 x86_64

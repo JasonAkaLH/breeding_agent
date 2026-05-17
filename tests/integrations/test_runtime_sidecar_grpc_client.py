@@ -9,6 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
+from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract
 from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
 
 
@@ -24,6 +25,24 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
             RuntimeSidecarGrpcClient("https://127.0.0.1:50051", mtls_enabled=False)
         with self.assertRaisesRegex(ValueError, "requires CA, client certificate, and client key"):
             RuntimeSidecarGrpcClient("https://127.0.0.1:50051", mtls_enabled=True)
+
+    def test_client_rejects_unallowlisted_artifact_provenance_before_connecting(self) -> None:
+        metadata = _runtime_sidecar_artifact_metadata()
+        with self.assertRaisesRegex(RuntimeError, "runtime_store_artifact_untrusted"):
+            RuntimeSidecarGrpcClient(
+                "http://127.0.0.1:65535",
+                artifact_provenance={**metadata, "checksum_sha256": "sha256:tampered"},
+                allowed_artifact_checksums=("sha256:runtime-sidecar",),
+                allowed_cargo_lock_digests=("sha256:cargo-lock",),
+            )
+
+        client = RuntimeSidecarGrpcClient(
+            "http://127.0.0.1:65535",
+            artifact_provenance=metadata,
+            allowed_artifact_checksums=("sha256:runtime-sidecar",),
+            allowed_cargo_lock_digests=("sha256:cargo-lock",),
+        )
+        self.assertIsNotNone(client)
 
     def test_python_client_appends_and_replays_against_rust_sidecar_binary(self) -> None:
         binary = _ensure_runtime_sidecar_binary()
@@ -509,6 +528,20 @@ def _ensure_runtime_sidecar_binary() -> Path:
         check=True,
     )
     return binary
+
+
+def _runtime_sidecar_artifact_metadata() -> dict[str, str]:
+    contract = load_runtime_sidecar_contract()
+    return {
+        "source": "ci_pipeline",
+        "artifact_kind": "sidecar_binary",
+        "checksum_sha256": "sha256:runtime-sidecar",
+        "sbom_digest": "sha256:sbom",
+        "cargo_lock_digest": "sha256:cargo-lock",
+        "proto_hash": artifact_policy()["expected_proto_hash"],
+        "schema_hash": contract["schema_hash"],
+        "provenance_attestation": "slsa-provenance",
+    }
 
 
 def _free_loopback_port() -> int:

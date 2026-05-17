@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from src.storage.rust_contract import load_runtime_sidecar_contract
 from src.storage.runtime_sidecar_facade import (
+    validate_runtime_sidecar_artifact_provenance,
     validate_runtime_sidecar_config_authority,
     validate_runtime_sidecar_endpoint,
     validate_runtime_sidecar_handshake,
@@ -48,7 +49,16 @@ class RuntimeSidecarGrpcClient:
         tls_cert_path: str | None = None,
         tls_key_path: str | None = None,
         tls_server_name: str | None = None,
+        artifact_provenance: Mapping[str, Any] | None = None,
+        allowed_artifact_checksums: tuple[str, ...] = (),
+        allowed_cargo_lock_digests: tuple[str, ...] = (),
     ) -> None:
+        if artifact_provenance is not None:
+            validate_runtime_sidecar_artifact_provenance(
+                artifact_provenance,
+                allowed_checksums=set(allowed_artifact_checksums),
+                allowed_cargo_lock_digests=set(allowed_cargo_lock_digests),
+            )
         validated_endpoint = validate_runtime_sidecar_endpoint(
             endpoint,
             component="runtime_store",
