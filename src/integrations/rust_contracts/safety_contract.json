@@ -1,5 +1,15 @@
 {
   "component": "maf_safety_kernels",
+  "contract_version": "safety-kernels.v1",
+  "schema_hash": "maf_safety_kernels_schema_v1_20260517",
+  "error_code_table_hash": "maf_safety_kernels_error_table_v2_20260517",
+  "supported_features": [
+    "artifact_store_kernel",
+    "auth_core_kernel",
+    "data_access_kernel",
+    "audit_sanitizer_kernel",
+    "pyo3_safety_facade"
+  ],
   "crates": [
     "maf_artifact_store",
     "maf_auth_core",
@@ -41,6 +51,16 @@
       "retriable": false
     },
     {
+      "code": "artifact_structured_output_invalid",
+      "category": "contract",
+      "retriable": false
+    },
+    {
+      "code": "artifact_contract_mismatch",
+      "category": "contract",
+      "retriable": false
+    },
+    {
       "code": "auth_token_invalid",
       "category": "security",
       "retriable": false
@@ -48,6 +68,11 @@
     {
       "code": "auth_secret_missing",
       "category": "security",
+      "retriable": false
+    },
+    {
+      "code": "auth_structured_output_invalid",
+      "category": "contract",
       "retriable": false
     },
     {
@@ -71,6 +96,16 @@
       "retriable": false
     },
     {
+      "code": "data_access_deadline_exceeded",
+      "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "data_access_structured_output_invalid",
+      "category": "contract",
+      "retriable": false
+    },
+    {
       "code": "audit_sanitizer_secret_redacted",
       "category": "security",
       "retriable": false
@@ -78,6 +113,16 @@
     {
       "code": "audit_sanitizer_event_too_large",
       "category": "resource_limit",
+      "retriable": false
+    },
+    {
+      "code": "audit_sanitizer_structured_output_invalid",
+      "category": "contract",
+      "retriable": false
+    },
+    {
+      "code": "audit_sanitizer_contract_mismatch",
+      "category": "contract",
       "retriable": false
     }
   ]

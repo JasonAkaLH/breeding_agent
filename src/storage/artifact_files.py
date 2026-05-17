@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+from src.integrations.rust_safety_contract import normalize_storage_key
+
 
 @dataclass(slots=True, frozen=True)
 class StoredArtifactFile:
@@ -37,6 +39,7 @@ class LocalArtifactFileStore:
         if not source.exists() or not source.is_file():
             raise FileNotFoundError(f"Artifact source file does not exist: {source}")
         safe_filename = sanitize_download_filename(filename)
+        storage_key = normalize_storage_key(f"{sanitize_storage_component(artifact_id)}/{safe_filename}")
         artifact_dir = self._safe_artifact_dir(artifact_id)
         if artifact_dir.exists():
             shutil.rmtree(artifact_dir)
@@ -57,7 +60,7 @@ class LocalArtifactFileStore:
             shutil.rmtree(artifact_dir, ignore_errors=True)
             raise
         return StoredArtifactFile(
-            storage_key=f"{artifact_id}/{safe_filename}",
+            storage_key=storage_key,
             filename=safe_filename,
             size_bytes=size,
             sha256=digest.hexdigest(),
@@ -87,6 +90,7 @@ class LocalArtifactFileStore:
         return path
 
     def _resolve_storage_key(self, storage_key: str) -> Path:
+        storage_key = normalize_storage_key(storage_key)
         pure = PurePosixPath(storage_key)
         if pure.is_absolute() or len(pure.parts) != 2 or any(part in {"", ".", ".."} for part in pure.parts):
             raise ValueError("Invalid artifact storage key")

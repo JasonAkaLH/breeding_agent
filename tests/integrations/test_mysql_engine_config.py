@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
+from src.integrations.rust_safety_contract import resource_limit
 from src.mysql_engine import MYSQL_READONLY_URL_ENV, build_sql_engine
 
 
@@ -39,6 +41,38 @@ class MySQLEngineConfigTest(unittest.TestCase):
             self.assertIsNone(engine.url.password)
         finally:
             engine.dispose()
+
+    def test_build_sql_engine_defaults_db_timeouts_from_safety_contract(self) -> None:
+        with patch("src.mysql_engine.create_engine") as create_engine:
+            create_engine.return_value = object()
+
+            build_sql_engine(
+                config={"mysql_readonly": {"url": "mysql+pymysql://readonly@example.invalid:3306/business"}}
+            )
+
+        kwargs = create_engine.call_args.kwargs
+        deadline_seconds = resource_limit("db_deadline_ms") // 1000
+        self.assertEqual(kwargs["connect_args"]["read_timeout"], deadline_seconds)
+        self.assertEqual(kwargs["execution_options"]["timeout"], deadline_seconds)
+
+    def test_build_sql_engine_clamps_db_timeouts_to_safety_hard_cap(self) -> None:
+        with patch("src.mysql_engine.create_engine") as create_engine:
+            create_engine.return_value = object()
+
+            build_sql_engine(
+                config={
+                    "mysql_readonly": {
+                        "url": "mysql+pymysql://readonly@example.invalid:3306/business",
+                        "read_timeout": 60,
+                        "execution_timeout": 60,
+                    }
+                }
+            )
+
+        kwargs = create_engine.call_args.kwargs
+        hard_cap_seconds = resource_limit("db_hard_cap_ms") // 1000
+        self.assertEqual(kwargs["connect_args"]["read_timeout"], hard_cap_seconds)
+        self.assertEqual(kwargs["execution_options"]["timeout"], hard_cap_seconds)
 
     def test_build_sql_engine_can_build_url_from_config_parts(self) -> None:
         engine = build_sql_engine(

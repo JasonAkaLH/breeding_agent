@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult
 
-from src.integrations.mysql_readonly import MySQLReadonlyAdapter, TransientReadonlyExecutionError
+from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryTimeoutError, TransientReadonlyExecutionError
+from src.integrations.rust_safety_contract import DataAccessContractError
 
 from .helpers import SQL_QUERY_PUBLIC_CAPABILITY_ID, find_dependency_output, make_artifact
 
@@ -33,7 +34,21 @@ class SQLQuerySQLExecuteReadonlyCapability(CapabilityContract):
                 capability_id=request.capability_id,
                 task_id=request.task_id,
                 node_id=request.node_id,
-                error=CapabilityExecutionError(code="guard_token_missing", message=str(exc)),
+                error=CapabilityExecutionError(code="data_access_write_denied", message=str(exc), retriable=False),
+            )
+        except ReadonlyQueryTimeoutError as exc:
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                error=CapabilityExecutionError(code=exc.code, message=str(exc), retriable=False),
+            )
+        except DataAccessContractError as exc:
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                error=CapabilityExecutionError(code=exc.code, message=str(exc), retriable=exc.retriable),
             )
         except TransientReadonlyExecutionError as exc:
             return CapabilityExecutionResult(

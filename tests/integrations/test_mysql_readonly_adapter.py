@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 
-from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryResult
+from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryResult, ReadonlyQueryTimeoutError
+from src.integrations.rust_safety_contract import DataAccessContractError, resource_limit
 
 
 class _FakeResult:
@@ -67,6 +69,74 @@ class MySQLReadonlyAdapterTest(unittest.TestCase):
 
         self.assertEqual(result.columns, ("sql",))
         self.assertEqual(result.rows, ({"sql": "SELECT 1"},))
+
+    def test_default_deadline_comes_from_safety_contract(self) -> None:
+        adapter = MySQLReadonlyAdapter(runner=lambda _: ReadonlyQueryResult(columns=(), rows=(), row_count=0))
+
+        self.assertEqual(adapter.deadline_ms, resource_limit("db_deadline_ms"))
+
+    def test_configured_deadline_is_clamped_to_safety_hard_cap(self) -> None:
+        adapter = MySQLReadonlyAdapter(
+            runner=lambda _: ReadonlyQueryResult(columns=(), rows=(), row_count=0),
+            deadline_ms=resource_limit("db_hard_cap_ms") + 1000,
+        )
+
+        self.assertEqual(adapter.deadline_ms, resource_limit("db_hard_cap_ms"))
+
+    def test_execution_timeout_uses_stable_data_access_error(self) -> None:
+        calls = 0
+
+        def slow_runner(_: str) -> ReadonlyQueryResult:
+            nonlocal calls
+            calls += 1
+            time.sleep(0.05)
+            return ReadonlyQueryResult(columns=("id",), rows=({"id": 1},), row_count=1)
+
+        adapter = MySQLReadonlyAdapter(runner=slow_runner, deadline_ms=1)
+
+        with self.assertRaises(ReadonlyQueryTimeoutError) as context:
+            asyncio.run(adapter.execute_readonly("SELECT 1", guard_pass_token="guard:test"))
+
+        self.assertEqual(context.exception.code, "data_access_deadline_exceeded")
+        self.assertEqual(calls, 1)
+
+    def test_result_shape_errors_preserve_stable_data_access_codes(self) -> None:
+        wide_columns = tuple(f"c{index}" for index in range(resource_limit("db_column_limit") + 1))
+        cases = [
+            (
+                "data_access_row_limit_exceeded",
+                ReadonlyQueryResult(
+                    columns=("id",),
+                    rows=tuple({"id": index} for index in range(resource_limit("db_row_limit") + 1)),
+                    row_count=resource_limit("db_row_limit") + 1,
+                ),
+            ),
+            (
+                "data_access_column_limit_exceeded",
+                ReadonlyQueryResult(
+                    columns=wide_columns,
+                    rows=({column: 1 for column in wide_columns},),
+                    row_count=1,
+                ),
+            ),
+            (
+                "data_access_result_too_large",
+                ReadonlyQueryResult(
+                    columns=("payload",),
+                    rows=({"payload": "x" * (resource_limit("db_result_bytes") + 1)},),
+                    row_count=1,
+                ),
+            ),
+        ]
+        for expected_code, query_result in cases:
+            with self.subTest(expected_code=expected_code):
+                adapter = MySQLReadonlyAdapter(runner=lambda _sql, result=query_result: result)
+
+                with self.assertRaises(DataAccessContractError) as context:
+                    asyncio.run(adapter.execute_readonly("SELECT id FROM users", guard_pass_token="guard:test"))
+
+                self.assertEqual(context.exception.code, expected_code)
+                self.assertFalse(context.exception.retriable)
 
     def test_engine_factory_is_lazy_reused_and_disposable(self) -> None:
         engine = _FakeEngine()

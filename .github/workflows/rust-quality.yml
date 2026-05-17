@@ -12,6 +12,7 @@ on:
       - "scripts/validate_prd03_runtime_sidecar_evidence.py"
       - "scripts/validate_prd04_skill_runtime_evidence.py"
       - "scripts/validate_prd05_mcp_runtime_evidence.py"
+      - "scripts/validate_prd06_safety_kernel_evidence.py"
       - "src/integrations/mcp/**"
       - "docs/prd/rust/**"
       - "requirements.txt"
@@ -28,6 +29,7 @@ on:
       - "scripts/validate_prd03_runtime_sidecar_evidence.py"
       - "scripts/validate_prd04_skill_runtime_evidence.py"
       - "scripts/validate_prd05_mcp_runtime_evidence.py"
+      - "scripts/validate_prd06_safety_kernel_evidence.py"
       - "src/integrations/mcp/**"
       - "docs/prd/rust/**"
       - "requirements.txt"
@@ -98,6 +100,9 @@ jobs:
 
       - name: Compile PRD01 fuzz harnesses
         run: cargo check --manifest-path native/fuzz/Cargo.toml --bins
+
+      - name: Check PRD06 safety kernel evidence manifest remains fail-closed
+        run: python scripts/validate_prd06_safety_kernel_evidence.py --allow-pending
 
       - name: python scripts/rust_artifact_provenance.py self-test
         run: python scripts/rust_artifact_provenance.py self-test
@@ -318,6 +323,22 @@ jobs:
         working-directory: native/fuzz
         run: cargo +nightly fuzz run skill_runtime_policy -- -max_total_time=30
 
+      - name: cargo +nightly fuzz run artifact_path
+        working-directory: native/fuzz
+        run: cargo +nightly fuzz run artifact_path -- -max_total_time=30
+
+      - name: cargo +nightly fuzz run auth_core
+        working-directory: native/fuzz
+        run: cargo +nightly fuzz run auth_core -- -max_total_time=30
+
+      - name: cargo +nightly fuzz run audit_sanitizer
+        working-directory: native/fuzz
+        run: cargo +nightly fuzz run audit_sanitizer -- -max_total_time=30
+
+      - name: cargo +nightly fuzz run data_access_readonly
+        working-directory: native/fuzz
+        run: cargo +nightly fuzz run data_access_readonly -- -max_total_time=30
+
   skill-runtime-pyo3-wheel-smoke:
     name: Rust PyO3 wheel smoke / Ubuntu 22.04 x86_64 / Python 3.13
     runs-on: ubuntu-22.04
@@ -452,6 +473,60 @@ jobs:
       - name: test_installed_pyo3_module_matches_core_lifecycle_contract_when_available
         run: python -m unittest tests.integrations.test_core_lifecycle_pyo3_wheel_contract.CoreLifecyclePyo3WheelContractTest.test_installed_pyo3_module_matches_core_lifecycle_contract_when_available
 
+      - name: python -m maturin build --release --manifest-path native/crates/maf_safety_kernels_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check
+        run: python -m maturin build --release --locked --manifest-path native/crates/maf_safety_kernels_pyo3/Cargo.toml --interpreter python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels
+
+      - name: Generate Safety Kernels PyO3 wheel SBOM / provenance / manifest
+        run: |
+          set -euo pipefail
+          mapfile -t SAFETY_WHEELS < <(find native/target/wheels -maxdepth 1 -type f -name 'maf_safety_kernels_pyo3-*.whl' | sort)
+          if [ "${#SAFETY_WHEELS[@]}" -ne 1 ]; then
+            echo "expected exactly one Safety Kernels PyO3 wheel, got ${#SAFETY_WHEELS[@]}" >&2
+            printf '%s\n' "${SAFETY_WHEELS[@]}" >&2
+            exit 1
+          fi
+          WHEEL="${SAFETY_WHEELS[0]}"
+          RUSTC_VERSION="$(rustc --version)"
+          python scripts/rust_artifact_provenance.py write-sbom \
+            --component maf_safety_kernels \
+            --cargo-metadata native/target/wheels/cargo-metadata.json \
+            --output native/target/wheels/maf_safety_kernels_pyo3.sbom.json
+          python scripts/rust_artifact_provenance.py write-provenance \
+            --component maf_safety_kernels \
+            --artifact-id maf_safety_kernels_pyo3 \
+            --artifact-kind pyo3_wheel \
+            --artifact-path "$WHEEL" \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash safety_kernels=maf_safety_kernels_schema_v1_20260517 \
+            --output native/target/wheels/maf_safety_kernels_pyo3.provenance.json
+          python scripts/rust_artifact_provenance.py generate \
+            --component maf_safety_kernels \
+            --artifact-id maf_safety_kernels_pyo3 \
+            --artifact-kind pyo3_wheel \
+            --artifact-path "$WHEEL" \
+            --cargo-lock native/Cargo.lock \
+            --sbom native/target/wheels/maf_safety_kernels_pyo3.sbom.json \
+            --provenance native/target/wheels/maf_safety_kernels_pyo3.provenance.json \
+            --source ci_pipeline \
+            --git-commit "${{ github.sha }}" \
+            --toolchain "$RUSTC_VERSION" \
+            --target-triple x86_64-unknown-linux-gnu \
+            --build-profile release \
+            --cargo-feature default \
+            --contract-hash safety_kernels=maf_safety_kernels_schema_v1_20260517 \
+            --output native/target/wheels/maf_safety_kernels_pyo3.manifest.json
+
+      - name: Install built Safety Kernels PyO3 wheel
+        run: python -m pip install --force-reinstall --no-deps native/target/wheels/maf_safety_kernels_pyo3-*.whl
+
+      - name: test_installed_pyo3_module_matches_safety_contract_when_available
+        run: python -m unittest tests.integrations.test_safety_kernels_pyo3_wheel_contract.SafetyKernelsPyo3WheelContractTest.test_installed_pyo3_module_matches_safety_contract_when_available
+
       - name: Upload Rust PyO3 wheel release evidence
         uses: actions/upload-artifact@v4
         with:
@@ -466,3 +541,7 @@ jobs:
             native/target/wheels/maf_core_lifecycle_pyo3.sbom.json
             native/target/wheels/maf_core_lifecycle_pyo3.provenance.json
             native/target/wheels/maf_core_lifecycle_pyo3.manifest.json
+            native/target/wheels/maf_safety_kernels_pyo3-*.whl
+            native/target/wheels/maf_safety_kernels_pyo3.sbom.json
+            native/target/wheels/maf_safety_kernels_pyo3.provenance.json
+            native/target/wheels/maf_safety_kernels_pyo3.manifest.json

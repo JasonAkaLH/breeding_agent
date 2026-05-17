@@ -182,6 +182,38 @@ def build_gates() -> list[Gate]:
             ),
         ),
         Gate(
+            name="safety_kernels_pyo3_wheel_smoke",
+            command=[
+                "conda",
+                "run",
+                "-n",
+                PYTHON_ENV,
+                "python",
+                "-m",
+                "maturin",
+                "build",
+                "--release",
+                "--locked",
+                "--manifest-path",
+                "native/crates/maf_safety_kernels_pyo3/Cargo.toml",
+                "--interpreter",
+                sys.executable,
+                "--compatibility",
+                "manylinux_2_35",
+                "--auditwheel",
+                "check",
+                "--out",
+                "native/target/wheels",
+            ],
+            cwd=REPO_ROOT,
+            env={"CARGO_BUILD_JOBS": "1"},
+            required_tools=("conda", "cargo"),
+            description=(
+                "PRD06 Artifact/Auth/DataAccess/Audit safety PyO3 wheel build smoke; Ubuntu 22.04 "
+                "x86_64 CI uses manylinux_2_35, production still requires provenance allowlist evidence."
+            ),
+        ),
+        Gate(
             name="fuzz_target_manifest",
             command=[sys.executable, "scripts/run_rust_quality_gates.py", "--check-fuzz-targets"],
             cwd=REPO_ROOT,
@@ -205,6 +237,7 @@ def check_fuzz_targets() -> int:
         "skill_runtime_policy.rs",
         "mcp_runtime_protocol.rs",
         "artifact_path.rs",
+        "auth_core.rs",
         "audit_sanitizer.rs",
         "data_access_readonly.rs",
     }

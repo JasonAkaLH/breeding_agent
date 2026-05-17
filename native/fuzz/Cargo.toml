@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 maf_artifact_store = { path = "../crates/maf_artifact_store" }
 maf_audit_sanitizer = { path = "../crates/maf_audit_sanitizer" }
+maf_auth_core = { path = "../crates/maf_auth_core" }
 maf_data_access = { path = "../crates/maf_data_access" }
 maf_mcp_runtime = { path = "../crates/maf_mcp_runtime" }
 maf_skill_runtime = { path = "../crates/maf_skill_runtime" }
@@ -40,6 +41,13 @@ bench = false
 [[bin]]
 name = "audit_sanitizer"
 path = "fuzz_targets/audit_sanitizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_core"
+path = "fuzz_targets/auth_core.rs"
 test = false
 doc = false
 bench = false

@@ -58,6 +58,7 @@ from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, Reasonin
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
+from src.integrations.rust_safety_contract import configure_safety_shadow_sink
 from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.interrupt_service import InterruptService
@@ -156,6 +157,7 @@ class ApiRuntime:
         self._mcp_runtime_state = mcp_runtime_state
         self._runtime_sidecar_client = runtime_sidecar_client
         self._runtime_sidecar_shadow_sink = _build_runtime_sidecar_shadow_diff_sink(audit_sink)
+        configure_safety_shadow_sink(_build_safety_kernel_shadow_diff_sink(audit_sink))
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._running_title_tasks: set[asyncio.Task[None]] = set()
@@ -2321,6 +2323,18 @@ def _build_runtime_sidecar_shadow_diff_sink(
 
     def record_shadow_diff(payload: Mapping[str, str]) -> None:
         audit_sink.record_sync("runtime.sidecar_shadow_diff", payload)
+
+    return record_shadow_diff
+
+
+def _build_safety_kernel_shadow_diff_sink(
+    audit_sink: JsonlAuditSink | None,
+) -> Callable[[Mapping[str, str]], None] | None:
+    if audit_sink is None:
+        return None
+
+    def record_shadow_diff(payload: Mapping[str, str]) -> None:
+        audit_sink.record_sync("safety.kernel_shadow_diff", payload)
 
     return record_shadow_diff
 

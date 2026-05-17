@@ -1,0 +1,26 @@
+[package]
+name = "maf_safety_kernels_pyo3"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "maf_safety_kernels_pyo3"
+crate-type = ["rlib", "cdylib"]
+test = false
+bench = false
+
+[dependencies]
+maf_artifact_store = { path = "../maf_artifact_store" }
+maf_audit_sanitizer = { path = "../maf_audit_sanitizer" }
+maf_auth_core = { path = "../maf_auth_core" }
+maf_data_access = { path = "../maf_data_access" }
+pyo3 = { workspace = true, features = ["abi3-py313"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[build-dependencies]
+pyo3-build-config.workspace = true

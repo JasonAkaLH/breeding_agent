@@ -41,6 +41,18 @@ class UploadReadLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content, b"1234567890")
         self.assertEqual(upload.read_calls, 3)
 
+    def test_upload_store_rejects_pathful_filename_instead_of_silent_normalization(self) -> None:
+        store = InMemoryUploadStore()
+
+        with self.assertRaisesRegex(UploadValidationError, "filename"):
+            store.save(
+                account_id="acc-1",
+                conversation_id="conv-1",
+                filename="../secret.csv",
+                content_type="text/csv",
+                content=b"col\nvalue\n",
+            )
+
 
 class UploadsAPITest(APITestCase):
     async def asyncSetUp(self) -> None:

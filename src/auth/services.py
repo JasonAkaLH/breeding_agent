@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import html
 import re
 import secrets
@@ -11,6 +10,7 @@ from datetime import datetime, timedelta
 
 from src.core.contracts import StoragePort
 from src.core.models import AuthSession, AuthUser, CaptchaChallenge
+from src.integrations.rust_safety_contract import hmac_sha256_hex, verify_auth_token
 
 NowFn = Callable[[], datetime]
 CodeGenerator = Callable[[], str]
@@ -70,7 +70,7 @@ class PasswordHasher:
         if user.password_scheme != self.scheme:
             return False
         expected, _, _ = self.hash_password(password, salt=user.password_salt)
-        return hmac.compare_digest(expected, user.password_hash)
+        return verify_auth_token(expected, user.password_hash)
 
 
 class CaptchaService:
@@ -115,7 +115,7 @@ class CaptchaService:
 
         normalized = self._normalize_code(code)
         next_attempt_count = challenge.attempt_count + 1
-        matches = hmac.compare_digest(challenge.code_hash, self._hash_code(captcha_id, normalized))
+        matches = verify_auth_token(challenge.code_hash, self._hash_code(captcha_id, normalized))
         updated = replace(
             challenge,
             attempt_count=next_attempt_count,
@@ -126,7 +126,7 @@ class CaptchaService:
 
     def _hash_code(self, captcha_id: str, code: str) -> str:
         payload = f"{captcha_id}:{code}".encode("utf-8")
-        return hmac.new(self._secret, payload, hashlib.sha256).hexdigest()
+        return hmac_sha256_hex(self._secret, payload)
 
     @staticmethod
     def _random_code() -> str:

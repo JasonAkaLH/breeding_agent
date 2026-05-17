@@ -556,6 +556,7 @@ dependencies = [
 name = "maf_auth_core"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "thiserror",
 ]
 
@@ -640,6 +641,20 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "maf_safety_kernels_pyo3"
+version = "0.1.0"
+dependencies = [
+ "maf_artifact_store",
+ "maf_audit_sanitizer",
+ "maf_auth_core",
+ "maf_data_access",
+ "pyo3",
+ "pyo3-build-config",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

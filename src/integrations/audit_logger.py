@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.core.contracts import AuditSink, Payload
+from src.integrations.rust_safety_contract import sanitize_audit_payload
 
 
 class JsonlAuditSink(AuditSink):
@@ -34,7 +35,7 @@ class JsonlAuditSink(AuditSink):
             "conversation_id": conversation_id,
             "task_id": task_id,
             "node_id": node_id,
-            "payload": dict(payload),
+            "payload": sanitize_audit_payload(dict(payload)),
         }
         line = json.dumps(record, ensure_ascii=False, default=self._json_default) + "\n"
         async with self._lock:
@@ -57,7 +58,7 @@ class JsonlAuditSink(AuditSink):
             "conversation_id": conversation_id,
             "task_id": task_id,
             "node_id": node_id,
-            "payload": dict(payload),
+            "payload": sanitize_audit_payload(dict(payload)),
         }
         line = json.dumps(record, ensure_ascii=False, default=self._json_default) + "\n"
         self._append_line(line)

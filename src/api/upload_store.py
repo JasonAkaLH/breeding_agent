@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -10,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
-from src.integrations.rust_safety_contract import resource_limit
+from src.integrations.rust_safety_contract import normalize_storage_key, resource_limit, sha256_hex
 
 
 SUPPORTED_UPLOAD_EXTENSIONS: dict[str, Literal["json", "csv"]] = {".json": "json", ".csv": "csv"}
@@ -89,6 +88,7 @@ class InMemoryUploadStore:
     ) -> UploadedFileRecord:
         self.cleanup_expired()
         normalized_filename = _normalize_filename(filename)
+        _validate_managed_upload_key(normalized_filename)
         if len(content) > self.max_file_bytes:
             raise UploadValidationError(f"Uploaded file exceeds {self.max_file_bytes} bytes")
         if len(content) > self.max_preview_bytes:
@@ -111,7 +111,7 @@ class InMemoryUploadStore:
             content_type=(content_type or "application/octet-stream"),
             file_type=file_type,
             size_bytes=len(content),
-            sha256=hashlib.sha256(content).hexdigest(),
+            sha256=sha256_hex(content),
             content_text=content_text,
             preview=preview,
             created_at=now,
@@ -164,8 +164,18 @@ class InMemoryUploadStore:
 
 
 def _normalize_filename(filename: str) -> str:
-    normalized = Path(filename or "upload").name.strip()
+    raw = str(filename or "upload").replace("\\", "/")
+    if "/" in raw:
+        raise UploadValidationError("Uploaded filename must not contain path components")
+    normalized = Path(raw).name.strip()
     return normalized or "upload"
+
+
+def _validate_managed_upload_key(filename: str) -> None:
+    try:
+        normalize_storage_key(f"uploads/{filename}")
+    except ValueError as exc:
+        raise UploadValidationError("Uploaded filename failed artifact safety validation") from exc
 
 
 def _utcnow_naive() -> datetime:

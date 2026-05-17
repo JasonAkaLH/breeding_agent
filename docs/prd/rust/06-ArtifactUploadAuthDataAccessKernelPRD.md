@@ -1,9 +1,18 @@
 # Artifact / Upload / Auth / DataAccess Rust Kernel PRD
 
-- **状态**：部分落地（`maf_artifact_store` / `maf_auth_core` / `maf_data_access` / `maf_audit_sanitizer` safety kernel 与聚合 contract artifact 基线已落地；PyO3/facade 接入、coverage/fuzz、enforce 与 legacy 下线仍待完成）
+- **状态**：仓库内 PyO3/facade 与 fail-closed evidence gate 已落地（`maf_artifact_store` / `maf_auth_core` / `maf_data_access` / `maf_audit_sanitizer` safety kernel、聚合 contract metadata、`maf_safety_kernels_pyo3`、Python safety facade consumption、auth fuzz target 与 PRD06 evidence validator 已完成；真实 production shadow、benchmark、ops drill、deployment allowlist promotion 与 Python legacy 下线仍待外部证据）
 - **日期**：2026-05-14
 - **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` RUST-P0-008、RUST-P1-001、RUST-P1-003、RUST-P1-005、9.6、10.3
 - **影响范围**：`src/storage/artifact_files.py`、`src/api/upload_store.py`、`src/auth/`、`src/integrations/mysql_readonly.py`、`src/mysql_engine.py`、audit/event serialization
+
+## 0. 当前仓库内交付状态（2026-05-17）
+
+- `src/integrations/rust_contracts/safety_contract.json` 已由 Rust `maf_audit_sanitizer` 导出，包含 `contract_version`、`schema_hash`、`error_code_table_hash`、`supported_features`、resource limits 与四类安全错误前缀。
+- `native/crates/maf_safety_kernels_pyo3` 已提供预构建 PyO3 facade source，导出 artifact storage-key normalization / sha256、auth token compare / HMAC / TTL、readonly SQL / shape validation、audit sanitizer JSON bridge 与 contract JSON。
+- `src/integrations/rust_safety_contract.py` 已支持四个 component 的 `off|shadow|enforce` 模式；`enforce` 下缺少预构建 module 或 contract/hash/features 不兼容会 fail closed，runtime 不调用 Cargo / `maturin`。
+- Python upload/artifact/auth/readonly DB/audit sink 已消费 safety facade；默认 `off` 保持 Python 用户可见行为，readonly SQL/shape/deadline 使用 safety contract hard cap，安全审计 payload 会按 safety sanitizer 屏蔽 token/secret/base_url/prompt/rows/path/dsn。
+- `native/fuzz/fuzz_targets/auth_core.rs`、PRD06 evidence ledger `docs/prd/rust/evidence/prd06/safety_kernel_release_gates.json` 与 `scripts/validate_prd06_safety_kernel_evidence.py` 已落地；`--allow-pending` 用于 repo-local CI，严格模式在外部生产证据缺失时 fail closed。
+- 仍未完成：真实 deployment allowlist promotion、7 天 production shadow、真实 benchmark / long-run fuzz、artifact quarantine / secret rotation / identity mismatch / redaction / DB limit / restore drill、最终 Python legacy canonical logic 下线。
 
 ## 1. 问题陈述
 
@@ -138,7 +147,7 @@ Config / secrets / identity 策略冻结：Artifact/Auth/DataAccess/Audit 的 st
 |---|---|
 | Rust property | path normalization、archive path、quota、redaction |
 | Rust unit | auth primitives、hash、TTL、row shape、error mapping |
-| Fuzz | archive/path/filename sanitizer、upload metadata parser、audit redaction/secret masking、DB readonly policy/row shaping；PR bounded smoke + nightly / release 长跑 |
+| Fuzz | archive/path/filename sanitizer、auth primitive、upload metadata parser、audit redaction/secret masking、DB readonly policy/row shaping；PR bounded smoke + nightly / release 长跑 |
 | Rust coverage | `cargo-llvm-cov` line coverage ≥90% |
 | Supply chain | wheel / binary / sidecar image checksum、SBOM、contract hash、provenance、allowlist denial |
 | Performance | path / archive / hash / auth / row shaping / redaction Python baseline vs Rust P50/P95/P99、CPU、memory、result size |

@@ -36,6 +36,7 @@ class RustQualityGateTest(unittest.TestCase):
             "rust_artifact_provenance_self_check",
             "skill_runtime_pyo3_wheel_smoke",
             "core_lifecycle_pyo3_wheel_smoke",
+            "safety_kernels_pyo3_wheel_smoke",
             "fuzz_target_manifest",
         ]:
             self.assertIn(name, gates)
@@ -82,6 +83,12 @@ class RustQualityGateTest(unittest.TestCase):
         )
         self.assertIn("manylinux_2_35", gates["core_lifecycle_pyo3_wheel_smoke"]["command"])
         self.assertIn("--auditwheel", gates["core_lifecycle_pyo3_wheel_smoke"]["command"])
+        self.assertIn("maturin", gates["safety_kernels_pyo3_wheel_smoke"]["command"])
+        self.assertTrue(
+            any("maf_safety_kernels_pyo3" in item for item in gates["safety_kernels_pyo3_wheel_smoke"]["command"])
+        )
+        self.assertIn("manylinux_2_35", gates["safety_kernels_pyo3_wheel_smoke"]["command"])
+        self.assertIn("--auditwheel", gates["safety_kernels_pyo3_wheel_smoke"]["command"])
         self.assertEqual(plan["workspace"], "native")
         self.assertEqual(plan["python_env"], "multi_agent")
 
@@ -100,6 +107,9 @@ class RustQualityGateTest(unittest.TestCase):
             "cargo llvm-cov --workspace --all-features --summary-only",
             "cargo install cargo-fuzz --version 0.13.1",
             "cargo +nightly fuzz run skill_runtime_policy",
+            "cargo +nightly fuzz run auth_core",
+            "cargo +nightly fuzz run audit_sanitizer",
+            "cargo +nightly fuzz run data_access_readonly",
             "python scripts/run_rust_coverage_thresholds.py --run",
             "python scripts/rust_artifact_provenance.py self-test",
             "Set up Python 3.13 for PyO3 workspace gates",
@@ -113,6 +123,7 @@ class RustQualityGateTest(unittest.TestCase):
             "python scripts/rust_artifact_provenance.py generate",
             "python -m maturin build --release --manifest-path native/crates/maf_skill_runtime_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check",
             "python -m maturin build --release --manifest-path native/crates/maf_core_lifecycle_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check",
+            "python -m maturin build --release --manifest-path native/crates/maf_safety_kernels_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check",
             "test_installed_pyo3_module_matches_rust_contract_when_available",
             "test_installed_pyo3_module_matches_core_lifecycle_contract_when_available",
             "actions/upload-artifact@v4",

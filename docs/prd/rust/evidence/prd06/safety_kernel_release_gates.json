@@ -1,0 +1,22 @@
+{
+  "schema_version": "maf.prd06.safety_kernel_evidence.v1",
+  "status": "pending_external_production_evidence",
+  "last_updated": "2026-05-17",
+  "artifact_provenance": {"status": "pending"},
+  "allowed_artifact_checksums": [],
+  "allowed_cargo_lock_digests": [],
+  "fuzz_report": {"status": "pending"},
+  "coverage_report": {"status": "pending"},
+  "benchmark_report": {"status": "pending"},
+  "promotion_readiness": {"status": "pending"},
+  "ops_readiness": {"status": "pending"},
+  "decommission_readiness": {"status": "pending"},
+  "blockers": [
+    "safety_kernels_pyo3_wheel_not_promoted_by_deployment_allowlist",
+    "safety_kernel_7_day_shadow_not_collected",
+    "safety_kernel_benchmark_report_not_collected",
+    "safety_kernel_long_run_fuzz_not_collected",
+    "artifact_quarantine_secret_rotation_identity_redaction_db_limit_drills_not_executed",
+    "python_legacy_path_auth_db_audit_canonical_logic_not_decommissioned"
+  ]
+}

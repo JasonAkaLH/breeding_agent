@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from .rust_safety_contract import resource_limit
+from .rust_safety_contract import ensure_readonly_sql, resource_limit, validate_data_access_shape
 
 
 @dataclass(slots=True, frozen=True)
@@ -23,6 +23,14 @@ class TransientReadonlyExecutionError(RuntimeError):
     """Raised for transient database errors that can be retried."""
 
 
+class ReadonlyQueryTimeoutError(TimeoutError):
+    code = "data_access_deadline_exceeded"
+
+    def __init__(self, deadline_ms: int) -> None:
+        super().__init__(f"readonly query exceeded configured deadline of {deadline_ms} ms")
+        self.deadline_ms = deadline_ms
+
+
 class MySQLReadonlyAdapter:
     def __init__(
         self,
@@ -30,23 +38,34 @@ class MySQLReadonlyAdapter:
         runner: Callable[[str], ReadonlyQueryResult] | None = None,
         engine_factory: Callable[[], Any] | None = None,
         transient_retries: int = 1,
+        deadline_ms: int | None = None,
     ) -> None:
         self._runner = runner
         self._engine_factory = engine_factory
         self._transient_retries = transient_retries
+        self._deadline_ms = _clamped_deadline_ms(deadline_ms)
         self._engine: Any | None = None
         self._engine_lock = Lock()
+
+    @property
+    def deadline_ms(self) -> int:
+        return self._deadline_ms
 
     async def execute_readonly(self, sql: str, *, guard_pass_token: str | None) -> ReadonlyQueryResult:
         if not guard_pass_token:
             raise PermissionError("guard_pass_token is required before readonly SQL execution.")
-        _ensure_readonly_sql(sql)
+        ensure_readonly_sql(sql)
         attempt = 0
         while True:
             try:
-                result = await asyncio.to_thread(self._execute_sync, sql)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self._execute_sync, sql),
+                    timeout=self._deadline_ms / 1000,
+                )
                 _ensure_result_limits(result)
                 return result
+            except TimeoutError as exc:
+                raise ReadonlyQueryTimeoutError(self._deadline_ms) from exc
             except TransientReadonlyExecutionError:
                 attempt += 1
                 if attempt > self._transient_retries:
@@ -91,37 +110,23 @@ class MySQLReadonlyAdapter:
             raise RuntimeError("mysql readonly execution requires the configured SQLAlchemy MySQL driver.") from exc
 
 
-def _ensure_readonly_sql(sql: str) -> None:
-    normalized = sql.strip().lower()
-    if not (normalized.startswith("select") or normalized.startswith("with")):
-        raise PermissionError("SQL is not readonly.")
-    padded = f" {normalized} "
-    for forbidden in (
-        " insert ",
-        " update ",
-        " delete ",
-        " drop ",
-        " alter ",
-        " truncate ",
-        " create ",
-        " replace ",
-        " grant ",
-        " revoke ",
-        " merge ",
-        " call ",
-    ):
-        if forbidden in padded:
-            raise PermissionError("SQL is not readonly.")
-
-
 def _ensure_result_limits(result: ReadonlyQueryResult) -> None:
-    row_limit = resource_limit("db_row_limit")
-    column_limit = resource_limit("db_column_limit")
-    result_bytes_limit = resource_limit("db_result_bytes")
-    if result.row_count > row_limit or len(result.rows) > row_limit:
-        raise RuntimeError("readonly query result exceeds row limit")
-    if len(result.columns) > column_limit:
-        raise RuntimeError("readonly query result exceeds column limit")
-    result_size = len(json.dumps({"columns": result.columns, "rows": result.rows}, ensure_ascii=False, default=str).encode("utf-8"))
-    if result_size > result_bytes_limit:
-        raise RuntimeError("readonly query result exceeds byte limit")
+    result_size = len(
+        json.dumps(
+            {"columns": result.columns, "rows": result.rows},
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+    )
+    validate_data_access_shape(
+        row_count=max(result.row_count, len(result.rows)),
+        column_count=len(result.columns),
+        result_bytes=result_size,
+    )
+
+
+def _clamped_deadline_ms(deadline_ms: int | None) -> int:
+    default_ms = resource_limit("db_deadline_ms")
+    hard_cap_ms = resource_limit("db_hard_cap_ms")
+    raw_ms = default_ms if deadline_ms is None else int(deadline_ms)
+    return max(1, min(raw_ms, hard_cap_ms))

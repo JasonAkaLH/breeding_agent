@@ -34,6 +34,7 @@ class RustServerCompatibilityTest(unittest.TestCase):
         for manifest_path in [
             Path("native/crates/maf_skill_runtime_pyo3/Cargo.toml"),
             Path("native/crates/maf_core_lifecycle_pyo3/Cargo.toml"),
+            Path("native/crates/maf_safety_kernels_pyo3/Cargo.toml"),
         ]:
             manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
             pyo3 = manifest["dependencies"]["pyo3"]

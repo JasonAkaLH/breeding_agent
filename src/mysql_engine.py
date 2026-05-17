@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 from sqlalchemy.pool import QueuePool
 
+from src.integrations.rust_safety_contract import resource_limit
 from src.integrations.llm_client import load_config
 
 
@@ -15,8 +16,6 @@ MYSQL_READONLY_URL_ENV = "MAF_MYSQL_READONLY_URL"
 DEFAULT_POOL_SIZE = 5
 DEFAULT_MAX_OVERFLOW = 10
 DEFAULT_CONNECT_TIMEOUT = 10
-DEFAULT_READ_TIMEOUT = 30
-DEFAULT_EXECUTION_TIMEOUT = 60
 
 
 def build_sql_engine(config: Mapping[str, Any] | None = None) -> object:
@@ -37,9 +36,9 @@ def build_sql_engine(config: Mapping[str, Any] | None = None) -> object:
         echo=False,
         connect_args={
             "connect_timeout": _int_config(mysql_config, "connect_timeout", DEFAULT_CONNECT_TIMEOUT),
-            "read_timeout": _int_config(mysql_config, "read_timeout", DEFAULT_READ_TIMEOUT),
+            "read_timeout": _db_timeout_config(mysql_config, "read_timeout"),
         },
-        execution_options={"timeout": _int_config(mysql_config, "execution_timeout", DEFAULT_EXECUTION_TIMEOUT)},
+        execution_options={"timeout": _db_timeout_config(mysql_config, "execution_timeout")},
     )
 
 
@@ -90,6 +89,18 @@ def _query_config(mysql_config: Mapping[str, Any]) -> dict[str, str]:
 def _int_config(config: Mapping[str, Any], key: str, default: int) -> int:
     parsed = _optional_int(config.get(key))
     return parsed if parsed is not None else default
+
+
+def _db_timeout_config(config: Mapping[str, Any], key: str) -> int:
+    default_seconds = _milliseconds_to_seconds(resource_limit("db_deadline_ms"))
+    hard_cap_seconds = _milliseconds_to_seconds(resource_limit("db_hard_cap_ms"))
+    parsed = _optional_int(config.get(key))
+    requested = default_seconds if parsed is None else parsed
+    return max(1, min(requested, hard_cap_seconds))
+
+
+def _milliseconds_to_seconds(value: int) -> int:
+    return max(1, (int(value) + 999) // 1000)
 
 
 def _optional_int(value: Any) -> int | None:
