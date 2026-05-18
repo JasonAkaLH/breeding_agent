@@ -59,6 +59,90 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
         self.assertIsNotNone(message)
         self.assertEqual(message.content, "全局汇总")
 
+    async def test_assistant_history_sync_tolerates_duplicate_write_race_only_after_message_exists(self) -> None:
+        await self.runtime.storage.save_conversation(Conversation("conv-history-race", "acc-1"))
+        await self.runtime.storage.save_task(
+            Task(
+                "task-history-race",
+                "conv-history-race",
+                root_message_id="msg-history-race",
+                status=TaskStatus.COMPLETED,
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "art-final",
+                "task-history-race",
+                "node-final",
+                ArtifactType.TEXT,
+                "全局汇总",
+                is_complete=True,
+            )
+        )
+        await self.runtime.storage.append_event(
+            EventRecord(
+                "evt-final-race",
+                "conv-history-race",
+                "task-history-race",
+                node_id="node-final",
+                event_type="main_agent.output_final",
+                payload={"response_role": "final"},
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+
+        original_save_message = self.runtime.storage.save_message
+        calls = 0
+
+        async def save_then_raise_once(message):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await original_save_message(message)
+                raise RuntimeError("simulated duplicate write race")
+            return await original_save_message(message)
+
+        self.runtime.storage.save_message = save_then_raise_once
+
+        await self.runtime.sync_assistant_history_message_for_task("task-history-race", "conv-history-race")
+
+        message = await self.runtime.storage.get_message("task-history-race:assistant")
+        self.assertIsNotNone(message)
+        self.assertEqual(message.content, "全局汇总")
+        self.assertEqual(calls, 1)
+
+    async def test_assistant_history_sync_reraises_save_failure_when_message_is_absent(self) -> None:
+        await self.runtime.storage.save_conversation(Conversation("conv-history-save-fail", "acc-1"))
+        await self.runtime.storage.save_task(
+            Task(
+                "task-history-save-fail",
+                "conv-history-save-fail",
+                root_message_id="msg-history-save-fail",
+                status=TaskStatus.COMPLETED,
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "art-final",
+                "task-history-save-fail",
+                "node-final",
+                ArtifactType.TEXT,
+                "全局汇总",
+                is_complete=True,
+            )
+        )
+
+        async def fail_without_write(_message):
+            raise RuntimeError("simulated persistent storage failure")
+
+        self.runtime.storage.save_message = fail_without_write
+
+        with self.assertRaisesRegex(RuntimeError, "simulated persistent storage failure"):
+            await self.runtime.sync_assistant_history_message_for_task(
+                "task-history-save-fail",
+                "conv-history-save-fail",
+            )
+
     async def test_platform_skill_plan_uses_single_shared_main_agent_runtime_and_finalizer(self) -> None:
         class FakeMainAgentLLM:
             instances: list["FakeMainAgentLLM"] = []

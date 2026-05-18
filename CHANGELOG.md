@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- 多 Skill final-only DAG 收口：保留显式单 Skill `requires_finalizer` 的最终回答节点，同时抑制 LLM Planner 多 Skill 宏展开中的 per-skill 中间 finalizer；全局 finalizer 会汇总所有 answer-producing skill，assistant history 同步对并发重复写入保持幂等。
+- 本地全栈开发会话收尾：按需重启并最终清理 `maf-fullstack-dev` tmux 会话、uvicorn / Vite 后台进程，确认 `8000` / `5173` 端口已释放。
 - Skill finalizer 输出契约修复：`answer` / `summary` 现在在 Skill executor 边界归一化为 `response_text`，覆盖 `python_subprocess` 与 `platform_service`，使 `requires_finalizer` 的主代理 dependency context 能读取 answer-only Skill 中间结果；同步更新《Codex-Skill构建指南.md》并补充 helper / executor / API 多 Skill DAG 回归测试。
 - Skill 脚本上传文件边界修复：public `skill.*` 的 `python_subprocess` 执行路径现在优先消费 `skill_artifacts` 中的完整上传文件内容，LLM / finalizer prompt 仍只接收脱敏 `uploaded_artifacts` 摘要；补充 script-only artifact helper、SkillExecutor / API 回归，并验证 RCBD sample CSV 可生成 3 重复 30 行 fieldbook。
 

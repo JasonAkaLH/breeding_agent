@@ -42,6 +42,7 @@ class WorkflowExpander:
         expanded_nodes: list[WorkflowNodePlan] = []
         expanded_tail_ids_by_original: dict[str, tuple[str, ...]] = {}
         expanded_answer_ids_by_original: dict[str, tuple[str, ...]] = {}
+        answer_source_original_ids: list[str] = []
         required_finalizer_original_ids: list[str] = []
         expanded_macro_nodes: dict[str, dict[str, object]] = {}
         expanded_main_agent_node_ids: set[str] = set()
@@ -90,6 +91,9 @@ class WorkflowExpander:
                     if high_level_answer_source_count >= 2:
                         metadata.setdefault(RESPONSE_ROLE_METADATA_KEY, RESPONSE_ROLE_FINAL)
                         metadata.setdefault(ANSWER_SCOPE_METADATA_KEY, "task")
+                    else:
+                        metadata.setdefault(RESPONSE_ROLE_METADATA_KEY, RESPONSE_ROLE_INTERMEDIATE)
+                        metadata.setdefault(ANSWER_SCOPE_METADATA_KEY, "partial")
                 expanded_node = replace(node, depends_on=depends_on, metadata=metadata)
                 expanded_nodes.append(expanded_node)
                 expanded_tail_ids_by_original[node.node_id] = (expanded_node.node_id,)
@@ -110,6 +114,7 @@ class WorkflowExpander:
                     metadata={
                         **dict(request.metadata),
                         "macro_input_payload": dict(node.input_payload),
+                        "macro_expansion": True,
                         "macro_source": str(plan.metadata.get("source") or plan.metadata.get("route") or ""),
                     },
                     current_user_message=request.current_user_message,
@@ -176,8 +181,10 @@ class WorkflowExpander:
                 )
             )
             expanded_answer_ids_by_original[node.node_id] = macro_answer_ids
-            if macro_answer_ids and macro_requires_finalizer:
-                required_finalizer_original_ids.append(node.node_id)
+            if macro_answer_ids:
+                answer_source_original_ids.append(node.node_id)
+                if macro_requires_finalizer:
+                    required_finalizer_original_ids.append(node.node_id)
             expanded_macro_nodes[node.node_id] = {
                 "capability_id": node.capability_id,
                 "root_node_ids": tuple(sorted(macro_roots)),
@@ -186,10 +193,15 @@ class WorkflowExpander:
                 "requires_finalizer": macro_requires_finalizer,
             }
 
+        finalizer_original_ids = (
+            answer_source_original_ids
+            if len(answer_source_original_ids) >= 2
+            else required_finalizer_original_ids
+        )
         required_finalizer_dependencies = tuple(
             self._dedupe(
                 answer_id
-                for original_id in required_finalizer_original_ids
+                for original_id in finalizer_original_ids
                 for answer_id in expanded_answer_ids_by_original[original_id]
             )
         )
@@ -294,7 +306,7 @@ class WorkflowExpander:
     def _as_final_answer_node(node: WorkflowNodePlan) -> WorkflowNodePlan:
         metadata = dict(node.metadata)
         metadata[RESPONSE_ROLE_METADATA_KEY] = RESPONSE_ROLE_FINAL
-        metadata.setdefault(ANSWER_SCOPE_METADATA_KEY, "task")
+        metadata[ANSWER_SCOPE_METADATA_KEY] = "task"
         metadata.setdefault(AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY, False)
         return replace(node, metadata=metadata)
 

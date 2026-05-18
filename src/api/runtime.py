@@ -631,17 +631,21 @@ class ApiRuntime:
         text_artifact = select_final_text_artifact(artifacts, events=events)
         if text_artifact is None:
             return
-        await self.storage.save_message(
-            Message(
-                message_id=message_id,
-                conversation_id=conversation_id,
-                role=MessageRole.ASSISTANT,
-                content=text_artifact.storage_ref,
-                task_id=task_id,
-                stream_status="complete",
-                created_at=self._utcnow_naive(),
-            )
+        message = Message(
+            message_id=message_id,
+            conversation_id=conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=text_artifact.storage_ref,
+            task_id=task_id,
+            stream_status="complete",
+            created_at=self._utcnow_naive(),
         )
+        try:
+            await self.storage.save_message(message)
+        except Exception:
+            if await self.storage.get_message(message_id) is not None:
+                return
+            raise
 
     async def _record_plan_built(self, request: OrchestrationRequest, plan: WorkflowPlan) -> None:
         await self._record_event(

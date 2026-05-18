@@ -78,6 +78,7 @@ execution:
         self.assertEqual(expanded.nodes[0].node_id, "task-1:query_data:skill_execute")
         self.assertEqual(expanded.nodes[1].depends_on, ("task-1:query_data:skill_execute",))
         self.assertEqual(expanded.nodes[1].metadata["response_role"], RESPONSE_ROLE_FINAL)
+        self.assertEqual(expanded.nodes[1].metadata["answer_scope"], "task")
         self.assertEqual(expanded.metadata["expanded_macro_nodes"]["query_data"]["capability_id"], "skill.generic_data_lookup")
 
     def test_macro_roots_depend_on_high_level_dependencies_for_skill_executor_mode(self) -> None:

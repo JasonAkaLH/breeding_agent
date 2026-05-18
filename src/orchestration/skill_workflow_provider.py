@@ -5,6 +5,12 @@ from collections.abc import Callable, Mapping
 from src.core.enums import NodeCriticality
 from src.integrations.codex_skills import SkillManifest, resolve_skill_execution_config
 
+from .answer_roles import (
+    ANSWER_SCOPE_METADATA_KEY,
+    AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY,
+    RESPONSE_ROLE_FINAL,
+    RESPONSE_ROLE_METADATA_KEY,
+)
 from .models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 
 
@@ -98,9 +104,31 @@ class SkillWorkflowProvider:
             retry_policy={"max_attempts": 1},
             timeout_policy={"seconds": 120},
         )
+        nodes = [skill_node]
+        finalizer_added = False
+        if answer_mode == "requires_finalizer" and request.metadata.get("macro_expansion") is not True:
+            finalizer_added = True
+            nodes.append(
+                WorkflowNodePlan(
+                    node_id=f"{task_id}:main_agent.respond",
+                    capability_id="main_agent.respond",
+                    input_payload={"user_message": request.effective_user_message},
+                    metadata={
+                        RESPONSE_ROLE_METADATA_KEY: RESPONSE_ROLE_FINAL,
+                        ANSWER_SCOPE_METADATA_KEY: "task",
+                        AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY: False,
+                        "source_skill_node_id": skill_node_id,
+                        "finalizer_source": "skill_workflow_provider",
+                    },
+                    depends_on=(skill_node_id,),
+                    criticality=NodeCriticality.REQUIRED,
+                    retry_policy={"max_attempts": 1},
+                    timeout_policy={"seconds": 60},
+                )
+            )
         return WorkflowPlan(
             task_id=task_id,
-            nodes=(skill_node,),
+            nodes=tuple(nodes),
             metadata={
                 "route": "skill",
                 "public_capability_id": capability_id,
@@ -109,7 +137,7 @@ class SkillWorkflowProvider:
                 "skill_execution_mode": execution_mode,
                 "skill_answer_mode": answer_mode,
                 "skill_requires_finalizer": answer_mode == "requires_finalizer",
-                "skill_finalizer_added": False,
+                "skill_finalizer_added": finalizer_added,
             },
             max_replans=0,
             max_dynamic_nodes=0,
