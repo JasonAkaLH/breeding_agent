@@ -13,12 +13,22 @@ export type TaskPhase =
   | 'failed'
   | 'waiting_for_input';
 
+export interface SkillStatusLine {
+  key: string;
+  nodeId: string | null;
+  capabilityId: string;
+  label: string;
+  statusText: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+}
+
 export interface TaskEventState {
   phase: TaskPhase;
   statusText: string;
   currentCapabilityId: string | null;
   currentCapabilityLabel: string | null;
   currentActivityText: string | null;
+  skillStatuses: SkillStatusLine[];
   assistantText: string;
   reasoningText: string;
   errorMessage: string | null;
@@ -32,6 +42,7 @@ export function createInitialTaskEventState(): TaskEventState {
     currentCapabilityId: null,
     currentCapabilityLabel: null,
     currentActivityText: null,
+    skillStatuses: [],
     assistantText: '',
     reasoningText: '',
     errorMessage: null,
@@ -92,6 +103,16 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
       };
     case 'node.started': {
       const activity = nodeActivity(event.payload);
+      const skillStatuses = isSkillCapability(activity.capabilityId)
+        ? upsertSkillStatusLine(withEvent.skillStatuses, {
+          key: skillStatusKey(event, event.payload),
+          nodeId: event.node_id,
+          capabilityId: activity.capabilityId,
+          label: activity.capabilityLabel,
+          statusText: activity.stepText,
+          status: 'running',
+        })
+        : withEvent.skillStatuses;
       return {
         ...withEvent,
         phase: 'running',
@@ -99,11 +120,18 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
         currentCapabilityId: activity.capabilityId,
         currentCapabilityLabel: activity.capabilityLabel,
         currentActivityText: `正在执行 ${activity.capabilityLabel}：${activity.stepText}`,
+        skillStatuses,
         errorMessage: null,
       };
     }
     case 'node.completed': {
       const activity = nodeActivity(event.payload);
+      const skillStatuses = isSkillCapability(activity.capabilityId)
+        ? updateExistingSkillStatusLine(withEvent.skillStatuses, skillStatusKey(event, event.payload), {
+          status: 'completed',
+          statusText: '已完成',
+        })
+        : withEvent.skillStatuses;
       return {
         ...withEvent,
         phase: state.phase === 'streaming' ? 'streaming' : 'running',
@@ -111,6 +139,7 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
         currentCapabilityId: activity.capabilityId,
         currentCapabilityLabel: activity.capabilityLabel,
         currentActivityText: `${activity.capabilityLabel} 已完成，正在整理执行结果`,
+        skillStatuses,
         errorMessage: null,
       };
     }
@@ -127,13 +156,27 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
       if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
       return { ...withEvent, phase: state.phase === 'idle' ? 'running' : state.phase, statusText: '回答生成完成，正在收尾', currentActivityText: null, errorMessage: null };
     case 'task.completed':
-      return { ...withEvent, phase: 'loading_artifacts', statusText: '任务完成，正在整理结果', currentActivityText: null, errorMessage: null };
+      return {
+        ...withEvent,
+        phase: 'loading_artifacts',
+        statusText: '任务完成，正在整理结果',
+        currentActivityText: null,
+        skillStatuses: markRunningSkillStatusesCompleted(withEvent.skillStatuses),
+        errorMessage: null,
+      };
     case 'task.cancellation_requested':
       return { ...withEvent, phase: 'cancelling', statusText: '取消请求已发送', currentActivityText: '正在取消当前任务', errorMessage: null };
     case 'task.cancelled':
       return { ...withEvent, phase: 'cancelled', statusText: '任务已取消', currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, errorMessage: null };
     case 'node.failed':
-      return { ...withEvent, phase: 'failed', statusText: '本次任务未完成', currentActivityText: null, errorMessage: failureMessage(event.payload, event.node_id) };
+      return {
+        ...withEvent,
+        phase: 'failed',
+        statusText: '本次任务未完成',
+        currentActivityText: null,
+        skillStatuses: markSkillStatusFailed(withEvent.skillStatuses, event),
+        errorMessage: failureMessage(event.payload, event.node_id),
+      };
     case 'task.failed':
       return {
         ...withEvent,
@@ -147,6 +190,14 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     case 'skill.progress': {
       const progress = skillProgressActivity(event.payload);
       if (!progress) return withEvent;
+      const skillStatuses = upsertSkillStatusLine(withEvent.skillStatuses, {
+        key: skillStatusKey(event, event.payload),
+        nodeId: event.node_id,
+        capabilityId: progress.capabilityId,
+        label: progress.capabilityLabel,
+        statusText: progress.stepText,
+        status: 'running',
+      });
       return {
         ...withEvent,
         phase: 'running',
@@ -154,6 +205,7 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
         currentCapabilityId: progress.capabilityId,
         currentCapabilityLabel: progress.capabilityLabel,
         currentActivityText: `正在执行 ${progress.capabilityLabel}：${progress.stepText}`,
+        skillStatuses,
         errorMessage: null,
       };
     }
@@ -162,9 +214,78 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
   }
 }
 
+function isSkillCapability(capabilityId: unknown): capabilityId is string {
+  return typeof capabilityId === 'string' && capabilityId.startsWith('skill.');
+}
+
 function isVisibleMainAgentResponse(payload: Record<string, unknown>): boolean {
   const responseRole = typeof payload.response_role === 'string' ? payload.response_role : null;
   return responseRole === null || responseRole === 'final';
+}
+
+function skillStatusKey(event: TaskEventEnvelope, payload: Record<string, unknown>): string {
+  const payloadNodeId = typeof payload.node_id === 'string' && payload.node_id.trim() ? payload.node_id.trim() : '';
+  if (event.node_id) return event.node_id;
+  if (payloadNodeId) return payloadNodeId;
+  const capabilityId = typeof payload.capability_id === 'string' ? payload.capability_id : 'skill';
+  const skillName = typeof payload.skill_name === 'string' && payload.skill_name.trim() ? payload.skill_name.trim() : capabilityId;
+  return `${capabilityId}::${skillName}`;
+}
+
+function upsertSkillStatusLine(statuses: SkillStatusLine[], next: SkillStatusLine): SkillStatusLine[] {
+  const index = statuses.findIndex((status) => status.key === next.key);
+  if (index < 0) return [...statuses, next];
+  const current = statuses[index];
+  if (skillStatusLineEquals(current, next)) return statuses;
+  return statuses.map((status, currentIndex) => (currentIndex === index ? next : status));
+}
+
+function updateExistingSkillStatusLine(
+  statuses: SkillStatusLine[],
+  key: string,
+  patch: Partial<Pick<SkillStatusLine, 'status' | 'statusText'>>,
+): SkillStatusLine[] {
+  const index = statuses.findIndex((status) => status.key === key);
+  if (index < 0) return statuses;
+  const next = { ...statuses[index], ...patch };
+  if (skillStatusLineEquals(statuses[index], next)) return statuses;
+  return statuses.map((status, currentIndex) => (currentIndex === index ? next : status));
+}
+
+function markRunningSkillStatusesCompleted(statuses: SkillStatusLine[]): SkillStatusLine[] {
+  let changed = false;
+  const next = statuses.map((status) => {
+    if (status.status !== 'running' && status.status !== 'pending') return status;
+    changed = true;
+    return { ...status, status: 'completed' as const, statusText: '已完成' };
+  });
+  return changed ? next : statuses;
+}
+
+function markSkillStatusFailed(statuses: SkillStatusLine[], event: TaskEventEnvelope): SkillStatusLine[] {
+  const key = skillStatusKey(event, event.payload);
+  const updated = updateExistingSkillStatusLine(statuses, key, { status: 'failed', statusText: '失败' });
+  if (updated !== statuses) return updated;
+
+  const activity = nodeActivity(event.payload);
+  if (!isSkillCapability(activity.capabilityId)) return statuses;
+  return upsertSkillStatusLine(statuses, {
+    key,
+    nodeId: event.node_id,
+    capabilityId: activity.capabilityId,
+    label: activity.capabilityLabel,
+    statusText: '失败',
+    status: 'failed',
+  });
+}
+
+function skillStatusLineEquals(left: SkillStatusLine, right: SkillStatusLine): boolean {
+  return left.key === right.key
+    && left.nodeId === right.nodeId
+    && left.capabilityId === right.capabilityId
+    && left.label === right.label
+    && left.statusText === right.statusText
+    && left.status === right.status;
 }
 
 function nodeActivity(payload: Record<string, unknown>): { capabilityId: string; capabilityLabel: string; stepText: string } {

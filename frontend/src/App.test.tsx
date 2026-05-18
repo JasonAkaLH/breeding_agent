@@ -64,12 +64,12 @@ async function renderAuthed(ui: ReactElement) {
   await screen.findByText('小奥Agent');
 }
 
-function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type): TaskEventEnvelope {
+function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
   return {
     event_id,
     conversation_id: 'conv-test',
     task_id: 'task-1',
-    node_id: null,
+    node_id,
     event_type,
     payload,
     created_at: '2026-04-27T00:00:00',
@@ -449,6 +449,29 @@ describe('App', () => {
     const assistantBubble = assistantText.closest('.message-assistant') as HTMLElement;
     expect(assistantBubble).not.toBeNull();
     expect(within(assistantBubble).queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
+  });
+
+  it('does not restore transient skill status lines when loading history', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: null, title: '历史问题', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+          { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: '以前的回答', task_id: 'task-history', stream_status: 'complete', created_at: null },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+
+    expect(await screen.findByText('以前的回答')).toBeInTheDocument();
+    expect(document.querySelector('.skill-status-lines')).toBeNull();
   });
 
   it('renders history entries as flat rows with hover-revealed actions', async () => {
@@ -989,22 +1012,66 @@ describe('App', () => {
     expect(link).toHaveAttribute('href', '/api/v1/artifacts/art-file-1/download');
   });
 
-  it('shows the upstream capability currently being executed inside the assistant bubble', async () => {
+  it('shows skill progress as a lightweight status line outside the assistant bubble', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
-      event('node.started', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'sql-skill-started'),
-      event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'sql-execute-progress'),
+      event('node.started', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'sql-skill-started', 'node-sql'),
+      event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'sql-execute-progress', 'node-sql'),
     ])} />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    const progressText = await screen.findByText('正在执行 data-query：正在检索数据');
-    const assistantBubble = progressText.closest('.message-assistant') as HTMLElement;
-    expect(assistantBubble).not.toBeNull();
-    expect(assistantBubble.querySelector('.activity-notice')).not.toBeNull();
-    expect(assistantBubble.querySelector('.ant-spin')).not.toBeNull();
+    const progressText = await screen.findByText('data-query：正在检索数据');
+    const assistantMessage = progressText.closest('.message-assistant') as HTMLElement;
+    expect(assistantMessage).not.toBeNull();
+    expect(progressText.closest('.skill-status-lines')).not.toBeNull();
+    expect(progressText.closest('.message-body')).toBeNull();
+    expect(assistantMessage.querySelector('.skill-status-lines')).not.toBeNull();
+    expect(within(assistantMessage.querySelector('.message-body') as HTMLElement).queryByText(/data-query/)).not.toBeInTheDocument();
+  });
+
+  it('renders multiple skill status lines while keeping the final answer in the assistant bubble', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询并生成设计' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery' }, 'sql-start', 'node-sql'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'skill.rcbd', skill_name: 'RCBD' }, 'rcbd-start', 'node-rcbd'));
+      streamHandlers?.onMessage(event('skill.progress', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery', stage: 'execute_query' }, 'sql-progress', 'node-sql'));
+      streamHandlers?.onMessage(event('skill.progress', { capability_id: 'skill.rcbd', skill_name: 'RCBD', label: '正在读取材料清单' }, 'rcbd-progress', 'node-rcbd'));
+    });
+
+    const sqlStatus = await screen.findByText('SQLQuery：正在检索数据');
+    const rcbdStatus = await screen.findByText('RCBD：正在读取材料清单');
+    const assistantMessage = sqlStatus.closest('.message-assistant') as HTMLElement;
+    expect(assistantMessage).not.toBeNull();
+    expect(rcbdStatus.closest('.message-assistant')).toBe(assistantMessage);
+    expect(assistantMessage.querySelectorAll('.skill-status-line')).toHaveLength(2);
+    expect(sqlStatus.closest('.message-body')).toBeNull();
+    expect(rcbdStatus.closest('.message-body')).toBeNull();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '最终汇总回答', ordinal: 1, response_role: 'final' }, 'final-delta', 'node-final'));
+      streamHandlers?.onMessage(event('main_agent.output_final', { response_role: 'final' }, 'final-output', 'node-final'));
+      streamHandlers?.onMessage(event('task.completed', {}, 'task-completed'));
+    });
+
+    const finalAnswer = await screen.findByText('最终汇总回答');
+    expect(finalAnswer.closest('.message-body')).not.toBeNull();
+    expect(await screen.findByText('SQLQuery：已完成')).toBeInTheDocument();
+    expect(await screen.findByText('RCBD：已完成')).toBeInTheDocument();
   });
 
   it('does not show the assistant copy action until the reply is completed', async () => {
@@ -1145,7 +1212,7 @@ describe('App', () => {
         [event('task.accepted', {}, 'accepted-before-interrupt')],
         [
           event('task.accepted', {}, 'accepted-after-interrupt'),
-          event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'execute-after-interrupt'),
+          event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'execute-after-interrupt', 'node-resumed-query'),
         ],
       ])}
       waitingInputCheckDelayMs={1}
@@ -1167,11 +1234,11 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { crop: '水稻' }));
-    const resumedProgress = await screen.findByText('正在执行 data-query：正在检索数据');
-    const resumedBubble = resumedProgress.closest('.message-assistant') as HTMLElement;
-    expect(resumedBubble).not.toBeNull();
-    expect(resumedBubble.querySelector('.activity-notice')).not.toBeNull();
-    expect(resumedBubble.querySelector('.ant-spin')).not.toBeNull();
+    const resumedProgress = await screen.findByText('data-query：正在检索数据');
+    const resumedMessage = resumedProgress.closest('.message-assistant') as HTMLElement;
+    expect(resumedMessage).not.toBeNull();
+    expect(resumedProgress.closest('.skill-status-lines')).not.toBeNull();
+    expect(resumedProgress.closest('.message-body')).toBeNull();
     expect(screen.queryByText('已收到补充信息，继续当前任务...')).not.toBeInTheDocument();
     expect(api.cancelTask).not.toHaveBeenCalled();
   });

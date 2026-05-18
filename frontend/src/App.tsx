@@ -16,6 +16,7 @@ import {
   markTaskFailed,
   markWaitingInputRequired,
   taskProgressDisplayText,
+  type SkillStatusLine,
   type TaskEventState,
 } from './domain/taskEvents';
 import { DataQueryResultCard } from './components/DataQueryResultCard';
@@ -43,13 +44,14 @@ interface ConversationMessage {
   reasoningComplete?: boolean;
   reasoningContent?: string;
   activityText?: string;
+  skillStatuses?: SkillStatusLine[];
   artifactDisplays?: CapabilityArtifactDisplay[];
   finalContentLoaded?: boolean;
   replyCompleted?: boolean;
   interruptPrompt?: PendingInterrupt;
 }
 
-type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
+type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
 
 interface PendingInterrupt {
   taskId: string;
@@ -632,6 +634,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       const next = applyTaskEvent(previous, event);
       const previousProgressText = taskProgressDisplayText(previous);
       const nextProgressText = taskProgressDisplayText(next);
+      if (next.skillStatuses !== previous.skillStatuses) {
+        updateAssistantMessage(assistantId, { skillStatuses: next.skillStatuses });
+      }
       if (next.assistantText !== previous.assistantText) {
         updateAssistantStreamingContent(assistantId, next.assistantText);
         if (next.assistantText) {
@@ -642,7 +647,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
       }
       if (nextProgressText !== previousProgressText) {
-        updateAssistantMessage(assistantId, { activityText: next.assistantText ? undefined : nextProgressText });
+        updateAssistantMessage(assistantId, { activityText: assistantActivityText(next, nextProgressText) });
       }
       if (['task.failed', 'node.failed'].includes(event.event_type)) {
         subscriptionRef.current?.close();
@@ -1431,6 +1436,13 @@ function interruptAnswerPlaceholder(interrupt: PendingInterrupt): string {
   return '请补充当前任务所需信息';
 }
 
+function assistantActivityText(state: TaskEventState, progressText: string): string | undefined {
+  if (state.assistantText) return undefined;
+  if (!state.skillStatuses.length) return progressText;
+  if (state.currentCapabilityId?.startsWith('skill.')) return undefined;
+  return progressText;
+}
+
 function MessageBubble({ message }: { message: ConversationMessage }) {
   const className = message.role === 'user' ? 'message message-user' : 'message message-assistant';
   const shouldShowContent = Boolean(message.content);
@@ -1441,6 +1453,7 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
   return (
     <div className={className}>
       <div className="message-meta">{message.role === 'user' ? '你' : '主代理'}</div>
+      {message.role === 'assistant' ? <SkillStatusLines statuses={message.skillStatuses} /> : null}
       <div className="message-body">
         {shouldShowReasoning ? (
           <ReasoningBox content={message.reasoningContent ?? ''} complete={message.reasoningComplete} />
@@ -1475,6 +1488,22 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
           </span>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function SkillStatusLines({ statuses }: { statuses?: SkillStatusLine[] }) {
+  if (!statuses?.length) return null;
+  return (
+    <div className="skill-status-lines" role="status" aria-live="polite">
+      {statuses.map((status) => (
+        <div
+          key={status.key}
+          className={`skill-status-line ${status.status === 'failed' ? 'skill-status-line-failed' : ''}`}
+        >
+          <span>{status.label}：{status.statusText}</span>
+        </div>
+      ))}
     </div>
   );
 }

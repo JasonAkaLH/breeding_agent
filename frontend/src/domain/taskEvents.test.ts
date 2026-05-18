@@ -55,6 +55,77 @@ describe('applyTaskEvent', () => {
     expect(state.currentCapabilityLabel).toBe('report-query');
   });
 
+  it('tracks skill status lines independently for parallel skill events', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery' }, 'sql-start', 'node-sql'));
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.rcbd', skill_name: 'RCBD' }, 'rcbd-start', 'node-rcbd'));
+
+    expect(state.skillStatuses).toEqual([
+      expect.objectContaining({ key: 'node-sql', nodeId: 'node-sql', capabilityId: 'skill.sql_query', label: 'SQLQuery', status: 'running', statusText: '正在处理' }),
+      expect.objectContaining({ key: 'node-rcbd', nodeId: 'node-rcbd', capabilityId: 'skill.rcbd', label: 'RCBD', status: 'running', statusText: '正在处理' }),
+    ]);
+
+    const previousRows = state.skillStatuses;
+    state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery', stage: 'execute_query' }, 'sql-progress', 'node-sql'));
+
+    expect(state.skillStatuses).not.toBe(previousRows);
+    expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ label: 'SQLQuery', status: 'running', statusText: '正在检索数据' }));
+    expect(state.skillStatuses[1]).toEqual(expect.objectContaining({ label: 'RCBD', status: 'running', statusText: '正在处理' }));
+  });
+
+  it('lazy-creates skill status lines from progress and keeps duplicate events idempotent', () => {
+    const progress = event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', stage: 'execute_query' }, 'progress-once', 'node-query');
+    let state = applyTaskEvent(createInitialTaskEventState(), progress);
+    state = applyTaskEvent(state, progress);
+
+    expect(state.skillStatuses).toHaveLength(1);
+    expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ key: 'node-query', label: 'data-query', status: 'running', statusText: '正在检索数据' }));
+    expect(state.seenEventIds.filter((eventId) => eventId === 'progress-once')).toHaveLength(1);
+  });
+
+  it('marks matching skill status lines completed and closes running rows on task completion', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery' }, 'sql-start', 'node-sql'));
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.rcbd', skill_name: 'RCBD' }, 'rcbd-start', 'node-rcbd'));
+    state = applyTaskEvent(state, event('node.completed', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery' }, 'sql-complete', 'node-sql'));
+
+    expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ label: 'SQLQuery', status: 'completed', statusText: '已完成' }));
+    expect(state.skillStatuses[1]).toEqual(expect.objectContaining({ label: 'RCBD', status: 'running' }));
+
+    state = applyTaskEvent(state, event('task.completed', {}, 'task-complete'));
+
+    expect(state.skillStatuses).toEqual([
+      expect.objectContaining({ label: 'SQLQuery', status: 'completed', statusText: '已完成' }),
+      expect.objectContaining({ label: 'RCBD', status: 'completed', statusText: '已完成' }),
+    ]);
+  });
+
+  it('marks existing skill rows failed without inventing rows for unknown failed nodes', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery' }, 'sql-start', 'node-sql'));
+    state = applyTaskEvent(state, event('node.failed', { code: 'db_transient_error' }, 'sql-failed', 'node-sql'));
+
+    expect(state.skillStatuses).toHaveLength(1);
+    expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ label: 'SQLQuery', status: 'failed', statusText: '失败' }));
+    expect(state.errorMessage).toContain('数据库暂时不可用');
+
+    const unknownFailure = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'db_transient_error' }, 'unknown-failed', 'node-unknown'));
+    expect(unknownFailure.skillStatuses).toEqual([]);
+    expect(unknownFailure.errorMessage).toContain('数据库暂时不可用');
+  });
+
+  it('does not create skill rows for main-agent nodes and uses fallback keys when node ids are missing', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'main_agent.respond' }, 'main-start', 'node-main'));
+    expect(state.skillStatuses).toEqual([]);
+
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.report', skill_name: 'ReportSkill' }, 'fallback-start'));
+    state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.report', skill_name: 'ReportSkill', label: '正在整理报告' }, 'fallback-progress'));
+
+    expect(state.skillStatuses).toHaveLength(1);
+    expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ key: 'skill.report::ReportSkill', nodeId: null, label: 'ReportSkill', statusText: '正在整理报告' }));
+  });
+
   it('appends main-agent deltas once by event id', () => {
     let state = createInitialTaskEventState();
     const delta = event('main_agent.output_delta', { delta: '你好', ordinal: 1 }, 'evt-delta-1');

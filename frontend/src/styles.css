@@ -430,6 +430,23 @@ body {
   border: 1px solid var(--color-border);
 }
 
+.skill-status-lines {
+  margin: 0 0 8px;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.skill-status-line {
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.skill-status-line-failed {
+  color: #a36b6b;
+}
+
 .message-actions {
   display: inline-flex;
   align-items: center;
