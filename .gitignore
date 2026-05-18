@@ -1,4 +1,5 @@
 # Local tooling
+.superpowers/
 .omx/
 .codex/
 .DS_Store
