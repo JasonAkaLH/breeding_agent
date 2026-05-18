@@ -64,6 +64,22 @@ describe('applyTaskEvent', () => {
     expect(state.assistantText).toBe('你好');
   });
 
+  it('only appends final or legacy main-agent response events to the visible assistant text', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '中间回答', ordinal: 1, response_role: 'intermediate' }, 'intermediate-delta'));
+    state = applyTaskEvent(state, event('main_agent.output_final', { response_role: 'intermediate' }, 'intermediate-final'));
+
+    expect(state.phase).toBe('idle');
+    expect(state.assistantText).toBe('');
+    expect(state.seenEventIds).toEqual(['intermediate-delta', 'intermediate-final']);
+
+    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '最终回答', ordinal: 1, response_role: 'final' }, 'final-delta'));
+    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '，兼容旧事件', ordinal: 2 }, 'legacy-delta'));
+
+    expect(state.phase).toBe('streaming');
+    expect(state.assistantText).toBe('最终回答，兼容旧事件');
+  });
+
   it('appends main-agent reasoning deltas separately once by event id', () => {
     let state = createInitialTaskEventState();
     const delta = event('main_agent.reasoning_delta', { delta: '先分析', ordinal: 1 }, 'evt-reasoning-1');
