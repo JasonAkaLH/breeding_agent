@@ -4,12 +4,61 @@ import json
 import textwrap
 from typing import Any
 
-from src.core.enums import MessageRole
+from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
+from src.core.models import Artifact, Conversation, EventRecord, Task
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryResult
 from tests.api.support import APITestCase
 
 
 class MainAgentLoopOrchestrationAPITest(APITestCase):
+    async def test_assistant_history_sync_uses_final_event_for_roleless_artifacts(self) -> None:
+        await self.runtime.storage.save_conversation(Conversation("conv-history-final-event", "acc-1"))
+        await self.runtime.storage.save_task(
+            Task(
+                "task-history-final-event",
+                "conv-history-final-event",
+                root_message_id="msg-history-final-event",
+                status=TaskStatus.COMPLETED,
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "art-intermediate",
+                "task-history-final-event",
+                "node-intermediate",
+                ArtifactType.TEXT,
+                "局部回答",
+                is_complete=True,
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "art-final",
+                "task-history-final-event",
+                "node-final",
+                ArtifactType.TEXT,
+                "全局汇总",
+                is_complete=True,
+            )
+        )
+        await self.runtime.storage.append_event(
+            EventRecord(
+                "evt-final",
+                "conv-history-final-event",
+                "task-history-final-event",
+                node_id="node-final",
+                event_type="main_agent.output_final",
+                payload={"response_role": "final"},
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+
+        await self.runtime.sync_assistant_history_message_for_task("task-history-final-event", "conv-history-final-event")
+
+        message = await self.runtime.storage.get_message("task-history-final-event:assistant")
+        self.assertIsNotNone(message)
+        self.assertEqual(message.content, "全局汇总")
+
     async def test_platform_skill_plan_uses_single_shared_main_agent_runtime_and_finalizer(self) -> None:
         class FakeMainAgentLLM:
             instances: list["FakeMainAgentLLM"] = []
