@@ -13,6 +13,7 @@ on:
       - "scripts/validate_prd04_skill_runtime_evidence.py"
       - "scripts/validate_prd05_mcp_runtime_evidence.py"
       - "scripts/validate_prd06_safety_kernel_evidence.py"
+      - "scripts/validate_prd07_orchestration_hotspot_evidence.py"
       - "src/integrations/mcp/**"
       - "docs/prd/rust/**"
       - "requirements.txt"
@@ -30,6 +31,7 @@ on:
       - "scripts/validate_prd04_skill_runtime_evidence.py"
       - "scripts/validate_prd05_mcp_runtime_evidence.py"
       - "scripts/validate_prd06_safety_kernel_evidence.py"
+      - "scripts/validate_prd07_orchestration_hotspot_evidence.py"
       - "src/integrations/mcp/**"
       - "docs/prd/rust/**"
       - "requirements.txt"
@@ -103,6 +105,9 @@ jobs:
 
       - name: Check PRD06 safety kernel evidence manifest remains fail-closed
         run: python scripts/validate_prd06_safety_kernel_evidence.py --allow-pending
+
+      - name: Check PRD07 orchestration hotspot guard remains conditional
+        run: python scripts/validate_prd07_orchestration_hotspot_evidence.py --json
 
       - name: python scripts/rust_artifact_provenance.py self-test
         run: python scripts/rust_artifact_provenance.py self-test

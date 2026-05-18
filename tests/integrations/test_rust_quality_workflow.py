@@ -78,3 +78,11 @@ class RustQualityWorkflowTest(unittest.TestCase):
         self.assertIn('"scripts/validate_prd05_mcp_runtime_evidence.py"', workflow)
         self.assertIn('"src/integrations/mcp/**"', workflow)
         self.assertIn('"docs/prd/rust/**"', workflow)
+
+    def test_prd07_orchestration_hotspot_guard_is_wired_into_quality_gates(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn('"scripts/validate_prd07_orchestration_hotspot_evidence.py"', workflow)
+        self.assertIn("Check PRD07 orchestration hotspot guard remains conditional", workflow)
+        self.assertIn("python scripts/validate_prd07_orchestration_hotspot_evidence.py --json", workflow)
+        self.assertIn('"docs/prd/rust/**"', workflow)

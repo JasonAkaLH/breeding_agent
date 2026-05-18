@@ -92,3 +92,13 @@ orchestration 中既有 deterministic DAG / scheduler / validator，也有 LLM p
 | prompt 语义被错误固化 | 明确 prompt/LLM glue 非目标 |
 | WASM 引入前端复杂度 | 仅数据解析热点启用，UI 不迁移 |
 | 条件候选绕过最终交付门禁 | 未来启动前必须另开实施 PRD，并显式继承供应链、SLO、迁移容灾、legacy 下线与运维演练要求 |
+
+## 10. 仓库内 guard 证据
+
+本 PRD 当前不启动 `maf_orchestration_kernel` / WASM 实现。仓库内完成项是将条件候选状态机器可读化，防止后续绕过启动条件直接 Rust 化 orchestration：
+
+- evidence ledger：`docs/prd/rust/evidence/prd07/orchestration_hotspot_release_gates.json`
+- validator：`scripts/validate_prd07_orchestration_hotspot_evidence.py --json`
+- CI guard：Rust quality workflow 执行 PRD07 validator，确认当前状态为 `guarded`
+
+若未来要启动候选，需要先另开 implementation PRD，并把 ledger 从 `conditional_candidate_not_started` 升级为 `candidate_ready_to_start`；严格模式必须证明独立实施 PRD、性能/可靠性证据、Python/JS baseline、Rust/WASM candidate baseline、shadow compare、供应链、benchmark/SLO、migration/DR、ops runbook 与 legacy decommission 计划均已就绪。

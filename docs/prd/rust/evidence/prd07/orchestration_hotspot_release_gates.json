@@ -1,0 +1,81 @@
+{
+  "schema_version": "maf.prd07.orchestration_hotspot_evidence.v1",
+  "status": "conditional_candidate_not_started",
+  "last_updated": "2026-05-18",
+  "classification": {
+    "conditional_candidate": true,
+    "in_mandatory_rust_target_set": false,
+    "implementation_prd_required": true,
+    "separate_implementation_prd": {"status": "not_created", "required_before_start": true},
+    "candidate_crate_reserved": "maf_orchestration_kernel",
+    "current_rust_kernel_started": false
+  },
+  "scope_boundary": {
+    "allowed_rust_scope": {
+      "dag_validator": true,
+      "scheduler_policy": true,
+      "completion_policy": true,
+      "backpressure": true,
+      "payload_policy": true,
+      "token_budget_kernel": true,
+      "artifact_dependency_sanitizer": true,
+      "large_payload_parser": true,
+      "optional_frontend_wasm_parser": true
+    },
+    "excluded_from_rust_scope": {
+      "llm_planner_prompt": true,
+      "provider_fallback": true,
+      "router_glue": true,
+      "product_answer_strategy": true,
+      "react_or_ant_design_ui": true
+    }
+  },
+  "startup_readiness": {
+    "core_lifecycle_stable": {"status": "pending", "reason": "PRD02 production promotion and legacy decommission evidence are not complete"},
+    "store_event_shadow_compare_stable": {"status": "pending", "reason": "PRD03 production enforce, 7-day shadow, benchmark, ops and legacy decommission gates remain pending"},
+    "skill_mcp_boundaries_stable": {"status": "pending", "reason": "PRD04/PRD05 production enforce, benchmark, ops/recovery and legacy decommission gates remain pending"},
+    "performance_or_reliability_evidence": {"status": "pending", "reason": "No measured orchestration/token/payload hotspot evidence has been accepted"},
+    "python_baseline_defined": {"status": "pending", "reason": "Existing tests are listed as baseline anchors, but a future implementation PRD must freeze golden parity cases"},
+    "candidate_baseline_plan_defined": {"status": "pending", "reason": "No Rust/WASM candidate baseline plan exists because the candidate has not started"},
+    "shadow_compare_plan_defined": {"status": "pending", "reason": "No Python-vs-Rust/WASM shadow compare plan exists because the candidate has not started"},
+    "supply_chain_gates_defined": {"status": "pending", "reason": "Future artifacts must inherit PRD01 SBOM/provenance/allowlist gates in the implementation PRD"},
+    "benchmark_slo_gates_defined": {"status": "pending", "reason": "Future implementation PRD must define P50/P95/P99/CPU/memory/payload SLO gates"},
+    "migration_dr_runbook_defined": {"status": "pending", "reason": "No Rust-owned orchestration cache/index/schema state exists; future persistent state requires migration/DR runbook"},
+    "ops_runbook_defined": {"status": "pending", "reason": "No production Rust/WASM orchestration hotspot runtime exists; future enforce requires dashboards, alerts and drill evidence"},
+    "legacy_decommission_plan_defined": {"status": "pending", "reason": "Future canonical Rust/WASM deterministic semantics require explicit Python/JS duplicate-semantics removal plan"}
+  },
+  "baseline_tests": {
+    "python_orchestration": [
+      "tests/orchestration/test_workflow_plan_validator.py",
+      "tests/orchestration/test_registry_scheduler.py",
+      "tests/orchestration/test_completion_policy.py",
+      "tests/orchestration/test_backpressure.py",
+      "tests/orchestration/test_workflow_expander.py",
+      "tests/orchestration/test_runtime_replanning.py"
+    ],
+    "token_counter": ["tests/integrations/test_token_counter.py"],
+    "main_agent_sanitizer": [
+      "tests/capabilities/main_agent/test_runtime_replanner.py",
+      "tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py"
+    ]
+  },
+  "future_release_gates": {
+    "artifact_provenance_required": true,
+    "sbom_required": true,
+    "allowlist_required": true,
+    "python_js_baseline_required": true,
+    "rust_wasm_candidate_baseline_required": true,
+    "ffi_or_wasm_overhead_required": true,
+    "p50_p95_p99_cpu_memory_payload_required": true,
+    "state_migration_lock_backup_restore_required": true,
+    "dashboard_alert_slo_runbook_drill_required": true,
+    "legacy_duplicate_semantics_decommission_required": true
+  },
+  "startup_blockers": [
+    "separate_orchestration_hotspot_implementation_prd_missing",
+    "core_lifecycle_store_skill_mcp_foundation_not_production_stable",
+    "performance_or_reliability_evidence_missing",
+    "python_js_baseline_and_shadow_compare_plan_missing",
+    "rust_wasm_candidate_benchmark_slo_migration_ops_decommission_gates_missing"
+  ]
+}
