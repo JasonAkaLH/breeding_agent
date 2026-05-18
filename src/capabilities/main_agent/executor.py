@@ -364,7 +364,8 @@ class MainAgentRespondCapability(CapabilityContract):
                     script=script,
                     user_message=user_message,
                     metadata=request.metadata,
-                    artifact_context=tuple(script_input_artifacts),
+                    artifact_context=tuple(artifact_context),
+                    script_artifact_context=tuple(script_input_artifacts),
                     output_context={
                         "task_id": request.task_id,
                         "conversation_id": request.conversation_id,

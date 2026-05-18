@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,185 @@ from tests.api.support import APITestCase
 
 
 class SkillExecutorRuntimeAPITest(APITestCase):
+    async def test_python_subprocess_requires_finalizer_normalizes_answer_without_direct_artifact(self) -> None:
+        project_skill_root = self.workspace / 'skill'
+        skill_dir = project_skill_root / 'answer-finalizer'
+        scripts_dir = skill_dir / 'scripts'
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / 'answer.py').write_text(
+            'import json\nprint(json.dumps({"answer": "RCBD 设计已完成"}, ensure_ascii=False))',
+            encoding='utf-8',
+        )
+        (skill_dir / 'SKILL.md').write_text(
+            """---
+name: answer-finalizer
+description: 需要主代理汇总的 RCBD 设计
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    runtime: python
+    auto_run: true
+    outputs:
+      required:
+        - answer
+execution:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+outputs:
+  required:
+    - answer
+---
+
+# Answer Finalizer
+执行脚本并交给主代理汇总。
+""",
+            encoding='utf-8',
+        )
+        prompts: list[str] = []
+
+        def finalizer(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            self.assertIn('RCBD 设计已完成', prompt)
+            self.assertIn('response_text', prompt)
+            return 'finalized'
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=finalizer,
+        )
+
+        response = await self.submit_message(
+            conversation_id='conv-answer-finalizer',
+            content='run rcbd',
+            capability_id='skill.answer_finalizer',
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()['task_id']
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal['status'], 'completed')
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_node = next(node for node in nodes if node.capability_id == 'skill.answer_finalizer')
+        artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
+        self.assertFalse(
+            any(artifact.producer_node_id == skill_node.node_id and str(artifact.artifact_type) == 'text' for artifact in artifacts)
+        )
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertIn('skill.execution_completed', [event.event_type for event in events])
+        self.assertTrue(prompts)
+
+    async def test_python_subprocess_direct_answer_still_generates_text_artifact(self) -> None:
+        project_skill_root = self.workspace / 'skill'
+        skill_dir = project_skill_root / 'answer-direct'
+        scripts_dir = skill_dir / 'scripts'
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / 'answer.py').write_text(
+            'import json\nprint(json.dumps({"answer": "RCBD 设计已完成"}, ensure_ascii=False))',
+            encoding='utf-8',
+        )
+        (skill_dir / 'SKILL.md').write_text(
+            """---
+name: answer-direct
+description: 直接回答的 RCBD 设计
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    runtime: python
+    auto_run: true
+    outputs:
+      required:
+        - answer
+execution:
+  mode: python_subprocess
+  answer_mode: direct
+outputs:
+  required:
+    - answer
+---
+
+# Answer Direct
+执行脚本并直接回答。
+""",
+            encoding='utf-8',
+        )
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+        )
+
+        response = await self.submit_message(
+            conversation_id='conv-answer-direct',
+            content='run rcbd',
+            capability_id='skill.answer_direct',
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()['task_id']
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal['status'], 'completed')
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        self.assertEqual([node.capability_id for node in nodes], ['skill.answer_direct'])
+        artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
+        self.assertEqual([str(artifact.artifact_type) for artifact in artifacts], ['text'])
+        self.assertEqual(artifacts[0].storage_ref, 'RCBD 设计已完成')
+
+    async def test_platform_service_requires_finalizer_normalizes_answer_for_prompt_context(self) -> None:
+        project_skill_root = self.workspace / 'skill'
+        skill_dir = project_skill_root / 'platform-answer'
+        runtime_dir = skill_dir / 'runtime'
+        runtime_dir.mkdir(parents=True)
+        (runtime_dir / 'platform_handler.py').write_text(
+            textwrap.dedent(
+                """\
+                def build_handler():
+                    return lambda context: {"answer": "平台服务结果"}
+                """
+            ),
+            encoding='utf-8',
+        )
+        (skill_dir / 'SKILL.md').write_text(
+            """---
+name: platform-answer
+description: 平台服务回答
+execution:
+  mode: platform_service
+  answer_mode: requires_finalizer
+  trust_scope: project
+  handler: skill.platform_answer.handler
+  handler_module: runtime/platform_handler.py
+---
+
+# Platform Answer
+平台服务返回 answer。
+""",
+            encoding='utf-8',
+        )
+        prompts: list[str] = []
+
+        def finalizer(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            self.assertIn('平台服务结果', prompt)
+            self.assertIn('response_text', prompt)
+            return 'finalized'
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=finalizer,
+        )
+
+        response = await self.submit_message(
+            conversation_id='conv-platform-answer',
+            content='run platform',
+            capability_id='skill.platform_answer',
+        )
+        self.assertEqual(response.status_code, 202)
+        terminal = await self.wait_for_terminal_task(response.json()['task_id'])
+        self.assertEqual(terminal['status'], 'completed')
+        self.assertTrue(prompts)
+
     async def test_explicit_python_subprocess_skill_executes_direct_answer(self) -> None:
         project_skill_root = self.workspace / 'skill'
         skill_dir = project_skill_root / 'echo'
@@ -61,6 +241,96 @@ outputs:
         artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
         self.assertEqual([str(artifact.artifact_type) for artifact in artifacts], ['text'])
         self.assertEqual(artifacts[0].storage_ref, 'echo: hello skill')
+
+    async def test_public_python_subprocess_skill_reads_raw_upload_without_prompt_leak(self) -> None:
+        project_skill_root = self.workspace / 'skill'
+        skill_dir = project_skill_root / 'material-reader'
+        scripts_dir = skill_dir / 'scripts'
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / 'read_materials.py').write_text(
+            textwrap.dedent(
+                """\
+                import json
+                import sys
+
+                payload = json.load(sys.stdin)
+                artifacts = payload.get("uploaded_artifacts") or []
+                content = artifacts[0].get("content", "") if artifacts else ""
+                rows = [line for line in content.splitlines() if line.strip()]
+                print(json.dumps(
+                    {
+                        "answer": f"材料文件已读取：{max(len(rows) - 1, 0)} 行数据",
+                        "row_count": max(len(rows) - 1, 0),
+                    },
+                    ensure_ascii=False,
+                ))
+                """
+            ),
+            encoding='utf-8',
+        )
+        (skill_dir / 'SKILL.md').write_text(
+            """---
+name: material-reader
+description: 读取上传材料文件
+scripts:
+  - name: read_materials
+    path: scripts/read_materials.py
+    runtime: python
+    auto_run: true
+    outputs:
+      required:
+        - answer
+execution:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+outputs:
+  required:
+    - answer
+---
+
+# Material Reader
+读取上传材料。
+""",
+            encoding='utf-8',
+        )
+        prompts: list[str] = []
+        raw_csv = "plot_id,hyb_check,set\n1,A,A\n2,B,A\n"
+
+        def finalizer(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            self.assertIn("材料文件已读取：2 行数据", prompt)
+            self.assertIn("response_text", prompt)
+            self.assertIn("materials.csv", prompt)
+            self.assertNotIn(raw_csv, prompt)
+            self.assertNotIn("1,A,A", prompt)
+            return "finalized"
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=finalizer,
+        )
+        upload = await self.client.post(
+            "/api/v1/conversations/conv-material-reader/uploads",
+            files={"file": ("materials.csv", raw_csv, "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201)
+        self.assertNotIn("content", upload.json())
+
+        response = await self.submit_message(
+            conversation_id='conv-material-reader',
+            content='请根据这份材料文件处理',
+            capability_id='skill.material_reader',
+            metadata={'upload_ids': [upload.json()['upload_id']]},
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()['task_id']
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal['status'], 'completed')
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        self.assertIn('skill.material_reader', [node.capability_id for node in nodes])
+        self.assertTrue(prompts)
 
     async def test_new_conversation_refreshes_executor_mode_skill_and_syncs_instance_support(self) -> None:
         project_skill_root = self.workspace / 'skill'

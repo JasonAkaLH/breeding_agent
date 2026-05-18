@@ -8,6 +8,9 @@
 
 ## [Unreleased]
 
+- Skill finalizer 输出契约修复：`answer` / `summary` 现在在 Skill executor 边界归一化为 `response_text`，覆盖 `python_subprocess` 与 `platform_service`，使 `requires_finalizer` 的主代理 dependency context 能读取 answer-only Skill 中间结果；同步更新《Codex-Skill构建指南.md》并补充 helper / executor / API 多 Skill DAG 回归测试。
+- Skill 脚本上传文件边界修复：public `skill.*` 的 `python_subprocess` 执行路径现在优先消费 `skill_artifacts` 中的完整上传文件内容，LLM / finalizer prompt 仍只接收脱敏 `uploaded_artifacts` 摘要；补充 script-only artifact helper、SkillExecutor / API 回归，并验证 RCBD sample CSV 可生成 3 重复 30 行 fieldbook。
+
 ### 当前开发焦点：Rust Runtime 迁移按 `docs/prd/rust` 顺序推进
 
 - 多 Skill DAG 回答编排修复：新增 `response_role=intermediate|final` 轻量合约、全局 finalizer 自动追加、finalizer 阶段 skill auto-match 抑制，以及 assistant history / conversation memory 优先选择全局最终回答的回归测试；保持 Artifact / SQLite schema 不变。

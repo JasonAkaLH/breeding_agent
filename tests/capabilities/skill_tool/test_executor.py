@@ -69,7 +69,355 @@ outputs:
 
         self.assertIsNone(result.error)
         self.assertEqual(result.output_payload['summary'], 'processed hello')
+        self.assertEqual(result.output_payload['response_text'], 'processed hello')
         self.assertIn('skill.execution_completed', [event.event_type for event in result.events])
+
+    async def test_python_subprocess_requires_finalizer_normalizes_answer_without_text_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'rcbd'
+            scripts = skill_dir / 'scripts'
+            scripts.mkdir(parents=True)
+            (scripts / 'answer.py').write_text(
+                'import json, sys\njson.load(sys.stdin)\nprint(json.dumps({"answer": "RCBD 设计已完成"}, ensure_ascii=False))',
+                encoding='utf-8',
+            )
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: rcbd
+description: 生成随机区组设计
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    runtime: python
+outputs:
+  required:
+    - answer
+---
+
+# RCBD
+执行脚本。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            executor = SkillExecutor(runtime_state=state, script_runner=SkillScriptRunner())
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.rcbd',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': '做 3 次重复 RCBD'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload['answer'], 'RCBD 设计已完成')
+        self.assertEqual(result.output_payload['response_text'], 'RCBD 设计已完成')
+        self.assertEqual(result.artifacts, ())
+
+    async def test_python_subprocess_receives_raw_skill_artifact_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'materials'
+            scripts = skill_dir / 'scripts'
+            scripts.mkdir(parents=True)
+            (scripts / 'read_materials.py').write_text(
+                textwrap.dedent(
+                    '''
+                    import json, sys
+                    payload = json.load(sys.stdin)
+                    artifacts = payload.get("uploaded_artifacts") or []
+                    content = artifacts[0].get("content", "") if artifacts else ""
+                    print(json.dumps(
+                        {
+                            "answer": "content-bytes:%d" % len(content.encode("utf-8")),
+                            "raw_content_seen": bool(content),
+                        },
+                        ensure_ascii=False,
+                    ))
+                    '''
+                ).strip(),
+                encoding='utf-8',
+            )
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: materials
+description: 读取上传材料
+scripts:
+  - name: read_materials
+    path: scripts/read_materials.py
+    runtime: python
+outputs:
+  required:
+    - answer
+---
+
+# Materials
+执行脚本。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            executor = SkillExecutor(runtime_state=state, script_runner=SkillScriptRunner())
+            raw_content = 'plot_id,hyb_check,set\n1,A,A\n'
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.materials',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': '读取材料'},
+                    metadata={
+                        'skill_bundle_revision': state.active_revision,
+                        'uploaded_artifacts': [
+                            {
+                                'upload_id': 'upl-1',
+                                'filename': 'materials.csv',
+                                'preview': {'row_count': 1},
+                            }
+                        ],
+                        'skill_artifacts': [
+                            {
+                                'upload_id': 'upl-1',
+                                'filename': 'materials.csv',
+                                'preview': {'row_count': 1},
+                                'content': raw_content,
+                            }
+                        ],
+                    },
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload['answer'], f'content-bytes:{len(raw_content.encode("utf-8"))}')
+        self.assertEqual(result.output_payload['response_text'], f'content-bytes:{len(raw_content.encode("utf-8"))}')
+        self.assertIs(result.output_payload['raw_content_seen'], True)
+
+    async def test_python_subprocess_slot_llm_does_not_receive_raw_skill_artifact_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'material-slot'
+            scripts = skill_dir / 'scripts'
+            scripts.mkdir(parents=True)
+            (scripts / 'read_materials.py').write_text(
+                textwrap.dedent(
+                    '''
+                    import json, sys
+                    payload = json.load(sys.stdin)
+                    artifacts = payload.get("uploaded_artifacts") or []
+                    content = artifacts[0].get("content", "") if artifacts else ""
+                    print(json.dumps(
+                        {
+                            "answer": "%s:%d" % (payload.get("variety"), len(content.encode("utf-8"))),
+                            "raw_content_seen": bool(content),
+                        },
+                        ensure_ascii=False,
+                    ))
+                    '''
+                ).strip(),
+                encoding='utf-8',
+            )
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: material-slot
+description: 读取上传材料并补槽
+scripts:
+  - name: read_materials
+    path: scripts/read_materials.py
+    runtime: python
+outputs:
+  required:
+    - answer
+parameters:
+  material_data:
+    type: artifact
+    required: true
+    source: artifact
+  variety:
+    type: string
+    required: true
+---
+
+# Material Slot
+执行脚本。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            prompts: list[str] = []
+            raw_content = 'plot_id,hyb_check,set\n1,A,A\n'
+
+            def slot_generator(prompt: str):
+                prompts.append(prompt)
+                self.assertNotIn(raw_content, prompt)
+                self.assertNotIn('1,A,A', prompt)
+                return '{"resolved":{"variety":{"value":"龙粳33","source":"query"}},"missing":[]}'
+
+            executor = SkillExecutor(
+                runtime_state=state,
+                script_runner=SkillScriptRunner(),
+                skill_input_text_generator=slot_generator,
+            )
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.material_slot',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': '请处理这个材料文件'},
+                    metadata={
+                        'skill_bundle_revision': state.active_revision,
+                        'uploaded_artifacts': [
+                            {
+                                'upload_id': 'upl-1',
+                                'filename': 'materials.csv',
+                                'preview': {'row_count': 1},
+                            }
+                        ],
+                        'skill_artifacts': [
+                            {
+                                'upload_id': 'upl-1',
+                                'filename': 'materials.csv',
+                                'preview': {'row_count': 1},
+                                'content': raw_content,
+                            }
+                        ],
+                    },
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertTrue(prompts)
+        self.assertEqual(result.output_payload['answer'], f'龙粳33:{len(raw_content.encode("utf-8"))}')
+        self.assertIs(result.output_payload['raw_content_seen'], True)
+
+    async def test_platform_service_receives_only_sanitized_artifacts_and_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform-safe'
+            skill_dir.mkdir(parents=True)
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: platform-safe
+description: 平台服务只能看摘要
+execution:
+  mode: platform_service
+  answer_mode: direct
+  handler: demo.handler
+outputs:
+  required:
+    - response_text
+---
+
+# Platform Safe
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            raw_content = 'plot_id,hyb_check,set\n1,A,A\n'
+
+            def handler(context):
+                serialized_artifacts = str(context.artifact_context)
+                serialized_metadata = str(context.safe_metadata)
+                return {
+                    'response_text': 'safe',
+                    'artifact_content_visible': raw_content in serialized_artifacts or '1,A,A' in serialized_artifacts,
+                    'metadata_content_visible': raw_content in serialized_metadata or '1,A,A' in serialized_metadata,
+                }
+
+            executor = SkillExecutor(
+                runtime_state=state,
+                platform_handler_registry=SkillPlatformHandlerRegistry(
+                    handlers={'demo.handler': handler},
+                    trusted_skill_handlers={'skill.platform_safe': 'demo.handler'},
+                    trusted_skill_services={'skill.platform_safe': ()},
+                ),
+                service_registry=SkillServiceRegistry(),
+            )
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform_safe',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': 'hello'},
+                    metadata={
+                        'skill_bundle_revision': state.active_revision,
+                        'uploaded_artifacts': [
+                            {
+                                'upload_id': 'upl-1',
+                                'filename': 'materials.csv',
+                                'preview': {'row_count': 1},
+                                'content': raw_content,
+                            }
+                        ],
+                        'skill_artifacts': [
+                            {
+                                'upload_id': 'upl-1',
+                                'filename': 'materials.csv',
+                                'preview': {'row_count': 1},
+                                'content': raw_content,
+                            }
+                        ],
+                    },
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertIs(result.output_payload['artifact_content_visible'], False)
+        self.assertIs(result.output_payload['metadata_content_visible'], False)
+
+    async def test_python_subprocess_direct_answer_still_returns_text_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'direct-rcbd'
+            scripts = skill_dir / 'scripts'
+            scripts.mkdir(parents=True)
+            (scripts / 'answer.py').write_text(
+                'import json, sys\njson.load(sys.stdin)\nprint(json.dumps({"answer": "直接回答"}, ensure_ascii=False))',
+                encoding='utf-8',
+            )
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: direct-rcbd
+description: 直接输出
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    runtime: python
+execution:
+  answer_mode: direct
+outputs:
+  required:
+    - answer
+---
+
+# Direct RCBD
+执行脚本。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            executor = SkillExecutor(runtime_state=state, script_runner=SkillScriptRunner())
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.direct_rcbd',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': '直接输出'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload['response_text'], '直接回答')
+        self.assertEqual([artifact.artifact_type.value for artifact in result.artifacts], ['text'])
+        self.assertEqual(result.artifacts[0].storage_ref, '直接回答')
 
     async def test_missing_required_input_returns_controlled_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -390,6 +738,103 @@ execution:
         self.assertIsNone(result.error)
         self.assertEqual(result.output_payload['response_text'], 'handled hello')
         self.assertEqual(result.artifacts[0].artifact_type.value, 'text')
+
+    async def test_platform_service_requires_finalizer_normalizes_answer_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform'
+            skill_dir.mkdir(parents=True)
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: platform
+description: 平台服务
+execution:
+  mode: platform_service
+  answer_mode: requires_finalizer
+  trust_scope: project
+  handler: demo.handler
+  services:
+    - demo.service
+---
+
+# Platform
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            services = SkillServiceRegistry({'demo.service': object()})
+            handlers = SkillPlatformHandlerRegistry(
+                handlers={'demo.handler': lambda _ctx: {'answer': '平台服务结果'}},
+                trusted_skill_handlers={'skill.platform': 'demo.handler'},
+                trusted_skill_services={'skill.platform': ('demo.service',)},
+            )
+            executor = SkillExecutor(
+                runtime_state=state,
+                platform_handler_registry=handlers,
+                service_registry=services,
+            )
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': 'hello'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload['answer'], '平台服务结果')
+        self.assertEqual(result.output_payload['response_text'], '平台服务结果')
+        self.assertEqual(result.artifacts, ())
+
+    async def test_platform_service_normalizes_failed_answer_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform'
+            skill_dir.mkdir(parents=True)
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: platform
+description: 平台服务
+execution:
+  mode: platform_service
+  answer_mode: requires_finalizer
+  trust_scope: project
+  handler: demo.handler
+---
+
+# Platform
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            handlers = SkillPlatformHandlerRegistry(
+                handlers={'demo.handler': lambda _ctx: {'ok': False, 'answer': '缺少输入'}},
+                trusted_skill_handlers={'skill.platform': 'demo.handler'},
+            )
+            executor = SkillExecutor(
+                runtime_state=state,
+                platform_handler_registry=handlers,
+                service_registry=SkillServiceRegistry(),
+            )
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': 'hello'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload['response_text'], '缺少输入')
+        self.assertIs(result.output_payload['is_error'], True)
 
     async def test_project_platform_handler_loads_from_public_skill_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

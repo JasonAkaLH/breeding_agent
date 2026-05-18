@@ -7,7 +7,10 @@ import shutil
 import unittest
 from pathlib import Path
 
+from src.capabilities.skill_tool import SkillExecutor
+from src.core.contracts import CapabilityExecutionRequest
 from src.integrations.codex_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
+from src.integrations.codex_skills import SkillRuntimeState
 
 
 class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):
@@ -126,6 +129,51 @@ class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):
         if result.get("layout_html_generated"):
             self.assertEqual(result["output_files"][0]["mime_type"], "text/html")
             self.assertNotIn("layout_html", result)
+
+    def test_public_skill_executor_uses_raw_skill_artifact_content(self) -> None:
+        self._skip_without_rscript()
+        root = Path("skill")
+        state = SkillRuntimeState.from_roots(
+            skill_roots=(root,),
+            public_skill_roots=(root,),
+            reserved_capability_ids=("main_agent.respond",),
+        )
+        csv_content = Path("skill/mini_breedstat_rcbd_skill/examples/rcbd_sample_plot_hyb_set.csv").read_text()
+
+        result = asyncio.run(
+            SkillExecutor(runtime_state=state, script_runner=SkillScriptRunner()).execute(
+                CapabilityExecutionRequest(
+                    capability_id="skill.mini_breedstat_rcbd",
+                    conversation_id="conv-rcbd",
+                    task_id="task-rcbd",
+                    node_id="node-rcbd",
+                    input_payload={"user_message": "请用这份材料清单做3次重复的随机区组设计"},
+                    metadata={
+                        "skill_bundle_revision": state.active_revision,
+                        "uploaded_artifacts": [
+                            {
+                                "upload_id": "upl-1",
+                                "filename": "rcbd_sample_plot_hyb_set.csv",
+                                "preview": {"row_count": 10, "columns": ["plot_id", "hyb_check", "set"]},
+                            }
+                        ],
+                        "skill_artifacts": [
+                            {
+                                "upload_id": "upl-1",
+                                "filename": "rcbd_sample_plot_hyb_set.csv",
+                                "preview": {"row_count": 10, "columns": ["plot_id", "hyb_check", "set"]},
+                                "content": csv_content,
+                            }
+                        ],
+                    },
+                )
+            )
+        )
+
+        self.assertIsNone(result.error)
+        self.assertTrue(result.output_payload["ok"])
+        self.assertEqual(result.output_payload["fieldbook_row_count"], 30)
+        self.assertIn("RCBD 设计已完成", result.output_payload["response_text"])
 
 
 if __name__ == "__main__":

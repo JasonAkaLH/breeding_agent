@@ -3,7 +3,7 @@
 - **适用对象**：使用 Oh-my-codex / Codex 的 `skill-creator` 创建 Skill，并希望这些 Skill 能被本项目后端 `main_agent.respond` / `SkillExecutor` 使用的开发者。
 - **适配范围**：本系统的 Codex Skill 兼容层，而不是完整 Codex 本地 runtime。
 - **当前实现入口**：`src/integrations/codex_skills/`、`src/capabilities/main_agent/`、`src/capabilities/skill_tool/`、`src/api/runtime.py`。
-- **更新时间**：2026-05-14
+- **更新时间**：2026-05-18
 
 ## 1. 一句话结论
 
@@ -77,12 +77,12 @@ triggers:
 | `triggers` | 强烈建议 | 按子串命中，分数最高；中文 Skill 必须尽量列出自然触发表达。 |
 | `capability_id` | 公开 Skill 必填 | 公开到 capability pool 的稳定 ID；项目 Skill 使用 `skill.*`，例如 `skill.report_writer`。 |
 | `inputs` | 可选 | 会被解析；顶层 `inputs.required` 当前不阻塞主代理执行，主要作为契约说明。 |
-| `outputs` | 脚本 / 服务 Skill 建议 | 顶层 `outputs.required` 会用于校验脚本 JSON 输出，也可作为 platform-service 输出契约说明。 |
+| `outputs` | 脚本 / 服务 Skill 建议 | 顶层 `outputs.required` / `scripts[].outputs.required` 是执行校验契约：用于判断脚本 / handler 输出是否满足声明；不表示这些字段会原样注入主代理 prompt。 |
 | `parameters` / `input_parameters` | 脚本 / 服务 Skill 建议 | 声明执行前需要解析的业务参数；系统先做确定性解析，仍缺少文本型标量参数时才让 LLM 生成候选 JSON，最终只有通过系统校验的值会作为入参注入。 |
 | `scripts` | 可选 | 只支持声明式 Python 脚本；`auto_run: true` 时自动执行。 |
 | `execution.mode` | 执行型 Skill 建议 | 支持 `delegated_main_agent`、`python_subprocess`、`platform_service`。 |
 | `execution.handler` | platform-service 必填 | runtime 预注册 / allowlist 的 handler key；不能作为动态 import 路径。 |
-| `execution.answer_mode` | 执行型 Skill 建议 | 支持 `direct`、`requires_finalizer`、`none`；platform-service 必须显式声明。 |
+| `execution.answer_mode` | 执行型 Skill 建议 | 支持 `direct`、`requires_finalizer`、`none`；platform-service 必须显式声明。`requires_finalizer` 表示执行结果先进入安全归一化的 dependency context，再由主代理汇总，而不是把原始 payload 整包塞进 prompt。 |
 | `execution.services` | platform-service 可选 | 仅能列出该 Skill allowlist 允许的服务名；普通脚本不能绑定服务。 |
 | `execution.trust_scope` | platform-service 建议 | 标记信任边界；当前项目内服务型 Skill 使用 `project`。 |
 | `x_runtime.rust` | Rust Skill 可选 | 仅作为约定 metadata；不会触发自动编译或自动执行，必须由 platform handler / runtime allowlist 显式支持。 |
@@ -627,7 +627,25 @@ stdout 必须是 JSON object，例如：
 {"answer": "脚本处理结果", "facts": ["..."]}
 ```
 
-如果 `outputs.required` 或 `scripts[].outputs.required` 声明了必需字段，stdout JSON 必须包含这些字段，否则脚本结果会被视为失败，不会注入主代理 prompt。
+建议始终输出一个短的人类可读摘要字段：`answer`、`response_text` 或 `summary`。当前 Skill executor 会在执行边界把 `answer` / `summary` 归一化为 `response_text`，供 `requires_finalizer` 的主代理 finalizer 从 dependency context 中读取；如果已经输出非空 `response_text`，则不会被 `answer` 覆盖。
+
+如果 `outputs.required` 或 `scripts[].outputs.required` 声明了必需字段，stdout JSON 必须包含这些字段，否则脚本结果会被视为失败，无法进入正常回答链路。注意：required-output 校验只回答“输出是否合格”，不回答“哪些字段会进入 prompt”。字段存在、通过 required 校验，也不等于原始 payload 会整包注入主代理 prompt。
+
+三层契约必须分清：
+
+1. **required-output 执行校验契约**：`outputs.required` / `scripts[].outputs.required` 校验脚本或服务是否产出必需字段；缺字段会导致执行失败或不进入正常回答链路。
+2. **main-agent dependency context 注入契约**：`requires_finalizer` 只读取归一化、脱敏、allowlist 后的 dependency context；`answer` / `summary` 会先归一化为 `response_text`，表格类字段也受 allowlist 与 token budget 限制。
+3. **`output_files` artifact 契约**：可下载文件由 artifact 管线收集、校验、打包和替换；文件描述与文件正文不保证原样进入 finalizer prompt。
+
+推荐输出字段矩阵：
+
+| 用途 | 推荐字段 | 是否可进入 finalizer prompt |
+|---|---|---|
+| 人类可读摘要 | `answer` / `response_text` / `summary` | 是；`answer` / `summary` 会归一化为 `response_text` 后进入，已有非空 `response_text` 优先。 |
+| 表格结果 | `columns` / `rows` / `row_count` / `preview_row_count` | 是；受现有 allowlist 与 token budget 限制，不应输出无界大表。 |
+| 错误 / 缺参 | `ok: false` + `answer` + 可选短 `error` | 是；`answer` 会归一化为 `response_text`，`ok: false` 会标记为 `is_error` 供主代理识别。 |
+| 文件产物 | `output_files` | 由 artifact 管线处理；不保证原样进入 prompt，文件正文不会作为最终回答内容注入。 |
+| 领域大对象 | `parameters` / `out_design` / fieldbook 全量 | 否；不要依赖整包注入，如需汇总请另行生成短 `answer` / `summary` / `response_text`。 |
 
 如果脚本需要产出可下载文件，应写入运行时提供的 `MAF_SKILL_OUTPUT_DIR`，并在 stdout JSON 中声明 `output_files`：
 
@@ -744,7 +762,7 @@ print(json.dumps(result, ensure_ascii=False))
 4. 如需脚本，只能声明 scripts[].runtime=python，path 必须是包内相对路径，不能使用绝对路径、..、symlink、shell、node、runtime:rust 或任意命令。
 5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；如需业务参数，必须用 parameters/input_parameters 声明可解析字段，LLM 只会在缺参时生成候选并由系统校验后注入，不要依赖主代理口头承诺传参；stdout 必须是 JSON object。若需要下载文件，写入 MAF_SKILL_OUTPUT_DIR 并用 output_files 声明；若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
 6. 只有项目信任、runtime 已注册 handler/service allowlist 的 Skill 才能声明 execution.mode=platform_service；不要把 platform handler 写成动态 import 路径，不要让 python_subprocess 绑定服务。Rust 只能作为 platform_service 背后的受控实现，不能要求框架自动编译或执行。
-7. 如果声明 outputs.required 或 scripts[].outputs.required，脚本 stdout 必须包含这些字段。
+7. 如果声明 outputs.required 或 scripts[].outputs.required，脚本 stdout 必须包含这些字段；这只是执行校验契约，不代表字段会原样注入 prompt。推荐输出 answer / response_text / summary，其中 answer / summary 会在 finalizer 使用前归一化为 response_text。
 8. 不要创建 README、安装指南、CHANGELOG 等额外说明文件；除非脚本需要，不要创建 references/ 或 assets/。
 9. Skill 正文保持精简，写 Use when、Workflow、Output、Boundaries；不要放 secret、内网地址、数据库密码或要求模型读取本地路径。
 10. 输出最终文件树和每个文件内容。
@@ -766,6 +784,8 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] 如果有脚本，`path` 是包内相对路径，不包含 `..`。
 - [ ] 如果有脚本，stdout 是 JSON object。
 - [ ] 如果声明了 required 输出，脚本真实输出包含这些字段。
+- [ ] 已区分 required-output 校验、main-agent dependency context 注入和 `output_files` artifact 管线；没有假设原始 payload 会整包进入 prompt。
+- [ ] 执行型 Skill 至少输出一个短摘要字段：`answer` / `response_text` / `summary`；需要 finalizer 汇总时知道 `answer` / `summary` 会归一化为 `response_text`。
 - [ ] 如果脚本产出下载文件，文件写入 `MAF_SKILL_OUTPUT_DIR`，stdout `output_files[].path` 使用 `outputs/` 下相对路径，不使用绝对路径、`..`、symlink、hardlink 或目录，且不声明平台默认拒绝的源压缩包。
 - [ ] 输出文件扩展名属于平台 allowlist；如声明 `mime_type`，MIME 与扩展名匹配。
 - [ ] 如果 Skill 只产出固定文件类型，已用 `outputs.files` 声明更严格的扩展名 / MIME 约束，且该声明只收紧、不放宽平台默认规则。
@@ -852,6 +872,8 @@ python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 | 直接声明 `runtime: r` | runner 拒绝 | 使用 Python wrapper 调用包内 `.R` 脚本 |
 | 把详细资料放 references/ | 后端 LLM 看不到 | 把必要内容压缩进 SKILL.md body，或用脚本读取并输出摘要 |
 | 输出字段和 `outputs.required` 不一致 | 脚本结果失败 | 对齐 required 字段 |
+| 以为 `outputs.required` 字段会原样进入主代理 prompt | finalizer 看不到预期内容 | 输出短 `answer` / `summary` / `response_text`，并依赖归一化后的 dependency context |
+| 把 `output_files` 当作 prompt 内容 | finalizer 不会读取文件正文 | 用 `output_files` 交付下载产物，同时用 `answer` / `summary` 描述文件内容 |
 
 ## 13. 和标准 Codex Skill 的差异
 

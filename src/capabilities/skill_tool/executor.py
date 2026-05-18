@@ -20,9 +20,11 @@ from src.integrations.codex_skills import (
     SkillRuntimeState,
     SkillServiceRegistry,
     build_skill_artifact_context,
+    build_skill_script_artifact_context,
     build_skill_safe_metadata,
     call_platform_handler,
     coerce_skill_response_text,
+    normalize_skill_response_payload,
     resolve_skill_execution_config,
     select_skill_entrypoint,
 )
@@ -178,12 +180,16 @@ class SkillExecutor(ExecutorPort):
                         retriable=False,
                     ),
                 )
+            script_artifact_context = build_skill_script_artifact_context(
+                request.metadata,
+                fallback_artifact_context=artifact_context,
+            )
             return await self._execute_script_skill(
                 request=request,
                 resolved=resolved,
                 execution=execution,
                 user_message=user_message,
-                artifact_context=artifact_context,
+                script_artifact_context=script_artifact_context,
                 script=script,
                 started_at=started_at,
                 prior_events=events,
@@ -225,7 +231,7 @@ class SkillExecutor(ExecutorPort):
         resolved: _ResolvedSkill,
         execution,
         user_message: str,
-        artifact_context: tuple[Mapping[str, Any], ...],
+        script_artifact_context: tuple[Mapping[str, Any], ...],
         script,
         started_at: float,
         prior_events: list[EventRecord],
@@ -235,7 +241,8 @@ class SkillExecutor(ExecutorPort):
             script=script,
             user_message=user_message,
             metadata=request.metadata,
-            artifact_context=artifact_context,
+            artifact_context=build_skill_artifact_context(request.metadata),
+            script_artifact_context=script_artifact_context,
             output_context={
                 "task_id": request.task_id,
                 "conversation_id": request.conversation_id,
@@ -383,7 +390,8 @@ class SkillExecutor(ExecutorPort):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
-        response_text = coerce_skill_response_text(script_result.output)
+        output_payload = normalize_skill_response_payload(script_result.output)
+        response_text = coerce_skill_response_text(output_payload)
         if execution.answer_mode == "direct" and response_text:
             artifacts.append(self._make_text_artifact(request, response_text))
         events.append(
@@ -412,7 +420,7 @@ class SkillExecutor(ExecutorPort):
             capability_id=request.capability_id,
             task_id=request.task_id,
             node_id=request.node_id,
-            output_payload=dict(script_result.output),
+            output_payload=output_payload,
             artifacts=tuple(artifacts),
             events=tuple(events),
         )
@@ -540,7 +548,7 @@ class SkillExecutor(ExecutorPort):
             )
 
         artifacts = list(handler_result.artifacts)
-        output_payload = dict(handler_result.output_payload)
+        output_payload = normalize_skill_response_payload(handler_result.output_payload)
         response_text = coerce_skill_response_text(output_payload)
         if execution.answer_mode == "direct" and response_text:
             artifacts.append(self._make_text_artifact(request, response_text))

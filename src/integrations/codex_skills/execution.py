@@ -24,6 +24,7 @@ from .script_manifest import SkillScriptEntrypoint
 from .script_runner import SkillScriptError, SkillScriptRunner
 
 _SAFE_ARTIFACT_KEYS = frozenset({"artifact_id", "upload_id", "filename", "mime_type", "content_type", "size", "row_count", "columns", "preview", "summary"})
+_SCRIPT_ARTIFACT_KEYS = frozenset((*_SAFE_ARTIFACT_KEYS, "content"))
 _BLOCKED_METADATA_KEYS = frozenset({"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"})
 
 
@@ -347,11 +348,18 @@ class SkillScriptExecutionService:
         user_message: str,
         metadata: Mapping[str, Any],
         artifact_context: tuple[Mapping[str, Any], ...],
+        script_artifact_context: tuple[Mapping[str, Any], ...] | None = None,
         output_context: Mapping[str, Any],
     ) -> SkillScriptExecutionResult:
+        prompt_artifact_context = tuple(artifact_context)
+        if not prompt_artifact_context and script_artifact_context:
+            prompt_artifact_context = _sanitize_artifact_items(
+                script_artifact_context,
+                allowed_keys=_SAFE_ARTIFACT_KEYS,
+            )
         base_payload = {
             "query": user_message,
-            "uploaded_artifacts": list(artifact_context),
+            "uploaded_artifacts": list(prompt_artifact_context),
             "metadata": build_skill_safe_metadata(metadata),
         }
         resolution = await resolve_skill_inputs_with_llm(
@@ -361,7 +369,7 @@ class SkillScriptExecutionService:
             SkillInputResolutionContext.from_metadata(
                 query=user_message,
                 metadata=metadata,
-                artifact_summaries=artifact_context,
+                artifact_summaries=prompt_artifact_context,
             ),
             text_generator=self._skill_input_text_generator,
         )
@@ -379,11 +387,15 @@ class SkillScriptExecutionService:
                 resolution=resolution,
                 missing=contract_missing,
             )
+        runner_payload = {
+            **resolution.payload,
+            "uploaded_artifacts": list(script_artifact_context or artifact_context),
+        }
         try:
             output = await self._script_runner.run(
                 manifest,
                 script,
-                resolution.payload,
+                runner_payload,
                 output_context=output_context,
             )
         except SkillScriptError as exc:
@@ -462,6 +474,31 @@ def select_skill_entrypoint(manifest: SkillManifest) -> SkillScriptEntrypoint:
 
 def build_skill_artifact_context(metadata: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
     raw_items = metadata.get("uploaded_artifacts") or metadata.get("artifacts") or ()
+    return _sanitize_artifact_items(raw_items, allowed_keys=_SAFE_ARTIFACT_KEYS)
+
+
+def build_skill_script_artifact_context(
+    metadata: Mapping[str, Any],
+    *,
+    fallback_artifact_context: tuple[Mapping[str, Any], ...] = (),
+) -> tuple[dict[str, Any], ...]:
+    """Return script-only upload context, including raw content when explicitly available.
+
+    ``uploaded_artifacts`` is the prompt-safe summary channel.  ``skill_artifacts``
+    is the execution-only channel created by the API runtime from the same upload
+    records, and may contain raw file content.  Keep this helper separate from
+    ``build_skill_artifact_context`` so LLM-facing code cannot accidentally gain
+    access to raw upload bytes.
+    """
+
+    raw_items = metadata.get("skill_artifacts")
+    sanitized = _sanitize_artifact_items(raw_items, allowed_keys=_SCRIPT_ARTIFACT_KEYS)
+    if sanitized:
+        return sanitized
+    return tuple(dict(item) for item in fallback_artifact_context if isinstance(item, Mapping))
+
+
+def _sanitize_artifact_items(raw_items: Any, *, allowed_keys: frozenset[str]) -> tuple[dict[str, Any], ...]:
     if not isinstance(raw_items, list | tuple):
         return ()
     sanitized: list[dict[str, Any]] = []
@@ -471,7 +508,7 @@ def build_skill_artifact_context(metadata: Mapping[str, Any]) -> tuple[dict[str,
         safe = {
             str(key): value
             for key, value in item.items()
-            if str(key).lower() in _SAFE_ARTIFACT_KEYS
+            if str(key).lower() in allowed_keys
         }
         if safe:
             sanitized.append(safe)
@@ -479,11 +516,20 @@ def build_skill_artifact_context(metadata: Mapping[str, Any]) -> tuple[dict[str,
 
 
 def build_skill_safe_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        str(key): value
-        for key, value in metadata.items()
-        if str(key).lower() not in _BLOCKED_METADATA_KEYS
-    }
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        key_text = str(key)
+        normalized = key_text.lower()
+        if normalized in _BLOCKED_METADATA_KEYS:
+            continue
+        if normalized == "skill_artifacts":
+            safe[key_text] = list(_sanitize_artifact_items(value, allowed_keys=_SAFE_ARTIFACT_KEYS))
+            continue
+        if normalized in {"uploaded_artifacts", "artifacts"}:
+            safe[key_text] = list(_sanitize_artifact_items(value, allowed_keys=_SAFE_ARTIFACT_KEYS))
+            continue
+        safe[key_text] = value
+    return safe
 
 
 def coerce_skill_response_text(output_payload: Mapping[str, Any]) -> str:
@@ -492,6 +538,17 @@ def coerce_skill_response_text(output_payload: Mapping[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def normalize_skill_response_payload(output_payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(output_payload)
+    response_text = coerce_skill_response_text(normalized)
+    existing_response_text = normalized.get("response_text")
+    if response_text and not (isinstance(existing_response_text, str) and existing_response_text.strip()):
+        normalized["response_text"] = response_text
+    if normalized.get("ok") is False:
+        normalized["is_error"] = True
+    return normalized
 
 
 def normalize_platform_handler_result(value: SkillPlatformHandlerResult | Mapping[str, Any]) -> SkillPlatformHandlerResult:
