@@ -6,8 +6,8 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Iterable
 
-from src.core.enums import ArtifactType, MessageRole, TaskStatus
-from src.core.models import Artifact, Conversation, ConversationMemorySummary, Message, Task
+from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
+from src.core.models import Artifact, Conversation, ConversationMemorySummary, EventRecord, Message, Task
 from src.orchestration.conversation_memory import (
     ConversationMemoryBuilder,
     ConversationMemoryConfig,
