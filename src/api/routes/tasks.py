@@ -67,6 +67,8 @@ def _count_failed_nodes(nodes) -> int:
 
 
 async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
+    if task.status == TaskStatus.COMPLETED:
+        await runtime.sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
     nodes = await runtime.storage.list_task_nodes_for_task(task.task_id)
     return TaskSummaryResponse(
         task_id=task.task_id,

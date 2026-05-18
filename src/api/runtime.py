@@ -617,7 +617,10 @@ class ApiRuntime:
     async def sync_assistant_history_messages(self, conversation_id: str) -> None:
         tasks = await self.storage.list_tasks_for_conversation(conversation_id, statuses={TaskStatus.COMPLETED})
         for task in tasks:
-            await self._persist_assistant_history_message(task.task_id, task.conversation_id)
+            await self.sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
+
+    async def sync_assistant_history_message_for_task(self, task_id: str, conversation_id: str) -> None:
+        await self._persist_assistant_history_message(task_id, conversation_id)
 
     async def _persist_assistant_history_message(self, task_id: str, conversation_id: str) -> None:
         message_id = f"{task_id}:assistant"
