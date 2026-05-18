@@ -627,7 +627,8 @@ class ApiRuntime:
         if await self.storage.get_message(message_id) is not None:
             return
         artifacts = await self.storage.list_artifacts_for_task(task_id)
-        text_artifact = select_final_text_artifact(artifacts)
+        events = await self.storage.list_events_for_task(task_id)
+        text_artifact = select_final_text_artifact(artifacts, events=events)
         if text_artifact is None:
             return
         await self.storage.save_message(
