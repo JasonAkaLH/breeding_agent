@@ -42,7 +42,7 @@ class WorkflowExpander:
         expanded_nodes: list[WorkflowNodePlan] = []
         expanded_tail_ids_by_original: dict[str, tuple[str, ...]] = {}
         expanded_answer_ids_by_original: dict[str, tuple[str, ...]] = {}
-        answer_source_original_ids: list[str] = []
+        required_finalizer_original_ids: list[str] = []
         expanded_macro_nodes: dict[str, dict[str, object]] = {}
         expanded_main_agent_node_ids: set[str] = set()
         last_main_agent_node_id: str | None = None
@@ -122,6 +122,7 @@ class WorkflowExpander:
             macro_nodes = tuple(macro_plan.nodes)
             if not macro_nodes:
                 raise WorkflowExpansionError(f"Macro capability produced no nodes: {node.capability_id}")
+            macro_requires_finalizer = self._macro_requires_finalizer(macro_plan, macro_nodes)
 
             macro_node_ids = {macro_node.node_id for macro_node in macro_nodes}
             macro_dependency_ids = {
@@ -175,45 +176,52 @@ class WorkflowExpander:
                 )
             )
             expanded_answer_ids_by_original[node.node_id] = macro_answer_ids
-            if macro_answer_ids:
-                answer_source_original_ids.append(node.node_id)
+            if macro_answer_ids and macro_requires_finalizer:
+                required_finalizer_original_ids.append(node.node_id)
             expanded_macro_nodes[node.node_id] = {
                 "capability_id": node.capability_id,
                 "root_node_ids": tuple(sorted(macro_roots)),
                 "tail_node_ids": macro_tails,
                 "answer_node_ids": macro_answer_ids,
+                "requires_finalizer": macro_requires_finalizer,
             }
 
         required_finalizer_dependencies = tuple(
             self._dedupe(
                 answer_id
-                for original_id in answer_source_original_ids
+                for original_id in required_finalizer_original_ids
                 for answer_id in expanded_answer_ids_by_original[original_id]
             )
         )
         global_finalizer_added = False
-        if (
-            len(answer_source_original_ids) >= 2
-            and not self._has_final_answer_node_covering(expanded_nodes, required_finalizer_dependencies)
-        ):
-            global_finalizer_added = True
-            expanded_nodes.append(
-                WorkflowNodePlan(
-                    node_id=self._unique_node_id(plan.task_id, {node.node_id for node in expanded_nodes}),
-                    capability_id="main_agent.respond",
-                    input_payload={"user_message": request.effective_user_message},
-                    metadata={
-                        RESPONSE_ROLE_METADATA_KEY: RESPONSE_ROLE_FINAL,
-                        ANSWER_SCOPE_METADATA_KEY: "task",
-                        AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY: False,
-                        "finalizer_source": "workflow_expander",
-                    },
-                    depends_on=required_finalizer_dependencies,
-                    criticality=NodeCriticality.REQUIRED,
-                    retry_policy={"max_attempts": 1},
-                    timeout_policy={"seconds": 60},
-                )
+        if required_finalizer_dependencies:
+            covering_answer_index = self._find_answer_node_covering(
+                expanded_nodes,
+                required_finalizer_dependencies,
             )
+            if covering_answer_index is None:
+                global_finalizer_added = True
+                expanded_nodes.append(
+                    WorkflowNodePlan(
+                        node_id=self._unique_node_id(plan.task_id, {node.node_id for node in expanded_nodes}),
+                        capability_id="main_agent.respond",
+                        input_payload={"user_message": request.effective_user_message},
+                        metadata={
+                            RESPONSE_ROLE_METADATA_KEY: RESPONSE_ROLE_FINAL,
+                            ANSWER_SCOPE_METADATA_KEY: "task",
+                            AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY: False,
+                            "finalizer_source": "workflow_expander",
+                        },
+                        depends_on=required_finalizer_dependencies,
+                        criticality=NodeCriticality.REQUIRED,
+                        retry_policy={"max_attempts": 1},
+                        timeout_policy={"seconds": 60},
+                    )
+                )
+            else:
+                expanded_nodes[covering_answer_index] = self._as_final_answer_node(
+                    expanded_nodes[covering_answer_index]
+                )
 
         return WorkflowPlan(
             task_id=plan.task_id,
@@ -257,14 +265,38 @@ class WorkflowExpander:
         return tuple(ordered)
 
     @staticmethod
-    def _has_final_answer_node_covering(nodes: list[WorkflowNodePlan], required_dependencies: tuple[str, ...]) -> bool:
-        required = set(required_dependencies)
+    def _macro_requires_finalizer(
+        macro_plan: WorkflowPlan,
+        macro_nodes: tuple[WorkflowNodePlan, ...],
+    ) -> bool:
+        if str(macro_plan.metadata.get("skill_answer_mode") or "").strip().lower() == "requires_finalizer":
+            return True
+        if macro_plan.metadata.get("skill_requires_finalizer") is True:
+            return True
         return any(
-            node.capability_id == "main_agent.respond"
-            and response_role_from_metadata(node.metadata) == RESPONSE_ROLE_FINAL
-            and required.issubset(set(node.depends_on))
-            for node in nodes
+            str(macro_node.metadata.get("skill_answer_mode") or "").strip().lower() == "requires_finalizer"
+            or macro_node.metadata.get("skill_requires_finalizer") is True
+            for macro_node in macro_nodes
         )
+
+    @staticmethod
+    def _find_answer_node_covering(
+        nodes: list[WorkflowNodePlan],
+        required_dependencies: tuple[str, ...],
+    ) -> int | None:
+        required = set(required_dependencies)
+        for index, node in enumerate(nodes):
+            if node.capability_id == "main_agent.respond" and required.issubset(set(node.depends_on)):
+                return index
+        return None
+
+    @staticmethod
+    def _as_final_answer_node(node: WorkflowNodePlan) -> WorkflowNodePlan:
+        metadata = dict(node.metadata)
+        metadata[RESPONSE_ROLE_METADATA_KEY] = RESPONSE_ROLE_FINAL
+        metadata.setdefault(ANSWER_SCOPE_METADATA_KEY, "task")
+        metadata.setdefault(AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY, False)
+        return replace(node, metadata=metadata)
 
     @staticmethod
     def _unique_node_id(task_id: str, existing_node_ids: set[str]) -> str:

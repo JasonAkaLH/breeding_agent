@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from src.integrations.codex_skills.skill_runtime_state import SkillRuntimeState
-from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL, RESPONSE_ROLE_INTERMEDIATE
+from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 from src.orchestration.models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_expander import WorkflowExpander
@@ -77,6 +77,7 @@ execution:
         self.assertEqual([node.capability_id for node in expanded.nodes], ["skill.generic_data_lookup", "main_agent.respond"])
         self.assertEqual(expanded.nodes[0].node_id, "task-1:query_data:skill_execute")
         self.assertEqual(expanded.nodes[1].depends_on, ("task-1:query_data:skill_execute",))
+        self.assertEqual(expanded.nodes[1].metadata["response_role"], RESPONSE_ROLE_FINAL)
         self.assertEqual(expanded.metadata["expanded_macro_nodes"]["query_data"]["capability_id"], "skill.generic_data_lookup")
 
     def test_macro_roots_depend_on_high_level_dependencies_for_skill_executor_mode(self) -> None:
@@ -182,10 +183,11 @@ scripts:
         self.assertEqual([node.capability_id for node in expanded.nodes], ["skill.scripted", "main_agent.respond"])
         self.assertEqual(expanded.nodes[0].input_payload["user_message"], "请处理这个文本")
         self.assertEqual(expanded.nodes[1].depends_on, (expanded.nodes[0].node_id,))
-        self.assertEqual(expanded.nodes[1].metadata["response_role"], RESPONSE_ROLE_INTERMEDIATE)
+        self.assertEqual(expanded.nodes[1].metadata["response_role"], RESPONSE_ROLE_FINAL)
+        self.assertEqual(expanded.nodes[1].metadata["finalizer_source"], "workflow_expander")
         self.assertFalse(expanded.nodes[1].metadata["auto_skill_matching_enabled"])
 
-    def test_multi_skill_plan_adds_global_finalizer_after_intermediate_answers(self) -> None:
+    def test_multi_skill_plan_adds_single_global_finalizer_without_intermediate_finalizers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "skill"
             skill_provider, revision = self._platform_skill_provider(
@@ -220,17 +222,14 @@ scripts:
         final_node = main_nodes[-1]
 
         self.assertEqual(len(skill_nodes), 2)
-        self.assertEqual(len(main_nodes), 3)
-        self.assertEqual([node.metadata["response_role"] for node in main_nodes[:-1]], [RESPONSE_ROLE_INTERMEDIATE, RESPONSE_ROLE_INTERMEDIATE])
+        self.assertEqual(len(main_nodes), 1)
         self.assertEqual(final_node.metadata["response_role"], RESPONSE_ROLE_FINAL)
         self.assertEqual(final_node.metadata["finalizer_source"], "workflow_expander")
         self.assertEqual(
             final_node.depends_on,
             (
                 "task-multi:lookup_a:skill_execute",
-                "task-multi:lookup_a:main_agent.respond",
                 "task-multi:lookup_b:skill_execute",
-                "task-multi:lookup_b:main_agent.respond",
             ),
         )
 
