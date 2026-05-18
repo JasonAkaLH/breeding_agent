@@ -372,7 +372,11 @@ class ConversationMemoryBuilder:
             artifacts = await self._storage.list_artifacts_for_task(task_id)
         except AttributeError:
             return None
-        return select_final_text_artifact(artifacts)
+        try:
+            events = await self._storage.list_events_for_task(task_id)
+        except AttributeError:
+            events = ()
+        return select_final_text_artifact(artifacts, events=events)
 
     def _capability_summaries_from_metadata(self, metadata: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         raw_items = metadata.get("capability_summaries") or ()

@@ -66,6 +66,8 @@ def _format_response_role(response_role: str, *, answer_scope: str | None = None
             "你正在生成整个任务的最终汇总回答。必须综合所有上游能力结果；"
             "优先采用“上游能力结果上下文”中的事实。若某个子任务缺少结果，只说明该子任务缺口，"
             "不得否定或覆盖已经成功完成的其它子任务结果。"
+            "只输出最终结论，不要输出每个 skill 的中间回答；"
+            "不要再次调用 skill，也不要要求用户重复已经由上游能力完成的步骤。"
         )
     if response_role == RESPONSE_ROLE_INTERMEDIATE:
         return (
