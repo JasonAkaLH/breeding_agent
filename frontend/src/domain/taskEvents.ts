@@ -115,6 +115,7 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
       };
     }
     case 'main_agent.output_delta': {
+      if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
       const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
       return { ...withEvent, phase: 'streaming', statusText: '正在生成答案', currentActivityText: null, assistantText: `${state.assistantText}${delta}`, errorMessage: null };
     }
@@ -123,6 +124,7 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
       return { ...withEvent, phase: 'streaming', statusText: '正在思考并生成答案', currentActivityText: null, reasoningText: `${state.reasoningText}${delta}`, errorMessage: null };
     }
     case 'main_agent.output_final':
+      if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
       return { ...withEvent, phase: state.phase === 'idle' ? 'running' : state.phase, statusText: '回答生成完成，正在收尾', currentActivityText: null, errorMessage: null };
     case 'task.completed':
       return { ...withEvent, phase: 'loading_artifacts', statusText: '任务完成，正在整理结果', currentActivityText: null, errorMessage: null };
@@ -158,6 +160,11 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     default:
       return state;
   }
+}
+
+function isVisibleMainAgentResponse(payload: Record<string, unknown>): boolean {
+  const responseRole = typeof payload.response_role === 'string' ? payload.response_role : null;
+  return responseRole === null || responseRole === 'final';
 }
 
 function nodeActivity(payload: Record<string, unknown>): { capabilityId: string; capabilityLabel: string; stepText: string } {
