@@ -5,6 +5,16 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Mapping, Protocol
 
+from src.core.enums import NodeCriticality
+
+from .answer_roles import (
+    ANSWER_SCOPE_METADATA_KEY,
+    AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY,
+    RESPONSE_ROLE_FINAL,
+    RESPONSE_ROLE_INTERMEDIATE,
+    RESPONSE_ROLE_METADATA_KEY,
+    response_role_from_metadata,
+)
 from .models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 
 
@@ -31,9 +41,16 @@ class WorkflowExpander:
         ordered_nodes = self._topological_nodes(plan)
         expanded_nodes: list[WorkflowNodePlan] = []
         expanded_tail_ids_by_original: dict[str, tuple[str, ...]] = {}
+        expanded_answer_ids_by_original: dict[str, tuple[str, ...]] = {}
+        answer_source_original_ids: list[str] = []
         expanded_macro_nodes: dict[str, dict[str, object]] = {}
+        expanded_main_agent_node_ids: set[str] = set()
+        last_main_agent_node_id: str | None = None
         max_replans = plan.max_replans
         max_dynamic_nodes = plan.max_dynamic_nodes
+
+        def answer_ids_for(dependency_id: str) -> tuple[str, ...]:
+            return expanded_answer_ids_by_original.get(dependency_id) or expanded_tail_ids_by_original[dependency_id]
 
         for node in ordered_nodes:
             high_level_dependencies = tuple(
@@ -41,29 +58,46 @@ class WorkflowExpander:
                 for dependency in node.depends_on
                 for tail_id in expanded_tail_ids_by_original[dependency]
             )
+            high_level_answer_dependencies = tuple(
+                self._dedupe(
+                    answer_id
+                    for dependency in node.depends_on
+                    for answer_id in answer_ids_for(dependency)
+                )
+            )
+            high_level_answer_source_count = sum(
+                1 for dependency in node.depends_on if dependency in expanded_answer_ids_by_original
+            )
             provider = self._resolve_macro_provider(node.capability_id)
             if provider is None:
-                existing_main_agent_tails = tuple(
-                    existing.node_id
-                    for existing in expanded_nodes
-                    if existing.capability_id == "main_agent.respond"
-                )
-                if node.capability_id == "main_agent.respond" and not high_level_dependencies and existing_main_agent_tails:
-                    expanded_tail_ids_by_original[node.node_id] = (existing_main_agent_tails[-1],)
+                if node.capability_id == "main_agent.respond" and not high_level_dependencies and last_main_agent_node_id:
+                    expanded_tail_ids_by_original[node.node_id] = (last_main_agent_node_id,)
                     continue
                 if (
                     node.capability_id == "main_agent.respond"
                     and high_level_dependencies
-                    and all(
-                        any(existing.node_id == dependency and existing.capability_id == "main_agent.respond" for existing in expanded_nodes)
-                        for dependency in high_level_dependencies
-                    )
+                    and all(dependency in expanded_main_agent_node_ids for dependency in high_level_dependencies)
+                    and len(high_level_dependencies) <= 1
                 ):
                     expanded_tail_ids_by_original[node.node_id] = high_level_dependencies
+                    expanded_answer_ids_by_original[node.node_id] = high_level_answer_dependencies
                     continue
-                expanded_node = replace(node, depends_on=high_level_dependencies)
+                metadata = dict(node.metadata)
+                depends_on = high_level_dependencies
+                if node.capability_id == "main_agent.respond" and high_level_answer_dependencies:
+                    depends_on = high_level_answer_dependencies
+                    metadata.setdefault(AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY, False)
+                    if high_level_answer_source_count >= 2:
+                        metadata.setdefault(RESPONSE_ROLE_METADATA_KEY, RESPONSE_ROLE_FINAL)
+                        metadata.setdefault(ANSWER_SCOPE_METADATA_KEY, "task")
+                expanded_node = replace(node, depends_on=depends_on, metadata=metadata)
                 expanded_nodes.append(expanded_node)
                 expanded_tail_ids_by_original[node.node_id] = (expanded_node.node_id,)
+                if expanded_node.capability_id == "main_agent.respond":
+                    expanded_main_agent_node_ids.add(expanded_node.node_id)
+                    last_main_agent_node_id = expanded_node.node_id
+                if response_role_from_metadata(expanded_node.metadata) == RESPONSE_ROLE_FINAL:
+                    expanded_answer_ids_by_original[node.node_id] = (expanded_node.node_id,)
                 continue
 
             macro_plan = provider.build_plan(
@@ -113,18 +147,73 @@ class WorkflowExpander:
                 depends_on = macro_node.depends_on
                 if macro_node.node_id in macro_roots:
                     depends_on = high_level_dependencies + depends_on
-                expanded_nodes.append(
-                    replace(
-                        macro_node,
-                        depends_on=depends_on,
+                metadata = dict(macro_node.metadata)
+                if macro_node.capability_id == "main_agent.respond" and response_role_from_metadata(metadata) is None:
+                    metadata.update(
+                        {
+                            RESPONSE_ROLE_METADATA_KEY: RESPONSE_ROLE_INTERMEDIATE,
+                            ANSWER_SCOPE_METADATA_KEY: f"skill:{node.capability_id}",
+                            AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY: False,
+                        }
                     )
+                expanded_node = replace(
+                    macro_node,
+                    depends_on=depends_on,
+                    metadata=metadata,
                 )
+                expanded_nodes.append(expanded_node)
+                if expanded_node.capability_id == "main_agent.respond":
+                    expanded_main_agent_node_ids.add(expanded_node.node_id)
+                    last_main_agent_node_id = expanded_node.node_id
             expanded_tail_ids_by_original[node.node_id] = macro_tails
+            macro_tail_ids = set(macro_tails)
+            macro_answer_ids = tuple(
+                self._dedupe(
+                    macro_node.node_id
+                    for macro_node in macro_nodes
+                    if macro_node.capability_id != "main_agent.respond" or macro_node.node_id in macro_tail_ids
+                )
+            )
+            expanded_answer_ids_by_original[node.node_id] = macro_answer_ids
+            if macro_answer_ids:
+                answer_source_original_ids.append(node.node_id)
             expanded_macro_nodes[node.node_id] = {
                 "capability_id": node.capability_id,
                 "root_node_ids": tuple(sorted(macro_roots)),
                 "tail_node_ids": macro_tails,
+                "answer_node_ids": macro_answer_ids,
             }
+
+        required_finalizer_dependencies = tuple(
+            self._dedupe(
+                answer_id
+                for original_id in answer_source_original_ids
+                for answer_id in expanded_answer_ids_by_original[original_id]
+            )
+        )
+        global_finalizer_added = False
+        if (
+            len(answer_source_original_ids) >= 2
+            and not self._has_final_answer_node_covering(expanded_nodes, required_finalizer_dependencies)
+        ):
+            global_finalizer_added = True
+            expanded_nodes.append(
+                WorkflowNodePlan(
+                    node_id=self._unique_node_id(plan.task_id, {node.node_id for node in expanded_nodes}),
+                    capability_id="main_agent.respond",
+                    input_payload={"user_message": request.effective_user_message},
+                    metadata={
+                        RESPONSE_ROLE_METADATA_KEY: RESPONSE_ROLE_FINAL,
+                        ANSWER_SCOPE_METADATA_KEY: "task",
+                        AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY: False,
+                        "finalizer_source": "workflow_expander",
+                    },
+                    depends_on=required_finalizer_dependencies,
+                    criticality=NodeCriticality.REQUIRED,
+                    retry_policy={"max_attempts": 1},
+                    timeout_policy={"seconds": 60},
+                )
+            )
 
         return WorkflowPlan(
             task_id=plan.task_id,
@@ -134,6 +223,7 @@ class WorkflowExpander:
                 "expanded": True,
                 "macro_capabilities": tuple(sorted(self._macro_providers)),
                 "expanded_macro_nodes": expanded_macro_nodes,
+                "global_finalizer_added": global_finalizer_added,
             },
             max_replans=max_replans,
             max_dynamic_nodes=max_dynamic_nodes,
@@ -154,6 +244,37 @@ class WorkflowExpander:
             if isinstance(value, str) and value:
                 return value
         return request.user_message
+
+    @staticmethod
+    def _dedupe(values) -> tuple[str, ...]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+        return tuple(ordered)
+
+    @staticmethod
+    def _has_final_answer_node_covering(nodes: list[WorkflowNodePlan], required_dependencies: tuple[str, ...]) -> bool:
+        required = set(required_dependencies)
+        return any(
+            node.capability_id == "main_agent.respond"
+            and response_role_from_metadata(node.metadata) == RESPONSE_ROLE_FINAL
+            and required.issubset(set(node.depends_on))
+            for node in nodes
+        )
+
+    @staticmethod
+    def _unique_node_id(task_id: str, existing_node_ids: set[str]) -> str:
+        base = f"{task_id}:global_final_answer"
+        if base not in existing_node_ids:
+            return base
+        index = 2
+        while f"{base}_{index}" in existing_node_ids:
+            index += 1
+        return f"{base}_{index}"
 
     @staticmethod
     def _topological_nodes(plan: WorkflowPlan) -> tuple[WorkflowNodePlan, ...]:

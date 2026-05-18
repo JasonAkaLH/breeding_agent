@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from src.capabilities.main_agent import MainAgentExecutor, MainAgentWorkflowProvider
 from src.core.contracts import CapabilityExecutionRequest
+from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 from src.orchestration.models import OrchestrationRequest
 from src.integrations.codex_skills import SkillCatalog
 
@@ -306,6 +307,113 @@ triggers:
 
         self.assertEqual(result.output_payload["matched_skills"], ["report-writer"])
         self.assertIn("请使用项目汇报格式", prompts[0])
+
+    async def test_executor_suppresses_auto_skill_matching_when_metadata_disables_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "report"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: report-writer
+description: 生成周报
+triggers:
+  - 周报
+---
+
+# Report Writer
+请使用项目汇报格式。
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+            prompts: list[str] = []
+
+            async def streamer(prompt: str):
+                prompts.append(prompt)
+                yield "ok"
+
+            executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "写一个周报"},
+                    metadata={"auto_skill_matching_enabled": False},
+                )
+            )
+
+        self.assertEqual(result.output_payload["matched_skills"], [])
+        self.assertNotIn("请使用项目汇报格式", prompts[0])
+        self.assertIn("skill.match_suppressed", [event.event_type for event in result.events])
+
+    async def test_executor_keeps_forced_skill_even_when_auto_matching_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "report"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: report-writer
+description: 生成周报
+---
+
+# Report Writer
+请使用项目汇报格式。
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+
+            async def streamer(_prompt: str):
+                yield "ok"
+
+            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "普通问题"},
+                    metadata={"forced_skill_name": "report-writer", "auto_skill_matching_enabled": False},
+                )
+            )
+
+        self.assertEqual(result.output_payload["matched_skills"], ["report-writer"])
+        self.assertIn("skill.forced_selected", [event.event_type for event in result.events])
+
+    async def test_final_response_role_prompt_prioritizes_all_upstream_results(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "全局汇总"
+
+        result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(())).execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-final",
+                input_payload={"user_message": "先查品种，再做随机区组"},
+                dependency_outputs={
+                    "node-query": {"summary": "查到龙粳33", "row_count": 1},
+                    "node-rcbd": {"summary": "RCBD设计完成", "blocks": 3},
+                },
+                metadata={"response_role": RESPONSE_ROLE_FINAL, "answer_scope": "task"},
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_text"], "全局汇总")
+        self.assertEqual(result.output_payload["response_role"], RESPONSE_ROLE_FINAL)
+        self.assertIn("回答角色：全局最终汇总", prompts[0])
+        self.assertIn("查到龙粳33", prompts[0])
+        self.assertIn("RCBD设计完成", prompts[0])
+        final_event = next(event for event in result.events if event.event_type == "main_agent.output_final")
+        self.assertEqual(final_event.payload["response_role"], RESPONSE_ROLE_FINAL)
+        delta_event = next(event for event in result.events if event.event_type == "main_agent.output_delta")
+        self.assertEqual(delta_event.payload["response_role"], RESPONSE_ROLE_FINAL)
+        self.assertIn(":main_agent_response:final:", result.artifacts[0].artifact_id)
 
     async def test_auto_run_script_result_is_added_to_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

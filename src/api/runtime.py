@@ -34,7 +34,7 @@ from src.capabilities.main_agent import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
+from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import (
@@ -62,6 +62,7 @@ from src.integrations.rust_safety_contract import configure_safety_shadow_sink
 from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.interrupt_service import InterruptService
+from src.orchestration.answer_selection import select_final_text_artifact
 from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
@@ -623,14 +624,7 @@ class ApiRuntime:
         if await self.storage.get_message(message_id) is not None:
             return
         artifacts = await self.storage.list_artifacts_for_task(task_id)
-        text_artifact = next(
-            (
-                artifact
-                for artifact in artifacts
-                if str(artifact.artifact_type) == str(ArtifactType.TEXT) and artifact.storage_ref.strip()
-            ),
-            None,
-        )
+        text_artifact = select_final_text_artifact(artifacts)
         if text_artifact is None:
             return
         await self.storage.save_message(

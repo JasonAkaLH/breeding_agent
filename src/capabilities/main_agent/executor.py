@@ -17,6 +17,13 @@ from src.integrations.codex_skills import (
     resolve_skill_execution_config,
 )
 from src.integrations.llm_client import LLMClient, ReasoningEffort
+from src.orchestration.answer_roles import (
+    ANSWER_SCOPE_METADATA_KEY,
+    RESPONSE_ROLE_METADATA_KEY,
+    answer_scope_from_metadata,
+    auto_skill_matching_enabled,
+    response_role_from_metadata,
+)
 
 from .helpers import LiveEventRecorder, StreamGenerator, iter_stream_events, make_event, make_text_artifact
 from .prompt_builder import build_artifact_context, build_dependency_context, build_main_agent_prompt
@@ -76,6 +83,9 @@ class MainAgentRespondCapability(CapabilityContract):
         user_message = str(request.input_payload.get("user_message") or "")
         artifact_context = build_artifact_context(request.metadata)
         dependency_context = build_dependency_context(request.dependency_outputs)
+        response_role = response_role_from_metadata(request.metadata)
+        answer_scope = answer_scope_from_metadata(request.metadata)
+        response_role_payload = self._response_role_payload(response_role=response_role, answer_scope=answer_scope)
         skill_matches, forced_skill_events = self._resolve_skill_matches(request, user_message)
         script_results, script_events, script_artifacts = await self._run_auto_scripts(request, user_message, artifact_context, skill_matches)
         prompt = build_main_agent_prompt(
@@ -85,6 +95,8 @@ class MainAgentRespondCapability(CapabilityContract):
             script_results=script_results,
             dependency_context=dependency_context,
             memory_context=self._memory_context_from_metadata(request.metadata),
+            response_role=response_role,
+            answer_scope=answer_scope,
         )
 
         events = [*forced_skill_events, *script_events]
@@ -143,7 +155,11 @@ class MainAgentRespondCapability(CapabilityContract):
                     delta_event = make_event(
                         request,
                         event_type="main_agent.output_delta",
-                        payload={"delta": answer_delta, "ordinal": answer_ordinal},
+                        payload={
+                            "delta": answer_delta,
+                            "ordinal": answer_ordinal,
+                            **response_role_payload,
+                        },
                         visibility=EventVisibility.FRONTEND,
                         ordinal=answer_ordinal,
                     )
@@ -174,6 +190,7 @@ class MainAgentRespondCapability(CapabilityContract):
                     "matched_skills": [match.manifest.name for match in skill_matches],
                     "script_results": script_results,
                     "prompt_recorded": False,
+                    **response_role_payload,
                 },
                 artifacts=tuple(script_artifacts),
                 events=tuple(events),
@@ -190,7 +207,10 @@ class MainAgentRespondCapability(CapabilityContract):
         final_event = make_event(
             request,
             event_type="main_agent.output_final",
-            payload={"response_length": len(response_text)},
+            payload={
+                "response_length": len(response_text),
+                **response_role_payload,
+            },
             visibility=EventVisibility.FRONTEND,
         )
         await self._record_or_collect(final_event, events)
@@ -206,11 +226,17 @@ class MainAgentRespondCapability(CapabilityContract):
                     "matched_skill_count": len(skill_matches),
                     "uploaded_artifact_count": len(artifact_context),
                     "dependency_context_count": len(dependency_context),
+                    **response_role_payload,
                 },
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         )
-        artifact = make_text_artifact(task_id=request.task_id, node_id=request.node_id, text=response_text)
+        artifact = make_text_artifact(
+            task_id=request.task_id,
+            node_id=request.node_id,
+            text=response_text,
+            response_role=response_role,
+        )
         return CapabilityExecutionResult(
             capability_id=request.capability_id,
             task_id=request.task_id,
@@ -221,6 +247,7 @@ class MainAgentRespondCapability(CapabilityContract):
                 "matched_skills": [match.manifest.name for match in skill_matches],
                 "script_results": script_results,
                 "prompt_recorded": False,
+                **response_role_payload,
             },
             artifacts=(*script_artifacts, artifact),
             events=tuple(events),
@@ -241,6 +268,15 @@ class MainAgentRespondCapability(CapabilityContract):
             ]
         forced_skill_name = self._forced_skill_name(request)
         if not forced_skill_name:
+            if not auto_skill_matching_enabled(request.metadata):
+                return [], [
+                    make_event(
+                        request,
+                        event_type="skill.match_suppressed",
+                        payload={"reason": "auto_skill_matching_disabled"},
+                        visibility=EventVisibility.AUDIT_ONLY,
+                    )
+                ]
             return match_skills(user_message, skill_catalog), []
 
         manifest = skill_catalog.get(forced_skill_name)
@@ -272,6 +308,15 @@ class MainAgentRespondCapability(CapabilityContract):
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         ]
+
+    @staticmethod
+    def _response_role_payload(*, response_role: str | None, answer_scope: str | None) -> dict[str, str]:
+        payload: dict[str, str] = {}
+        if response_role:
+            payload[RESPONSE_ROLE_METADATA_KEY] = response_role
+        if answer_scope:
+            payload[ANSWER_SCOPE_METADATA_KEY] = answer_scope
+        return payload
 
     def _resolve_skill_catalog(self, revision: str | None) -> SkillCatalog:
         if self._skill_catalog_resolver is not None:

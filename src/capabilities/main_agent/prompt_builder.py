@@ -4,6 +4,7 @@ import json
 from typing import Any, Mapping
 
 from src.integrations.codex_skills import SkillMatch
+from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL, RESPONSE_ROLE_INTERMEDIATE
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 
 _SENSITIVE_ARTIFACT_KEYS = {"content", "raw", "text", "storage_ref", "path", "file_path", "local_path"}
@@ -17,6 +18,8 @@ def build_main_agent_prompt(
     script_results: list[dict[str, Any]],
     dependency_context: list[dict[str, Any]] | None = None,
     memory_context: Mapping[str, Any] | None = None,
+    response_role: str | None = None,
+    answer_scope: str | None = None,
 ) -> str:
     parts = [
         "你是小奥 Agent 的主代理。",
@@ -30,6 +33,8 @@ def build_main_agent_prompt(
         parts.append(_format_memory_context(memory_payload))
     if artifact_context:
         parts.append("\n# 上传文件上下文（已脱敏）\n" + json.dumps(artifact_context, ensure_ascii=False, indent=2, default=str))
+    if response_role:
+        parts.append(_format_response_role(response_role, answer_scope=answer_scope))
     if dependency_context:
         parts.append(
             "\n# 上游能力结果上下文（已执行完成）\n"
@@ -50,6 +55,26 @@ def build_main_agent_prompt(
         parts.append("\n# Skill 脚本输出\n" + json.dumps(script_results, ensure_ascii=False, indent=2, default=str))
     parts.append("\n# 用户问题\n" + user_message)
     return "\n".join(parts)
+
+
+def _format_response_role(response_role: str, *, answer_scope: str | None = None) -> str:
+    scope_line = f"\n回答范围：{answer_scope}" if answer_scope else ""
+    if response_role == RESPONSE_ROLE_FINAL:
+        return (
+            "\n# 回答角色：全局最终汇总"
+            f"{scope_line}\n"
+            "你正在生成整个任务的最终汇总回答。必须综合所有上游能力结果；"
+            "优先采用“上游能力结果上下文”中的事实。若某个子任务缺少结果，只说明该子任务缺口，"
+            "不得否定或覆盖已经成功完成的其它子任务结果。"
+        )
+    if response_role == RESPONSE_ROLE_INTERMEDIATE:
+        return (
+            "\n# 回答角色：Skill 中间回答"
+            f"{scope_line}\n"
+            "你正在生成某个能力节点完成后的中间回答。请只整理当前上游结果；"
+            "不要声称整个用户任务已经全部完成，也不要对尚未执行的其它子任务下结论。"
+        )
+    return "\n# 回答角色\n" + response_role
 
 
 def _format_memory_context(memory_payload: Mapping[str, Any]) -> str:

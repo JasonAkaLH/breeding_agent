@@ -5,6 +5,12 @@ from collections.abc import Callable, Mapping
 from src.core.enums import NodeCriticality
 from src.integrations.codex_skills import SkillManifest, resolve_skill_execution_config
 
+from .answer_roles import (
+    ANSWER_SCOPE_METADATA_KEY,
+    AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY,
+    RESPONSE_ROLE_INTERMEDIATE,
+    RESPONSE_ROLE_METADATA_KEY,
+)
 from .models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 
 
@@ -106,6 +112,12 @@ class SkillWorkflowProvider:
                     node_id=f"{task_id}:main_agent.respond",
                     capability_id="main_agent.respond",
                     input_payload={"user_message": request.effective_user_message},
+                    metadata={
+                        RESPONSE_ROLE_METADATA_KEY: RESPONSE_ROLE_INTERMEDIATE,
+                        ANSWER_SCOPE_METADATA_KEY: f"skill:{capability_id}",
+                        "source_skill_node_id": skill_node_id,
+                        AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY: False,
+                    },
                     depends_on=(skill_node_id,),
                     criticality=NodeCriticality.REQUIRED,
                     retry_policy={"max_attempts": 1},

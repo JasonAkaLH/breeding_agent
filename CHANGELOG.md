@@ -10,6 +10,7 @@
 
 ### 当前开发焦点：Rust Runtime 迁移按 `docs/prd/rust` 顺序推进
 
+- 多 Skill DAG 回答编排修复：新增 `response_role=intermediate|final` 轻量合约、全局 finalizer 自动追加、finalizer 阶段 skill auto-match 抑制，以及 assistant history / conversation memory 优先选择全局最终回答的回归测试；保持 Artifact / SQLite schema 不变。
 - PRD01-PRD07 cleanup：新增共享 `scripts/prd_evidence.py`，把 PRD03-PRD07 evidence validator 中重复的 JSON object 读取、pending gate 收集、required mapping、allowlist digest、CLI 输出与轻量模块加载逻辑收敛为 stdlib-only helper；CI path trigger 已纳入该 helper，PRD07 `provider_fallback` 仍仅作为范围排除标签，不是 runtime fallback。
 - PRD07 条件候选 guard 已落地：新增 `docs/prd/rust/evidence/prd07/orchestration_hotspot_release_gates.json`、`scripts/validate_prd07_orchestration_hotspot_evidence.py`、PRD07 evidence README、CI wiring 与 integration tests；当前状态为 `guarded`，明确不创建 `maf_orchestration_kernel` / WASM artifact，未来启动必须另开 implementation PRD 并补齐性能/可靠性、baseline/shadow compare、供应链、SLO、migration/DR、ops 与 legacy decommission gate。
 - 安全配置口径澄清：敏感信息不得写入、提交或推送 tracked 文件；开发 / 手工 smoke 使用本地 `config.yaml` 或部署环境变量，并由启动 bootstrap 注入 `MAF_CONFIG_*` / 专用环境变量供 runtime 消费。

@@ -10,11 +10,12 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from src.core.enums import ArtifactType, MessageRole, TaskStatus
+from src.core.enums import MessageRole, TaskStatus
 from src.core.models import Artifact, ConversationMemorySummary, Message, Task
 from src.integrations.llm_client import load_config
 from src.integrations.token_counter import get_num_of_tokens_from_messages
 
+from .answer_selection import select_final_text_artifact
 from .models import OrchestrationRequest
 
 SUMMARY_VERSION = "conversation-memory-summary-v1"
@@ -371,10 +372,7 @@ class ConversationMemoryBuilder:
             artifacts = await self._storage.list_artifacts_for_task(task_id)
         except AttributeError:
             return None
-        for artifact in artifacts:
-            if str(artifact.artifact_type) == str(ArtifactType.TEXT) and artifact.storage_ref.strip():
-                return artifact
-        return None
+        return select_final_text_artifact(artifacts)
 
     def _capability_summaries_from_metadata(self, metadata: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         raw_items = metadata.get("capability_summaries") or ()

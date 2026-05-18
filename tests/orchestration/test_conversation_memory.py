@@ -17,11 +17,21 @@ from src.orchestration.models import OrchestrationRequest
 
 
 class FakeStorage:
-    def __init__(self, *, conversation: Conversation, messages=(), tasks=(), artifacts_by_task=None, latest_summary=None):
+    def __init__(
+        self,
+        *,
+        conversation: Conversation,
+        messages=(),
+        tasks=(),
+        artifacts_by_task=None,
+        events_by_task=None,
+        latest_summary=None,
+    ):
         self.conversation = conversation
         self.messages = list(messages)
         self.tasks = list(tasks)
         self.artifacts_by_task = dict(artifacts_by_task or {})
+        self.events_by_task = dict(events_by_task or {})
         self.latest_summary = latest_summary
         self.saved_summaries = []
 
@@ -40,6 +50,9 @@ class FakeStorage:
 
     async def list_artifacts_for_task(self, task_id: str):
         return list(self.artifacts_by_task.get(task_id, ()))
+
+    async def list_events_for_task(self, task_id: str):
+        return list(self.events_by_task.get(task_id, ()))
 
     async def get_latest_conversation_memory_summary(self, conversation_id: str, account_id: str | None = None):
         if self.latest_summary is None:
@@ -408,6 +421,44 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("artifact answer", "\n".join(message.content for message in context.recent_messages))
+
+    async def test_builder_artifact_fallback_prefers_final_answer_role(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "先查品种，再做设计", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "继续", task_id="task-2", created_at=now),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        artifacts = {
+            "task-1": [
+                Artifact("art-intermediate", "task-1", "node-intermediate", ArtifactType.TEXT, "局部回答", is_complete=True),
+                Artifact(
+                    "node-final:main_agent_response:final:def",
+                    "task-1",
+                    "node-final",
+                    ArtifactType.TEXT,
+                    "全局汇总",
+                    is_complete=True,
+                ),
+            ]
+        }
+        storage = FakeStorage(
+            conversation=Conversation("conv-1", "alice"),
+            messages=messages,
+            tasks=tasks,
+            artifacts_by_task=artifacts,
+        )
+        context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
+            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            account_id="alice",
+        )
+
+        rendered = "\n".join(message.content for message in context.recent_messages)
+        self.assertIn("全局汇总", rendered)
+        self.assertNotIn("局部回答", rendered)
 
     async def test_builder_rejects_owner_mismatch(self) -> None:
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"))

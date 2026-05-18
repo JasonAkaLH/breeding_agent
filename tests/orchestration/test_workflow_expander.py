@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from src.integrations.codex_skills.skill_runtime_state import SkillRuntimeState
+from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL, RESPONSE_ROLE_INTERMEDIATE
 from src.orchestration.models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_expander import WorkflowExpander
@@ -12,12 +13,30 @@ from src.orchestration.workflow_expander import WorkflowExpander
 
 class WorkflowExpanderTest(unittest.TestCase):
     def _generic_data_lookup_skill_provider(self, root: Path) -> tuple[SkillWorkflowProvider, str]:
-        skill_dir = root / "generic-data-lookup"
+        return self._platform_skill_provider(root, (("generic-data-lookup", "skill.generic_data_lookup"),))
+
+    def _platform_skill_provider(self, root: Path, skills: tuple[tuple[str, str], ...]) -> tuple[SkillWorkflowProvider, str]:
+        for skill_name, capability_id in skills:
+            self._write_platform_skill(root, skill_name=skill_name, capability_id=capability_id)
+        state = SkillRuntimeState.from_roots(
+            skill_roots=(root,),
+            public_skill_roots=(root,),
+            reserved_capability_ids=("main_agent.respond",),
+        )
+        provider = SkillWorkflowProvider(
+            skill_name_resolver=lambda capability_id, revision: state.skill_name_for_capability(capability_id, revision),
+            skill_manifest_resolver=lambda capability_id, revision: state.catalog_for_revision(revision).get(state.skill_name_for_capability(capability_id, revision) or ""),
+        )
+        return provider, state.active_revision
+
+    @staticmethod
+    def _write_platform_skill(root: Path, *, skill_name: str, capability_id: str) -> None:
+        skill_dir = root / skill_name
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
-            """---
-name: generic-data-lookup
-capability_id: skill.generic_data_lookup
+            f"""---
+name: {skill_name}
+capability_id: {capability_id}
 description: 通过平台服务执行 DataLookup
 execution:
   mode: platform_service
@@ -29,16 +48,6 @@ execution:
 """,
             encoding="utf-8",
         )
-        state = SkillRuntimeState.from_roots(
-            skill_roots=(root,),
-            public_skill_roots=(root,),
-            reserved_capability_ids=("main_agent.respond",),
-        )
-        provider = SkillWorkflowProvider(
-            skill_name_resolver=lambda capability_id, revision: state.skill_name_for_capability(capability_id, revision),
-            skill_manifest_resolver=lambda capability_id, revision: state.catalog_for_revision(revision).get(state.skill_name_for_capability(capability_id, revision) or ""),
-        )
-        return provider, state.active_revision
 
     def test_expands_generic_data_lookup_skill_platform_service_and_rewires_downstream_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -173,6 +182,144 @@ scripts:
         self.assertEqual([node.capability_id for node in expanded.nodes], ["skill.scripted", "main_agent.respond"])
         self.assertEqual(expanded.nodes[0].input_payload["user_message"], "请处理这个文本")
         self.assertEqual(expanded.nodes[1].depends_on, (expanded.nodes[0].node_id,))
+        self.assertEqual(expanded.nodes[1].metadata["response_role"], RESPONSE_ROLE_INTERMEDIATE)
+        self.assertFalse(expanded.nodes[1].metadata["auto_skill_matching_enabled"])
+
+    def test_multi_skill_plan_adds_global_finalizer_after_intermediate_answers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            skill_provider, revision = self._platform_skill_provider(
+                root,
+                (
+                    ("lookup-a", "skill.lookup_a"),
+                    ("lookup-b", "skill.lookup_b"),
+                ),
+            )
+            request = OrchestrationRequest(
+                task_id="task-multi",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="先查数据A，再查数据B",
+                metadata={"skill_bundle_revision": revision},
+            )
+            high_level = WorkflowPlan(
+                task_id="task-multi",
+                nodes=(
+                    WorkflowNodePlan(node_id="lookup_a", capability_id="skill.lookup_a"),
+                    WorkflowNodePlan(node_id="lookup_b", capability_id="skill.lookup_b"),
+                ),
+            )
+
+            expanded = WorkflowExpander(
+                {},
+                macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+            ).expand(high_level, request=request)
+
+        main_nodes = [node for node in expanded.nodes if node.capability_id == "main_agent.respond"]
+        skill_nodes = [node for node in expanded.nodes if node.capability_id.startswith("skill.")]
+        final_node = main_nodes[-1]
+
+        self.assertEqual(len(skill_nodes), 2)
+        self.assertEqual(len(main_nodes), 3)
+        self.assertEqual([node.metadata["response_role"] for node in main_nodes[:-1]], [RESPONSE_ROLE_INTERMEDIATE, RESPONSE_ROLE_INTERMEDIATE])
+        self.assertEqual(final_node.metadata["response_role"], RESPONSE_ROLE_FINAL)
+        self.assertEqual(final_node.metadata["finalizer_source"], "workflow_expander")
+        self.assertEqual(
+            final_node.depends_on,
+            (
+                "task-multi:lookup_a:skill_execute",
+                "task-multi:lookup_a:main_agent.respond",
+                "task-multi:lookup_b:skill_execute",
+                "task-multi:lookup_b:main_agent.respond",
+            ),
+        )
+
+    def test_explicit_task_finalizer_is_marked_final_without_duplicate_global_finalizer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            skill_provider, revision = self._platform_skill_provider(
+                root,
+                (
+                    ("lookup-a", "skill.lookup_a"),
+                    ("lookup-b", "skill.lookup_b"),
+                ),
+            )
+            request = OrchestrationRequest(
+                task_id="task-explicit-final",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="查两个数据后汇总",
+                metadata={"skill_bundle_revision": revision},
+            )
+            high_level = WorkflowPlan(
+                task_id="task-explicit-final",
+                nodes=(
+                    WorkflowNodePlan(node_id="lookup_a", capability_id="skill.lookup_a"),
+                    WorkflowNodePlan(node_id="lookup_b", capability_id="skill.lookup_b"),
+                    WorkflowNodePlan(
+                        node_id="answer_user",
+                        capability_id="main_agent.respond",
+                        depends_on=("lookup_a", "lookup_b"),
+                    ),
+                ),
+            )
+
+            expanded = WorkflowExpander(
+                {},
+                macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+            ).expand(high_level, request=request)
+
+        final_nodes = [
+            node
+            for node in expanded.nodes
+            if node.capability_id == "main_agent.respond" and node.metadata.get("response_role") == RESPONSE_ROLE_FINAL
+        ]
+
+        self.assertEqual(len(final_nodes), 1)
+        self.assertEqual(final_nodes[0].node_id, "answer_user")
+        self.assertFalse(expanded.metadata["global_finalizer_added"])
+
+    def test_partial_explicit_answer_does_not_suppress_global_finalizer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            skill_provider, revision = self._platform_skill_provider(
+                root,
+                (
+                    ("lookup-a", "skill.lookup_a"),
+                    ("lookup-b", "skill.lookup_b"),
+                ),
+            )
+            request = OrchestrationRequest(
+                task_id="task-partial-final",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="查两个数据，其中一个先解释",
+                metadata={"skill_bundle_revision": revision},
+            )
+            high_level = WorkflowPlan(
+                task_id="task-partial-final",
+                nodes=(
+                    WorkflowNodePlan(node_id="lookup_a", capability_id="skill.lookup_a"),
+                    WorkflowNodePlan(node_id="answer_a", capability_id="main_agent.respond", depends_on=("lookup_a",)),
+                    WorkflowNodePlan(node_id="lookup_b", capability_id="skill.lookup_b"),
+                ),
+            )
+
+            expanded = WorkflowExpander(
+                {},
+                macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+            ).expand(high_level, request=request)
+
+        final_nodes = [
+            node
+            for node in expanded.nodes
+            if node.capability_id == "main_agent.respond" and node.metadata.get("response_role") == RESPONSE_ROLE_FINAL
+        ]
+
+        self.assertEqual(len(final_nodes), 1)
+        self.assertEqual(final_nodes[0].node_id, "task-partial-final:global_final_answer")
+        self.assertTrue(expanded.metadata["global_finalizer_added"])
+        self.assertIn("task-partial-final:lookup_b:skill_execute", final_nodes[0].depends_on)
 
     def test_skill_direct_answer_mode_does_not_add_finalizer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
