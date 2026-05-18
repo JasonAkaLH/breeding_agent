@@ -30,6 +30,7 @@ class RustQualityWorkflowTest(unittest.TestCase):
 
         self.assertIn('"docs/prd/rust/**"', workflow)
         self.assertIn('"scripts/validate_prd03_runtime_sidecar_evidence.py"', workflow)
+        self.assertIn('"scripts/prd_evidence.py"', workflow)
 
     def test_skill_sandbox_binary_release_evidence_is_uploaded(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

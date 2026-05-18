@@ -10,6 +10,7 @@
 
 ### 当前开发焦点：Rust Runtime 迁移按 `docs/prd/rust` 顺序推进
 
+- PRD01-PRD07 cleanup：新增共享 `scripts/prd_evidence.py`，把 PRD03-PRD07 evidence validator 中重复的 JSON object 读取、pending gate 收集、required mapping、allowlist digest、CLI 输出与轻量模块加载逻辑收敛为 stdlib-only helper；CI path trigger 已纳入该 helper，PRD07 `provider_fallback` 仍仅作为范围排除标签，不是 runtime fallback。
 - PRD07 条件候选 guard 已落地：新增 `docs/prd/rust/evidence/prd07/orchestration_hotspot_release_gates.json`、`scripts/validate_prd07_orchestration_hotspot_evidence.py`、PRD07 evidence README、CI wiring 与 integration tests；当前状态为 `guarded`，明确不创建 `maf_orchestration_kernel` / WASM artifact，未来启动必须另开 implementation PRD 并补齐性能/可靠性、baseline/shadow compare、供应链、SLO、migration/DR、ops 与 legacy decommission gate。
 - 安全配置口径澄清：敏感信息不得写入、提交或推送 tracked 文件；开发 / 手工 smoke 使用本地 `config.yaml` 或部署环境变量，并由启动 bootstrap 注入 `MAF_CONFIG_*` / 专用环境变量供 runtime 消费。
 - PRD06 仓库内收口：新增 `maf_safety_kernels_pyo3` PyO3 facade、PRD06 safety contract metadata、Python `rust_safety_contract` enforce/shadow facade、upload/artifact/auth/readonly SQL/DB deadline/audit sink safety facade consumption、auth fuzz target、`docs/prd/rust/evidence/prd06/safety_kernel_release_gates.json` 与 `scripts/validate_prd06_safety_kernel_evidence.py`；远端 GitHub Actions `Rust quality gates` push run `25995183561` 已通过并验证 wheel / binary artifact 生成上传链路可跑通；真实 deployment allowlist promotion、7 天 production shadow、benchmark / long-run fuzz、ops drill 与 Python legacy 下线仍作为外部证据 pending gate，不得伪造为本地完成。

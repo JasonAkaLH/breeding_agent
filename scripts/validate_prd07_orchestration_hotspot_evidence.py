@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.prd_evidence import (
+    EvidenceError,
+    require_mapping,
+    require_true_flags,
+    run_evidence_cli,
+    validate_schema_version,
+)
+
 DEFAULT_EVIDENCE = Path("docs/prd/rust/evidence/prd07/orchestration_hotspot_release_gates.json")
 SCHEMA_VERSION = "maf.prd07.orchestration_hotspot_evidence.v1"
+INVALID_CODE = "prd07_orchestration_hotspot_evidence_invalid"
+PENDING_CODE = "prd07_orchestration_hotspot_evidence_pending"
 GUARDED_STATUS = "conditional_candidate_not_started"
 READY_STATUS = "candidate_ready_to_start"
 
@@ -59,66 +71,32 @@ REQUIRED_FUTURE_RELEASE_GATES = (
 )
 
 
-class EvidenceError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(f"{code}: {message}")
-        self.code = code
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"{path} is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"{path} must contain a JSON object")
-    return payload
-
-
 def _as_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
-    value = payload.get(key)
-    if not isinstance(value, Mapping):
-        raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"{key} must be a JSON object")
-    return value
+    return require_mapping(payload, key, invalid_code=INVALID_CODE)
 
 
 def _require_true(mapping: Mapping[str, Any], keys: Sequence[str], *, parent: str) -> dict[str, bool]:
-    missing = [key for key in keys if mapping.get(key) is not True]
-    if missing:
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
-            f"{parent} booleans must be true: " + ",".join(missing),
-        )
-    return {key: True for key in keys}
+    return require_true_flags(mapping, keys, parent=parent, invalid_code=INVALID_CODE)
 
 
 def _validate_classification(payload: Mapping[str, Any]) -> dict[str, Any]:
     value = _as_mapping(payload, "classification")
     if value.get("conditional_candidate") is not True:
-        raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", "classification.conditional_candidate must be true")
+        raise EvidenceError(INVALID_CODE, "classification.conditional_candidate must be true")
     if value.get("in_mandatory_rust_target_set") is not False:
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
-            "classification.in_mandatory_rust_target_set must be false",
-        )
+        raise EvidenceError(INVALID_CODE, "classification.in_mandatory_rust_target_set must be false")
     if value.get("implementation_prd_required") is not True:
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
-            "classification.implementation_prd_required must be true",
-        )
+        raise EvidenceError(INVALID_CODE, "classification.implementation_prd_required must be true")
     if value.get("candidate_crate_reserved") != "maf_orchestration_kernel":
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
-            "classification.candidate_crate_reserved must be maf_orchestration_kernel",
-        )
+        raise EvidenceError(INVALID_CODE, "classification.candidate_crate_reserved must be maf_orchestration_kernel")
     if value.get("current_rust_kernel_started") is not False:
         raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
+            INVALID_CODE,
             "classification.current_rust_kernel_started must remain false until a separate implementation PRD is approved",
         )
     if Path("native/crates/maf_orchestration_kernel").exists():
         raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
+            INVALID_CODE,
             "native/crates/maf_orchestration_kernel exists before a PRD07 implementation startup gate is ready",
         )
     return dict(value)
@@ -140,13 +118,10 @@ def _validate_scope_boundary(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _status_of(value: Any, *, gate: str) -> str:
     if not isinstance(value, Mapping):
-        raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"startup_readiness.{gate} must be a JSON object")
+        raise EvidenceError(INVALID_CODE, f"startup_readiness.{gate} must be a JSON object")
     status = value.get("status")
     if status not in {"ready", "pending"}:
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
-            f"startup_readiness.{gate}.status must be ready or pending",
-        )
+        raise EvidenceError(INVALID_CODE, f"startup_readiness.{gate}.status must be ready or pending")
     return str(status)
 
 
@@ -161,7 +136,7 @@ def _validate_startup_readiness(
     pending: list[str] = []
     for gate in REQUIRED_STARTUP_GATES:
         if gate not in value:
-            raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"startup_readiness.{gate} is required")
+            raise EvidenceError(INVALID_CODE, f"startup_readiness.{gate} is required")
         gate_value = value[gate]
         gate_status = _status_of(gate_value, gate=gate)
         results[gate] = dict(gate_value)  # type: ignore[arg-type]
@@ -169,10 +144,7 @@ def _validate_startup_readiness(
             pending.append(gate)
 
     if status == READY_STATUS and pending and not allow_pending:
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_pending",
-            "pending startup gates remain: " + ", ".join(pending),
-        )
+        raise EvidenceError(PENDING_CODE, "pending startup gates remain: " + ", ".join(pending))
     return results, pending
 
 
@@ -182,13 +154,13 @@ def _validate_baseline_tests(payload: Mapping[str, Any]) -> dict[str, list[str]]
     for section in ("python_orchestration", "token_counter", "main_agent_sanitizer"):
         paths = value.get(section)
         if not isinstance(paths, list) or not paths:
-            raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"baseline_tests.{section} must be a non-empty list")
+            raise EvidenceError(INVALID_CODE, f"baseline_tests.{section} must be a non-empty list")
         normalized: list[str] = []
         for item in paths:
             if not isinstance(item, str) or not item:
-                raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"baseline_tests.{section} items must be paths")
+                raise EvidenceError(INVALID_CODE, f"baseline_tests.{section} items must be paths")
             if not Path(item).exists():
-                raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", f"baseline test does not exist: {item}")
+                raise EvidenceError(INVALID_CODE, f"baseline test does not exist: {item}")
             normalized.append(item)
         results[section] = normalized
     return results
@@ -205,25 +177,18 @@ def _validate_future_release_gates(payload: Mapping[str, Any]) -> dict[str, bool
 def _validate_startup_blockers(payload: Mapping[str, Any], *, status: str, allow_pending: bool) -> list[str]:
     blockers = payload.get("startup_blockers", [])
     if not isinstance(blockers, list) or any(not isinstance(item, str) or not item for item in blockers):
-        raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", "startup_blockers must be a list of strings")
+        raise EvidenceError(INVALID_CODE, "startup_blockers must be a list of strings")
     normalized = [str(item) for item in blockers]
     if status == READY_STATUS and normalized and not allow_pending:
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_pending",
-            "startup blockers remain: " + ", ".join(normalized),
-        )
+        raise EvidenceError(PENDING_CODE, "startup blockers remain: " + ", ".join(normalized))
     return normalized
 
 
 def validate_evidence(payload: Mapping[str, Any], *, allow_pending: bool) -> dict[str, Any]:
-    if payload.get("schema_version") != SCHEMA_VERSION:
-        raise EvidenceError("prd07_orchestration_hotspot_evidence_invalid", "unsupported evidence schema_version")
+    validate_schema_version(payload, expected=SCHEMA_VERSION, invalid_code=INVALID_CODE)
     status = str(payload.get("status") or "")
     if status not in {GUARDED_STATUS, READY_STATUS}:
-        raise EvidenceError(
-            "prd07_orchestration_hotspot_evidence_invalid",
-            f"status must be {GUARDED_STATUS} or {READY_STATUS}",
-        )
+        raise EvidenceError(INVALID_CODE, f"status must be {GUARDED_STATUS} or {READY_STATUS}")
 
     results: dict[str, Any] = {
         "classification": _validate_classification(payload),
@@ -250,45 +215,23 @@ def validate_evidence(payload: Mapping[str, Any], *, allow_pending: bool) -> dic
     }
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate PRD07 orchestration hotspot conditional-candidate evidence.")
-    parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
-    parser.add_argument(
-        "--allow-pending",
-        action="store_true",
-        help="Treat future startup-readiness blockers as an explicit pending status.",
-    )
-    parser.add_argument("--json", action="store_true", help="Print machine-readable validation result.")
-    return parser
-
-
 def main() -> int:
-    args = build_parser().parse_args()
-    try:
-        if not args.evidence.exists():
-            if args.allow_pending:
-                result = {
-                    "status": "pending",
-                    "pending_gates": ["evidence_file"],
-                    "startup_blockers": [f"{args.evidence} does not exist"],
-                    "results": {},
-                }
-            else:
-                raise EvidenceError("prd07_orchestration_hotspot_evidence_pending", f"{args.evidence} does not exist")
-        else:
-            result = validate_evidence(_load_json(args.evidence), allow_pending=args.allow_pending)
-        if args.json:
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        elif result["status"] == "ready":
-            print("prd07_orchestration_hotspot_evidence_ready")
-        elif result["status"] == "guarded":
-            print("prd07_orchestration_hotspot_evidence_guarded")
-        else:
-            print("prd07_orchestration_hotspot_evidence_pending: " + ",".join(result["pending_gates"]))
-        return 0 if result["status"] in {"ready", "guarded"} or args.allow_pending else 1
-    except EvidenceError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+    return run_evidence_cli(
+        validate_evidence,
+        default_evidence=DEFAULT_EVIDENCE,
+        description="Validate PRD07 orchestration hotspot conditional-candidate evidence.",
+        invalid_code=INVALID_CODE,
+        missing_pending_code=PENDING_CODE,
+        status_messages={
+            "ready": "prd07_orchestration_hotspot_evidence_ready",
+            "guarded": "prd07_orchestration_hotspot_evidence_guarded",
+        },
+        pending_message_prefix="prd07_orchestration_hotspot_evidence_pending",
+        success_statuses=("ready", "guarded"),
+        blockers_key="startup_blockers",
+        allow_pending_help="Treat future startup-readiness blockers as an explicit pending status.",
+        catch_runtime_error=False,
+    )
 
 
 if __name__ == "__main__":
