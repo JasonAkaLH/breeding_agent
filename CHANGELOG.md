@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 多 Skill DAG 独立执行修复：public `skill.*` 节点之间的 LLM 规划依赖默认不再阻塞宏展开，RCBD 等基于上传文件的 Skill 可与 SQLQuery 并行执行；显式声明 `requires_public_skill_dependency` 的链式 Skill 仍可保留依赖，最终回答节点继续汇总所有 Skill 结果。
 - 前端临时 Skill 状态行：多 / 单 Skill 进度现在以当前页灰色轻量行显示在 assistant 气泡外，不写入聊天正文、历史或记忆；刷新 / 历史会话不恢复，最终回答仍只在 assistant 气泡内展示。
 - 多 Skill final-only DAG 收口：保留显式单 Skill `requires_finalizer` 的最终回答节点，同时抑制 LLM Planner 多 Skill 宏展开中的 per-skill 中间 finalizer；全局 finalizer 会汇总所有 answer-producing skill，assistant history 同步对并发重复写入保持幂等。
 - 本地全栈开发会话收尾：按需重启并最终清理 `maf-fullstack-dev` tmux 会话、uvicorn / Vite 后台进程，确认 `8000` / `5173` 端口已释放。

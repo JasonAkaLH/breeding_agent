@@ -39,6 +39,8 @@ class WorkflowExpander:
 
     def expand(self, plan: WorkflowPlan, *, request: OrchestrationRequest) -> WorkflowPlan:
         ordered_nodes = self._topological_nodes(plan)
+        nodes_by_original_id = {node.node_id: node for node in ordered_nodes}
+        dropped_public_skill_dependencies: dict[str, tuple[str, ...]] = {}
         expanded_nodes: list[WorkflowNodePlan] = []
         expanded_tail_ids_by_original: dict[str, tuple[str, ...]] = {}
         expanded_answer_ids_by_original: dict[str, tuple[str, ...]] = {}
@@ -54,20 +56,26 @@ class WorkflowExpander:
             return expanded_answer_ids_by_original.get(dependency_id) or expanded_tail_ids_by_original[dependency_id]
 
         for node in ordered_nodes:
+            preserved_dependency_ids, dropped_dependency_ids = self._preserved_high_level_dependency_ids(
+                node,
+                nodes_by_original_id,
+            )
+            if dropped_dependency_ids:
+                dropped_public_skill_dependencies[node.node_id] = dropped_dependency_ids
             high_level_dependencies = tuple(
                 tail_id
-                for dependency in node.depends_on
+                for dependency in preserved_dependency_ids
                 for tail_id in expanded_tail_ids_by_original[dependency]
             )
             high_level_answer_dependencies = tuple(
                 self._dedupe(
                     answer_id
-                    for dependency in node.depends_on
+                    for dependency in preserved_dependency_ids
                     for answer_id in answer_ids_for(dependency)
                 )
             )
             high_level_answer_source_count = sum(
-                1 for dependency in node.depends_on if dependency in expanded_answer_ids_by_original
+                1 for dependency in preserved_dependency_ids if dependency in expanded_answer_ids_by_original
             )
             provider = self._resolve_macro_provider(node.capability_id)
             if provider is None:
@@ -244,10 +252,45 @@ class WorkflowExpander:
                 "macro_capabilities": tuple(sorted(self._macro_providers)),
                 "expanded_macro_nodes": expanded_macro_nodes,
                 "global_finalizer_added": global_finalizer_added,
+                "dropped_public_skill_dependencies": dropped_public_skill_dependencies,
             },
             max_replans=max_replans,
             max_dynamic_nodes=max_dynamic_nodes,
         )
+
+    @classmethod
+    def _preserved_high_level_dependency_ids(
+        cls,
+        node: WorkflowNodePlan,
+        nodes_by_original_id: Mapping[str, WorkflowNodePlan],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if not cls._is_public_skill_capability(node.capability_id) or cls._requires_public_skill_dependency(node):
+            return node.depends_on, ()
+
+        preserved: list[str] = []
+        dropped: list[str] = []
+        for dependency_id in node.depends_on:
+            dependency = nodes_by_original_id.get(dependency_id)
+            if dependency is not None and cls._is_public_skill_capability(dependency.capability_id):
+                dropped.append(dependency_id)
+                continue
+            preserved.append(dependency_id)
+        return tuple(preserved), tuple(dropped)
+
+    @staticmethod
+    def _is_public_skill_capability(capability_id: str) -> bool:
+        return capability_id.startswith("skill.")
+
+    @staticmethod
+    def _requires_public_skill_dependency(node: WorkflowNodePlan) -> bool:
+        for container in (node.input_payload, node.metadata):
+            value = container.get("requires_public_skill_dependency")
+            if value is True:
+                return True
+            value = container.get("requires_skill_dependency")
+            if value is True:
+                return True
+        return False
 
     def _resolve_macro_provider(self, capability_id: str) -> WorkflowProvider | None:
         provider = self._macro_providers.get(capability_id)

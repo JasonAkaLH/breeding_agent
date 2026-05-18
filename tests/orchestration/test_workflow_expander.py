@@ -234,6 +234,106 @@ scripts:
             ),
         )
 
+    def test_public_skill_dependencies_are_not_used_to_block_independent_skill_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            skill_provider, revision = self._platform_skill_provider(
+                root,
+                (
+                    ("sql-query", "skill.sql_query"),
+                    ("rcbd-design", "skill.mini_breedstat_rcbd"),
+                ),
+            )
+            request = OrchestrationRequest(
+                task_id="task-independent-skills",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="查龙粳33，并按上传材料清单设计随机区组",
+                metadata={"skill_bundle_revision": revision},
+            )
+            high_level = WorkflowPlan(
+                task_id="task-independent-skills",
+                nodes=(
+                    WorkflowNodePlan(node_id="sql_query_1", capability_id="skill.sql_query"),
+                    WorkflowNodePlan(
+                        node_id="rcbd_design_1",
+                        capability_id="skill.mini_breedstat_rcbd",
+                        depends_on=("sql_query_1",),
+                    ),
+                    WorkflowNodePlan(
+                        node_id="answer_user",
+                        capability_id="main_agent.respond",
+                        depends_on=("sql_query_1", "rcbd_design_1"),
+                    ),
+                ),
+            )
+
+            expanded = WorkflowExpander(
+                {},
+                macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+            ).expand(high_level, request=request)
+
+        sql_node = next(node for node in expanded.nodes if node.node_id == "task-independent-skills:sql_query_1:skill_execute")
+        rcbd_node = next(node for node in expanded.nodes if node.node_id == "task-independent-skills:rcbd_design_1:skill_execute")
+        final_node = next(
+            node
+            for node in expanded.nodes
+            if node.capability_id == "main_agent.respond" and node.metadata.get("response_role") == RESPONSE_ROLE_FINAL
+        )
+
+        self.assertEqual(sql_node.depends_on, ())
+        self.assertEqual(rcbd_node.depends_on, ())
+        self.assertEqual(
+            final_node.depends_on,
+            (
+                "task-independent-skills:sql_query_1:skill_execute",
+                "task-independent-skills:rcbd_design_1:skill_execute",
+            ),
+        )
+        self.assertEqual(
+            expanded.metadata["dropped_public_skill_dependencies"],
+            {"rcbd_design_1": ("sql_query_1",)},
+        )
+
+    def test_public_skill_dependency_can_be_explicitly_preserved_for_chained_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "skill"
+            skill_provider, revision = self._platform_skill_provider(
+                root,
+                (
+                    ("lookup-a", "skill.lookup_a"),
+                    ("lookup-b", "skill.lookup_b"),
+                ),
+            )
+            request = OrchestrationRequest(
+                task_id="task-chained-skills",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="先查A，再用A处理B",
+                metadata={"skill_bundle_revision": revision},
+            )
+            high_level = WorkflowPlan(
+                task_id="task-chained-skills",
+                nodes=(
+                    WorkflowNodePlan(node_id="lookup_a", capability_id="skill.lookup_a"),
+                    WorkflowNodePlan(
+                        node_id="lookup_b",
+                        capability_id="skill.lookup_b",
+                        input_payload={"requires_public_skill_dependency": True},
+                        depends_on=("lookup_a",),
+                    ),
+                ),
+            )
+
+            expanded = WorkflowExpander(
+                {},
+                macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
+            ).expand(high_level, request=request)
+
+        lookup_b = next(node for node in expanded.nodes if node.node_id == "task-chained-skills:lookup_b:skill_execute")
+        self.assertEqual(lookup_b.depends_on, ("task-chained-skills:lookup_a:skill_execute",))
+        self.assertEqual(expanded.metadata["dropped_public_skill_dependencies"], {})
+
     def test_explicit_task_finalizer_is_marked_final_without_duplicate_global_finalizer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "skill"
