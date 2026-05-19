@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- MCP Client 四版本兼容分步 PRD：新增 `docs/prd/MCP/compatibility/`，将四版本兼容拆为协议协商内核、2024 legacy HTTP+SSE、2025+ Streamable HTTP 收敛、conformance/document/sidecar 口径四个 PRD，并同步 PRD 索引；仍未进入 runtime 代码实现。
 - MCP Client 四版本兼容矩阵设计：新增并加固 `docs/superpowers/specs/2026-05-19-mcp-four-version-client-compatibility-matrix-design.md`，按 core / transport / feature 三层定义 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25` 的 client-only 兼容状态、配置协商、错误处理、验收标准与测试边界；尚未进入 runtime 实现。
 - 多 Skill DAG 独立执行修复：public `skill.*` 节点之间的 LLM 规划依赖默认不再阻塞宏展开，RCBD 等基于上传文件的 Skill 可与 SQLQuery 并行执行；显式声明 `requires_public_skill_dependency` 的链式 Skill 仍可保留依赖，最终回答节点继续汇总所有 Skill 结果。
 - 前端临时 Skill 状态行：多 / 单 Skill 进度现在以当前页灰色轻量行显示在 assistant 气泡外，不写入聊天正文、历史或记忆；刷新 / 历史会话不恢复，最终回答仍只在 assistant 气泡内展示。

@@ -1,0 +1,41 @@
+# MCP Client 四版本兼容 PRD 索引
+
+本目录承接 `docs/superpowers/specs/2026-05-19-mcp-four-version-client-compatibility-matrix-design.md`，把 MCP Runtime 作为 **client** 兼容四个官方协议版本的工作拆成 4 个可独立评审和实施的 PRD。
+
+覆盖协议版本：
+
+- `2024-11-05`
+- `2025-03-26`
+- `2025-06-18`
+- `2025-11-25`
+
+## 拆分原则
+
+1. 先建立协议版本与 session 协商内核，再接入具体 transport。
+2. `2024-11-05` legacy HTTP+SSE 与 `2025-03-26+` Streamable HTTP 分开实现和测试。
+3. 普通 `tools/list` / `tools/call` 是首个兼容目标；resources、prompts、tasks、interactive OAuth、roots、sampling、elicitation 与 stdio sandbox 保持 future / config-gated。
+4. Conformance gate 与现有 MCP PRD 文档口径必须最后统一收敛，避免 runtime 已多版本但证据账本仍只认 `2025-11-25`。
+
+## PRD 列表
+
+| 顺序 | PRD | 目标 | 完成后允许宣称 |
+|---|---|---|---|
+| A | `01-协议版本与协商内核PRD.md` | 建立四版本常量、config 校验、mandatory initialize `protocolVersion`、negotiated session state 与 feature gate 基础接口 | Runtime 具备多版本协商内核，但不代表 2024 HTTP 已可用 |
+| B | `02-2024-11-05-LegacyHTTP-SSETransportPRD.md` | 实现 `2024-11-05` legacy HTTP+SSE transport family、fixtures 与 fake server 测试 | 可通过 legacy HTTP+SSE 对 2024 server 完成普通 tools 链路 |
+| C | `03-2025Plus-StreamableHTTP多版本收敛PRD.md` | 将现有 Streamable HTTP 收敛为 `2025-03-26` / `2025-06-18` / `2025-11-25` 多版本行为 | 2025+ 三个版本的普通 tools 链路均受 negotiated version gate 管理 |
+| D | `04-ConformanceGate文档同步与Sidecar口径PRD.md` | 更新 conformance gate、fixtures evidence、MCP PRD 口径与 Rust sidecar external protocol 说明 | 文档、测试证据与 sidecar 口径不再隐含单一 `2025-11-25` |
+
+## 依赖关系
+
+```text
+A 协商内核
+├── B 2024 legacy HTTP+SSE
+├── C 2025+ Streamable HTTP
+└── D Conformance / 文档 / sidecar 口径（依赖 A/B/C 的验收定义，可并行准备）
+```
+
+## 维护要求
+
+- 修改本目录 PRD 时，同步检查 `docs/prd/MCP/README.md`、`docs/prd/README.md` 与 `CHANGELOG.md`。
+- 任一 PRD 不得把本项目扩展为 MCP Server；本目录只覆盖 MCP Client runtime。
+- 任一 PRD 不得绕过现有 endpoint/auth/config 安全边界；LLM、Planner 或用户消息不得决定 MCP endpoint、token、transport、protocol version 或 tool identity。

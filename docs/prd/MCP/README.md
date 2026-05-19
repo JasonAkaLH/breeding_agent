@@ -24,11 +24,24 @@ Phase 是工程落地顺序和验收门禁，不是产品版本、降级目标�
 | Phase 4 | `05-Phase4-API事件桥接取消与Executor集成PRD.md` | 接入 MCP executor、live event bridge、API/SSE、取消传播、CapabilityExecutionResult 映射 | 具备用户可见长任务闭环，可进入 shadow |
 | Phase 5 | `06-Phase5-ShadowEnforce生产门禁与Legacy下线PRD.md` | shadow compare、SLO、安全、运维、rollback drill、enforce 与 Python legacy 下线 | 具备最终生产级 MCP Runtime 能力 |
 
-## 3. 总览入口
+
+## 3. Client 四版本兼容 PRD 轨道
+
+`docs/prd/MCP/compatibility/` 是新增的 MCP Client 四版本兼容实施轨道，覆盖 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25`。该轨道只处理本项目作为 MCP Client 连接外部 MCP Server 的兼容矩阵，不把本项目扩展为 MCP Server。
+
+该轨道与上方 Phase 0-5 的关系：
+
+- Phase 0-5 仍描述 MCP 长任务 / Rust sidecar canonical runtime 的阶段性交付。
+- compatibility PRD 轨道补充普通 `tools/list` / `tools/call` 的多版本 client 兼容前置工作。
+- 在 compatibility PRD-D 完成前，现有 Phase 文档中的 `2025-11-25` 单基线口径仍是历史基线，不代表 runtime 已完成四版本兼容。
+
+入口：`docs/prd/MCP/compatibility/README.md`。
+
+## 4. 总览入口
 
 联合实施总览见：`00-MCPRuntime联合改造总览PRD.md`。
 
-## 4. 维护要求
+## 5. 维护要求
 
 新增或修改本目录 PRD 时，应同步检查：
 
