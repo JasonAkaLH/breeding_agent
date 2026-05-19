@@ -4,11 +4,30 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .protocol import JSONRPC_VERSION, MCP_PROTOCOL_VERSION, MCPTransport, MCPStreamEvent, json_rpc_error, json_rpc_result, json_rpc_message_kind
+from .protocol import (
+    JSONRPC_VERSION,
+    MCP_PROTOCOL_VERSION,
+    MCPNegotiatedSession,
+    MCPStreamEvent,
+    MCP_TRANSPORT_STREAMABLE_HTTP,
+    MCPTransport,
+    is_mcp_transport_family_allowed,
+    json_rpc_error,
+    json_rpc_message_kind,
+    json_rpc_result,
+    validate_mcp_protocol_version,
+)
 
 
 class MCPClientError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "mcp_client_error", retriable: bool = False, metadata: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "mcp_client_error",
+        retriable: bool = False,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.mcp_error_code = code
         self.retriable = retriable
@@ -21,13 +40,26 @@ class MCPProtocolError(MCPClientError):
 
 
 class MCPRemoteError(MCPClientError):
-    def __init__(self, message: str, *, remote_code: int | str | None = None, retriable: bool = False, metadata: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        remote_code: int | str | None = None,
+        retriable: bool = False,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         merged = {**dict(metadata or {}), "remote_code": remote_code}
         super().__init__(message, code="mcp_remote_error", retriable=retriable, metadata=merged)
 
 
 class MCPAuthRequiredError(MCPClientError):
-    def __init__(self, message: str = "MCP authorization is required.", *, scope_required: bool = False, metadata: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        message: str = "MCP authorization is required.",
+        *,
+        scope_required: bool = False,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(
             message,
             code="mcp_scope_required" if scope_required else "mcp_auth_required",
@@ -48,7 +80,7 @@ class MCPInitializeResult:
 
 
 class MCPClient:
-    """Small MCP 2025-11-25 JSON-RPC client with lifecycle enforcement."""
+    """Small MCP JSON-RPC client with version negotiation and lifecycle enforcement."""
 
     def __init__(
         self,
@@ -59,10 +91,14 @@ class MCPClient:
         timeout_seconds: float = 20,
         client_info: Mapping[str, Any] | None = None,
         client_capabilities: Mapping[str, Any] | None = None,
+        pinned_protocol_version: bool = True,
+        transport_family: str = MCP_TRANSPORT_STREAMABLE_HTTP,
     ) -> None:
         self.server_id = server_id
         self._transport = transport
-        self._protocol_version = protocol_version
+        self._requested_protocol_version = validate_mcp_protocol_version(protocol_version)
+        self._pinned_protocol_version = bool(pinned_protocol_version)
+        self._transport_family = str(transport_family or "").strip().lower()
         self._timeout_seconds = timeout_seconds
         self._client_info = dict(client_info or {"name": "multi_agent_framework", "version": "1"})
         self._client_capabilities = self._minimal_capabilities(client_capabilities or {})
@@ -81,6 +117,38 @@ class MCPClient:
     @property
     def session_id(self) -> str | None:
         return self._session_id
+
+    @property
+    def requested_protocol_version(self) -> str:
+        return self._requested_protocol_version
+
+    @property
+    def negotiated_protocol_version(self) -> str | None:
+        if self._initialize_result is None:
+            return None
+        return self._initialize_result.protocol_version
+
+    @property
+    def negotiated_session(self) -> MCPNegotiatedSession | None:
+        if self.negotiated_protocol_version is None:
+            return None
+        legacy_post_endpoint = str(getattr(self._transport, "post_endpoint", "") or "").strip() or None
+        return MCPNegotiatedSession(
+            server_id=self.server_id,
+            requested_protocol_version=self._requested_protocol_version,
+            negotiated_protocol_version=self.negotiated_protocol_version,
+            transport_family=self._transport_family,
+            server_capabilities=self.server_capabilities,
+            server_info=dict(self._initialize_result.server_info) if self._initialize_result is not None else {},
+            pinned_protocol_version=self._pinned_protocol_version,
+            session_id=self._session_id,
+            legacy_post_endpoint=legacy_post_endpoint,
+            last_event_id=self._last_event_id,
+        )
+
+    @property
+    def _current_protocol_version(self) -> str:
+        return self.negotiated_protocol_version or self._requested_protocol_version
 
     @property
     def last_sse_retry_ms(self) -> int | None:
@@ -107,12 +175,12 @@ class MCPClient:
                 "id": request_id,
                 "method": "initialize",
                 "params": {
-                    "protocolVersion": self._protocol_version,
+                    "protocolVersion": self._requested_protocol_version,
                     "capabilities": self._client_capabilities,
                     "clientInfo": self._client_info,
                 },
             },
-            protocol_version=self._protocol_version,
+            protocol_version=self._requested_protocol_version,
             session_id=None,
             timeout_seconds=self._timeout_seconds,
             last_event_id=self._last_event_id,
@@ -124,11 +192,34 @@ class MCPClient:
         if not isinstance(result, Mapping):
             raise MCPProtocolError("initialize result must be an object.")
         negotiated_version = str(result.get("protocolVersion") or "").strip()
-        if negotiated_version != self._protocol_version:
+        try:
+            negotiated_version = validate_mcp_protocol_version(negotiated_version)
+        except ValueError as exc:
             self._state = "failed"
             raise MCPProtocolError(
                 "Unsupported MCP protocol version negotiated.",
                 metadata={"server_id": self.server_id, "negotiated_protocol_version": negotiated_version},
+            ) from exc
+        if self._pinned_protocol_version and negotiated_version != self._requested_protocol_version:
+            self._state = "failed"
+            raise MCPProtocolError(
+                "Negotiated MCP protocol version does not match requested pinned version.",
+                metadata={
+                    "server_id": self.server_id,
+                    "requested_protocol_version": self._requested_protocol_version,
+                    "negotiated_protocol_version": negotiated_version,
+                },
+            )
+        if not is_mcp_transport_family_allowed(negotiated_version, self._transport_family):
+            self._state = "failed"
+            raise MCPProtocolError(
+                "Negotiated MCP protocol version is incompatible with the configured transport family.",
+                metadata={
+                    "server_id": self.server_id,
+                    "requested_protocol_version": self._requested_protocol_version,
+                    "negotiated_protocol_version": negotiated_version,
+                    "transport_family": self._transport_family,
+                },
             )
         server_capabilities = result.get("capabilities") if isinstance(result.get("capabilities"), Mapping) else {}
         server_info = result.get("serverInfo") if isinstance(result.get("serverInfo"), Mapping) else {}
@@ -175,7 +266,7 @@ class MCPClient:
                 "method": method,
                 "params": dict(params or {}),
             },
-            protocol_version=self._protocol_version,
+            protocol_version=self._current_protocol_version,
             session_id=self._session_id,
             timeout_seconds=self._timeout_seconds,
             last_event_id=self._last_event_id,
@@ -199,7 +290,7 @@ class MCPClient:
     async def send_notification(self, method: str, params: Mapping[str, Any] | None = None) -> None:
         response = await self._transport.send(
             {"jsonrpc": JSONRPC_VERSION, "method": method, "params": dict(params or {})},
-            protocol_version=self._protocol_version,
+            protocol_version=self._current_protocol_version,
             session_id=self._session_id,
             timeout_seconds=self._timeout_seconds,
             last_event_id=self._last_event_id,
@@ -267,7 +358,7 @@ class MCPClient:
     async def send_response(self, request_id: str | int | None, result: Mapping[str, Any] | None = None) -> None:
         response = await self._transport.send(
             json_rpc_result(request_id=request_id, result=result),
-            protocol_version=self._protocol_version,
+            protocol_version=self._current_protocol_version,
             session_id=self._session_id,
             timeout_seconds=self._timeout_seconds,
             last_event_id=self._last_event_id,
@@ -277,7 +368,7 @@ class MCPClient:
     async def send_error_response(self, request_id: str | int | None, *, code: int, message: str) -> None:
         response = await self._transport.send(
             json_rpc_error(request_id=request_id, code=code, message=message),
-            protocol_version=self._protocol_version,
+            protocol_version=self._current_protocol_version,
             session_id=self._session_id,
             timeout_seconds=self._timeout_seconds,
             last_event_id=self._last_event_id,
@@ -291,7 +382,7 @@ class MCPClient:
         if get_stream is None:
             raise MCPProtocolError("MCP transport does not support GET server stream.")
         response = await get_stream(
-            protocol_version=self._protocol_version,
+            protocol_version=self._current_protocol_version,
             session_id=self._session_id,
             timeout_seconds=self._timeout_seconds,
             last_event_id=self._last_event_id,
@@ -306,7 +397,12 @@ class MCPClient:
         self._state = "closed"
         await self._transport.close()
 
-    async def _handle_stream_events(self, events: tuple[MCPStreamEvent, ...], *, expected_response_id: str | int | None) -> tuple[Mapping[str, Any], ...]:
+    async def _handle_stream_events(
+        self,
+        events: tuple[MCPStreamEvent, ...],
+        *,
+        expected_response_id: str | int | None,
+    ) -> tuple[Mapping[str, Any], ...]:
         notifications: list[Mapping[str, Any]] = []
         for event in events:
             message = event.message

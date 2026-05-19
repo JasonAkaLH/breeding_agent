@@ -1,0 +1,6 @@
+{
+  "description": "2024-11-05 legacy HTTP+SSE response delivered over original persistent SSE stream after POST returns 202.",
+  "sseEndpointEvent": "event: endpoint\ndata: /messages\n\n",
+  "postStatus": 202,
+  "sseMessageEvent": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"request-1\",\"result\":{\"ok\":true}}\n\n"
+}

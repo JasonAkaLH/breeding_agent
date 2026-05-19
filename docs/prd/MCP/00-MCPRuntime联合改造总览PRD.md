@@ -24,7 +24,7 @@ Phase 只表达工程顺序，不允许把任一中间 Phase 包装成完整 MCP
 
 ## 3. 总目标
 
-1. 以 MCP 2025-11-25 为协议基线，完整支持 Streamable HTTP、多事件 SSE、GET server-to-client stream、reconnect、progress、tasks、cancel 与 result retrieval。
+1. 以 MCP 2025-11-25 latest-feature invariant 为长任务 / Tasks / Streamable HTTP 完整能力基线，完整支持 Streamable HTTP、多事件 SSE、GET server-to-client stream、reconnect、progress、tasks、cancel 与 result retrieval；普通 tools client 兼容另受 multi-version client compatibility invariant 约束。
 2. 以独立 Rust sidecar 作为最终生产 MCP Runtime 承载层，Python 只保留 config、sidecar client、capability descriptor、executor wrapper、API/SSE bridge 与 DTO adapter。
 3. 保持现有用户行为、API/SSE、capability、Skill、artifact 与前端事件契约兼容。
 4. 所有外部 MCP 输入、output、status、progress、server-to-client request 均按不可信输入治理，fail closed、脱敏审计、限流和可观测。
@@ -58,7 +58,8 @@ Rust MCP sidecar
   └─ audit / metrics / health / shutdown drain
 
 External MCP servers
-  └─ MCP 2025-11-25 JSON-RPC over Streamable HTTP
+  ├─ MCP 2025-11-25 JSON-RPC over Streamable HTTP（long-task / Tasks latest-feature target）
+  └─ MCP 2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 ordinary tools client compatibility
 ```
 
 ## 6. Phase 顺序与依赖
@@ -84,9 +85,12 @@ Phase 之间可以并行准备测试、fixtures、proto 草案和 fake server，
 6. `input_required` 首版稳定失败；不得让外部 MCP server 直接驱动用户输入或内部能力。
 7. `enforce` 模式下安全、权限、schema、sanitizer、sidecar identity、secret、contract mismatch 默认 fail closed。
 
-## 8. MCP 2025-11-25 标准一致性不变量
+## 8. MCP latest-feature invariant 与 multi-version client compatibility invariant
 
 以下规则跨所有 Phase 生效，任何实现或测试不得放宽：
+
+- **latest-feature invariant**：MCP `2025-11-25` 是长任务、Tasks、progress、cancellation、完整 Streamable HTTP/SSE 与 Rust sidecar canonical runtime 的 latest-feature invariant。`2025-11-25 long-task / Tasks` 约束不得因四版本普通 tools 兼容而删除或降级。
+- **multi-version client compatibility invariant**：本项目作为 MCP Client 的普通 `tools/list` / `tools/call` 首版兼容范围是 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25`；2024 使用 legacy HTTP+SSE，2025+ 使用 Streamable HTTP，conformance gate 必须逐版本验证。
 
 1. **JSON-RPC 形态**：所有 MCP data layer message 必须是 JSON-RPC 2.0 object；Streamable HTTP POST body 必须是单个 JSON-RPC request、notification 或 response，不支持 batch array。
 2. **Lifecycle first**：每个 MCP session 的第一阶段必须是 `initialize`；client 收到 `InitializeResult` 后必须发送 `notifications/initialized`，随后才能进入 operation。初始化完成前除 `ping` 外不得发送普通 operation request。
@@ -121,6 +125,7 @@ Phase 之间可以并行准备测试、fixtures、proto 草案和 fake server，
 - `docs/prd/MCP/04-Phase3-Tasks长任务状态与DurableRegistryPRD.md`
 - `docs/prd/MCP/05-Phase4-API事件桥接取消与Executor集成PRD.md`
 - `docs/prd/MCP/06-Phase5-ShadowEnforce生产门禁与Legacy下线PRD.md`
+- `docs/prd/MCP/compatibility/README.md`
 
 ## 11. 标准参考
 

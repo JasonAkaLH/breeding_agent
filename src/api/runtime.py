@@ -56,7 +56,7 @@ from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcC
 from src.integrations.codex_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
-from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState
+from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.integrations.rust_safety_contract import configure_safety_shadow_sink
 from src.lifecycle.cancellation_service import CancellationService
@@ -1036,14 +1036,13 @@ class ApiRuntime:
             return
         bundle = self._mcp_runtime_state.active_bundle
         for descriptor in bundle.descriptors:
+            binding = bundle.bindings.get(descriptor.capability_id)
             self._audit_sink.record_sync(
                 "mcp.capability_registered",
-                {
-                    "capability_id": descriptor.capability_id,
-                    "name": descriptor.name,
-                    "source_path": descriptor.source_path,
-                    "source": descriptor.source,
-                },
+                _mcp_capability_audit_payload(
+                    descriptor,
+                    binding,
+                ),
             )
         for diagnostic in bundle.diagnostics:
             self._audit_sink.record_sync(
@@ -1054,6 +1053,8 @@ class ApiRuntime:
                     "capability_id": diagnostic.capability_id,
                     "reason": diagnostic.reason,
                     "message": diagnostic.message,
+                    "transport_security": diagnostic.transport_security,
+                    "header_names": list(diagnostic.header_names),
                 },
             )
 
@@ -2204,12 +2205,12 @@ def _is_skill_descriptor(descriptor: CapabilityDescriptor) -> bool:
 
 def _resolve_mcp_runtime_config(config: Mapping[str, Any] | None) -> MCPRuntimeConfig:
     if config is not None:
-        return MCPRuntimeConfig.from_mapping(config)
+        return load_mcp_server_config(base_config=MCPRuntimeConfig.from_mapping(config))
     loaded = load_config()
     raw = loaded.get("mcp")
     if isinstance(raw, Mapping):
-        return MCPRuntimeConfig.from_mapping(raw)
-    return MCPRuntimeConfig.disabled()
+        return load_mcp_server_config(base_config=MCPRuntimeConfig.from_mapping(raw))
+    return load_mcp_server_config(base_config=MCPRuntimeConfig.disabled())
 
 
 def _record_mcp_startup_audit(
@@ -2225,17 +2226,14 @@ def _record_mcp_startup_audit(
         "skipped_count": refresh_result.skipped_count,
         "duration_ms": refresh_result.duration_ms,
     }
+    payload.update(_mcp_security_audit_summary(runtime_state.active_bundle))
     if refresh_result.status == "completed":
         audit_sink.record_sync("mcp.server_discovery_completed", payload)
         for descriptor in runtime_state.active_bundle.descriptors:
+            binding = runtime_state.active_bundle.bindings.get(descriptor.capability_id)
             audit_sink.record_sync(
                 "mcp.capability_registered",
-                {
-                    "capability_id": descriptor.capability_id,
-                    "name": descriptor.name,
-                    "source_path": descriptor.source_path,
-                    "source": descriptor.source,
-                },
+                _mcp_capability_audit_payload(descriptor, binding),
             )
         for diagnostic in runtime_state.active_bundle.diagnostics:
             audit_sink.record_sync(
@@ -2246,6 +2244,8 @@ def _record_mcp_startup_audit(
                     "capability_id": diagnostic.capability_id,
                     "reason": diagnostic.reason,
                     "message": diagnostic.message,
+                    "transport_security": diagnostic.transport_security,
+                    "header_names": list(diagnostic.header_names),
                 },
             )
         return
@@ -2256,6 +2256,55 @@ def _record_mcp_startup_audit(
         )
         return
     audit_sink.record_sync("mcp.server_discovery_skipped", payload)
+
+
+def _mcp_capability_audit_payload(descriptor: CapabilityDescriptor, binding: Any | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "capability_id": descriptor.capability_id,
+        "name": descriptor.name,
+        "source_path": descriptor.source_path,
+        "source": descriptor.source,
+    }
+    if binding is not None:
+        payload.update(
+            {
+                "server_id": getattr(binding, "server_id", ""),
+                "tool_name": getattr(binding, "tool_name", ""),
+                "transport_security": getattr(binding, "transport_security", ""),
+                "header_names": list(getattr(binding, "header_names", ()) or ()),
+                "credential_over_plaintext_http": bool(getattr(binding, "credential_over_plaintext_http", False)),
+            }
+        )
+    return payload
+
+
+def _mcp_security_audit_summary(bundle: MCPRuntimeBundle) -> dict[str, Any]:
+    transport_security = {
+        value
+        for value in (
+            *(getattr(binding, "transport_security", "") for binding in bundle.bindings.values()),
+            *(diagnostic.transport_security for diagnostic in bundle.diagnostics),
+        )
+        if value
+    }
+    header_names = {
+        name
+        for names in (
+            *(getattr(binding, "header_names", ()) or () for binding in bundle.bindings.values()),
+            *(diagnostic.header_names for diagnostic in bundle.diagnostics),
+        )
+        for name in names
+        if name
+    }
+    credential_over_plaintext_http = any(
+        bool(getattr(binding, "credential_over_plaintext_http", False))
+        for binding in bundle.bindings.values()
+    )
+    return {
+        "transport_security": sorted(transport_security),
+        "header_names": sorted(header_names),
+        "credential_over_plaintext_http": credential_over_plaintext_http,
+    }
 
 
 def _record_skill_capability_startup_audit(

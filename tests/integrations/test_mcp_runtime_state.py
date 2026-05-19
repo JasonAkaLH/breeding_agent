@@ -98,9 +98,11 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
         second = await state.refresh(reason="manual", force=True)
 
         self.assertEqual(first.status, "completed")
-        self.assertEqual(second.status, "failed")
-        self.assertEqual(state.active_revision, first_revision)
+        self.assertEqual(second.status, "completed")
+        self.assertEqual(second.reason, "optional_discovery_failed")
+        self.assertNotEqual(state.active_revision, first_revision)
         self.assertEqual([descriptor.capability_id for descriptor in state.active_bundle.descriptors], ["mcp.crm.search_customer"])
+        self.assertEqual(state.active_bundle.diagnostics[-1].reason, "server_discovery_failed")
 
     async def test_public_tool_with_input_fields_requires_explicit_planner_allowlist(self) -> None:
         config = MCPRuntimeConfig.from_mapping(

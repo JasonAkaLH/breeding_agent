@@ -11,7 +11,7 @@ from .mcp_runtime_gates import (
     load_mcp_runtime_artifact_trust,
     validate_mcp_runtime_artifact_provenance,
 )
-from .protocol import MCP_PROTOCOL_VERSION
+from .protocol import MCP_PROTOCOL_VERSION, SUPPORTED_MCP_PROTOCOL_VERSIONS
 
 MCP_SIDECAR_COMPONENT = "maf_mcp_runtime_sidecar"
 MCP_SIDECAR_PROTOCOL_VERSION = "maf.mcp.sidecar.v1"
@@ -128,9 +128,11 @@ class MCPSidecarVersionInfo:
     min_client_version: str
     max_client_version: str
     external_mcp_protocol_version: str = MCP_PROTOCOL_VERSION
+    external_mcp_protocol_versions: tuple[str, ...] = (MCP_PROTOCOL_VERSION,)
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "MCPSidecarVersionInfo":
+        external_version = str(payload.get("external_mcp_protocol_version") or MCP_PROTOCOL_VERSION)
         return cls(
             component=str(payload.get("component") or ""),
             build_version=str(payload.get("build_version") or ""),
@@ -140,7 +142,11 @@ class MCPSidecarVersionInfo:
             supported_features=frozenset(str(item) for item in payload.get("supported_features") or ()),
             min_client_version=str(payload.get("min_client_version") or ""),
             max_client_version=str(payload.get("max_client_version") or ""),
-            external_mcp_protocol_version=str(payload.get("external_mcp_protocol_version") or MCP_PROTOCOL_VERSION),
+            external_mcp_protocol_version=external_version,
+            external_mcp_protocol_versions=_external_protocol_versions(
+                payload.get("external_mcp_protocol_versions"),
+                fallback=external_version,
+            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -154,6 +160,7 @@ class MCPSidecarVersionInfo:
             "min_client_version": self.min_client_version,
             "max_client_version": self.max_client_version,
             "external_mcp_protocol_version": self.external_mcp_protocol_version,
+            "external_mcp_protocol_versions": self.external_mcp_protocol_versions,
         }
 
     def with_updates(self, **updates: Any) -> "MCPSidecarVersionInfo":
@@ -291,11 +298,31 @@ class MCPSidecarClient:
         if version.component != MCP_SIDECAR_COMPONENT:
             raise MCPSidecarCompatibilityError("MCP sidecar component mismatch.", metadata={"component": version.component})
         if version.protocol_version != MCP_SIDECAR_PROTOCOL_VERSION:
-            raise MCPSidecarCompatibilityError("MCP sidecar protocol_version mismatch.", metadata={"protocol_version": version.protocol_version})
+            raise MCPSidecarCompatibilityError(
+                "MCP sidecar protocol_version mismatch.",
+                metadata={"protocol_version": version.protocol_version},
+            )
         if version.external_mcp_protocol_version != MCP_PROTOCOL_VERSION:
             raise MCPSidecarCompatibilityError(
                 "MCP sidecar external MCP protocol version mismatch.",
                 metadata={"external_mcp_protocol_version": version.external_mcp_protocol_version},
+            )
+        if (
+            not version.external_mcp_protocol_versions
+            or MCP_PROTOCOL_VERSION not in version.external_mcp_protocol_versions
+            or any(item not in SUPPORTED_MCP_PROTOCOL_VERSIONS for item in version.external_mcp_protocol_versions)
+        ):
+            raise MCPSidecarCompatibilityError(
+                "MCP sidecar external MCP protocol versions mismatch.",
+                metadata={"external_mcp_protocol_versions": version.external_mcp_protocol_versions},
+            )
+        if (
+            len(set(version.external_mcp_protocol_versions)) > 1
+            and "multi_version_transport" not in version.supported_features
+        ):
+            raise MCPSidecarCompatibilityError(
+                "MCP sidecar cannot claim multi-version external transport without multi_version_transport feature.",
+                metadata={"external_mcp_protocol_versions": version.external_mcp_protocol_versions},
             )
         if self._expected_schema_hash and version.schema_hash != self._expected_schema_hash:
             raise MCPSidecarCompatibilityError("MCP sidecar schema_hash mismatch.", metadata={"schema_hash": version.schema_hash})
@@ -307,7 +334,11 @@ class MCPSidecarClient:
         if self._client_version < version.min_client_version or self._client_version > version.max_client_version:
             raise MCPSidecarCompatibilityError(
                 "MCP sidecar client version is outside the supported range.",
-                metadata={"client_version": self._client_version, "min_client_version": version.min_client_version, "max_client_version": version.max_client_version},
+                metadata={
+                    "client_version": self._client_version,
+                    "min_client_version": version.min_client_version,
+                    "max_client_version": version.max_client_version,
+                },
             )
         missing = sorted(required_features - version.supported_features)
         if missing:
@@ -332,6 +363,20 @@ def _positive_float(value: Any, default: float) -> float:
 
 def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _external_protocol_versions(value: Any, *, fallback: str) -> tuple[str, ...]:
+    if value is None:
+        return (fallback,)
+    if isinstance(value, str):
+        items = (value,)
+    else:
+        try:
+            items = tuple(str(item) for item in value)
+        except TypeError:
+            return ()
+    parsed = tuple(item.strip() for item in items if item.strip())
+    return parsed
 
 
 def _is_allowed_internal_endpoint(endpoint: str) -> bool:

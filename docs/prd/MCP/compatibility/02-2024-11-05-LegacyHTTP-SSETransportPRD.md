@@ -1,6 +1,6 @@
 # PRD-B：MCP 2024-11-05 Legacy HTTP+SSE Transport
 
-- **状态**：待评审
+- **状态**：已实现（仓库内，待提交；PRD-C/D 尚未完成）
 - **日期**：2026-05-19
 - **范围**：`2024-11-05` HTTP+SSE client transport / fixtures / fake server / ordinary tools integration
 - **依赖**：PRD-A 协议版本与协商内核
@@ -8,13 +8,13 @@
 
 ## 1. 问题陈述
 
-`2024-11-05` 的 HTTP transport 与 `2025-03-26+` Streamable HTTP 不是同一个连接模型。2024 legacy HTTP+SSE 需要 client 先连接 SSE endpoint，从 server-sent `endpoint` event 获得 POST endpoint，然后把 JSON-RPC object POST 到该 endpoint。当前仓库只有 Streamable HTTP 风格的 `StreamableHTTPTransport`，不能把 2024 legacy 行为硬塞进去。
+`2024-11-05` 的 HTTP transport 与 `2025-03-26+` Streamable HTTP 不是同一个连接模型。2024 legacy HTTP+SSE 需要 client 先连接 SSE endpoint，从 server-sent `endpoint` event 获得 POST endpoint，然后把 JSON-RPC object POST 到该 endpoint。立项时仓库只有 Streamable HTTP 风格的 `StreamableHTTPTransport`，不能把 2024 legacy 行为硬塞进去；本 PRD 的当前实现证据见第 4.1 节。
 
 ## 2. 目标
 
 1. 新增 `legacy_http_sse` transport family，仅允许 `2024-11-05` 使用。
 2. 实现 `LegacyHTTPSSETransport`，支持 SSE endpoint connect、endpoint event parsing、POST endpoint 保存与 JSON-RPC object 发送。
-3. 复用现有 JSON-RPC validation、SSE parser、timeout、auth header 与 redaction 规则。
+3. 复用现有 JSON-RPC validation、HTTP response/SSE message 解析、timeout、auth header 与 redaction 规则；`endpoint` event 解析保持 legacy transport 内聚。
 4. 支持 `initialize`、`notifications/initialized`、`tools/list`、ordinary `tools/call` 的 2024 fake server 链路。
 5. 建立 2024 contract fixtures 和 transport integration tests。
 
@@ -35,6 +35,17 @@
 | Security / audit | 必须避免记录 raw endpoint query、auth header、session/event id。 |
 | Tests / fixtures | 新增 2024 legacy HTTP+SSE fixture 和 fake server。 |
 
+## 4.1 当前实现证据
+
+| 文件 | 当前事实 |
+|---|---|
+| `src/integrations/mcp/transport_legacy_http_sse.py` | 已新增独立 `LegacyHTTPSSETransport`，执行 SSE GET、解析 `endpoint` event、校验同源 POST endpoint、POST JSON-RPC object，并拒绝非 `2024-11-05` protocol version。 |
+| `src/integrations/mcp/runtime_state.py` | 默认 client factory 已按 `server.transport` 分流到 `StreamableHTTPTransport` 或 `LegacyHTTPSSETransport`；legacy transport 错误映射为 `legacy_*` diagnostic reason。 |
+| `src/integrations/mcp/config.py` / `src/integrations/mcp/protocol.py` | `legacy_http_sse` 仅与 `2024-11-05` 配对合法；`2025+` 与 legacy transport 会 config fail closed。 |
+| `tests/integrations/mcp/test_legacy_http_sse_transport.py` | 覆盖 endpoint event 解析、same-origin POST、无 Streamable HTTP headers、missing/invalid endpoint、SSE message response、batch rejection。 |
+| `tests/integrations/mcp/test_2024_legacy_runtime_discovery.py` | 覆盖 fake 2024 server initialize、initialized、tools/list、ordinary tools/call、runtime discovery descriptor 注册与 optional/required diagnostic。 |
+| `tests/fixtures/mcp/messages/2024-11-05/`、`tests/fixtures/mcp/transports/2024-11-05/` | 已新增 2024 message 与 legacy HTTP+SSE fixture。 |
+
 ## 5. 功能需求
 
 | ID | Requirement | Priority |
@@ -42,20 +53,20 @@
 | MCP-B-FR-001 | config validation 必须允许 `transport: legacy_http_sse` 仅与 `2024-11-05` 配对。 | P0 |
 | MCP-B-FR-002 | `LegacyHTTPSSETransport` 必须连接配置中的 SSE endpoint。 | P0 |
 | MCP-B-FR-003 | transport 必须从 SSE stream 的 `endpoint` event 中解析 server-provided POST endpoint。 | P0 |
-| MCP-B-FR-004 | 在 POST endpoint 未建立前发送 JSON-RPC request 必须 fail closed。 | P0 |
+| MCP-B-FR-004 | 在 POST endpoint 未从 `endpoint` event 建立前发送 JSON-RPC request 必须 fail closed，且 reason 为 `legacy_endpoint_missing` 或 `legacy_endpoint_invalid`。 | P0 |
 | MCP-B-FR-005 | transport 必须把后续 JSON-RPC object POST 到 server-provided endpoint。 | P0 |
 | MCP-B-FR-006 | transport 必须拒绝 JSON-RPC batch arrays。 | P0 |
 | MCP-B-FR-007 | transport 必须支持普通 JSON-RPC response 与 SSE message event 响应路径。 | P0 |
 | MCP-B-FR-008 | endpoint、auth、event id 诊断必须脱敏。 | P0 |
-| MCP-B-FR-009 | fake 2024 server 必须覆盖 initialize、initialized、tools/list、tools/call、malformed endpoint event、missing endpoint event。 | P0 |
+| MCP-B-FR-009 | fake 2024 server / transport tests 必须覆盖 initialize、initialized、tools/list、tools/call、invalid endpoint event、missing endpoint event。 | P0 |
 | MCP-B-FR-010 | 2024 server discovery 成功后应能注册 read-only public MCP tool descriptor。 | P1 |
 
 ## 6. 非功能需求
 
 | 类型 | Requirement |
 |---|---|
-| 安全 | POST endpoint 来自 server event，必须经过 endpoint allowlist / scheme / host 校验，不得盲目信任。 |
-| 稳定性 | SSE connect、endpoint event 等待与 POST 请求必须有独立 timeout。 |
+| 安全 | POST endpoint 来自 server event，必须经过 scheme、same-origin host/port 与 localhost HTTP gate 校验；diagnostic 只能记录 fingerprint，不得记录 raw endpoint/query。 |
+| 稳定性 | SSE connect / endpoint event 读取与 POST 请求必须受 `timeout_seconds` 约束；首版不承诺完整 reconnect/resume。 |
 | 兼容性 | 2024 legacy transport 不发送 `MCP-Protocol-Version` / `MCP-Session-Id` 作为协议必需 header。 |
 | 可维护性 | legacy transport 只能复用通用 parser/helper，不继承 Streamable HTTP 状态机。 |
 | 可观测 | 失败 diagnostic 使用 reason code：`legacy_sse_connect_failed`、`legacy_endpoint_missing`、`legacy_endpoint_invalid`、`legacy_post_failed`。 |
@@ -81,7 +92,7 @@ mcp:
 1. Runtime 读取 server config 并验证 `2024-11-05` + `legacy_http_sse` 配对。
 2. `LegacyHTTPSSETransport` 连接 SSE endpoint。
 3. transport 等待并解析 `endpoint` event。
-4. POST endpoint 通过 endpoint allowlist、scheme 与 secret redaction 检查。
+4. POST endpoint 通过 scheme、same-origin host/port、localhost HTTP gate 与 secret redaction 检查。
 5. MCP client 发送 `initialize.params.protocolVersion = "2024-11-05"`。
 6. server 返回 `InitializeResult.protocolVersion = "2024-11-05"`。
 7. client 保存 negotiated session 并发送 `notifications/initialized`。
@@ -94,7 +105,7 @@ mcp:
 |---|---|
 | SSE endpoint 连接失败 | optional skip / required fail，reason `legacy_sse_connect_failed`。 |
 | endpoint event 缺失或超时 | optional skip / required fail，reason `legacy_endpoint_missing`。 |
-| endpoint URL 不合法或不在 allowlist | fail closed，reason `legacy_endpoint_invalid`。 |
+| endpoint URL 不合法、跨 origin、scheme 不匹配或不满足 localhost HTTP gate | fail closed，reason `legacy_endpoint_invalid`。 |
 | POST endpoint 返回非 JSON-RPC object | protocol error。 |
 | SSE data 非 JSON-RPC object | protocol error。 |
 | server 返回非 `2024-11-05` protocolVersion | 按 PRD-A pin mismatch fail closed。 |
@@ -120,6 +131,7 @@ mcp:
 - `tests/fixtures/mcp/transports/2024-11-05/legacy_http_sse_*`
 - `tests/integrations/mcp/test_legacy_http_sse_transport.py`
 - `tests/integrations/mcp/test_2024_legacy_runtime_discovery.py`
+- `tests/integrations/mcp/test_protocol_version_negotiation.py`
 
 ## 12. 风险与假设
 

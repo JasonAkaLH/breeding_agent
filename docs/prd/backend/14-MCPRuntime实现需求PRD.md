@@ -3,7 +3,7 @@
 - **范围**：后端 / MCP client runtime / capability 接入 / 外部工具治理
 - **文档状态**：Phase 1 已实现（2026-05-12）；长任务 / 完整流式 SSE 扩展见 `docs/prd/backend/17-MCP长任务流式SSEPRD.md`
 - **日期**：2026-05-12
-- **协议参考版本**：Model Context Protocol latest spec 2025-11-25 官方规范
+- **协议参考版本**：Model Context Protocol `2025-11-25` latest features + 四版本 client compatibility matrix（`2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25`，见 `docs/prd/MCP/compatibility/README.md`）
 
 ## 1. 背景
 
@@ -31,6 +31,15 @@
 - MCP 2025-11-25 Tools：https://modelcontextprotocol.io/specification/2025-11-25/server/tools
 - MCP 2025-11-25 Authorization：https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 - MCP 2025-11-25 Key Changes：https://modelcontextprotocol.io/specification/2025-11-25/changelog
+
+### 2.0A 四版本 client compatibility matrix
+
+本 PRD 的 v1 普通 MCP tools 链路不再只声明 single latest baseline。仓库内 MCP Client 兼容目标以 `docs/prd/MCP/compatibility/README.md` 和 `SUPPORTED_MCP_PROTOCOL_VERSIONS` 为准，四版本 client compatibility matrix 覆盖 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25`：
+
+- `2024-11-05`：legacy HTTP+SSE transport family，仅用于普通 `initialize`、`tools/list`、`tools/call` 兼容。
+- `2025-03-26`、`2025-06-18`、`2025-11-25`：Streamable HTTP transport family，后续 HTTP 请求使用 negotiated `MCP-Protocol-Version`。
+- `2025-11-25 latest features`（Tasks、progress、cancellation、long-task Streamable HTTP/SSE）仍由 `docs/prd/backend/17-MCP长任务流式SSEPRD.md` 和 `docs/prd/MCP/` Phase 0-5 轨道治理，不等同于四版本普通 tools 首版兼容范围。
+
 
 ### 2.1 MCP 2025-11-25 标准通用通信方式
 

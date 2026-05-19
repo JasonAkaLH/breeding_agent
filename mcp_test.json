@@ -1,34 +1,14 @@
 {
-  "test_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/test": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/test"
-      }
-    }
-  },
-  "darb_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/darb": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/darb"
-      }
-    }
-  },
-  "germ_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/germ": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/germ"
-      }
-    }
-  },
-  "gws_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/gws": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/gws"
-      }
+  "mcpServers": {
+    "example-test-server": {
+      "url": "http://example.internal/gateway/mcp/sse",
+      "transport": "legacy_http_sse",
+      "protocolVersion": "2024-11-05",
+      "headers": {
+        "X-Example-Tenant": "example-tenant",
+        "X-Example-User": "example-user"
+      },
+      "enabled": false
     }
   }
 }

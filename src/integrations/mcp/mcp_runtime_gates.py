@@ -5,6 +5,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .protocol import (
+    SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
+    SUPPORTED_MCP_PROTOCOL_VERSIONS,
+    mcp_remote_transport_family_for_protocol_version,
+)
 from .rust_contract import load_mcp_runtime_contract
 
 _ALLOWED_SOURCES = frozenset({"ci_pipeline", "deployment_pipeline", "runtime_allowlist"})
@@ -52,6 +57,72 @@ _BENCHMARK_METRICS = (
     "sanitized_output_bytes",
 )
 _CONFORMANCE_PHASES = ("phase_0", "phase_1", "phase_2", "phase_3", "phase_4", "phase_5")
+_CLIENT_CONFORMANCE_SCHEMA_VERSION = "maf.mcp.client_compatibility_conformance.v1"
+_CONFORMANCE_GLOBAL_SAFETY_GATES = (
+    "jsonrpc_batch_rejected",
+    "raw_id_redaction_passed",
+    "safe_diagnostics_passed",
+)
+
+_ALLOWED_CLIENT_ADAPTERS = ("official_rust_sdk", "python_legacy")
+_MATRIX_SCHEMA_VERSION = "maf.mcp.client_compatibility_conformance_matrix.v1"
+_SHADOW_COMPARE_SCHEMA_VERSION = "maf.mcp.official_rust_sdk_shadow_compare.v1"
+_ENFORCE_ALLOWLIST_SCHEMA_VERSION = "maf.mcp.adapter_enforce_allowlist.v1"
+_CONFORMANCE_TRANSPORT_SCOPE = "remote_http_only_until_stdio_sandbox_passes"
+_MATRIX_REQUIRED_ADAPTER_FIELDS = (
+    "initialize",
+    "initialized",
+    "tools_list",
+    "tools_call",
+    "redaction",
+    "plaintext_http_audit",
+    "redirect_origin_safety",
+    "payload_size_limit",
+)
+_MATRIX_2024_REQUIRED_FIELDS = ("persistent_sse_response", "request_id_correlation")
+_MATRIX_2025_REQUIRED_FIELDS = ("object_response", "sse_response")
+_SHADOW_REQUIRED_COMPARED_FIELDS = frozenset(
+    {
+        "negotiated_protocol_version",
+        "server_info",
+        "capabilities",
+        "tools_descriptor_shape",
+        "safe_tool_call_result_shape",
+        "error_category",
+    }
+)
+_SHADOW_STATUSES = frozenset({"matched", "mismatched", "skipped"})
+_OFFICIAL_SDK_OPERATIONAL_STATUSES = frozenset(
+    {"passed", "partial_shadow_verified", "unsupported_transport", "pending_adapter_contract"}
+)
+_MATRIX_EVIDENCE_REFS_FIELD = "evidence_refs"
+_ENFORCE_ROLLBACK_PATHS = frozenset({"python_legacy_adapter", "deployment_rollback", "legacy_mcp_runtime_flag"})
+
+_CONFORMANCE_VERSION_GATES = (
+    "initialize",
+    "transport",
+    "tools_list",
+    "tools_call",
+    "batch_rejected",
+    "raw_id_redaction_passed",
+    "safe_diagnostics_passed",
+)
+_FORBIDDEN_CONFORMANCE_FIELD_NAMES = frozenset(
+    {
+        "authorization",
+        "endpoint",
+        "last_event_id",
+        "progress_token",
+        "raw_endpoint",
+        "raw_last_event_id",
+        "raw_progress_token",
+        "raw_session_id",
+        "raw_tool_output",
+        "session_id",
+        "token",
+        "tool_output",
+    }
+)
 _OPS_OBSERVABILITY = ("health_dashboard", "readiness_dashboard", "slo_dashboard", "structured_metrics")
 _OPS_ALERTS = (
     "sidecar_unavailable",
@@ -221,19 +292,206 @@ def artifact_allowlist_entry_matches_manifest(entry: object, manifest: Mapping[s
 def validate_mcp_runtime_conformance_report(report: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(report, Mapping):
         _raise_conformance_blocked()
-    if str(report.get("mcp_spec_version") or "") != "2025-11-25":
+    if report.get("schema_version") != _CLIENT_CONFORMANCE_SCHEMA_VERSION:
+        _raise_conformance_blocked()
+    _reject_forbidden_conformance_fields(report)
+    supported_versions = _string_tuple(report.get("supported_mcp_spec_versions"))
+    if supported_versions != SUPPORTED_MCP_PROTOCOL_VERSION_ORDER:
+        _raise_conformance_blocked()
+    if set(supported_versions) != SUPPORTED_MCP_PROTOCOL_VERSIONS:
         _raise_conformance_blocked()
     phase_results = report.get("phase_results")
     if not isinstance(phase_results, Mapping):
         _raise_conformance_blocked()
     _require_boolean_evidence(phase_results, _CONFORMANCE_PHASES, _raise_conformance_blocked)
-    if report.get("jsonrpc_batch_rejected") is not True:
+    _require_boolean_evidence(report, _CONFORMANCE_GLOBAL_SAFETY_GATES, _raise_conformance_blocked)
+    version_results = report.get("version_results")
+    if not isinstance(version_results, Mapping) or set(version_results.keys()) != set(
+        SUPPORTED_MCP_PROTOCOL_VERSION_ORDER
+    ):
         _raise_conformance_blocked()
-    if report.get("raw_id_redaction_passed") is not True:
+    for version in SUPPORTED_MCP_PROTOCOL_VERSION_ORDER:
+        result = version_results.get(version)
+        if not isinstance(result, Mapping):
+            _raise_conformance_blocked()
+        _reject_forbidden_conformance_fields(result)
+        if result.get("transport_family") != mcp_remote_transport_family_for_protocol_version(version):
+            _raise_conformance_blocked()
+        _require_boolean_evidence(result, _CONFORMANCE_VERSION_GATES, _raise_conformance_blocked)
+    return {
+        "supported_mcp_spec_versions": ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        "phase_results": ",".join(_CONFORMANCE_PHASES),
+        "transport_families": "2024-11-05=legacy_http_sse,2025+=streamable_http",
+        "version_results": ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+    }
+
+
+def validate_mcp_official_sdk_conformance_matrix(matrix: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(matrix, Mapping):
+        _raise_conformance_blocked()
+    if matrix.get("schema_version") != _MATRIX_SCHEMA_VERSION:
+        _raise_conformance_blocked()
+    _reject_forbidden_conformance_fields(matrix)
+    supported_versions = _string_tuple(matrix.get("supported_mcp_spec_versions"))
+    if supported_versions != SUPPORTED_MCP_PROTOCOL_VERSION_ORDER:
+        _raise_conformance_blocked()
+    if matrix.get("transport_scope") != _CONFORMANCE_TRANSPORT_SCOPE:
+        _raise_conformance_blocked()
+    if matrix.get("stdio_sandbox_conformance_passed") is not False:
+        _raise_conformance_blocked()
+    expected_transport_families = matrix.get("expected_transport_families")
+    if not isinstance(expected_transport_families, Mapping):
+        _raise_conformance_blocked()
+    adapter_conformance = matrix.get("adapter_conformance")
+    if not isinstance(adapter_conformance, Mapping) or set(adapter_conformance.keys()) != set(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER):
+        _raise_conformance_blocked()
+    for version in SUPPORTED_MCP_PROTOCOL_VERSION_ORDER:
+        expected_family = mcp_remote_transport_family_for_protocol_version(version)
+        if expected_transport_families.get(version) != expected_family:
+            _raise_conformance_blocked()
+        version_entry = adapter_conformance.get(version)
+        if not isinstance(version_entry, Mapping) or set(version_entry.keys()) != {expected_family}:
+            _raise_conformance_blocked()
+        transport_entry = version_entry.get(expected_family)
+        if not isinstance(transport_entry, Mapping) or set(transport_entry.keys()) != set(_ALLOWED_CLIENT_ADAPTERS):
+            _raise_conformance_blocked()
+        for adapter in _ALLOWED_CLIENT_ADAPTERS:
+            adapter_result = transport_entry.get(adapter)
+            if not isinstance(adapter_result, Mapping):
+                _raise_conformance_blocked()
+            _require_existing_evidence_refs(adapter_result)
+            required_fields = _MATRIX_REQUIRED_ADAPTER_FIELDS
+            required_fields += _MATRIX_2024_REQUIRED_FIELDS if version == "2024-11-05" else _MATRIX_2025_REQUIRED_FIELDS
+            if adapter == "python_legacy":
+                _require_boolean_evidence(adapter_result, required_fields, _raise_conformance_blocked)
+                continue
+            operational_status = str(adapter_result.get("operational_status") or "")
+            if operational_status not in _OFFICIAL_SDK_OPERATIONAL_STATUSES:
+                _raise_conformance_blocked()
+            shadow_compare = adapter_result.get("shadow_compare")
+            if operational_status == "passed":
+                _require_boolean_evidence(adapter_result, required_fields, _raise_conformance_blocked)
+                if shadow_compare != "matched":
+                    _raise_conformance_blocked()
+            elif operational_status == "partial_shadow_verified":
+                if version == "2024-11-05":
+                    _raise_conformance_blocked()
+                _require_boolean_evidence(
+                    adapter_result,
+                    _MATRIX_REQUIRED_ADAPTER_FIELDS + ("object_response",),
+                    _raise_conformance_blocked,
+                )
+                if adapter_result.get("sse_response") is not False:
+                    _raise_conformance_blocked()
+                if shadow_compare != "matched" or adapter_result.get("enforce_allowed") is not False:
+                    _raise_conformance_blocked()
+                if not _non_empty_string(adapter_result.get("sse_response_gap_reason")):
+                    _raise_conformance_blocked()
+            else:
+                if any(adapter_result.get(field) is True for field in required_fields):
+                    _raise_conformance_blocked()
+                if shadow_compare != "skipped" or adapter_result.get("enforce_allowed") is not False:
+                    _raise_conformance_blocked()
+                if not _non_empty_string(adapter_result.get("gap_reason")):
+                    _raise_conformance_blocked()
+    return {
+        "supported_mcp_spec_versions": ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        "adapters": ",".join(_ALLOWED_CLIENT_ADAPTERS),
+        "transport_scope": _CONFORMANCE_TRANSPORT_SCOPE,
+    }
+
+
+def validate_mcp_official_rust_sdk_shadow_compare(evidence: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(evidence, Mapping):
+        _raise_conformance_blocked()
+    if evidence.get("schema_version") != _SHADOW_COMPARE_SCHEMA_VERSION:
+        _raise_conformance_blocked()
+    _reject_forbidden_conformance_fields(evidence)
+    if evidence.get("visible_adapter") != "python_legacy" or evidence.get("shadow_adapter") != "official_rust_sdk":
+        _raise_conformance_blocked()
+    results = evidence.get("results")
+    if not isinstance(results, list) or not results:
+        _raise_conformance_blocked()
+    seen: set[str] = set()
+    statuses: set[str] = set()
+    for item in results:
+        if not isinstance(item, Mapping):
+            _raise_conformance_blocked()
+        _reject_forbidden_conformance_fields(item)
+        version = str(item.get("protocol_version") or "")
+        if version not in SUPPORTED_MCP_PROTOCOL_VERSIONS:
+            _raise_conformance_blocked()
+        if item.get("transport_family") != mcp_remote_transport_family_for_protocol_version(version):
+            _raise_conformance_blocked()
+        status = str(item.get("status") or "")
+        if status not in _SHADOW_STATUSES:
+            _raise_conformance_blocked()
+        if version in seen:
+            _raise_conformance_blocked()
+        skip_reason = item.get("skip_reason")
+        if status == "skipped" and not _non_empty_string(skip_reason):
+            _raise_conformance_blocked()
+        if status != "skipped" and skip_reason is not None:
+            _raise_conformance_blocked()
+        if version == "2024-11-05" and status != "skipped":
+            _raise_conformance_blocked()
+        statuses.add(status)
+        compared_fields = frozenset(str(field) for field in item.get("compared_fields") or ())
+        if not _SHADOW_REQUIRED_COMPARED_FIELDS.issubset(compared_fields):
+            _raise_conformance_blocked()
+        redaction = item.get("redaction")
+        if not isinstance(redaction, Mapping):
+            _raise_conformance_blocked()
+        if redaction.get("header_values") != "redacted" or redaction.get("raw_payload") != "omitted":
+            _raise_conformance_blocked()
+        if item.get("visible_path_unchanged") is not True:
+            _raise_conformance_blocked()
+        seen.add(version)
+    if seen != set(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER):
         _raise_conformance_blocked()
     return {
-        "mcp_spec_version": "2025-11-25",
-        "phase_results": ",".join(_CONFORMANCE_PHASES),
+        "visible_adapter": "python_legacy",
+        "shadow_adapter": "official_rust_sdk",
+        "shadow_statuses": ",".join(sorted(statuses)),
+    }
+
+
+def validate_mcp_enforce_allowlist(allowlist: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(allowlist, Mapping):
+        _raise_enforce_allowlist_blocked()
+    if allowlist.get("schema_version") != _ENFORCE_ALLOWLIST_SCHEMA_VERSION:
+        _raise_enforce_allowlist_blocked()
+    _reject_forbidden_conformance_fields(allowlist)
+    entries = allowlist.get("allowed_combinations")
+    if not isinstance(entries, list) or not entries:
+        _raise_enforce_allowlist_blocked()
+    combinations: list[str] = []
+    enforce_count = 0
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            _raise_enforce_allowlist_blocked()
+        version = str(entry.get("protocol_version") or "")
+        adapter = str(entry.get("adapter") or "")
+        server_scope = str(entry.get("server_scope") or "")
+        transport_family = str(entry.get("transport_family") or "")
+        if not server_scope or adapter not in _ALLOWED_CLIENT_ADAPTERS or version not in SUPPORTED_MCP_PROTOCOL_VERSIONS:
+            _raise_enforce_allowlist_blocked()
+        if transport_family != mcp_remote_transport_family_for_protocol_version(version):
+            _raise_enforce_allowlist_blocked()
+        shadow_status = str(entry.get("shadow_compare_status") or "")
+        if shadow_status not in _SHADOW_STATUSES:
+            _raise_enforce_allowlist_blocked()
+        if entry.get("rollback_path") not in _ENFORCE_ROLLBACK_PATHS:
+            _raise_enforce_allowlist_blocked()
+        enforce_allowed = entry.get("enforce_allowed") is True
+        if enforce_allowed and shadow_status != "matched":
+            _raise_enforce_allowlist_blocked()
+        if enforce_allowed:
+            enforce_count += 1
+        combinations.append(f"{server_scope}|{version}|{transport_family}|{adapter}|enforce={str(enforce_allowed).lower()}")
+    return {
+        "enforce_allowed_combinations": str(enforce_count),
+        "combinations": ",".join(sorted(combinations)),
     }
 
 
@@ -345,8 +603,40 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
     return payload
 
 
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    parsed = tuple(str(item) for item in value)
+    return parsed if all(parsed) else ()
+
+
+def _reject_forbidden_conformance_fields(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if str(key).strip().lower() in _FORBIDDEN_CONFORMANCE_FIELD_NAMES:
+                _raise_conformance_blocked()
+            _reject_forbidden_conformance_fields(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _reject_forbidden_conformance_fields(nested)
+
+
 def _non_empty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _require_existing_evidence_refs(evidence: Mapping[str, Any]) -> None:
+    refs = evidence.get(_MATRIX_EVIDENCE_REFS_FIELD)
+    if not isinstance(refs, list) or not refs:
+        _raise_conformance_blocked()
+    for ref in refs:
+        if not _non_empty_string(ref):
+            _raise_conformance_blocked()
+        path_text = ref.split("::", 1)[0].strip()
+        if not path_text or Path(path_text).is_absolute() or ".." in Path(path_text).parts:
+            _raise_conformance_blocked()
+        if not Path(path_text).is_file():
+            _raise_conformance_blocked()
 
 
 def _is_number(value: Any) -> bool:
@@ -398,11 +688,18 @@ def _raise_decommission_blocked() -> None:
     raise RuntimeError("mcp_runtime_decommission_blocked: Rust MCP Runtime legacy decommission evidence is incomplete")
 
 
+def _raise_enforce_allowlist_blocked() -> None:
+    raise RuntimeError("mcp_runtime_enforce_allowlist_blocked: MCP adapter enforce allowlist evidence is incomplete")
+
+
 __all__ = [
     "artifact_allowlist_digests",
     "artifact_allowlist_entry_matches_manifest",
     "load_mcp_runtime_artifact_trust",
     "mcp_runtime_artifact_metadata_from_manifest",
+    "validate_mcp_enforce_allowlist",
+    "validate_mcp_official_rust_sdk_shadow_compare",
+    "validate_mcp_official_sdk_conformance_matrix",
     "validate_mcp_runtime_artifact_provenance",
     "validate_mcp_runtime_benchmark_report",
     "validate_mcp_runtime_conformance_report",

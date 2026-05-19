@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 
 from src.integrations.mcp.config import MCPRuntimeConfig
-from src.integrations.mcp.protocol import MCP_PROTOCOL_VERSION
+from src.integrations.mcp.protocol import (
+    MCP_PROTOCOL_VERSION,
+    SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
+)
 from src.integrations.mcp.rust_contract import load_mcp_runtime_contract
 from src.integrations.mcp.sidecar import (
     MCP_SIDECAR_COMPONENT,
@@ -70,8 +73,31 @@ class MCPPhase1SidecarFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.ready)
         self.assertEqual(negotiated.protocol_version, MCP_SIDECAR_PROTOCOL_VERSION)
         self.assertEqual(negotiated.external_mcp_protocol_version, MCP_PROTOCOL_VERSION)
+        self.assertEqual(negotiated.external_mcp_protocol_versions, (MCP_PROTOCOL_VERSION,))
         self.assertNotEqual(negotiated.protocol_version, negotiated.external_mcp_protocol_version)
         self.assertEqual(await client.readiness(), {"ready": True, "component": MCP_SIDECAR_COMPONENT})
+
+    async def test_sidecar_handshake_fails_closed_when_multi_version_is_claimed_without_feature(self) -> None:
+        version = MCPSidecarVersionInfo(
+            component=MCP_SIDECAR_COMPONENT,
+            build_version="test-build",
+            protocol_version=MCP_SIDECAR_PROTOCOL_VERSION,
+            schema_hash="schema-v1",
+            error_code_table_hash="errors-v1",
+            supported_features=frozenset({"health", "compatibility_handshake"}),
+            min_client_version="0.1.0",
+            max_client_version="0.1.x",
+            external_mcp_protocol_version=MCP_PROTOCOL_VERSION,
+            external_mcp_protocol_versions=SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
+        )
+        client = MCPSidecarClient(
+            transport=InMemoryMCPSidecarTransport(version=version),
+            expected_schema_hash="schema-v1",
+            expected_error_code_table_hash="errors-v1",
+        )
+
+        with self.assertRaisesRegex(MCPSidecarCompatibilityError, "multi-version"):
+            await client.handshake()
 
     async def test_sidecar_handshake_fails_closed_on_component_schema_or_feature_mismatch(self) -> None:
         bad_version = MCPSidecarVersionInfo(

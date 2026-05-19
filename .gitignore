@@ -8,6 +8,7 @@
 
 # Local config
 /config.yaml
+/mcp_server_config.json
 
 # Skill runtime artifacts
 /skill/**/outputs/

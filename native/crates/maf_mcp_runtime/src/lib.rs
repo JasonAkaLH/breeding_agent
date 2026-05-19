@@ -28,6 +28,38 @@ pub const FEATURE_MCP_TASKS: &str = "mcp_tasks";
 pub const FEATURE_TASK_AUGMENTED_TOOLS_CALL: &str = "task_augmented_tools_call";
 pub const FEATURE_REMOTE_CANCEL: &str = "remote_cancel";
 pub const RELATED_TASK_META_KEY: &str = "io.modelcontextprotocol/related-task";
+pub const ADAPTER_PYTHON_LEGACY: &str = "python_legacy";
+pub const ADAPTER_OFFICIAL_RUST_SDK: &str = "official_rust_sdk";
+pub const OFFICIAL_RUST_SDK_CRATE_NAME: &str = "rmcp";
+pub const OFFICIAL_RUST_SDK_DEPENDENCY_MODE: &str = "linked_client_streamable_http_shadow_adapter";
+pub const OFFICIAL_RUST_SDK_VERSION_REQUIREMENT: &str = "1.7.0";
+pub const OFFICIAL_RUST_SDK_LICENSE: &str = "Apache-2.0";
+pub const OFFICIAL_RUST_SDK_METADATA_STATUS: &str =
+    "linked_client_streamable_http_shadow_compare_only";
+pub const OFFICIAL_RUST_SDK_FEATURE_FLAGS: &[&str] = &[
+    "client",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+];
+pub const OFFICIAL_RUST_SDK_API_MARKERS: &[&str] = &[
+    "rmcp::model::CallToolRequestParams",
+    "rmcp::transport::StreamableHttpClientTransportConfig",
+];
+pub const OFFICIAL_RUST_SDK_OPERATIONAL_METHODS: &[&str] = &[
+    "initialize",
+    "list_tools",
+    "call_tool",
+    "close",
+    "diagnostics",
+];
+pub const SHADOW_FIELD_NEGOTIATED_PROTOCOL_VERSION: &str = "negotiated_protocol_version";
+pub const SHADOW_FIELD_SERVER_INFO: &str = "server_info";
+pub const SHADOW_FIELD_CAPABILITIES: &str = "capabilities";
+pub const SHADOW_FIELD_TOOL_DESCRIPTOR_SHAPE: &str = "tools_descriptor_shape";
+pub const SHADOW_FIELD_SAFE_TOOL_CALL_RESULT_SHAPE: &str = "safe_tool_call_result_shape";
+pub const SHADOW_FIELD_ERROR_CATEGORY: &str = "error_category";
+pub const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
+    &["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 
 pub const SUPPORTED_FEATURES: &[&str] = &[
     FEATURE_HEALTH,
@@ -93,6 +125,278 @@ pub fn mcp_runtime_contract_json() -> Result<String, serde_json::Error> {
     let mut json = serde_json::to_string_pretty(&mcp_runtime_contract_artifact())?;
     json.push('\n');
     Ok(json)
+}
+
+#[must_use]
+pub fn approved_mcp_protocol_versions() -> Vec<String> {
+    string_values(SUPPORTED_MCP_PROTOCOL_VERSIONS)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficialRustSdkAdapterMetadata {
+    pub adapter_name: String,
+    pub sdk_crate_name: String,
+    pub dependency_mode: String,
+    pub version_requirement: String,
+    pub license: String,
+    pub feature_flags: Vec<String>,
+    pub api_markers: Vec<String>,
+    pub operational_methods: Vec<String>,
+    pub compile_time_markers: Vec<String>,
+    pub metadata_status: String,
+    pub expands_approved_protocol_versions: bool,
+    pub approved_mcp_protocol_versions: Vec<String>,
+}
+
+#[must_use]
+pub fn official_rust_sdk_compile_time_markers() -> Vec<String> {
+    vec![
+        std::any::type_name::<rmcp::model::CallToolRequestParams>().to_owned(),
+        std::any::type_name::<
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig,
+        >()
+        .to_owned(),
+    ]
+}
+
+#[must_use]
+pub fn official_rust_sdk_adapter_metadata() -> OfficialRustSdkAdapterMetadata {
+    OfficialRustSdkAdapterMetadata {
+        adapter_name: ADAPTER_OFFICIAL_RUST_SDK.to_owned(),
+        sdk_crate_name: OFFICIAL_RUST_SDK_CRATE_NAME.to_owned(),
+        dependency_mode: OFFICIAL_RUST_SDK_DEPENDENCY_MODE.to_owned(),
+        version_requirement: OFFICIAL_RUST_SDK_VERSION_REQUIREMENT.to_owned(),
+        license: OFFICIAL_RUST_SDK_LICENSE.to_owned(),
+        feature_flags: string_values(OFFICIAL_RUST_SDK_FEATURE_FLAGS),
+        api_markers: string_values(OFFICIAL_RUST_SDK_API_MARKERS),
+        operational_methods: string_values(OFFICIAL_RUST_SDK_OPERATIONAL_METHODS),
+        compile_time_markers: official_rust_sdk_compile_time_markers(),
+        metadata_status: OFFICIAL_RUST_SDK_METADATA_STATUS.to_owned(),
+        expands_approved_protocol_versions: false,
+        approved_mcp_protocol_versions: approved_mcp_protocol_versions(),
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficialRustSdkClientConfig {
+    pub endpoint: String,
+    pub protocol_version: String,
+    #[serde(skip_serializing)]
+    pub authorization_bearer_token: Option<String>,
+    #[serde(skip_serializing)]
+    pub custom_headers: BTreeMap<String, String>,
+    pub allow_stateless: bool,
+}
+
+impl std::fmt::Debug for OfficialRustSdkClientConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OfficialRustSdkClientConfig")
+            .field("endpoint", &self.endpoint)
+            .field("protocol_version", &self.protocol_version)
+            .field(
+                "authorization_bearer_token",
+                &self
+                    .authorization_bearer_token
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field(
+                "custom_header_names",
+                &self.custom_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("allow_stateless", &self.allow_stateless)
+            .finish()
+    }
+}
+
+impl OfficialRustSdkClientConfig {
+    #[must_use]
+    pub fn streamable_http(
+        endpoint: impl Into<String>,
+        protocol_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            protocol_version: protocol_version.into(),
+            authorization_bearer_token: None,
+            custom_headers: BTreeMap::new(),
+            allow_stateless: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.authorization_bearer_token = Some(token.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_custom_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.custom_headers.insert(name.into(), value.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficialRustSdkToolDescriptor {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub input_schema_keys: Vec<String>,
+    pub output_schema_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficialRustSdkToolCallResult {
+    pub is_error: bool,
+    pub content_count: usize,
+    pub structured_content_present: bool,
+    pub text: SanitizedToolOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficialRustSdkDiagnostics {
+    pub adapter_name: String,
+    pub transport: String,
+    pub endpoint_fingerprint: String,
+    pub negotiated_protocol_version: Option<String>,
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub server_capabilities_shape: Vec<String>,
+    pub closed: bool,
+}
+
+#[derive(Debug)]
+pub struct OfficialRustSdkClientSession {
+    service: rmcp::service::RunningService<rmcp::RoleClient, rmcp::model::ClientInfo>,
+    transport: String,
+    endpoint_fingerprint: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OfficialRustSdkAdapter;
+
+impl OfficialRustSdkAdapter {
+    #[must_use]
+    pub fn metadata(self) -> OfficialRustSdkAdapterMetadata {
+        official_rust_sdk_adapter_metadata()
+    }
+
+    #[must_use]
+    pub fn compare_shadow(
+        self,
+        request: OfficialRustSdkShadowCompareRequest,
+    ) -> OfficialRustSdkShadowCompareEvidence {
+        compare_official_rust_sdk_shadow(request)
+    }
+
+    #[must_use]
+    pub fn map_error(self, kind: OfficialRustSdkErrorKind, raw_message: &str) -> TypedError {
+        map_official_rust_sdk_error(kind, raw_message)
+    }
+
+    pub async fn initialize(
+        self,
+        config: OfficialRustSdkClientConfig,
+    ) -> Result<OfficialRustSdkClientSession, TypedError> {
+        use rmcp::{
+            ServiceExt as _,
+            model::{ClientCapabilities, ClientInfo, Implementation},
+            transport::{
+                StreamableHttpClientTransport,
+                streamable_http_client::StreamableHttpClientTransportConfig,
+            },
+        };
+
+        let endpoint = config.endpoint.trim();
+        if endpoint.is_empty() {
+            return Err(map_official_rust_sdk_error(
+                OfficialRustSdkErrorKind::InitializeFailed,
+                "official Rust SDK endpoint is required",
+            ));
+        }
+        let protocol_version = protocol_version_from_str(&config.protocol_version)?;
+        let custom_headers = http_headers_from_config(&config.custom_headers)?;
+
+        let mut transport_config =
+            StreamableHttpClientTransportConfig::with_uri(endpoint.to_owned());
+        transport_config.allow_stateless = config.allow_stateless;
+        transport_config.auth_header = config.authorization_bearer_token;
+        transport_config.custom_headers = custom_headers;
+
+        let client_info = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("multi_agent_framework", env!("CARGO_PKG_VERSION")),
+        )
+        .with_protocol_version(protocol_version);
+        let transport = StreamableHttpClientTransport::from_config(transport_config);
+        let service = client_info.serve(transport).await.map_err(|error| {
+            map_official_rust_sdk_error(
+                OfficialRustSdkErrorKind::InitializeFailed,
+                &error.to_string(),
+            )
+        })?;
+
+        Ok(OfficialRustSdkClientSession {
+            service,
+            transport: "streamable_http".to_owned(),
+            endpoint_fingerprint: stable_fingerprint(endpoint),
+        })
+    }
+}
+
+impl OfficialRustSdkClientSession {
+    pub async fn list_tools(&self) -> Result<Vec<OfficialRustSdkToolDescriptor>, TypedError> {
+        let tools = self.service.list_all_tools().await.map_err(|error| {
+            map_official_rust_sdk_error(
+                OfficialRustSdkErrorKind::RemoteServerError,
+                &error.to_string(),
+            )
+        })?;
+        Ok(tools.into_iter().map(tool_descriptor_from_rmcp).collect())
+    }
+
+    pub async fn call_tool(
+        &self,
+        name: impl Into<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<OfficialRustSdkToolCallResult, TypedError> {
+        let params = rmcp::model::CallToolRequestParams::new(name.into()).with_arguments(arguments);
+        let result = self.service.call_tool(params).await.map_err(|error| {
+            map_official_rust_sdk_error(
+                OfficialRustSdkErrorKind::RemoteServerError,
+                &error.to_string(),
+            )
+        })?;
+        tool_call_result_from_rmcp(result)
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> OfficialRustSdkDiagnostics {
+        let server_info = self.service.peer_info();
+        OfficialRustSdkDiagnostics {
+            adapter_name: ADAPTER_OFFICIAL_RUST_SDK.to_owned(),
+            transport: self.transport.clone(),
+            endpoint_fingerprint: self.endpoint_fingerprint.clone(),
+            negotiated_protocol_version: server_info
+                .map(|info| info.protocol_version.as_str().to_owned()),
+            server_name: server_info.map(|info| info.server_info.name.clone()),
+            server_version: server_info.map(|info| info.server_info.version.clone()),
+            server_capabilities_shape: server_info
+                .map(|info| {
+                    json_object_shape(&serde_json::to_value(&info.capabilities).unwrap_or_default())
+                })
+                .unwrap_or_default(),
+            closed: self.service.is_closed(),
+        }
+    }
+
+    pub async fn close(&mut self) -> Result<(), TypedError> {
+        self.service.close().await.map(|_| ()).map_err(|error| {
+            map_official_rust_sdk_error(OfficialRustSdkErrorKind::Internal, &error.to_string())
+        })
+    }
 }
 
 impl VersionInfo {
@@ -380,6 +684,325 @@ pub struct ExternalMcpContext {
     pub json_rpc_id_correlation: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedToolDescriptorShape {
+    pub name: String,
+    pub input_schema_fingerprint: Option<String>,
+    pub output_schema_fingerprint: Option<String>,
+    pub annotations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafeToolCallResultShape {
+    pub content_kinds: Vec<String>,
+    pub is_error: bool,
+    pub structured_content_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedMcpAdapterSnapshot {
+    pub adapter_name: String,
+    pub negotiated_protocol_version: Option<String>,
+    pub server_info: BTreeMap<String, String>,
+    pub capabilities: BTreeMap<String, String>,
+    pub tool_descriptor_shapes: Vec<NormalizedToolDescriptorShape>,
+    pub safe_tool_call_result_shape: Option<SafeToolCallResultShape>,
+    pub error_category: Option<ErrorCategory>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShadowCompareStatus {
+    Matched,
+    Mismatched,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowRedactionEvidence {
+    pub header_values: String,
+    pub raw_payload: String,
+    pub raw_error: String,
+    pub server_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficialRustSdkShadowCompareRequest {
+    pub server_ref: String,
+    pub transport: String,
+    pub visible: NormalizedMcpAdapterSnapshot,
+    pub shadow: Option<NormalizedMcpAdapterSnapshot>,
+    pub skip_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfficialRustSdkShadowCompareEvidence {
+    pub server_fingerprint: String,
+    pub visible_adapter: String,
+    pub shadow_adapter: String,
+    pub protocol_version: Option<String>,
+    pub transport: String,
+    pub status: ShadowCompareStatus,
+    pub compared_fields: Vec<String>,
+    pub mismatched_fields: Vec<String>,
+    pub skip_reason: Option<String>,
+    pub redaction: ShadowRedactionEvidence,
+    pub error: Option<TypedError>,
+    pub adapter_metadata: OfficialRustSdkAdapterMetadata,
+    pub approved_mcp_protocol_versions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OfficialRustSdkErrorKind {
+    InitializeFailed,
+    UnsupportedCombination,
+    InvalidJsonRpc,
+    SchemaValidationFailed,
+    RemoteServerError,
+    DeadlineExceeded,
+    Cancelled,
+    Internal,
+}
+
+fn stable_fingerprint(value: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn compared_shadow_fields() -> Vec<String> {
+    string_values(&[
+        SHADOW_FIELD_NEGOTIATED_PROTOCOL_VERSION,
+        SHADOW_FIELD_SERVER_INFO,
+        SHADOW_FIELD_CAPABILITIES,
+        SHADOW_FIELD_TOOL_DESCRIPTOR_SHAPE,
+        SHADOW_FIELD_SAFE_TOOL_CALL_RESULT_SHAPE,
+        SHADOW_FIELD_ERROR_CATEGORY,
+    ])
+}
+
+fn default_shadow_redaction(server_ref: &str) -> ShadowRedactionEvidence {
+    ShadowRedactionEvidence {
+        header_values: "redacted".to_owned(),
+        raw_payload: "omitted".to_owned(),
+        raw_error: "redacted".to_owned(),
+        server_ref: stable_fingerprint(server_ref),
+    }
+}
+
+#[must_use]
+pub fn map_official_rust_sdk_error(
+    kind: OfficialRustSdkErrorKind,
+    raw_message: &str,
+) -> TypedError {
+    let (safe_message, _) = redact_authority_tokens(raw_message);
+    let (code, default_safe_message) = match kind {
+        OfficialRustSdkErrorKind::InitializeFailed => (
+            McpRuntimeErrorCode::ProtocolIncompatible,
+            "official Rust SDK initialization failed",
+        ),
+        OfficialRustSdkErrorKind::UnsupportedCombination => (
+            McpRuntimeErrorCode::ProtocolIncompatible,
+            "official Rust SDK unsupported version or transport",
+        ),
+        OfficialRustSdkErrorKind::InvalidJsonRpc => (
+            McpRuntimeErrorCode::JsonRpcInvalid,
+            "official Rust SDK returned invalid JSON-RPC",
+        ),
+        OfficialRustSdkErrorKind::SchemaValidationFailed => (
+            McpRuntimeErrorCode::SchemaValidationFailed,
+            "official Rust SDK schema validation failed",
+        ),
+        OfficialRustSdkErrorKind::RemoteServerError => (
+            McpRuntimeErrorCode::RemoteServerError,
+            "official Rust SDK remote server error",
+        ),
+        OfficialRustSdkErrorKind::DeadlineExceeded => (
+            McpRuntimeErrorCode::DeadlineExceeded,
+            "official Rust SDK deadline exceeded",
+        ),
+        OfficialRustSdkErrorKind::Cancelled => (
+            McpRuntimeErrorCode::Cancelled,
+            "official Rust SDK call cancelled",
+        ),
+        OfficialRustSdkErrorKind::Internal => (
+            McpRuntimeErrorCode::Internal,
+            "official Rust SDK internal error",
+        ),
+    };
+    let message = if safe_message.trim().is_empty() {
+        default_safe_message.to_owned()
+    } else {
+        safe_message
+    };
+    TypedError::new(code, message)
+        .with_safe_metadata("adapter", ADAPTER_OFFICIAL_RUST_SDK)
+        .with_safe_metadata("sdk_crate", OFFICIAL_RUST_SDK_CRATE_NAME)
+}
+
+fn protocol_version_from_str(version: &str) -> Result<rmcp::model::ProtocolVersion, TypedError> {
+    match version {
+        "2024-11-05" => Err(map_official_rust_sdk_error(
+            OfficialRustSdkErrorKind::UnsupportedCombination,
+            "2024-11-05 requires the legacy HTTP+SSE adapter; the official Rust SDK Streamable HTTP adapter is disabled for this combination",
+        )),
+        "2025-03-26" => Ok(rmcp::model::ProtocolVersion::V_2025_03_26),
+        "2025-06-18" => Ok(rmcp::model::ProtocolVersion::V_2025_06_18),
+        "2025-11-25" => Ok(rmcp::model::ProtocolVersion::V_2025_11_25),
+        _ => Err(map_official_rust_sdk_error(
+            OfficialRustSdkErrorKind::UnsupportedCombination,
+            "unsupported MCP protocol version for official Rust SDK adapter",
+        )),
+    }
+}
+
+fn http_headers_from_config(
+    headers: &BTreeMap<String, String>,
+) -> Result<std::collections::HashMap<http::HeaderName, http::HeaderValue>, TypedError> {
+    let mut parsed = std::collections::HashMap::new();
+    for (name, value) in headers {
+        let header_name = name.parse::<http::HeaderName>().map_err(|_| {
+            map_official_rust_sdk_error(
+                OfficialRustSdkErrorKind::SchemaValidationFailed,
+                "invalid official Rust SDK custom header name",
+            )
+        })?;
+        let header_value = http::HeaderValue::from_str(value).map_err(|_| {
+            map_official_rust_sdk_error(
+                OfficialRustSdkErrorKind::SchemaValidationFailed,
+                "invalid official Rust SDK custom header value",
+            )
+        })?;
+        parsed.insert(header_name, header_value);
+    }
+    Ok(parsed)
+}
+
+fn json_object_shape(value: &serde_json::Value) -> Vec<String> {
+    let mut keys = value
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+fn tool_descriptor_from_rmcp(tool: rmcp::model::Tool) -> OfficialRustSdkToolDescriptor {
+    let mut input_schema_keys = tool.input_schema.keys().cloned().collect::<Vec<_>>();
+    input_schema_keys.sort();
+    OfficialRustSdkToolDescriptor {
+        name: tool.name.into_owned(),
+        title: tool.title,
+        description: tool.description.map(std::borrow::Cow::into_owned),
+        input_schema_keys,
+        output_schema_present: tool.output_schema.is_some(),
+    }
+}
+
+fn tool_call_result_from_rmcp(
+    result: rmcp::model::CallToolResult,
+) -> Result<OfficialRustSdkToolCallResult, TypedError> {
+    let text = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let sanitized = sanitize_tool_output(&text).map_err(|error| error.typed_error)?;
+    Ok(OfficialRustSdkToolCallResult {
+        is_error: result.is_error.unwrap_or(false),
+        content_count: result.content.len(),
+        structured_content_present: result.structured_content.is_some(),
+        text: sanitized,
+    })
+}
+
+#[must_use]
+pub fn compare_official_rust_sdk_shadow(
+    request: OfficialRustSdkShadowCompareRequest,
+) -> OfficialRustSdkShadowCompareEvidence {
+    let compared_fields = compared_shadow_fields();
+    let adapter_metadata = official_rust_sdk_adapter_metadata();
+    let protocol_version = request.visible.negotiated_protocol_version.clone();
+    let redaction = default_shadow_redaction(&request.server_ref);
+
+    let Some(shadow) = request.shadow else {
+        let reason = request
+            .skip_reason
+            .unwrap_or_else(|| "official Rust SDK shadow adapter unavailable".to_owned());
+        return OfficialRustSdkShadowCompareEvidence {
+            server_fingerprint: redaction.server_ref.clone(),
+            visible_adapter: request.visible.adapter_name,
+            shadow_adapter: ADAPTER_OFFICIAL_RUST_SDK.to_owned(),
+            protocol_version,
+            transport: request.transport,
+            status: ShadowCompareStatus::Skipped,
+            compared_fields,
+            mismatched_fields: Vec::new(),
+            skip_reason: Some(reason.clone()),
+            redaction,
+            error: Some(
+                TypedError::new(McpRuntimeErrorCode::ProtocolIncompatible, reason)
+                    .with_safe_metadata("adapter", ADAPTER_OFFICIAL_RUST_SDK),
+            ),
+            approved_mcp_protocol_versions: adapter_metadata.approved_mcp_protocol_versions.clone(),
+            adapter_metadata,
+        };
+    };
+
+    let mut mismatched_fields = Vec::new();
+    if request.visible.negotiated_protocol_version != shadow.negotiated_protocol_version {
+        mismatched_fields.push(SHADOW_FIELD_NEGOTIATED_PROTOCOL_VERSION.to_owned());
+    }
+    if request.visible.server_info != shadow.server_info {
+        mismatched_fields.push(SHADOW_FIELD_SERVER_INFO.to_owned());
+    }
+    if request.visible.capabilities != shadow.capabilities {
+        mismatched_fields.push(SHADOW_FIELD_CAPABILITIES.to_owned());
+    }
+    if request.visible.tool_descriptor_shapes != shadow.tool_descriptor_shapes {
+        mismatched_fields.push(SHADOW_FIELD_TOOL_DESCRIPTOR_SHAPE.to_owned());
+    }
+    if request.visible.safe_tool_call_result_shape != shadow.safe_tool_call_result_shape {
+        mismatched_fields.push(SHADOW_FIELD_SAFE_TOOL_CALL_RESULT_SHAPE.to_owned());
+    }
+    if request.visible.error_category != shadow.error_category {
+        mismatched_fields.push(SHADOW_FIELD_ERROR_CATEGORY.to_owned());
+    }
+
+    let status = if mismatched_fields.is_empty() {
+        ShadowCompareStatus::Matched
+    } else {
+        ShadowCompareStatus::Mismatched
+    };
+    let error = (!mismatched_fields.is_empty()).then(|| {
+        TypedError::new(
+            McpRuntimeErrorCode::ProtocolIncompatible,
+            "official Rust SDK shadow compare mismatch",
+        )
+        .with_safe_metadata("adapter", ADAPTER_OFFICIAL_RUST_SDK)
+        .with_safe_metadata("mismatch_count", mismatched_fields.len().to_string())
+    });
+
+    OfficialRustSdkShadowCompareEvidence {
+        server_fingerprint: redaction.server_ref.clone(),
+        visible_adapter: request.visible.adapter_name,
+        shadow_adapter: shadow.adapter_name,
+        protocol_version,
+        transport: request.transport,
+        status,
+        compared_fields,
+        mismatched_fields,
+        skip_reason: request.skip_reason,
+        redaction,
+        error,
+        approved_mcp_protocol_versions: adapter_metadata.approved_mcp_protocol_versions.clone(),
+        adapter_metadata,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonRpcRequestEnvelope {
     pub jsonrpc: String,
@@ -462,15 +1085,30 @@ pub struct SanitizedToolOutput {
 fn redact_authority_tokens(raw: &str) -> (String, usize) {
     let mut output = Vec::new();
     let mut redactions = 0usize;
+    let mut skip_next_authorization_value = false;
     for token in raw.split_whitespace() {
         let lower = token.to_ascii_lowercase();
-        if lower.starts_with("token=")
+        if skip_next_authorization_value {
+            output.push("[REDACTED]");
+            redactions += 1;
+            skip_next_authorization_value = lower == "bearer";
+        } else if lower.starts_with("token=")
             || lower.starts_with("secret=")
             || lower.starts_with("api_key=")
+            || lower.contains("token=")
+            || lower.contains("secret=")
+            || lower.contains("api_key=")
             || lower.starts_with("authorization:")
         {
             output.push("[REDACTED]");
             redactions += 1;
+            if lower == "authorization:" {
+                skip_next_authorization_value = true;
+            }
+        } else if lower == "bearer" {
+            output.push("[REDACTED]");
+            redactions += 1;
+            skip_next_authorization_value = true;
         } else {
             output.push(token);
         }
@@ -610,6 +1248,219 @@ mod tests {
             expected_error_code_table_hash: ERROR_CODE_TABLE_HASH.to_owned(),
             required_features,
         }
+    }
+
+    fn normalized_snapshot(
+        adapter_name: &str,
+        version: &str,
+        capability_value: &str,
+    ) -> NormalizedMcpAdapterSnapshot {
+        let mut server_info = BTreeMap::new();
+        server_info.insert("name".to_owned(), "fixture-server".to_owned());
+        server_info.insert("version".to_owned(), "1.0.0".to_owned());
+        let mut capabilities = BTreeMap::new();
+        capabilities.insert("tools".to_owned(), capability_value.to_owned());
+        NormalizedMcpAdapterSnapshot {
+            adapter_name: adapter_name.to_owned(),
+            negotiated_protocol_version: Some(version.to_owned()),
+            server_info,
+            capabilities,
+            tool_descriptor_shapes: vec![NormalizedToolDescriptorShape {
+                name: "echo".to_owned(),
+                input_schema_fingerprint: Some("sha256:input".to_owned()),
+                output_schema_fingerprint: None,
+                annotations: vec!["readOnlyHint".to_owned()],
+            }],
+            safe_tool_call_result_shape: Some(SafeToolCallResultShape {
+                content_kinds: vec!["text".to_owned()],
+                is_error: false,
+                structured_content_fingerprint: None,
+            }),
+            error_category: None,
+        }
+    }
+
+    fn spawn_fake_rmcp_streamable_http_server(
+        protocol_version: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+        listener
+            .set_nonblocking(true)
+            .expect("fake server nonblocking");
+        let endpoint = format!("http://{}/mcp", listener.local_addr().expect("local addr"));
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut saw_call_tool = false;
+            let mut saw_delete = false;
+            while std::time::Instant::now() < deadline && !(saw_call_tool && saw_delete) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_http_request(&mut stream);
+                        let method = request.request_line.split_whitespace().next().unwrap_or("");
+                        if method == "GET" {
+                            write_http_response(&mut stream, 405, &[], "");
+                            continue;
+                        }
+                        if method == "DELETE" {
+                            saw_delete = true;
+                            write_http_response(&mut stream, 200, &[], "");
+                            continue;
+                        }
+                        let payload: serde_json::Value =
+                            serde_json::from_slice(&request.body).unwrap_or_default();
+                        let jsonrpc_method = payload
+                            .get("method")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        let id = payload
+                            .get("id")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        match jsonrpc_method {
+                            "initialize" => {
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "protocolVersion": protocol_version,
+                                        "capabilities": {"tools": {}},
+                                        "serverInfo": {"name": "fake-rmcp-server", "version": "0.1.0"}
+                                    }
+                                });
+                                write_http_response(
+                                    &mut stream,
+                                    200,
+                                    &[("mcp-session-id", "fake-session")],
+                                    &body.to_string(),
+                                );
+                            }
+                            "notifications/initialized" => {
+                                write_http_response(&mut stream, 202, &[], "");
+                            }
+                            "tools/list" => {
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "tools": [{
+                                            "name": "echo",
+                                            "description": "Echo test tool",
+                                            "inputSchema": {
+                                                "type": "object",
+                                                "properties": {},
+                                                "additionalProperties": true
+                                            }
+                                        }]
+                                    }
+                                });
+                                write_http_response(&mut stream, 200, &[], &body.to_string());
+                            }
+                            "tools/call" => {
+                                saw_call_tool = true;
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "content": [{"type": "text", "text": "echo ok"}],
+                                        "isError": false
+                                    }
+                                });
+                                write_http_response(&mut stream, 200, &[], &body.to_string());
+                            }
+                            _ => {
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": {"code": -32601, "message": "method not found"}
+                                });
+                                write_http_response(&mut stream, 200, &[], &body.to_string());
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("fake server accept failed: {error}"),
+                }
+            }
+            assert!(saw_call_tool, "fake server observed tools/call");
+        });
+        (endpoint, handle)
+    }
+
+    struct HttpRequest {
+        request_line: String,
+        body: Vec<u8>,
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> HttpRequest {
+        use std::io::Read as _;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set fake server read timeout");
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            let bytes_read = stream.read(&mut chunk).expect("read fake request");
+            assert_ne!(bytes_read, 0, "client closed before headers");
+            buffer.extend_from_slice(&chunk[..bytes_read]);
+            if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+        let request_line = header_text.lines().next().unwrap_or("").to_owned();
+        let content_length = header_text
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while buffer.len() < header_end + content_length {
+            let bytes_read = stream.read(&mut chunk).expect("read fake body");
+            assert_ne!(bytes_read, 0, "client closed before body");
+            buffer.extend_from_slice(&chunk[..bytes_read]);
+        }
+        HttpRequest {
+            request_line,
+            body: buffer[header_end..header_end + content_length].to_vec(),
+        }
+    }
+
+    fn write_http_response(
+        stream: &mut std::net::TcpStream,
+        status: u16,
+        extra_headers: &[(&str, &str)],
+        body: &str,
+    ) {
+        use std::io::Write as _;
+        let reason = match status {
+            200 => "OK",
+            202 => "Accepted",
+            405 => "Method Not Allowed",
+            _ => "OK",
+        };
+        let mut response = format!(
+            "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            body.len()
+        );
+        if !body.is_empty() {
+            response.push_str("content-type: application/json\r\n");
+        }
+        for (name, value) in extra_headers {
+            response.push_str(name);
+            response.push_str(": ");
+            response.push_str(value);
+            response.push_str("\r\n");
+        }
+        response.push_str("\r\n");
+        response.push_str(body);
+        stream
+            .write_all(response.as_bytes())
+            .expect("write fake response");
     }
 
     #[test]
@@ -874,6 +1725,289 @@ mod tests {
 
         assert_eq!(context.external_protocol_version, "2025-11-25");
         assert_ne!(context.external_protocol_version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn official_rust_sdk_metadata_is_traceable_without_expanding_approved_versions() {
+        let metadata = official_rust_sdk_adapter_metadata();
+        let adapter_metadata = OfficialRustSdkAdapter.metadata();
+
+        assert_eq!(metadata.adapter_name, ADAPTER_OFFICIAL_RUST_SDK);
+        assert_eq!(adapter_metadata, metadata);
+        assert_eq!(metadata.sdk_crate_name, OFFICIAL_RUST_SDK_CRATE_NAME);
+        assert_eq!(
+            metadata.dependency_mode,
+            "linked_client_streamable_http_shadow_adapter"
+        );
+        assert_eq!(metadata.version_requirement, "1.7.0");
+        assert_eq!(metadata.license, "Apache-2.0");
+        assert_eq!(
+            metadata.feature_flags,
+            vec![
+                "client".to_owned(),
+                "transport-streamable-http-client-reqwest".to_owned(),
+                "reqwest".to_owned(),
+            ]
+        );
+        assert_eq!(
+            metadata.metadata_status,
+            "linked_client_streamable_http_shadow_compare_only"
+        );
+        assert!(
+            metadata
+                .api_markers
+                .contains(&"rmcp::model::CallToolRequestParams".to_owned())
+        );
+        assert!(
+            metadata
+                .api_markers
+                .contains(&"rmcp::transport::StreamableHttpClientTransportConfig".to_owned())
+        );
+        assert_eq!(
+            metadata.operational_methods,
+            vec![
+                "initialize".to_owned(),
+                "list_tools".to_owned(),
+                "call_tool".to_owned(),
+                "close".to_owned(),
+                "diagnostics".to_owned(),
+            ]
+        );
+        assert!(
+            metadata
+                .compile_time_markers
+                .iter()
+                .any(|marker| marker.contains("CallToolRequestParams"))
+        );
+        assert!(
+            metadata
+                .compile_time_markers
+                .iter()
+                .any(|marker| marker.contains("StreamableHttpClientTransportConfig"))
+        );
+        assert!(!metadata.expands_approved_protocol_versions);
+        assert_eq!(
+            metadata.approved_mcp_protocol_versions,
+            vec![
+                "2024-11-05".to_owned(),
+                "2025-03-26".to_owned(),
+                "2025-06-18".to_owned(),
+                "2025-11-25".to_owned(),
+            ]
+        );
+        assert_eq!(
+            approved_mcp_protocol_versions(),
+            metadata.approved_mcp_protocol_versions
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn official_rust_sdk_adapter_executes_streamable_http_list_call_and_close() {
+        for protocol_version in ["2025-03-26", "2025-06-18", "2025-11-25"] {
+            let (endpoint, handle) = spawn_fake_rmcp_streamable_http_server(protocol_version);
+            let config = OfficialRustSdkClientConfig::streamable_http(endpoint, protocol_version)
+                .with_custom_header("x-maf-test", "ok");
+
+            let mut session = OfficialRustSdkAdapter
+                .initialize(config)
+                .await
+                .expect("official SDK initializes against fake Streamable HTTP server");
+            let diagnostics = session.diagnostics();
+
+            assert_eq!(
+                diagnostics.negotiated_protocol_version.as_deref(),
+                Some(protocol_version)
+            );
+            assert_eq!(diagnostics.server_name.as_deref(), Some("fake-rmcp-server"));
+            assert!(
+                diagnostics
+                    .server_capabilities_shape
+                    .contains(&"tools".to_owned())
+            );
+
+            let tools = session
+                .list_tools()
+                .await
+                .expect("official SDK lists tools");
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, "echo");
+            assert!(tools[0].input_schema_keys.contains(&"type".to_owned()));
+
+            let result = session
+                .call_tool("echo", serde_json::Map::new())
+                .await
+                .expect("official SDK calls a tool");
+            assert!(!result.is_error);
+            assert_eq!(result.content_count, 1);
+            assert_eq!(result.text.text, "echo ok");
+
+            session.close().await.expect("official SDK session closes");
+            handle.join().expect("fake server thread joins");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn official_rust_sdk_streamable_http_rejects_2024_legacy_protocol() {
+        let error = OfficialRustSdkAdapter
+            .initialize(OfficialRustSdkClientConfig::streamable_http(
+                "http://127.0.0.1:9/mcp",
+                "2024-11-05",
+            ))
+            .await
+            .expect_err("2024 legacy HTTP+SSE must not enter the Streamable HTTP SDK adapter");
+
+        assert_eq!(error.code, "mcp_runtime_protocol_incompatible");
+        assert!(error.message.contains("2024-11-05"));
+        assert!(error.message.contains("legacy HTTP+SSE"));
+        assert_eq!(error.category, ErrorCategory::Compatibility);
+    }
+
+    #[test]
+    fn official_rust_sdk_client_config_redacts_bearer_token_from_debug_and_json() {
+        let config = OfficialRustSdkClientConfig::streamable_http(
+            "https://example.invalid/mcp",
+            "2025-11-25",
+        )
+        .with_bearer_token("secret-token")
+        .with_custom_header("x-api-key", "secret-header-value");
+        let debug = format!("{config:?}");
+        let serialized = serde_json::to_string(&config).expect("serialize SDK config");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("x-api-key"));
+        assert!(!debug.contains("secret-token"));
+        assert!(!debug.contains("secret-header-value"));
+        assert!(!serialized.contains("secret-token"));
+        assert!(!serialized.contains("secret-header-value"));
+        assert!(!serialized.contains("authorization_bearer_token"));
+        assert!(!serialized.contains("custom_headers"));
+    }
+
+    #[test]
+    fn official_rust_sdk_shadow_compare_records_matched_evidence() {
+        let visible = normalized_snapshot(ADAPTER_PYTHON_LEGACY, "2025-11-25", "list+call");
+        let shadow = normalized_snapshot(ADAPTER_OFFICIAL_RUST_SDK, "2025-11-25", "list+call");
+        let evidence = compare_official_rust_sdk_shadow(OfficialRustSdkShadowCompareRequest {
+            server_ref: "https://example.invalid/mcp?token=secret".to_owned(),
+            transport: "streamable_http".to_owned(),
+            visible,
+            shadow: Some(shadow),
+            skip_reason: None,
+        });
+
+        assert_eq!(evidence.status, ShadowCompareStatus::Matched);
+        assert_eq!(evidence.mismatched_fields, Vec::<String>::new());
+        assert_eq!(evidence.error, None);
+        assert_eq!(evidence.visible_adapter, ADAPTER_PYTHON_LEGACY);
+        assert_eq!(evidence.shadow_adapter, ADAPTER_OFFICIAL_RUST_SDK);
+        assert_eq!(
+            evidence.compared_fields,
+            vec![
+                SHADOW_FIELD_NEGOTIATED_PROTOCOL_VERSION.to_owned(),
+                SHADOW_FIELD_SERVER_INFO.to_owned(),
+                SHADOW_FIELD_CAPABILITIES.to_owned(),
+                SHADOW_FIELD_TOOL_DESCRIPTOR_SHAPE.to_owned(),
+                SHADOW_FIELD_SAFE_TOOL_CALL_RESULT_SHAPE.to_owned(),
+                SHADOW_FIELD_ERROR_CATEGORY.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn official_rust_sdk_shadow_compare_records_mismatched_evidence() {
+        let visible = normalized_snapshot(ADAPTER_PYTHON_LEGACY, "2024-11-05", "list+call");
+        let shadow = normalized_snapshot(ADAPTER_OFFICIAL_RUST_SDK, "2024-11-05", "list-only");
+        let evidence = compare_official_rust_sdk_shadow(OfficialRustSdkShadowCompareRequest {
+            server_ref: "fixture-server".to_owned(),
+            transport: "legacy_http_sse".to_owned(),
+            visible,
+            shadow: Some(shadow),
+            skip_reason: None,
+        });
+
+        assert_eq!(evidence.status, ShadowCompareStatus::Mismatched);
+        assert_eq!(
+            evidence.mismatched_fields,
+            vec![SHADOW_FIELD_CAPABILITIES.to_owned()]
+        );
+        let error = evidence.error.expect("mismatch has typed error");
+        assert_eq!(error.code, "mcp_runtime_protocol_incompatible");
+        assert_eq!(error.category, ErrorCategory::Compatibility);
+        assert_eq!(
+            error.safe_metadata.get("adapter").map(String::as_str),
+            Some(ADAPTER_OFFICIAL_RUST_SDK)
+        );
+    }
+
+    #[test]
+    fn official_rust_sdk_shadow_compare_records_skipped_evidence() {
+        let visible = normalized_snapshot(ADAPTER_PYTHON_LEGACY, "2025-03-26", "list+call");
+        let evidence = compare_official_rust_sdk_shadow(OfficialRustSdkShadowCompareRequest {
+            server_ref: "fixture-server".to_owned(),
+            transport: "streamable_http".to_owned(),
+            visible,
+            shadow: None,
+            skip_reason: Some("sdk_unsupported_combination".to_owned()),
+        });
+
+        assert_eq!(evidence.status, ShadowCompareStatus::Skipped);
+        assert_eq!(
+            evidence.skip_reason.as_deref(),
+            Some("sdk_unsupported_combination")
+        );
+        assert_eq!(evidence.mismatched_fields, Vec::<String>::new());
+        assert_eq!(
+            evidence.error.as_ref().map(|error| error.code.as_str()),
+            Some("mcp_runtime_protocol_incompatible")
+        );
+        assert_eq!(evidence.shadow_adapter, ADAPTER_OFFICIAL_RUST_SDK);
+    }
+
+    #[test]
+    fn official_rust_sdk_shadow_evidence_redacts_server_ref_and_raw_payloads() {
+        let visible = normalized_snapshot(ADAPTER_PYTHON_LEGACY, "2025-06-18", "list+call");
+        let shadow = normalized_snapshot(ADAPTER_OFFICIAL_RUST_SDK, "2025-06-18", "list+call");
+        let evidence = compare_official_rust_sdk_shadow(OfficialRustSdkShadowCompareRequest {
+            server_ref: "https://example.invalid/mcp?api_key=secret-value".to_owned(),
+            transport: "streamable_http".to_owned(),
+            visible,
+            shadow: Some(shadow),
+            skip_reason: None,
+        });
+        let serialized = serde_json::to_string(&evidence).expect("serialize evidence");
+
+        assert!(evidence.server_fingerprint.starts_with("fnv1a64:"));
+        assert_eq!(evidence.redaction.header_values, "redacted");
+        assert_eq!(evidence.redaction.raw_payload, "omitted");
+        assert_eq!(evidence.redaction.raw_error, "redacted");
+        assert!(!serialized.contains("secret-value"));
+        assert!(!serialized.contains("api_key="));
+    }
+
+    #[test]
+    fn official_rust_sdk_error_mapping_uses_typed_errors_and_redacts_raw_secret() {
+        let error = map_official_rust_sdk_error(
+            OfficialRustSdkErrorKind::RemoteServerError,
+            "upstream failed Authorization: Bearer secret-token token=abc",
+        );
+
+        assert_eq!(error.code, "mcp_runtime_remote_server_error");
+        assert_eq!(error.category, ErrorCategory::Upstream);
+        assert!(error.retriable);
+        assert!(error.message.contains("[REDACTED]"));
+        assert!(!error.message.contains("secret-token"));
+        assert!(!error.message.contains("token=abc"));
+        assert_eq!(
+            error.safe_metadata.get("sdk_crate").map(String::as_str),
+            Some(OFFICIAL_RUST_SDK_CRATE_NAME)
+        );
+
+        let unsupported = map_official_rust_sdk_error(
+            OfficialRustSdkErrorKind::UnsupportedCombination,
+            "unsupported",
+        );
+        assert_eq!(unsupported.code, "mcp_runtime_protocol_incompatible");
+        assert_eq!(unsupported.category, ErrorCategory::Compatibility);
     }
 
     #[test]

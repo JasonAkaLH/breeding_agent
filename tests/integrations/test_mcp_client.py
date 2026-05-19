@@ -5,7 +5,7 @@ import unittest
 import httpx
 
 from src.integrations.mcp.client import MCPClient, MCPProtocolError, MCPUnsupportedClientRequest
-from src.integrations.mcp.protocol import MCP_PROTOCOL_VERSION, MCPTransportResponse
+from src.integrations.mcp.protocol import DEFAULT_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, MCPTransportResponse
 from src.integrations.mcp.transport_http import StreamableHTTPTransport
 
 
@@ -69,6 +69,117 @@ class MCPClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.requests[1]["message"]["method"], "notifications/initialized")
         self.assertNotIn("id", transport.requests[1]["message"])
         self.assertEqual(transport.requests[1]["session_id"], "sess-1")
+
+
+    async def test_unpinned_client_accepts_supported_negotiated_version_and_uses_it_for_session(self) -> None:
+        transport = RecordingTransport(
+            [
+                MCPTransportResponse(
+                    message={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "fake"},
+                        },
+                    },
+                    headers={"MCP-Session-Id": "sess-negotiated"},
+                ),
+                MCPTransportResponse(message=None, headers={}),
+                MCPTransportResponse(message={"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}, headers={}),
+            ]
+        )
+        client = MCPClient(
+            server_id="crm",
+            transport=transport,
+            protocol_version=DEFAULT_MCP_PROTOCOL_VERSION,
+            pinned_protocol_version=False,
+        )
+
+        await client.initialize()
+        await client.list_tools()
+
+        self.assertEqual(client.requested_protocol_version, DEFAULT_MCP_PROTOCOL_VERSION)
+        self.assertEqual(client.negotiated_protocol_version, "2025-06-18")
+        self.assertEqual(client.negotiated_session.requested_protocol_version, DEFAULT_MCP_PROTOCOL_VERSION)
+        self.assertEqual(client.negotiated_session.negotiated_protocol_version, "2025-06-18")
+        self.assertEqual(client.negotiated_session.transport_family, "streamable_http")
+        self.assertEqual(client.negotiated_session.session_id, "sess-negotiated")
+        self.assertFalse(client.negotiated_session.pinned_protocol_version)
+        self.assertEqual(transport.requests[0]["message"]["params"]["protocolVersion"], DEFAULT_MCP_PROTOCOL_VERSION)
+        self.assertEqual(transport.requests[0]["protocol_version"], DEFAULT_MCP_PROTOCOL_VERSION)
+        self.assertEqual(transport.requests[1]["protocol_version"], "2025-06-18")
+        self.assertEqual(transport.requests[2]["protocol_version"], "2025-06-18")
+
+    async def test_pinned_client_rejects_supported_but_different_negotiated_version(self) -> None:
+        transport = RecordingTransport(
+            [
+                MCPTransportResponse(
+                    message={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "serverInfo": {"name": "fake"},
+                        },
+                    },
+                    headers={},
+                ),
+            ]
+        )
+        client = MCPClient(server_id="crm", transport=transport, protocol_version=DEFAULT_MCP_PROTOCOL_VERSION)
+
+        with self.assertRaisesRegex(MCPProtocolError, "does not match requested"):
+            await client.initialize()
+        self.assertIsNone(client.negotiated_protocol_version)
+
+    async def test_client_rejects_unknown_negotiated_protocol_version(self) -> None:
+        transport = RecordingTransport(
+            [
+                MCPTransportResponse(
+                    message={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2026-01-01",
+                            "capabilities": {},
+                            "serverInfo": {"name": "fake"},
+                        },
+                    },
+                    headers={},
+                ),
+            ]
+        )
+        client = MCPClient(server_id="crm", transport=transport, pinned_protocol_version=False)
+
+        with self.assertRaisesRegex(MCPProtocolError, "Unsupported MCP protocol version negotiated"):
+            await client.initialize()
+        self.assertIsNone(client.negotiated_protocol_version)
+
+    async def test_client_rejects_negotiated_version_incompatible_with_transport_family(self) -> None:
+        transport = RecordingTransport(
+            [
+                MCPTransportResponse(
+                    message={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "serverInfo": {"name": "fake"},
+                        },
+                    },
+                    headers={},
+                ),
+            ]
+        )
+        client = MCPClient(server_id="crm", transport=transport, pinned_protocol_version=False, transport_family="streamable_http")
+
+        with self.assertRaisesRegex(MCPProtocolError, "incompatible with the configured transport family"):
+            await client.initialize()
+        self.assertIsNone(client.negotiated_protocol_version)
 
     async def test_list_tools_paginates_and_reuses_session_header(self) -> None:
         transport = RecordingTransport(

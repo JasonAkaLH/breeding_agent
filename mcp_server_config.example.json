@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "example-server": {
+      "url": "http://example.internal/gateway/mcp/sse",
+      "transport": "legacy_http_sse",
+      "protocolVersion": "2024-11-05",
+      "headers": {
+        "X-Example-Tenant": "example-tenant",
+        "X-Example-User": "example-user"
+      },
+      "auth": {
+        "type": "none"
+      },
+      "enabled": true
+    }
+  }
+}

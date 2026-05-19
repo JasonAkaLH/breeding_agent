@@ -19,10 +19,12 @@ class StreamableHTTPTransport:
         *,
         endpoint: str,
         auth: MCPAuthConfig | None = None,
+        request_headers: Mapping[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._auth = auth or MCPAuthConfig()
+        self._request_headers = {str(key): str(value) for key, value in dict(request_headers or {}).items()}
         self._client = client or httpx.AsyncClient()
         self._owns_client = client is None
 
@@ -61,6 +63,7 @@ class StreamableHTTPTransport:
         headers = {
             "Accept": "text/event-stream",
             "MCP-Protocol-Version": protocol_version,
+            **self._request_headers,
             **self._auth.headers(),
         }
         if session_id:
@@ -86,6 +89,7 @@ class StreamableHTTPTransport:
     ) -> bool:
         headers = {
             "MCP-Protocol-Version": protocol_version,
+            **self._request_headers,
             "MCP-Session-Id": session_id,
             **self._auth.headers(),
         }
@@ -110,6 +114,7 @@ class StreamableHTTPTransport:
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
             "MCP-Protocol-Version": protocol_version,
+            **self._request_headers,
             **self._auth.headers(),
         }
         if session_id:

@@ -1,6 +1,6 @@
 # PRD-A：MCP Client 协议版本与协商内核
 
-- **状态**：待评审
+- **状态**：已实现（仓库内，待提交；后续 PRD-B 已基于本内核接入）
 - **日期**：2026-05-19
 - **范围**：Python MCP client / config / runtime session state / feature gate 基础接口
 - **上游设计**：`docs/superpowers/specs/2026-05-19-mcp-four-version-client-compatibility-matrix-design.md`
@@ -9,7 +9,7 @@
 
 ## 1. 问题陈述
 
-当前 MCP Runtime 使用单一 `MCP_PROTOCOL_VERSION = "2025-11-25"`，server config 只接受该版本，client initialize 后也要求 server 返回同一版本。这使当前实现确定但无法安全支持 `2024-11-05`、`2025-03-26` 与 `2025-06-18`。
+立项时 MCP Runtime 使用单一 `MCP_PROTOCOL_VERSION = "2025-11-25"`，server config 只接受该版本，client initialize 后也要求 server 返回同一版本。这使原实现确定但无法安全支持 `2024-11-05`、`2025-03-26` 与 `2025-06-18`；本 PRD 的当前实现证据见第 5 节。
 
 要支持四版本兼容，第一步必须把协议版本从全局常量变成 **session negotiated state**。否则后续 transport 和 feature gate 会继续读取全局版本，导致 2024 legacy transport、2025+ Streamable HTTP 和 future sidecar enforce 口径互相污染。
 
@@ -44,11 +44,12 @@
 
 | 文件 | 当前事实 |
 |---|---|
-| `src/integrations/mcp/protocol.py` | 只有 `MCP_PROTOCOL_VERSION = "2025-11-25"` 与单值 supported set。 |
-| `src/integrations/mcp/config.py` | `MCPServerConfig.validation_error()` 拒绝 supported set 外版本。 |
-| `src/integrations/mcp/client.py` | initialize 发送 `_protocol_version`，并在 negotiated version 不等于请求版本时失败。 |
-| `src/integrations/mcp/runtime_state.py` | 默认 client factory 仍把 `server.protocol_version or MCP_PROTOCOL_VERSION` 传给 client。 |
-| `tests/fixtures/mcp/messages/initialize_request.json` | fixture 只覆盖 `2025-11-25`。 |
+| `src/integrations/mcp/protocol.py` | 已定义四版本 supported set、`DEFAULT_MCP_PROTOCOL_VERSION`、transport family gate、feature gate 与 `MCPNegotiatedSession`。 |
+| `src/integrations/mcp/config.py` | `MCPServerConfig.from_mapping()` 已区分显式 pin 与默认候选；validation 已拒绝未知版本和不兼容 transport/version 组合。 |
+| `src/integrations/mcp/client.py` | initialize 始终发送 requested `protocolVersion`；初始化后保存 negotiated version，并在后续 request/notification/response/GET stream 使用 negotiated version。 |
+| `src/integrations/mcp/runtime_state.py` | refresh diagnostic 已携带 safe version/transport/required 字段；required 失败 fail closed，optional 失败保留 diagnostic。 |
+| `tests/fixtures/mcp/messages/versions/<version>/` | 已补齐四版本 initialize request/result fixtures。 |
+| `tests/integrations/mcp/test_protocol_version_negotiation.py`、`tests/integrations/test_mcp_client.py`、`tests/integrations/test_mcp_runtime_state.py` | 已覆盖四版本集合、config gate、pinned/unpinned negotiation、transport gate、feature gate 与 optional/required 失败路径。 |
 
 ## 6. 功能需求
 
@@ -88,6 +89,7 @@ class MCPNegotiatedSession:
     transport_family: str
     server_capabilities: Mapping[str, Any]
     server_info: Mapping[str, Any]
+    pinned_protocol_version: bool
     session_id: str | None = None
     legacy_post_endpoint: str | None = None
     last_event_id: str | None = None
@@ -128,10 +130,10 @@ mcp_feature_status(version: str, feature: str) -> CompatibilityStatus
 
 ## 11. 测试计划
 
-- `tests/integrations/mcp/test_protocol_versions.py`
-- `tests/integrations/mcp/test_mcp_negotiated_session.py`
-- `tests/integrations/mcp/test_mcp_transport_family_gate.py`
-- 补充 versioned initialize fixtures：`tests/fixtures/mcp/messages/<version>/initialize_request.json`、`initialize_result.json`。
+- `tests/integrations/mcp/test_protocol_version_negotiation.py`
+- `tests/integrations/test_mcp_client.py`
+- `tests/integrations/test_mcp_runtime_state.py`
+- versioned initialize fixtures：`tests/fixtures/mcp/messages/versions/<version>/initialize_request.json`、`initialize_result.json`。
 
 ## 12. 风险与假设
 

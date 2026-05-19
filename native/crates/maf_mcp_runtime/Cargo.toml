@@ -22,3 +22,13 @@ path = "src/bin/export_mcp_runtime_contract.rs"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+http.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
+
+[features]
+default = []
+# PRD-3 official Rust SDK adapter feature marker. The rmcp dependency is
+# linked with client/Streamable HTTP features only and must not expand the
+# product-approved MCP protocol version set.
+official-rust-sdk-adapter = []

@@ -2,7 +2,7 @@
 
 这份文档给开发 MCP Server 的同事阅读。目标是让你的服务能被本项目顺利发现、调用和校验。
 
-一句话：**请实现一个 HTTP 接口，接收 JSON-RPC 2.0 请求，按 MCP `2025-11-25` 协议返回工具列表和工具调用结果。**
+一句话：**请实现一个能通过 JSON-RPC 2.0 完成 `initialize -> notifications/initialized -> tools/list -> tools/call` 的 MCP HTTP endpoint；首选 MCP `2025-11-25` Streamable HTTP，如需兼容旧版，必须明确声明实际协商版本和传输形态。**
 
 ---
 
@@ -10,16 +10,27 @@
 
 当前本项目作为 **MCP Client** 调用你的 **MCP Server**。
 
-我们当前支持：
+我们当前能接受的是 **MCP Client 调用外部 MCP Server 的普通 tools 链路**。这里的“普通 tools”只包括工具发现和工具调用，不包含 resources、prompts、sampling、roots、长任务、server-to-client request 或交互式 OAuth。
 
-| 项 | 当前要求 |
+| 项 | 当前可接受规则 |
 |---|---|
-| MCP 协议版本 | `2025-11-25` |
+| MCP 协议版本 | 首选 `2025-11-25`；普通 tools 可兼容 `2025-03-26`、`2025-06-18`、`2024-11-05` |
 | 消息格式 | JSON-RPC 2.0 |
-| 传输方式 | Streamable HTTP，也就是 HTTP `POST` JSON |
+| 传输方式 | `2025-03-26+` 使用 Streamable HTTP；`2024-11-05` 标准形态使用 legacy HTTP+SSE；旧网关如只提供 JSON-RPC POST，必须按“2024-over-POST 兼容例外”声明 |
 | 必须支持的方法 | `initialize`、`notifications/initialized`、`tools/list`、`tools/call` |
 | 工具输入 schema | JSON Schema Draft 2020-12 或 Draft-07 |
 | 工具输出 | `content` 和可选 `structuredContent` |
+
+### 1.1 版本和传输接受矩阵
+
+| Server 形态 | 是否接受 | 适用范围 | 必须满足的条件 |
+|---|---|---|---|
+| `2025-11-25` Streamable HTTP | 推荐 | 正式接入首选 | HTTP `POST` JSON-RPC；`initialize.result.protocolVersion` 返回 `2025-11-25`；支持 `tools/list` 和 `tools/call` |
+| `2025-06-18` / `2025-03-26` Streamable HTTP | 接受 | 普通 tools 兼容 | HTTP `POST` JSON-RPC；返回实际协商版本；不要依赖本项目尚未启用的最新特性 |
+| `2024-11-05` legacy HTTP+SSE | 接受 | 标准旧版 MCP Server | 使用 2024 规范的 SSE endpoint + server `endpoint` event + POST message endpoint；普通 tools 可接入 |
+| `2024-11-05` JSON-RPC POST 兼容网关 | 有条件接受 | 已有网关 / QA 联调 / 普通只读 tools | endpoint 可以通过同一个 HTTP `POST` 完成 `initialize`、`tools/list`、`tools/call`；`initialize` 必须如实返回 `2024-11-05`；不得伪装成 `2025-11-25`；不得依赖 session header、长任务或 SSE-only 能力；正式进入 runtime 时必须显式标注兼容模式并由适配层处理 |
+
+> 说明：如果一个 endpoint 的配置名称写着 `streamable-http`，但 `initialize` 实际返回 `2024-11-05`，我们不会把它当作合格的 `2025+ Streamable HTTP`。它只能按“`2024-11-05` JSON-RPC POST 兼容网关”处理，范围限于普通 tools。
 
 当前不作为正式接入方式：
 
@@ -27,6 +38,9 @@
 - 交互式 OAuth；
 - WebSocket；
 - 自定义非 JSON-RPC 协议。
+- JSON-RPC batch array；
+- 返回未声明或不支持的 MCP `protocolVersion`；
+- 把 2024 旧版协议伪装成 2025+ Streamable HTTP。
 
 ---
 
@@ -38,15 +52,19 @@
 https://mcp.example.com/mcp
 ```
 
-本项目会向这个地址发 `POST` 请求。
+生产或准生产接入必须优先使用 `https://`。内网 QA 环境如只能提供 `http://`，可以用于临时连通性验证，但正式接入前必须补齐网络边界、鉴权和部署 allowlist 评审。
 
-请求头大致如下：
+对 `2025-03-26+` Streamable HTTP 或 `2024-11-05` JSON-RPC POST 兼容网关，本项目会向这个地址发 `POST` 请求。标准 `2024-11-05` legacy HTTP+SSE 服务则需要提供 SSE endpoint，并通过 SSE `endpoint` event 告诉客户端后续 JSON-RPC POST message endpoint。
+
+`2025-03-26+` Streamable HTTP 的请求头大致如下：
 
 ```http
 Content-Type: application/json
 Accept: application/json, text/event-stream
 MCP-Protocol-Version: 2025-11-25
 ```
+
+`2024-11-05` JSON-RPC POST 兼容网关也可以收到类似 HTTP `POST` 请求，但你的服务器必须在 `initialize.result.protocolVersion` 中返回实际支持的 `"2024-11-05"`，并且不能要求 `MCP-Session-Id` 才能完成基础 `tools/list` / `tools/call`。
 
 如果你的服务器需要鉴权，可以使用：
 
@@ -80,7 +98,7 @@ Authorization: Bearer <token>
 }
 ```
 
-### 正确响应
+### 推荐响应：`2025-11-25`
 
 ```json
 {
@@ -103,8 +121,35 @@ Authorization: Bearer <token>
 
 - `jsonrpc` 必须是 `"2.0"`。
 - 响应里的 `id` 必须和请求里的 `id` 一样。
-- `protocolVersion` 必须返回 `"2025-11-25"`。
-- 如果返回其他版本，本项目会拒绝连接。
+- `protocolVersion` 必须返回服务器实际协商出的 MCP 版本。
+- 如果你支持 `2025-11-25`，推荐返回 `"2025-11-25"`。
+- 如果你只能支持 `2024-11-05`，可以返回 `"2024-11-05"`，但这会进入旧版兼容路径；不要把旧版能力伪装成 2025+。
+
+### 兼容响应：`2024-11-05`
+
+如果你的现有网关只支持 2024 协议，但可以通过同一个 HTTP `POST` endpoint 完成普通 tools，请返回：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": {
+        "listChanged": true
+      },
+      "logging": {}
+    },
+    "serverInfo": {
+      "name": "legacy-gateway-mcp-server",
+      "version": "1.0.0"
+    }
+  }
+}
+```
+
+这种形态只允许用于普通 tools：`initialize`、`notifications/initialized`、`tools/list`、`tools/call`。不要在这种兼容模式里依赖 `MCP-Session-Id`、长任务、resources、prompts、sampling、roots 或 server-to-client request。
 
 初始化成功后，客户端会发送一条通知。
 
@@ -118,7 +163,7 @@ Authorization: Bearer <token>
 }
 ```
 
-这条消息没有 `id`，说明它不需要业务结果。你的服务器可以返回 HTTP `202`、`204` 或空响应。
+这条消息没有 `id`，说明它不需要业务结果。推荐返回 HTTP `202`、`204` 或空响应。为了兼容部分旧网关，联调时可以容忍一个空 JSON-RPC result，但新服务不要依赖这种行为。
 
 ---
 
@@ -423,6 +468,25 @@ tools:
     risk_level: read_only
 ```
 
+如果你的服务是旧版或兼容网关，请不要只写 `streamable_http` 了事，必须额外说明真实形态：
+
+```yaml
+server_id: legacy_gateway_service
+endpoint: https://mcp.example.com/gateway/mcp/service
+protocol_version: 2024-11-05
+transport: jsonrpc_http_post
+compatibility_mode: 2024_jsonrpc_post
+scope: ordinary_tools_only
+
+notes:
+  - initialize 返回 2024-11-05
+  - 同一个 POST endpoint 支持 tools/list 和 tools/call
+  - 不依赖 MCP-Session-Id
+  - 不提供 resources/prompts/tasks/sampling/roots
+```
+
+> `jsonrpc_http_post` / `2024_jsonrpc_post` 是对接说明字段，用于告诉我们需要走兼容适配；不要把这种服务标成标准 `2025+ Streamable HTTP`。
+
 如果需要鉴权，请额外说明：
 
 ```yaml
@@ -459,9 +523,10 @@ auth:
 交付前请逐项确认：
 
 - [ ] HTTP endpoint 可以访问。
-- [ ] 只接受 `POST` JSON-RPC 请求。
-- [ ] `MCP-Protocol-Version` 支持 `2025-11-25`。
-- [ ] `initialize` 返回同样的 `protocolVersion`。
+- [ ] 支持 JSON-RPC 2.0 object 请求；不要求 JSON-RPC batch array。
+- [ ] 明确声明真实 MCP 协议版本：`2025-11-25`、`2025-06-18`、`2025-03-26` 或 `2024-11-05`。
+- [ ] `initialize` 返回服务器实际协商出的 `protocolVersion`，不要伪装版本。
+- [ ] 如果返回 `2024-11-05` 但 endpoint 是单 POST 网关，已显式标注 `compatibility_mode: 2024_jsonrpc_post`。
 - [ ] `notifications/initialized` 能正常处理。
 - [ ] `tools/list` 返回工具列表。
 - [ ] 每个工具都有稳定的 `name`、`description`、`inputSchema`。
@@ -471,6 +536,7 @@ auth:
 - [ ] 工具输出不包含 secret、token、连接串、内部路径。
 - [ ] 只读工具标注清楚；有副作用的工具单独说明。
 - [ ] 超时、上游失败、参数错误都有清晰错误响应。
+- [ ] 不声明或依赖本项目当前不接入的 resources、prompts、tasks、sampling、roots、server-to-client request。
 
 ---
 

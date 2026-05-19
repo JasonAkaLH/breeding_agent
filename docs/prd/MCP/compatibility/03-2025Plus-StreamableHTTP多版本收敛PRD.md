@@ -1,21 +1,21 @@
 # PRD-C：MCP 2025+ Streamable HTTP 多版本收敛
 
-- **状态**：待评审
+- **状态**：已实现（仓库内，待提交；PRD-D 尚未完成）
 - **日期**：2026-05-19
 - **范围**：`2025-03-26`、`2025-06-18`、`2025-11-25` 的 Streamable HTTP client behavior / fixtures / ordinary tools 链路
-- **依赖**：PRD-A 协议版本与协商内核
+- **依赖**：PRD-A 协议版本与协商内核；PRD-B 已将 2024 legacy transport 与 Streamable HTTP 分离
 - **非目标**：不实现 2024 legacy HTTP+SSE；不实现 tasks durable registry；不实现 interactive OAuth；不公开 resources/prompts
 
 ## 1. 问题陈述
 
-当前 `StreamableHTTPTransport` 按 `2025-11-25` 单版本设计，默认发送 `MCP-Protocol-Version`、支持 POST JSON/SSE、GET stream、session id、DELETE session 等能力。要兼容 `2025-03-26` 与 `2025-06-18`，必须把这些行为改为基于 negotiated session version 的 gate，而不是继续假设所有 2025+ server 都是 latest。
+当前 `StreamableHTTPTransport` 已能从 MCP client 获得 negotiated session version，并默认发送 `MCP-Protocol-Version`、支持 POST JSON/SSE、GET stream、session id、DELETE session 等能力。要兼容 `2025-03-26` 与 `2025-06-18`，必须把 2025+ 行为显式收敛为 negotiated-version gate，而不是继续把所有 Streamable HTTP server 当作 latest feature server。
 
 ## 2. 目标
 
 1. 让现有 Streamable HTTP transport 支持 `2025-03-26`、`2025-06-18`、`2025-11-25` 三个 negotiated versions。
 2. 保持 JSON-RPC object-only，不支持 batch。
 3. 保留普通 `tools/list` / `tools/call` 作为首个跨版本能力。
-4. 对 `MCP-Protocol-Version` header、session id、GET stream、DELETE 405、POST SSE response 等行为建立版本 gate 和 fixtures。
+4. 对 `MCP-Protocol-Version` header、session id、GET stream、DELETE 405、POST SSE response 等行为建立版本化 fixtures 与 header/session 断言。
 5. 对 structured output、icons、tasks 等新版本 feature 做 safe parse / ignore / future gate。
 
 ## 3. 非目标
@@ -30,10 +30,12 @@
 
 | 文件 | 当前事实 |
 |---|---|
-| `src/integrations/mcp/transport_http.py` | POST headers 始终包含 `Accept: application/json, text/event-stream`、`Content-Type`、`MCP-Protocol-Version`；GET/DELETE 使用 same endpoint。 |
-| `tests/integrations/mcp/test_phase2_runtime_behavior.py` | 已有 GET stream、Last-Event-ID、session 404 reinitialize 测试。 |
-| `tests/integrations/mcp/test_phase2_streamable_http_contract.py` | 已有 Streamable HTTP contract 方向测试。 |
-| `docs/prd/MCP/03-Phase2-StreamableHTTP与SSE内核PRD.md` | 当前 Phase 2 仍以 `2025-11-25` 为标准一致性基线。 |
+| `src/integrations/mcp/transport_http.py` | POST headers 始终包含 `Accept: application/json, text/event-stream`、`Content-Type`、`MCP-Protocol-Version`；GET/DELETE 使用 same endpoint，并对 405 返回 non-fatal unavailable。 |
+| `src/integrations/mcp/client.py` | 后续 request/notification/response/GET stream 已使用 negotiated version；session 404 对 read/discovery 路径 reinitialize，对 `tools/call` 不自动 replay。 |
+| `tests/integrations/mcp/test_streamable_http_versions.py` | 已覆盖三个 2025+ 版本 initialize、initialized、`tools/list`、ordinary `tools/call`、negotiated header/session、2025-03-26 缺 header 的 server 兼容、GET/DELETE 405、SSE response id、runtime metadata 安全边界。 |
+| `tests/fixtures/mcp/messages/2025-03-26/`、`2025-06-18/`、`2025-11-25/` | 已补齐三版本独立 message fixtures，不只复用 latest fixture。 |
+| `tests/integrations/mcp/test_phase2_runtime_behavior.py`、`tests/integrations/mcp/test_phase2_streamable_http_contract.py` | 保留既有 GET stream、Last-Event-ID、session 404 reinitialize 与 Streamable HTTP contract 回归。 |
+| 官方 2025+ transport 文档 | 2025+ Streamable HTTP 替代 2024 HTTP+SSE；HTTP client 后续请求应使用 negotiated `MCP-Protocol-Version` header；缺 header 的 server backwards compatibility 默认口径是 `2025-03-26`。 |
 
 ## 5. 功能需求
 
@@ -43,20 +45,20 @@
 | MCP-C-FR-002 | POST request body 必须始终为单个 JSON-RPC object。 | P0 |
 | MCP-C-FR-003 | transport 必须支持 POST JSON response。 | P0 |
 | MCP-C-FR-004 | transport 必须支持 POST `text/event-stream` response，并从 events 中选择 matching JSON-RPC response。 | P0 |
-| MCP-C-FR-005 | `2025-03-26` 不得把 `MCP-Protocol-Version` header 作为 server 正确性的硬依赖。 | P0 |
+| MCP-C-FR-005 | `2025-03-26` 后续 HTTP 请求也应携带 negotiated `MCP-Protocol-Version` header；测试需覆盖 server 即使按 backwards compatibility 容忍缺 header，也不会要求 client 省略 header。 | P0 |
 | MCP-C-FR-006 | `2025-06-18` 与 `2025-11-25` 后续 HTTP 请求必须携带 negotiated `MCP-Protocol-Version` header。 | P0 |
 | MCP-C-FR-007 | server 返回 `MCP-Session-Id` 后，后续 POST/GET/DELETE 必须携带 session id。 | P0 |
 | MCP-C-FR-008 | session 404 对 discovery/read-only 请求可 reinitialize 后重试；对 `tools/call` 不自动重放。 | P0 |
 | MCP-C-FR-009 | GET stream 405 必须表示 server 不支持 GET stream，不作为 protocol fatal。 | P1 |
 | MCP-C-FR-010 | DELETE 405 必须表示 server 不支持主动 session shutdown，不作为 protocol fatal。 | P1 |
-| MCP-C-FR-011 | `2025-06-18+` structured output / outputSchema 可校验；不存在时维持普通 result mapping。 | P1 |
-| MCP-C-FR-012 | `2025-11-25` tasks、icons 等 metadata 默认不启用用户可见能力。 | P1 |
+| MCP-C-FR-011 | `2025-06-18+` structured output / outputSchema 只可作为 local schema metadata 校验；不存在时维持普通 result mapping。 | P1 |
+| MCP-C-FR-012 | `2025-11-25` tasks、icons 等 metadata 默认不启用用户可见能力，不得影响 Planner 权限。 | P1 |
 
 ## 6. 非功能需求
 
 | 类型 | Requirement |
 |---|---|
-| 兼容性 | 三个 2025+ 版本共享 transport adapter，但 version-specific 行为必须经 gate helper 控制。 |
+| 兼容性 | 三个 2025+ 版本共享 transport adapter，但 version-specific 行为必须经 gate/helper 或测试 fixture 明确控制；不得影响 `legacy_http_sse`。 |
 | 安全 | Session id、Last-Event-ID、auth header、raw tool output 不得进入前端事件或未脱敏 audit。 |
 | 可靠性 | 不自动 replay side-effecting `tools/call`；所有重试策略必须能区分 read-only discovery 与 invocation。 |
 | 可测试性 | 每个 2025+ 版本必须有独立 fixtures，而不是只复用 latest fixture。 |
@@ -95,7 +97,7 @@
 | MCP-C-AC-002 | 三个版本均可完成 initialize + initialized。 | fake server integration test |
 | MCP-C-AC-003 | 三个版本均可完成 `tools/list`。 | runtime discovery test |
 | MCP-C-AC-004 | 三个版本均可完成 ordinary `tools/call`。 | capability execution test |
-| MCP-C-AC-005 | `2025-03-26` fixture 覆盖不依赖 protocol version header 的 server。 | transport integration test |
+| MCP-C-AC-005 | `2025-03-26` fixture 覆盖 negotiated protocol header；另有 backwards compatibility fixture 证明 server 可容忍缺 header，但 client 默认仍发送 header。 | transport integration test |
 | MCP-C-AC-006 | `2025-06-18` 与 `2025-11-25` 后续请求携带 negotiated `MCP-Protocol-Version`。 | header assertion test |
 | MCP-C-AC-007 | POST SSE response 多事件中 response id 必须匹配 active request。 | SSE parser/client test |
 | MCP-C-AC-008 | GET stream 405 和 DELETE 405 被视为 capability unavailable。 | transport integration test |
@@ -108,8 +110,10 @@
 - `tests/fixtures/mcp/messages/2025-06-18/*`
 - `tests/fixtures/mcp/messages/2025-11-25/*`
 - `tests/integrations/mcp/test_streamable_http_versions.py`
-- `tests/integrations/mcp/test_streamable_http_session_recovery.py`
-- `tests/integrations/mcp/test_mcp_feature_gates.py`
+- `tests/integrations/mcp/test_phase2_runtime_behavior.py`
+- `tests/integrations/mcp/test_phase2_streamable_http_contract.py`
+- `tests/integrations/mcp/test_protocol_version_negotiation.py`
+- `tests/integrations/test_mcp_client.py`
 
 ## 11. 风险与假设
 

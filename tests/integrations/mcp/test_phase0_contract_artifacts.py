@@ -12,11 +12,13 @@ from tests.fixtures.mcp.protocol_fixtures import (
     assert_no_raw_sensitive_values,
     validate_jsonrpc_object_only,
 )
+from src.integrations.mcp.protocol import (
+    SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
+)
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "mcp"
 MESSAGE_ROOT = FIXTURE_ROOT / "messages"
 CONTRACT_ROOT = FIXTURE_ROOT / "contracts"
-
 
 class MCPPhase0ContractArtifactTests(unittest.TestCase):
     def test_all_message_fixtures_are_single_jsonrpc_objects(self) -> None:
@@ -80,12 +82,32 @@ class MCPPhase0ContractArtifactTests(unittest.TestCase):
         self.assertEqual(contract["component"], "maf_mcp_runtime_sidecar")
         self.assertEqual(contract["sidecar_protocol_version"], "maf.mcp.sidecar.v1")
         self.assertEqual(contract["external_mcp_protocol_version"], MCP_PROTOCOL_VERSION)
+        self.assertEqual(contract["external_mcp_protocol_versions"], [MCP_PROTOCOL_VERSION])
+        self.assertEqual(contract["external_mcp_protocol_version_scope"], "single_latest_long_task_phase_baseline")
+        self.assertEqual(
+            contract["python_visible_mcp_client_protocol_versions"],
+            list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        )
+        self.assertFalse(contract["canonical_multi_version_transport"])
         self.assertNotEqual(contract["sidecar_protocol_version"], contract["external_mcp_protocol_version"])
         self.assertIn("health", contract["implemented_features"])
         self.assertIn("compatibility_handshake", contract["implemented_features"])
+        self.assertIn("multi_version_transport", contract["reserved_features"])
         self.assertIn("mcp_tasks", contract["reserved_features"])
         self.assertIn("remote_cancel", contract["reserved_features"])
         self.assertNotIn("mcp_tasks", contract["implemented_features"])
+
+    def test_conformance_matrix_declares_four_client_versions_and_safe_gates(self) -> None:
+        matrix = json.loads((CONTRACT_ROOT / "conformance_matrix.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(matrix["schema_version"], "maf.mcp.client_compatibility_conformance_matrix.v1")
+        self.assertEqual(matrix["supported_mcp_spec_versions"], list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER))
+        self.assertNotIn("mcp_spec_version", matrix)
+        item_ids = {item["id"] for item in matrix["items"]}
+        self.assertIn("MCP-CONF-CLIENT-2024-TRANSPORT", item_ids)
+        self.assertIn("MCP-CONF-CLIENT-2025-TRANSPORT", item_ids)
+        self.assertIn("MCP-CONF-BATCH-REJECTION", item_ids)
+        self.assertIn("MCP-CONF-SAFE-DIAGNOSTICS", item_ids)
 
     def test_contract_artifacts_do_not_contain_secret_sample_values(self) -> None:
         encoded_contracts = {

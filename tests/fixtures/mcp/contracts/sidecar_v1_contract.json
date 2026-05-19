@@ -41,12 +41,24 @@
     "server_to_client_get",
     "mcp_tasks",
     "task_augmented_tools_call",
-    "remote_cancel"
+    "remote_cancel",
+    "multi_version_transport"
   ],
   "reserved_rpc_methods": [
     "ListTools",
     "CallTool",
     "Cancel",
     "OpenServerStream"
-  ]
+  ],
+  "external_mcp_protocol_versions": [
+    "2025-11-25"
+  ],
+  "external_mcp_protocol_version_scope": "single_latest_long_task_phase_baseline",
+  "python_visible_mcp_client_protocol_versions": [
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25"
+  ],
+  "canonical_multi_version_transport": false
 }

@@ -32,6 +32,7 @@ MCP Runtime 需要处理外部 server / tools 的协议输入输出。外部 too
 3. `MCPToolExecutor` 对 Rust sidecar canonical runtime operations 的完整调用、API/SSE live event bridge 与 cancel propagation。
 4. shadow 样本、promotion report、production enforce、ops runbook / rollback drill 与 Python legacy MCP duplicate semantics 下线。
 5. Phase 2-5 canonical runtime operations 仍未在 Rust sidecar 中成为主执行面；当前 MCP tool 真实执行仍由 Python MCP client / transport / task registry 承担。
+6. Rust sidecar canonical multi-version transport 仍需后续 feature evidence；当前四版本普通 tools 兼容的用户可见执行面仍是 Python MCP client path，sidecar 仅保留 `2025-11-25` latest-feature / long-task phase baseline 与 compatibility handshake 骨架。
 
 因此，当前只能宣称“Rust MCP sidecar 接入骨架 / Phase 0-1 基线已落地”；不得宣称完整 Rust MCP Runtime、完整长任务流式 SSE、production enforce 或 Python legacy 下线已完成。
 

@@ -1,6 +1,20 @@
+from .adapter import MCPAdapterDiagnostic, MCPClientAdapter, PythonLegacyMCPClientAdapter
 from .client import MCPAuthRequiredError, MCPClient, MCPClientError, MCPProtocolError, MCPRemoteError
-from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig
-from .protocol import MCP_PROTOCOL_VERSION, MCPTransportResponse
+from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig, load_mcp_server_config
+from .protocol import (
+    DEFAULT_MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION,
+    MCPCompatibilityStatus,
+    MCPNegotiatedSession,
+    MCPTransportResponse,
+    SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
+    SUPPORTED_MCP_PROTOCOL_VERSIONS,
+    is_transport_family_allowed,
+    is_mcp_transport_family_allowed,
+    mcp_feature_status,
+    mcp_remote_transport_family_for_protocol_version,
+    validate_mcp_protocol_version,
+)
 from .sidecar import (
     MCPFeatureUnsupportedError,
     MCPRustRuntimeSettings,
@@ -18,9 +32,23 @@ from .runtime_state import (
     MCPToolBinding,
 )
 from .transport_http import StreamableHTTPTransport
+from .transport_legacy_http_sse import LegacyHTTPSSETransport
 
 __all__ = [
     "MCP_PROTOCOL_VERSION",
+    "DEFAULT_MCP_PROTOCOL_VERSION",
+    "SUPPORTED_MCP_PROTOCOL_VERSION_ORDER",
+    "SUPPORTED_MCP_PROTOCOL_VERSIONS",
+    "MCPCompatibilityStatus",
+    "MCPAdapterDiagnostic",
+    "MCPClientAdapter",
+    "PythonLegacyMCPClientAdapter",
+    "MCPNegotiatedSession",
+    "is_mcp_transport_family_allowed",
+    "is_transport_family_allowed",
+    "mcp_feature_status",
+    "mcp_remote_transport_family_for_protocol_version",
+    "validate_mcp_protocol_version",
     "MCPAuthRequiredError",
     "MCPClient",
     "MCPClientError",
@@ -41,6 +69,8 @@ __all__ = [
     "MCPServerConfig",
     "MCPToolBinding",
     "MCPToolConfig",
+    "load_mcp_server_config",
     "MCPTransportResponse",
     "StreamableHTTPTransport",
+    "LegacyHTTPSSETransport",
 ]

@@ -11,7 +11,7 @@ Phase 是工程落地顺序和验收门禁，不是产品版本、降级目标�
 
 本目录内 PRD 不替代上述两个冻结基线；如果出现冲突，以后续明确更新过的冻结基线和本目录总览 PRD 为准，并必须同步更新 `CHANGELOG.md`。
 
-所有 Phase 必须遵守 `00-MCPRuntime联合改造总览PRD.md` 第 8 节的 MCP 2025-11-25 标准一致性不变量；任一 Phase PRD 没有重复书写某条标准规则，不代表该 Phase 可以不遵守。
+所有 Phase 必须遵守 `00-MCPRuntime联合改造总览PRD.md` 第 8 节的 latest-feature invariant；client multi-version compatibility 轨道必须同时遵守 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25` 四版本普通 tools 兼容矩阵。任一 Phase PRD 没有重复书写某条标准规则，不代表该 Phase 可以不遵守。
 
 ## 2. Phase 列表
 
@@ -33,15 +33,31 @@ Phase 是工程落地顺序和验收门禁，不是产品版本、降级目标�
 
 - Phase 0-5 仍描述 MCP 长任务 / Rust sidecar canonical runtime 的阶段性交付。
 - compatibility PRD 轨道补充普通 `tools/list` / `tools/call` 的多版本 client 兼容前置工作。
-- 在 compatibility PRD-D 完成前，现有 Phase 文档中的 `2025-11-25` 单基线口径仍是历史基线，不代表 runtime 已完成四版本兼容。
+- compatibility PRD-D 已把 conformance gate、fixtures evidence 与 sidecar 口径同步为 client multi-version compatibility：`2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25`。
 
 入口：`docs/prd/MCP/compatibility/README.md`。
 
-## 4. 总览入口
+
+## 4. 官方 SDK 引入与四版本完整兼容 PRD 轨道
+
+`docs/prd/MCP/official-sdk-compatibility/` 是新增的 MCP Client 官方 SDK 中长期引入轨道，承接 `docs/superpowers/specs/2026-05-19-mcp-official-sdk-client-compatibility-design.md`。该轨道将官方 Rust SDK / `rmcp` 限定在 Rust sidecar adapter 内，保持 CapabilityRegistry、Planner 权限、租户/用户 header policy、审计脱敏、release gate 与 rollback 仍由本项目 runtime 控制。首批交付聚焦远程 HTTP/HTTPS ordinary tools；当前 `stdio` 仍按 sandbox-gated 后续轨道处理，未完成前不得宣称 all-transport conformance。
+
+当前 PRD-3 / PRD-4 的仓库内实现已经落地：`rmcp 1.7.0` 作为 client-only Streamable HTTP 依赖进入 Rust workspace / lockfile，Rust sidecar 已具备 official SDK-backed 2025+ Streamable HTTP initialize/list/call/close/diagnostics shadow adapter；四版本 `version + transport + adapter` conformance、shadow compare、enforce allowlist 与非规范真实 server smoke 口径已同步到 PRD05 evidence ledger。`2024-11-05 + legacy_http_sse` 组合仍由 Python legacy visible path 覆盖，official SDK lane 记录为 skipped/unsupported transport，不得误报为 SDK operational pass。该 repo-local evidence 不满足 Phase 5 production gate；真实 artifact provenance、生产 shadow、benchmark、ops/recovery drill、rollback drill 与 legacy decommission 仍保持 pending/fail-closed。
+
+该轨道分为 4 个 PRD：
+
+1. `01-MCPServerConfig与AdapterContractPRD.md`：独立 `mcp_server_config.json`、config-driven headers、HTTP `plaintext_http` mode 与统一 adapter contract。
+2. `02-2024LegacyHTTPSSE完整协议PRD.md`：补齐 `2024-11-05` legacy HTTP+SSE 持久 SSE reader、POST endpoint 与 request id correlation。
+3. `03-OfficialRustSDKAdapterShadowComparePRD.md`：在 Rust sidecar 引入官方 Rust SDK adapter，并只做 shadow compare。
+4. `04-四版本ConformanceGate与EnforceRolloutPRD.md`：建立 `version + transport + adapter` conformance / shadow / enforce gate。
+
+入口：`docs/prd/MCP/official-sdk-compatibility/README.md`。
+
+## 5. 总览入口
 
 联合实施总览见：`00-MCPRuntime联合改造总览PRD.md`。
 
-## 5. 维护要求
+## 6. 维护要求
 
 新增或修改本目录 PRD 时，应同步检查：
 

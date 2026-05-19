@@ -9,6 +9,16 @@ from src.integrations.mcp.mcp_runtime_gates import (
     artifact_allowlist_entry_matches_manifest,
     load_mcp_runtime_artifact_trust,
     validate_mcp_runtime_artifact_provenance,
+    validate_mcp_runtime_conformance_report,
+)
+from src.integrations.mcp.protocol import (
+    MCP_PROTOCOL_VERSION_2024_11_05,
+    MCP_PROTOCOL_VERSION_2025_03_26,
+    MCP_PROTOCOL_VERSION_2025_06_18,
+    MCP_PROTOCOL_VERSION_2025_11_25,
+    MCP_TRANSPORT_LEGACY_HTTP_SSE,
+    MCP_TRANSPORT_STREAMABLE_HTTP,
+    SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
 )
 from src.integrations.mcp.rust_contract import load_mcp_runtime_contract
 
@@ -115,6 +125,59 @@ class MCPRuntimeGateTests(unittest.TestCase):
                     allowlist_path=str(allowlist_path),
                 )
 
+    def test_conformance_report_requires_all_supported_versions_and_transport_families(self) -> None:
+        report = _conformance_report()
+
+        result = validate_mcp_runtime_conformance_report(report)
+
+        self.assertEqual(result["supported_mcp_spec_versions"], ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER))
+        self.assertEqual(result["transport_families"], "2024-11-05=legacy_http_sse,2025+=streamable_http")
+
+    def test_conformance_report_rejects_missing_or_extra_supported_versions(self) -> None:
+        for versions in (
+            SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1],
+            (*SUPPORTED_MCP_PROTOCOL_VERSION_ORDER, "2024-10-07"),
+            (),
+        ):
+            with self.subTest(versions=versions):
+                report = _conformance_report()
+                report["supported_mcp_spec_versions"] = list(versions)
+                with self.assertRaisesRegex(RuntimeError, "mcp_runtime_conformance_blocked"):
+                    validate_mcp_runtime_conformance_report(report)
+
+    def test_conformance_report_rejects_missing_version_result_or_transport_mismatch(self) -> None:
+        missing_result = _conformance_report()
+        del missing_result["version_results"][MCP_PROTOCOL_VERSION_2025_06_18]
+        with self.assertRaisesRegex(RuntimeError, "mcp_runtime_conformance_blocked"):
+            validate_mcp_runtime_conformance_report(missing_result)
+
+        wrong_2024_family = _conformance_report()
+        wrong_2024_family["version_results"][MCP_PROTOCOL_VERSION_2024_11_05][
+            "transport_family"
+        ] = MCP_TRANSPORT_STREAMABLE_HTTP
+        with self.assertRaisesRegex(RuntimeError, "mcp_runtime_conformance_blocked"):
+            validate_mcp_runtime_conformance_report(wrong_2024_family)
+
+        wrong_2025_family = _conformance_report()
+        wrong_2025_family["version_results"][MCP_PROTOCOL_VERSION_2025_03_26][
+            "transport_family"
+        ] = MCP_TRANSPORT_LEGACY_HTTP_SSE
+        with self.assertRaisesRegex(RuntimeError, "mcp_runtime_conformance_blocked"):
+            validate_mcp_runtime_conformance_report(wrong_2025_family)
+
+    def test_conformance_report_requires_batch_redaction_and_safe_diagnostics(self) -> None:
+        for field in ("jsonrpc_batch_rejected", "raw_id_redaction_passed", "safe_diagnostics_passed"):
+            with self.subTest(field=field):
+                report = _conformance_report()
+                report[field] = False
+                with self.assertRaisesRegex(RuntimeError, "mcp_runtime_conformance_blocked"):
+                    validate_mcp_runtime_conformance_report(report)
+
+        per_version = _conformance_report()
+        per_version["version_results"][MCP_PROTOCOL_VERSION_2025_11_25]["safe_diagnostics_passed"] = False
+        with self.assertRaisesRegex(RuntimeError, "mcp_runtime_conformance_blocked"):
+            validate_mcp_runtime_conformance_report(per_version)
+
 
 def _manifest() -> dict[str, object]:
     contract = load_mcp_runtime_contract()
@@ -139,6 +202,43 @@ def _manifest() -> dict[str, object]:
             "mcp_runtime_errors": contract["error_code_table_hash"],
         },
         "proto_hashes": {"mcp": "maf_mcp_proto_v1_20260517"},
+    }
+
+
+def _conformance_report() -> dict[str, object]:
+    return {
+        "schema_version": "maf.mcp.client_compatibility_conformance.v1",
+        "supported_mcp_spec_versions": list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        "phase_results": {
+            "phase_0": True,
+            "phase_1": True,
+            "phase_2": True,
+            "phase_3": True,
+            "phase_4": True,
+            "phase_5": True,
+        },
+        "version_results": {
+            MCP_PROTOCOL_VERSION_2024_11_05: _version_result(MCP_TRANSPORT_LEGACY_HTTP_SSE),
+            MCP_PROTOCOL_VERSION_2025_03_26: _version_result(MCP_TRANSPORT_STREAMABLE_HTTP),
+            MCP_PROTOCOL_VERSION_2025_06_18: _version_result(MCP_TRANSPORT_STREAMABLE_HTTP),
+            MCP_PROTOCOL_VERSION_2025_11_25: _version_result(MCP_TRANSPORT_STREAMABLE_HTTP),
+        },
+        "jsonrpc_batch_rejected": True,
+        "raw_id_redaction_passed": True,
+        "safe_diagnostics_passed": True,
+    }
+
+
+def _version_result(transport_family: str) -> dict[str, object]:
+    return {
+        "initialize": True,
+        "transport_family": transport_family,
+        "transport": True,
+        "tools_list": True,
+        "tools_call": True,
+        "batch_rejected": True,
+        "raw_id_redaction_passed": True,
+        "safe_diagnostics_passed": True,
     }
 
 

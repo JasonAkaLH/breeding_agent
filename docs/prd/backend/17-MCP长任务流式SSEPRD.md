@@ -9,6 +9,8 @@
 
 ## 1. 一句话结论
 
+本 PRD 是 `2025-11-25 latest-feature` 长任务 / Tasks / 完整 Streamable HTTP-SSE 轨道，不是四版本普通 tools 兼容的首版目标；普通 tools 的 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25` client compatibility 由 `docs/prd/MCP/compatibility/` 管理。
+
 本项目需要把 MCP 通信升级到完整的 **长任务流式 SSE** 能力：不再只解析单条 SSE 响应，而是要支持 MCP Streamable HTTP 的多事件流、断线恢复、server-to-client notification / request、progress、task status、取消、最终结果拉取与本项目 API/SSE 事件桥接。
 
 这不是“多等一会儿 HTTP response”的小改动，而是 MCP Runtime 的一项正式能力扩展。

@@ -8,6 +8,20 @@ from pathlib import Path
 from typing import Any
 
 from scripts.validate_prd05_mcp_runtime_evidence import validate_evidence
+from src.integrations.mcp.mcp_runtime_gates import (
+    validate_mcp_enforce_allowlist,
+    validate_mcp_official_rust_sdk_shadow_compare,
+    validate_mcp_runtime_conformance_report,
+)
+from src.integrations.mcp.protocol import (
+    MCP_PROTOCOL_VERSION_2024_11_05,
+    MCP_PROTOCOL_VERSION_2025_03_26,
+    MCP_PROTOCOL_VERSION_2025_06_18,
+    MCP_PROTOCOL_VERSION_2025_11_25,
+    MCP_TRANSPORT_LEGACY_HTTP_SSE,
+    MCP_TRANSPORT_STREAMABLE_HTTP,
+    SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
+)
 from src.integrations.mcp.rust_contract import load_mcp_runtime_contract
 
 
@@ -41,6 +55,52 @@ class PRD05MCPRuntimeEvidenceTest(unittest.TestCase):
         self.assertNotEqual(strict.returncode, 0)
         self.assertIn("prd05_mcp_runtime_evidence_pending", strict.stderr)
 
+    def test_pending_ledger_records_repo_local_client_compatibility_conformance(self) -> None:
+        evidence_path = Path("docs/prd/rust/evidence/prd05/mcp_runtime_release_gates.json")
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+        conformance_report = payload["conformance_report"]
+        self.assertEqual(conformance_report["status"], "pending")
+        self.assertEqual(
+            conformance_report["expected_schema_version"],
+            "maf.mcp.client_compatibility_conformance.v1",
+        )
+        repo_local = conformance_report["repo_local_client_compatibility_conformance"]
+
+        result = validate_mcp_runtime_conformance_report(repo_local)
+
+        self.assertEqual(
+            result["supported_mcp_spec_versions"],
+            ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        )
+        self.assertEqual(repo_local["evidence_kind"], "repo_local_client_compatibility")
+        self.assertEqual(repo_local["visible_runtime"], "python_mcp_client_path")
+        self.assertFalse(repo_local["sidecar_canonical_multi_version_transport"])
+        self.assertIn("not Rust sidecar production readiness", repo_local["phase_results_scope"])
+        self.assertEqual(repo_local["transport_scope"], "remote_http_only_until_stdio_sandbox_passes")
+        self.assertFalse(repo_local["stdio_sandbox_conformance_passed"])
+        self.assertEqual(repo_local["adapters"], ["python_legacy", "official_rust_sdk"])
+        shadow = validate_mcp_official_rust_sdk_shadow_compare(repo_local["official_rust_sdk_shadow_compare"])
+        self.assertEqual(shadow["shadow_statuses"], "matched,skipped")
+        allowlist = validate_mcp_enforce_allowlist(repo_local["adapter_enforce_allowlist"])
+        self.assertEqual(allowlist["enforce_allowed_combinations"], "0")
+        sdk_dependency = repo_local["official_rust_sdk_dependency"]
+        self.assertEqual(sdk_dependency["crate"], "rmcp")
+        self.assertEqual(sdk_dependency["version"], "1.7.0")
+        self.assertEqual(sdk_dependency["license"], "Apache-2.0")
+        self.assertFalse(sdk_dependency["default_features"])
+        self.assertEqual(
+            sdk_dependency["features"],
+            ["client", "transport-streamable-http-client-reqwest", "reqwest"],
+        )
+        self.assertFalse(sdk_dependency["server_macros_enabled"])
+        self.assertFalse(sdk_dependency["production_enforce_enabled"])
+        self.assertFalse(repo_local["external_smoke_samples"]["is_normative"])
+        self.assertFalse(payload["client_compatibility"]["production_release_gate_satisfied"])
+        self.assertEqual(payload["client_compatibility"]["official_rust_sdk_dependency"], sdk_dependency)
+        self.assertIn("2024-11-05 legacy_http_sse remains python_legacy", payload["client_compatibility"]["official_rust_sdk_transport_scope"])
+        self.assertGreaterEqual(len(repo_local["verification_commands"]), 4)
+
     def test_complete_synthetic_evidence_validates_all_prd05_gates(self) -> None:
         contract = load_mcp_runtime_contract()
         payload = {
@@ -64,6 +124,10 @@ class PRD05MCPRuntimeEvidenceTest(unittest.TestCase):
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["pending_gates"], [])
         self.assertEqual(result["results"]["artifact_provenance"]["artifact_kind"], "mcp_runtime_sidecar_binary")
+        self.assertEqual(
+            result["results"]["conformance_report"]["supported_mcp_spec_versions"],
+            ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        )
 
 
 def _artifact(contract: dict[str, Any]) -> dict[str, str]:
@@ -83,7 +147,8 @@ def _artifact(contract: dict[str, Any]) -> dict[str, str]:
 
 def _conformance() -> dict[str, Any]:
     return {
-        "mcp_spec_version": "2025-11-25",
+        "schema_version": "maf.mcp.client_compatibility_conformance.v1",
+        "supported_mcp_spec_versions": list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
         "phase_results": {
             "phase_0": True,
             "phase_1": True,
@@ -92,8 +157,28 @@ def _conformance() -> dict[str, Any]:
             "phase_4": True,
             "phase_5": True,
         },
+        "version_results": {
+            MCP_PROTOCOL_VERSION_2024_11_05: _version_result(MCP_TRANSPORT_LEGACY_HTTP_SSE),
+            MCP_PROTOCOL_VERSION_2025_03_26: _version_result(MCP_TRANSPORT_STREAMABLE_HTTP),
+            MCP_PROTOCOL_VERSION_2025_06_18: _version_result(MCP_TRANSPORT_STREAMABLE_HTTP),
+            MCP_PROTOCOL_VERSION_2025_11_25: _version_result(MCP_TRANSPORT_STREAMABLE_HTTP),
+        },
         "jsonrpc_batch_rejected": True,
         "raw_id_redaction_passed": True,
+        "safe_diagnostics_passed": True,
+    }
+
+
+def _version_result(transport_family: str) -> dict[str, Any]:
+    return {
+        "initialize": True,
+        "transport_family": transport_family,
+        "transport": True,
+        "tools_list": True,
+        "tools_call": True,
+        "batch_rejected": True,
+        "raw_id_redaction_passed": True,
+        "safe_diagnostics_passed": True,
     }
 
 

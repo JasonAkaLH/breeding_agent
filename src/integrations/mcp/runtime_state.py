@@ -16,14 +16,16 @@ from jsonschema import Draft202012Validator, Draft7Validator, SchemaError
 from src.orchestration.models import CapabilityDescriptor
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 
+from .adapter import PythonLegacyMCPClientAdapter
 from .client import MCPClient, MCPClientError
 from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig
-from .protocol import MCP_PROTOCOL_VERSION
+from .protocol import MCP_PROTOCOL_VERSION, MCP_TRANSPORT_LEGACY_HTTP_SSE, MCP_TRANSPORT_STREAMABLE_HTTP
 from .rust_contract import contract_value as mcp_contract_value
 from .rust_contract import status_list as mcp_status_list
 from .sidecar import MCPSidecarMode
 from .tasks import InMemoryMCPTaskRegistry, is_create_task_result, normalize_task_status, validate_related_task_result_metadata
 from .transport_http import StreamableHTTPTransport
+from .transport_legacy_http_sse import LegacyHTTPSSETransport
 
 MCP_CAPABILITY_KIND = "mcp_tool"
 MCP_CAPABILITY_SOURCE = "mcp"
@@ -45,6 +47,9 @@ class MCPToolBinding:
     task_augmented_call: bool = False
     task_ttl_ms: int = 60000
     task_max_polls: int = 20
+    transport_security: str = ""
+    header_names: tuple[str, ...] = ()
+    credential_over_plaintext_http: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -54,6 +59,12 @@ class MCPRuntimeDiagnostic:
     message: str
     tool_name: str = ""
     capability_id: str = ""
+    requested_protocol_version: str = ""
+    negotiated_protocol_version: str = ""
+    transport_family: str = ""
+    transport_security: str = ""
+    header_names: tuple[str, ...] = ()
+    required: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -119,6 +130,7 @@ class MCPRuntimeState:
         self._retained_counts: dict[str, int] = {}
         self._clients: dict[str, Any] = {}
         self._bundles: dict[str, MCPRuntimeBundle] = {}
+        self._last_refresh_diagnostics: tuple[MCPRuntimeDiagnostic, ...] = ()
         self._inflight_by_platform_task: dict[str, dict[str, MCPInflightRequest]] = {}
         empty = self._make_bundle(descriptors=(), payload_policies={}, bindings={}, diagnostics=())
         self._active_revision = empty.revision
@@ -146,6 +158,10 @@ class MCPRuntimeState:
 
     def active_mcp_capability_ids(self) -> tuple[str, ...]:
         return tuple(self.active_bundle.bindings)
+
+    @property
+    def last_refresh_diagnostics(self) -> tuple[MCPRuntimeDiagnostic, ...]:
+        return self._last_refresh_diagnostics
 
     def binding_for_capability(self, capability_id: str, revision: str | None = None) -> MCPToolBinding:
         bundle = self.bundle_for_revision(revision)
@@ -194,13 +210,27 @@ class MCPRuntimeState:
         started = time.monotonic()
         previous = self.active_bundle
         if not self._config.enabled:
+            self._last_refresh_diagnostics = ()
             return MCPRuntimePendingActivation(
-                result=self._refresh_result(status="skipped", reason="disabled", previous_revision=previous.revision, active_revision=previous.revision, started=started),
+                result=self._refresh_result(
+                    status="skipped",
+                    reason="disabled",
+                    previous_revision=previous.revision,
+                    active_revision=previous.revision,
+                    started=started,
+                ),
                 bundle=previous,
             )
         if not force and previous.descriptors:
+            self._last_refresh_diagnostics = ()
             return MCPRuntimePendingActivation(
-                result=self._refresh_result(status="skipped", reason="unchanged", previous_revision=previous.revision, active_revision=previous.revision, started=started),
+                result=self._refresh_result(
+                    status="skipped",
+                    reason="unchanged",
+                    previous_revision=previous.revision,
+                    active_revision=previous.revision,
+                    started=started,
+                ),
                 bundle=previous,
             )
 
@@ -219,6 +249,7 @@ class MCPRuntimeState:
             started=started,
         )
         if sidecar_gate is not None:
+            self._last_refresh_diagnostics = tuple(diagnostics)
             return sidecar_gate
 
         try:
@@ -227,18 +258,47 @@ class MCPRuntimeState:
                     continue
                 server_error = server.validation_error()
                 if server_error:
-                    diagnostics.append(MCPRuntimeDiagnostic(server_id=server.server_id, reason="invalid_server_config", message=server_error))
+                    diagnostics.append(
+                        MCPRuntimeDiagnostic(
+                            server_id=server.server_id,
+                            reason="invalid_server_config",
+                            message=server_error,
+                            requested_protocol_version=server.protocol_version,
+                            transport_family=server.transport,
+                            transport_security=server.transport_security,
+                            header_names=server.request_header_names,
+                            required=server.required,
+                        )
+                    )
                     if server.required:
                         raise RuntimeError(server_error)
                     continue
-                client = self._client_factory(server)
+                client = None
                 try:
+                    client = self._client_factory(server)
                     raw_tools = await _maybe_await(client.list_tools())
                 except Exception as exc:
                     discovery_failed = True
                     fatal_error_type = type(exc).__name__
-                    diagnostics.append(MCPRuntimeDiagnostic(server_id=server.server_id, reason="server_discovery_failed", message=type(exc).__name__))
-                    await _close_client(client)
+                    exc_metadata = getattr(exc, "metadata", {}) if isinstance(getattr(exc, "metadata", {}), Mapping) else {}
+                    error_code = getattr(exc, "mcp_error_code", "")
+                    diagnostics.append(
+                        MCPRuntimeDiagnostic(
+                            server_id=server.server_id,
+                            reason=error_code if str(error_code).startswith("legacy_") else "server_discovery_failed",
+                            message=type(exc).__name__,
+                            requested_protocol_version=str(
+                                exc_metadata.get("requested_protocol_version") or server.protocol_version
+                            ),
+                            negotiated_protocol_version=str(exc_metadata.get("negotiated_protocol_version") or ""),
+                            transport_family=str(exc_metadata.get("transport_family") or server.transport),
+                            transport_security=server.transport_security,
+                            header_names=server.request_header_names,
+                            required=server.required,
+                        )
+                    )
+                    if client is not None:
+                        await _close_client(client)
                     if server.required:
                         raise
                     continue
@@ -256,31 +316,50 @@ class MCPRuntimeState:
         except Exception as exc:
             for client in next_clients.values():
                 await _close_client(client)
+            self._last_refresh_diagnostics = tuple(diagnostics)
+            bundle = self._make_bundle(
+                descriptors=previous.descriptors,
+                payload_policies=previous.payload_policies,
+                bindings=previous.bindings,
+                diagnostics=tuple(previous.diagnostics) + tuple(diagnostics),
+            )
             return MCPRuntimePendingActivation(
-                result=self._refresh_result(
+                result=MCPRuntimeRefreshResult(
                     status="failed",
                     reason=reason,
                     previous_revision=previous.revision,
                     active_revision=previous.revision,
-                    started=started,
+                    registered_count=len(previous.descriptors),
+                    skipped_count=len(bundle.diagnostics),
+                    duration_ms=int((time.monotonic() - started) * 1000),
                     error_type=type(exc).__name__,
                 ),
-                bundle=previous,
+                bundle=bundle,
             )
 
-        if discovery_failed and not descriptors:
+        if discovery_failed and not descriptors and previous.descriptors:
             for client in next_clients.values():
                 await _close_client(client)
+            bundle = self._make_bundle(
+                descriptors=previous.descriptors,
+                payload_policies=previous.payload_policies,
+                bindings=previous.bindings,
+                diagnostics=tuple(previous.diagnostics) + tuple(diagnostics),
+            )
+            self._last_refresh_diagnostics = tuple(diagnostics)
             return MCPRuntimePendingActivation(
-                result=self._refresh_result(
-                    status="failed",
-                    reason=reason,
+                result=MCPRuntimeRefreshResult(
+                    status="completed",
+                    reason="optional_discovery_failed",
                     previous_revision=previous.revision,
-                    active_revision=previous.revision,
-                    started=started,
+                    active_revision=bundle.revision,
+                    registered_count=len(bundle.descriptors),
+                    skipped_count=len(bundle.diagnostics),
+                    duration_ms=int((time.monotonic() - started) * 1000),
                     error_type=fatal_error_type or "MCPDiscoveryError",
                 ),
-                bundle=previous,
+                bundle=bundle,
+                clients=dict(self._clients),
             )
 
         bundle = self._make_bundle(
@@ -289,6 +368,7 @@ class MCPRuntimeState:
             bindings=bindings,
             diagnostics=tuple(diagnostics),
         )
+        self._last_refresh_diagnostics = tuple(diagnostics)
         result = MCPRuntimeRefreshResult(
             status="completed",
             reason=reason,
@@ -434,19 +514,59 @@ class MCPRuntimeState:
             capability_id = tool_config.effective_capability_id(server.server_id)
             tool_name = tool_config.tool_name
             if tool_config.risk_level != "read_only":
-                diagnostics.append(_diagnostic(server, tool_config, "unsupported_risk_level", "Generic public MCP tools must be read_only in Phase 1.", capability_id))
+                diagnostics.append(
+                    _diagnostic(
+                        server,
+                        tool_config,
+                        "unsupported_risk_level",
+                        "Generic public MCP tools must be read_only in Phase 1.",
+                        capability_id,
+                    )
+                )
                 continue
             if not tool_name:
-                diagnostics.append(_diagnostic(server, tool_config, "missing_tool_name", "MCP public tool requires tool_name.", capability_id))
+                diagnostics.append(
+                    _diagnostic(
+                        server,
+                        tool_config,
+                        "missing_tool_name",
+                        "MCP public tool requires tool_name.",
+                        capability_id,
+                    )
+                )
                 continue
             if tool_name not in tool_by_name:
-                diagnostics.append(_diagnostic(server, tool_config, "tool_not_discovered", "Configured MCP tool was not discovered from server.", capability_id))
+                diagnostics.append(
+                    _diagnostic(
+                        server,
+                        tool_config,
+                        "tool_not_discovered",
+                        "Configured MCP tool was not discovered from server.",
+                        capability_id,
+                    )
+                )
                 continue
             if not MCPToolConfig.valid_capability_id(capability_id) or capability_id in reserved:
-                diagnostics.append(_diagnostic(server, tool_config, "reserved_or_duplicate_capability_id", f"Invalid or reserved MCP capability id: {capability_id}", capability_id))
+                diagnostics.append(
+                    _diagnostic(
+                        server,
+                        tool_config,
+                        "reserved_or_duplicate_capability_id",
+                        f"Invalid or reserved MCP capability id: {capability_id}",
+                        capability_id,
+                    )
+                )
                 continue
             if not tool_config.public_name or not tool_config.public_description:
-                diagnostics.append(_diagnostic(server, tool_config, "missing_public_descriptor", "Public MCP capability requires local public_name and public_description.", capability_id))
+                diagnostics.append(
+                    _diagnostic(
+                        server,
+                        tool_config,
+                        "missing_public_descriptor",
+                        "Public MCP capability requires local public_name and public_description.",
+                        capability_id,
+                    )
+                )
                 continue
             discovered_tool = tool_by_name[tool_name]
             task_support = _tool_task_support(discovered_tool)
@@ -506,6 +626,9 @@ class MCPRuntimeState:
                 task_augmented_call=task_decision in {"task_augmented", "task_augmented_preferred"},
                 task_ttl_ms=tool_config.task_ttl_ms,
                 task_max_polls=tool_config.task_max_polls,
+                transport_security=server.transport_security,
+                header_names=server.request_header_names,
+                credential_over_plaintext_http=server.credential_over_plaintext_http,
             )
             descriptors[capability_id] = CapabilityDescriptor(
                 capability_id=capability_id,
@@ -522,7 +645,14 @@ class MCPRuntimeState:
             bindings[capability_id] = binding
             reserved.add(capability_id)
 
-    async def call_tool(self, capability_id: str, arguments: Mapping[str, Any], revision: str | None = None, event_callback=None, request_context: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+    async def call_tool(
+        self,
+        capability_id: str,
+        arguments: Mapping[str, Any],
+        revision: str | None = None,
+        event_callback=None,
+        request_context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         binding = self.binding_for_capability(capability_id, revision)
         client = self._clients.get(binding.server_id)
         if client is None:
@@ -534,12 +664,13 @@ class MCPRuntimeState:
             if key in allowed
         }
         context = dict(request_context or {})
+        platform_task_id = str(context.get("task_id") or "")
         registered_request_ids: list[str | int] = []
 
         def _register_request(request_id: str | int) -> None:
             registered_request_ids.append(request_id)
             self._register_inflight_request(
-                platform_task_id=str(context.get("task_id") or ""),
+                platform_task_id=platform_task_id,
                 server_id=binding.server_id,
                 tool_name=binding.tool_name,
                 client=client,
@@ -547,7 +678,10 @@ class MCPRuntimeState:
             )
 
         if binding.task_augmented_call:
-            progress_token = self._task_registry.make_progress_token(server_id=binding.server_id, tool_name=binding.tool_name)
+            progress_token = self._task_registry.make_progress_token(
+                server_id=binding.server_id,
+                tool_name=binding.tool_name,
+            )
             call_kwargs: dict[str, Any] = {
                 "task_augmented": True,
                 "progress_token": progress_token,
@@ -564,12 +698,19 @@ class MCPRuntimeState:
                     )
                 )
             except asyncio.CancelledError:
-                await self._cancel_registered_inflight_before_reraising(str(context.get("task_id") or ""))
+                await self._cancel_registered_inflight_before_reraising(platform_task_id)
                 raise
             finally:
-                self._complete_registered_inflight(str(context.get("task_id") or ""), registered_request_ids)
+                self._complete_registered_inflight(platform_task_id, registered_request_ids)
             if isinstance(result, Mapping) and is_create_task_result(result):
-                return await self._resolve_task_result(client, binding, result, progress_token, event_callback=event_callback, request_context=context)
+                return await self._resolve_task_result(
+                    client,
+                    binding,
+                    result,
+                    progress_token,
+                    event_callback=event_callback,
+                    request_context=context,
+                )
             return result
         call_kwargs: dict[str, Any] = {}
         if _callable_accepts_keyword(getattr(client, "call_tool", None), "request_registered_callback"):
@@ -578,10 +719,10 @@ class MCPRuntimeState:
             result = client.call_tool(binding.tool_name, filtered_arguments, **call_kwargs)
             return await _maybe_await(result)
         except asyncio.CancelledError:
-            await self._cancel_registered_inflight_before_reraising(str(context.get("task_id") or ""))
+            await self._cancel_registered_inflight_before_reraising(platform_task_id)
             raise
         finally:
-            self._complete_registered_inflight(str(context.get("task_id") or ""), registered_request_ids)
+            self._complete_registered_inflight(platform_task_id, registered_request_ids)
 
     async def _resolve_task_result(
         self,
@@ -627,12 +768,24 @@ class MCPRuntimeState:
             await _emit_mcp_event(
                 event_callback,
                 "mcp.long_task_status",
-                {"status": record.status, "status_message": record.status_message, "safe_ref": record.safe_ref},
+                {
+                    "status": record.status,
+                    "status_message": record.status_message,
+                    "safe_ref": record.safe_ref,
+                },
             )
             if record.status == input_required_status:
-                raise MCPClientError("MCP task input_required is unsupported.", code="mcp_runtime_task_input_required_unsupported", retriable=False)
+                raise MCPClientError(
+                    "MCP task input_required is unsupported.",
+                    code="mcp_runtime_task_input_required_unsupported",
+                    retriable=False,
+                )
             if record.status in {failed_status, cancelled_status}:
-                raise MCPClientError(f"MCP task ended with {record.status}.", code=f"mcp_runtime_task_{record.status}", retriable=False)
+                raise MCPClientError(
+                    f"MCP task ended with {record.status}.",
+                    code=f"mcp_runtime_task_{record.status}",
+                    retriable=False,
+                )
             if record.status == completed_status:
                 result = await _maybe_await(client.tasks_result(raw_task_id))
                 if isinstance(result, Mapping):
@@ -645,19 +798,36 @@ class MCPRuntimeState:
                     await _emit_mcp_event(
                         event_callback,
                         "mcp.long_task_completed",
-                        {"safe_ref": record.safe_ref, "duration_ms": 0, "output_size_bytes": output_size, "truncated": False},
+                        {
+                            "safe_ref": record.safe_ref,
+                            "duration_ms": 0,
+                            "output_size_bytes": output_size,
+                            "truncated": False,
+                        },
                     )
                     return result
-                raise MCPClientError("MCP task result is unavailable.", code="mcp_runtime_task_result_unavailable", retriable=True)
-        raise MCPClientError("MCP task result is unavailable.", code="mcp_runtime_task_result_unavailable", retriable=True)
-
+                raise MCPClientError(
+                    "MCP task result is unavailable.",
+                    code="mcp_runtime_task_result_unavailable",
+                    retriable=True,
+                )
+        raise MCPClientError(
+            "MCP task result is unavailable.",
+            code="mcp_runtime_task_result_unavailable",
+            retriable=True,
+        )
 
     async def cancel_platform_task(self, task_id: str, *, reason: str = "user_requested") -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         inflight = list(self._inflight_by_platform_task.get(task_id, {}).values())
         cancelled_status = mcp_contract_value("task_cancelled_state")
         for request in inflight:
-            events.append({"event_type": "mcp.long_task_cancel_requested", "payload": {"safe_ref": request.safe_ref, "reason": reason}})
+            events.append(
+                {
+                    "event_type": "mcp.long_task_cancel_requested",
+                    "payload": {"safe_ref": request.safe_ref, "reason": reason},
+                }
+            )
             try:
                 cancel_request = getattr(request.client, "cancel_request", None)
                 if callable(cancel_request):
@@ -666,26 +836,51 @@ class MCPRuntimeState:
                     send_notification = getattr(request.client, "send_notification", None)
                     if not callable(send_notification):
                         raise AttributeError("MCP client cannot send cancellation notification.")
-                    await _maybe_await(send_notification("notifications/cancelled", {"requestId": request.request_id, "reason": reason}))
+                    await _maybe_await(
+                        send_notification(
+                            "notifications/cancelled",
+                            {"requestId": request.request_id, "reason": reason},
+                        )
+                    )
             except Exception:
-                events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": request.safe_ref, "error_code": "mcp_runtime_request_cancel_failed", "retriable": False}})
+                events.append(
+                    _mcp_task_failure_event(
+                        safe_ref=request.safe_ref,
+                        error_code="mcp_runtime_request_cancel_failed",
+                    )
+                )
                 continue
-            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": request.safe_ref, "status": cancelled_status}})
+            events.append(_mcp_task_cancelled_event(safe_ref=request.safe_ref, status=cancelled_status))
         for record in self._task_registry.records_for_platform_task(task_id):
             if record.status in mcp_status_list("task_terminal_states"):
                 continue
-            events.append({"event_type": "mcp.long_task_cancel_requested", "payload": {"safe_ref": record.safe_ref, "reason": reason}})
+            events.append(
+                {
+                    "event_type": "mcp.long_task_cancel_requested",
+                    "payload": {"safe_ref": record.safe_ref, "reason": reason},
+                }
+            )
             client = self._clients.get(record.server_id)
             if client is None:
-                events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": record.safe_ref, "error_code": "mcp_runtime_task_cancel_failed", "retriable": False}})
+                events.append(
+                    _mcp_task_failure_event(
+                        safe_ref=record.safe_ref,
+                        error_code="mcp_runtime_task_cancel_failed",
+                    )
+                )
                 continue
             try:
                 await _maybe_await(client.tasks_cancel(record.mcp_task_id, reason=reason))
             except Exception:
-                events.append({"event_type": "mcp.long_task_failed", "payload": {"safe_ref": record.safe_ref, "error_code": "mcp_runtime_task_cancel_failed", "retriable": False}})
+                events.append(
+                    _mcp_task_failure_event(
+                        safe_ref=record.safe_ref,
+                        error_code="mcp_runtime_task_cancel_failed",
+                    )
+                )
                 continue
             self._task_registry.update_status(record.mcp_task_id, {"status": {"state": cancelled_status, "message": reason}})
-            events.append({"event_type": "mcp.long_task_cancelled", "payload": {"safe_ref": record.safe_ref, "status": cancelled_status}})
+            events.append(_mcp_task_cancelled_event(safe_ref=record.safe_ref, status=cancelled_status))
         if inflight:
             self._inflight_by_platform_task.pop(task_id, None)
         return events
@@ -827,25 +1022,72 @@ class MCPRuntimeState:
 
 def _default_client_factory(default_timeout_seconds: float) -> MCPClientFactory:
     def _factory(server: MCPServerConfig) -> MCPClient:
-        return MCPClient(
+        if server.transport == MCP_TRANSPORT_STREAMABLE_HTTP:
+            transport = StreamableHTTPTransport(
+                endpoint=server.endpoint,
+                auth=server.auth,
+                request_headers=server.request_headers,
+            )
+        elif server.transport == MCP_TRANSPORT_LEGACY_HTTP_SSE:
+            transport = LegacyHTTPSSETransport(
+                endpoint=server.endpoint,
+                auth=server.auth,
+                request_headers=server.request_headers,
+            )
+        else:
+            raise MCPClientError(
+                f"MCP transport {server.transport} is not implemented by the Python default client factory.",
+                code="mcp_transport_unsupported",
+                retriable=False,
+                metadata={"server_id": server.server_id, "transport": server.transport},
+            )
+        client = MCPClient(
             server_id=server.server_id,
-            transport=StreamableHTTPTransport(endpoint=server.endpoint, auth=server.auth),
+            transport=transport,
             protocol_version=server.protocol_version or MCP_PROTOCOL_VERSION,
+            pinned_protocol_version=server.protocol_version_pinned,
+            transport_family=server.transport,
             timeout_seconds=server.limits.timeout_seconds or default_timeout_seconds,
             client_capabilities={},
         )
+        return PythonLegacyMCPClientAdapter(client)
 
     return _factory
 
 
-def _diagnostic(server: MCPServerConfig, tool: MCPToolConfig, reason: str, message: str, capability_id: str) -> MCPRuntimeDiagnostic:
+def _diagnostic(
+    server: MCPServerConfig,
+    tool: MCPToolConfig,
+    reason: str,
+    message: str,
+    capability_id: str,
+) -> MCPRuntimeDiagnostic:
     return MCPRuntimeDiagnostic(
         server_id=server.server_id,
         tool_name=tool.tool_name,
         capability_id=capability_id,
         reason=reason,
         message=message,
+        requested_protocol_version=server.protocol_version,
+        transport_family=server.transport,
+        transport_security=server.transport_security,
+        header_names=server.request_header_names,
+        required=server.required,
     )
+
+
+def _mcp_task_failure_event(*, safe_ref: str, error_code: str) -> dict[str, Any]:
+    return {
+        "event_type": "mcp.long_task_failed",
+        "payload": {"safe_ref": safe_ref, "error_code": error_code, "retriable": False},
+    }
+
+
+def _mcp_task_cancelled_event(*, safe_ref: str, status: str) -> dict[str, Any]:
+    return {
+        "event_type": "mcp.long_task_cancelled",
+        "payload": {"safe_ref": safe_ref, "status": status},
+    }
 
 
 def _coerce_schema(value: Any) -> Mapping[str, Any]:
@@ -930,7 +1172,11 @@ def _bundle_digest(
     diagnostics: tuple[MCPRuntimeDiagnostic, ...],
 ) -> str:
     raw = "\n".join(
-        [*(descriptor.capability_id for descriptor in descriptors), *(f"{cap}:{binding.server_id}/{binding.tool_name}" for cap, binding in bindings.items()), *(f"{diag.server_id}:{diag.tool_name}:{diag.reason}" for diag in diagnostics)]
+        [
+            *(descriptor.capability_id for descriptor in descriptors),
+            *(f"{cap}:{binding.server_id}/{binding.tool_name}" for cap, binding in bindings.items()),
+            *(f"{diag.server_id}:{diag.tool_name}:{diag.reason}" for diag in diagnostics),
+        ]
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 

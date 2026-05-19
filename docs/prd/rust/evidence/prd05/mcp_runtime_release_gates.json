@@ -1,16 +1,299 @@
 {
   "schema_version": "maf.prd05.mcp_runtime_evidence.v1",
   "status": "pending_external_production_evidence",
-  "last_updated": "2026-05-17",
-  "artifact_provenance": {"status": "pending"},
+  "last_updated": "2026-05-20",
+  "artifact_provenance": {
+    "status": "pending"
+  },
   "allowed_artifact_checksums": [],
   "allowed_cargo_lock_digests": [],
-  "conformance_report": {"status": "pending"},
-  "benchmark_report": {"status": "pending"},
-  "promotion_readiness": {"status": "pending"},
-  "ops_readiness": {"status": "pending"},
-  "recovery_readiness": {"status": "pending"},
-  "decommission_readiness": {"status": "pending"},
+  "conformance_report": {
+    "status": "pending",
+    "reason": "Rust sidecar canonical Phase 2-5 production conformance evidence is still pending; repo-local Python MCP client compatibility evidence is recorded below without satisfying the PRD05 production release gate.",
+    "expected_schema_version": "maf.mcp.client_compatibility_conformance.v1",
+    "repo_local_client_compatibility_conformance": {
+      "schema_version": "maf.mcp.client_compatibility_conformance.v1",
+      "evidence_kind": "repo_local_client_compatibility",
+      "visible_runtime": "python_mcp_client_path",
+      "runtime_scope": "client_only",
+      "phase_results_scope": "repo-local client compatibility and conformance/document gates only; not Rust sidecar production readiness",
+      "sidecar_canonical_multi_version_transport": false,
+      "supported_mcp_spec_versions": [
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25"
+      ],
+      "phase_results": {
+        "phase_0": true,
+        "phase_1": true,
+        "phase_2": true,
+        "phase_3": true,
+        "phase_4": true,
+        "phase_5": true
+      },
+      "version_results": {
+        "2024-11-05": {
+          "initialize": true,
+          "transport_family": "legacy_http_sse",
+          "transport": true,
+          "tools_list": true,
+          "tools_call": true,
+          "batch_rejected": true,
+          "raw_id_redaction_passed": true,
+          "safe_diagnostics_passed": true
+        },
+        "2025-03-26": {
+          "initialize": true,
+          "transport_family": "streamable_http",
+          "transport": true,
+          "tools_list": true,
+          "tools_call": true,
+          "batch_rejected": true,
+          "raw_id_redaction_passed": true,
+          "safe_diagnostics_passed": true
+        },
+        "2025-06-18": {
+          "initialize": true,
+          "transport_family": "streamable_http",
+          "transport": true,
+          "tools_list": true,
+          "tools_call": true,
+          "batch_rejected": true,
+          "raw_id_redaction_passed": true,
+          "safe_diagnostics_passed": true
+        },
+        "2025-11-25": {
+          "initialize": true,
+          "transport_family": "streamable_http",
+          "transport": true,
+          "tools_list": true,
+          "tools_call": true,
+          "batch_rejected": true,
+          "raw_id_redaction_passed": true,
+          "safe_diagnostics_passed": true
+        }
+      },
+      "jsonrpc_batch_rejected": true,
+      "raw_id_redaction_passed": true,
+      "safe_diagnostics_passed": true,
+      "verification_commands": [
+        "conda run -n multi_agent python -m unittest discover -s tests/integrations/mcp -p 'test_*.py'",
+        "conda run -n multi_agent python -m unittest tests.integrations.test_mcp_client tests.integrations.test_mcp_runtime_state",
+        "conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'",
+        "conda run -n multi_agent python scripts/validate_prd05_mcp_runtime_evidence.py --allow-pending --json"
+      ],
+      "verification_results": [
+        {
+          "command": "conda run -n multi_agent python -m unittest tests.integrations.mcp.test_prd05_mcp_runtime_evidence",
+          "exit_code": 0,
+          "result": "3 tests OK"
+        },
+        {
+          "command": "conda run -n multi_agent python scripts/validate_prd05_mcp_runtime_evidence.py --allow-pending --json",
+          "exit_code": 0,
+          "result": "status=pending with all production release gates still pending"
+        },
+        {
+          "command": "conda run -n multi_agent python scripts/validate_prd05_mcp_runtime_evidence.py",
+          "exit_code": 1,
+          "result": "strict gate remains fail-closed: artifact provenance evidence is pending"
+        },
+        {
+          "command": "conda run -n multi_agent python -m unittest tests.integrations.test_mcp_client tests.integrations.test_mcp_runtime_state",
+          "exit_code": 0,
+          "result": "15 tests OK"
+        },
+        {
+          "command": "conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'",
+          "exit_code": 0,
+          "result": "191 tests OK"
+        },
+        {
+          "command": "git diff --check",
+          "exit_code": 0,
+          "result": "no whitespace errors"
+        },
+        {
+          "command": "conda run -n multi_agent python -m unittest tests.integrations.mcp.test_official_sdk_conformance_matrix tests.integrations.mcp.test_prd05_mcp_runtime_evidence tests.integrations.mcp.test_legacy_http_sse_persistent_reader",
+          "exit_code": 0,
+          "result": "14 tests OK"
+        },
+        {
+          "command": "conda run -n multi_agent python -m unittest discover -s tests/integrations/mcp -p 'test_*.py'",
+          "exit_code": 0,
+          "result": "119 tests OK"
+        }
+      ],
+      "transport_scope": "remote_http_only_until_stdio_sandbox_passes",
+      "stdio_sandbox_conformance_passed": false,
+      "adapters": [
+        "python_legacy",
+        "official_rust_sdk"
+      ],
+      "adapter_conformance_status": "python_legacy_passed_official_rust_sdk_streamable_http_2025plus_partial_shadow_verified_2024_legacy_skipped",
+      "official_rust_sdk_shadow_compare": {
+        "schema_version": "maf.mcp.official_rust_sdk_shadow_compare.v1",
+        "visible_adapter": "python_legacy",
+        "shadow_adapter": "official_rust_sdk",
+        "results": [
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2024-11-05",
+            "transport_family": "legacy_http_sse",
+            "status": "skipped",
+            "compared_fields": [
+              "negotiated_protocol_version",
+              "server_info",
+              "capabilities",
+              "tools_descriptor_shape",
+              "safe_tool_call_result_shape",
+              "error_category"
+            ],
+            "redaction": {
+              "header_values": "redacted",
+              "raw_payload": "omitted"
+            },
+            "visible_path_unchanged": true,
+            "skip_reason": "rmcp_streamable_http_client_only_2024_legacy_http_sse_visible_python_path"
+          },
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2025-03-26",
+            "transport_family": "streamable_http",
+            "status": "matched",
+            "compared_fields": [
+              "negotiated_protocol_version",
+              "server_info",
+              "capabilities",
+              "tools_descriptor_shape",
+              "safe_tool_call_result_shape",
+              "error_category"
+            ],
+            "redaction": {
+              "header_values": "redacted",
+              "raw_payload": "omitted"
+            },
+            "visible_path_unchanged": true
+          },
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2025-06-18",
+            "transport_family": "streamable_http",
+            "status": "matched",
+            "compared_fields": [
+              "negotiated_protocol_version",
+              "server_info",
+              "capabilities",
+              "tools_descriptor_shape",
+              "safe_tool_call_result_shape",
+              "error_category"
+            ],
+            "redaction": {
+              "header_values": "redacted",
+              "raw_payload": "omitted"
+            },
+            "visible_path_unchanged": true
+          },
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2025-11-25",
+            "transport_family": "streamable_http",
+            "status": "matched",
+            "compared_fields": [
+              "negotiated_protocol_version",
+              "server_info",
+              "capabilities",
+              "tools_descriptor_shape",
+              "safe_tool_call_result_shape",
+              "error_category"
+            ],
+            "redaction": {
+              "header_values": "redacted",
+              "raw_payload": "omitted"
+            },
+            "visible_path_unchanged": true
+          }
+        ]
+      },
+      "adapter_enforce_allowlist": {
+        "schema_version": "maf.mcp.adapter_enforce_allowlist.v1",
+        "allowed_combinations": [
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2024-11-05",
+            "transport_family": "legacy_http_sse",
+            "adapter": "official_rust_sdk",
+            "shadow_compare_status": "skipped",
+            "enforce_allowed": false,
+            "rollback_path": "python_legacy_adapter"
+          },
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2025-03-26",
+            "transport_family": "streamable_http",
+            "adapter": "official_rust_sdk",
+            "shadow_compare_status": "matched",
+            "enforce_allowed": false,
+            "rollback_path": "python_legacy_adapter"
+          },
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2025-06-18",
+            "transport_family": "streamable_http",
+            "adapter": "official_rust_sdk",
+            "shadow_compare_status": "matched",
+            "enforce_allowed": false,
+            "rollback_path": "python_legacy_adapter"
+          },
+          {
+            "server_scope": "fixture_remote_http",
+            "protocol_version": "2025-11-25",
+            "transport_family": "streamable_http",
+            "adapter": "official_rust_sdk",
+            "shadow_compare_status": "matched",
+            "enforce_allowed": false,
+            "rollback_path": "python_legacy_adapter"
+          }
+        ]
+      },
+      "external_smoke_samples": {
+        "is_normative": false,
+        "server_specific_logic_allowed": false,
+        "script": "scripts/smoke_mcp_server_config.py"
+      },
+      "production_gate_boundary": "repo-local client compatibility does not satisfy artifact provenance, production shadow, benchmark, ops/recovery, promotion, or legacy decommission gates",
+      "official_rust_sdk_dependency": {
+        "crate": "rmcp",
+        "version": "1.7.0",
+        "license": "Apache-2.0",
+        "default_features": false,
+        "features": [
+          "client",
+          "transport-streamable-http-client-reqwest",
+          "reqwest"
+        ],
+        "server_macros_enabled": false,
+        "runtime_role": "client_only_shadow_adapter",
+        "production_enforce_enabled": false
+      }
+    }
+  },
+  "benchmark_report": {
+    "status": "pending"
+  },
+  "promotion_readiness": {
+    "status": "pending"
+  },
+  "ops_readiness": {
+    "status": "pending"
+  },
+  "recovery_readiness": {
+    "status": "pending"
+  },
+  "decommission_readiness": {
+    "status": "pending"
+  },
   "blockers": [
     "mcp_runtime_sidecar_artifact_not_promoted_by_deployment_allowlist",
     "mcp_runtime_phase2_streamable_http_sse_kernel_not_canonical",
@@ -20,5 +303,40 @@
     "mcp_runtime_benchmark_report_not_collected",
     "mcp_runtime_ops_recovery_drills_not_executed",
     "python_legacy_mcp_protocol_sanitizer_activation_paths_not_decommissioned"
-  ]
+  ],
+  "client_compatibility": {
+    "supported_versions": [
+      "2024-11-05",
+      "2025-03-26",
+      "2025-06-18",
+      "2025-11-25"
+    ],
+    "adapters": [
+      "python_legacy",
+      "official_rust_sdk"
+    ],
+    "conformance_status": "passed_repo_local_client_only",
+    "transport_scope": "remote_http_only_until_stdio_sandbox_passes",
+    "shadow_status": "matched_2025plus_streamable_http_skipped_2024_legacy_http_sse",
+    "external_smoke_samples": {
+      "is_normative": false,
+      "server_specific_logic_allowed": false
+    },
+    "production_release_gate_satisfied": false,
+    "official_rust_sdk_dependency": {
+      "crate": "rmcp",
+      "version": "1.7.0",
+      "license": "Apache-2.0",
+      "default_features": false,
+      "features": [
+        "client",
+        "transport-streamable-http-client-reqwest",
+        "reqwest"
+      ],
+      "server_macros_enabled": false,
+      "runtime_role": "client_only_shadow_adapter",
+      "production_enforce_enabled": false
+    },
+    "official_rust_sdk_transport_scope": "streamable_http_2025plus_json_object_shadow; 2025plus SSE response remains python_legacy visible path; 2024-11-05 legacy_http_sse remains python_legacy visible path until dedicated SDK fixtures pass"
+  }
 }
