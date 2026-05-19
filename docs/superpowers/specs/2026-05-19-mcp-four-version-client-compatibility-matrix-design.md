@@ -1,11 +1,31 @@
 # MCP Four-Version Client Compatibility Matrix Design
 
 - **Date:** 2026-05-19
-- **Status:** Approved design for implementation planning
+- **Status:** Reviewed and hardened design for implementation planning
 - **Scope:** MCP Runtime as **client only**
 - **Protocol revisions covered:** `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`
 
-## 1. Goal and boundaries
+## 1. Problem statement
+
+The current repository MCP Runtime is intentionally pinned to a single external MCP protocol revision, `2025-11-25`. That made the first Rust sidecar and Python facade gates deterministic, but it prevents the client from connecting to legacy or intermediate MCP servers that still implement `2024-11-05`, `2025-03-26`, or `2025-06-18`.
+
+The project needs a client-only compatibility matrix that tells implementers exactly which protocol behavior is expected per revision, which behavior is deliberately rejected, and which behavior is reserved for later PRDs. Without that matrix, adding `2024-11-05` support risks mixing legacy HTTP+SSE with Streamable HTTP, incorrectly using a global protocol constant after negotiation, or accidentally enabling unimplemented client capabilities.
+
+## 2. Current state and evidence
+
+| Evidence | What it establishes |
+|---|---|
+| `src/integrations/mcp/protocol.py` | Runtime currently exposes one `MCP_PROTOCOL_VERSION` and one supported version: `2025-11-25`. |
+| `src/integrations/mcp/config.py` | Server config rejects any protocol version outside `SUPPORTED_MCP_PROTOCOL_VERSIONS`. |
+| `src/integrations/mcp/client.py` | Client sends `initialize.params.protocolVersion`, currently rejects negotiated versions different from the requested version, and keeps the requested version for later transport calls. |
+| `src/integrations/mcp/transport_http.py` | Current HTTP transport is Streamable HTTP shaped: POST/GET, `MCP-Protocol-Version`, `MCP-Session-Id`, `Last-Event-ID`; it is not a 2024 HTTP+SSE adapter. |
+| `tests/fixtures/mcp/contracts/conformance_matrix.json` | Current conformance fixture names only `2025-11-25`. |
+| `src/integrations/mcp/mcp_runtime_gates.py` | Current conformance evidence gate accepts only `mcp_spec_version == "2025-11-25"`. |
+| `native/crates/maf_mcp_runtime/src/lib.rs` and `native/proto/maf/mcp/v1/mcp_runtime.proto` | Rust MCP sidecar is still a contract/handshake skeleton, not a canonical multi-version MCP transport implementation. |
+| Official MCP `2024-11-05` lifecycle / transport docs | `protocolVersion` is mandatory in initialize; 2024 HTTP transport is HTTP+SSE with an SSE endpoint and server-provided POST endpoint. |
+| Official MCP changelogs for `2025-03-26`, `2025-06-18`, `2025-11-25` | Streamable HTTP replaced HTTP+SSE in 2025-03-26; batching was removed in 2025-06-18; later revisions added structured output, elicitation, resource links, icons, and tasks. |
+
+## 3. Goal and boundaries
 
 Design a layered compatibility matrix for the repository MCP Runtime so it can reason about and test compatibility with four official MCP protocol revisions as a client connecting to external MCP servers.
 
@@ -23,7 +43,7 @@ Out of scope:
 - Planner / LLM product strategy for selecting MCP tools.
 - Production rollout, shadow, or enforce migration beyond identifying gates.
 
-## 2. Compatibility status vocabulary
+## 4. Compatibility status vocabulary
 
 Every matrix cell uses one of these statuses:
 
@@ -36,7 +56,7 @@ Every matrix cell uses one of these statuses:
 | `future` | Capability is acknowledged but reserved for later design / implementation. |
 | `not-applicable` | Capability does not apply to that protocol version or layer. |
 
-## 3. Core protocol layer
+## 5. Core protocol layer
 
 | Core capability | 2024-11-05 | 2025-03-26 | 2025-06-18 | 2025-11-25 | Client behavior |
 |---|---|---|---|---|---|
@@ -47,9 +67,9 @@ Every matrix cell uses one of these statuses:
 | Post-initialize version stability | `supported` | `supported` | `supported` | `supported` | A session never switches versions after initialize. Transport and feature gates read session state. |
 | Initialized notification | `supported` | `supported` | `supported` | `supported` | Always send `notifications/initialized` after a valid InitializeResult. |
 | JSON-RPC request / response / notification object | `supported` | `supported` | `supported` | `supported` | Outer data-layer message must be a JSON-RPC 2.0 object. |
-| JSON-RPC batch | `not-supported` | `compatible-degraded` | `not-supported` | `not-supported` | `2025-03-26` briefly supported batching, but this runtime remains object-only and rejects batch arrays. |
+| JSON-RPC batch | `not-supported` | `not-supported` | `not-supported` | `not-supported` | `2025-03-26` briefly allowed batching, but this runtime intentionally remains object-only and rejects batch arrays for every version. |
 | Request id correlation | `supported` | `supported` | `supported` | `supported` | Client generates request IDs per session; responses must match the request ID. |
-| Server-to-client request | `compatible-degraded` | `compatible-degraded` | `compatible-degraded` | `compatible-degraded` | Respond to `ping`; unsupported roots/sampling/elicitation/etc. return method-not-found / unsupported. |
+| Server-to-client request | `compatible-degraded` | `compatible-degraded` | `compatible-degraded` | `compatible-degraded` | Respond to `ping`; unsupported roots, sampling, elicitation, tasks, and other unimplemented client-feature requests return method-not-found / unsupported. |
 | Capability negotiation | `supported` | `supported` | `supported` | `supported` | Operation uses only negotiated server capabilities and allowed tool metadata. |
 | Client capabilities | `config-gated` | `config-gated` | `config-gated` | `config-gated` | Default `{}`; do not declare roots/sampling/elicitation/tasks unless separately implemented and tested. |
 | Logging notification | `compatible-degraded` | `compatible-degraded` | `compatible-degraded` | `compatible-degraded` | May be received and sanitized for diagnostics; does not enter planner prompts. |
@@ -62,8 +82,9 @@ Core principles:
 - The server's InitializeResult determines the negotiated session version.
 - Runtime default version affects only the initial candidate for unpinned server configs.
 - JSON-RPC batch support is not required for tool business payloads. A tool may return many rows/items while the outer JSON-RPC response remains a single object.
+- The batch decision is a deliberate implementation constraint, not a claim that `2025-03-26` never specified batching.
 
-## 4. Transport layer
+## 6. Transport layer
 
 | Transport capability | 2024-11-05 | 2025-03-26 | 2025-06-18 | 2025-11-25 | Client behavior |
 |---|---|---|---|---|---|
@@ -76,7 +97,7 @@ Core principles:
 | POST response SSE stream | `not-applicable` | `supported` | `supported` | `supported` | Streamable HTTP may return an SSE stream from POST. |
 | Dedicated GET stream | `not-applicable` | `supported` | `supported` | `supported` | 2025+ can open server-to-client stream by GET; 405 means unavailable, not fatal protocol corruption. |
 | 2024 SSE endpoint messages | `supported` | `not-applicable` | `not-applicable` | `not-applicable` | Client connects to SSE endpoint, reads endpoint event, and POSTs future messages to that endpoint. |
-| `MCP-Protocol-Version` header | `not-applicable` | `compatible-degraded` | `supported` | `supported` | Required for `2025-06-18+`; may be sent for `2025-03-26`; not used for `2024-11-05`. |
+| `MCP-Protocol-Version` header | `not-applicable` | `compatible-degraded` | `supported` | `supported` | Required for `2025-06-18+`; for `2025-03-26`, do not make correctness depend on the header because the requirement was introduced later; not used for `2024-11-05`. |
 | `MCP-Session-Id` header | `not-applicable` | `supported` | `supported` | `supported` | If returned by server, carry it on later requests; 404 triggers controlled reinitialize. |
 | `Last-Event-ID` resume | `compatible-degraded` | `supported` | `supported` | `supported` | Save legacy SSE IDs but do not promise full 2024 recovery; 2025+ resumes through GET. |
 | DELETE session shutdown | `not-applicable` | `compatible-degraded` | `supported` | `supported` | Use for 2025+ where supported; 405 means server does not support active session termination. |
@@ -103,7 +124,7 @@ Transport principles:
 
 If negotiated version and transport family do not match: optional servers are skipped with diagnostics; required servers fail closed.
 
-## 5. Feature / extension layer
+## 7. Feature / extension layer
 
 | Feature capability | 2024-11-05 | 2025-03-26 | 2025-06-18 | 2025-11-25 | Client behavior |
 |---|---|---|---|---|---|
@@ -136,7 +157,7 @@ Feature principles:
 - Newer metadata is safe to parse only as untrusted diagnostics unless explicitly allowlisted.
 - Resources, prompts, tasks, interactive OAuth, roots, sampling, elicitation, and stdio sandbox remain outside this implementation slice.
 
-## 6. Configuration and runtime data flow
+## 8. Configuration and runtime data flow
 
 Example configuration:
 
@@ -202,7 +223,7 @@ Constraints:
 - No 2024 legacy HTTP+SSE emulation through Streamable HTTP.
 - No protocol, endpoint, auth, transport, or tool identity control from LLM / Planner / user messages.
 
-## 7. Error handling matrix
+## 9. Error handling matrix
 
 | Scenario | Behavior |
 |---|---|
@@ -220,7 +241,7 @@ Constraints:
 | Tool result output validation fails | Return capability execution error; do not pass unvalidated output to Planner. |
 | 401/403/scope challenge | Map to auth_required / scope_required; do not misclassify as protocol mismatch. |
 
-## 8. Test and evidence plan
+## 10. Test and evidence plan
 
 Test layers:
 
@@ -256,7 +277,48 @@ Evidence/documentation gates:
 - Change `src/integrations/mcp/mcp_runtime_gates.py` so conformance reports require coverage for all supported versions instead of only `2025-11-25`.
 - Update MCP PRDs from a single `2025-11-25` baseline to multi-version client compatibility invariants.
 
-## 9. Implementation boundary for the first plan
+## 11. Non-functional requirements
+
+| Requirement | Design requirement |
+|---|---|
+| Determinism | Version selection and transport family selection must be derived from config and initialize negotiation, never from LLM/user text. |
+| Safety / privacy | Endpoints, session IDs, event IDs, progress tokens, auth headers, raw task IDs, and raw tool outputs must be sanitized before audit, diagnostics, frontend events, or planner context. |
+| Compatibility | A server can be marked supported only when ordinary `tools/list` and ordinary `tools/call` pass version-specific conformance fixtures for its negotiated protocol revision and transport family. |
+| Reliability | Reinitialization may retry side-effect-free discovery/read flows, but must not automatically replay `tools/call`. |
+| Observability | Skipped servers and degraded feature handling must emit safe diagnostics with server id, negotiated/requested version, transport family, reason code, and required/optional outcome. |
+| Maintainability | Version differences must live behind protocol/transport/feature gates rather than scattered conditionals in executor or planner code. |
+| Testability | Every supported version must have contract fixtures plus unit/integration tests for negotiation, transport, discovery, and ordinary invocation. |
+
+## 12. Acceptance criteria
+
+| ID | Acceptance criterion | Verification |
+|---|---|---|
+| MCP-COMPAT-AC-001 | `SUPPORTED_MCP_PROTOCOL_VERSIONS` includes exactly `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25` for this implementation slice. | Unit test for constants/config validation. |
+| MCP-COMPAT-AC-002 | `initialize.params.protocolVersion` is always sent and uses config-pinned version or default candidate `2025-11-25`. | Client unit tests. |
+| MCP-COMPAT-AC-003 | Client stores `negotiated_protocol_version` from `InitializeResult.protocolVersion` and uses it for subsequent feature/transport gates. | Client/session unit tests. |
+| MCP-COMPAT-AC-004 | Explicitly pinned server config fails closed if the server negotiates a different version. | Config/client integration tests. |
+| MCP-COMPAT-AC-005 | `2024-11-05` HTTP servers use `legacy_http_sse`; `2025-03-26+` HTTP servers use `streamable_http`; invalid pairings fail validation. | Config validation tests. |
+| MCP-COMPAT-AC-006 | Legacy HTTP+SSE support connects to an SSE endpoint, reads the server-provided POST endpoint event, and sends JSON-RPC object messages to that endpoint. | Legacy transport integration tests. |
+| MCP-COMPAT-AC-007 | Streamable HTTP support remains valid for `2025-03-26`, `2025-06-18`, and `2025-11-25`, including POST JSON, POST SSE response, GET stream, session handling, and DELETE 405 semantics where applicable. | Streamable transport integration tests. |
+| MCP-COMPAT-AC-008 | JSON-RPC batch arrays are rejected for every supported version, including `2025-03-26`. | Protocol unit tests. |
+| MCP-COMPAT-AC-009 | Ordinary `tools/list` and ordinary `tools/call` work against fake servers for all four versions. | Runtime discovery/call integration tests. |
+| MCP-COMPAT-AC-010 | Metadata/features outside this slice, including resources/prompts public capabilities, interactive OAuth, tasks, roots, sampling, elicitation, and stdio sandbox, remain disabled or unsupported by default. | Runtime capability and server-to-client request tests. |
+| MCP-COMPAT-AC-011 | Conformance evidence gates require all supported versions rather than a single `2025-11-25` report. | Gate unit tests and fixture schema tests. |
+| MCP-COMPAT-AC-012 | Optional incompatible servers are skipped with safe diagnostics; required incompatible servers fail startup/refresh. | Runtime state integration tests. |
+
+## 13. Risks, assumptions, and open questions
+
+| Type | Item | Handling |
+|---|---|---|
+| Assumption | The first implementation slice only needs ordinary tools, not resources/prompts/tasks. | Recorded in scope and acceptance criteria; future PRDs can expand. |
+| Assumption | HTTP transport family is configured, not auto-detected. | Config validation enforces version/transport pairing. |
+| Risk | `2025-03-26` server behavior around `MCP-Protocol-Version` header may vary because the hard requirement arrived later. | Treat header dependence as degraded for `2025-03-26`; conformance tests must include a server that does not require that header. |
+| Risk | 2024 HTTP+SSE endpoint event parsing can leak endpoint/query secrets if diagnostics log raw values. | Legacy transport must reuse endpoint redaction and audit-safe diagnostics. |
+| Risk | Supporting four versions can scatter version checks across runtime code. | Require centralized protocol/transport/feature gate helpers before executor integration. |
+| Risk | Rust sidecar contract currently advertises one external MCP protocol version. | First implementation plan must decide whether Python legacy path owns multi-version support first or sidecar contract expands at the same time; until then production enforce remains gated. |
+| Open question | Whether to update existing MCP PRDs in the same implementation plan or as a documentation-first preliminary PR. | Implementation planning should choose sequencing; no runtime ambiguity depends on this. |
+
+## 14. Implementation boundary for the first plan
 
 First implementation slice should include:
 
@@ -278,9 +340,10 @@ First slice should not include:
 - stdio sandbox implementation.
 - Production enforce rollout.
 
-## 10. Official reference anchors
+## 15. Official reference anchors
 
-- MCP `2024-11-05` lifecycle and HTTP+SSE transport.
-- MCP `2025-03-26` changelog: Streamable HTTP introduced and previous HTTP+SSE replaced.
-- MCP `2025-06-18` changelog: JSON-RPC batching removed, structured output and elicitation added.
-- MCP `2025-11-25` changelog: tasks, icons metadata, URL mode elicitation, and related enhancements added.
+- MCP `2024-11-05` lifecycle: https://modelcontextprotocol.io/specification/2024-11-05/basic/lifecycle
+- MCP `2024-11-05` transport: https://modelcontextprotocol.io/specification/2024-11-05/basic/transports
+- MCP `2025-03-26` changelog: https://modelcontextprotocol.io/specification/2025-03-26/changelog
+- MCP `2025-06-18` changelog: https://modelcontextprotocol.io/specification/2025-06-18/changelog
+- MCP `2025-11-25` changelog: https://modelcontextprotocol.io/specification/2025-11-25/changelog
