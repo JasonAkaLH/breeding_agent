@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 前端 current task 刷新恢复设计已确认：新增 `docs/superpowers/specs/2026-05-20-current-task-refresh-restore-design.md`，将目标收敛为同一 conversation 单任务串行下只恢复 `current_task_id` 的临时 assistant 气泡运行态，复用现有 messages/task/graph/interrupts/events API 和前端单任务状态，不做多任务面板或后端 snapshot API。
 - Slash Skill Command PRD02 已实现：新增后端 `conversation_pending_skill_context` 持久化模型与 storage/API 生命周期，slash 强制 Skill 在 typed missing-input 且无 interrupt 时会写正式 assistant 缺失提示并释放 conversation busy；下一轮普通消息优先续接原 Skill 并在成功后消费 context，新 slash 覆盖旧 pending，用户 metadata 不能伪造续接，普通失败文本不触发 pending。新增 storage/API 回归并验证 storage、api、orchestration、core、lifecycle、capabilities/main_agent、skill_tool 与 e2e 相关 unittest 通过。
 - 前端 Slash Skill Command MVP 已实现：业务对话台登录后拉取 public `skill.*` capability 并支持 `/` picker、默认 3 个候选高度/超出内部滚动、键盘/鼠标选择、已选 Skill badge、direct `/skill args` 强制提交、unknown slash fail-closed、上传文件 metadata merge 与 IME 安全；API client 新增 capabilities list / explicit capability submit，后端 `force_capability` 缺 capability fail-closed 并保存 task routing mode；新增前端 domain/App/client 与 API 回归，验证 `npm test -- --run`、`npm run typecheck`、`npm run build` 及相关 API/orchestration unittest 通过。
 - 前端 Slash Skill Command 设计、PRD 拆分与置信审查：新增并加固 `docs/superpowers/specs/2026-05-20-frontend-slash-skill-command-design.md` 与 `docs/prd/frontend/slash-skill-command/`，将前端 slash Skill command MVP 和 pending Skill context continuation 拆成两份可独立实施 PRD，并补齐用户/系统边界、NFR、失败模式、命令冲突 fail-closed、typed missing-input 续接 contract 与 rollout/migration 约束。
