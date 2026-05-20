@@ -23,4 +23,4 @@
 3. `docs/prd/backend/05-API与核心数据模型.md`
 4. `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`
 5. 具体可移除数据类 Skill 的前端结果展示契约（由对应 Skill bundle 自带 docs 维护）
-- [Slash Skill Command PRD Set](slash-skill-command/README.md)：拆分为前端 slash Skill command MVP 与 pending Skill context continuation 两份 PRD。
+6. `docs/prd/frontend/slash-skill-command/README.md`：前端 slash Skill command MVP 与 pending Skill context continuation PRD set。
