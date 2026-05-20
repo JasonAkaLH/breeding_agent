@@ -64,6 +64,7 @@
   - Skill 描述
   - 可选小字：`source_path` 或 capability id。
 - 支持鼠标点击、`↑/↓` 高亮、`Enter` 选择、`Esc` 关闭。
+- 默认最多露出 3 个候选；候选数大于 3 时在 picker 内部纵向滚动，不挤压 composer。
 
 ### 5.2 已选 Skill badge
 

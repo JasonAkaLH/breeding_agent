@@ -1313,17 +1313,24 @@ body {
 }
 
 .slash-command-menu {
+  --slash-command-option-height: 72px;
+
   margin: 0 8px;
-  overflow: hidden;
+  max-height: calc(var(--slash-command-option-height) * 3 + 2px);
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid rgba(47, 64, 31, 0.14);
   border-radius: 18px;
   background: rgba(255, 253, 247, 0.88);
   box-shadow: 0 16px 42px rgba(74, 67, 41, 0.13), inset 0 1px 0 rgba(255, 255, 255, 0.62);
   backdrop-filter: blur(18px) saturate(1.08);
   -webkit-backdrop-filter: blur(18px) saturate(1.08);
+  overscroll-behavior: contain;
 }
 
 .slash-command-option {
+  box-sizing: border-box;
+  height: var(--slash-command-option-height);
   padding: 10px 14px;
   border-left: 3px solid transparent;
   cursor: pointer;
@@ -1349,6 +1356,7 @@ body {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
 }
 
 .slash-command-name {
@@ -1358,9 +1366,12 @@ body {
 }
 
 .slash-command-title {
+  overflow: hidden;
   color: var(--color-text);
   font-size: 13px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .slash-command-description,
@@ -1373,10 +1384,16 @@ body {
 
 .slash-command-description {
   margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .slash-command-meta {
   margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   word-break: break-all;
 }
 

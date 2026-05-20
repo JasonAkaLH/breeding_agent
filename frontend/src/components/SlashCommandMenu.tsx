@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { SlashCommand } from '../domain/slashCommands';
 
 interface SlashCommandMenuProps {
@@ -8,6 +9,12 @@ interface SlashCommandMenuProps {
 }
 
 export default function SlashCommandMenu({ candidates, activeIndex, emptyMessage, onSelect }: SlashCommandMenuProps) {
+  const optionRefs = useRef<Array<HTMLDivElement | null>>([]);
+
+  useEffect(() => {
+    optionRefs.current[activeIndex]?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeIndex, candidates.length]);
+
   return (
     <div className="slash-command-menu" role="listbox" aria-label="Skill 命令列表">
       {candidates.length === 0 ? (
@@ -15,6 +22,9 @@ export default function SlashCommandMenu({ candidates, activeIndex, emptyMessage
       ) : candidates.map((candidate, index) => (
         <div
           key={`${candidate.capabilityId}:${candidate.command}`}
+          ref={(element) => {
+            optionRefs.current[index] = element;
+          }}
           role="option"
           aria-selected={index === activeIndex}
           tabIndex={0}
