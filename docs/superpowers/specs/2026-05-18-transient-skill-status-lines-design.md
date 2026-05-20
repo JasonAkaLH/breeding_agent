@@ -41,7 +41,7 @@
 
 ```text
 灰色 Skill 状态区（可选，多行）
-SQLQuery：正在检索数据
+data-query：正在检索数据
 RCBD：正在读取材料清单
 文件生成：等待执行
 
@@ -103,7 +103,7 @@ interface TaskEventState {
 例如：
 
 ```text
-SQLQuery：正在检索数据
+data-query：正在检索数据
 RCBD：正在读取材料清单
 ```
 

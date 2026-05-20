@@ -240,7 +240,7 @@ scripts:
             skill_provider, revision = self._platform_skill_provider(
                 root,
                 (
-                    ("sql-query", "skill.sql_query"),
+                    ("data-lookup", "skill.data_lookup"),
                     ("rcbd-design", "skill.mini_breedstat_rcbd"),
                 ),
             )
@@ -254,16 +254,16 @@ scripts:
             high_level = WorkflowPlan(
                 task_id="task-independent-skills",
                 nodes=(
-                    WorkflowNodePlan(node_id="sql_query_1", capability_id="skill.sql_query"),
+                    WorkflowNodePlan(node_id="data_lookup_1", capability_id="skill.data_lookup"),
                     WorkflowNodePlan(
                         node_id="rcbd_design_1",
                         capability_id="skill.mini_breedstat_rcbd",
-                        depends_on=("sql_query_1",),
+                        depends_on=("data_lookup_1",),
                     ),
                     WorkflowNodePlan(
                         node_id="answer_user",
                         capability_id="main_agent.respond",
-                        depends_on=("sql_query_1", "rcbd_design_1"),
+                        depends_on=("data_lookup_1", "rcbd_design_1"),
                     ),
                 ),
             )
@@ -273,7 +273,7 @@ scripts:
                 macro_provider_resolver=lambda capability_id: skill_provider if capability_id.startswith("skill.") else None,
             ).expand(high_level, request=request)
 
-        sql_node = next(node for node in expanded.nodes if node.node_id == "task-independent-skills:sql_query_1:skill_execute")
+        lookup_node = next(node for node in expanded.nodes if node.node_id == "task-independent-skills:data_lookup_1:skill_execute")
         rcbd_node = next(node for node in expanded.nodes if node.node_id == "task-independent-skills:rcbd_design_1:skill_execute")
         final_node = next(
             node
@@ -281,18 +281,18 @@ scripts:
             if node.capability_id == "main_agent.respond" and node.metadata.get("response_role") == RESPONSE_ROLE_FINAL
         )
 
-        self.assertEqual(sql_node.depends_on, ())
+        self.assertEqual(lookup_node.depends_on, ())
         self.assertEqual(rcbd_node.depends_on, ())
         self.assertEqual(
             final_node.depends_on,
             (
-                "task-independent-skills:sql_query_1:skill_execute",
+                "task-independent-skills:data_lookup_1:skill_execute",
                 "task-independent-skills:rcbd_design_1:skill_execute",
             ),
         )
         self.assertEqual(
             expanded.metadata["dropped_public_skill_dependencies"],
-            {"rcbd_design_1": ("sql_query_1",)},
+            {"rcbd_design_1": ("data_lookup_1",)},
         )
 
     def test_public_skill_dependency_can_be_explicitly_preserved_for_chained_skills(self) -> None:

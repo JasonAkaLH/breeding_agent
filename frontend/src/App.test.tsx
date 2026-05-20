@@ -1047,13 +1047,13 @@ describe('App', () => {
     await waitFor(() => expect(streamHandlers).not.toBeNull());
 
     await act(async () => {
-      streamHandlers?.onMessage(event('node.started', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery' }, 'sql-start', 'node-sql'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'sql-start', 'node-sql'));
       streamHandlers?.onMessage(event('node.started', { capability_id: 'skill.rcbd', skill_name: 'RCBD' }, 'rcbd-start', 'node-rcbd'));
-      streamHandlers?.onMessage(event('skill.progress', { capability_id: 'skill.sql_query', skill_name: 'SQLQuery', stage: 'execute_query' }, 'sql-progress', 'node-sql'));
+      streamHandlers?.onMessage(event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', stage: 'execute_query' }, 'sql-progress', 'node-sql'));
       streamHandlers?.onMessage(event('skill.progress', { capability_id: 'skill.rcbd', skill_name: 'RCBD', label: '正在读取材料清单' }, 'rcbd-progress', 'node-rcbd'));
     });
 
-    const sqlStatus = await screen.findByText('SQLQuery：正在检索数据');
+    const sqlStatus = await screen.findByText('data-query：正在检索数据');
     const rcbdStatus = await screen.findByText('RCBD：正在读取材料清单');
     const assistantMessage = sqlStatus.closest('.message-assistant') as HTMLElement;
     expect(assistantMessage).not.toBeNull();
@@ -1070,7 +1070,7 @@ describe('App', () => {
 
     const finalAnswer = await screen.findByText('最终汇总回答');
     expect(finalAnswer.closest('.message-body')).not.toBeNull();
-    expect(await screen.findByText('SQLQuery：已完成')).toBeInTheDocument();
+    expect(await screen.findByText('data-query：已完成')).toBeInTheDocument();
     expect(await screen.findByText('RCBD：已完成')).toBeInTheDocument();
   });
 

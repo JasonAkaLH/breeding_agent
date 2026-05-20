@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 数据查询 Skill ownership guard 修复：将活动文档、编排测试与前端任务状态测试中的旧专属查询 Skill 示例收敛为通用 Skill 示例，避免系统层继续硬编码可移除 bundle 细节。
 - MCP Client 官方 SDK PRD-3/PRD-4 漏洞收敛：修复 2024 legacy HTTP+SSE POST timeout / HTTPError 异常链路未绑定 `exc` 导致稳定错误码失效的问题；conformance matrix 现在要求 adapter evidence 绑定 repo-local 文件引用，并将 official Rust SDK 2025+ Streamable HTTP 口径收敛为 JSON object response shadow verified、SSE response 继续由 Python visible path 覆盖直至补齐 rmcp-backed fixture。
 - MCP Client 官方 SDK PRD-3/PRD-4 cleanup：收紧 `OfficialRustSdkClientConfig` 脱敏边界，Debug / JSON 不再输出 bearer token 或 custom header value；official SDK shadow evidence validator 现在拒绝重复版本结果，并要求所有 skipped evidence 携带明确 `skip_reason`。
 - MCP Client 官方 SDK PRD-3/PRD-4 收口：`rmcp 1.7.0` 已作为 client-only Streamable HTTP 依赖进入 Rust workspace / `Cargo.lock`，Rust adapter metadata、compile-time marker、2025+ Streamable HTTP SDK-backed initialize/list/call/close/diagnostics、shadow compare、SDK error mapping 与 lockfile drift guard 已落地；四版本 conformance / shadow / enforce evidence 同步 PRD03、PRD04 与 PRD05 ledger，并明确 `2024-11-05 + legacy_http_sse` official SDK lane 为 skipped/unsupported transport、仍由 Python legacy visible path 覆盖，production gates 继续 pending/fail-closed。
