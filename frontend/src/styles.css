@@ -13,6 +13,7 @@
   --color-agri-green-border: #b9d7b4;
   --color-console-ink: #263328;
   --color-console-accent: #4c6548;
+  --color-danger: #a0533e;
   --glass-bg: rgba(255, 253, 247, 0.48);
   --glass-bg-hover: rgba(255, 253, 247, 0.66);
   --glass-border: rgba(47, 64, 31, 0.14);
@@ -624,6 +625,15 @@ body {
   align-items: center;
   gap: 8px;
   color: var(--color-muted);
+}
+
+.activity-notice-failed {
+  color: var(--color-danger);
+}
+
+.activity-notice-error-icon {
+  color: var(--color-danger);
+  font-size: 16px;
 }
 
 .interrupt-card {

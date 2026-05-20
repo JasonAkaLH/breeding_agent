@@ -1,6 +1,6 @@
 # 主代理框架 PRD（后端总览）
 
-- **项目**：multi_agent_framework
+- **项目**：breeding_agent
 - **范围**：后端主代理框架
 - **文档状态**：正式版（已补齐至 Rust 化 Runtime 模块评估 PRD；PRD 目录为当前文档基线）
 - **日期**：2026-05-13

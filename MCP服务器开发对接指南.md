@@ -91,7 +91,7 @@ Authorization: Bearer <token>
     "protocolVersion": "2025-11-25",
     "capabilities": {},
     "clientInfo": {
-      "name": "multi_agent_framework",
+      "name": "breeding_agent",
       "version": "1"
     }
   }

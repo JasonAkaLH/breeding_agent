@@ -327,7 +327,7 @@ impl OfficialRustSdkAdapter {
 
         let client_info = ClientInfo::new(
             ClientCapabilities::default(),
-            Implementation::new("multi_agent_framework", env!("CARGO_PKG_VERSION")),
+            Implementation::new("breeding_agent", env!("CARGO_PKG_VERSION")),
         )
         .with_protocol_version(protocol_version);
         let transport = StreamableHttpClientTransport::from_config(transport_config);

@@ -1,9 +1,9 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { ApiClient } from './api/client';
-import type { TaskEventEnvelope } from './api/types';
+import type { ConversationMessagesResponse, TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
 import { WELCOME_PROMPTS } from './domain/welcomePrompts';
 
@@ -83,6 +83,31 @@ function event(event_type: string, payload: Record<string, unknown> = {}, event_
   };
 }
 
+function taskSummary(taskId: string, status: string) {
+  return {
+    task_id: taskId,
+    conversation_id: 'conv-history',
+    status,
+    root_node_id: `${taskId}:root`,
+    summary: null,
+    requested_capability_id: null,
+    active_node_count: status === 'completed' || status === 'failed' || status === 'cancelled' ? 0 : 1,
+    completed_node_count: status === 'completed' ? 1 : 0,
+    failed_node_count: status === 'failed' ? 1 : 0,
+    cancel_requested: status === 'cancelling' || status === 'cancelled',
+    created_at: null,
+    updated_at: null,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
 function makeEventSourceFactory(events: TaskEventEnvelope[]): EventSourceFactory {
   return (_url, handlers) => {
     queueMicrotask(() => {
@@ -92,6 +117,20 @@ function makeEventSourceFactory(events: TaskEventEnvelope[]): EventSourceFactory
     });
     return { close: vi.fn() };
   };
+}
+
+function makeInspectableEventSourceFactory(events: TaskEventEnvelope[] = []) {
+  const urls: string[] = [];
+  const factory: EventSourceFactory = (url, handlers) => {
+    urls.push(url);
+    queueMicrotask(() => {
+      for (const item of events) {
+        handlers.onMessage(item);
+      }
+    });
+    return { close: vi.fn() };
+  };
+  return { factory, urls };
 }
 
 function makeSequencedEventSourceFactory(eventBatches: TaskEventEnvelope[][]): EventSourceFactory {
@@ -116,6 +155,12 @@ function makeErrorEventSourceFactory(): EventSourceFactory {
 }
 
 describe('App', () => {
+  afterEach(() => {
+    localStorage.clear();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
   it('shows login page when no session exists and logs in with captcha', async () => {
     const api = makeApi({
       me: vi.fn(async () => {
@@ -481,6 +526,269 @@ describe('App', () => {
     expect(document.querySelector('.skill-status-lines')).toBeNull();
   });
 
+  it('restores an active current task after automatic session recovery', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-running', stream_status: null, created_at: null },
+        ],
+      })),
+      getTask: vi.fn(async () => taskSummary('task-running', 'running')),
+    });
+    const events = [
+      event('task.accepted', {}, 'restore-accepted'),
+      event('task.graph_created', {}, 'restore-graph'),
+      event('node.started', { capability_id: 'main_agent.respond' }, 'restore-node', 'node-main'),
+      event('main_agent.output_delta', { delta: '已生成内容', response_role: 'final' }, 'restore-output'),
+    ];
+    const eventSource = makeInspectableEventSourceFactory(events);
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('以前的问题')).toBeInTheDocument();
+    expect(await screen.findByText('已生成内容')).toBeInTheDocument();
+    expect(screen.getByLabelText('请输入问题')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
+    expect(api.getTask).toHaveBeenCalledWith('task-running');
+    expect(eventSource.urls).toEqual(['/api/v1/tasks/task-running/events']);
+  });
+
+  it('restores an active current task after explicit login', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      me: vi.fn(async () => {
+        throw new Error('unauthenticated');
+      }),
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '登录前的问题', task_id: 'task-running', stream_status: null, created_at: null },
+        ],
+      })),
+      getTask: vi.fn(async () => taskSummary('task-running', 'running')),
+    });
+    const eventSource = makeInspectableEventSourceFactory([
+      event('main_agent.output_delta', { delta: '登录后恢复内容', response_role: 'final' }, 'restore-login-output'),
+    ]);
+
+    render(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'alice-password' } });
+    fireEvent.change(screen.getByLabelText('4位验证码'), { target: { value: '1234' } });
+    fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
+
+    expect(await screen.findByText('登录前的问题')).toBeInTheDocument();
+    expect(await screen.findByText('登录后恢复内容')).toBeInTheDocument();
+    expect(api.getTask).toHaveBeenCalledWith('task-running');
+  });
+
+  it('self-heals a completed current task by showing formal history instead of a restoring bubble', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-completed', title: '历史问题', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn()
+        .mockResolvedValueOnce({
+          conversation_id: 'conv-history',
+          messages: [
+            { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-completed', stream_status: null, created_at: null },
+          ],
+        })
+        .mockResolvedValueOnce({
+          conversation_id: 'conv-history',
+          messages: [
+            { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-completed', stream_status: null, created_at: null },
+            { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: '正式历史回答', task_id: 'task-completed', stream_status: 'complete', created_at: null },
+          ],
+        }),
+      getTask: vi.fn(async () => taskSummary('task-completed', 'completed')),
+    });
+    const eventSource = makeInspectableEventSourceFactory([]);
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('正式历史回答')).toBeInTheDocument();
+    expect(screen.queryByText(/正在恢复任务状态/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('请输入问题')).not.toBeDisabled();
+    expect(eventSource.urls).toEqual([]);
+  });
+
+  it('does not restore unfinished tasks when current_task_id is null', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: null, title: '历史问题', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '没有当前任务的问题', task_id: 'task-old', stream_status: null, created_at: null },
+        ],
+      })),
+      listConversationTasks: vi.fn(async () => ({ conversation_id: 'conv-history', tasks: [taskSummary('task-old', 'running')] })),
+      getTask: vi.fn(async () => taskSummary('task-old', 'running')),
+    });
+    const eventSource = makeInspectableEventSourceFactory([]);
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('没有当前任务的问题')).toBeInTheDocument();
+    expect(api.getTask).not.toHaveBeenCalled();
+    expect(api.listConversationTasks).not.toHaveBeenCalled();
+    expect(eventSource.urls).toEqual([]);
+    expect(screen.getByLabelText('请输入问题')).not.toBeDisabled();
+  });
+
+  it('fails safe and releases input when current task status is unknown', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-paused', title: '历史问题', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '未知状态问题', task_id: 'task-paused', stream_status: null, created_at: null },
+        ],
+      })),
+      getTask: vi.fn(async () => taskSummary('task-paused', 'paused')),
+    });
+    const eventSource = makeInspectableEventSourceFactory([]);
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('未知状态问题')).toBeInTheDocument();
+    expect(await screen.findByText(/任务状态暂不支持恢复/)).toBeInTheDocument();
+    expect(screen.getByLabelText('请输入问题')).not.toBeDisabled();
+    expect(eventSource.urls).toEqual([]);
+  });
+
+  it('restores waiting-for-input state and continues the same task after an answer', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '需要补充的问题', task_id: 'task-running', stream_status: null, created_at: null },
+        ],
+      })),
+      getTask: vi.fn(async () => taskSummary('task-running', 'running')),
+      getTaskGraph: vi.fn(async () => ({
+        task_id: 'task-running',
+        nodes: [{
+          node_id: 'node-wait',
+          capability_id: 'skill.example',
+          status: 'waiting_for_input',
+          criticality: 'required',
+          dependency_type: 'all_success',
+          assigned_instance_id: null,
+          started_at: null,
+          finished_at: null,
+        }],
+        edges: [],
+      })),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-running',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          task_id: 'task-running',
+          node_id: 'node-wait',
+          question: '请补充作物类型',
+          required_fields: { crop: { options: ['rice'] } },
+          status: 'open',
+          created_at: null,
+          answered_at: null,
+        }],
+      })),
+      answerInterrupt: vi.fn(async () => ({ interrupt_id: 'interrupt-1', status: 'answered', node_id: 'node-wait', answer_payload: { crop: '水稻' } })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeInspectableEventSourceFactory([]).factory} waitingInputCheckDelayMs={1} />);
+
+    expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
+    expect(await screen.findByText(/当前任务等待补充信息/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-running', 'interrupt-1', { crop: '水稻' }));
+  });
+
+  it('keeps the active conversation switch guard while a task is running', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-other', account_id: 'alice', status: 'active', current_task_id: null, title: '另一个会话', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-other',
+        messages: [
+          { message_id: 'other-msg', conversation_id: 'conv-other', role: 'user', content: '其它会话内容', task_id: null, stream_status: null, created_at: null },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.accepted')])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '保持当前任务' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(await screen.findByRole('button', { name: '停止' })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '另一个会话' }));
+
+    expect(api.listConversationMessages).not.toHaveBeenCalledWith('conv-other');
+    expect(screen.queryByText('其它会话内容')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
+  });
+
+  it('ignores stale conversation restore responses after switching conversations', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-a');
+    const convA = deferred<ConversationMessagesResponse>();
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-a', account_id: 'alice', status: 'active', current_task_id: null, title: '会话 A', created_at: null, updated_at: null },
+          { conversation_id: 'conv-b', account_id: 'alice', status: 'active', current_task_id: null, title: '会话 B', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async (conversationId) => {
+        if (conversationId === 'conv-a') {
+          return convA.promise;
+        }
+        return {
+          conversation_id: 'conv-b',
+          messages: [
+            { message_id: 'msg-b', conversation_id: 'conv-b', role: 'user', content: 'B 的内容', task_id: null, stream_status: null, created_at: null },
+          ],
+        };
+      }),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(await screen.findByRole('button', { name: '会话 B' }));
+    convA.resolve({
+      conversation_id: 'conv-a',
+      messages: [
+        { message_id: 'msg-a', conversation_id: 'conv-a', role: 'user', content: 'A 的过期内容', task_id: null, stream_status: null, created_at: null },
+      ],
+    });
+
+    expect(await screen.findByText('B 的内容')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('A 的过期内容')).not.toBeInTheDocument());
+  });
+
   it('renders history entries as flat rows with hover-revealed actions', async () => {
     const api = makeApi({
       listConversations: vi.fn(async () => ({
@@ -782,6 +1090,24 @@ describe('App', () => {
     expect(reasoningBox).toHaveClass('reasoning-box-collapsed');
     await waitFor(() => expect(screen.getAllByText('你好').length).toBeGreaterThan(0));
     await screen.findByText(/已接通。/);
+  });
+
+  it('renders a failed task bubble with a red error icon instead of a spinner', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
+      event('task.accepted'),
+      event('task.failed', { error: '执行失败' }, 'task-failed'),
+    ])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '触发失败' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const failureText = await screen.findByText('本次任务未完成');
+    const notice = failureText.closest('.activity-notice') as HTMLElement;
+    expect(notice).not.toBeNull();
+    expect(notice).toHaveClass('activity-notice-failed');
+    expect(within(notice).getByLabelText('任务失败')).toBeInTheDocument();
+    expect(notice.querySelector('.ant-spin')).toBeNull();
   });
 
   it('submits long composer input without a character cap', async () => {

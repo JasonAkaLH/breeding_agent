@@ -755,7 +755,7 @@ print(json.dumps(result, ensure_ascii=False))
 把下面这段作为创建 Skill 的约束交给 Oh-my-codex `skill-creator`：
 
 ```text
-请创建一个适配 multi_agent_framework 后端的 Codex Skill。必须遵守：
+请创建一个适配 breeding_agent 后端的 Codex Skill。必须遵守：
 1. Skill 包只能依赖 SKILL.md；可选 scripts/ 下的 Python 脚本；只有项目级 trusted Skill 才能在 native/ 放 Rust runtime。
 2. SKILL.md frontmatter 必须包含 name、description；中文任务必须包含高质量 triggers。
 3. 本系统只会把 SKILL.md body 注入 LLM，不会自动读取 references/ 或 assets/。

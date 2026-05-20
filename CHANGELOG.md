@@ -1,6 +1,6 @@
 # 全局变更日志
 
-本文件是 **multi_agent_framework 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
+本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
 > 语言：全部条目使用中文。当前记录以“最新状态优先”为准；已经解决的中间报错、重复验证和过期阻断只保留归并摘要。
 
@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- 将 REST API 文档迁移到 `docs/api/api-doc.html`，新增后端只读入口 `GET /api-doc` 直接返回该静态 HTML，入口不挂到项目前端且不进入 OpenAPI schema；补充 API 回归测试覆盖未登录访问、HTML content-type 与关键接口内容。
+- 新增并重设计根目录 `api-doc.html` RESTful API Console 单页文档：覆盖认证 Cookie、会话/消息、任务/SSE、上传、能力列表、artifact 下载、数据结构与错误码，提供中文界面文案、左侧目录导航、正式认证说明、必填参数说明、请求/响应/错误/下一步契约、正式 curl 调用模板、response 样式、搜索/分类过滤与展开收起，并优化卡片排版避免内容溢出，并用当前 FastAPI OpenAPI path / operation 集合完成覆盖校验。
+- 项目命名更新：本地项目标识统一从 `multi_agent_framework` / `multi-agent-framework` 调整为 `breeding_agent` / `breeding-agent`，并已同步 GitHub 远端仓库名与 origin。
+- 前端任务失败气泡视觉调整：会话任务进入 `task.failed` / `node.failed` 后，assistant 运行态气泡不再显示旋转等待图标，改为红色失败感叹号，并补充对应 App 回归测试。
+- Current task 刷新恢复实现推进：PRD/test spec 已按用户指定固化到 `docs/prd/frontend/current_task_refresh_restore/`；前端新增基于 `conversation.current_task_id` 的 active task 恢复、terminal/stale 自愈、waiting-for-input 续接、generation guard 与正式 history 去重策略，并补充 App/domain 回归测试。
+- Current task 刷新恢复已进入 OMX `$plan` 实施计划并完成 document-perfectization 加固：`docs/prd/frontend/current_task_refresh_restore/01-current-task-refresh-restore.md` 与 `docs/prd/frontend/current_task_refresh_restore/test-spec-current-task-refresh-restore.md` 已明确长期交付级口径，并补齐自动登录/显式登录恢复、active status contract、异步 generation guard、SSE replay / waiting input / terminal 自愈、重复气泡防护、active conversation switch guard 与测试矩阵。
 - 前端 current task 刷新恢复设计已确认：新增 `docs/superpowers/specs/2026-05-20-current-task-refresh-restore-design.md`，将目标收敛为同一 conversation 单任务串行下只恢复 `current_task_id` 的临时 assistant 气泡运行态，复用现有 messages/task/graph/interrupts/events API 和前端单任务状态，不做多任务面板或后端 snapshot API。
 - Slash Skill Command PRD02 已实现：新增后端 `conversation_pending_skill_context` 持久化模型与 storage/API 生命周期，slash 强制 Skill 在 typed missing-input 且无 interrupt 时会写正式 assistant 缺失提示并释放 conversation busy；下一轮普通消息优先续接原 Skill 并在成功后消费 context，新 slash 覆盖旧 pending，用户 metadata 不能伪造续接，普通失败文本不触发 pending。新增 storage/API 回归并验证 storage、api、orchestration、core、lifecycle、capabilities/main_agent、skill_tool 与 e2e 相关 unittest 通过。
 - 前端 Slash Skill Command MVP 已实现：业务对话台登录后拉取 public `skill.*` capability 并支持 `/` picker、默认 3 个候选高度/超出内部滚动、键盘/鼠标选择、已选 Skill badge、direct `/skill args` 强制提交、unknown slash fail-closed、上传文件 metadata merge 与 IME 安全；API client 新增 capabilities list / explicit capability submit，后端 `force_capability` 缺 capability fail-closed 并保存 task routing mode；新增前端 domain/App/client 与 API 回归，验证 `npm test -- --run`、`npm run typecheck`、`npm run build` 及相关 API/orchestration unittest 通过。

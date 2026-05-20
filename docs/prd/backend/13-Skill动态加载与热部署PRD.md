@@ -1,6 +1,6 @@
 # Skill 动态加载与热部署 PRD
 
-- **项目**：multi_agent_framework
+- **项目**：breeding_agent
 - **范围**：后端 SkillCatalog、Skill capability 注册、Planner / Replanner 能力发现、Skill macro 展开、主代理 Skill 执行快照
 - **文档状态**：Phase 1 已实现（开发 / 内网可用热加载闭环）；生产级 package snapshot 待后续 Phase 3
 - **日期**：2026-05-11

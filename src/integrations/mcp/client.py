@@ -100,7 +100,7 @@ class MCPClient:
         self._pinned_protocol_version = bool(pinned_protocol_version)
         self._transport_family = str(transport_family or "").strip().lower()
         self._timeout_seconds = timeout_seconds
-        self._client_info = dict(client_info or {"name": "multi_agent_framework", "version": "1"})
+        self._client_info = dict(client_info or {"name": "breeding_agent", "version": "1"})
         self._client_capabilities = self._minimal_capabilities(client_capabilities or {})
         self._state = "new"
         self._request_id = 0

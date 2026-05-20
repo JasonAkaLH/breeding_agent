@@ -1,4 +1,4 @@
-# multi_agent_framework
+# breeding_agent
 
 本仓库当前已进入前后端联调阶段：一期“主代理最小内核 + 可移除数据查询 Skill bundle + FastAPI/SSE/cancel/query API”已完成，后续补齐了主代理 Skill 兼容层、主代理真实 LLM runtime 绑定、默认主代理 LLM 编排、运行时受控重排与 smoke 验证；前端 v1 业务对话台已基于现有 API/SSE/artifacts 落地。
 

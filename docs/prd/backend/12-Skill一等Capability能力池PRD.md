@@ -1,6 +1,6 @@
 # Skill 一等 Capability 能力池 PRD
 
-- **项目**：multi_agent_framework
+- **项目**：breeding_agent
 - **范围**：后端 capability registry、Planner / Replanner 能力发现、Skill runtime 接入边界
 - **文档状态**：已实现并更新（2026-05-13 起 数据查询 Skill 也作为 `skill.data_lookup` platform-service 进入能力池）
 - **日期**：2026-05-09

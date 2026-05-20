@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState, markWaitingInputRequired, taskProgressDisplayText } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, markWaitingInputRequired, taskProgressDisplayText } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -15,6 +15,37 @@ function event(event_type: string, payload: Record<string, unknown> = {}, event_
 }
 
 describe('applyTaskEvent', () => {
+  it('creates a restoring task state for refresh recovery', () => {
+    const state = createRestoringTaskState();
+
+    expect(state.phase).toBe('running');
+    expect(state.statusText).toContain('恢复任务状态');
+    expect(state.currentActivityText).toContain('同步任务输出');
+    expect(state.assistantText).toBe('');
+    expect(state.reasoningText).toBe('');
+    expect(state.seenEventIds).toEqual([]);
+  });
+
+  it('replays visible output, reasoning, and skill progress from restoring state', () => {
+    let state = createRestoringTaskState();
+    state = applyTaskEvent(state, event('main_agent.output_delta', { delta: '已生成内容', response_role: 'final' }, 'restore-output'));
+    state = applyTaskEvent(state, event('main_agent.reasoning_delta', { delta: '先分析' }, 'restore-reasoning'));
+    state = applyTaskEvent(state, event('skill.progress', { capability_id: 'skill.example', skill_name: 'ExampleSkill', label: '正在处理文件' }, 'restore-skill', 'node-skill'));
+
+    expect(state.assistantText).toBe('已生成内容');
+    expect(state.reasoningText).toBe('先分析');
+    expect(state.skillStatuses).toEqual([
+      expect.objectContaining({ capabilityId: 'skill.example', label: 'ExampleSkill', statusText: '正在处理文件', status: 'running' }),
+    ]);
+  });
+
+  it('keeps intermediate main-agent deltas hidden during restore replay', () => {
+    const state = applyTaskEvent(createRestoringTaskState(), event('main_agent.output_delta', { delta: '中间结果', response_role: 'intermediate' }, 'restore-intermediate'));
+
+    expect(state.assistantText).toBe('');
+    expect(state.seenEventIds).toEqual(['restore-intermediate']);
+  });
+
   it('maps accepted and running events to business states', () => {
     let state = createInitialTaskEventState();
     state = applyTaskEvent(state, event('task.accepted'));

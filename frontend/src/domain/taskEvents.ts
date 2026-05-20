@@ -58,6 +58,15 @@ export function createSubmittingTaskState(): TaskEventState {
   };
 }
 
+export function createRestoringTaskState(): TaskEventState {
+  return {
+    ...createInitialTaskEventState(),
+    phase: 'running',
+    statusText: '正在恢复任务状态',
+    currentActivityText: '正在同步任务输出',
+  };
+}
+
 export function taskProgressDisplayText(state: TaskEventState): string {
   return state.currentActivityText ?? state.statusText;
 }

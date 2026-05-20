@@ -6,7 +6,7 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.95"
 license = "Proprietary"
-repository = "https://example.invalid/multi_agent_framework"
+repository = "https://example.invalid/breeding_agent"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

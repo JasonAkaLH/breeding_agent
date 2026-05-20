@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { CopyOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CopyOutlined, ExclamationCircleFilled, ReloadOutlined } from '@ant-design/icons';
 import { Alert, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
 import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, UploadFileResponse, UserResponse } from './api/types';
+import type { ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
 import {
   applyTaskEvent,
   createInitialTaskEventState,
+  createRestoringTaskState,
   createSubmittingTaskState,
   isTaskActive,
   markTaskCompleted,
@@ -46,6 +47,7 @@ interface ConversationMessage {
   reasoningComplete?: boolean;
   reasoningContent?: string;
   activityText?: string;
+  activityStatus?: 'pending' | 'failed';
   skillStatuses?: SkillStatusLine[];
   artifactDisplays?: CapabilityArtifactDisplay[];
   finalContentLoaded?: boolean;
@@ -53,7 +55,7 @@ interface ConversationMessage {
   interruptPrompt?: PendingInterrupt;
 }
 
-type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
+type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
 
 interface PendingInterrupt {
   taskId: string;
@@ -73,6 +75,8 @@ const CONVERSATION_STORAGE_KEY_PREFIX = 'maf.frontend.conversation_id';
 const WAITING_INPUT_CHECK_DELAY_MS = 8_000;
 const TRANSIENT_NOTICE_DURATION_MS = 5_000;
 const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
+const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const INTERRUPT_FIELD_LABELS: Record<string, string> = {
   crop: '作物类型',
   missing_info: '补充信息',
@@ -152,8 +156,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const conversationListRef = useRef<HTMLDivElement | null>(null);
   const shouldFollowConversationRef = useRef(true);
   const lastAutoFollowConversationIdRef = useRef(conversationId);
+  const conversationIdRef = useRef(conversationId);
+  const restoreGenerationRef = useRef(0);
+  const initializedWorkspaceConversationIdRef = useRef<string | null>(null);
   const composingInputRef = useRef(false);
   const taskPresentationModesRef = useRef<Map<string, ChatMode>>(new Map());
+  const restoredTaskIdsRef = useRef<Set<string>>(new Set());
+  const localTaskRuntimeActiveRef = useRef(false);
   const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
   const transientNoticeIdRef = useRef(0);
 
@@ -166,13 +175,27 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setTransientNotice(null);
   }
 
+  function setActiveConversationId(nextConversationId: string) {
+    conversationIdRef.current = nextConversationId;
+    setConversationId(nextConversationId);
+  }
+
+  function beginRestoreGeneration(): number {
+    restoreGenerationRef.current += 1;
+    return restoreGenerationRef.current;
+  }
+
+  function isCurrentRestoreGeneration(generation: number, targetConversationId: string): boolean {
+    return restoreGenerationRef.current === generation && conversationIdRef.current === targetConversationId;
+  }
+
   useEffect(() => {
     let mounted = true;
     api.me()
       .then((result) => {
         if (!mounted) return;
         setAuthUser(result.user);
-        setConversationId(loadOrCreateConversationId(result.user.username));
+        setActiveConversationId(loadOrCreateConversationId(result.user.username));
       })
       .catch(() => {
         if (mounted) setAuthUser(null);
@@ -215,18 +238,22 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     return () => window.clearTimeout(timeoutId);
   }, [transientNotice]);
 
-  const refreshConversationHistory = useCallback(async () => {
-    if (!authUser) return;
+  const refreshConversationHistory = useCallback(async (): Promise<ConversationSummaryResponse[] | null> => {
+    if (!authUser) return [];
     setHistoryLoading(true);
     try {
       const result = await api.listConversations();
       setConversationHistory(result.conversations);
+      return result.conversations;
     } catch {
       showTransientNotice('历史会话加载失败，请稍后重试。');
+      return null;
     } finally {
       setHistoryLoading(false);
     }
   }, [api, authUser]);
+
+  const active = isTaskActive(taskState.phase);
 
   useEffect(() => {
     if (!authUser) return;
@@ -236,9 +263,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }, [authUser]);
 
   useEffect(() => {
-    if (!authUser) return;
-    void refreshConversationHistory();
-  }, [authUser, refreshConversationHistory]);
+    if (!authUser || !conversationId || active || localTaskRuntimeActiveRef.current) return;
+    if (initializedWorkspaceConversationIdRef.current === conversationId) return;
+    const generation = beginRestoreGeneration();
+    void initializeConversationWorkspace(conversationId, generation);
+  }, [authUser, conversationId, active]);
 
   const refreshConversationUploads = useCallback(async (targetConversationId = conversationId) => {
     if (!authUser || !targetConversationId) return;
@@ -253,8 +282,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   useEffect(() => {
     void refreshConversationUploads();
   }, [refreshConversationUploads]);
-
-  const active = isTaskActive(taskState.phase);
 
   const handleConversationScroll = useCallback(() => {
     const conversationList = conversationListRef.current;
@@ -360,28 +387,138 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     return false;
   }
 
+  async function loadConversationMessages(targetConversationId: string): Promise<ConversationMessage[]> {
+    const result = await api.listConversationMessages(targetConversationId);
+    return result.messages.map(messageFromHistory).filter((message): message is ConversationMessage => message !== null);
+  }
+
+  async function initializeConversationWorkspace(targetConversationId: string, generation: number): Promise<void> {
+    const conversations = await refreshConversationHistory();
+    if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+    if (conversations === null) return;
+    initializedWorkspaceConversationIdRef.current = targetConversationId;
+    const summary = conversations.find((item) => item.conversation_id === targetConversationId);
+    if (!summary) {
+      clearCurrentTaskRuntime({ closeSubscription: true });
+      setMessages([]);
+      return;
+    }
+    try {
+      const loadedMessages = await loadConversationMessages(targetConversationId);
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      setMessages(loadedMessages);
+      await restoreCurrentConversationTask(summary, generation);
+    } catch {
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      showTransientNotice('历史消息加载失败，请稍后重试。');
+      clearCurrentTaskRuntime({ closeSubscription: true });
+    }
+  }
+
+  function clearCurrentTaskRuntime({ closeSubscription = true }: { closeSubscription?: boolean } = {}) {
+    if (closeSubscription) {
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+    }
+    setTaskState(createInitialTaskEventState());
+    setCurrentTaskId(null);
+    setCurrentAssistantId(null);
+    setPendingInterrupt(null);
+    localTaskRuntimeActiveRef.current = false;
+    restoredTaskIdsRef.current.clear();
+    pendingAssistantPatchesRef.current.clear();
+  }
+
+  function isActiveTaskStatus(status: string): boolean {
+    return ACTIVE_TASK_STATUSES.has(status);
+  }
+
+  function isTerminalTaskStatus(status: string): boolean {
+    return TERMINAL_TASK_STATUSES.has(status);
+  }
+
+  async function restoreCurrentConversationTask(conversation: ConversationSummaryResponse, generation: number): Promise<void> {
+    const targetConversationId = conversation.conversation_id;
+    const taskId = conversation.current_task_id;
+    if (!taskId) {
+      clearCurrentTaskRuntime({ closeSubscription: true });
+      return;
+    }
+    let task: TaskSummaryResponse;
+    try {
+      task = await api.getTask(taskId);
+    } catch {
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      showTransientNotice('任务状态暂时无法恢复，请刷新历史消息。');
+      clearCurrentTaskRuntime({ closeSubscription: true });
+      return;
+    }
+    if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+    if (isTerminalTaskStatus(task.status)) {
+      clearCurrentTaskRuntime({ closeSubscription: true });
+      if (task.status === 'completed') {
+        try {
+          const loadedMessages = await loadConversationMessages(targetConversationId);
+          if (isCurrentRestoreGeneration(generation, targetConversationId)) {
+            setMessages(loadedMessages);
+          }
+        } catch {
+          if (isCurrentRestoreGeneration(generation, targetConversationId)) {
+            showTransientNotice('历史消息加载失败，请稍后重试。');
+          }
+        }
+      } else {
+        showTransientNotice(task.status === 'cancelled' ? '当前任务已取消。' : '当前任务未完成，请调整问题后重试。');
+      }
+      return;
+    }
+    if (!isActiveTaskStatus(task.status)) {
+      showTransientNotice('任务状态暂不支持恢复，请刷新历史消息。');
+      clearCurrentTaskRuntime({ closeSubscription: true });
+      return;
+    }
+    const restoringState = createRestoringTaskState();
+    const restoredAssistantId = `restored-assistant-${taskId}`;
+    const restoredAssistantMessage: ConversationMessage = {
+      id: restoredAssistantId,
+      role: 'assistant',
+      content: '',
+      mode,
+      reasoningRequested: false,
+      activityText: taskProgressDisplayText(restoringState),
+    };
+    restoredTaskIdsRef.current.add(taskId);
+    taskPresentationModesRef.current.set(taskId, mode);
+    setMessages((current) => (
+      current.some((message) => message.id === restoredAssistantId)
+        ? current
+        : [...current, applyPendingAssistantPatch(restoredAssistantMessage)]
+    ));
+    setCurrentTaskId(taskId);
+    setCurrentAssistantId(restoredAssistantId);
+    setPendingInterrupt(null);
+    setTaskState(restoringState);
+    subscribeToTask(taskId, restoredAssistantId, generation, targetConversationId);
+  }
+
   async function handleLogin(user: UserResponse) {
     setAuthUser(user);
     const nextConversationId = loadOrCreateConversationId(user.username);
-    setConversationId(nextConversationId);
+    initializedWorkspaceConversationIdRef.current = null;
+    setActiveConversationId(nextConversationId);
     setMessages([]);
     setPendingUploads([]);
-    setTaskState(createInitialTaskEventState());
-    setCurrentTaskId(null);
-    setPendingInterrupt(null);
-    try {
-      const result = await api.listConversations();
-      setConversationHistory(result.conversations);
-    } catch {
-      showTransientNotice('历史会话加载失败，请稍后重试。');
-    }
+    clearCurrentTaskRuntime({ closeSubscription: true });
   }
 
   async function handleLogout() {
     await api.logout().catch(() => undefined);
+    const targetConversationId = conversationId;
+    const generation = beginRestoreGeneration();
     subscriptionRef.current?.close();
     setAuthUser(null);
-    setConversationId('');
+    initializedWorkspaceConversationIdRef.current = null;
+    setActiveConversationId('');
     setMessages([]);
     setConversationHistory([]);
     setPendingUploads([]);
@@ -398,7 +535,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   function resetConversationWorkspace(nextConversationId: string) {
-    setConversationId(nextConversationId);
+    beginRestoreGeneration();
+    subscriptionRef.current?.close();
+    subscriptionRef.current = null;
+    initializedWorkspaceConversationIdRef.current = null;
+    setActiveConversationId(nextConversationId);
     setMessages([]);
     setInput('');
     setPendingUploads([]);
@@ -407,6 +548,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setPendingInterrupt(null);
     setTaskState(createInitialTaskEventState());
     taskPresentationModesRef.current.clear();
+    restoredTaskIdsRef.current.clear();
     pendingAssistantPatchesRef.current.clear();
   }
 
@@ -420,20 +562,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   async function handleSelectConversation(nextConversationId: string) {
     if (!authUser || active) return;
     saveConversationId(authUser.username, nextConversationId);
+    const generation = beginRestoreGeneration();
+    clearCurrentTaskRuntime({ closeSubscription: true });
     if (nextConversationId !== conversationId) {
-      setConversationId(nextConversationId);
+      initializedWorkspaceConversationIdRef.current = null;
+      setActiveConversationId(nextConversationId);
+      return;
     }
-    setTaskState(createInitialTaskEventState());
-    setCurrentTaskId(null);
-    setCurrentAssistantId(null);
-    setPendingInterrupt(null);
-    subscriptionRef.current?.close();
-    try {
-      const result = await api.listConversationMessages(nextConversationId);
-      setMessages(result.messages.map(messageFromHistory).filter((message): message is ConversationMessage => message !== null));
-    } catch {
-      showTransientNotice('历史消息加载失败，请稍后重试。');
-    }
+    void initializeConversationWorkspace(nextConversationId, generation);
   }
 
   async function handleDeleteConversation(targetConversationId: string) {
@@ -586,13 +722,20 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const content = intent.content;
     const forcedCommand = intent.kind === 'ready' ? intent.command : null;
     const forcedMetadata = intent.kind === 'ready' ? intent.metadata : {};
-    if (!authUser || !conversationId || active) return;
+    const targetConversationId = authUser ? (conversationId || loadOrCreateConversationId(authUser.username)) : '';
+    if (!authUser || !targetConversationId || active) return;
+    if (!conversationId) {
+      setActiveConversationId(targetConversationId);
+    }
     if (!content && intent.kind !== 'ready') return;
     clearTransientNotice();
     if (pendingInterrupt) {
       await handleInterruptAnswer(content, pendingInterrupt);
       return;
     }
+    localTaskRuntimeActiveRef.current = true;
+    const generation = beginRestoreGeneration();
+    initializedWorkspaceConversationIdRef.current = targetConversationId;
     const displayContent = content || (intent.kind === 'ready' ? intent.command.command : content);
     const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode };
     const assistantMessage: ConversationMessage = {
@@ -610,7 +753,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
     try {
       const accepted = await api.submitMessage({
-        conversationId,
+        conversationId: targetConversationId,
         content,
         mode,
         deepThinking,
@@ -621,12 +764,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           ...forcedMetadata,
         },
       });
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(accepted.task_id, mode);
       setCurrentTaskId(accepted.task_id);
       setSelectedSkillCommand(null);
       setSlashMenuOpen(false);
-      subscribeToTask(accepted.task_id, assistantMessage.id);
+      subscribeToTask(accepted.task_id, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
+      localTaskRuntimeActiveRef.current = false;
       const message = friendlyError(error);
       if (forcedCommand) {
         setSelectedSkillCommand(null);
@@ -718,6 +863,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleInterruptAnswer(content: string, interrupt: PendingInterrupt) {
+    const targetConversationId = conversationIdRef.current;
+    localTaskRuntimeActiveRef.current = true;
+    const generation = beginRestoreGeneration();
     const resumeProgressText = '补充信息已提交，正在继续任务';
     const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content, mode: interrupt.mode };
     const assistantMessage: ConversationMessage = {
@@ -742,21 +890,34 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
     try {
       await api.answerInterrupt(interrupt.taskId, interrupt.interruptId, buildInterruptAnswerPayload(interrupt, content));
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(interrupt.taskId, interrupt.mode);
       setPendingInterrupt(null);
       setCurrentTaskId(interrupt.taskId);
-      subscribeToTask(interrupt.taskId, assistantMessage.id);
+      subscribeToTask(interrupt.taskId, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
+      localTaskRuntimeActiveRef.current = false;
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
       showTransientNotice(friendlyError(error));
     }
   }
 
-  function subscribeToTask(taskId: string, assistantId: string) {
+  function subscribeToTask(
+    taskId: string,
+    assistantId: string,
+    generation = restoreGenerationRef.current,
+    targetConversationId = conversationIdRef.current,
+  ) {
     subscriptionRef.current?.close();
     subscriptionRef.current = createEventSource(taskEventsUrl(taskId), {
-      onMessage: (event) => handleTaskEvent(event, taskId, assistantId),
-      onError: () => handleEventStreamError(taskId, assistantId),
+      onMessage: (event) => {
+        if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+        handleTaskEvent(event, taskId, assistantId);
+      },
+      onError: () => {
+        if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+        handleEventStreamError(taskId, assistantId);
+      },
     });
   }
 
@@ -778,14 +939,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
       }
       if (nextProgressText !== previousProgressText) {
-        updateAssistantMessage(assistantId, { activityText: assistantActivityText(next, nextProgressText) });
+        updateAssistantMessage(assistantId, {
+          activityText: assistantActivityText(next, nextProgressText),
+          activityStatus: next.phase === 'failed' ? 'failed' : 'pending',
+        });
       }
       if (['task.failed', 'node.failed'].includes(event.event_type)) {
+        localTaskRuntimeActiveRef.current = false;
         subscriptionRef.current?.close();
+        subscriptionRef.current = null;
+        setCurrentTaskId(null);
+        restoredTaskIdsRef.current.delete(taskId);
         taskPresentationModesRef.current.delete(taskId);
       }
       if (event.event_type === 'task.cancelled') {
+        localTaskRuntimeActiveRef.current = false;
         subscriptionRef.current?.close();
+        subscriptionRef.current = null;
+        setCurrentTaskId(null);
+        restoredTaskIdsRef.current.delete(taskId);
         taskPresentationModesRef.current.delete(taskId);
       }
       return next;
@@ -803,9 +975,16 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (task.status === 'completed') {
         await loadArtifacts(taskId, assistantId);
       } else if (task.status === 'failed') {
+        localTaskRuntimeActiveRef.current = false;
         setTaskState((state) => markTaskFailed(state, '本次任务未完成，请调整问题后重试。'));
+        updateAssistantMessage(assistantId, { activityText: '本次任务未完成', activityStatus: 'failed' });
+        setCurrentTaskId(null);
+        restoredTaskIdsRef.current.delete(taskId);
       } else if (task.status === 'cancelled') {
+        localTaskRuntimeActiveRef.current = false;
         setTaskState((state) => ({ ...state, phase: 'cancelled', statusText: '任务已取消' }));
+        setCurrentTaskId(null);
+        restoredTaskIdsRef.current.delete(taskId);
       }
     } catch {
       showTransientNotice('事件流中断，任务状态暂时无法确认。');
@@ -829,10 +1008,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       updateAssistantMessage(assistantId, { activityText: undefined });
       setTaskState((state) => markTaskCompleted(state));
       setCurrentTaskId(null);
+      localTaskRuntimeActiveRef.current = false;
       taskPresentationModesRef.current.delete(taskId);
       subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      if (restoredTaskIdsRef.current.has(taskId)) {
+        restoredTaskIdsRef.current.delete(taskId);
+        const targetConversationId = conversationIdRef.current;
+        try {
+          const loadedMessages = await loadConversationMessages(targetConversationId);
+          if (conversationIdRef.current === targetConversationId) {
+            setMessages(loadedMessages);
+          }
+        } catch {
+          showTransientNotice('任务已完成，但历史消息刷新失败，请稍后重试。');
+        }
+      }
       void refreshConversationHistory();
     } catch {
+      localTaskRuntimeActiveRef.current = false;
       setTaskState((state) => markTaskCompleted(state, '任务已完成，但结果加载失败'));
       showTransientNotice('结果加载失败，可稍后重试。');
     }
@@ -863,6 +1057,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       setPendingInterrupt(null);
       setCurrentTaskId(null);
       subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      restoredTaskIdsRef.current.clear();
       setTaskState((state) => ({
         ...state,
         phase: 'cancelled',
@@ -1625,7 +1821,7 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
             {message.artifactDisplays?.map((display) => <CapabilityArtifactPanel key={capabilityArtifactDisplayKey(display)} display={display} />)}
           </>
         ) : message.activityText ? (
-          <ActivityNotice text={message.activityText} />
+          <ActivityNotice text={message.activityText} status={message.activityStatus} />
         ) : (
           <ActivityNotice text="正在等待回答..." />
         )}
@@ -1731,11 +1927,12 @@ function FileArtifactCard({ result }: { result: Extract<CapabilityArtifactDispla
   );
 }
 
-function ActivityNotice({ text }: { text: string }) {
+function ActivityNotice({ text, status = 'pending' }: { text: string; status?: 'pending' | 'failed' }) {
+  const failed = status === 'failed';
   return (
-    <div className="activity-notice" role="status" aria-live="polite">
-      <Spin size="small" />
-      <Typography.Text type="secondary">{text}</Typography.Text>
+    <div className={`activity-notice ${failed ? 'activity-notice-failed' : ''}`} role="status" aria-live="polite">
+      {failed ? <ExclamationCircleFilled className="activity-notice-error-icon" aria-label="任务失败" /> : <Spin size="small" />}
+      <Typography.Text type={failed ? 'danger' : 'secondary'}>{text}</Typography.Text>
     </div>
   );
 }
