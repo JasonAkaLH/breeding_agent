@@ -28,6 +28,21 @@ export interface SubmitMessageRequest {
   metadata: Record<string, unknown>;
 }
 
+export interface CapabilityResponse {
+  capability_id: string;
+  name: string;
+  description: string;
+  version: string;
+  status: string;
+  kind: string;
+  source: string;
+  source_path: string;
+}
+
+export interface CapabilityListResponse {
+  capabilities: CapabilityResponse[];
+}
+
 export interface MessageAcceptedResponse {
   conversation_id: string;
   message_id: string;

@@ -6,6 +6,7 @@ import { createApiClient, type ApiClient } from './api/client';
 import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
 import type { ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
+import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
 import {
   applyTaskEvent,
@@ -21,6 +22,7 @@ import {
 } from './domain/taskEvents';
 import { DataQueryResultCard } from './components/DataQueryResultCard';
 import { MarkdownText } from './components/MarkdownText';
+import SlashCommandMenu from './components/SlashCommandMenu';
 import './styles.css';
 
 const INPUT_MENU_BUTTON_IMAGE = '/pics/input-menu-plus-button.svg';
@@ -127,6 +129,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [deepThinking, setDeepThinking] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('medium');
   const [input, setInput] = useState('');
+  const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([]);
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
+  const [selectedSkillCommand, setSelectedSkillCommand] = useState<SlashCommand | null>(null);
   const [pendingUploads, setPendingUploads] = useState<UploadFileResponse[]>([]);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [draggingUpload, setDraggingUpload] = useState(false);
@@ -175,6 +181,29 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mounted = false;
     };
   }, [api]);
+
+  useEffect(() => {
+    if (!authUser) {
+      setSkillCommands([]);
+      setSlashMenuOpen(false);
+      setSelectedSkillCommand(null);
+      return undefined;
+    }
+    let mounted = true;
+    api.listCapabilities()
+      .then((result) => {
+        if (!mounted) return;
+        setSkillCommands(deriveSlashCommands(result.capabilities));
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setSkillCommands([]);
+        showTransientNotice('Skill 列表加载失败，请刷新重试。');
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [api, authUser]);
 
   useEffect(() => {
     if (!transientNotice) return undefined;
@@ -469,15 +498,103 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
   }
 
+  const slashCandidates = useMemo(
+    () => (slashMenuOpen ? slashMenuCandidates(input, skillCommands) : []),
+    [input, skillCommands, slashMenuOpen],
+  );
+  const normalizedSlashMenuActiveIndex = slashCandidates.length === 0
+    ? 0
+    : Math.min(slashMenuActiveIndex, slashCandidates.length - 1);
+  const directSlashParse = useMemo(() => parseDirectSlashCommand(input, skillCommands), [input, skillCommands]);
+  const slashInputBlocked = !selectedSkillCommand && (directSlashParse.kind === 'not_found' || directSlashParse.kind === 'conflict');
+  const canSubmitComposer = !slashInputBlocked && (
+    Boolean(input.trim())
+    || selectedSkillCommand !== null
+    || directSlashParse.kind === 'matched'
+  );
+  const slashMenuEmptyMessage = skillCommands.length === 0 ? '暂无可用 Skill' : '未找到 Skill';
+
+  function handleComposerInputChange(value: string) {
+    setInput(value);
+    if (isSlashInput(value)) {
+      setSlashMenuOpen(true);
+      setSlashMenuActiveIndex(0);
+    } else {
+      setSlashMenuOpen(false);
+    }
+  }
+
+  function selectSlashCommand(command: SlashCommand) {
+    setSelectedSkillCommand(command);
+    setInput((current) => {
+      const parsed = parseDirectSlashCommand(current, [command]);
+      if (parsed.kind === 'matched') return parsed.content;
+      if (isSlashInput(current)) return current.trimStart().replace(/^\/[^\s]*\s*/, '');
+      return current;
+    });
+    setSlashMenuOpen(false);
+    setSlashMenuActiveIndex(0);
+    clearTransientNotice();
+  }
+
+  function handleSlashKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (!slashMenuOpen && !isSlashInput(input)) return false;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setSlashMenuOpen(false);
+      return true;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setSlashMenuOpen(true);
+      setSlashMenuActiveIndex((current) => (slashCandidates.length === 0 ? 0 : (current + 1) % slashCandidates.length));
+      return true;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setSlashMenuOpen(true);
+      setSlashMenuActiveIndex((current) => (slashCandidates.length === 0 ? 0 : (current - 1 + slashCandidates.length) % slashCandidates.length));
+      return true;
+    }
+    if (event.key === 'Enter') {
+      const parsed = parseDirectSlashCommand(input, skillCommands);
+      if (parsed.kind === 'matched' && /\s/.test(input.trimStart().slice(parsed.command.command.length))) {
+        return false;
+      }
+      if (slashMenuOpen && slashCandidates.length > 0) {
+        event.preventDefault();
+        selectSlashCommand(slashCandidates[normalizedSlashMenuActiveIndex]);
+        return true;
+      }
+      if (parsed.kind === 'not_found' || parsed.kind === 'conflict') {
+        event.preventDefault();
+        setSlashMenuOpen(true);
+        showTransientNotice(parsed.kind === 'conflict' ? `命令 ${parsed.command} 存在冲突，请从列表中选择具体 Skill。` : `未找到 Skill：${parsed.command}`);
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function handleSubmit() {
-    const content = input.trim();
-    if (!authUser || !conversationId || !content || active) return;
+    const intent = slashSubmitIntent(input, skillCommands, selectedSkillCommand);
+    if (intent.kind === 'blocked') {
+      setSlashMenuOpen(true);
+      showTransientNotice(intent.reason === 'conflict' ? `命令 ${intent.command} 存在冲突，请从列表中选择具体 Skill。` : `未找到 Skill：${intent.command}`);
+      return;
+    }
+    const content = intent.content;
+    const forcedCommand = intent.kind === 'ready' ? intent.command : null;
+    const forcedMetadata = intent.kind === 'ready' ? intent.metadata : {};
+    if (!authUser || !conversationId || active) return;
+    if (!content && intent.kind !== 'ready') return;
     clearTransientNotice();
     if (pendingInterrupt) {
       await handleInterruptAnswer(content, pendingInterrupt);
       return;
     }
-    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content, mode };
+    const displayContent = content || (intent.kind === 'ready' ? intent.command.command : content);
+    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
       role: 'assistant',
@@ -498,14 +615,28 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         mode,
         deepThinking,
         reasoningEffort,
-        metadata: pendingUploads.length > 0 ? { upload_ids: pendingUploads.map((upload) => upload.upload_id) } : undefined,
+        capabilityId: forcedCommand?.capabilityId,
+        metadata: {
+          ...(pendingUploads.length > 0 ? { upload_ids: pendingUploads.map((upload) => upload.upload_id) } : {}),
+          ...forcedMetadata,
+        },
       });
       taskPresentationModesRef.current.set(accepted.task_id, mode);
       setCurrentTaskId(accepted.task_id);
+      setSelectedSkillCommand(null);
+      setSlashMenuOpen(false);
       subscribeToTask(accepted.task_id, assistantMessage.id);
     } catch (error) {
-      setTaskState((state) => markTaskFailed(state, friendlyError(error)));
-      showTransientNotice(friendlyError(error));
+      const message = friendlyError(error);
+      if (forcedCommand) {
+        setSelectedSkillCommand(null);
+        setSlashMenuOpen(false);
+        void api.listCapabilities()
+          .then((result) => setSkillCommands(deriveSlashCommands(result.capabilities)))
+          .catch(() => undefined);
+      }
+      setTaskState((state) => markTaskFailed(state, message));
+      showTransientNotice(forcedCommand ? `${message} Skill 列表可能已更新，请重新选择。` : message);
     }
   }
 
@@ -966,11 +1097,33 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       ))}
                     </Space>
                   ) : null}
+                  {selectedSkillCommand ? (
+                    <div className="selected-skill-command" role="status" aria-label="已选择 Skill">
+                      <span>将使用 <strong>{selectedSkillCommand.command}</strong></span>
+                      <Button
+                        type="link"
+                        size="small"
+                        aria-label={`取消 Skill ${selectedSkillCommand.command}`}
+                        disabled={active}
+                        onClick={() => setSelectedSkillCommand(null)}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  ) : null}
+                  {slashMenuOpen ? (
+                    <SlashCommandMenu
+                      candidates={slashCandidates}
+                      activeIndex={normalizedSlashMenuActiveIndex}
+                      emptyMessage={slashMenuEmptyMessage}
+                      onSelect={selectSlashCommand}
+                    />
+                  ) : null}
                   <div className="send-row" role="group" aria-label="消息发送栏">
                     <Input.TextArea
                       aria-label="请输入问题"
                       value={input}
-                      onChange={(event) => setInput(event.target.value)}
+                      onChange={(event) => handleComposerInputChange(event.target.value)}
                       onCompositionStart={() => {
                         composingInputRef.current = true;
                       }}
@@ -979,8 +1132,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       }}
                       onPressEnter={(event) => {
                         if (!event.shiftKey && !isComposerImeConfirming(event)) {
+                          if (handleSlashKeyDown(event)) return;
                           event.preventDefault();
                           void handleSubmit();
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && !isComposerImeConfirming(event)) {
+                          handleSlashKeyDown(event);
                         }
                       }}
                       placeholder={inputPlaceholder}
@@ -1030,7 +1189,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                           aria-label="发送"
                           className="composer-send-button composer-image-button"
                           onClick={handleSubmit}
-                          disabled={!input.trim() || uploadingFile}
+                          disabled={!canSubmitComposer || uploadingFile}
                         >
                           <img
                             aria-hidden="true"

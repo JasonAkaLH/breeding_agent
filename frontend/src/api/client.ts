@@ -3,6 +3,7 @@ import type {
   AnswerInterruptResponse,
   AuthUserResponse,
   CaptchaChallengeResponse,
+  CapabilityListResponse,
   ChatMode,
   ConversationListResponse,
   ConversationMessagesResponse,
@@ -37,6 +38,7 @@ export interface SubmitMessageInput {
   reasoningEffort?: ReasoningEffort;
   clientMessageId?: string;
   metadata?: Record<string, unknown>;
+  capabilityId?: string | null;
 }
 
 export interface ApiClient {
@@ -49,6 +51,7 @@ export interface ApiClient {
   listConversationUploads(conversationId: string): Promise<UploadListResponse>;
   deleteConversationUpload(conversationId: string, uploadId: string): Promise<DeleteUploadResponse>;
   uploadConversationFile(conversationId: string, file: File): Promise<UploadFileResponse>;
+  listCapabilities(): Promise<CapabilityListResponse>;
   submitMessage(input: SubmitMessageInput): Promise<MessageAcceptedResponse>;
   listConversations(): Promise<ConversationListResponse>;
   listConversationMessages(conversationId: string): Promise<ConversationMessagesResponse>;
@@ -135,6 +138,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads/${encodeURIComponent(uploadId)}`,
       { method: 'DELETE' },
     ),
+    listCapabilities: () => request<CapabilityListResponse>('/api/v1/capabilities'),
     uploadConversationFile: async (conversationId, file) => {
       const formData = new FormData();
       formData.append('file', file);
@@ -153,11 +157,13 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       if (!mode) {
         throw new ApiError(0, null, '当前对话模式不可用，请刷新后重试。');
       }
+      const explicitCapabilityId = input.capabilityId ?? null;
+      const capabilityId = explicitCapabilityId || mode.capabilityId;
       const body: SubmitMessageRequest = {
         account_id: input.accountId ?? 'session-user',
         content: input.content,
-        routing_mode: 'auto',
-        capability_id: mode.capabilityId,
+        routing_mode: capabilityId ? 'force_capability' : 'auto',
+        capability_id: capabilityId,
         client_message_id: input.clientMessageId ?? null,
         metadata: {
           ...(input.metadata ?? {}),

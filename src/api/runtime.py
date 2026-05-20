@@ -34,7 +34,7 @@ from src.capabilities.main_agent import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import EventVisibility, MessageRole, TaskStatus
+from src.core.enums import EventVisibility, MessageRole, RoutingMode, TaskStatus
 from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import (
@@ -288,6 +288,9 @@ class ApiRuntime:
         await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._refresh_mcp_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._conversation_guard.ensure_conversation_available(conversation_id)
+        routing_mode = self._routing_mode(request.routing_mode)
+        if routing_mode == RoutingMode.FORCE_CAPABILITY and not request.capability_id:
+            raise ValueError("capability_id is required when routing_mode is force_capability")
         requested_capability_id = self._canonical_capability_id(request.capability_id)
         self._ensure_supported_capability(requested_capability_id)
 
@@ -332,6 +335,7 @@ class ApiRuntime:
             conversation_id=conversation_id,
             root_message_id=message_id,
             status=TaskStatus.ACCEPTED,
+            routing_mode=routing_mode,
             requested_capability_id=requested_capability_id,
             summary=request.content,
             created_at=now,
@@ -376,6 +380,15 @@ class ApiRuntime:
         )
         await self._schedule_execution(orchestration_request)
         return message, task
+
+    @staticmethod
+    def _routing_mode(value: str | None) -> RoutingMode:
+        if not value:
+            return RoutingMode.AUTO
+        try:
+            return RoutingMode(value)
+        except ValueError as exc:
+            raise ValueError(f"Unsupported routing_mode: {value}") from exc
 
     @staticmethod
     def _metadata_list(value: Any) -> list[Any]:

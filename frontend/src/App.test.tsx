@@ -18,6 +18,13 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     logout: vi.fn(async () => ({ logged_out: true })),
     me: vi.fn(async () => ({ user: { username: 'alice' } })),
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
+    listCapabilities: vi.fn(async () => ({
+      capabilities: [
+        { capability_id: 'skill.sql_query', name: 'sql-query', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'sql-query/SKILL.md' },
+        { capability_id: 'skill.mini_breedstat_rcbd', name: 'mini-breedstat-rcbd', description: '生成 RCBD 随机区组设计', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'mini_breedstat_rcbd_skill/SKILL.md' },
+        { capability_id: 'main_agent.respond', name: '普通对话', description: '主代理', version: '1', status: 'active', kind: 'builtin', source: 'builtin', source_path: '' },
+      ],
+    })),
     listConversationUploads: vi.fn(async () => ({ conversation_id: 'conv-test', uploads: [] })),
     deleteConversationUpload: vi.fn(async (conversationId, uploadId) => ({ upload_id: uploadId, deleted: true })),
     uploadConversationFile: vi.fn(async (_conversationId, file) => ({
@@ -842,6 +849,130 @@ describe('App', () => {
 
     await screen.findByText(/回到底部后继续。/);
     expect(conversationList.scrollTop).toBe(2400);
+  });
+
+
+  it('opens the slash Skill picker, selects a Skill with the keyboard, and submits a forced route from the badge', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    await waitFor(() => expect(api.listCapabilities).toHaveBeenCalled());
+    fireEvent.change(input, { target: { value: '/sql' } });
+
+    expect(await screen.findByRole('listbox', { name: 'Skill 命令列表' })).toBeInTheDocument();
+    expect(screen.getByText('/sql-query')).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
+
+    expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/sql-query');
+    fireEvent.change(input, { target: { value: '查询龙粳33' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '查询龙粳33',
+      capabilityId: 'skill.sql_query',
+      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/sql-query' }),
+    })));
+  });
+
+  it('removes the selected slash Skill badge and returns to auto routing', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: '/sql' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
+    fireEvent.click(await screen.findByRole('button', { name: '取消 Skill /sql-query' }));
+
+    expect(screen.queryByRole('status', { name: '已选择 Skill' })).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '普通问题' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '普通问题',
+      capabilityId: undefined,
+    })));
+  });
+
+  it('supports mouse selection and Escape closing for the slash Skill picker', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: '/' } });
+    expect(await screen.findByRole('listbox', { name: 'Skill 命令列表' })).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: 'Escape', code: 'Escape' });
+    expect(screen.queryByRole('listbox', { name: 'Skill 命令列表' })).not.toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.change(input, { target: { value: '/' } });
+    fireEvent.click(await screen.findByText('/mini-breedstat-rcbd'));
+    expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/mini-breedstat-rcbd');
+  });
+
+  it('submits direct slash command input as a forced Skill call with cleaned content', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: '/sql-query 查询龙粳33' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '查询龙粳33',
+      capabilityId: 'skill.sql_query',
+      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/sql-query' }),
+    })));
+  });
+
+  it('allows exact direct slash command submit with empty args', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: '/sql-query' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '',
+      capabilityId: 'skill.sql_query',
+      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/sql-query' }),
+    })));
+  });
+
+  it('blocks unknown slash command input instead of submitting it as normal chat', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    const input = screen.getByLabelText('请输入问题');
+
+    fireEvent.change(input, { target: { value: '/unknown 查询龙粳33' } });
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    expect(await screen.findByText('未找到 Skill')).toBeInTheDocument();
+  });
+
+  it('submits uploaded files and slash forced capability metadata together', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON 或 CSV 文件'), { target: { files: [file] } });
+
+    await screen.findByText(/materials.csv/);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '/mini-breedstat-rcbd 用这个文件做3个区组RCBD' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '用这个文件做3个区组RCBD',
+      capabilityId: 'skill.mini_breedstat_rcbd',
+      metadata: expect.objectContaining({
+        upload_ids: ['upl-1'],
+        forced_by_slash_command: true,
+        slash_command: '/mini-breedstat-rcbd',
+      }),
+    })));
   });
 
   it('does not submit while IME composition is confirming text with Enter', async () => {

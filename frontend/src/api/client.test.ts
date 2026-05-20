@@ -41,6 +41,16 @@ describe('createApiClient', () => {
     });
   });
 
+  it('lists public capabilities', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ capabilities: [{ capability_id: 'skill.sql_query', name: 'sql-query', description: '查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'sql-query/SKILL.md' }] }), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    const result = await api.listCapabilities();
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/capabilities', expect.any(Object));
+    expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.sql_query', kind: 'skill' });
+  });
+
   it('submits normal chat with capability_id null', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
@@ -50,6 +60,34 @@ describe('createApiClient', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/messages', expect.objectContaining({ method: 'POST' }));
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.capability_id).toBeNull();
+  });
+
+
+  it('submits an explicit capability as a forced route while preserving metadata', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
+    const api = createApiClient({ fetcher });
+
+    await api.submitMessage({
+      conversationId: 'conv-1',
+      accountId: 'acc-1',
+      content: '查询龙粳33',
+      mode: 'chat',
+      capabilityId: 'skill.sql_query',
+      metadata: { upload_ids: ['upl-1'], forced_by_slash_command: true, slash_command: '/sql-query' },
+    });
+
+    const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
+    expect(body).toMatchObject({
+      routing_mode: 'force_capability',
+      capability_id: 'skill.sql_query',
+      metadata: {
+        upload_ids: ['upl-1'],
+        forced_by_slash_command: true,
+        slash_command: '/sql-query',
+        deep_thinking: false,
+        main_agent_reasoning_effort: 'medium',
+      },
+    });
   });
 
   it('submits deep thinking metadata without changing reasoning effort', async () => {

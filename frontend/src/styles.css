@@ -1285,3 +1285,101 @@ body {
     letter-spacing: 0.04em;
   }
 }
+
+.selected-skill-command {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px;
+  padding: 5px 8px 5px 12px;
+  border: 1px solid rgba(47, 125, 50, 0.22);
+  border-radius: 999px;
+  background: rgba(232, 243, 228, 0.76);
+  color: var(--color-agri-green-dark);
+  font-size: 13px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.48);
+}
+
+.selected-skill-command .ant-btn-link {
+  height: auto !important;
+  min-width: 0 !important;
+  padding: 0 4px !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--color-muted) !important;
+}
+
+.slash-command-menu {
+  margin: 0 8px;
+  overflow: hidden;
+  border: 1px solid rgba(47, 64, 31, 0.14);
+  border-radius: 18px;
+  background: rgba(255, 253, 247, 0.88);
+  box-shadow: 0 16px 42px rgba(74, 67, 41, 0.13), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(18px) saturate(1.08);
+  -webkit-backdrop-filter: blur(18px) saturate(1.08);
+}
+
+.slash-command-option {
+  padding: 10px 14px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  outline: none;
+}
+
+.slash-command-option + .slash-command-option {
+  border-top: 1px solid rgba(47, 64, 31, 0.08);
+}
+
+.slash-command-option-active,
+.slash-command-option:hover,
+.slash-command-option:focus-visible {
+  border-left-color: var(--color-agri-green);
+  background: rgba(232, 243, 228, 0.62);
+}
+
+.slash-command-option-conflict {
+  border-left-color: #b7791f;
+}
+
+.slash-command-option-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.slash-command-name {
+  color: var(--color-agri-green-dark);
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-weight: 700;
+}
+
+.slash-command-title {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.slash-command-description,
+.slash-command-meta,
+.slash-command-empty {
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.slash-command-description {
+  margin-top: 4px;
+}
+
+.slash-command-meta {
+  margin-top: 3px;
+  word-break: break-all;
+}
+
+.slash-command-empty {
+  padding: 12px 14px;
+}
