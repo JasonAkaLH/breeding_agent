@@ -1,33 +1,10 @@
 {
-  "test_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/test": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/test"
-      }
-    }
-  },
-  "darb_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/darb": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/darb"
-      }
-    }
-  },
-  "germ_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/germ": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/germ"
-      }
-    }
-  },
-  "gws_mcp_servers": {
-    "mcpServers": {
-      "@baiseeds/gws": {
-        "type": "streamable-http",
-        "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/gws"
+  "mcpServers": {
+    "germQA-mcp-server": {
+      "url": "http://breeding-dashboard-qa.biobin.com.cn/gateway/mcphub/mcp/germ/sse",
+      "headers": {
+        "X-Tenant-Id": "118",
+        "X-User-Id": "363"
       }
     }
   }

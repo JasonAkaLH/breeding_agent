@@ -32,7 +32,9 @@ def load_yaml(path: str | Path) -> Mapping[str, Any]:
     return data
 
 
-def find_dependency_output(request: CapabilityExecutionRequest, required_keys: tuple[str, ...]) -> dict[str, Any]:
+def find_dependency_output(
+    request: CapabilityExecutionRequest, required_keys: tuple[str, ...]
+) -> dict[str, Any]:
     for output in request.dependency_outputs.values():
         if all(key in output for key in required_keys):
             return dict(output)
@@ -49,7 +51,9 @@ def make_artifact(
     artifact_type: ArtifactType = ArtifactType.JSON,
 ) -> Artifact:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    digest = hashlib.sha256(f"{node_id}:{name}:{serialized}".encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(
+        f"{node_id}:{name}:{serialized}".encode("utf-8")
+    ).hexdigest()[:12]
     artifact_id = f"{node_id}:{name}:{digest}"
     return Artifact(
         artifact_id=artifact_id,
@@ -69,7 +73,9 @@ def make_audit_event(
     payload: Mapping[str, Any],
 ) -> EventRecord:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    digest = hashlib.sha256(f"{request.node_id}:{event_type}:{serialized}".encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(
+        f"{request.node_id}:{event_type}:{serialized}".encode("utf-8")
+    ).hexdigest()[:12]
     return EventRecord(
         event_id=f"{request.node_id}:{event_type}:{digest}",
         conversation_id=request.conversation_id,
