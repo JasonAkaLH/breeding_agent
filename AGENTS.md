@@ -177,6 +177,11 @@ python --version
 
 任何引入运行时行为的 PR，都应附带验证步骤或测试说明。
 
+每次开发工作结束前，都必须检查本次变更是否满足 License Requirement：
+- 涉及 `native/` / Rust 依赖、`Cargo.lock`、`native/deny.toml` 或供应链策略变更时，至少运行 `cd native && cargo deny check` 并读取结果。
+- 未涉及依赖或许可策略时，也应在最终验证说明中明确记录“License Requirement：无依赖/许可变更，未触发 cargo-deny 风险”。
+- 不得通过关闭 license gate、扩大忽略范围或删除依赖证据来绕过许可要求。
+
 ## 提交与 Pull Request 规范
 现有提交历史采用**简短、祈使句、意图优先**的标题，例如：
 - `Keep the repository blank until the architecture is decided`

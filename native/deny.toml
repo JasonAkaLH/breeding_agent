@@ -12,3 +12,12 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
+exceptions = [
+    # Keep CDLA-Permissive-2.0 scoped to the official MCP SDK TLS root
+    # bundle instead of globally allowing the license. This dependency is
+    # currently introduced by:
+    # maf_mcp_runtime -> rmcp -> reqwest -> rustls-platform-verifier ->
+    # webpki-root-certs. Future version changes should fail closed and require
+    # a fresh license review.
+    { crate = "webpki-root-certs@1.0.7", allow = ["CDLA-Permissive-2.0"] },
+]

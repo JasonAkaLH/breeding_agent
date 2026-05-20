@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 修复远端 Rust quality gates 中 `cargo deny check` 因 `rmcp -> reqwest -> rustls-platform-verifier -> webpki-root-certs` 引入 `CDLA-Permissive-2.0` 而失败的问题：在 `native/deny.toml` 中为 `webpki-root-certs =1.0.7` 添加精确 license exception，保持 license gate fail-closed 且不全局放宽 allowlist；同步在 `AGENTS.md` 增加每次开发结束必须检查 License Requirement 的长期规则。
 - 将 REST API 文档迁移到 `docs/api/api-doc.html`，新增后端只读入口 `GET /api-doc` 直接返回该静态 HTML，入口不挂到项目前端且不进入 OpenAPI schema；补充 API 回归测试覆盖未登录访问、HTML content-type 与关键接口内容。
 - 新增并重设计根目录 `api-doc.html` RESTful API Console 单页文档：覆盖认证 Cookie、会话/消息、任务/SSE、上传、能力列表、artifact 下载、数据结构与错误码，提供中文界面文案、左侧目录导航、正式认证说明、必填参数说明、请求/响应/错误/下一步契约、正式 curl 调用模板、response 样式、搜索/分类过滤与展开收起，并优化卡片排版避免内容溢出，并用当前 FastAPI OpenAPI path / operation 集合完成覆盖校验。
 - 项目命名更新：本地项目标识统一从 `multi_agent_framework` / `multi-agent-framework` 调整为 `breeding_agent` / `breeding-agent`，并已同步 GitHub 远端仓库名与 origin。
