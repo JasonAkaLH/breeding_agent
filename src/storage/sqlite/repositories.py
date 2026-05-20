@@ -5,7 +5,7 @@ import hashlib
 import inspect
 import json
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, or_, select
@@ -27,6 +27,7 @@ from src.core.models import (
     MailboxDelivery,
     MailboxMessage,
     Message,
+    PendingSkillContext,
     Task,
     TaskEdge,
     TaskNode,
@@ -59,6 +60,7 @@ from .models import (
     MailboxDeliveryRow,
     MailboxMessageRow,
     MessageRow,
+    PendingSkillContextRow,
     TaskEdgeRow,
     TaskNodeRow,
     TaskRow,
@@ -95,6 +97,28 @@ def _row_to_conversation_memory_summary(row: ConversationMemorySummaryRow) -> Co
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def _row_to_pending_skill_context(row: PendingSkillContextRow) -> PendingSkillContext:
+    return PendingSkillContext(
+        context_id=row.context_id,
+        conversation_id=row.conversation_id,
+        account_id=row.account_id,
+        capability_id=row.capability_id,
+        skill_name=row.skill_name,
+        source_task_id=row.source_task_id,
+        source_message_id=row.source_message_id,
+        original_user_message=row.original_user_message,
+        missing_requirements=tuple(str(item) for item in (row.missing_requirements or ())),
+        assistant_message=row.assistant_message,
+        status=row.status,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _row_to_auth_user(row: AuthUserRow) -> AuthUser:
@@ -506,6 +530,92 @@ class SQLiteStateRepository:
         self._session.flush()
         return int(result.rowcount if result.rowcount is not None and result.rowcount > 0 else 0)
 
+    def save_pending_skill_context(self, context: PendingSkillContext) -> PendingSkillContext:
+        if context.status == "pending_user_input":
+            self.mark_pending_skill_context_superseded(
+                context.conversation_id,
+                exclude_context_id=context.context_id,
+                updated_at=context.updated_at or context.created_at,
+            )
+        row = PendingSkillContextRow(
+            context_id=context.context_id,
+            conversation_id=context.conversation_id,
+            account_id=context.account_id,
+            capability_id=context.capability_id,
+            skill_name=context.skill_name,
+            source_task_id=context.source_task_id,
+            source_message_id=context.source_message_id,
+            original_user_message=context.original_user_message,
+            missing_requirements=list(context.missing_requirements),
+            assistant_message=context.assistant_message,
+            status=context.status,
+            created_at=context.created_at,
+            updated_at=context.updated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_pending_skill_context(merged)
+
+    def get_pending_skill_context(self, context_id: str) -> PendingSkillContext | None:
+        row = self._session.get(PendingSkillContextRow, context_id)
+        return None if row is None else _row_to_pending_skill_context(row)
+
+    def get_active_pending_skill_context(self, conversation_id: str) -> PendingSkillContext | None:
+        row = self._session.scalar(
+            select(PendingSkillContextRow)
+            .where(
+                PendingSkillContextRow.conversation_id == conversation_id,
+                PendingSkillContextRow.status == "pending_user_input",
+            )
+            .order_by(PendingSkillContextRow.updated_at.desc(), PendingSkillContextRow.created_at.desc(), PendingSkillContextRow.context_id.desc())
+        )
+        return None if row is None else _row_to_pending_skill_context(row)
+
+    def mark_pending_skill_context_consumed(self, context_id: str, *, updated_at: datetime | None = None) -> PendingSkillContext | None:
+        return self._mark_pending_skill_context_status(context_id, "consumed", updated_at=updated_at)
+
+    def mark_pending_skill_context_cancelled(self, context_id: str, *, updated_at: datetime | None = None) -> PendingSkillContext | None:
+        return self._mark_pending_skill_context_status(context_id, "cancelled", updated_at=updated_at)
+
+    def mark_pending_skill_context_superseded(
+        self,
+        conversation_id: str,
+        *,
+        exclude_context_id: str | None = None,
+        updated_at: datetime | None = None,
+    ) -> int:
+        status_updated_at = updated_at or _utcnow_naive()
+        rows = self._session.scalars(
+            select(PendingSkillContextRow).where(
+                PendingSkillContextRow.conversation_id == conversation_id,
+                PendingSkillContextRow.status == "pending_user_input",
+            )
+        ).all()
+        count = 0
+        for row in rows:
+            if exclude_context_id is not None and row.context_id == exclude_context_id:
+                continue
+            row.status = "superseded"
+            row.updated_at = status_updated_at
+            count += 1
+        self._session.flush()
+        return count
+
+    def _mark_pending_skill_context_status(
+        self,
+        context_id: str,
+        status: str,
+        *,
+        updated_at: datetime | None = None,
+    ) -> PendingSkillContext | None:
+        row = self._session.get(PendingSkillContextRow, context_id)
+        if row is None:
+            return None
+        row.status = status
+        row.updated_at = updated_at or _utcnow_naive()
+        self._session.flush()
+        return _row_to_pending_skill_context(row)
+
     def delete_conversation(self, conversation_id: str) -> dict[str, int]:
         task_ids = list(
             self._session.scalars(select(TaskRow.task_id).where(TaskRow.conversation_id == conversation_id)).all()
@@ -533,6 +643,7 @@ class SQLiteStateRepository:
 
         deleted_counts: dict[str, int] = {
             "conversation_memory_summary": 0,
+            "conversation_pending_skill_context": 0,
             "mailbox_delivery": 0,
             "interrupt_answer": 0,
             "checkpoint": 0,
@@ -568,6 +679,10 @@ class SQLiteStateRepository:
         _delete(
             "conversation_memory_summary",
             delete(ConversationMemorySummaryRow).where(ConversationMemorySummaryRow.conversation_id == conversation_id),
+        )
+        _delete(
+            "conversation_pending_skill_context",
+            delete(PendingSkillContextRow).where(PendingSkillContextRow.conversation_id == conversation_id),
         )
         _delete("message", delete(MessageRow).where(or_(*message_conditions)))
         _delete("task", delete(TaskRow).where(TaskRow.conversation_id == conversation_id))
@@ -1081,6 +1196,24 @@ class SQLiteStorage(StoragePort):
 
     async def delete_conversation_memory_summaries_for_conversation(self, conversation_id: str) -> int:
         return await self._run(lambda state, collab: state.delete_conversation_memory_summaries_for_conversation(conversation_id))
+
+    async def save_pending_skill_context(self, context: PendingSkillContext) -> PendingSkillContext:
+        return await self._run(lambda state, collab: state.save_pending_skill_context(context))
+
+    async def get_pending_skill_context(self, context_id: str) -> PendingSkillContext | None:
+        return await self._run(lambda state, collab: state.get_pending_skill_context(context_id))
+
+    async def get_active_pending_skill_context(self, conversation_id: str) -> PendingSkillContext | None:
+        return await self._run(lambda state, collab: state.get_active_pending_skill_context(conversation_id))
+
+    async def mark_pending_skill_context_consumed(self, context_id: str) -> PendingSkillContext | None:
+        return await self._run(lambda state, collab: state.mark_pending_skill_context_consumed(context_id, updated_at=_utcnow_naive()))
+
+    async def mark_pending_skill_context_cancelled(self, context_id: str) -> PendingSkillContext | None:
+        return await self._run(lambda state, collab: state.mark_pending_skill_context_cancelled(context_id, updated_at=_utcnow_naive()))
+
+    async def mark_pending_skill_context_superseded(self, conversation_id: str) -> int:
+        return await self._run(lambda state, collab: state.mark_pending_skill_context_superseded(conversation_id, updated_at=_utcnow_naive()))
 
     async def save_message(self, message: Message) -> Message:
         return await self._run(lambda state, collab: state.save_message(message))

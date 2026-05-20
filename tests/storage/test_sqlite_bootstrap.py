@@ -20,6 +20,7 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
         self.assertTrue(
             {
                 "conversation",
+                "conversation_pending_skill_context",
                 "message",
                 "task",
                 "task_node",

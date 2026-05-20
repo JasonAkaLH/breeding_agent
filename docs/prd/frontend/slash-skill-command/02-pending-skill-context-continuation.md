@@ -1,7 +1,7 @@
 # PRD 02: Pending Skill Context Continuation
 
 日期：2026-05-20  
-状态：待实施  
+状态：已实施
 依赖：`01-frontend-slash-skill-command-mvp.md`  
 范围：slash 强制调用 Skill 后，信息不足时的后端持久化待补全上下文与下一轮续接。
 
@@ -255,3 +255,11 @@ conda run -n multi_agent python -m unittest tests.api.test_pending_skill_context
 ## 14. 与 PRD 01 的关系
 
 PRD 01 完成后，即使没有本 PRD，用户仍可通过 slash 强制调用 Skill。本 PRD 只补齐信息不足后的跨轮续接语义，不能阻塞 PRD 01 上线。
+
+## 15. 实施记录
+
+2026-05-20 已完成后端持久化 pending Skill context、续接路由优先级、typed missing-input 处理、普通失败不猜测为待补全、interrupt 路径排除、新 slash 覆盖旧 pending、成功续接消费 context 与审计事件。验证覆盖：
+
+- `tests/storage/test_sqlite_pending_skill_context.py`
+- `tests/api/test_pending_skill_context.py`
+- `tests/orchestration` 回归

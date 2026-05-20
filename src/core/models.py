@@ -114,6 +114,23 @@ class Task:
 
 
 @dataclass(slots=True, frozen=True)
+class PendingSkillContext:
+    context_id: str
+    conversation_id: str
+    account_id: str | None
+    capability_id: str
+    skill_name: str
+    source_task_id: str
+    source_message_id: str
+    original_user_message: str
+    missing_requirements: tuple[str, ...]
+    assistant_message: str
+    status: str = "pending_user_input"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class TaskNode:
     node_id: str
     task_id: str

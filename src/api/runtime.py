@@ -5,7 +5,7 @@ import inspect
 import json
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,7 +35,7 @@ from src.capabilities.main_agent import (
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import EventVisibility, MessageRole, RoutingMode, TaskStatus
-from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, Task
+from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, PendingSkillContext, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import (
     SkillCapabilityRegistry,
@@ -68,7 +68,7 @@ from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
 from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig, ResolutionGenerator
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
-from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowPlan
+from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, OrchestrationRunResult, WorkflowPlan
 from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.composite_executor import CompositeExecutor
@@ -108,6 +108,26 @@ UNFINISHED_TASK_STATUSES = {
     TaskStatus.RUNNING,
     TaskStatus.CANCELLING,
 }
+
+PENDING_SKILL_METADATA_KEYS = frozenset(
+    {
+        "continued_from_pending_skill_context",
+        "pending_skill_capability_id",
+        "pending_skill_missing_requirements",
+        "pending_skill_original_user_message",
+        "pending_skill_assistant_message",
+        "defer_task_completed_until_pending_skill_context_processed",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSkillMissingInput:
+    capability_id: str
+    skill_name: str
+    missing_requirements: tuple[str, ...]
+    assistant_message: str
+    source_node_id: str | None = None
 
 
 class ApiRuntime:
@@ -293,6 +313,16 @@ class ApiRuntime:
             raise ValueError("capability_id is required when routing_mode is force_capability")
         requested_capability_id = self._canonical_capability_id(request.capability_id)
         self._ensure_supported_capability(requested_capability_id)
+        explicit_force_capability = routing_mode == RoutingMode.FORCE_CAPABILITY and requested_capability_id is not None
+        continued_pending_context: PendingSkillContext | None = None
+        superseded_pending_count = 0
+        if explicit_force_capability:
+            superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
+        elif requested_capability_id is None:
+            continued_pending_context = await self.storage.get_active_pending_skill_context(conversation_id)
+            if continued_pending_context is not None:
+                requested_capability_id = continued_pending_context.capability_id
+                self._ensure_supported_capability(requested_capability_id)
 
         upload_context = await self.resolve_uploads_for_message(
             conversation_id,
@@ -351,11 +381,32 @@ class ApiRuntime:
                 created_at=now,
             )
         )
+        if superseded_pending_count:
+            await self._record_event(
+                self._make_event(
+                    task_id=task_id,
+                    conversation_id=conversation_id,
+                    event_type="pending_skill_context.superseded",
+                    payload={"count": superseded_pending_count, "reason": "new_forced_capability"},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    created_at=now,
+                )
+            )
 
-        metadata = dict(request.metadata)
+        metadata = self._drop_user_supplied_pending_skill_metadata(request.metadata)
         if request.capability_id != requested_capability_id and request.capability_id is not None:
             metadata["requested_capability_alias"] = request.capability_id
             metadata["canonical_capability_id"] = requested_capability_id
+        execution_user_message = request.content
+        current_user_message = None
+        resolved_user_message = None
+        if continued_pending_context is not None:
+            metadata.update(self._pending_skill_continuation_metadata(continued_pending_context))
+            execution_user_message = self._format_pending_skill_continuation_message(continued_pending_context, request.content)
+            current_user_message = request.content
+            resolved_user_message = execution_user_message
+        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
+            metadata["defer_task_completed_until_pending_skill_context_processed"] = True
         if self._skill_runtime_state is not None:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
         if self._mcp_runtime_state is not None:
@@ -374,12 +425,44 @@ class ApiRuntime:
             task_id=task_id,
             conversation_id=conversation_id,
             root_message_id=message_id,
-            user_message=request.content,
+            user_message=execution_user_message,
             requested_capability_id=requested_capability_id,
             metadata=metadata,
+            current_user_message=current_user_message,
+            resolved_user_message=resolved_user_message,
         )
         await self._schedule_execution(orchestration_request)
         return message, task
+
+    @staticmethod
+    def _drop_user_supplied_pending_skill_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+        values = dict(metadata)
+        for key in PENDING_SKILL_METADATA_KEYS:
+            values.pop(key, None)
+        return values
+
+    @staticmethod
+    def _pending_skill_continuation_metadata(context: PendingSkillContext) -> dict[str, Any]:
+        return {
+            "continued_from_pending_skill_context": context.context_id,
+            "pending_skill_capability_id": context.capability_id,
+            "pending_skill_missing_requirements": list(context.missing_requirements),
+            "pending_skill_original_user_message": context.original_user_message,
+            "pending_skill_assistant_message": context.assistant_message,
+        }
+
+    @staticmethod
+    def _format_pending_skill_continuation_message(context: PendingSkillContext, user_message: str) -> str:
+        missing = "、".join(context.missing_requirements) or "必需信息"
+        return "\n\n".join(
+            part
+            for part in (
+                context.original_user_message.strip(),
+                f"此前缺少的信息：{missing}",
+                f"用户补充：{user_message.strip()}",
+            )
+            if part
+        )
 
     @staticmethod
     def _routing_mode(value: str | None) -> RoutingMode:
@@ -550,6 +633,7 @@ class ApiRuntime:
             plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
             await self._record_plan_built(request, plan)
             result = await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
+            await self._handle_pending_skill_context_after_execution(request, result)
             if result.completion_status == str(TaskStatus.COMPLETED):
                 await self._persist_assistant_history_message(request.task_id, request.conversation_id)
         except Exception as exc:
@@ -660,6 +744,187 @@ class ApiRuntime:
                 return
             raise
 
+    async def _handle_pending_skill_context_after_execution(
+        self,
+        request: OrchestrationRequest,
+        result: OrchestrationRunResult,
+    ) -> None:
+        missing_input = await self._extract_pending_skill_missing_input(request)
+        continued_context_id = self._metadata_text(request.metadata.get("continued_from_pending_skill_context"))
+        if missing_input is not None:
+            await self._create_pending_skill_context(request, missing_input)
+            if result.completion_status != str(TaskStatus.COMPLETED):
+                await self._mark_task_completed_for_pending_skill_context(request, reason="pending_skill_context_created")
+            return
+        if result.completion_status == str(TaskStatus.COMPLETED) and continued_context_id:
+            consumed = await self.storage.mark_pending_skill_context_consumed(continued_context_id)
+            if consumed is not None:
+                await self._record_event(
+                    self._make_event(
+                        task_id=request.task_id,
+                        conversation_id=request.conversation_id,
+                        event_type="pending_skill_context.consumed",
+                        payload={
+                            "context_id": consumed.context_id,
+                            "capability_id": consumed.capability_id,
+                        },
+                        visibility=EventVisibility.AUDIT_ONLY,
+                    )
+                )
+            if request.metadata.get("defer_task_completed_until_pending_skill_context_processed") is True:
+                await self._mark_task_completed_for_pending_skill_context(request, reason="pending_skill_context_consumed")
+            return
+        if (
+            result.completion_status == str(TaskStatus.COMPLETED)
+            and request.metadata.get("defer_task_completed_until_pending_skill_context_processed") is True
+        ):
+            await self._mark_task_completed_for_pending_skill_context(request, reason="pending_skill_context_processed")
+
+    async def _extract_pending_skill_missing_input(
+        self,
+        request: OrchestrationRequest,
+    ) -> _PendingSkillMissingInput | None:
+        capability_id = request.requested_capability_id or ""
+        if not capability_id.startswith("skill."):
+            return None
+        interrupts = await self.storage.list_interrupts_for_task(request.task_id)
+        if any(str(interrupt.status) == "open" for interrupt in interrupts):
+            return None
+
+        events = await self.storage.list_events_for_task(request.task_id)
+        for event in reversed(events):
+            if event.event_type != "skill.input_missing":
+                continue
+            missing = self._missing_requirements_from_payload(event.payload)
+            if not missing:
+                continue
+            skill_name = self._metadata_text(event.payload.get("skill_name")) or capability_id.removeprefix("skill.")
+            return _PendingSkillMissingInput(
+                capability_id=capability_id,
+                skill_name=skill_name,
+                missing_requirements=missing,
+                assistant_message=self._format_pending_skill_missing_message(missing),
+                source_node_id=event.node_id,
+            )
+        return None
+
+    @staticmethod
+    def _missing_requirements_from_payload(payload: Mapping[str, Any]) -> tuple[str, ...]:
+        raw_missing = payload.get("missing")
+        if isinstance(raw_missing, str):
+            values = [raw_missing]
+        elif isinstance(raw_missing, Iterable):
+            values = list(raw_missing)
+        else:
+            values = []
+        seen: set[str] = set()
+        missing: list[str] = []
+        for value in values:
+            item = str(value).strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            missing.append(item)
+        return tuple(missing)
+
+    @staticmethod
+    def _format_pending_skill_missing_message(missing_requirements: tuple[str, ...]) -> str:
+        missing = "、".join(missing_requirements) or "必需信息"
+        return f"缺少 Skill 必需信息：{missing}。请补充后继续。"
+
+    async def _create_pending_skill_context(
+        self,
+        request: OrchestrationRequest,
+        missing_input: _PendingSkillMissingInput,
+    ) -> PendingSkillContext:
+        now = self._utcnow_naive()
+        conversation = await self.storage.get_conversation(request.conversation_id)
+        root_message = await self.storage.get_message(request.root_message_id)
+        original_user_message = (
+            self._metadata_text(request.metadata.get("pending_skill_original_user_message"))
+            or (root_message.content if root_message is not None else "")
+            or request.current_user_message
+            or request.user_message
+        )
+        context = PendingSkillContext(
+            context_id=self._make_id("pending-skill-context"),
+            conversation_id=request.conversation_id,
+            account_id=conversation.account_id if conversation is not None else None,
+            capability_id=missing_input.capability_id,
+            skill_name=missing_input.skill_name,
+            source_task_id=request.task_id,
+            source_message_id=request.root_message_id,
+            original_user_message=original_user_message,
+            missing_requirements=missing_input.missing_requirements,
+            assistant_message=missing_input.assistant_message,
+            status="pending_user_input",
+            created_at=now,
+            updated_at=now,
+        )
+        saved = await self.storage.save_pending_skill_context(context)
+        await self._save_pending_skill_assistant_message(request, missing_input.assistant_message, created_at=now)
+        await self._record_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                node_id=missing_input.source_node_id,
+                event_type="pending_skill_context.created",
+                payload={
+                    "context_id": saved.context_id,
+                    "capability_id": saved.capability_id,
+                    "skill_name": saved.skill_name,
+                    "missing_requirements": list(saved.missing_requirements),
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+                created_at=now,
+            )
+        )
+        return saved
+
+    async def _save_pending_skill_assistant_message(
+        self,
+        request: OrchestrationRequest,
+        content: str,
+        *,
+        created_at: datetime,
+    ) -> None:
+        message_id = f"{request.task_id}:assistant"
+        if await self.storage.get_message(message_id) is not None:
+            return
+        await self.storage.save_message(
+            Message(
+                message_id=message_id,
+                conversation_id=request.conversation_id,
+                role=MessageRole.ASSISTANT,
+                content=content,
+                task_id=request.task_id,
+                stream_status="complete",
+                created_at=created_at,
+            )
+        )
+
+    async def _mark_task_completed_for_pending_skill_context(self, request: OrchestrationRequest, *, reason: str) -> None:
+        task = await self.storage.get_task(request.task_id)
+        if task is None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+            return
+        completed = replace(task, status=TaskStatus.COMPLETED, updated_at=self._utcnow_naive())
+        await self.storage.save_task(completed)
+        await self._record_event(
+            self._make_event(
+                task_id=request.task_id,
+                conversation_id=request.conversation_id,
+                event_type="task.completed",
+                payload={"completion_reason": reason},
+            )
+        )
+
+    @staticmethod
+    def _metadata_text(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
     async def _record_plan_built(self, request: OrchestrationRequest, plan: WorkflowPlan) -> None:
         await self._record_event(
             self._make_event(
@@ -679,6 +944,9 @@ class ApiRuntime:
         revision = request.metadata.get("skill_bundle_revision")
         if revision:
             metadata["skill_bundle_revision"] = revision
+        for key in PENDING_SKILL_METADATA_KEYS:
+            if key in request.metadata:
+                metadata[key] = request.metadata[key]
         return self._json_safe_mapping(metadata)
 
     @staticmethod

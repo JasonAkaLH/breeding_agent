@@ -47,6 +47,28 @@ class ConversationMemorySummaryRow(SQLiteBase):
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class PendingSkillContextRow(SQLiteBase):
+    __tablename__ = "conversation_pending_skill_context"
+    __table_args__ = (
+        Index("idx_pending_skill_context_conversation_status", "conversation_id", "status", "updated_at"),
+        Index("idx_pending_skill_context_source_task", "source_task_id"),
+    )
+
+    context_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capability_id: Mapped[str] = mapped_column(Text, nullable=False)
+    skill_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    original_user_message: Mapped[str] = mapped_column(Text, nullable=False)
+    missing_requirements: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
+    assistant_message: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class AuthUserRow(SQLiteBase):
     __tablename__ = "auth_user"
     __table_args__ = (Index("idx_auth_user_status_updated", "status", "updated_at"),)

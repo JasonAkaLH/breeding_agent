@@ -479,6 +479,24 @@ class OrchestrationService:
             return saved_node, dict(result.output_payload)
 
         if result.error is not None:
+            if result.error.code == "skill_input_missing":
+                waiting = replace(
+                    latest_node,
+                    status=NodeStatus.WAITING_FOR_INPUT,
+                    finished_at=now,
+                    output_refs=tuple(artifact.artifact_id for artifact in result.artifacts),
+                )
+                waiting = await self._storage.save_task_node(waiting)
+                await self._record_event(
+                    self._make_event(
+                        task_id=request.task_id,
+                        conversation_id=request.conversation_id,
+                        node_id=task_node.node_id,
+                        event_type="node.waiting_for_input",
+                        payload={**self._node_activity_payload(node_plan), "reason": "skill_input_missing"},
+                    )
+                )
+                return waiting, dict(result.output_payload)
             failed = replace(latest_node, status=NodeStatus.FAILED, finished_at=now)
             failed = await self._storage.save_task_node(failed)
             await self._record_event(
@@ -712,10 +730,13 @@ class OrchestrationService:
                     task = await self._storage.save_task(replace(task, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive()))
                     continue
 
-                task = await self._storage.save_task(replace(task, status=TaskStatus.COMPLETED, updated_at=self._utcnow_naive()))
-                await self._record_event(
-                    self._make_event(task_id=task.task_id, conversation_id=task.conversation_id, event_type="task.completed")
-                )
+                if request.metadata.get("defer_task_completed_until_pending_skill_context_processed") is True:
+                    task = await self._storage.save_task(replace(task, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive()))
+                else:
+                    task = await self._storage.save_task(replace(task, status=TaskStatus.COMPLETED, updated_at=self._utcnow_naive()))
+                    await self._record_event(
+                        self._make_event(task_id=task.task_id, conversation_id=task.conversation_id, event_type="task.completed")
+                    )
                 return OrchestrationRunResult(task=task, nodes=tuple(nodes.values()), completion_status=completion.value)
 
             if completion == CompletionStatus.FAILED:
