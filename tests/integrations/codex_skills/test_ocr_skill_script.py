@@ -4,8 +4,8 @@ import base64
 import io
 import importlib.util
 import json
-import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -37,41 +37,64 @@ class OCRSkillScriptTest(unittest.TestCase):
 
         self.assertEqual(resolved, (png_content, "scan.png", "image/png"))
 
-
-    def test_read_config_uses_environment_configuration(self) -> None:
+    def test_read_config_uses_skill_local_config_file(self) -> None:
         run_ocr = _load_run_ocr_module()
 
-        with patch.dict(
-            os.environ,
-            {
-                "OCR_MCP_BASE_URL": "http://ocr.example.test",
-                "OCR_MCP_AUTH_TOKEN": "test-token",
-            },
-            clear=False,
-        ):
-            config = run_ocr._read_config({})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                """
+base_url: http://ocr.example.test/
+auth_token: test-token
+timeout_seconds: 123
+poll_interval_seconds: 0.5
+debug_progress: true
+""".strip(),
+                encoding="utf-8",
+            )
+            with patch.object(run_ocr, "OCR_CONFIG_PATH", config_path):
+                config = run_ocr._read_config({"metadata": {"ocr_mcp_base_url": "http://ignored.example.test"}})
 
         self.assertEqual(config["base_url"], "http://ocr.example.test")
         self.assertEqual(config["token"], "test-token")
+        self.assertEqual(config["timeout_seconds"], 123)
+        self.assertEqual(config["poll_interval_seconds"], 0.5)
+        self.assertTrue(config["debug_progress"])
+
+    def test_read_config_accepts_nested_ocr_mcp_mapping(self) -> None:
+        run_ocr = _load_run_ocr_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                """
+ocr_mcp:
+  base_url: http://ocr-from-skill-config.example.test
+  auth_token: nested-token
+""".strip(),
+                encoding="utf-8",
+            )
+            with patch.object(run_ocr, "OCR_CONFIG_PATH", config_path):
+                config = run_ocr._read_config({})
+
+        self.assertEqual(config["base_url"], "http://ocr-from-skill-config.example.test")
+        self.assertEqual(config["token"], "nested-token")
         self.assertEqual(config["timeout_seconds"], 3600)
         self.assertEqual(config["poll_interval_seconds"], 2.0)
         self.assertFalse(config["debug_progress"])
 
-    def test_read_config_uses_bootstrapped_local_config_environment(self) -> None:
+    def test_read_config_rejects_non_mapping_skill_config(self) -> None:
         run_ocr = _load_run_ocr_module()
 
-        with patch.dict(
-            os.environ,
-            {
-                "MAF_CONFIG_OCR_MCP__BASE_URL": "http://ocr-from-config.example.test",
-                "MAF_CONFIG_OCR_MCP__AUTH_TOKEN": "config-token",
-            },
-            clear=False,
-        ):
-            config = run_ocr._read_config({})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("- invalid\n", encoding="utf-8")
+            with patch.object(run_ocr, "OCR_CONFIG_PATH", config_path):
+                with self.assertRaises(run_ocr.OCRSkillError) as context:
+                    run_ocr._read_config({})
 
-        self.assertEqual(config["base_url"], "http://ocr-from-config.example.test")
-        self.assertEqual(config["token"], "config-token")
+        self.assertEqual(context.exception.error_code, "ocr_mcp_config_invalid")
+        self.assertEqual(context.exception.stage, "config")
 
     def test_progress_logging_is_opt_in_and_redacts_sensitive_values(self) -> None:
         run_ocr = _load_run_ocr_module()
@@ -171,24 +194,27 @@ class OCRSkillScriptTest(unittest.TestCase):
         }
 
         stdout = io.StringIO()
-        with (
-            patch.dict(os.environ, {"OCR_MCP_BASE_URL": "http://ocr.example.test"}, clear=False),
-            patch.object(run_ocr, "_upload", return_value="upload-id"),
-            patch.object(run_ocr, "_initialize", return_value="session-id"),
-            patch.object(run_ocr, "_start_parse_job", return_value="job-id"),
-            patch.object(
-                run_ocr,
-                "_wait_for_result",
-                return_value={
-                    "status": "succeeded",
-                    "markdown": "品种：龙粳33\n处理：A1",
-                    "result": {"pages": [{"text": "品种：龙粳33"}]},
-                },
-            ),
-            patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
-            patch.object(sys, "stdout", stdout),
-        ):
-            run_ocr.main()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("base_url: http://ocr.example.test\n", encoding="utf-8")
+            with (
+                patch.object(run_ocr, "OCR_CONFIG_PATH", config_path),
+                patch.object(run_ocr, "_upload", return_value="upload-id"),
+                patch.object(run_ocr, "_initialize", return_value="session-id"),
+                patch.object(run_ocr, "_start_parse_job", return_value="job-id"),
+                patch.object(
+                    run_ocr,
+                    "_wait_for_result",
+                    return_value={
+                        "status": "succeeded",
+                        "markdown": "品种：龙粳33\n处理：A1",
+                        "result": {"pages": [{"text": "品种：龙粳33"}]},
+                    },
+                ),
+                patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                patch.object(sys, "stdout", stdout),
+            ):
+                run_ocr.main()
 
         result = json.loads(stdout.getvalue())
         self.assertTrue(result["ok"])
@@ -220,13 +246,16 @@ class OCRSkillScriptTest(unittest.TestCase):
             raise RuntimeError("连接 OCR MCP 失败：Authorization: Bearer SECRET_TOKEN timed out")
 
         stdout = io.StringIO()
-        with (
-            patch.dict(os.environ, {"OCR_MCP_BASE_URL": "http://ocr.example.test"}, clear=False),
-            patch.object(run_ocr, "_upload", side_effect=fail_upload),
-            patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
-            patch.object(sys, "stdout", stdout),
-        ):
-            run_ocr.main()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("base_url: http://ocr.example.test\nauth_token: SECRET_TOKEN\n", encoding="utf-8")
+            with (
+                patch.object(run_ocr, "OCR_CONFIG_PATH", config_path),
+                patch.object(run_ocr, "_upload", side_effect=fail_upload),
+                patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                patch.object(sys, "stdout", stdout),
+            ):
+                run_ocr.main()
 
         result = json.loads(stdout.getvalue())
         self.assertFalse(result["ok"])
@@ -241,13 +270,14 @@ class OCRSkillScriptTest(unittest.TestCase):
     def test_main_returns_structured_error_when_ocr_base_url_is_missing(self) -> None:
         run_ocr = _load_run_ocr_module()
         stdout = io.StringIO()
-        with (
-            patch.object(run_ocr, "OCR_MCP_BASE_URL", ""),
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(sys, "stdin", io.StringIO(json.dumps({"query": "识别图片"}))),
-            patch.object(sys, "stdout", stdout),
-        ):
-            run_ocr.main()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_config_path = Path(tmpdir) / "missing-config.yaml"
+            with (
+                patch.object(run_ocr, "OCR_CONFIG_PATH", missing_config_path),
+                patch.object(sys, "stdin", io.StringIO(json.dumps({"query": "识别图片"}))),
+                patch.object(sys, "stdout", stdout),
+            ):
+                run_ocr.main()
 
         result = json.loads(stdout.getvalue())
         self.assertFalse(result["ok"])

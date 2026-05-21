@@ -12,6 +12,7 @@
 
 # Skill runtime artifacts
 /skill/**/outputs/
+/skill/ocr/config.yaml
 
 # Local report drafts
 /本周工作周报.md

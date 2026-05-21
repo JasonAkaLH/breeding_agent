@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
-import os
 import re
 import sys
 import time
@@ -14,8 +13,9 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-OCR_MCP_BASE_URL = ""
-OCR_MCP_AUTH_TOKEN = ""
+import yaml
+
+OCR_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 DEFAULT_TIMEOUT_SECONDS = 3600
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_DEBUG_PROGRESS = False
@@ -137,13 +137,17 @@ def _read_payload() -> dict[str, Any]:
 
 
 def _read_config(payload: dict[str, Any]) -> dict[str, Any]:
-    del payload  # Service connection and runtime limits are intentionally fixed in code.
-    base_url = _config_value("OCR_MCP_BASE_URL", "MAF_CONFIG_OCR_MCP__BASE_URL", default=OCR_MCP_BASE_URL)
-    auth_token = _config_value("OCR_MCP_AUTH_TOKEN", "MAF_CONFIG_OCR_MCP__AUTH_TOKEN", default=OCR_MCP_AUTH_TOKEN)
+    del payload  # Service connection and runtime limits are intentionally read from this Skill's local config.
+    file_config = _read_ocr_config_file()
+    base_url = _config_string(file_config, "base_url")
+    auth_token = _config_string(file_config, "auth_token")
+    timeout_seconds = _to_int(_config_value(file_config, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS), DEFAULT_TIMEOUT_SECONDS)
+    poll_interval = _to_float(_config_value(file_config, "poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS), DEFAULT_POLL_INTERVAL_SECONDS)
+    debug_progress = _to_bool(_config_value(file_config, "debug_progress", DEFAULT_DEBUG_PROGRESS))
     normalized_base_url = base_url.strip().rstrip("/")
     if not normalized_base_url:
         raise OCRSkillError(
-            "缺少 OCR MCP 服务地址，请通过本地 config.yaml 的 ocr_mcp.base_url 或 OCR_MCP_BASE_URL 配置。",
+            "缺少 OCR MCP 服务地址，请在 skill/ocr/config.yaml 中配置 base_url。",
             error_code="ocr_mcp_config_missing",
             stage="config",
             retriable=False,
@@ -152,18 +156,63 @@ def _read_config(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "base_url": normalized_base_url,
         "token": auth_token,
-        "timeout_seconds": DEFAULT_TIMEOUT_SECONDS,
-        "poll_interval_seconds": DEFAULT_POLL_INTERVAL_SECONDS,
-        "debug_progress": DEFAULT_DEBUG_PROGRESS,
+        "timeout_seconds": timeout_seconds if timeout_seconds >= 1 else DEFAULT_TIMEOUT_SECONDS,
+        "poll_interval_seconds": poll_interval if poll_interval > 0 else DEFAULT_POLL_INTERVAL_SECONDS,
+        "debug_progress": debug_progress,
     }
 
 
-def _config_value(*keys: str, default: str = "") -> str:
-    for key in keys:
-        value = os.getenv(key)
-        if value:
-            return value
-    return default
+def _read_ocr_config_file() -> dict[str, Any]:
+    if not OCR_CONFIG_PATH.exists():
+        return {}
+    with OCR_CONFIG_PATH.open(encoding="utf-8") as file:
+        parsed = yaml.safe_load(file)
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise OCRSkillError(
+            "OCR Skill 配置文件必须是 YAML object。",
+            error_code="ocr_mcp_config_invalid",
+            stage="config",
+            retriable=False,
+            error_type="ValueError",
+        )
+    nested = parsed.get("ocr_mcp")
+    if isinstance(nested, dict):
+        return dict(nested)
+    return dict(parsed)
+
+
+def _config_value(config: dict[str, Any], key: str, default: Any) -> Any:
+    value = config.get(key)
+    return default if value is None else value
+
+
+def _config_string(config: dict[str, Any], key: str, *, default: str = "") -> str:
+    value = _config_value(config, key, default)
+    return str(value or "")
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _set_progress_enabled(config: dict[str, Any]) -> None:

@@ -9,8 +9,8 @@
 ## [Unreleased]
 
 - OCR 原文展示链路增强：OCR Skill 成功时同时输出供主代理总结的识别内容与 `ocr_raw_text` 展示 artifact，前端在 assistant 气泡内部底部渲染“OCR 回传原文”卡片，默认限高并支持展开/收起，原文按纯文本保留换行展示。
-- OCR MCP 配置脱敏：OCR Skill 不再把远端服务地址或 token 写入 tracked 脚本，改为从本地 `config.yaml` 的 `ocr_mcp.*` 启动注入或部署环境变量读取，Skill subprocess 仅透传 OCR MCP allowlist 配置键，避免提交 provider endpoint / token。
-- Skill 执行可观测性增强：`python_subprocess` Skill 输出 `ok:false` / `is_error:true` 时新增脱敏的 `skill.output_error` audit-only 事件，同时 OCR Skill 失败输出补充 `error_code`、`error_type`、`stage`、`retriable` 与 `status=failed`，OCR MCP 服务地址改为仅从 metadata/env 配置读取，便于排查远端 OCR MCP 连接/HTTP/超时问题且不改变现有 finalizer 用户体验。
+- OCR Skill 配置隔离：OCR 远端服务地址、token、超时与轮询参数改为直接从 git-ignored `skill/ocr/config.yaml` 读取，与项目根目录 `config.yaml` 完全分开，不再通过 Skill subprocess 环境变量传递 OCR MCP 配置。
+- Skill 执行可观测性增强：`python_subprocess` Skill 输出 `ok:false` / `is_error:true` 时新增脱敏的 `skill.output_error` audit-only 事件，同时 OCR Skill 失败输出补充 `error_code`、`error_type`、`stage`、`retriable` 与 `status=failed`，OCR MCP 服务地址改为仅从 Skill 本地配置读取，便于排查远端 OCR MCP 连接/HTTP/超时问题且不改变现有 finalizer 用户体验。
 - OCR Skill 上传兼容修复：会话上传支持 PNG/JPG/JPEG/PDF，二进制文件通过脚本专用 `content_base64` artifact 传给 Skill，LLM-facing 上传摘要继续不暴露原始内容；前端上传入口与 API 文档同步支持范围，并补充 OCR / 上传回归测试。
 - REST API 静态文档补齐 26 个 API 操作的返回参数明细，按接口列出响应字段、类型、必返性、简介和枚举/备注，覆盖 JSON、SSE 与文件下载响应。
 - REST API 静态文档补充提交消息 `metadata` 明细，列出 `upload_ids`、thinking/reasoning、auto skill matching、slash command 追踪字段与内部保留 key 边界。
