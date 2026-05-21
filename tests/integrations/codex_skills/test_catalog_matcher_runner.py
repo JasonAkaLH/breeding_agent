@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.integrations.codex_skills import SkillCatalog, SkillScriptError, SkillScriptRunner, match_skills, parse_skill_file
 
@@ -106,6 +108,22 @@ Run script.
             result = asyncio.run(SkillScriptRunner().run(manifest, manifest.scripts[0], {"query": "hello"}))
 
         self.assertEqual(result, {"answer": "processed hello"})
+
+    def test_runner_passes_only_ocr_runtime_config_to_skill_environment(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OCR_MCP_BASE_URL": "http://ocr.example.test",
+                "MAF_CONFIG_OCR_MCP__AUTH_TOKEN": "secret-token",
+                "UNRELATED_SECRET": "must-not-pass",
+            },
+            clear=False,
+        ):
+            env = SkillScriptRunner._minimal_env(outputs_dir=Path("/tmp/skill-output"))
+
+        self.assertEqual(env["OCR_MCP_BASE_URL"], "http://ocr.example.test")
+        self.assertEqual(env["MAF_CONFIG_OCR_MCP__AUTH_TOKEN"], "secret-token")
+        self.assertNotIn("UNRELATED_SECRET", env)
 
     def test_runner_rejects_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

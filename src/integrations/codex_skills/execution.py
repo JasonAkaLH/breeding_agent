@@ -24,7 +24,7 @@ from .script_manifest import SkillScriptEntrypoint
 from .script_runner import SkillScriptError, SkillScriptRunner
 
 _SAFE_ARTIFACT_KEYS = frozenset({"artifact_id", "upload_id", "filename", "mime_type", "content_type", "size", "row_count", "columns", "preview", "summary"})
-_SCRIPT_ARTIFACT_KEYS = frozenset((*_SAFE_ARTIFACT_KEYS, "content"))
+_SCRIPT_ARTIFACT_KEYS = frozenset((*_SAFE_ARTIFACT_KEYS, "content", "content_base64", "encoding"))
 _BLOCKED_METADATA_KEYS = frozenset({"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"})
 
 

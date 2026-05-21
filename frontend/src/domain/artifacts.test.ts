@@ -188,6 +188,37 @@ describe('parseCapabilityArtifactDisplays', () => {
     expect(summarizeCapabilityArtifactDisplays(displays)).toBe('HTML 布局');
   });
 
+  it('returns an OCR raw text display for OCR artifacts', () => {
+    const displays = parseCapabilityArtifactDisplays([
+      artifact({
+        artifact_id: 'task-1:skill_display:abc:ocr_raw_text',
+        producer_node_id: 'task-1:ocr:skill_execute',
+        artifact_type: 'json',
+        summary: 'OCR 回传原文：scan.png',
+        storage_ref: JSON.stringify({
+          domain_kind: 'ocr',
+          artifact_role: 'ocr_raw_text',
+          raw_text: '品种：龙粳33\n处理：A1',
+          filename: 'scan.png',
+          job_id: 'job-1',
+          status: 'succeeded',
+        }),
+      }),
+    ]);
+
+    expect(displays).toHaveLength(1);
+    expect(displays[0]).toMatchObject({
+      kind: 'ocr_raw_text',
+      result: {
+        title: 'OCR 回传原文：scan.png',
+        rawText: '品种：龙粳33\n处理：A1',
+        filename: 'scan.png',
+        jobId: 'job-1',
+      },
+    });
+    expect(summarizeCapabilityArtifactDisplays(displays)).toBe('OCR 回传原文：scan.png');
+  });
+
   it('does not turn unrelated capability summaries into data-query cards', () => {
     const displays = parseCapabilityArtifactDisplays([
       artifact({

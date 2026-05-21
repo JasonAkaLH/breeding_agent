@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import json
 from dataclasses import dataclass
@@ -12,13 +13,25 @@ from uuid import uuid4
 from src.integrations.rust_safety_contract import normalize_storage_key, resource_limit, sha256_hex
 
 
-SUPPORTED_UPLOAD_EXTENSIONS: dict[str, Literal["json", "csv"]] = {".json": "json", ".csv": "csv"}
-SUPPORTED_UPLOAD_CONTENT_TYPES: dict[str, Literal["json", "csv"]] = {
+UploadFileType = Literal["json", "csv", "image", "pdf"]
+
+SUPPORTED_UPLOAD_EXTENSIONS: dict[str, UploadFileType] = {
+    ".json": "json",
+    ".csv": "csv",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".pdf": "pdf",
+}
+SUPPORTED_UPLOAD_CONTENT_TYPES: dict[str, UploadFileType] = {
     "application/json": "json",
     "text/json": "json",
     "text/csv": "csv",
     "application/csv": "csv",
     "application/vnd.ms-excel": "csv",
+    "image/png": "image",
+    "image/jpeg": "image",
+    "application/pdf": "pdf",
 }
 DEFAULT_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024
 
@@ -34,10 +47,11 @@ class UploadedFileRecord:
     conversation_id: str
     filename: str
     content_type: str
-    file_type: Literal["json", "csv"]
+    file_type: UploadFileType
     size_bytes: int
     sha256: str
-    content_text: str
+    content_bytes: bytes
+    content_text: str | None
     preview: dict[str, Any]
     created_at: datetime
     expires_at: datetime
@@ -56,7 +70,11 @@ class UploadedFileRecord:
 
     def to_skill_artifact(self) -> dict[str, Any]:
         artifact = self.to_summary()
-        artifact["content"] = self.content_text
+        if self.content_text is not None:
+            artifact["content"] = self.content_text
+        else:
+            artifact["encoding"] = "base64"
+            artifact["content_base64"] = base64.b64encode(self.content_bytes).decode("ascii")
         return artifact
 
 
@@ -91,16 +109,20 @@ class InMemoryUploadStore:
         _validate_managed_upload_key(normalized_filename)
         if len(content) > self.max_file_bytes:
             raise UploadValidationError(f"Uploaded file exceeds {self.max_file_bytes} bytes")
-        if len(content) > self.max_preview_bytes:
-            raise UploadValidationError(f"Uploaded file exceeds preview limit of {self.max_preview_bytes} bytes")
         file_type = _detect_file_type(normalized_filename, content_type)
         if file_type is None:
-            raise UploadValidationError("Only JSON and CSV files are supported")
-        try:
-            content_text = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise UploadValidationError("Uploaded file must be UTF-8 encoded") from exc
-        preview = _build_preview(file_type, content_text)
+            raise UploadValidationError("Only JSON, CSV, PNG, JPG/JPEG, and PDF files are supported")
+        if file_type in {"json", "csv"}:
+            if len(content) > self.max_preview_bytes:
+                raise UploadValidationError(f"Uploaded file exceeds preview limit of {self.max_preview_bytes} bytes")
+            try:
+                content_text = content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise UploadValidationError("Uploaded file must be UTF-8 encoded") from exc
+            preview = _build_text_preview(file_type, content_text)
+        else:
+            content_text = None
+            preview = _build_binary_preview(file_type, len(content))
         now = self._now_fn()
         self._enforce_account_quota(account_id)
         record = UploadedFileRecord(
@@ -112,6 +134,7 @@ class InMemoryUploadStore:
             file_type=file_type,
             size_bytes=len(content),
             sha256=sha256_hex(content),
+            content_bytes=bytes(content),
             content_text=content_text,
             preview=preview,
             created_at=now,
@@ -182,7 +205,7 @@ def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _detect_file_type(filename: str, content_type: str | None) -> Literal["json", "csv"] | None:
+def _detect_file_type(filename: str, content_type: str | None) -> UploadFileType | None:
     suffix_type = SUPPORTED_UPLOAD_EXTENSIONS.get(Path(filename).suffix.lower())
     if suffix_type:
         return suffix_type
@@ -190,10 +213,14 @@ def _detect_file_type(filename: str, content_type: str | None) -> Literal["json"
     return SUPPORTED_UPLOAD_CONTENT_TYPES.get(base_content_type)
 
 
-def _build_preview(file_type: Literal["json", "csv"], content_text: str) -> dict[str, Any]:
+def _build_text_preview(file_type: Literal["json", "csv"], content_text: str) -> dict[str, Any]:
     if file_type == "json":
         return _build_json_preview(content_text)
     return _build_csv_preview(content_text)
+
+
+def _build_binary_preview(file_type: Literal["image", "pdf"], size_bytes: int) -> dict[str, Any]:
+    return {"row_count": None, "columns": [], "shape": "binary", "size_bytes": size_bytes, "file_type": file_type}
 
 
 def _build_json_preview(content_text: str) -> dict[str, Any]:

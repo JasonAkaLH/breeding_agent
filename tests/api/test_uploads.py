@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import unittest
 
@@ -110,6 +111,37 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(payload["file_type"], "json")
         self.assertEqual(payload["preview"]["row_count"], 2)
         self.assertEqual(payload["preview"]["columns"], ["ped_id", "design_check", "set"])
+
+    async def test_upload_png_resolves_binary_content_only_for_skill_scripts(self) -> None:
+        png_content = b"\x89PNG\r\n\x1a\nocr-test"
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-ocr"},
+            files={"file": ("scan.png", png_content, "image/png")},
+        )
+
+        self.assertEqual(upload.status_code, 201)
+        payload = upload.json()
+        self.assertEqual(payload["filename"], "scan.png")
+        self.assertEqual(payload["file_type"], "image")
+        self.assertEqual(payload["preview"]["shape"], "binary")
+        self.assertEqual(payload["preview"]["columns"], [])
+        self.assertIsNone(payload["preview"]["row_count"])
+        self.assertNotIn("content", payload)
+        self.assertNotIn("content_base64", payload)
+
+        resolved = await self.runtime.resolve_uploads_for_message(
+            "conv-ocr", "acc-1", [payload["upload_id"]]
+        )
+        prompt_artifact = resolved["uploaded_artifacts"][0]
+        script_artifact = resolved["skill_artifacts"][0]
+        self.assertEqual(prompt_artifact["filename"], "scan.png")
+        self.assertNotIn("content", prompt_artifact)
+        self.assertNotIn("content_base64", prompt_artifact)
+        self.assertEqual(script_artifact["content_base64"], base64.b64encode(png_content).decode("ascii"))
+        self.assertEqual(script_artifact["encoding"], "base64")
+        self.assertNotIn("content", script_artifact)
 
     async def test_list_and_delete_uploads_for_conversation(self) -> None:
         first = await self.client.post(

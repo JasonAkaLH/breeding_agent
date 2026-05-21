@@ -242,7 +242,7 @@ describe('createApiClient', () => {
   });
 
 
-  it('uploads a JSON or CSV file with multipart form data', async () => {
+  it('uploads a supported conversation file with multipart form data', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       upload_id: 'upl-1',
       conversation_id: 'conv-1',

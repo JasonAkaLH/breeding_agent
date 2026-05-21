@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import textwrap
@@ -78,6 +79,183 @@ outputs:
         )
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertIn('skill.execution_completed', [event.event_type for event in events])
+        self.assertTrue(prompts)
+
+    async def test_python_subprocess_ok_false_records_sanitized_output_error_event(self) -> None:
+        project_skill_root = self.workspace / 'skill'
+        skill_dir = project_skill_root / 'soft-fail'
+        scripts_dir = skill_dir / 'scripts'
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / 'soft_fail.py').write_text(
+            textwrap.dedent(
+                """
+                import json
+                print(json.dumps({
+                    "ok": False,
+                    "answer": "OCR 失败：连接 OCR MCP 失败：timed out",
+                    "error": "连接 OCR MCP 失败：Authorization: Bearer SECRET_TOKEN timed out",
+                    "error_code": "ocr_mcp_connection_failed",
+                    "error_type": "RuntimeError",
+                    "stage": "initialize",
+                    "retriable": True,
+                    "content_base64": "SECRET_IMAGE_BYTES",
+                    "Authorization": "Bearer SECRET_TOKEN"
+                }, ensure_ascii=False))
+                """
+            ),
+            encoding='utf-8',
+        )
+        (skill_dir / 'SKILL.md').write_text(
+            """---
+name: soft-fail
+description: 返回可解释失败的 OCR Skill
+scripts:
+  - name: soft_fail
+    path: scripts/soft_fail.py
+    runtime: python
+    auto_run: true
+    outputs:
+      required:
+        - answer
+execution:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+outputs:
+  required:
+    - answer
+---
+
+# Soft Fail
+返回 ok:false，并交给主代理汇总。
+""",
+            encoding='utf-8',
+        )
+        prompts: list[str] = []
+
+        def finalizer(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            self.assertIn('OCR 失败：连接 OCR MCP 失败', prompt)
+            return 'finalized'
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=finalizer,
+        )
+
+        response = await self.submit_message(
+            conversation_id='conv-soft-fail',
+            content='解析图片',
+            capability_id='skill.soft_fail',
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()['task_id']
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal['status'], 'completed')
+
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        output_error_events = [event for event in events if event.event_type == 'skill.output_error']
+        self.assertEqual(len(output_error_events), 1)
+        payload = output_error_events[0].payload
+        self.assertEqual(str(output_error_events[0].visibility), 'audit_only')
+        self.assertEqual(payload['severity'], 'warning')
+        self.assertEqual(payload['error_code'], 'ocr_mcp_connection_failed')
+        self.assertEqual(payload['error_type'], 'RuntimeError')
+        self.assertEqual(payload['stage'], 'initialize')
+        self.assertTrue(payload['retriable'])
+        self.assertIn('content_base64', payload['output_keys'])
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn('SECRET_IMAGE_BYTES', serialized_payload)
+        self.assertNotIn('SECRET_TOKEN', serialized_payload)
+        self.assertTrue(prompts)
+
+    async def test_python_subprocess_collects_display_artifact_without_finalizer_leak(self) -> None:
+        project_skill_root = self.workspace / 'skill'
+        skill_dir = project_skill_root / 'ocr-like'
+        scripts_dir = skill_dir / 'scripts'
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / 'ocr_like.py').write_text(
+            textwrap.dedent(
+                """
+                import json
+                print(json.dumps({
+                    "answer": "OCR 已完成，请总结识别结果。",
+                    "display_artifacts": [{
+                        "artifact_type": "json",
+                        "artifact_role": "ocr_raw_text",
+                        "artifact_id_suffix": "ocr_raw_text",
+                        "summary": "OCR 回传原文",
+                        "storage_ref": {
+                            "domain_kind": "ocr",
+                            "artifact_role": "ocr_raw_text",
+                            "raw_text": "RAW OCR LINE 1\\nRAW OCR LINE 2",
+                            "filename": "scan.png",
+                            "status": "succeeded"
+                        }
+                    }]
+                }, ensure_ascii=False))
+                """
+            ),
+            encoding='utf-8',
+        )
+        (skill_dir / 'SKILL.md').write_text(
+            """---
+name: ocr-like
+description: 模拟 OCR 原文产物
+scripts:
+  - name: ocr_like
+    path: scripts/ocr_like.py
+    runtime: python
+    auto_run: true
+    outputs:
+      required:
+        - answer
+execution:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+outputs:
+  required:
+    - answer
+---
+
+# OCR Like
+返回摘要上下文和 OCR 原文展示产物。
+""",
+            encoding='utf-8',
+        )
+        prompts: list[str] = []
+
+        def finalizer(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            self.assertIn('OCR 已完成，请总结识别结果。', prompt)
+            self.assertNotIn('RAW OCR LINE 1', prompt)
+            self.assertNotIn('display_artifacts', prompt)
+            return 'finalized'
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=finalizer,
+        )
+
+        response = await self.submit_message(
+            conversation_id='conv-ocr-like',
+            content='识别图片',
+            capability_id='skill.ocr_like',
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()['task_id']
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal['status'], 'completed')
+
+        artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
+        ocr_artifacts = [artifact for artifact in artifacts if artifact.artifact_id.endswith(':ocr_raw_text')]
+        self.assertEqual(len(ocr_artifacts), 1)
+        self.assertEqual(str(ocr_artifacts[0].artifact_type), 'json')
+        payload = json.loads(ocr_artifacts[0].storage_ref)
+        self.assertEqual(payload['domain_kind'], 'ocr')
+        self.assertEqual(payload['artifact_role'], 'ocr_raw_text')
+        self.assertEqual(payload['raw_text'], 'RAW OCR LINE 1\nRAW OCR LINE 2')
         self.assertTrue(prompts)
 
     async def test_python_subprocess_direct_answer_still_generates_text_artifact(self) -> None:
@@ -331,6 +509,94 @@ outputs:
 
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
         self.assertIn('skill.material_reader', [node.capability_id for node in nodes])
+        self.assertTrue(prompts)
+
+    async def test_public_python_subprocess_skill_reads_binary_upload_as_base64_without_prompt_leak(self) -> None:
+        project_skill_root = self.workspace / 'skill'
+        skill_dir = project_skill_root / 'binary-reader'
+        scripts_dir = skill_dir / 'scripts'
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / 'read_binary.py').write_text(
+            textwrap.dedent(
+                """\
+                import base64
+                import json
+                import sys
+
+                payload = json.load(sys.stdin)
+                artifacts = payload.get("uploaded_artifacts") or []
+                encoded = artifacts[0].get("content_base64", "") if artifacts else ""
+                content = base64.b64decode(encoded)
+                print(json.dumps(
+                    {
+                        "answer": f"二进制文件已读取：{len(content)} bytes",
+                        "byte_count": len(content),
+                    },
+                    ensure_ascii=False,
+                ))
+                """
+            ),
+            encoding='utf-8',
+        )
+        (skill_dir / 'SKILL.md').write_text(
+            """---
+name: binary-reader
+description: 读取上传二进制文件
+scripts:
+  - name: read_binary
+    path: scripts/read_binary.py
+    runtime: python
+    auto_run: true
+    outputs:
+      required:
+        - answer
+execution:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+outputs:
+  required:
+    - answer
+---
+
+# Binary Reader
+读取上传二进制文件。
+""",
+            encoding='utf-8',
+        )
+        prompts: list[str] = []
+        raw_png = b"\x89PNG\r\n\x1a\nocr-test"
+        encoded_png = base64.b64encode(raw_png).decode("ascii")
+
+        def finalizer(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            self.assertIn("二进制文件已读取：16 bytes", prompt)
+            self.assertIn("scan.png", prompt)
+            self.assertNotIn(encoded_png, prompt)
+            return "finalized"
+
+        await self.reconfigure_runtime(
+            skill_roots=(project_skill_root,),
+            public_skill_roots=(project_skill_root,),
+            main_agent_stream_generator=finalizer,
+        )
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-binary-reader"},
+            files={"file": ("scan.png", raw_png, "image/png")},
+        )
+        self.assertEqual(upload.status_code, 201)
+        self.assertNotIn("content_base64", upload.json())
+
+        response = await self.submit_message(
+            conversation_id='conv-binary-reader',
+            content='请读取这张图片',
+            capability_id='skill.binary_reader',
+            metadata={'upload_ids': [upload.json()['upload_id']]},
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()['task_id']
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal['status'], 'completed')
         self.assertTrue(prompts)
 
     async def test_new_conversation_refreshes_executor_mode_skill_and_syncs_instance_support(self) -> None:

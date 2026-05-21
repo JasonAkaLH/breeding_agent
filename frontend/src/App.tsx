@@ -1146,12 +1146,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     <Space direction="vertical" size="middle" className="composer-menu">
       <Button
         block
-        aria-label="选择 JSON 或 CSV 文件"
+        aria-label="选择 JSON、CSV、图片或 PDF 文件"
         onClick={() => uploadInputRef.current?.click()}
         disabled={interactionLocked || uploadingFile}
         loading={uploadingFile}
       >
-        上传 JSON / CSV 文件
+        上传文件
       </Button>
       <Space size="small" align="center" className="composer-menu-row">
         <Typography.Text type="secondary">思考强度</Typography.Text>
@@ -1401,9 +1401,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   <input
                     ref={uploadInputRef}
                     className="file-input-hidden"
-                    aria-label="上传 JSON 或 CSV 文件"
+                    aria-label="上传 JSON、CSV、图片或 PDF 文件"
                     type="file"
-                    accept=".json,.csv,application/json,text/csv"
+                    accept=".json,.csv,.png,.jpg,.jpeg,.pdf,application/json,text/csv,image/png,image/jpeg,application/pdf"
                     disabled={interactionLocked || uploadingFile}
                     onChange={(event) => void handleUploadFile(event.target.files?.[0])}
                   />
@@ -1892,6 +1892,9 @@ function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDispl
   if (display.kind === 'data_query') {
     return <DataQueryResultCard result={display.result} />;
   }
+  if (display.kind === 'ocr_raw_text') {
+    return <OcrRawTextCard result={display.result} />;
+  }
   if (display.kind === 'file') {
     return <FileArtifactCard result={display.result} />;
   }
@@ -1905,7 +1908,36 @@ function capabilityArtifactDisplayKey(display: CapabilityArtifactDisplay): strin
   if (display.kind === 'file') {
     return `${display.kind}:${display.result.artifactId}`;
   }
+  if (display.kind === 'ocr_raw_text') {
+    return `${display.kind}:${display.result.artifactId}`;
+  }
   return 'capability-artifact';
+}
+
+function OcrRawTextCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'ocr_raw_text' }>['result'] }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <Card
+      size="small"
+      className="capability-card ocr-raw-text-card"
+      title={result.title || 'OCR 回传原文'}
+      extra={(
+        <Button type="link" size="small" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? '收起原文' : '展开原文'}
+        </Button>
+      )}
+    >
+      <Space direction="vertical" size="small" className="ocr-raw-text-stack">
+        <Space wrap size="small">
+          {result.filename ? <Tag>{result.filename}</Tag> : null}
+          {result.status ? <Tag color={result.status === 'succeeded' ? 'green' : undefined}>{result.status}</Tag> : null}
+        </Space>
+        <pre className={`ocr-raw-text-content ${expanded ? 'ocr-raw-text-content-expanded' : ''}`}>
+          {result.rawText}
+        </pre>
+      </Space>
+    </Card>
+  );
 }
 
 function FileArtifactCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'file' }>['result'] }) {

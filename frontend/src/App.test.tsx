@@ -274,11 +274,11 @@ describe('App', () => {
     expect(inputMenuButton.querySelector('img')).toHaveAttribute('src', '/pics/input-menu-plus-button.svg');
     expect(sendButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '发送');
     expect(inputMenuButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '打开输入功能菜单');
-    expect(within(sendRow).queryByRole('button', { name: '选择 JSON 或 CSV 文件' })).not.toBeInTheDocument();
+    expect(within(sendRow).queryByRole('button', { name: '选择 JSON、CSV、图片或 PDF 文件' })).not.toBeInTheDocument();
     expect(sendBar).toHaveClass('floating-composer');
 
     fireEvent.click(inputMenuButton);
-    expect(await screen.findByRole('button', { name: '选择 JSON 或 CSV 文件' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '选择 JSON、CSV、图片或 PDF 文件' })).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
     expect(await screen.findByLabelText('深度思考')).toBeInTheDocument();
   });
@@ -1284,7 +1284,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON 或 CSV 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '/mini-breedstat-rcbd 用这个文件做3个区组RCBD' } });
@@ -1350,7 +1350,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON 或 CSV 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     await screen.findByText(/1 行/);
@@ -1467,6 +1467,47 @@ describe('App', () => {
     expect(screen.getByText('layout.html')).toBeInTheDocument();
     const link = screen.getByRole('link', { name: /下\s*载/ });
     expect(link).toHaveAttribute('href', '/api/v1/artifacts/art-file-1/download');
+  });
+
+  it('renders OCR raw text artifacts as a collapsible card inside the assistant bubble', async () => {
+    const api = makeApi({
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [
+          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '主代理总结：图片中包含品种和处理信息。', summary: 'final', is_complete: true, created_at: null },
+          {
+            artifact_id: 'task-1:skill_display:abc:ocr_raw_text',
+            producer_node_id: 'task-1:ocr:skill_execute',
+            artifact_type: 'json',
+            storage_ref: JSON.stringify({
+              domain_kind: 'ocr',
+              artifact_role: 'ocr_raw_text',
+              raw_text: '品种：龙粳33\n处理：A1',
+              filename: 'scan.png',
+              status: 'succeeded',
+            }),
+            summary: 'OCR 回传原文：scan.png',
+            is_complete: true,
+            created_at: null,
+          },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别图片' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const summary = await screen.findByText('主代理总结：图片中包含品种和处理信息。');
+    const assistantMessage = summary.closest('.message-assistant') as HTMLElement;
+    expect(assistantMessage).not.toBeNull();
+    const messageBody = assistantMessage.querySelector('.message-body') as HTMLElement;
+    expect(within(messageBody).getByText('OCR 回传原文：scan.png')).toBeInTheDocument();
+    expect(within(messageBody).getByText('scan.png')).toBeInTheDocument();
+    expect(messageBody.querySelector('.ocr-raw-text-content')?.textContent).toBe('品种：龙粳33\n处理：A1');
+    const toggle = within(messageBody).getByRole('button', { name: '展开原文' });
+    fireEvent.click(toggle);
+    expect(within(messageBody).getByRole('button', { name: '收起原文' })).toBeInTheDocument();
   });
 
   it('shows skill progress as a lightweight status line outside the assistant bubble', async () => {

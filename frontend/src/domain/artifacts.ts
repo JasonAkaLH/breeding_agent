@@ -25,6 +25,15 @@ export interface FileArtifactDisplayModel {
   archiveFormat?: string;
 }
 
+export interface OcrRawTextDisplayModel {
+  artifactId: string;
+  title: string;
+  rawText: string;
+  filename?: string;
+  status?: string;
+  jobId?: string;
+}
+
 export type CapabilityArtifactDisplay =
   | {
       kind: 'data_query';
@@ -33,6 +42,10 @@ export type CapabilityArtifactDisplay =
   | {
       kind: 'file';
       result: FileArtifactDisplayModel;
+    }
+  | {
+      kind: 'ocr_raw_text';
+      result: OcrRawTextDisplayModel;
     };
 
 export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): CapabilityArtifactDisplay[] {
@@ -42,6 +55,7 @@ export function parseCapabilityArtifactDisplays(artifacts: ArtifactResponse[]): 
   if (hasDataQueryResult) {
     displays.push({ kind: 'data_query', result: dataQueryResult });
   }
+  displays.push(...parseOcrRawTextDisplays(artifacts).map((result) => ({ kind: 'ocr_raw_text' as const, result })));
   displays.push(...parseFileArtifactDisplays(artifacts).map((result) => ({ kind: 'file' as const, result })));
   return displays;
 }
@@ -51,7 +65,31 @@ export function summarizeCapabilityArtifactDisplays(displays: CapabilityArtifact
   if (!first) return '';
   if (first.kind === 'data_query') return first.result.summary;
   if (first.kind === 'file') return first.result.summary;
+  if (first.kind === 'ocr_raw_text') return first.result.title;
   return '';
+}
+
+export function parseOcrRawTextDisplays(artifacts: ArtifactResponse[]): OcrRawTextDisplayModel[] {
+  const displays: OcrRawTextDisplayModel[] = [];
+  for (const artifact of artifacts) {
+    const parsed = artifactMetadata(artifact);
+    if (!isOcrRawTextArtifact(artifact, parsed)) continue;
+    const rawText = stringField(parsed, 'raw_text') || stringField(parsed, 'text') || stringField(parsed, 'markdown');
+    if (!rawText) continue;
+    const filename = stringField(parsed, 'filename') ?? undefined;
+    const title = stringOrFallback(artifact.summary, filename ? `OCR 回传原文：${filename}` : 'OCR 回传原文');
+    displays.push(
+      {
+        artifactId: artifact.artifact_id,
+        title,
+        rawText,
+        filename,
+        status: stringField(parsed, 'status') ?? undefined,
+        jobId: stringField(parsed, 'job_id') ?? undefined,
+      },
+    );
+  }
+  return displays;
 }
 
 export function parseFileArtifactDisplays(artifacts: ArtifactResponse[]): FileArtifactDisplayModel[] {
@@ -142,6 +180,17 @@ function isDataQueryDisplayArtifact(artifact: ArtifactResponse): boolean {
     || artifact.producer_node_id.includes('data_query')
     || isPreviewArtifact(artifact)
   );
+}
+
+function isOcrRawTextArtifact(artifact: ArtifactResponse, metadata: Record<string, unknown>): boolean {
+  return artifact.artifact_type === 'json'
+    && (
+      metadata.domain_kind === 'ocr'
+      || metadata.artifact_family === 'ocr'
+      || metadata.artifact_role === 'ocr_raw_text'
+      || artifact.artifact_id.includes('ocr_raw_text')
+    )
+    && metadata.artifact_role === 'ocr_raw_text';
 }
 
 function artifactMetadata(artifact: ArtifactResponse): Record<string, unknown> {

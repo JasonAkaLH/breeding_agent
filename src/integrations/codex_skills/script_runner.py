@@ -278,4 +278,7 @@ class SkillScriptRunner:
         if current_path:
             env["PATH"] = str(python_path)
         env["MAF_SKILL_OUTPUT_DIR"] = str(outputs_dir)
+        for key, value in os.environ.items():
+            if key.startswith("OCR_MCP_") or key.startswith("MAF_CONFIG_OCR_MCP__"):
+                env[key] = value
         return env

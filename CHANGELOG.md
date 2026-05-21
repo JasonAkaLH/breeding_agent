@@ -8,6 +8,18 @@
 
 ## [Unreleased]
 
+- OCR 原文展示链路增强：OCR Skill 成功时同时输出供主代理总结的识别内容与 `ocr_raw_text` 展示 artifact，前端在 assistant 气泡内部底部渲染“OCR 回传原文”卡片，默认限高并支持展开/收起，原文按纯文本保留换行展示。
+- OCR MCP 配置脱敏：OCR Skill 不再把远端服务地址或 token 写入 tracked 脚本，改为从本地 `config.yaml` 的 `ocr_mcp.*` 启动注入或部署环境变量读取，Skill subprocess 仅透传 OCR MCP allowlist 配置键，避免提交 provider endpoint / token。
+- Skill 执行可观测性增强：`python_subprocess` Skill 输出 `ok:false` / `is_error:true` 时新增脱敏的 `skill.output_error` audit-only 事件，同时 OCR Skill 失败输出补充 `error_code`、`error_type`、`stage`、`retriable` 与 `status=failed`，OCR MCP 服务地址改为仅从 metadata/env 配置读取，便于排查远端 OCR MCP 连接/HTTP/超时问题且不改变现有 finalizer 用户体验。
+- OCR Skill 上传兼容修复：会话上传支持 PNG/JPG/JPEG/PDF，二进制文件通过脚本专用 `content_base64` artifact 传给 Skill，LLM-facing 上传摘要继续不暴露原始内容；前端上传入口与 API 文档同步支持范围，并补充 OCR / 上传回归测试。
+- REST API 静态文档补齐 26 个 API 操作的返回参数明细，按接口列出响应字段、类型、必返性、简介和枚举/备注，覆盖 JSON、SSE 与文件下载响应。
+- REST API 静态文档补充提交消息 `metadata` 明细，列出 `upload_ids`、thinking/reasoning、auto skill matching、slash command 追踪字段与内部保留 key 边界。
+- REST API 静态文档将 Cookie 结构中的 `Set-Cookie` 示例改为可复制代码块，避免长 Cookie header 以内联文本挤压版面。
+- REST API 静态文档新增正式 Cookie 结构章节，说明 `__Host-maf_session` 名称、opaque session_id 值、安全属性、旧 `maf_session` 迁移 fallback、跨站 Bearer 边界与 Set-Cookie 示例。
+- REST API 静态文档移除面向开发过程的“手动验证当前改动”章节，保留正式接入、接口控制台、SSE、数据结构与维护信息，避免把一次性验证清单混入交付 API 文档。
+- REST API 静态文档去重接口详情：删除每个 API 详情中的“必填参数”和参数型“请求”卡片，统一改为“请求说明”承载协议层信息，参数字段说明继续由“参数明细”表负责。
+- REST API 静态文档补齐参数级契约：数据结构区域改为单列展示，26 个 API 操作均新增参数明细表，覆盖参数位置、类型、必填性、说明、枚举/默认值，并拆分 API token 创建/列表/撤销为独立接口卡片。
+- REST API 静态文档按当前安全认证与手动验证口径更新：同步 OpenAPI 路径/操作数量、`__Host-maf_session` Secure Cookie 约束、Bearer token 管理与 scope、CORS allowlist、非 GET 业务 ID 入 body、SSE Bearer fetch-stream 注意事项，并修正任务/上传 GET 路径说明。
 - 安全 Session Cookie / 多客户端认证已落地：登录/注册改写 `__Host-maf_session` opaque Cookie 并保留旧 `maf_session` 只读迁移，新增 hash 存储的 scoped API token 创建/列表/撤销与 Bearer 业务 API 鉴权，补齐 CORS allowlist、前端 Bearer REST 与 fetch-stream SSE client、API 文档和覆盖 Cookie/Bearer/CORS/storage/frontend 的回归测试；token revoke/last-used 采用字段级条件更新，避免并发撤销被 touch 覆盖。
 - 安全 Session Cookie / 多客户端认证实现计划完成 document-perfectization 加固：补齐 scope 只约束 Bearer、token 管理仅限 Cookie session、capability/API doc public 不退化、token secret fail-closed、CORS credentials 与 SSE header 约束等实施和测试门禁。
 - 安全 Session Cookie / 多客户端认证已补充实现计划与测试规格：新增 `.omx/plans/prd-20260521-secure-session-cookie-auth.md` 与 `.omx/plans/test-spec-20260521-secure-session-cookie-auth.md`，明确 Cookie hardening、opaque Bearer token、CORS、SSE、前端 client、文档与验证路径。

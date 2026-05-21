@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequ
 from src.core.enums import ArtifactType, EventVisibility
 from src.core.models import Artifact, EventRecord
 from src.integrations.codex_skills import (
+    SkillExecutionConfig,
     SkillExecutionConfigError,
     SkillManifest,
     SkillPlatformExecutionContext,
@@ -392,8 +394,26 @@ class SkillExecutor(ExecutorPort):
             )
         output_payload = normalize_skill_response_payload(script_result.output)
         response_text = coerce_skill_response_text(output_payload)
+        display_artifact_specs = output_payload.pop("display_artifacts", None)
+        artifacts.extend(self._make_display_artifacts(request, display_artifact_specs))
         if execution.answer_mode == "direct" and response_text:
             artifacts.append(self._make_text_artifact(request, response_text))
+        if output_payload.get("is_error") is True:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.output_error",
+                    payload=self._skill_output_error_payload(
+                        request=request,
+                        resolved=resolved,
+                        execution=execution,
+                        script_name=script.name,
+                        output_payload=output_payload,
+                        response_text=response_text,
+                    ),
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
         events.append(
             self._make_event(
                 request,
@@ -424,6 +444,105 @@ class SkillExecutor(ExecutorPort):
             artifacts=tuple(artifacts),
             events=tuple(events),
         )
+
+    def _skill_output_error_payload(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        resolved: _ResolvedSkill,
+        execution: SkillExecutionConfig,
+        script_name: str,
+        output_payload: Mapping[str, Any],
+        response_text: str,
+    ) -> dict[str, Any]:
+        return {
+            "severity": "warning",
+            "capability_id": request.capability_id,
+            "skill_name": resolved.manifest.name,
+            "entrypoint": script_name,
+            "answer_mode": execution.answer_mode,
+            "error_code": self._safe_output_string(output_payload.get("error_code"), default="skill_output_error"),
+            "error_type": self._safe_output_string(output_payload.get("error_type"), default="SkillOutputError"),
+            "error_message": self._safe_output_string(
+                output_payload.get("error") or output_payload.get("error_message") or response_text,
+                default="Skill output indicated failure.",
+            ),
+            "retriable": bool(output_payload.get("retriable")),
+            "stage": self._safe_output_string(output_payload.get("stage"), default="unknown"),
+            "status": self._safe_output_string(output_payload.get("status"), default="failed"),
+            "output_keys": sorted(str(key) for key in output_payload.keys()),
+            "response_text_preview": self._safe_output_string(response_text, default=""),
+        }
+
+    @staticmethod
+    def _safe_output_string(value: Any, *, default: str, max_length: int = 500) -> str:
+        if value is None:
+            return default
+        text = str(value).replace("\r", " ").replace("\n", " ").strip()
+        text = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(token\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(cookie\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", text)
+        if not text:
+            return default
+        return text[:max_length]
+
+    def _make_display_artifacts(self, request: CapabilityExecutionRequest, specs: Any) -> tuple[Artifact, ...]:
+        if not isinstance(specs, list | tuple):
+            return ()
+        artifacts: list[Artifact] = []
+        for index, raw_spec in enumerate(specs):
+            if not isinstance(raw_spec, Mapping):
+                continue
+            artifact_type = self._display_artifact_type(raw_spec.get("artifact_type"))
+            if artifact_type is None:
+                continue
+            storage_ref = self._display_artifact_storage_ref(raw_spec)
+            if not storage_ref:
+                continue
+            suffix = self._artifact_id_suffix(raw_spec.get("artifact_id_suffix") or raw_spec.get("artifact_role"), index)
+            digest = hashlib.sha256(f"{request.node_id}:{artifact_type}:{suffix}:{storage_ref}".encode("utf-8")).hexdigest()[:12]
+            summary = self._safe_output_string(raw_spec.get("summary"), default="", max_length=120) or None
+            artifacts.append(
+                Artifact(
+                    artifact_id=f"{request.node_id}:skill_display:{digest}:{suffix}",
+                    task_id=request.task_id,
+                    producer_node_id=request.node_id,
+                    artifact_type=artifact_type,
+                    storage_ref=storage_ref,
+                    summary=summary,
+                    is_complete=True,
+                )
+            )
+        return tuple(artifacts)
+
+    @staticmethod
+    def _display_artifact_type(value: Any) -> ArtifactType | None:
+        raw = str(value or ArtifactType.JSON).strip().lower()
+        try:
+            artifact_type = ArtifactType(raw)
+        except ValueError:
+            return None
+        if artifact_type == ArtifactType.FILE:
+            return None
+        return artifact_type
+
+    @staticmethod
+    def _display_artifact_storage_ref(spec: Mapping[str, Any]) -> str:
+        value = spec.get("storage_ref")
+        if value is None:
+            value = spec.get("payload")
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _artifact_id_suffix(value: Any, index: int) -> str:
+        raw = str(value or f"display_{index}").strip().lower()
+        safe = re.sub(r"[^a-z0-9_.-]+", "_", raw).strip("_.-")
+        return safe[:48] or f"display_{index}"
 
     async def _execute_platform_service_skill(
         self,
