@@ -26,7 +26,7 @@ class MessageSubmissionAPITest(APITestCase):
             return task is not None and str(task.status) == "running"
 
         await self.wait_for_condition(task_running)
-        cancel_response = await self.client.post(f"/api/v1/tasks/{first_payload['task_id']}/cancel")
+        cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": first_payload['task_id']})
         self.assertEqual(cancel_response.status_code, 202)
         release.set()
         terminal = await self.wait_for_terminal_task(first_payload["task_id"])
@@ -58,8 +58,8 @@ class MessageSubmissionAPITest(APITestCase):
         self.assertEqual(open_interrupt["reason_code"], "lookup_target_missing")
 
         answer = await self.client.post(
-            f"/api/v1/tasks/{first_payload['task_id']}/interrupts/{open_interrupt['interrupt_id']}/answer",
-            json={"answer_payload": {"lookup_target": "龙粳33"}},
+            "/api/v1/tasks/interrupts/answer",
+            json={"task_id": first_payload['task_id'], "interrupt_id": open_interrupt['interrupt_id'], "answer_payload": {"lookup_target": "龙粳33"}},
         )
         self.assertEqual(answer.status_code, 202)
         self.assertEqual(answer.json()["status"], "answered")

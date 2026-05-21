@@ -29,14 +29,14 @@ const capabilities: CapabilityResponse[] = [
     source_path: 'mini_breedstat_rcbd_skill/SKILL.md',
   },
   {
-    capability_id: 'skill.sql_query',
-    name: 'sql-query',
+    capability_id: 'skill.data_lookup',
+    name: 'data-lookup',
     description: '只读数据库查询',
     version: '1',
     status: 'active',
     kind: 'skill',
     source: 'skill',
-    source_path: 'sql-query/SKILL.md',
+    source_path: 'data-lookup/SKILL.md',
   },
   {
     capability_id: 'skill.disabled_demo',
@@ -55,8 +55,8 @@ describe('slashCommands', () => {
     const commands = deriveSlashCommands(capabilities);
 
     expect(commands).toEqual([
+      expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup', hasCommandConflict: false }),
       expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd', hasCommandConflict: false }),
-      expect.objectContaining({ command: '/sql-query', capabilityId: 'skill.sql_query', hasCommandConflict: false }),
     ]);
     expect(commands.map((command) => command.capabilityId)).not.toContain('main_agent.respond');
     expect(commands.map((command) => command.capabilityId)).not.toContain('skill.disabled_demo');
@@ -77,36 +77,36 @@ describe('slashCommands', () => {
   it('filters menu candidates by command, name, description, and capability id', () => {
     const commands = deriveSlashCommands(capabilities);
 
-    expect(slashMenuCandidates('/', commands).map((command) => command.command)).toEqual(['/mini-breedstat-rcbd', '/sql-query']);
-    expect(slashMenuCandidates('/sql', commands).map((command) => command.command)).toEqual(['/sql-query']);
+    expect(slashMenuCandidates('/', commands).map((command) => command.command)).toEqual(['/data-lookup', '/mini-breedstat-rcbd']);
+    expect(slashMenuCandidates('/data', commands).map((command) => command.command)).toEqual(['/data-lookup']);
     expect(slashMenuCandidates('/随机', commands).map((command) => command.command)).toEqual(['/mini-breedstat-rcbd']);
-    expect(slashMenuCandidates('/skill.sql', commands).map((command) => command.command)).toEqual(['/sql-query']);
+    expect(slashMenuCandidates('/skill.data', commands).map((command) => command.command)).toEqual(['/data-lookup']);
   });
 
   it('parses exact slash command input into cleaned content and metadata', () => {
     const commands = deriveSlashCommands(capabilities);
 
-    expect(parseDirectSlashCommand('/sql-query 查询龙粳33', commands)).toEqual({
+    expect(parseDirectSlashCommand('/data-lookup 查询龙粳33', commands)).toEqual({
       kind: 'matched',
-      command: expect.objectContaining({ command: '/sql-query', capabilityId: 'skill.sql_query' }),
+      command: expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup' }),
       content: '查询龙粳33',
     });
-    expect(slashSubmitIntent('/sql-query 查询龙粳33', commands, null)).toEqual({
+    expect(slashSubmitIntent('/data-lookup 查询龙粳33', commands, null)).toEqual({
       kind: 'ready',
       content: '查询龙粳33',
-      command: expect.objectContaining({ command: '/sql-query', capabilityId: 'skill.sql_query' }),
-      metadata: { forced_by_slash_command: true, slash_command: '/sql-query' },
+      command: expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup' }),
+      metadata: { forced_by_slash_command: true, slash_command: '/data-lookup' },
     });
   });
 
   it('allows exact slash command with empty arguments and blocks unknown slash input', () => {
     const commands = deriveSlashCommands(capabilities);
 
-    expect(slashSubmitIntent('/sql-query', commands, null)).toEqual({
+    expect(slashSubmitIntent('/data-lookup', commands, null)).toEqual({
       kind: 'ready',
       content: '',
-      command: expect.objectContaining({ command: '/sql-query' }),
-      metadata: { forced_by_slash_command: true, slash_command: '/sql-query' },
+      command: expect.objectContaining({ command: '/data-lookup' }),
+      metadata: { forced_by_slash_command: true, slash_command: '/data-lookup' },
     });
     expect(slashSubmitIntent('/unknown args', commands, null)).toEqual({ kind: 'blocked', reason: 'not_found', command: '/unknown' });
   });
@@ -115,9 +115,9 @@ describe('slashCommands', () => {
     const commands = deriveSlashCommands(capabilities);
     const selected = commands.find((command) => command.command === '/mini-breedstat-rcbd') ?? null;
 
-    expect(slashSubmitIntent('/sql-query 查询龙粳33', commands, selected)).toEqual({
+    expect(slashSubmitIntent('/data-lookup 查询龙粳33', commands, selected)).toEqual({
       kind: 'ready',
-      content: '/sql-query 查询龙粳33',
+      content: '/data-lookup 查询龙粳33',
       command: expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd' }),
       metadata: { forced_by_slash_command: true, slash_command: '/mini-breedstat-rcbd' },
     });

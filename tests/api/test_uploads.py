@@ -63,7 +63,8 @@ class UploadsAPITest(APITestCase):
         csv_content = "ped_id,design_check,set\nCK_A,1,A\nA001,0,A\n"
 
         upload = await self.client.post(
-            "/api/v1/conversations/conv-upload/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-upload"},
             files={"file": ("rcbd.csv", csv_content, "text/csv")},
         )
 
@@ -99,7 +100,8 @@ class UploadsAPITest(APITestCase):
         ]
 
         upload = await self.client.post(
-            "/api/v1/conversations/conv-json/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-json"},
             files={"file": ("materials.json", json.dumps(material_data), "application/json")},
         )
 
@@ -111,11 +113,13 @@ class UploadsAPITest(APITestCase):
 
     async def test_list_and_delete_uploads_for_conversation(self) -> None:
         first = await self.client.post(
-            "/api/v1/conversations/conv-files/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-files"},
             files={"file": ("first.csv", "ped_id,design_check\nA,0\n", "text/csv")},
         )
         second = await self.client.post(
-            "/api/v1/conversations/conv-files/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-files"},
             files={"file": ("second.json", json.dumps([{"ped_id": "B", "design_check": "0"}]), "application/json")},
         )
         self.assertEqual(first.status_code, 201)
@@ -128,7 +132,11 @@ class UploadsAPITest(APITestCase):
         self.assertEqual([item["filename"] for item in payload["uploads"]], ["first.csv", "second.json"])
         self.assertNotIn("content", payload["uploads"][0])
 
-        deleted = await self.client.delete(f"/api/v1/conversations/conv-files/uploads/{first.json()['upload_id']}")
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": "conv-files", "upload_id": first.json()["upload_id"]},
+        )
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(deleted.json()["deleted"], True)
 
@@ -143,7 +151,8 @@ class UploadsAPITest(APITestCase):
 
     async def test_upload_rejects_unsupported_file_type(self) -> None:
         response = await self.client.post(
-            "/api/v1/conversations/conv-upload/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-upload"},
             files={"file": ("notes.txt", "hello", "text/plain")},
         )
 
@@ -153,7 +162,8 @@ class UploadsAPITest(APITestCase):
         self.runtime.upload_store.max_file_bytes = 16
 
         response = await self.client.post(
-            "/api/v1/conversations/conv-upload/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-upload"},
             files={"file": ("large.csv", "col\n" + "x" * 32, "text/csv")},
         )
 
@@ -162,7 +172,8 @@ class UploadsAPITest(APITestCase):
 
     async def test_upload_and_reference_are_owner_scoped(self) -> None:
         upload = await self.client.post(
-            "/api/v1/conversations/conv-owned/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-owned"},
             files={"file": ("data.csv", "ped_id,design_check\nA,0\n", "text/csv")},
         )
         self.assertEqual(upload.status_code, 201)
@@ -172,14 +183,16 @@ class UploadsAPITest(APITestCase):
         await self.login("bob", "bob-password1")
 
         forbidden_upload = await self.client.post(
-            "/api/v1/conversations/conv-owned/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-owned"},
             files={"file": ("data.csv", "ped_id,design_check\nB,0\n", "text/csv")},
         )
         self.assertEqual(forbidden_upload.status_code, 404)
 
         self.runtime.upload_store.max_file_bytes = 16
         forbidden_oversized_upload = await self.client.post(
-            "/api/v1/conversations/conv-owned/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-owned"},
             files={"file": ("large.csv", "col\n" + "x" * 32, "text/csv")},
         )
         self.assertEqual(forbidden_oversized_upload.status_code, 404)

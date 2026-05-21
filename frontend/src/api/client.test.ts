@@ -11,6 +11,42 @@ describe('createApiClient', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/me', expect.objectContaining({ credentials: 'same-origin' }));
   });
 
+
+  it('adds bearer authorization headers when configured', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' } }), { status: 200 }));
+    const api = createApiClient({ fetcher, accessToken: 'maf_tok_client' });
+
+    await api.me();
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/me', expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer maf_tok_client' }),
+    }));
+  });
+
+  it('manages api tokens without putting ids in the URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      token_id: 'tok-1',
+      client_name: 'client',
+      scopes: ['conversation:read'],
+      expires_at: '2026-05-21T12:00:00',
+      access_token: 'maf_tok_secret',
+    }), { status: 201 }));
+    const api = createApiClient({ fetcher });
+
+    await api.createApiToken({ clientName: 'client', scopes: ['conversation:read'], ttlSeconds: 3600 });
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/api-tokens', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ client_name: 'client', scopes: ['conversation:read'], ttl_seconds: 3600 }),
+    }));
+
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ token_id: 'tok-1', revoked: true }), { status: 200 }));
+    await api.revokeApiToken('tok-1');
+    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/auth/api-tokens', expect.objectContaining({
+      method: 'DELETE',
+      body: JSON.stringify({ token_id: 'tok-1' }),
+    }));
+  });
+
   it('logs in with username password and captcha fields', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' } }), { status: 200 }));
     const api = createApiClient({ fetcher });
@@ -42,13 +78,13 @@ describe('createApiClient', () => {
   });
 
   it('lists public capabilities', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ capabilities: [{ capability_id: 'skill.sql_query', name: 'sql-query', description: '查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'sql-query/SKILL.md' }] }), { status: 200 }));
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ capabilities: [{ capability_id: 'skill.data_lookup', name: 'data-lookup', description: '查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' }] }), { status: 200 }));
     const api = createApiClient({ fetcher });
 
     const result = await api.listCapabilities();
 
     expect(fetcher).toHaveBeenCalledWith('/api/v1/capabilities', expect.any(Object));
-    expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.sql_query', kind: 'skill' });
+    expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.data_lookup', kind: 'skill' });
   });
 
   it('submits normal chat with capability_id null', async () => {
@@ -57,8 +93,9 @@ describe('createApiClient', () => {
 
     await api.submitMessage({ conversationId: 'conv-1', accountId: 'acc-1', content: '你好', mode: 'chat' });
 
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/messages', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/chat-messages', expect.objectContaining({ method: 'POST' }));
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
+    expect(body.conversation_id).toBe('conv-1');
     expect(body.capability_id).toBeNull();
   });
 
@@ -72,18 +109,18 @@ describe('createApiClient', () => {
       accountId: 'acc-1',
       content: '查询龙粳33',
       mode: 'chat',
-      capabilityId: 'skill.sql_query',
-      metadata: { upload_ids: ['upl-1'], forced_by_slash_command: true, slash_command: '/sql-query' },
+      capabilityId: 'skill.data_lookup',
+      metadata: { upload_ids: ['upl-1'], forced_by_slash_command: true, slash_command: '/data-lookup' },
     });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body).toMatchObject({
       routing_mode: 'force_capability',
-      capability_id: 'skill.sql_query',
+      capability_id: 'skill.data_lookup',
       metadata: {
         upload_ids: ['upl-1'],
         forced_by_slash_command: true,
-        slash_command: '/sql-query',
+        slash_command: '/data-lookup',
         deep_thinking: false,
         main_agent_reasoning_effort: 'medium',
       },
@@ -135,9 +172,9 @@ describe('createApiClient', () => {
 
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ interrupt_id: 'interrupt-1', status: 'answered', node_id: 'node-1', answer_payload: { crop: '水稻' } }), { status: 202 }));
     await api.answerInterrupt('task-1', 'interrupt-1', { crop: '水稻' });
-    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/tasks/task-1/interrupts/interrupt-1/answer', expect.objectContaining({
+    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/tasks/interrupts/answer', expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ answer_payload: { crop: '水稻' } }),
+      body: JSON.stringify({ task_id: 'task-1', interrupt_id: 'interrupt-1', answer_payload: { crop: '水稻' } }),
     }));
   });
 
@@ -173,7 +210,10 @@ describe('createApiClient', () => {
 
     await api.deleteConversation('conv-1');
 
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1', expect.objectContaining({ method: 'DELETE' }));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations', expect.objectContaining({
+      method: 'DELETE',
+      body: JSON.stringify({ conversation_id: 'conv-1' }),
+    }));
   });
 
   it('renames a conversation by conversation id', async () => {
@@ -190,9 +230,9 @@ describe('createApiClient', () => {
 
     await api.renameConversation('conv-1', '新会话名称');
 
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations', expect.objectContaining({
       method: 'PATCH',
-      body: JSON.stringify({ title: '新会话名称' }),
+      body: JSON.stringify({ conversation_id: 'conv-1', title: '新会话名称' }),
     }));
   });
 
@@ -220,12 +260,13 @@ describe('createApiClient', () => {
     const result = await api.uploadConversationFile('conv-1', file);
 
     expect(result.upload_id).toBe('upl-1');
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/conv-1/uploads', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/uploads', expect.objectContaining({
       method: 'POST',
       credentials: 'same-origin',
     }));
     const init = fetcher.mock.calls[0][1] as RequestInit;
     expect(init.body).toBeInstanceOf(FormData);
+    expect((init.body as FormData).get('conversation_id')).toBe('conv-1');
     expect(init.headers).toBeUndefined();
   });
 
@@ -241,7 +282,33 @@ describe('createApiClient', () => {
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ upload_id: 'upl-1', deleted: true }), { status: 200 }));
     const deleted = await api.deleteConversationUpload('conv-1', 'upl-1');
     expect(deleted.deleted).toBe(true);
-    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/conversations/conv-1/uploads/upl-1', expect.objectContaining({ method: 'DELETE' }));
+    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/conversations/uploads', expect.objectContaining({
+      method: 'DELETE',
+      body: JSON.stringify({ conversation_id: 'conv-1', upload_id: 'upl-1' }),
+    }));
+  });
+
+
+  it('adds bearer authorization headers to multipart uploads when configured', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      upload_id: 'upl-1',
+      conversation_id: 'conv-1',
+      filename: 'materials.csv',
+      content_type: 'text/csv',
+      file_type: 'csv',
+      size_bytes: 24,
+      sha256: 'hash',
+      expires_at: '2026-05-07T10:00:00',
+      preview: { row_count: 1, columns: ['ped_id'], shape: 'table' },
+    }), { status: 201 }));
+    const api = createApiClient({ fetcher, accessToken: 'maf_tok_client' });
+    const file = new File(['a,b\n'], 'materials.csv', { type: 'text/csv' });
+
+    await api.uploadConversationFile('conv-1', file);
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/uploads', expect.objectContaining({
+      headers: { Authorization: 'Bearer maf_tok_client' },
+    }));
   });
 
 });

@@ -26,7 +26,7 @@ class TaskListAPITest(APITestCase):
         self.assertEqual(listed[0]["requested_capability_id"], "skill.generic_data_lookup")
         self.assertGreaterEqual(listed[0]["active_node_count"], 1)
 
-        cancel_response = await self.client.post(f"/api/v1/tasks/{task_id}/cancel")
+        cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
         self.assertEqual(cancel_response.status_code, 202)
 
         after_cancel = await self.client.get("/api/v1/conversations/conv-1/tasks?scope=unfinished")

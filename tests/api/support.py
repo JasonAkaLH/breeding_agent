@@ -171,7 +171,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
     async def _bind_client(self) -> None:
         self.app = create_app(runtime=self.runtime)
         self.transport = httpx.ASGITransport(app=self.app)
-        self.client = httpx.AsyncClient(transport=self.transport, base_url="http://testserver")
+        self.client = httpx.AsyncClient(transport=self.transport, base_url="https://testserver")
         await self.runtime.create_user("acc-1", "password1")
         await self.login("acc-1", "password1")
 
@@ -291,8 +291,9 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         metadata: dict | None = None,
     ) -> httpx.Response:
         return await self.client.post(
-            f"/api/v1/conversations/{conversation_id}/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": conversation_id,
                 "account_id": account_id,
                 "content": content,
                 "routing_mode": "auto",

@@ -20,7 +20,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
     listCapabilities: vi.fn(async () => ({
       capabilities: [
-        { capability_id: 'skill.sql_query', name: 'sql-query', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'sql-query/SKILL.md' },
+        { capability_id: 'skill.data_lookup', name: 'data-lookup', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' },
         { capability_id: 'skill.mini_breedstat_rcbd', name: 'mini-breedstat-rcbd', description: '生成 RCBD 随机区组设计', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'mini_breedstat_rcbd_skill/SKILL.md' },
         { capability_id: 'main_agent.respond', name: '普通对话', description: '主代理', version: '1', status: 'active', kind: 'builtin', source: 'builtin', source_path: '' },
       ],
@@ -1184,20 +1184,20 @@ describe('App', () => {
     const input = screen.getByLabelText('请输入问题');
 
     await waitFor(() => expect(api.listCapabilities).toHaveBeenCalled());
-    fireEvent.change(input, { target: { value: '/sql' } });
+    fireEvent.change(input, { target: { value: '/data' } });
 
     expect(await screen.findByRole('listbox', { name: 'Skill 命令列表' })).toBeInTheDocument();
-    expect(screen.getByText('/sql-query')).toBeInTheDocument();
+    expect(screen.getByText('/data-lookup')).toBeInTheDocument();
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
 
-    expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/sql-query');
+    expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/data-lookup');
     fireEvent.change(input, { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'skill.sql_query',
-      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/sql-query' }),
+      capabilityId: 'skill.data_lookup',
+      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/data-lookup' }),
     })));
   });
 
@@ -1206,9 +1206,9 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
 
-    fireEvent.change(input, { target: { value: '/sql' } });
+    fireEvent.change(input, { target: { value: '/data' } });
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
-    fireEvent.click(await screen.findByRole('button', { name: '取消 Skill /sql-query' }));
+    fireEvent.click(await screen.findByRole('button', { name: '取消 Skill /data-lookup' }));
 
     expect(screen.queryByRole('status', { name: '已选择 Skill' })).not.toBeInTheDocument();
     fireEvent.change(input, { target: { value: '普通问题' } });
@@ -1241,13 +1241,13 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
 
-    fireEvent.change(input, { target: { value: '/sql-query 查询龙粳33' } });
+    fireEvent.change(input, { target: { value: '/data-lookup 查询龙粳33' } });
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'skill.sql_query',
-      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/sql-query' }),
+      capabilityId: 'skill.data_lookup',
+      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/data-lookup' }),
     })));
   });
 
@@ -1256,13 +1256,13 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
 
-    fireEvent.change(input, { target: { value: '/sql-query' } });
+    fireEvent.change(input, { target: { value: '/data-lookup' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '',
-      capabilityId: 'skill.sql_query',
-      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/sql-query' }),
+      capabilityId: 'skill.data_lookup',
+      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/data-lookup' }),
     })));
   });
 

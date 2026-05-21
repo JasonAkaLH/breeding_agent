@@ -90,7 +90,7 @@ class ConversationTitleAPITest(APITestCase):
         response = await self.submit_message(conversation_id="conv-rename", content="你好", capability_id=None)
         self.assertEqual(response.status_code, 202)
 
-        renamed = await self.client.patch("/api/v1/conversations/conv-rename", json={"title": "业务问答复盘"})
+        renamed = await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-rename", "title": "业务问答复盘"})
 
         self.assertEqual(renamed.status_code, 200)
         self.assertEqual(renamed.json()["title"], "业务问答复盘")
@@ -118,7 +118,7 @@ class ConversationTitleAPITest(APITestCase):
             return conversation is not None and conversation.title == "首轮自动标题"
 
         await self.wait_for_condition(title_generated)
-        renamed = await self.client.patch("/api/v1/conversations/conv-follow-title", json={"title": "用户手动标题"})
+        renamed = await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-follow-title", "title": "用户手动标题"})
         self.assertEqual(renamed.status_code, 200)
 
         second = await self.submit_message(conversation_id="conv-follow-title", content="第二轮问题", capability_id=None)
@@ -134,12 +134,12 @@ class ConversationTitleAPITest(APITestCase):
         response = await self.submit_message(conversation_id="conv-owned-title", content="你好", capability_id=None)
         self.assertEqual(response.status_code, 202)
 
-        blank = await self.client.patch("/api/v1/conversations/conv-owned-title", json={"title": "   "})
+        blank = await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-owned-title", "title": "   "})
         self.assertEqual(blank.status_code, 400)
 
-        too_long = await self.client.patch("/api/v1/conversations/conv-owned-title", json={"title": "超" * 61})
+        too_long = await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-owned-title", "title": "超" * 61})
         self.assertEqual(too_long.status_code, 400)
 
         await self.login("bob", "bob-password1")
-        forbidden = await self.client.patch("/api/v1/conversations/conv-owned-title", json={"title": "Bob 不能改"})
+        forbidden = await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-owned-title", "title": "Bob 不能改"})
         self.assertEqual(forbidden.status_code, 404)

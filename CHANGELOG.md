@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+- 安全 Session Cookie / 多客户端认证已落地：登录/注册改写 `__Host-maf_session` opaque Cookie 并保留旧 `maf_session` 只读迁移，新增 hash 存储的 scoped API token 创建/列表/撤销与 Bearer 业务 API 鉴权，补齐 CORS allowlist、前端 Bearer REST 与 fetch-stream SSE client、API 文档和覆盖 Cookie/Bearer/CORS/storage/frontend 的回归测试；token revoke/last-used 采用字段级条件更新，避免并发撤销被 touch 覆盖。
+- 安全 Session Cookie / 多客户端认证实现计划完成 document-perfectization 加固：补齐 scope 只约束 Bearer、token 管理仅限 Cookie session、capability/API doc public 不退化、token secret fail-closed、CORS credentials 与 SSE header 约束等实施和测试门禁。
+- 安全 Session Cookie / 多客户端认证已补充实现计划与测试规格：新增 `.omx/plans/prd-20260521-secure-session-cookie-auth.md` 与 `.omx/plans/test-spec-20260521-secure-session-cookie-auth.md`，明确 Cookie hardening、opaque Bearer token、CORS、SSE、前端 client、文档与验证路径。
+- 安全 Session Cookie / 多客户端认证设计完成 document-perfectization 审查：明确同站同域前端使用 `__Host-maf_session` opaque session Cookie，跨站/第三方浏览器与非浏览器客户端默认使用 opaque Bearer token，并补齐 CORS、CSRF、SSE、迁移、验收与风险约束。
+- 调整 API 契约：所有官方非 GET 路由不再在 URL 中携带业务 ID，提交消息、重命名/删除会话、上传/删除附件、取消任务与回答 interrupt 均改为从 JSON body 或 multipart form 读取 ID；非 GET 提交消息路径使用 `chat-messages`，GET 消息历史保持 `messages`，并补充路由契约回归测试确保非 GET API 不再使用 path 参数。
 - 修复远端 Rust quality gates 中 `cargo deny check` 因 `rmcp -> reqwest -> rustls-platform-verifier -> webpki-root-certs` 引入 `CDLA-Permissive-2.0` 而失败的问题：在 `native/deny.toml` 中为 `webpki-root-certs =1.0.7` 添加精确 license exception，保持 license gate fail-closed 且不全局放宽 allowlist；同步在 `AGENTS.md` 增加每次开发结束必须检查 License Requirement 的长期规则。
 - 将 REST API 文档迁移到 `docs/api/api-doc.html`，新增后端只读入口 `GET /api-doc` 直接返回该静态 HTML，入口不挂到项目前端且不进入 OpenAPI schema；补充 API 回归测试覆盖未登录访问、HTML content-type 与关键接口内容。
 - 新增并重设计根目录 `api-doc.html` RESTful API Console 单页文档：覆盖认证 Cookie、会话/消息、任务/SSE、上传、能力列表、artifact 下载、数据结构与错误码，提供中文界面文案、左侧目录导航、正式认证说明、必填参数说明、请求/响应/错误/下一步契约、正式 curl 调用模板、response 样式、搜索/分类过滤与展开收起，并优化卡片排版避免内容溢出，并用当前 FastAPI OpenAPI path / operation 集合完成覆盖校验。

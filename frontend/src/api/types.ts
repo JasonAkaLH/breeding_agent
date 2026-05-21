@@ -19,7 +19,31 @@ export interface LogoutResponse {
   logged_out: boolean;
 }
 
+export interface ApiTokenResponse {
+  token_id: string;
+  client_name: string;
+  scopes: string[];
+  expires_at: string;
+  revoked_at?: string | null;
+  created_at?: string | null;
+  last_used_at?: string | null;
+}
+
+export interface CreateApiTokenResponse extends ApiTokenResponse {
+  access_token: string;
+}
+
+export interface ApiTokenListResponse {
+  tokens: ApiTokenResponse[];
+}
+
+export interface RevokeApiTokenResponse {
+  token_id: string;
+  revoked: boolean;
+}
+
 export interface SubmitMessageRequest {
+  conversation_id: string;
   account_id: string;
   content: string;
   routing_mode: 'auto' | string;
@@ -113,6 +137,7 @@ export interface ConversationListResponse {
 }
 
 export interface RenameConversationRequest {
+  conversation_id: string;
   title: string;
 }
 

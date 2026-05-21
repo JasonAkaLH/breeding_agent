@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 
 from .enums import TaskStatus
 from .models import (
     Artifact,
+    AuthApiToken,
     AuthSession,
     AuthUser,
     Checkpoint,
@@ -74,6 +76,18 @@ class StoragePort(Protocol):
     async def save_auth_session(self, session: AuthSession) -> AuthSession: ...
 
     async def get_auth_session(self, session_id: str) -> AuthSession | None: ...
+
+    async def save_auth_api_token(self, token: AuthApiToken) -> AuthApiToken: ...
+
+    async def get_auth_api_token(self, token_id: str) -> AuthApiToken | None: ...
+
+    async def get_auth_api_token_by_hash(self, token_hash: str) -> AuthApiToken | None: ...
+
+    async def list_auth_api_tokens_for_user(self, username: str) -> list[AuthApiToken]: ...
+
+    async def touch_auth_api_token_last_used(self, token_id: str, *, at: datetime) -> AuthApiToken | None: ...
+
+    async def revoke_auth_api_token_for_user(self, username: str, token_id: str, *, revoked_at: datetime) -> AuthApiToken | None: ...
 
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
 

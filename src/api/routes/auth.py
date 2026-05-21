@@ -2,21 +2,27 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
-from src.auth import AuthValidationError, DuplicateUsernameError
+from src.auth import AuthTokenValidationError, AuthValidationError, DuplicateUsernameError
+from src.core.models import AuthApiToken
 
 from ..auth import (
-    SESSION_COOKIE_NAME,
     clear_session_cookie,
     require_authenticated_user,
+    resolve_session_cookie,
     set_session_cookie,
-    should_use_secure_cookie,
 )
 from ..dto import (
+    ApiTokenListResponse,
+    ApiTokenResponse,
     AuthUserResponse,
     CaptchaChallengeResponse,
+    CreateApiTokenRequest,
+    CreateApiTokenResponse,
     LoginRequest,
     LogoutResponse,
     RegisterRequest,
+    RevokeApiTokenRequest,
+    RevokeApiTokenResponse,
     UserResponse,
 )
 from ..runtime import ApiRuntime
@@ -52,7 +58,7 @@ async def login(body: LoginRequest, request: Request, response: Response) -> Aut
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials or verification code",
         )
-    set_session_cookie(response, session.session_id, secure=should_use_secure_cookie(request))
+    set_session_cookie(response, session.session_id)
     return AuthUserResponse(user=UserResponse(username=session.username))
 
 
@@ -74,7 +80,7 @@ async def register(body: RegisterRequest, request: Request, response: Response) 
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists") from exc
     if session is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code")
-    set_session_cookie(response, session.session_id, secure=should_use_secure_cookie(request))
+    set_session_cookie(response, session.session_id)
     return AuthUserResponse(user=UserResponse(username=session.username))
 
 
@@ -86,8 +92,52 @@ async def me(request: Request) -> AuthUserResponse:
 
 @router.post("/api/v1/auth/logout", response_model=LogoutResponse)
 async def logout(request: Request, response: Response) -> LogoutResponse:
-    session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    if session_id:
-        await _runtime(request).revoke_session(session_id)
+    resolved = resolve_session_cookie(request)
+    if resolved is not None:
+        await _runtime(request).revoke_session(resolved.session_id)
     clear_session_cookie(response)
     return LogoutResponse(logged_out=True)
+
+
+def _api_token_response(token: AuthApiToken) -> ApiTokenResponse:
+    return ApiTokenResponse(
+        token_id=token.token_id,
+        client_name=token.client_name,
+        scopes=list(token.scopes),
+        expires_at=token.expires_at,
+        revoked_at=token.revoked_at,
+        created_at=token.created_at,
+        last_used_at=token.last_used_at,
+    )
+
+
+@router.post("/api/v1/auth/api-tokens", response_model=CreateApiTokenResponse, status_code=status.HTTP_201_CREATED)
+async def create_api_token(body: CreateApiTokenRequest, request: Request) -> CreateApiTokenResponse:
+    user = await require_authenticated_user(request, require_cookie_session=True)
+    try:
+        token, access_token = await _runtime(request).create_api_token(
+            username=user.username,
+            client_name=body.client_name,
+            scopes=tuple(body.scopes),
+            ttl_seconds=body.ttl_seconds,
+        )
+    except AuthTokenValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": exc.code, "message": str(exc)}) from exc
+    response = _api_token_response(token)
+    return CreateApiTokenResponse(**response.model_dump(), access_token=access_token)
+
+
+@router.get("/api/v1/auth/api-tokens", response_model=ApiTokenListResponse)
+async def list_api_tokens(request: Request) -> ApiTokenListResponse:
+    user = await require_authenticated_user(request, require_cookie_session=True)
+    tokens = await _runtime(request).list_api_tokens_for_user(user.username)
+    return ApiTokenListResponse(tokens=[_api_token_response(token) for token in tokens])
+
+
+@router.delete("/api/v1/auth/api-tokens", response_model=RevokeApiTokenResponse)
+async def revoke_api_token(body: RevokeApiTokenRequest, request: Request) -> RevokeApiTokenResponse:
+    user = await require_authenticated_user(request, require_cookie_session=True)
+    token = await _runtime(request).revoke_api_token(username=user.username, token_id=body.token_id)
+    if token is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown API token: {body.token_id}")
+    return RevokeApiTokenResponse(token_id=token.token_id, revoked=token.revoked_at is not None)

@@ -1,4 +1,8 @@
 from .services import (
+    ALLOWED_API_TOKEN_SCOPES,
+    ApiTokenService,
+    AuthTokenScopeError,
+    AuthTokenValidationError,
     AuthValidationError,
     CaptchaService,
     DuplicateUsernameError,
@@ -10,6 +14,10 @@ from .services import (
 )
 
 __all__ = [
+    "ALLOWED_API_TOKEN_SCOPES",
+    "ApiTokenService",
+    "AuthTokenScopeError",
+    "AuthTokenValidationError",
     "AuthValidationError",
     "CaptchaService",
     "DuplicateUsernameError",

@@ -45,7 +45,7 @@
 
 ### 已选 Skill 显示
 
-- 选择 Skill 后，composer 显示独立徽标，例如 `Skill: sql-query ×`。
+- 选择 Skill 后，composer 显示独立徽标，例如 `Skill: data-lookup ×`。
 - TextArea 只保留用户真实问题正文，不保留 slash 命令文本。
 - 点击徽标 `×` 只取消当前 composer 的选择，回到自动规划模式。
 
@@ -126,7 +126,7 @@ Slash 强制调用：
 - 过滤 public `skill.*` capability。
 - 支持按 command name / capability id / description 做轻量 prefix 或 fuzzy 匹配。
 - 解析输入形态：
-  - `/sql-query 查询xxx`
+  - `/data-lookup 查询xxx`
   - `/mini-breedstat-rcbd`
 - 返回提交意图或阻断原因：
   - matched capability
@@ -218,7 +218,7 @@ Slash 强制调用：
 
 MVP 采用后端历史感知续接：
 
-1. 第一轮：用户 `/sql-query` 但信息不足。
+1. 第一轮：用户 `/data-lookup` 但信息不足。
 2. 后端保存任务/消息，并让 assistant 回复需要补充的数据库范围、查询对象或时间条件。
 3. 第二轮：用户普通输入补充信息。
 4. 后端检查最近 pending Skill context，优先把第二轮合并为同一 Skill 意图，继续调用原 Skill。
@@ -243,7 +243,7 @@ MVP 采用后端历史感知续接：
 `frontend/src/domain/slashCommands.test.ts`：
 
 - 从 `/api/v1/capabilities` 响应中过滤出 Skill commands。
-- `/sql-query 查询xxx` 解析为 `{ capabilityId, content }`。
+- `/data-lookup 查询xxx` 解析为 `{ capabilityId, content }`。
 - `/unknown 查询xxx` 返回 blocked 状态。
 - 已选 Skill 提交时正文不含 slash。
 

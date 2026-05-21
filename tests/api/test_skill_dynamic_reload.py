@@ -156,7 +156,8 @@ triggers:
             main_agent_stream_generator=streamer,
         )
         upload = await self.client.post(
-            "/api/v1/conversations/conv-upload-first/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-upload-first"},
             files={"file": ("input.csv", b"name\nhello\n", "text/csv")},
         )
         self.assertEqual(upload.status_code, 201)

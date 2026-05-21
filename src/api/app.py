@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from .cors import configure_cors
 from .routes.auth import router as auth_router
 from .routes.capabilities import router as capabilities_router
 from .routes.conversations import router as conversations_router
@@ -19,6 +20,7 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
         database_path=Path("runtime/dev.sqlite3"),
         audit_log_path=Path("runtime/audit.jsonl"),
     )
+    configure_cors(app)
     app.include_router(developer_docs_router)
     app.include_router(auth_router)
     app.include_router(conversations_router)

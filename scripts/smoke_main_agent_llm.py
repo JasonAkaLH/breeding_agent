@@ -60,6 +60,7 @@ async def _run(args: argparse.Namespace) -> int:
             _message, task = await runtime.submit_message(
                 args.conversation_id,
                 SubmitMessageRequest(
+                    conversation_id=args.conversation_id,
                     account_id=args.account_id,
                     content=args.message,
                     capability_id=None,

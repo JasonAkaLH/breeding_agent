@@ -41,7 +41,11 @@ class AuthLoginAPITest(APITestCase):
         )
         self.assertEqual(login.status_code, 200)
         self.assertEqual(login.json()["user"]["username"], "alice")
-        self.assertIn("maf_session", self.client.cookies)
+        self.assertIn("__Host-maf_session", self.client.cookies)
+        session_cookie = self.client.cookies.get("__Host-maf_session")
+        self.assertIsInstance(session_cookie, str)
+        self.assertNotIn("alice", session_cookie)
+        self.assertNotIn("username", session_cookie.lower())
 
         me = await self.client.get("/api/v1/auth/me")
         self.assertEqual(me.status_code, 200)
@@ -83,7 +87,7 @@ class AuthLoginAPITest(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["user"]["username"], "charlie")
-        self.assertIn("maf_session", self.client.cookies)
+        self.assertIn("__Host-maf_session", self.client.cookies)
         stored_user = await self.runtime.storage.get_auth_user("charlie")
         self.assertIsNotNone(stored_user)
         self.assertNotEqual(stored_user.password_hash, "charlie1")
@@ -189,7 +193,7 @@ class AuthIsolationAPITest(APITestCase):
         self.assertEqual((await self.client.get(f"/api/v1/tasks/{task_id}")).status_code, 404)
         self.assertEqual((await self.client.get(f"/api/v1/tasks/{task_id}/graph")).status_code, 404)
         self.assertEqual((await self.client.get(f"/api/v1/tasks/{task_id}/artifacts")).status_code, 404)
-        self.assertEqual((await self.client.post(f"/api/v1/tasks/{task_id}/cancel")).status_code, 404)
+        self.assertEqual((await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})).status_code, 404)
 
     async def test_delete_conversation_is_owner_scoped_and_purges_history(self) -> None:
         await self.login("alice", "alice-password1")
@@ -206,11 +210,11 @@ class AuthIsolationAPITest(APITestCase):
         self.assertGreater(len(await self.runtime.storage.list_messages_for_conversation("conv-delete")), 0)
 
         await self.login("bob", "bob-password1")
-        forbidden = await self.client.delete("/api/v1/conversations/conv-delete")
+        forbidden = await self.client.request("DELETE", "/api/v1/conversations", json={"conversation_id": "conv-delete"})
         self.assertEqual(forbidden.status_code, 404)
 
         await self.login("alice", "alice-password1")
-        deleted = await self.client.delete("/api/v1/conversations/conv-delete")
+        deleted = await self.client.request("DELETE", "/api/v1/conversations", json={"conversation_id": "conv-delete"})
         self.assertEqual(deleted.status_code, 200)
         payload = deleted.json()
         self.assertEqual(payload["conversation_id"], "conv-delete")
@@ -247,7 +251,7 @@ class AuthIsolationAPITest(APITestCase):
 
         await self.wait_for_condition(task_running)
 
-        deleted = await self.client.delete("/api/v1/conversations/conv-running-delete")
+        deleted = await self.client.request("DELETE", "/api/v1/conversations", json={"conversation_id": "conv-running-delete"})
         release.set()
         self.assertEqual(deleted.status_code, 200)
         payload = deleted.json()
@@ -284,12 +288,12 @@ class AuthIsolationAPITest(APITestCase):
         )
         self.assertEqual(stolen_submit.status_code, 404)
         self.assertNotIn(task_id, stolen_submit.text)
-        self.assertEqual((await self.client.post(f"/api/v1/tasks/{task_id}/cancel")).status_code, 404)
+        self.assertEqual((await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})).status_code, 404)
         async with aconnect_sse(self.client, "GET", f"/api/v1/tasks/{task_id}/events") as event_source:
             self.assertEqual(event_source.response.status_code, 404)
 
         await self.login("alice", "alice-password1")
-        cancel = await self.client.post(f"/api/v1/tasks/{task_id}/cancel")
+        cancel = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
         self.assertEqual(cancel.status_code, 202)
         release.set()
         terminal = await self.wait_for_terminal_task(task_id)

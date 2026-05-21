@@ -14,6 +14,9 @@ from uuid import uuid4
 from sqlalchemy import Engine
 
 from src.auth import (
+    ApiTokenService,
+    AuthTokenScopeError,
+    AuthTokenValidationError,
     CaptchaService,
     DuplicateUsernameError,
     PasswordHasher,
@@ -147,6 +150,7 @@ class ApiRuntime:
         password_hasher: PasswordHasher | None = None,
         captcha_service: CaptchaService | None = None,
         session_service: SessionService | None = None,
+        api_token_service: ApiTokenService | None = None,
         conversation_title_generator: ConversationTitleGenerator | None = None,
         upload_store: InMemoryUploadStore | None = None,
         conversation_memory_builder: ConversationMemoryBuilder | None = None,
@@ -169,6 +173,7 @@ class ApiRuntime:
         self.password_hasher = password_hasher or PasswordHasher()
         self.captcha_service = captcha_service
         self.session_service = session_service
+        self.api_token_service = api_token_service
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
@@ -290,6 +295,43 @@ class ApiRuntime:
         if self.session_service is None:
             return
         await self.session_service.revoke_session(session_id)
+
+    async def create_api_token(
+        self,
+        *,
+        username: str,
+        client_name: str,
+        scopes: tuple[str, ...],
+        ttl_seconds: int | None = None,
+    ):
+        if self.api_token_service is None:
+            raise RuntimeError("API token service is not configured.")
+        return await self.api_token_service.create_token(
+            username=username,
+            client_name=client_name,
+            scopes=scopes,
+            ttl_seconds=ttl_seconds,
+        )
+
+    async def list_api_tokens_for_user(self, username: str):
+        if self.api_token_service is None:
+            raise RuntimeError("API token service is not configured.")
+        return await self.api_token_service.list_tokens_for_user(username)
+
+    async def revoke_api_token(self, *, username: str, token_id: str):
+        if self.api_token_service is None:
+            raise RuntimeError("API token service is not configured.")
+        return await self.api_token_service.revoke_token(username=username, token_id=token_id)
+
+    async def get_bearer_token_user(self, raw_token: str, *, required_scopes: tuple[str, ...] = ()):
+        if self.api_token_service is None:
+            return None
+        try:
+            return await self.api_token_service.get_active_user_for_bearer(raw_token, required_scopes=required_scopes)
+        except AuthTokenScopeError:
+            raise
+        except AuthTokenValidationError:
+            return None
 
     async def submit_message(
         self,
@@ -1606,6 +1648,8 @@ def build_api_runtime(
     auth_captcha_code_generator: Callable[[], str] | None = None,
     auth_captcha_ttl_seconds: int = 300,
     auth_session_ttl_seconds: int = 28_800,
+    auth_token_hash_secret: str | None = None,
+    auth_token_hash_secret_required: bool | None = None,
     upload_store: InMemoryUploadStore | None = None,
     conversation_memory_builder: ConversationMemoryBuilder | None = None,
     enable_conversation_memory: bool = True,
@@ -1655,6 +1699,27 @@ def build_api_runtime(
         storage,
         now_fn=ApiRuntime._utcnow_naive,
         ttl_seconds=auth_session_ttl_seconds,
+    )
+    token_secret = auth_token_hash_secret if auth_token_hash_secret is not None else os.environ.get("MAF_AUTH_TOKEN_HASH_SECRET")
+    deployment_env = (
+        os.environ.get("MAF_API_ENV")
+        or os.environ.get("MAF_ENV")
+        or os.environ.get("APP_ENV")
+        or ""
+    ).strip().lower()
+    token_secret_required = (
+        auth_token_hash_secret_required
+        if auth_token_hash_secret_required is not None
+        else (
+            os.environ.get("MAF_AUTH_TOKEN_HASH_SECRET_REQUIRED", "").strip().lower() in {"1", "true", "yes", "on"}
+            or deployment_env in {"prod", "production"}
+        )
+    )
+    api_token_service = ApiTokenService(
+        storage,
+        now_fn=ApiRuntime._utcnow_naive,
+        secret=token_secret,
+        require_secret=token_secret_required,
     )
 
     roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
@@ -1909,6 +1974,7 @@ def build_api_runtime(
         password_hasher=password_hasher,
         captcha_service=captcha_service,
         session_service=session_service,
+        api_token_service=api_token_service,
         conversation_title_generator=resolved_conversation_title_generator,
         upload_store=upload_store,
         conversation_memory_builder=resolved_conversation_memory_builder,

@@ -96,8 +96,9 @@ outputs:
 
     async def _force_need_variety(self, content: str, conversation_id: str = "conv-pending"):
         return await self.client.post(
-            f"/api/v1/conversations/{conversation_id}/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": conversation_id,
                 "account_id": "acc-1",
                 "content": content,
                 "routing_mode": "force_capability",
@@ -184,8 +185,9 @@ outputs:
 
     async def test_interrupt_capable_path_does_not_create_pending_context(self) -> None:
         response = await self.client.post(
-            "/api/v1/conversations/conv-interrupt/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-interrupt",
                 "account_id": "acc-1",
                 "content": "帮我查询一下",
                 "routing_mode": "force_capability",
@@ -205,8 +207,9 @@ outputs:
 
     async def test_plain_failure_text_does_not_create_pending_context(self) -> None:
         response = await self.client.post(
-            "/api/v1/conversations/conv-plain-failure/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-plain-failure",
                 "account_id": "acc-1",
                 "content": "请执行失败技能",
                 "routing_mode": "force_capability",

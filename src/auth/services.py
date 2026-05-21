@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 
 from src.core.contracts import StoragePort
-from src.core.models import AuthSession, AuthUser, CaptchaChallenge
+from src.core.models import AuthApiToken, AuthSession, AuthUser, CaptchaChallenge
 from src.integrations.rust_safety_contract import hmac_sha256_hex, verify_auth_token
 
 NowFn = Callable[[], datetime]
@@ -26,6 +26,18 @@ class AuthValidationError(ValueError):
 
 class DuplicateUsernameError(ValueError):
     pass
+
+
+class AuthTokenValidationError(ValueError):
+    def __init__(self, message: str, *, code: str = "invalid_token") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class AuthTokenScopeError(PermissionError):
+    def __init__(self, missing_scopes: tuple[str, ...]) -> None:
+        super().__init__("API token scope is not sufficient.")
+        self.missing_scopes = missing_scopes
 
 
 def normalize_username(username: str) -> str:
@@ -190,3 +202,134 @@ class SessionService:
         if session is None or session.revoked_at is not None:
             return
         await self._storage.save_auth_session(replace(session, revoked_at=self._now_fn()))
+
+
+ALLOWED_API_TOKEN_SCOPES = frozenset(
+    {
+        "conversation:read",
+        "conversation:write",
+        "task:control",
+        "upload:write",
+        "capability:read",
+    }
+)
+DEFAULT_API_TOKEN_TTL_SECONDS = 28_800
+MAX_API_TOKEN_TTL_SECONDS = 604_800
+
+
+class ApiTokenService:
+    def __init__(
+        self,
+        storage: StoragePort,
+        *,
+        now_fn: NowFn,
+        secret: str | None = None,
+        require_secret: bool = False,
+        default_ttl_seconds: int = DEFAULT_API_TOKEN_TTL_SECONDS,
+        max_ttl_seconds: int = MAX_API_TOKEN_TTL_SECONDS,
+    ) -> None:
+        if require_secret and not secret:
+            raise AuthTokenValidationError("API token hash secret is required.", code="token_secret_required")
+        self._storage = storage
+        self._now_fn = now_fn
+        self._secret = (secret or secrets.token_urlsafe(32)).encode("utf-8")
+        self._default_ttl_seconds = default_ttl_seconds
+        self._max_ttl_seconds = max_ttl_seconds
+
+    @property
+    def allowed_scopes(self) -> frozenset[str]:
+        return ALLOWED_API_TOKEN_SCOPES
+
+    async def create_token(
+        self,
+        *,
+        username: str,
+        client_name: str,
+        scopes: tuple[str, ...],
+        ttl_seconds: int | None = None,
+    ) -> tuple[AuthApiToken, str]:
+        normalized_client_name = self._validate_client_name(client_name)
+        normalized_scopes = self._validate_scopes(scopes)
+        resolved_ttl = self._validate_ttl(ttl_seconds)
+        now = self._now_fn()
+        raw_token = f"maf_tok_{secrets.token_urlsafe(32)}"
+        token = AuthApiToken(
+            token_id=f"tok-{secrets.token_urlsafe(18)}",
+            token_hash=self._hash_token(raw_token),
+            username=username,
+            client_name=normalized_client_name,
+            scopes=normalized_scopes,
+            expires_at=now + timedelta(seconds=resolved_ttl),
+            created_at=now,
+        )
+        return await self._storage.save_auth_api_token(token), raw_token
+
+    async def list_tokens_for_user(self, username: str) -> list[AuthApiToken]:
+        return await self._storage.list_auth_api_tokens_for_user(username)
+
+    async def revoke_token(self, *, username: str, token_id: str) -> AuthApiToken | None:
+        return await self._storage.revoke_auth_api_token_for_user(
+            username,
+            token_id,
+            revoked_at=self._now_fn(),
+        )
+
+    async def get_active_user_for_bearer(
+        self,
+        raw_token: str,
+        *,
+        required_scopes: tuple[str, ...] = (),
+    ) -> tuple[AuthUser, AuthApiToken]:
+        normalized = self._normalize_raw_token(raw_token)
+        token = await self._storage.get_auth_api_token_by_hash(self._hash_token(normalized))
+        now = self._now_fn()
+        if token is None or token.revoked_at is not None or token.expires_at <= now:
+            raise AuthTokenValidationError("Invalid API token.")
+        user = await self._storage.get_auth_user(token.username)
+        if user is None or user.status != "active":
+            raise AuthTokenValidationError("Invalid API token.")
+        missing = tuple(scope for scope in required_scopes if scope not in token.scopes)
+        if missing:
+            raise AuthTokenScopeError(missing)
+        updated = await self._storage.touch_auth_api_token_last_used(token.token_id, at=now)
+        if updated is None:
+            raise AuthTokenValidationError("Invalid API token.")
+        return user, updated
+
+    def fingerprint(self, raw_token: str) -> str:
+        return self._hash_token(self._normalize_raw_token(raw_token))[:12]
+
+    def _hash_token(self, raw_token: str) -> str:
+        return hmac_sha256_hex(self._secret, raw_token.encode("utf-8"))
+
+    @staticmethod
+    def _validate_client_name(client_name: str) -> str:
+        normalized = " ".join(str(client_name).strip().split())
+        if not normalized or len(normalized) > 80:
+            raise AuthTokenValidationError("client_name must be 1-80 characters.", code="invalid_client_name")
+        return normalized
+
+    def _validate_scopes(self, scopes: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(dict.fromkeys(str(scope).strip() for scope in scopes if str(scope).strip()))
+        if not normalized:
+            raise AuthTokenValidationError("At least one API token scope is required.", code="invalid_scope")
+        unknown = tuple(scope for scope in normalized if scope not in self.allowed_scopes)
+        if unknown:
+            raise AuthTokenValidationError(f"Unknown API token scope: {unknown[0]}", code="invalid_scope")
+        return normalized
+
+    def _validate_ttl(self, ttl_seconds: int | None) -> int:
+        resolved = self._default_ttl_seconds if ttl_seconds is None else int(ttl_seconds)
+        if resolved <= 0 or resolved > self._max_ttl_seconds:
+            raise AuthTokenValidationError(
+                f"ttl_seconds must be between 1 and {self._max_ttl_seconds}.",
+                code="invalid_ttl",
+            )
+        return resolved
+
+    @staticmethod
+    def _normalize_raw_token(raw_token: str) -> str:
+        normalized = str(raw_token or "").strip()
+        if not normalized or any(ch.isspace() for ch in normalized) or not normalized.startswith("maf_tok_"):
+            raise AuthTokenValidationError("Invalid API token.")
+        return normalized

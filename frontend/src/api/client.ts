@@ -1,8 +1,10 @@
 import type {
   CancelTaskResponse,
   AnswerInterruptResponse,
+  ApiTokenListResponse,
   AuthUserResponse,
   CaptchaChallengeResponse,
+  CreateApiTokenResponse,
   CapabilityListResponse,
   ChatMode,
   ConversationListResponse,
@@ -15,6 +17,7 @@ import type {
   TaskListResponse,
   MessageAcceptedResponse,
   ReasoningEffort,
+  RevokeApiTokenResponse,
   SubmitMessageRequest,
   TaskArtifactsResponse,
   TaskGraphResponse,
@@ -48,6 +51,9 @@ export interface ApiClient {
   register(input: { username: string; password: string; captchaId: string; captchaCode: string }): Promise<AuthUserResponse>;
   logout(): Promise<LogoutResponse>;
   me(): Promise<AuthUserResponse>;
+  createApiToken(input: { clientName: string; scopes: string[]; ttlSeconds?: number | null }): Promise<CreateApiTokenResponse>;
+  listApiTokens(): Promise<ApiTokenListResponse>;
+  revokeApiToken(tokenId: string): Promise<RevokeApiTokenResponse>;
   listConversationUploads(conversationId: string): Promise<UploadListResponse>;
   deleteConversationUpload(conversationId: string, uploadId: string): Promise<DeleteUploadResponse>;
   uploadConversationFile(conversationId: string, file: File): Promise<UploadFileResponse>;
@@ -87,11 +93,18 @@ export const UI_MODES: UiModeOption[] = [
 interface CreateApiClientOptions {
   baseUrl?: string;
   fetcher?: typeof fetch;
+  accessToken?: string;
+  authHeaderProvider?: () => string | null | undefined;
 }
 
 export function createApiClient(options: CreateApiClientOptions = {}): ApiClient {
   const baseUrl = normalizeBaseUrl(options.baseUrl ?? import.meta.env.VITE_API_BASE_URL ?? '');
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
+
+  function authHeaders(): Record<string, string> {
+    const token = options.authHeaderProvider?.() ?? options.accessToken;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetcher(`${baseUrl}${path}`, {
@@ -99,6 +112,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       credentials: init?.credentials ?? 'same-origin',
       headers: {
         'Content-Type': 'application/json',
+        ...authHeaders(),
         ...(init?.headers ?? {}),
       },
     });
@@ -131,20 +145,36 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
     }),
     logout: () => request<LogoutResponse>('/api/v1/auth/logout', { method: 'POST' }),
     me: () => request<AuthUserResponse>('/api/v1/auth/me'),
+    createApiToken: (input) => request<CreateApiTokenResponse>('/api/v1/auth/api-tokens', {
+      method: 'POST',
+      body: JSON.stringify({
+        client_name: input.clientName,
+        scopes: input.scopes,
+        ttl_seconds: input.ttlSeconds ?? null,
+      }),
+    }),
+    listApiTokens: () => request<ApiTokenListResponse>('/api/v1/auth/api-tokens'),
+    revokeApiToken: (tokenId) => request<RevokeApiTokenResponse>('/api/v1/auth/api-tokens', {
+      method: 'DELETE',
+      body: JSON.stringify({ token_id: tokenId }),
+    }),
     listConversationUploads: (conversationId) => request<UploadListResponse>(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads`,
     ),
     deleteConversationUpload: (conversationId, uploadId) => request<DeleteUploadResponse>(
-      `/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads/${encodeURIComponent(uploadId)}`,
-      { method: 'DELETE' },
+      '/api/v1/conversations/uploads',
+      { method: 'DELETE', body: JSON.stringify({ conversation_id: conversationId, upload_id: uploadId }) },
     ),
     listCapabilities: () => request<CapabilityListResponse>('/api/v1/capabilities'),
     uploadConversationFile: async (conversationId, file) => {
       const formData = new FormData();
+      formData.append('conversation_id', conversationId);
       formData.append('file', file);
-      const response = await fetcher(`${baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads`, {
+      const multipartAuthHeaders = authHeaders();
+      const response = await fetcher(`${baseUrl}/api/v1/conversations/uploads`, {
         method: 'POST',
         credentials: 'same-origin',
+        ...(Object.keys(multipartAuthHeaders).length > 0 ? { headers: multipartAuthHeaders } : {}),
         body: formData,
       });
       if (!response.ok) {
@@ -160,6 +190,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       const explicitCapabilityId = input.capabilityId ?? null;
       const capabilityId = explicitCapabilityId || mode.capabilityId;
       const body: SubmitMessageRequest = {
+        conversation_id: input.conversationId,
         account_id: input.accountId ?? 'session-user',
         content: input.content,
         routing_mode: capabilityId ? 'force_capability' : 'auto',
@@ -171,7 +202,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
           main_agent_reasoning_effort: input.reasoningEffort ?? 'medium',
         },
       };
-      return request<MessageAcceptedResponse>(`/api/v1/conversations/${encodeURIComponent(input.conversationId)}/messages`, {
+      return request<MessageAcceptedResponse>('/api/v1/conversations/chat-messages', {
         method: 'POST',
         body: JSON.stringify(body),
       });
@@ -181,22 +212,25 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
     ),
     deleteConversation: (conversationId) => request<DeleteConversationResponse>(
-      `/api/v1/conversations/${encodeURIComponent(conversationId)}`,
-      { method: 'DELETE' },
+      '/api/v1/conversations',
+      { method: 'DELETE', body: JSON.stringify({ conversation_id: conversationId }) },
     ),
     renameConversation: (conversationId, title) => request<ConversationSummaryResponse>(
-      `/api/v1/conversations/${encodeURIComponent(conversationId)}`,
-      { method: 'PATCH', body: JSON.stringify({ title }) },
+      '/api/v1/conversations',
+      { method: 'PATCH', body: JSON.stringify({ conversation_id: conversationId, title }) },
     ),
     listConversationTasks: (conversationId, scope = 'unfinished') => request<TaskListResponse>(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/tasks?scope=${encodeURIComponent(scope)}`,
     ),
     getTask: (taskId) => request<TaskSummaryResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
-    cancelTask: (taskId) => request<CancelTaskResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' }),
+    cancelTask: (taskId) => request<CancelTaskResponse>('/api/v1/tasks/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ task_id: taskId }),
+    }),
     listInterrupts: (taskId) => request<TaskInterruptsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/interrupts`),
     answerInterrupt: (taskId, interruptId, answerPayload) => request<AnswerInterruptResponse>(
-      `/api/v1/tasks/${encodeURIComponent(taskId)}/interrupts/${encodeURIComponent(interruptId)}/answer`,
-      { method: 'POST', body: JSON.stringify({ answer_payload: answerPayload }) },
+      '/api/v1/tasks/interrupts/answer',
+      { method: 'POST', body: JSON.stringify({ task_id: taskId, interrupt_id: interruptId, answer_payload: answerPayload }) },
     ),
     getTaskArtifacts: (taskId) => request<TaskArtifactsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts`),
     getTaskGraph: (taskId) => request<TaskGraphResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/graph`),

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 
 from ..auth import require_authenticated_user
-from ..dto import DeleteUploadResponse, UploadFileResponse, UploadListResponse, UploadPreviewResponse
+from ..dto import DeleteUploadRequest, DeleteUploadResponse, UploadFileResponse, UploadListResponse, UploadPreviewResponse
 from ..runtime import ApiRuntime
 from ..upload_store import UploadValidationError
 
@@ -51,7 +51,7 @@ async def _read_upload_content_with_limit(
 @router.get("/api/v1/conversations/{conversation_id}/uploads", response_model=UploadListResponse)
 async def list_conversation_uploads(conversation_id: str, request: Request) -> UploadListResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
     try:
         records = await runtime.list_uploads(conversation_id, user.username)
     except PermissionError as exc:
@@ -63,17 +63,17 @@ async def list_conversation_uploads(conversation_id: str, request: Request) -> U
 
 
 @router.post(
-    "/api/v1/conversations/{conversation_id}/uploads",
+    "/api/v1/conversations/uploads",
     response_model=UploadFileResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_conversation_file(
-    conversation_id: str,
     request: Request,
+    conversation_id: str = Form(...),
     file: UploadFile = File(...),
 ) -> UploadFileResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("upload:write",))
     try:
         await runtime.ensure_upload_allowed(conversation_id, user.username)
         content = await _read_upload_content_with_limit(
@@ -95,10 +95,12 @@ async def upload_conversation_file(
     return _upload_response(record)
 
 
-@router.delete("/api/v1/conversations/{conversation_id}/uploads/{upload_id}", response_model=DeleteUploadResponse)
-async def delete_conversation_upload(conversation_id: str, upload_id: str, request: Request) -> DeleteUploadResponse:
+@router.delete("/api/v1/conversations/uploads", response_model=DeleteUploadResponse)
+async def delete_conversation_upload(body: DeleteUploadRequest, request: Request) -> DeleteUploadResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("upload:write",))
+    conversation_id = body.conversation_id
+    upload_id = body.upload_id
     try:
         deleted = await runtime.delete_upload(conversation_id, user.username, upload_id)
     except PermissionError as exc:

@@ -311,7 +311,8 @@ outputs:
             main_agent_stream_generator=finalizer,
         )
         upload = await self.client.post(
-            "/api/v1/conversations/conv-material-reader/uploads",
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-material-reader"},
             files={"file": ("materials.csv", raw_csv, "text/csv")},
         )
         self.assertEqual(upload.status_code, 201)

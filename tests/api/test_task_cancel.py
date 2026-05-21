@@ -25,7 +25,7 @@ class TaskCancelAPITest(APITestCase):
 
         await self.wait_for_condition(_task_started)
 
-        cancel_response = await self.client.post(f"/api/v1/tasks/{task_id}/cancel")
+        cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
         self.assertEqual(cancel_response.status_code, 202)
         self.assertTrue(cancel_response.json()["accepted"])
 
@@ -55,7 +55,7 @@ class TaskCancelAPITest(APITestCase):
         )
         await self.runtime.storage.save_task(task)
 
-        cancel_response = await self.client.post("/api/v1/tasks/task-terminal-api/cancel")
+        cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": "task-terminal-api"})
 
         self.assertEqual(cancel_response.status_code, 202)
         self.assertEqual(cancel_response.json()["status"], "completed")

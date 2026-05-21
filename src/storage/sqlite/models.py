@@ -112,6 +112,25 @@ class AuthSessionRow(SQLiteBase):
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class AuthApiTokenRow(SQLiteBase):
+    __tablename__ = "auth_api_token"
+    __table_args__ = (
+        Index("idx_auth_api_token_username_expires", "username", "expires_at"),
+        Index("idx_auth_api_token_revoked", "revoked_at"),
+        UniqueConstraint("token_hash", name="uq_auth_api_token_hash"),
+    )
+
+    token_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    client_name: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
+    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    revoked_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    last_used_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class MessageRow(SQLiteBase):
     __tablename__ = "message"
     __table_args__ = (

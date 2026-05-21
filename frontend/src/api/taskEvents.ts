@@ -12,6 +12,13 @@ export interface TaskEventSubscription {
 
 export type EventSourceFactory = (url: string, handlers: TaskEventHandlers) => TaskEventSubscription;
 
+export interface FetchTaskEventSourceOptions {
+  fetcher?: typeof fetch;
+  accessToken?: string;
+  authHeaderProvider?: () => string | null | undefined;
+  credentials?: RequestCredentials;
+}
+
 export function parseTaskEventData(data: string): TaskEventEnvelope | null {
   try {
     const parsed = JSON.parse(data) as TaskEventEnvelope;
@@ -66,6 +73,95 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
     }
     return { close: () => source.close() };
   };
+}
+
+export function createFetchTaskEventSourceFactory(options: FetchTaskEventSourceOptions = {}): EventSourceFactory {
+  const fetcher = options.fetcher ?? fetch.bind(globalThis);
+  return (url, handlers) => {
+    const controller = new AbortController();
+    let closed = false;
+    const token = options.authHeaderProvider?.() ?? options.accessToken;
+    const headers: Record<string, string> = {
+      Accept: 'text/event-stream',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+
+    void fetcher(url, {
+      method: 'GET',
+      credentials: options.credentials ?? 'same-origin',
+      headers,
+      signal: controller.signal,
+    }).then(async (response) => {
+      if (!response.ok || !response.body) {
+        throw new Error(`Task event stream failed with status ${response.status}`);
+      }
+      await readTaskEventStream(response.body, handlers, () => closed);
+    }).catch((error) => {
+      if (!closed) {
+        handlers.onError(error);
+      }
+    });
+
+    return {
+      close: () => {
+        closed = true;
+        controller.abort();
+      },
+    };
+  };
+}
+
+async function readTaskEventStream(
+  body: ReadableStream<Uint8Array>,
+  handlers: TaskEventHandlers,
+  isClosed: () => boolean,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (!isClosed()) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      buffer = normalizeSseNewlines(buffer);
+      let separatorIndex = buffer.indexOf('\n\n');
+      while (separatorIndex >= 0) {
+        const block = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + 2);
+        dispatchTaskEventBlock(block, handlers);
+        separatorIndex = buffer.indexOf('\n\n');
+      }
+    }
+    buffer += decoder.decode();
+    buffer = normalizeSseNewlines(buffer);
+    if (buffer.trim()) {
+      dispatchTaskEventBlock(buffer, handlers);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function normalizeSseNewlines(value: string): string {
+  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function dispatchTaskEventBlock(block: string, handlers: TaskEventHandlers): void {
+  const data = block
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).replace(/^ /, ''))
+    .join('\n');
+  if (!data) {
+    return;
+  }
+  const parsed = parseTaskEventData(data);
+  if (parsed) {
+    handlers.onMessage(parsed);
+  }
 }
 
 export function taskEventsUrl(taskId: string, baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''): string {

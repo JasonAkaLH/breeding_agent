@@ -267,7 +267,7 @@
         <div class="metric-strip" aria-label="文档摘要">
           <div class="metric"><b>20</b><span><code class="inline-code">OpenAPI</code> 路径</span></div>
           <div class="metric"><b>23</b><span><code class="inline-code">HTTP</code> 操作</span></div>
-          <div class="metric"><b><code class="inline-code">Cookie</code></b><span><code class="inline-code">maf_session</code> 认证</span></div>
+          <div class="metric"><b><code class="inline-code">Cookie</code></b><span><code class="inline-code">__Host-maf_session</code> 同站认证</span></div><div class="metric"><b><code class="inline-code">Bearer</code></b><span>跨站 / 非浏览器 API token</span></div>
           <div class="metric"><b>0</b><span>外部依赖</span></div>
         </div>
       </header>
@@ -276,12 +276,12 @@
         <div class="panel-head"><div><h2>快速接入</h2><p class="panel-intro">最短接入链路：验证码 → 登录 → 提交消息 → 监听任务事件。</p></div></div>
         <div class="quickstart-grid">
           <div class="step-card"><div class="num">1</div><h3>获取验证码</h3><p>调用 <code class="inline-code">POST /api/v1/auth/captcha</code>，把 <code class="inline-code">SVG</code> 展示给用户。</p></div>
-          <div class="step-card"><div class="num">2</div><h3>建立登录会话</h3><p>调用方必须保存并携带服务端写入的 <code class="inline-code">maf_session</code>；浏览器由 <code class="inline-code">Cookie</code> 机制自动处理。</p></div>
+          <div class="step-card"><div class="num">2</div><h3>建立登录会话</h3><p>调用方必须保存并携带服务端写入的 <code class="inline-code">__Host-maf_session</code>；浏览器由 <code class="inline-code">Cookie</code> 机制自动处理。</p></div>
           <div class="step-card"><div class="num">3</div><h3>提交消息</h3><p>向会话提交内容，拿到 <code class="inline-code">task_id</code>。</p></div>
           <div class="step-card"><div class="num">4</div><h3>监听 <code class="inline-code">SSE</code></h3><p>订阅任务事件，实时渲染节点输出、产物和中断。</p></div>
         </div>
         <div class="formal-flow" aria-label="正式接入规则">
-          <div class="note-card"><b>认证规则</b><p>登录和注册依赖验证码；登录成功后服务端设置 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>。所有需登录接口都必须携带该 <code class="inline-code">Cookie</code>。</p></div>
+          <div class="note-card"><b>认证规则</b><p>登录和注册依赖验证码；登录成功后服务端设置只包含 opaque session_id 的 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>；同站同域浏览器默认使用该 Cookie。跨站/第三方浏览器前端和非浏览器客户端默认使用 <code class="inline-code">Authorization: Bearer &lt;opaque-token&gt;</code>，不要把 token 放入 URL query。</p></div>
           <div class="note-card"><b>会话规则</b><p><code class="inline-code">conversation_id</code> 由调用方生成或复用；同一会话同一时间只允许一个未完成任务。</p></div>
           <div class="note-card"><b>任务规则</b><p>提交消息返回 <code class="inline-code">task_id</code>；任务输出以 <code class="inline-code">SSE</code> 为主，任务摘要、图、等待输入和产物接口用于状态恢复与补充展示。</p></div>
         </div>
@@ -291,7 +291,7 @@
         <div class="panel-head"><div><h2>推荐调用流程</h2><p class="panel-intro">业务对话台通常按下面顺序串联接口；<code class="inline-code">SSE</code> 是任务输出的主通道。</p></div></div>
         <div class="source-grid">
           <div class="note-card"><b>启动</b><p><code class="inline-code">GET /auth/me</code> 校验登录态；<code class="inline-code">GET /capabilities</code> 初始化能力列表；<code class="inline-code">GET /conversations</code> 恢复历史会话。</p></div>
-          <div class="note-card"><b>对话</b><p>可先上传附件，再调用 <code class="inline-code">POST /conversations/{conversation_id}/messages</code>。响应中的 <code class="inline-code">task_id</code> 是后续查询核心。</p></div>
+          <div class="note-card"><b>对话</b><p>可先上传附件，再调用 <code class="inline-code">POST /conversations/chat-messages</code>。响应中的 <code class="inline-code">task_id</code> 是后续查询核心。</p></div>
           <div class="note-card"><b>收尾</b><p><code class="inline-code">SSE</code> 完成后读取 <code class="inline-code">messages</code> 与 <code class="inline-code">artifacts</code>；文件 <code class="inline-code">artifact</code> 用 <code class="inline-code">download_url</code> 或下载接口获取。</p></div>
         </div>
       </section>
@@ -359,7 +359,7 @@
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-post-api-v1-auth-login" data-category="auth" data-method="POST" data-search="auth auth post /api/v1/auth/login 登录并设置 cookie 使用用户名、密码和验证码登录。成功后服务端写入 maf_session cookie，后续接口通过 cookie 识别用户。 公开 · 写入 cookie">
+<article class="endpoint-card" id="endpoint-post-api-v1-auth-login" data-category="auth" data-method="POST" data-search="auth auth post /api/v1/auth/login 登录并设置 cookie 使用用户名、密码和验证码登录。成功后服务端写入 __Host-maf_session cookie，后续接口通过 cookie 识别用户。 公开 · 写入 cookie">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method POST">POST</span>
@@ -370,7 +370,7 @@
           <div class="endpoint-summary">
             <div>
               <h3>登录并设置 <code class="inline-code">Cookie</code></h3>
-              <p>使用用户名、密码和验证码登录。成功后服务端写入 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>，后续接口通过 <code class="inline-code">Cookie</code> 识别用户。</p>
+              <p>使用用户名、密码和验证码登录。成功后服务端写入 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>，后续接口通过 <code class="inline-code">Cookie</code> 识别用户。</p>
             </div>
           </div>
           <details class="endpoint-detail" open>
@@ -378,7 +378,7 @@
             <div class="detail-grid">
               <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">username</code>、<code class="inline-code">password</code>、<code class="inline-code">captcha_id</code>、<code class="inline-code">captcha_code</code>。</p></div>
               <div><b>请求</b><p><code class="inline-code">LoginRequest</code>：<code class="inline-code">username</code>、<code class="inline-code">password</code>、<code class="inline-code">captcha_id</code>、<code class="inline-code">captcha_code</code>。</p></div>
-              <div><b>响应</b><p><code class="inline-code">AuthUserResponse</code>；响应头包含 <code class="inline-code">Set-Cookie</code>: <code class="inline-code">maf_session</code>。</p></div>
+              <div><b>响应</b><p><code class="inline-code">AuthUserResponse</code>；响应头包含 <code class="inline-code">Set-Cookie</code>: <code class="inline-code">__Host-maf_session</code>。</p></div>
               <div><b>错误</b><p>401：账号、密码或验证码错误；422：请求体字段缺失或类型错误。</p></div>
               <div><b>下一步</b><p>调用 <code class="inline-code">GET /api/v1/auth/me</code> 初始化登录态，或直接进入会话列表。</p></div>
             </div>
@@ -423,7 +423,7 @@
             <div class="detail-grid">
               <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">username</code>、<code class="inline-code">password</code>、<code class="inline-code">captcha_id</code>、<code class="inline-code">captcha_code</code>。</p></div>
               <div><b>请求</b><p><code class="inline-code">RegisterRequest</code>：<code class="inline-code">username</code>、<code class="inline-code">password</code>、<code class="inline-code">captcha_id</code>、<code class="inline-code">captcha_code</code>。</p></div>
-              <div><b>响应</b><p><code class="inline-code">AuthUserResponse</code>；成功后同样写入 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>。</p></div>
+              <div><b>响应</b><p><code class="inline-code">AuthUserResponse</code>；成功后同样写入 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>。</p></div>
               <div><b>错误</b><p>400：注册字段非法；401：验证码错误；409：用户名已存在；422：请求体错误。</p></div>
               <div><b>下一步</b><p>注册成功后调用 <code class="inline-code">GET /api/v1/conversations</code> 拉取会话列表。</p></div>
             </div>
@@ -449,7 +449,27 @@
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-get-api-v1-auth-me" data-category="auth" data-method="GET" data-search="auth auth get /api/v1/auth/me 读取当前用户 校验当前 maf_session cookie，并返回登录用户信息。前端启动时可用它恢复登录态。 需登录 · 会话校验">
+
+        <article class="endpoint-card" id="endpoint-api-v1-auth-api-tokens" data-category="auth" data-method="POST GET DELETE" data-search="auth api tokens bearer authorization opaque token 创建 列表 撤销">
+          <div class="endpoint-top">
+            <span class="method post">POST</span><code>/api/v1/auth/api-tokens</code>
+            <span class="endpoint-tag">需同站 Cookie · 创建 Bearer token</span>
+          </div>
+          <div class="endpoint-body">
+            <div>
+              <h3>创建 / 列出 / 撤销 API token</h3>
+              <p>API token 是跨站/第三方浏览器前端和非浏览器客户端的默认认证方式。token 为 opaque 随机值，服务端只保存 hash；明文 <code class="inline-code">access_token</code> 只在创建响应返回一次。token 管理接口必须使用同站 <code class="inline-code">__Host-maf_session</code> Cookie，普通 Bearer token 不能继续创建或管理 token。</p>
+            </div>
+            <div class="detail-grid">
+              <div><b>创建</b><p><code class="inline-code">POST /api/v1/auth/api-tokens</code>，body: <code class="inline-code">client_name</code>, <code class="inline-code">scopes</code>, <code class="inline-code">ttl_seconds</code>。</p></div>
+              <div><b>列表</b><p><code class="inline-code">GET /api/v1/auth/api-tokens</code> 只返回 token 元数据，不返回明文 token。</p></div>
+              <div><b>撤销</b><p><code class="inline-code">DELETE /api/v1/auth/api-tokens</code>，body 携带 <code class="inline-code">token_id</code>；非 GET 不在 URL 中携带业务 ID。</p></div>
+              <div><b>使用</b><p>业务 API 使用 <code class="inline-code">Authorization: Bearer ${ACCESS_TOKEN}</code>；禁止通过 URL query 传递 token。</p></div>
+            </div>
+          </div>
+        </article>
+
+<article class="endpoint-card" id="endpoint-get-api-v1-auth-me" data-category="auth" data-method="GET" data-search="auth auth get /api/v1/auth/me 读取当前用户 校验当前 __Host-maf_session cookie，并返回登录用户信息。前端启动时可用它恢复登录态。 需登录 · 会话校验">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method GET">GET</span>
@@ -460,13 +480,13 @@
           <div class="endpoint-summary">
             <div>
               <h3>读取当前用户</h3>
-              <p>校验当前 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>，并返回登录用户信息。前端启动时可用它恢复登录态。</p>
+              <p>校验当前 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>，并返回登录用户信息。前端启动时可用它恢复登录态。</p>
             </div>
           </div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p>无请求参数；必须携带有效 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>。</p></div>
+              <div><b>必填参数</b><p>无请求参数；必须携带有效 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>。</p></div>
               <div><b>请求</b><p>无请求体；需要携带 <code class="inline-code">Cookie</code>。</p></div>
               <div><b>响应</b><p><code class="inline-code">AuthUserResponse</code>：{ <code class="inline-code">user</code>: { <code class="inline-code">username</code> } }。</p></div>
               <div><b>错误</b><p>401：未登录或会话过期。</p></div>
@@ -477,7 +497,7 @@
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-auth-me">复制</button></div>
               <pre><code id="curl-get-api-v1-auth-me">curl -X GET &quot;${BASE_URL}/api/v1/auth/me&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -488,7 +508,7 @@
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-post-api-v1-auth-logout" data-category="auth" data-method="POST" data-search="auth auth post /api/v1/auth/logout 退出登录 撤销当前会话（如果存在）并清理 maf_session cookie。 需登录 · 清 cookie">
+<article class="endpoint-card" id="endpoint-post-api-v1-auth-logout" data-category="auth" data-method="POST" data-search="auth auth post /api/v1/auth/logout 退出登录 撤销当前会话（如果存在）并清理 __Host-maf_session cookie。 需登录 · 清 cookie">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method POST">POST</span>
@@ -499,13 +519,13 @@
           <div class="endpoint-summary">
             <div>
               <h3>退出登录</h3>
-              <p>撤销当前会话（如果存在）并清理 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>。</p>
+              <p>撤销当前会话（如果存在）并清理 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>。</p>
             </div>
           </div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p>无请求参数；携带 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code> 时会撤销对应会话，未携带也会清理响应 <code class="inline-code">Cookie</code>。</p></div>
+              <div><b>必填参数</b><p>无请求参数；携带 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code> 时会撤销对应会话，未携带也会清理响应 <code class="inline-code">Cookie</code>。</p></div>
               <div><b>请求</b><p>无请求体。</p></div>
               <div><b>响应</b><p><code class="inline-code">LogoutResponse</code>：{ <code class="inline-code">logged_out</code>: <code class="inline-code">true</code> }。</p></div>
               <div><b>错误</b><p>通常幂等返回 200；422 仅来自协议层校验。</p></div>
@@ -516,7 +536,7 @@
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-post-api-v1-auth-logout">复制</button></div>
               <pre><code id="curl-post-api-v1-auth-logout">curl -X POST &quot;${BASE_URL}/api/v1/auth/logout&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -595,7 +615,7 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p>无请求参数；必须携带有效 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>。</p></div>
+              <div><b>必填参数</b><p>无请求参数；必须携带有效 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>。</p></div>
               <div><b>请求</b><p>无请求体；需要 <code class="inline-code">Cookie</code>。</p></div>
               <div><b>响应</b><p><code class="inline-code">ConversationListResponse</code>：<code class="inline-code">conversations</code> 数组，每项包含 <code class="inline-code">conversation_id</code>、<code class="inline-code">status</code>、<code class="inline-code">current_task_id</code>、<code class="inline-code">title</code>、<code class="inline-code">created_at</code>、<code class="inline-code">updated_at</code>。</p></div>
               <div><b>错误</b><p>401：未登录；422：协议层校验失败。</p></div>
@@ -606,7 +626,7 @@
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-conversations">复制</button></div>
               <pre><code id="curl-get-api-v1-conversations">curl -X GET &quot;${BASE_URL}/api/v1/conversations&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -627,11 +647,11 @@
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-patch-api-v1-conversations-conversation-id" data-category="conversations" data-method="PATCH" data-search="conversations conversations patch /api/v1/conversations/{conversation_id} 重命名会话 更新会话标题。适合用户手动改名或前端基于首轮问题生成标题后写回。 需登录 · 重命名">
+<article class="endpoint-card" id="endpoint-patch-api-v1-conversations-conversation-id" data-category="conversations" data-method="PATCH" data-search="conversations conversations patch /api/v1/conversations 重命名会话 更新会话标题。适合用户手动改名或前端基于首轮问题生成标题后写回。 需登录 · 重命名">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method PATCH">PATCH</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}" aria-label="复制路径 /api/v1/conversations/{conversation_id}"><code class="inline-code">/api/v1/conversations/{conversation_id}</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations" aria-label="复制路径 /api/v1/conversations"><code class="inline-code">/api/v1/conversations</code></button>
             </div>
             <span class="endpoint-tag">需登录 · 重命名</span>
           </div>
@@ -644,8 +664,8 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">conversation_id</code>；<code class="inline-code">Body</code> 必填：<code class="inline-code">title</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">conversation_id</code>；<code class="inline-code">Body</code>：<code class="inline-code">RenameConversationRequest</code> { <code class="inline-code">title</code> }。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">conversation_id</code>、<code class="inline-code">title</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：<code class="inline-code">RenameConversationRequest</code> { <code class="inline-code">conversation_id</code>, <code class="inline-code">title</code> }。</p></div>
               <div><b>响应</b><p><code class="inline-code">ConversationSummaryResponse</code>。</p></div>
               <div><b>错误</b><p>400：标题非法；401：未登录；404：会话不存在或不属于当前用户；422：请求体错误。</p></div>
               <div><b>下一步</b><p>刷新会话列表或本地更新该 conversation <code class="inline-code">summary</code>。</p></div>
@@ -654,11 +674,11 @@
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-patch-api-v1-conversations-conversation-id">复制</button></div>
-              <pre><code id="curl-patch-api-v1-conversations-conversation-id">curl -X PATCH &quot;${BASE_URL}/api/v1/conversations/{conversation_id}&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+              <pre><code id="curl-patch-api-v1-conversations-conversation-id">curl -X PATCH &quot;${BASE_URL}/api/v1/conversations&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Content-Type: application/json&quot; \
   -H &quot;Accept: application/json&quot; \
-  -d &#x27;{ &quot;title&quot;: &quot;{title}&quot; }&#x27; </code></pre>
+  -d &#x27;{ &quot;conversation_id&quot;: &quot;{conversation_id}&quot;, &quot;title&quot;: &quot;{title}&quot; }&#x27; </code></pre>
             </div>
             <div class="formal-example-card">
               <div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-patch-api-v1-conversations-conversation-id">复制</button></div>
@@ -674,11 +694,11 @@
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-delete-api-v1-conversations-conversation-id" data-category="conversations" data-method="DELETE" data-search="conversations conversations delete /api/v1/conversations/{conversation_id} 删除会话 删除会话及相关数据。若存在运行中任务，服务端会请求取消并返回 cancelled_task_ids。 需登录 · 删除操作">
+<article class="endpoint-card" id="endpoint-delete-api-v1-conversations-conversation-id" data-category="conversations" data-method="DELETE" data-search="conversations conversations delete /api/v1/conversations 删除会话 删除会话及相关数据。若存在运行中任务，服务端会请求取消并返回 cancelled_task_ids。 需登录 · 删除操作">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method DELETE">DELETE</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}" aria-label="复制路径 /api/v1/conversations/{conversation_id}"><code class="inline-code">/api/v1/conversations/{conversation_id}</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations" aria-label="复制路径 /api/v1/conversations"><code class="inline-code">/api/v1/conversations</code></button>
             </div>
             <span class="endpoint-tag">需登录 · 删除操作</span>
           </div>
@@ -691,8 +711,8 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">conversation_id</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">conversation_id</code>；无请求体。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">conversation_id</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：{ <code class="inline-code">conversation_id</code> }。</p></div>
               <div><b>响应</b><p><code class="inline-code">DeleteConversationResponse</code>：<code class="inline-code">conversation_id</code>、<code class="inline-code">deleted</code>、<code class="inline-code">cancelled_task_ids</code>、<code class="inline-code">deleted_counts</code>。</p></div>
               <div><b>错误</b><p>401：未登录；404：会话不存在或不属于当前用户；422：路径参数错误。</p></div>
               <div><b>下一步</b><p>从前端会话列表移除该项，并停止监听相关任务事件。</p></div>
@@ -701,9 +721,11 @@
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-delete-api-v1-conversations-conversation-id">复制</button></div>
-              <pre><code id="curl-delete-api-v1-conversations-conversation-id">curl -X DELETE &quot;${BASE_URL}/api/v1/conversations/{conversation_id}&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
-  -H &quot;Accept: application/json&quot;</code></pre>
+              <pre><code id="curl-delete-api-v1-conversations-conversation-id">curl -X DELETE &quot;${BASE_URL}/api/v1/conversations&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ &quot;conversation_id&quot;: &quot;{conversation_id}&quot; }&#x27;</code></pre>
             </div>
             <div class="formal-example-card">
               <div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-delete-api-v1-conversations-conversation-id">复制</button></div>
@@ -744,7 +766,7 @@
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-conversations-conversation-id-messages">复制</button></div>
               <pre><code id="curl-get-api-v1-conversations-conversation-id-messages">curl -X GET &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/messages&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -766,11 +788,11 @@
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-post-api-v1-conversations-conversation-id-messages" data-category="conversations" data-method="POST" data-search="conversations conversations post /api/v1/conversations/{conversation_id}/messages 提交用户消息并创建任务 向会话提交一条用户消息，调度主代理或指定 capability，并返回可用于查询和 sse 订阅的 task_id。 需登录 · 核心流程">
+<article class="endpoint-card" id="endpoint-post-api-v1-conversations-conversation-id-messages" data-category="conversations" data-method="POST" data-search="conversations conversations post /api/v1/conversations/chat-messages 提交用户消息并创建任务 向会话提交一条用户消息，调度主代理或指定 capability，并返回可用于查询和 sse 订阅的 task_id。 需登录 · 核心流程">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method POST">POST</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}/messages" aria-label="复制路径 /api/v1/conversations/{conversation_id}/messages"><code class="inline-code">/api/v1/conversations/{conversation_id}/messages</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/chat-messages" aria-label="复制路径 /api/v1/conversations/chat-messages"><code class="inline-code">/api/v1/conversations/chat-messages</code></button>
             </div>
             <span class="endpoint-tag">需登录 · 核心流程</span>
           </div>
@@ -783,8 +805,8 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">conversation_id</code>；<code class="inline-code">Body</code> 必填：<code class="inline-code">account_id</code>、<code class="inline-code">content</code>；<code class="inline-code">routing_mode</code> 默认 <code class="inline-code">auto</code>，<code class="inline-code">metadata</code> 默认 {}；当 <code class="inline-code">routing_mode</code>=<code class="inline-code">force_capability</code> 时 <code class="inline-code">capability_id</code> 必填。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">conversation_id</code>；<code class="inline-code">Body</code>：<code class="inline-code">SubmitMessageRequest</code>。<code class="inline-code">metadata</code> 可携带 <code class="inline-code">upload_ids</code>、<code class="inline-code">deep_thinking</code>、<code class="inline-code">main_agent_reasoning_effort</code>。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">conversation_id</code>、<code class="inline-code">account_id</code>、<code class="inline-code">content</code>；<code class="inline-code">routing_mode</code> 默认 <code class="inline-code">auto</code>，<code class="inline-code">metadata</code> 默认 {}；当 <code class="inline-code">routing_mode</code>=<code class="inline-code">force_capability</code> 时 <code class="inline-code">capability_id</code> 必填。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：<code class="inline-code">SubmitMessageRequest</code>。<code class="inline-code">metadata</code> 可携带 <code class="inline-code">upload_ids</code>、<code class="inline-code">deep_thinking</code>、<code class="inline-code">main_agent_reasoning_effort</code>。</p></div>
               <div><b>响应</b><p>202 <code class="inline-code">MessageAcceptedResponse</code>：<code class="inline-code">conversation_id</code>、<code class="inline-code">message_id</code>、<code class="inline-code">task_id</code>、<code class="inline-code">status</code>。</p></div>
               <div><b>错误</b><p>400：<code class="inline-code">force_capability</code> 但缺 <code class="inline-code">capability_id</code>；401：未登录；409：同会话已有运行中任务；422：请求体错误。</p></div>
               <div><b>下一步</b><p>立刻订阅 <code class="inline-code">GET /api/v1/tasks/{{task_id}}/events</code>，或轮询 <code class="inline-code">GET /api/v1/tasks/{{task_id}}</code>。</p></div>
@@ -793,11 +815,12 @@
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-post-api-v1-conversations-conversation-id-messages">复制</button></div>
-              <pre><code id="curl-post-api-v1-conversations-conversation-id-messages">curl -X POST &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/messages&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+              <pre><code id="curl-post-api-v1-conversations-conversation-id-messages">curl -X POST &quot;${BASE_URL}/api/v1/conversations/chat-messages&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Content-Type: application/json&quot; \
   -H &quot;Accept: application/json&quot; \
   -d &#x27;{
+    &quot;conversation_id&quot;: &quot;{conversation_id}&quot;,
     &quot;account_id&quot;: &quot;{account_id}&quot;,
     &quot;content&quot;: &quot;{message_content}&quot;,
     &quot;routing_mode&quot;: &quot;auto&quot;,
@@ -818,11 +841,11 @@
           </div>
         </article>
 </section><section class="endpoint-group" id="group-uploads" data-group="uploads"><div class="group-title"><span>上传</span><small>3 个操作</small></div>
-        <article class="endpoint-card" id="endpoint-post-api-v1-conversations-conversation-id-uploads" data-category="uploads" data-method="POST" data-search="uploads uploads post /api/v1/conversations/{conversation_id}/uploads 上传会话附件 向指定会话上传 json 或 csv 附件，返回预览信息。提交消息时可把 upload_id 放入 metadata.upload_ids。 需登录 · json / csv">
+        <article class="endpoint-card" id="endpoint-post-api-v1-conversations-conversation-id-uploads" data-category="uploads" data-method="POST" data-search="uploads uploads post /api/v1/conversations/uploads 上传会话附件 向指定会话上传 json 或 csv 附件，返回预览信息。提交消息时可把 upload_id 放入 metadata.upload_ids。 需登录 · json / csv">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method POST">POST</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}/uploads" aria-label="复制路径 /api/v1/conversations/{conversation_id}/uploads"><code class="inline-code">/api/v1/conversations/{conversation_id}/uploads</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/uploads" aria-label="复制路径 /api/v1/conversations/uploads"><code class="inline-code">/api/v1/conversations/uploads</code></button>
             </div>
             <span class="endpoint-tag">需登录 · <code class="inline-code">JSON</code> / <code class="inline-code">CSV</code></span>
           </div>
@@ -835,8 +858,8 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">conversation_id</code>；<code class="inline-code">Form</code> 必填：<code class="inline-code">file</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Content-Type</code>：<code class="inline-code">multipart/form-data</code>；字段：<code class="inline-code">file</code>；默认最大 20MB，预览限制由 <code class="inline-code">runtime</code> 配置决定。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Form</code> 必填：<code class="inline-code">conversation_id</code>、<code class="inline-code">file</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Content-Type</code>：<code class="inline-code">multipart/form-data</code>；字段：<code class="inline-code">conversation_id</code>、<code class="inline-code">file</code>；默认最大 20MB，预览限制由 <code class="inline-code">runtime</code> 配置决定。</p></div>
               <div><b>响应</b><p>201 <code class="inline-code">UploadFileResponse</code>：<code class="inline-code">upload_id</code>、<code class="inline-code">filename</code>、<code class="inline-code">content_type</code>、<code class="inline-code">file_type</code>、<code class="inline-code">size_bytes</code>、<code class="inline-code">sha256</code>、<code class="inline-code">expires_at</code>、<code class="inline-code">preview</code>。</p></div>
               <div><b>错误</b><p>400：文件类型或内容非法；401：未登录；404：会话不存在；413：文件过大；422：表单错误。</p></div>
               <div><b>下一步</b><p>将返回的 <code class="inline-code">upload_id</code> 放入 <code class="inline-code">SubmitMessageRequest.metadata.upload_ids</code>。</p></div>
@@ -845,9 +868,10 @@
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-post-api-v1-conversations-conversation-id-uploads">复制</button></div>
-              <pre><code id="curl-post-api-v1-conversations-conversation-id-uploads">curl -X POST &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/uploads&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+              <pre><code id="curl-post-api-v1-conversations-conversation-id-uploads">curl -X POST &quot;${BASE_URL}/api/v1/conversations/uploads&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot; \
+  -F &quot;conversation_id={conversation_id}&quot; \
   -F &quot;file=@{absolute_file_path}&quot; </code></pre>
             </div>
             <div class="formal-example-card">
@@ -887,8 +911,8 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">conversation_id</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">conversation_id</code>；无请求体。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">conversation_id</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：{ <code class="inline-code">conversation_id</code> }。</p></div>
               <div><b>响应</b><p><code class="inline-code">UploadListResponse</code>：<code class="inline-code">conversation_id</code>、<code class="inline-code">uploads</code>。</p></div>
               <div><b>错误</b><p>401：未登录；404：会话不存在；422：路径参数错误。</p></div>
               <div><b>下一步</b><p>用户可删除上传，或在提交消息时引用 <code class="inline-code">upload_id</code>。</p></div>
@@ -898,7 +922,7 @@
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-conversations-conversation-id-uploads">复制</button></div>
               <pre><code id="curl-get-api-v1-conversations-conversation-id-uploads">curl -X GET &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/uploads&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -912,11 +936,11 @@
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-delete-api-v1-conversations-conversation-id-uploads-upload-id" data-category="uploads" data-method="DELETE" data-search="uploads uploads delete /api/v1/conversations/{conversation_id}/uploads/{upload_id} 删除上传附件 删除会话中的某个上传文件记录，适合用户从附件列表移除文件时调用。 需登录 · 清理">
+<article class="endpoint-card" id="endpoint-delete-api-v1-conversations-conversation-id-uploads-upload-id" data-category="uploads" data-method="DELETE" data-search="uploads uploads delete /api/v1/conversations/uploads 删除上传附件 删除会话中的某个上传文件记录，适合用户从附件列表移除文件时调用。 需登录 · 清理">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method DELETE">DELETE</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}/uploads/{upload_id}" aria-label="复制路径 /api/v1/conversations/{conversation_id}/uploads/{upload_id}"><code class="inline-code">/api/v1/conversations/{conversation_id}/uploads/{upload_id}</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/uploads" aria-label="复制路径 /api/v1/conversations/uploads"><code class="inline-code">/api/v1/conversations/uploads</code></button>
             </div>
             <span class="endpoint-tag">需登录 · 清理</span>
           </div>
@@ -929,8 +953,8 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">conversation_id</code>、<code class="inline-code">upload_id</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">conversation_id</code>、<code class="inline-code">upload_id</code>；无请求体。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">conversation_id</code>、<code class="inline-code">upload_id</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：{ <code class="inline-code">conversation_id</code>, <code class="inline-code">upload_id</code> }。</p></div>
               <div><b>响应</b><p><code class="inline-code">DeleteUploadResponse</code>：<code class="inline-code">upload_id</code>、<code class="inline-code">deleted</code>。</p></div>
               <div><b>错误</b><p>401：未登录；404：会话或上传不存在；422：路径参数错误。</p></div>
               <div><b>下一步</b><p>刷新上传列表，并从待提交 <code class="inline-code">metadata.upload_ids</code> 中移除该 ID。</p></div>
@@ -939,9 +963,11 @@
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-delete-api-v1-conversations-conversation-id-uploads-upload-id">复制</button></div>
-              <pre><code id="curl-delete-api-v1-conversations-conversation-id-uploads-upload-id">curl -X DELETE &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/uploads/{upload_id}&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
-  -H &quot;Accept: application/json&quot;</code></pre>
+              <pre><code id="curl-delete-api-v1-conversations-conversation-id-uploads-upload-id">curl -X DELETE &quot;${BASE_URL}/api/v1/conversations/uploads&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ &quot;conversation_id&quot;: &quot;{conversation_id}&quot;, &quot;upload_id&quot;: &quot;{upload_id}&quot; }&#x27;</code></pre>
             </div>
             <div class="formal-example-card">
               <div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-delete-api-v1-conversations-conversation-id-uploads-upload-id">复制</button></div>
@@ -953,11 +979,11 @@
           </div>
         </article>
 </section><section class="endpoint-group" id="group-tasks" data-group="tasks"><div class="group-title"><span>任务</span><small>7 个操作</small></div>
-        <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-tasks" data-category="tasks" data-method="GET" data-search="tasks tasks get /api/v1/conversations/{conversation_id}/tasks 列出会话任务 查询某个会话下的任务。scope 默认 unfinished；传 all 可返回历史任务。 需登录 · scope 过滤">
+        <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-tasks" data-category="tasks" data-method="GET" data-search="tasks tasks get /api/v1/conversations/tasks 列出会话任务 查询某个会话下的任务。scope 默认 unfinished；传 all 可返回历史任务。 需登录 · scope 过滤">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method GET">GET</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}/tasks" aria-label="复制路径 /api/v1/conversations/{conversation_id}/tasks"><code class="inline-code">/api/v1/conversations/{conversation_id}/tasks</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/tasks" aria-label="复制路径 /api/v1/conversations/tasks"><code class="inline-code">/api/v1/conversations/tasks</code></button>
             </div>
             <span class="endpoint-tag">需登录 · <code class="inline-code">scope</code> 过滤</span>
           </div>
@@ -980,8 +1006,8 @@
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-conversations-conversation-id-tasks">复制</button></div>
-              <pre><code id="curl-get-api-v1-conversations-conversation-id-tasks">curl -X GET &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/tasks?scope={scope}&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+              <pre><code id="curl-get-api-v1-conversations-conversation-id-tasks">curl -X GET &quot;${BASE_URL}/api/v1/conversations/tasks?scope={scope}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -1012,8 +1038,8 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">task_id</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">task_id</code>；无请求体。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">task_id</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：{ <code class="inline-code">task_id</code> }。</p></div>
               <div><b>响应</b><p><code class="inline-code">TaskSummaryResponse</code>。</p></div>
               <div><b>错误</b><p>401：未登录；404：任务不存在或不属于当前用户；422：路径参数错误。</p></div>
               <div><b>下一步</b><p><code class="inline-code">running</code> 时订阅 <code class="inline-code">SSE</code>；<code class="inline-code">completed</code> 时读取 <code class="inline-code">messages</code> / <code class="inline-code">artifacts</code>。</p></div>
@@ -1023,7 +1049,7 @@
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-tasks-task-id">复制</button></div>
               <pre><code id="curl-get-api-v1-tasks-task-id">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -1062,7 +1088,7 @@
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">task_id</code>；必须携带有效 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>；建议 <code class="inline-code">Accept</code>: <code class="inline-code">text/event-stream</code>。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">task_id</code>；必须携带有效 <code class="inline-code">__Host-maf_session</code> <code class="inline-code">Cookie</code>；建议 <code class="inline-code">Accept</code>: <code class="inline-code">text/event-stream</code>。</p></div>
               <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">task_id</code>；<code class="inline-code">Header</code>：<code class="inline-code">Accept</code>: <code class="inline-code">text/event-stream</code>；<code class="inline-code">Cookie</code> 认证。</p></div>
               <div><b>响应</b><p><code class="inline-code">SSE</code> stream；<code class="inline-code">data</code> 解码后为 <code class="inline-code">TaskEventEnvelope</code>。</p></div>
               <div><b>错误</b><p>401：未登录；404：任务不存在；422：路径参数错误；网络断开时客户端应重连或回查任务状态。</p></div>
@@ -1073,7 +1099,7 @@
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-tasks-task-id-events">复制</button></div>
               <pre><code id="curl-get-api-v1-tasks-task-id-events">curl -N &quot;${BASE_URL}/api/v1/tasks/{task_id}/events&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: text/event-stream&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -1084,11 +1110,11 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-post-api-v1-tasks-task-id-cancel" data-category="tasks" data-method="POST" data-search="tasks tasks post /api/v1/tasks/{task_id}/cancel 请求取消任务 请求取消正在运行的任务。服务端返回 202 表示已接受取消请求，终态通过 sse 或任务摘要确认。 需登录 · 异步取消">
+<article class="endpoint-card" id="endpoint-post-api-v1-tasks-task-id-cancel" data-category="tasks" data-method="POST" data-search="tasks tasks post /api/v1/tasks/cancel 请求取消任务 请求取消正在运行的任务。服务端返回 202 表示已接受取消请求，终态通过 sse 或任务摘要确认。 需登录 · 异步取消">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method POST">POST</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/{task_id}/cancel" aria-label="复制路径 /api/v1/tasks/{task_id}/cancel"><code class="inline-code">/api/v1/tasks/{task_id}/cancel</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/cancel" aria-label="复制路径 /api/v1/tasks/cancel"><code class="inline-code">/api/v1/tasks/cancel</code></button>
             </div>
             <span class="endpoint-tag">需登录 · 异步取消</span>
           </div>
@@ -1101,8 +1127,8 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">task_id</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">task_id</code>；无请求体。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">task_id</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：{ <code class="inline-code">task_id</code> }。</p></div>
               <div><b>响应</b><p>202 <code class="inline-code">CancelTaskResponse</code>：<code class="inline-code">task_id</code>、<code class="inline-code">status</code>、<code class="inline-code">accepted</code>。</p></div>
               <div><b>错误</b><p>401：未登录；404：任务不存在；409：任务已处于终态；422：路径参数错误。</p></div>
               <div><b>下一步</b><p>继续监听 <code class="inline-code">SSE</code>，或轮询 <code class="inline-code">GET /api/v1/tasks/{{task_id}}</code> 直到 <code class="inline-code">cancelled</code> / <code class="inline-code">completed</code> / <code class="inline-code">failed</code>。</p></div>
@@ -1111,9 +1137,11 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-post-api-v1-tasks-task-id-cancel">复制</button></div>
-              <pre><code id="curl-post-api-v1-tasks-task-id-cancel">curl -X POST &quot;${BASE_URL}/api/v1/tasks/{task_id}/cancel&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
-  -H &quot;Accept: application/json&quot;</code></pre>
+              <pre><code id="curl-post-api-v1-tasks-task-id-cancel">curl -X POST &quot;${BASE_URL}/api/v1/tasks/cancel&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ &quot;task_id&quot;: &quot;{task_id}&quot; }&#x27;</code></pre>
             </div>
             <div class="formal-example-card">
               <div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-post-api-v1-tasks-task-id-cancel">复制</button></div>
@@ -1153,7 +1181,7 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-tasks-task-id-interrupts">复制</button></div>
               <pre><code id="curl-get-api-v1-tasks-task-id-interrupts">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}/interrupts&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -1176,11 +1204,11 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
             </div>
           </div>
         </article>
-<article class="endpoint-card" id="endpoint-post-api-v1-tasks-task-id-interrupts-interrupt-id-answer" data-category="tasks" data-method="POST" data-search="tasks tasks post /api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer 回答任务中断 提交用户补充信息，让等待中的节点继续执行。answer_payload 的结构由 interrupt.required_fields 指示。 需登录 · 继续任务">
+<article class="endpoint-card" id="endpoint-post-api-v1-tasks-task-id-interrupts-interrupt-id-answer" data-category="tasks" data-method="POST" data-search="tasks tasks post /api/v1/tasks/interrupts/answer 回答任务中断 提交用户补充信息，让等待中的节点继续执行。answer_payload 的结构由 interrupt.required_fields 指示。 需登录 · 继续任务">
           <div class="endpoint-topline">
             <div class="endpoint-identity">
               <span class="method POST">POST</span>
-              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer" aria-label="复制路径 /api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer"><code class="inline-code">/api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer</code></button>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/interrupts/answer" aria-label="复制路径 /api/v1/tasks/interrupts/answer"><code class="inline-code">/api/v1/tasks/interrupts/answer</code></button>
             </div>
             <span class="endpoint-tag">需登录 · 继续任务</span>
           </div>
@@ -1193,8 +1221,8 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary>
             <div class="detail-grid">
-              <div><b>必填参数</b><p><code class="inline-code">Path</code> 必填：<code class="inline-code">task_id</code>、<code class="inline-code">interrupt_id</code>；请求体必须是 <code class="inline-code">JSON</code> <code class="inline-code">object</code>；<code class="inline-code">answer_payload</code> 默认 {}，但实际内容应满足 <code class="inline-code">interrupt.required_fields</code>。</p></div>
-              <div><b>请求</b><p><code class="inline-code">Path</code>：<code class="inline-code">task_id</code>、<code class="inline-code">interrupt_id</code>；<code class="inline-code">Body</code>：{ <code class="inline-code">answer_payload</code>: <code class="inline-code">object</code> }。</p></div>
+              <div><b>必填参数</b><p><code class="inline-code">Body</code> 必填：<code class="inline-code">task_id</code>、<code class="inline-code">interrupt_id</code>；请求体必须是 <code class="inline-code">JSON</code> <code class="inline-code">object</code>；<code class="inline-code">answer_payload</code> 默认 {}，但实际内容应满足 <code class="inline-code">interrupt.required_fields</code>。</p></div>
+              <div><b>请求</b><p><code class="inline-code">Body</code>：{ <code class="inline-code">task_id</code>, <code class="inline-code">interrupt_id</code>, <code class="inline-code">answer_payload</code>: <code class="inline-code">object</code> }。</p></div>
               <div><b>响应</b><p>202 <code class="inline-code">AnswerInterruptResponse</code>：<code class="inline-code">interrupt_id</code>、<code class="inline-code">status</code>、<code class="inline-code">node_id</code>、<code class="inline-code">answer_payload</code>。</p></div>
               <div><b>错误</b><p>400：回答不满足 <code class="inline-code">required_fields</code>；401：未登录；404：任务或中断不存在；409：中断已关闭；422：请求体错误。</p></div>
               <div><b>下一步</b><p>继续监听该 task 的 <code class="inline-code">SSE</code> 事件。</p></div>
@@ -1203,11 +1231,11 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
           <div class="formal-example-grid">
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-post-api-v1-tasks-task-id-interrupts-interrupt-id-answer">复制</button></div>
-              <pre><code id="curl-post-api-v1-tasks-task-id-interrupts-interrupt-id-answer">curl -X POST &quot;${BASE_URL}/api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+              <pre><code id="curl-post-api-v1-tasks-task-id-interrupts-interrupt-id-answer">curl -X POST &quot;${BASE_URL}/api/v1/tasks/interrupts/answer&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Content-Type: application/json&quot; \
   -H &quot;Accept: application/json&quot; \
-  -d &#x27;{ &quot;answer_payload&quot;: { &quot;{field_name}&quot;: &quot;{field_value}&quot; } }&#x27; </code></pre>
+  -d &#x27;{ &quot;task_id&quot;: &quot;{task_id}&quot;, &quot;interrupt_id&quot;: &quot;{interrupt_id}&quot;, &quot;answer_payload&quot;: { &quot;{field_name}&quot;: &quot;{field_value}&quot; } }&#x27; </code></pre>
             </div>
             <div class="formal-example-card">
               <div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-post-api-v1-tasks-task-id-interrupts-interrupt-id-answer">复制</button></div>
@@ -1248,7 +1276,7 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-tasks-task-id-graph">复制</button></div>
               <pre><code id="curl-get-api-v1-tasks-task-id-graph">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}/graph&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -1294,7 +1322,7 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-tasks-task-id-artifacts">复制</button></div>
               <pre><code id="curl-get-api-v1-tasks-task-id-artifacts">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}/artifacts&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -H &quot;Accept: application/json&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -1342,7 +1370,7 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
             <div class="formal-example-card">
               <div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-get-api-v1-artifacts-artifact-id-download">复制</button></div>
               <pre><code id="curl-get-api-v1-artifacts-artifact-id-download">curl -L &quot;${BASE_URL}/api/v1/artifacts/{artifact_id}/download&quot; \
-  --cookie &quot;maf_session=${SESSION_COOKIE}&quot; \
+  --cookie &quot;__Host-maf_session=${SESSION_COOKIE}&quot; \
   -o &quot;{filename}&quot;</code></pre>
             </div>
             <div class="formal-example-card">
@@ -1358,7 +1386,7 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
         <div class="panel-head"><div><h2><code class="inline-code">SSE</code> 流式事件</h2><p class="panel-intro"><code class="inline-code">GET /api/v1/tasks/{task_id}/events</code> 返回 <code class="inline-code">text/event-stream</code>。每条 <code class="inline-code">data</code> 是 <code class="inline-code">JSON</code> 字符串，解码后为 <code class="inline-code">TaskEventEnvelope</code>。</p></div></div>
         <div class="sse-layout">
           <div class="event-list">
-            <div class="event-item"><b>连接要求</b><span>客户端必须携带有效 <code class="inline-code">maf_session</code> <code class="inline-code">Cookie</code>，并保持长连接读取 <code class="inline-code">text/event-stream</code>。</span></div>
+            <div class="event-item"><b>连接要求</b><span>同站浏览器客户端可携带有效 <code class="inline-code">__Host-maf_session</code> Cookie；跨站 Bearer 客户端必须使用可设置 <code class="inline-code">Authorization</code> header 的 <code class="inline-code">fetch</code> stream，并保持长连接读取 <code class="inline-code">text/event-stream</code>。</span></div>
             <div class="event-item"><b>事件结构</b><span>每条事件包含 <code class="inline-code">SSE</code> <code class="inline-code">id</code>、<code class="inline-code">event</code> 与 <code class="inline-code">JSON</code> 字符串 <code class="inline-code">data</code>；<code class="inline-code">data</code> 解码后为 <code class="inline-code">TaskEventEnvelope</code>。</span></div>
             <div class="event-item"><b>断线处理</b><span>客户端应按浏览器或 <code class="inline-code">HTTP</code> 客户端策略重连；需要校准状态时回查 <code class="inline-code">GET /api/v1/tasks/{task_id}</code>。</span></div>
           </div>
@@ -1373,7 +1401,7 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
       <section class="panel" id="schemas">
         <div class="panel-head"><div><h2>数据结构</h2><p class="panel-intro">字段速查来自 <code class="inline-code">frontend/src/api/types.ts</code> 与后端 <code class="inline-code">DTO</code>。实现时以 <code class="inline-code">OpenAPI</code> / 源码为准。</p></div></div>
         <div class="schema-grid">
-          <details class="schema-card" open><summary>Auth</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>CaptchaChallengeResponse</code></td><td><code class="inline-code">captcha_id</code>, <code class="inline-code">image_svg</code>, <code class="inline-code">expires_in_seconds</code></td></tr><tr><td><code>LoginRequest / RegisterRequest</code></td><td><code class="inline-code">username</code>, <code class="inline-code">password</code>, <code class="inline-code">captcha_id</code>, <code class="inline-code">captcha_code</code></td></tr><tr><td><code>AuthUserResponse</code></td><td><code class="inline-code">user.username</code></td></tr><tr><td><code>LogoutResponse</code></td><td><code class="inline-code">logged_out</code></td></tr></tbody></table></details><details class="schema-card" open><summary>Conversation &amp; Message</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>SubmitMessageRequest</code></td><td><code class="inline-code">account_id</code>, <code class="inline-code">content</code>, <code class="inline-code">routing_mode</code>, <code class="inline-code">capability_id</code>, <code class="inline-code">client_message_id?</code>, <code class="inline-code">metadata</code></td></tr><tr><td><code>MessageAcceptedResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">message_id</code>, <code class="inline-code">task_id</code>, <code class="inline-code">status</code></td></tr><tr><td><code>ConversationSummaryResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">account_id</code>, <code class="inline-code">status</code>, <code class="inline-code">current_task_id</code>, <code class="inline-code">title</code>, <code class="inline-code">created_at</code>, <code class="inline-code">updated_at</code></td></tr><tr><td><code>ConversationMessagesResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">messages</code>[]</td></tr><tr><td><code>MessageResponse</code></td><td><code class="inline-code">message_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">role</code>, <code class="inline-code">content</code>, <code class="inline-code">task_id</code>, <code class="inline-code">stream_status</code>, <code class="inline-code">created_at</code></td></tr></tbody></table></details><details class="schema-card" open><summary>Task</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>TaskSummaryResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">status</code>, <code class="inline-code">root_node_id</code>, <code class="inline-code">summary</code>, <code class="inline-code">requested_capability_id</code>, <code class="inline-code">node counts</code>, <code class="inline-code">cancel_requested</code>, <code class="inline-code">timestamps</code></td></tr><tr><td><code>TaskEventEnvelope</code></td><td><code class="inline-code">event_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">task_id</code>, <code class="inline-code">node_id</code>, <code class="inline-code">event_type</code>, <code class="inline-code">payload</code>, <code class="inline-code">created_at</code></td></tr><tr><td><code>TaskGraphResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">nodes</code>[], <code class="inline-code">edges</code>[]</td></tr><tr><td><code>TaskInterruptsResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">interrupts</code>[]</td></tr><tr><td><code>AnswerInterruptResponse</code></td><td><code class="inline-code">interrupt_id</code>, <code class="inline-code">status</code>, <code class="inline-code">node_id</code>, <code class="inline-code">answer_payload</code></td></tr></tbody></table></details><details class="schema-card" open><summary>Upload &amp; Artifact</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>UploadFileResponse</code></td><td><code class="inline-code">upload_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">filename</code>, <code class="inline-code">content_type</code>, <code class="inline-code">file_type</code>, <code class="inline-code">size_bytes</code>, <code class="inline-code">sha256</code>, <code class="inline-code">expires_at</code>, <code class="inline-code">preview</code></td></tr><tr><td><code>UploadListResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">uploads</code>[]</td></tr><tr><td><code>ArtifactResponse</code></td><td><code class="inline-code">artifact_id</code>, <code class="inline-code">artifact_type</code>, <code class="inline-code">storage_ref</code>, <code class="inline-code">summary</code>, <code class="inline-code">is_complete</code>, <code class="inline-code">filename</code>?, <code class="inline-code">mime_type?</code>, <code class="inline-code">size_bytes?</code>, <code class="inline-code">sha256</code>?, <code class="inline-code">download_url?</code>, <code class="inline-code">retention_status?</code></td></tr><tr><td><code>TaskArtifactsResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">artifacts</code>[]</td></tr></tbody></table></details>
+          <details class="schema-card" open><summary>Auth</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>CaptchaChallengeResponse</code></td><td><code class="inline-code">captcha_id</code>, <code class="inline-code">image_svg</code>, <code class="inline-code">expires_in_seconds</code></td></tr><tr><td><code>LoginRequest / RegisterRequest</code></td><td><code class="inline-code">username</code>, <code class="inline-code">password</code>, <code class="inline-code">captcha_id</code>, <code class="inline-code">captcha_code</code></td></tr><tr><td><code>AuthUserResponse</code></td><td><code class="inline-code">user.username</code></td></tr><tr><td><code>LogoutResponse</code></td><td><code class="inline-code">logged_out</code></td></tr></tbody></table></details><details class="schema-card" open><summary>Conversation &amp; Message</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>SubmitMessageRequest</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">account_id</code>, <code class="inline-code">content</code>, <code class="inline-code">routing_mode</code>, <code class="inline-code">capability_id</code>, <code class="inline-code">client_message_id?</code>, <code class="inline-code">metadata</code></td></tr><tr><td><code>RenameConversationRequest / DeleteConversationRequest</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">title?</code></td></tr><tr><td><code>MessageAcceptedResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">message_id</code>, <code class="inline-code">task_id</code>, <code class="inline-code">status</code></td></tr><tr><td><code>ConversationSummaryResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">account_id</code>, <code class="inline-code">status</code>, <code class="inline-code">current_task_id</code>, <code class="inline-code">title</code>, <code class="inline-code">created_at</code>, <code class="inline-code">updated_at</code></td></tr><tr><td><code>ConversationMessagesResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">messages</code>[]</td></tr><tr><td><code>MessageResponse</code></td><td><code class="inline-code">message_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">role</code>, <code class="inline-code">content</code>, <code class="inline-code">task_id</code>, <code class="inline-code">stream_status</code>, <code class="inline-code">created_at</code></td></tr></tbody></table></details><details class="schema-card" open><summary>Task</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>TaskSummaryResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">status</code>, <code class="inline-code">root_node_id</code>, <code class="inline-code">summary</code>, <code class="inline-code">requested_capability_id</code>, <code class="inline-code">node counts</code>, <code class="inline-code">cancel_requested</code>, <code class="inline-code">timestamps</code></td></tr><tr><td><code>TaskEventEnvelope</code></td><td><code class="inline-code">event_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">task_id</code>, <code class="inline-code">node_id</code>, <code class="inline-code">event_type</code>, <code class="inline-code">payload</code>, <code class="inline-code">created_at</code></td></tr><tr><td><code>TaskGraphResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">nodes</code>[], <code class="inline-code">edges</code>[]</td></tr><tr><td><code>TaskInterruptsResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">interrupts</code>[]</td></tr><tr><td><code>CancelTaskRequest</code></td><td><code class="inline-code">task_id</code></td></tr><tr><td><code>AnswerInterruptRequest</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">interrupt_id</code>, <code class="inline-code">answer_payload</code></td></tr><tr><td><code>AnswerInterruptResponse</code></td><td><code class="inline-code">interrupt_id</code>, <code class="inline-code">status</code>, <code class="inline-code">node_id</code>, <code class="inline-code">answer_payload</code></td></tr></tbody></table></details><details class="schema-card" open><summary>Upload &amp; Artifact</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>DeleteUploadRequest</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">upload_id</code></td></tr><tr><td><code>UploadFileResponse</code></td><td><code class="inline-code">upload_id</code>, <code class="inline-code">conversation_id</code>, <code class="inline-code">filename</code>, <code class="inline-code">content_type</code>, <code class="inline-code">file_type</code>, <code class="inline-code">size_bytes</code>, <code class="inline-code">sha256</code>, <code class="inline-code">expires_at</code>, <code class="inline-code">preview</code></td></tr><tr><td><code>UploadListResponse</code></td><td><code class="inline-code">conversation_id</code>, <code class="inline-code">uploads</code>[]</td></tr><tr><td><code>ArtifactResponse</code></td><td><code class="inline-code">artifact_id</code>, <code class="inline-code">artifact_type</code>, <code class="inline-code">storage_ref</code>, <code class="inline-code">summary</code>, <code class="inline-code">is_complete</code>, <code class="inline-code">filename</code>?, <code class="inline-code">mime_type?</code>, <code class="inline-code">size_bytes?</code>, <code class="inline-code">sha256</code>?, <code class="inline-code">download_url?</code>, <code class="inline-code">retention_status?</code></td></tr><tr><td><code>TaskArtifactsResponse</code></td><td><code class="inline-code">task_id</code>, <code class="inline-code">artifacts</code>[]</td></tr></tbody></table></details>
         </div>
       </section>
 
@@ -1409,7 +1437,7 @@ data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;conversation_id&quot;:&
       </section>
       <section class="tool-section">
         <h2>认证方式</h2>
-        <p class="panel-intro">浏览器同源调用必须允许携带 <code class="inline-code">Cookie</code>；跨域部署时需由服务端与网关正确配置 <code class="inline-code">Cookie</code>、<code class="inline-code">CORS</code> 与安全属性。非浏览器客户端必须在登录后保存并回传 <code class="inline-code">maf_session</code>。</p>
+        <p class="panel-intro">浏览器同源调用使用 <code class="inline-code">__Host-maf_session</code> Cookie；跨站/第三方浏览器和非浏览器客户端默认使用 <code class="inline-code">Authorization: Bearer</code>。跨站部署需配置 allowlisted <code class="inline-code">CORS</code> origin，禁止 wildcard credentials；SSE 禁止 URL query token。</p>
       </section>
       <section class="tool-section">
         <h2>接入流程</h2>

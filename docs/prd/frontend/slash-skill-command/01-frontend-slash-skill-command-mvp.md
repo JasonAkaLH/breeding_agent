@@ -68,7 +68,7 @@
 
 ### 5.2 已选 Skill badge
 
-- 选择 Skill 后，composer 显示独立 badge，例如 `Skill: sql-query ×`。
+- 选择 Skill 后，composer 显示独立 badge，例如 `Skill: data-lookup ×`。
 - TextArea 只保留用户问题正文，不保留 slash 命令文本。
 - 点击 `×` 只取消当前 composer 选择，下一次提交回到自动规划。
 

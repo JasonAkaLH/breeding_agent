@@ -55,6 +55,49 @@ class TaskEventsSSEAPITest(APITestCase):
         self.assertEqual(events[-1].event_type, "task.completed")
         self.assertEqual(events[-1].event_id, f"evt-api-page-{page_limit:04d}")
 
+    async def test_task_events_endpoint_accepts_bearer_read_scope(self) -> None:
+        await self.logout()
+        await self.runtime.create_user("alice", "alice-password1")
+        await self.login("alice", "alice-password1")
+        create_token = await self.client.post(
+            "/api/v1/auth/api-tokens",
+            json={"client_name": "sse-client", "scopes": ["conversation:read"], "ttl_seconds": 3600},
+        )
+        self.assertEqual(create_token.status_code, 201, create_token.text)
+        access_token = create_token.json()["access_token"]
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id="conv-bearer-sse", account_id="alice")
+        )
+        await self.runtime.storage.save_task(
+            Task(
+                task_id="task-bearer-sse",
+                conversation_id="conv-bearer-sse",
+                root_message_id="msg-bearer-sse",
+                status=TaskStatus.COMPLETED,
+            )
+        )
+        await self.runtime.storage.append_event(
+            EventRecord(
+                event_id="evt-bearer-sse",
+                conversation_id="conv-bearer-sse",
+                task_id="task-bearer-sse",
+                event_type="task.completed",
+                payload={},
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+        self.client.cookies.clear()
+
+        response = await self.client.get(
+            "/api/v1/tasks/task-bearer-sse/events",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "text/event-stream"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("text/event-stream", response.headers.get("content-type", ""))
+        self.assertIn("evt-bearer-sse", response.text)
+        self.assertIn("task.completed", response.text)
+
     async def test_task_events_endpoint_replays_history_and_streams_live_completion(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)

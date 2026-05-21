@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class SubmitMessageRequest(BaseModel):
+    conversation_id: str
     account_id: str
     content: str
     routing_mode: str = "auto"
@@ -47,6 +48,39 @@ class LogoutResponse(BaseModel):
     logged_out: bool
 
 
+class CreateApiTokenRequest(BaseModel):
+    client_name: str
+    scopes: list[str] = Field(default_factory=list)
+    ttl_seconds: int | None = None
+
+
+class ApiTokenResponse(BaseModel):
+    token_id: str
+    client_name: str
+    scopes: list[str]
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    created_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+class CreateApiTokenResponse(ApiTokenResponse):
+    access_token: str
+
+
+class ApiTokenListResponse(BaseModel):
+    tokens: list[ApiTokenResponse]
+
+
+class RevokeApiTokenRequest(BaseModel):
+    token_id: str
+
+
+class RevokeApiTokenResponse(BaseModel):
+    token_id: str
+    revoked: bool
+
+
 class MessageAcceptedResponse(BaseModel):
     conversation_id: str
     message_id: str
@@ -80,6 +114,11 @@ class UploadListResponse(BaseModel):
 class DeleteUploadResponse(BaseModel):
     upload_id: str
     deleted: bool
+
+
+class DeleteUploadRequest(BaseModel):
+    conversation_id: str
+    upload_id: str
 
 
 class TaskSummaryResponse(BaseModel):
@@ -119,6 +158,7 @@ class ConversationListResponse(BaseModel):
 
 
 class RenameConversationRequest(BaseModel):
+    conversation_id: str
     title: str
 
 
@@ -127,6 +167,10 @@ class DeleteConversationResponse(BaseModel):
     deleted: bool
     cancelled_task_ids: list[str] = Field(default_factory=list)
     deleted_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class DeleteConversationRequest(BaseModel):
+    conversation_id: str
 
 
 class MessageResponse(BaseModel):
@@ -197,6 +241,10 @@ class CancelTaskResponse(BaseModel):
     accepted: bool
 
 
+class CancelTaskRequest(BaseModel):
+    task_id: str
+
+
 class InterruptResponse(BaseModel):
     interrupt_id: str
     conversation_id: str
@@ -214,6 +262,8 @@ class TaskInterruptsResponse(BaseModel):
 
 
 class AnswerInterruptRequest(BaseModel):
+    task_id: str
+    interrupt_id: str
     answer_payload: dict[str, Any] = Field(default_factory=dict)
 
 

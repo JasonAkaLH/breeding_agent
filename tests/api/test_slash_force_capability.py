@@ -7,8 +7,9 @@ from tests.api.support import APITestCase, GENERIC_DATA_SKILL_ID
 class SlashForceCapabilityAPITest(APITestCase):
     async def test_force_capability_requires_supported_capability_id(self) -> None:
         missing = await self.client.post(
-            "/api/v1/conversations/conv-1/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-1",
                 "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "force_capability",
@@ -20,8 +21,9 @@ class SlashForceCapabilityAPITest(APITestCase):
         self.assertIn("capability_id is required", missing.text)
 
         unsupported = await self.client.post(
-            "/api/v1/conversations/conv-1/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-1",
                 "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "force_capability",
@@ -34,8 +36,9 @@ class SlashForceCapabilityAPITest(APITestCase):
 
     async def test_force_capability_stores_routing_mode_and_routes_to_skill(self) -> None:
         response = await self.client.post(
-            "/api/v1/conversations/conv-1/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-1",
                 "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "force_capability",

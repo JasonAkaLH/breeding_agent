@@ -8,13 +8,14 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.contracts import StoragePort
 from src.core.enums import ArtifactType, EdgeType, TaskStatus
 from src.core.models import (
     Artifact,
+    AuthApiToken,
     AuthSession,
     AuthUser,
     CaptchaChallenge,
@@ -48,6 +49,7 @@ from src.storage.runtime_sidecar_shadow import (
 from .base import build_task_edge_id
 from .models import (
     ArtifactRow,
+    AuthApiTokenRow,
     AuthSessionRow,
     AuthUserRow,
     CaptchaChallengeRow,
@@ -152,6 +154,20 @@ def _row_to_auth_session(row: AuthSessionRow) -> AuthSession:
         expires_at=row.expires_at,
         revoked_at=row.revoked_at,
         created_at=row.created_at,
+    )
+
+
+def _row_to_auth_api_token(row: AuthApiTokenRow) -> AuthApiToken:
+    return AuthApiToken(
+        token_id=row.token_id,
+        token_hash=row.token_hash,
+        username=row.username,
+        client_name=row.client_name,
+        scopes=tuple(str(scope) for scope in (row.scopes or ())),
+        expires_at=row.expires_at,
+        revoked_at=row.revoked_at,
+        created_at=row.created_at,
+        last_used_at=row.last_used_at,
     )
 
 
@@ -431,6 +447,75 @@ class SQLiteStateRepository:
     def get_auth_session(self, session_id: str) -> AuthSession | None:
         row = self._session.get(AuthSessionRow, session_id)
         return None if row is None else _row_to_auth_session(row)
+
+    def save_auth_api_token(self, token: AuthApiToken) -> AuthApiToken:
+        row = AuthApiTokenRow(
+            token_id=token.token_id,
+            token_hash=token.token_hash,
+            username=token.username,
+            client_name=token.client_name,
+            scopes=list(token.scopes),
+            expires_at=token.expires_at,
+            revoked_at=token.revoked_at,
+            created_at=token.created_at,
+            last_used_at=token.last_used_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_auth_api_token(merged)
+
+    def get_auth_api_token(self, token_id: str) -> AuthApiToken | None:
+        row = self._session.get(AuthApiTokenRow, token_id)
+        return None if row is None else _row_to_auth_api_token(row)
+
+    def get_auth_api_token_by_hash(self, token_hash: str) -> AuthApiToken | None:
+        row = self._session.execute(
+            select(AuthApiTokenRow).where(AuthApiTokenRow.token_hash == token_hash)
+        ).scalar_one_or_none()
+        return None if row is None else _row_to_auth_api_token(row)
+
+    def list_auth_api_tokens_for_user(self, username: str) -> list[AuthApiToken]:
+        rows = self._session.execute(
+            select(AuthApiTokenRow)
+            .where(AuthApiTokenRow.username == username)
+            .order_by(AuthApiTokenRow.created_at.desc(), AuthApiTokenRow.token_id.desc())
+        ).scalars()
+        return [_row_to_auth_api_token(row) for row in rows]
+
+    def touch_auth_api_token_last_used(self, token_id: str, *, at: datetime) -> AuthApiToken | None:
+        result = self._session.execute(
+            update(AuthApiTokenRow)
+            .where(
+                AuthApiTokenRow.token_id == token_id,
+                AuthApiTokenRow.revoked_at.is_(None),
+                AuthApiTokenRow.expires_at > at,
+            )
+            .values(last_used_at=at)
+        )
+        if result.rowcount != 1:
+            self._session.flush()
+            return None
+        self._session.flush()
+        row = self._session.get(AuthApiTokenRow, token_id)
+        return None if row is None else _row_to_auth_api_token(row)
+
+    def revoke_auth_api_token_for_user(self, username: str, token_id: str, *, revoked_at: datetime) -> AuthApiToken | None:
+        existing = self._session.get(AuthApiTokenRow, token_id)
+        if existing is None or existing.username != username:
+            return None
+        if existing.revoked_at is None:
+            self._session.execute(
+                update(AuthApiTokenRow)
+                .where(
+                    AuthApiTokenRow.token_id == token_id,
+                    AuthApiTokenRow.username == username,
+                    AuthApiTokenRow.revoked_at.is_(None),
+                )
+                .values(revoked_at=revoked_at)
+            )
+            self._session.flush()
+            self._session.refresh(existing)
+        return _row_to_auth_api_token(existing)
 
     def save_conversation(self, conversation: Conversation) -> Conversation:
         row = ConversationRow(
@@ -1160,6 +1245,26 @@ class SQLiteStorage(StoragePort):
 
     async def get_auth_session(self, session_id: str) -> AuthSession | None:
         return await self._run(lambda state, collab: state.get_auth_session(session_id))
+
+    async def save_auth_api_token(self, token: AuthApiToken) -> AuthApiToken:
+        return await self._run(lambda state, collab: state.save_auth_api_token(token))
+
+    async def get_auth_api_token(self, token_id: str) -> AuthApiToken | None:
+        return await self._run(lambda state, collab: state.get_auth_api_token(token_id))
+
+    async def get_auth_api_token_by_hash(self, token_hash: str) -> AuthApiToken | None:
+        return await self._run(lambda state, collab: state.get_auth_api_token_by_hash(token_hash))
+
+    async def list_auth_api_tokens_for_user(self, username: str) -> list[AuthApiToken]:
+        return await self._run(lambda state, collab: state.list_auth_api_tokens_for_user(username))
+
+    async def touch_auth_api_token_last_used(self, token_id: str, *, at: datetime) -> AuthApiToken | None:
+        return await self._run(lambda state, collab: state.touch_auth_api_token_last_used(token_id, at=at))
+
+    async def revoke_auth_api_token_for_user(self, username: str, token_id: str, *, revoked_at: datetime) -> AuthApiToken | None:
+        return await self._run(
+            lambda state, collab: state.revoke_auth_api_token_for_user(username, token_id, revoked_at=revoked_at)
+        )
 
     async def save_conversation(self, conversation: Conversation) -> Conversation:
         return await self._run(lambda state, collab: state.save_conversation(conversation))

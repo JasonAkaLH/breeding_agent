@@ -10,6 +10,7 @@ from ..dto import (
     ConversationListResponse,
     ConversationMessagesResponse,
     ConversationSummaryResponse,
+    DeleteConversationRequest,
     DeleteConversationResponse,
     MessageAcceptedResponse,
     MessageResponse,
@@ -38,13 +39,14 @@ def _conversation_summary_response(conversation: Conversation) -> ConversationSu
 
 
 @router.post(
-    "/api/v1/conversations/{conversation_id}/messages",
+    "/api/v1/conversations/chat-messages",
     response_model=MessageAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def submit_message(conversation_id: str, body: SubmitMessageRequest, request: Request) -> MessageAcceptedResponse:
+async def submit_message(body: SubmitMessageRequest, request: Request) -> MessageAcceptedResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("conversation:write",))
+    conversation_id = body.conversation_id
     try:
         message, task = await runtime.submit_message(conversation_id, body, authenticated_account_id=user.username)
     except ConversationBusyError as exc:
@@ -65,17 +67,18 @@ async def submit_message(conversation_id: str, body: SubmitMessageRequest, reque
 @router.get("/api/v1/conversations", response_model=ConversationListResponse)
 async def list_conversations(request: Request) -> ConversationListResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
     conversations = await runtime.storage.list_conversations_for_account(user.username)
     return ConversationListResponse(
         conversations=[_conversation_summary_response(conversation) for conversation in conversations]
     )
 
 
-@router.patch("/api/v1/conversations/{conversation_id}", response_model=ConversationSummaryResponse)
-async def rename_conversation(conversation_id: str, body: RenameConversationRequest, request: Request) -> ConversationSummaryResponse:
+@router.patch("/api/v1/conversations", response_model=ConversationSummaryResponse)
+async def rename_conversation(body: RenameConversationRequest, request: Request) -> ConversationSummaryResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("conversation:write",))
+    conversation_id = body.conversation_id
     try:
         conversation = await runtime.rename_conversation(conversation_id, body.title, account_id=user.username)
     except PermissionError as exc:
@@ -90,7 +93,7 @@ async def rename_conversation(conversation_id: str, body: RenameConversationRequ
 @router.get("/api/v1/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)
 async def list_conversation_messages(conversation_id: str, request: Request) -> ConversationMessagesResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
     await require_conversation_owner(runtime, conversation_id, user)
     await runtime.sync_assistant_history_messages(conversation_id)
     messages = await runtime.storage.list_messages_for_conversation(conversation_id)
@@ -111,10 +114,11 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
     )
 
 
-@router.delete("/api/v1/conversations/{conversation_id}", response_model=DeleteConversationResponse)
-async def delete_conversation(conversation_id: str, request: Request) -> DeleteConversationResponse:
+@router.delete("/api/v1/conversations", response_model=DeleteConversationResponse)
+async def delete_conversation(body: DeleteConversationRequest, request: Request) -> DeleteConversationResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request)
+    user = await require_authenticated_user(request, required_scopes=("conversation:write",))
+    conversation_id = body.conversation_id
     await require_conversation_owner(runtime, conversation_id, user)
     try:
         result = await runtime.delete_conversation(conversation_id, account_id=user.username)

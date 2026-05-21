@@ -15,8 +15,9 @@ class MainAgentLLMAPITest(APITestCase):
 
         await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
         response = await self.client.post(
-            "/api/v1/conversations/conv-main/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-main",
                 "account_id": "acc-1",
                 "content": "你好",
                 "routing_mode": "auto",
@@ -50,8 +51,9 @@ class MainAgentLLMAPITest(APITestCase):
 
         await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
         response = await self.client.post(
-            "/api/v1/conversations/conv-main-reasoning/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-main-reasoning",
                 "account_id": "acc-1",
                 "content": "请深度思考",
                 "routing_mode": "auto",
@@ -127,8 +129,9 @@ class MainAgentLLMAPITest(APITestCase):
 
         await self.reconfigure_runtime(main_agent_stream_generator=streamer, planner_text_generator=planner, skill_roots=None)
         response = await self.client.post(
-            "/api/v1/conversations/conv-auto-sql/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-auto-sql",
                 "account_id": "acc-1",
                 "content": "查询龙粳33的详细审定信息",
                 "routing_mode": "auto",
@@ -185,8 +188,9 @@ class MainAgentLLMAPITest(APITestCase):
             skill_roots=None,
         )
         response = await self.client.post(
-            "/api/v1/conversations/conv-llm-planner-sql/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-llm-planner-sql",
                 "account_id": "acc-1",
                 "content": "查询龙粳33的详细审定信息",
                 "routing_mode": "auto",
@@ -224,8 +228,9 @@ class MainAgentLLMAPITest(APITestCase):
             skill_roots=None,
         )
         response = await self.client.post(
-            "/api/v1/conversations/conv-llm-planner-chat/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-llm-planner-chat",
                 "account_id": "acc-1",
                 "content": "你好，介绍一下你能做什么",
                 "routing_mode": "auto",
@@ -257,8 +262,9 @@ class MainAgentLLMAPITest(APITestCase):
             skill_roots=None,
         )
         response = await self.client.post(
-            "/api/v1/conversations/conv-llm-planner-fail/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-llm-planner-fail",
                 "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "auto",
@@ -409,8 +415,9 @@ triggers:
 
         await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=[self.workspace / "skills"])
         response = await self.client.post(
-            "/api/v1/conversations/conv-skill/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-skill",
                 "account_id": "acc-1",
                 "content": "帮我写周报",
                 "routing_mode": "auto",
@@ -520,8 +527,9 @@ triggers:
         )
 
         response = await self.client.post(
-            "/api/v1/conversations/conv-main-deep/messages",
+            "/api/v1/conversations/chat-messages",
             json={
+                "conversation_id": "conv-main-deep",
                 "account_id": "acc-1",
                 "content": "请深入分析",
                 "routing_mode": "auto",

@@ -31,7 +31,7 @@ class AuditJsonlObservabilityTest(SQLQueryE2EAPITestCase):
         cancel_task_id = cancel_response.json()["task_id"]
 
         await self.wait_for_node_status(cancel_task_id, node_suffix=":skill_execute", status="running")
-        await self.client.post(f"/api/v1/tasks/{cancel_task_id}/cancel")
+        await self.client.post("/api/v1/tasks/cancel", json={"task_id": cancel_task_id})
         release.set()
         cancelled_terminal = await self.wait_for_terminal_task(cancel_task_id)
         self.assertEqual(cancelled_terminal["status"], "cancelled")

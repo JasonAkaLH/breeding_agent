@@ -88,6 +88,19 @@ class AuthSession:
 
 
 @dataclass(slots=True, frozen=True)
+class AuthApiToken:
+    token_id: str
+    token_hash: str
+    username: str
+    client_name: str
+    scopes: tuple[str, ...]
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    created_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class Message:
     message_id: str
     conversation_id: str
