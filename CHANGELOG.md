@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+- 本周工作周报更新：重写根目录 `本周工作周报.md`，汇总 2026-05-18 至 2026-05-22 小奥 Agent 主项目与 `/Users/yinpeihai/Code_workspace/ocr_mcp` OCR MCP 项目的本周交付、验证和下周风险。
+- Docker 部署文档补充数据持久化说明：明确 `/app/runtime` 挂载到 Docker named volume `breeding-agent-runtime`，升级镜像/重建容器不删除 volume 即可保留 SQLite、audit 与 artifact 数据。
+- Docker 部署端口调整：backend 宿主机端口改为 `51888`，frontend 宿主机端口改为 `51999`，并同步 `docker_cmd.md`、Compose 与 README 说明。
+- Docker 远端部署命令补充：根目录部署命令文件调整为 `docker_cmd.md`，以 Markdown 文档分行列出 pull、network/volume、docker run、状态查看、日志与停止命令。
+- Docker Compose 打包基线新增：提供 `Dockerfile` 多阶段构建、`docker-compose.yml` 与 nginx 反代配置，backend / frontend 均按目标 `linux/amd64` 构建，backend 镜像基于 Ubuntu 22.04 + Conda Python 3.13.13 启动 FastAPI，frontend 镜像服务 Vite build 产物并代理 `/api/` / `/api-doc`；`.dockerignore` 排除 tests、根目录文档与除 `docs/api` 外的 docs，同时按用户要求允许本地 `config.yaml` 进入 backend 镜像。
 - OCR 原文展示链路增强：OCR Skill 成功时同时输出供主代理总结的识别内容与 `ocr_raw_text` 展示 artifact，前端在 assistant 气泡内部底部渲染“OCR 回传原文”卡片，默认限高并支持展开/收起，原文按纯文本保留换行展示。
 - OCR Skill 配置隔离：OCR 远端服务地址、token、超时与轮询参数改为直接从 git-ignored `skill/ocr/config.yaml` 读取，与项目根目录 `config.yaml` 完全分开，不再通过 Skill subprocess 环境变量传递 OCR MCP 配置。
 - Skill 执行可观测性增强：`python_subprocess` Skill 输出 `ok:false` / `is_error:true` 时新增脱敏的 `skill.output_error` audit-only 事件，同时 OCR Skill 失败输出补充 `error_code`、`error_type`、`stage`、`retriable` 与 `status=failed`，OCR MCP 服务地址改为仅从 Skill 本地配置读取，便于排查远端 OCR MCP 连接/HTTP/超时问题且不改变现有 finalizer 用户体验。

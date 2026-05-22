@@ -1,0 +1,65 @@
+# VCS / local agent state
+.git/
+.codex/
+.omx/
+.superpowers/
+.github/
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+
+# Root-level documents must not enter Docker context/images.
+/*.md
+/本周工作周报.md
+
+# Keep only the shipped static API document from docs/.
+docs/**
+!docs/api/
+!docs/api/**
+
+# Tests and generated caches are not runtime inputs.
+tests/
+**/tests/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
+# Frontend local dependencies/build output are rebuilt inside Docker.
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+
+# Runtime data is mounted as a Compose volume.
+runtime/
+
+# Python local env/build artifacts.
+.venv/
+venv/
+env/
+.python-version
+.env
+build/
+dist/
+site/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# Native/Rust build outputs and local reports.
+native/target/
+native/fuzz/target/
+
+# Skill-local non-runtime examples/docs/tests; keep Skill manifests, scripts,
+# configs, and runtime modules.
+skill/**/docs/
+skill/**/examples/
+skill/**/outputs/

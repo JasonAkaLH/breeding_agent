@@ -1,0 +1,50 @@
+services:
+  backend:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    image: breeding-agent-backend:local
+    environment:
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      MAF_RUST_CORE_MODE: "off"
+      MAF_RUST_LIFECYCLE_MODE: "off"
+      MAF_RUST_ARTIFACT_STORE_MODE: "off"
+      MAF_RUST_AUTH_CORE_MODE: "off"
+      MAF_RUST_DATA_ACCESS_MODE: "off"
+      MAF_RUST_AUDIT_SANITIZER_MODE: "off"
+      MAF_RUST_SKILL_RUNTIME_MODE: "off"
+    volumes:
+      - breeding-agent-runtime:/app/runtime
+    ports:
+      - "51888:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api-doc"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  frontend:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    image: breeding-agent-frontend:local
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "51999:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  breeding-agent-runtime:

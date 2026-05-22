@@ -108,6 +108,19 @@ python scripts/run_fullstack_dev.py
 
 真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随 `skill/<domain-query>/` bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
 
+- Docker Compose 打包 / 启动（会把本地 git-ignored `config.yaml` 复制进 backend 镜像；该文件包含 provider / 数据库等敏感配置时只应在受控环境构建和分发镜像）：
+
+```bash
+docker compose build
+docker compose up
+```
+
+Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`。
+
+`.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
+
+若通过远端域名对浏览器开放该 Compose 栈，应在反向代理 / LB 层提供 HTTPS；当前认证 Cookie 使用 `__Host-maf_session` + `Secure`，非 TLS 远端 HTTP 只适合 API token / 本地调试，不适合作为正式浏览器登录入口。
+
 运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、Skill runtime 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 仍可通过显式 `config` dict 注入覆盖，不应在业务节点执行阶段重复读取 `config.yaml`。
 MySQL 只读连接配置也放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
 认证相关部署配置不得写入 tracked 文件：跨站 REST API 只通过 `MAF_API_CORS_ALLOWED_ORIGINS` 配置逗号分隔的显式 origin allowlist，不允许 `*`；API token hash pepper 使用 `MAF_AUTH_TOKEN_HASH_SECRET`，当 `MAF_API_ENV` / `MAF_ENV` / `APP_ENV` 为 `production` / `prod` 或显式设置 `MAF_AUTH_TOKEN_HASH_SECRET_REQUIRED=1` 时，缺失 secret 必须 fail closed；未配置 secret 的开发/测试进程只使用进程内随机 pepper，重启后既有 token 自动失效。同站浏览器登录态只写 `__Host-maf_session` opaque session Cookie；跨站/第三方浏览器和非浏览器客户端默认使用 `Authorization: Bearer <opaque-token>`，不要把 token 放入 URL query。
