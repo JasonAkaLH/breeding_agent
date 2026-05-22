@@ -54,6 +54,15 @@ npm test -- --run
 npm run build
 ```
 
+Docker Compose 打包 / 启动命令（会把本地 git-ignored `config.yaml` 复制进 backend 镜像；该文件含敏感配置时只在受控环境构建 / 分发镜像）：
+
+```bash
+docker compose build
+docker compose up
+```
+
+当前 Compose 构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local` 使用 Ubuntu 22.04 + Conda Python 3.13.13 运行 FastAPI；`breeding-agent-frontend:local` 使用 Ubuntu 22.04 + nginx 服务 Vite build 产物并反代 `/api/` 与 `/api-doc`。`.dockerignore` 必须继续排除 `tests/`、根目录 Markdown 文档与 `docs/` 中除 `docs/api/` 外的文档。
+
 - Rust runtime contract/kernel workspace 当前验证命令：
 
 ```bash
