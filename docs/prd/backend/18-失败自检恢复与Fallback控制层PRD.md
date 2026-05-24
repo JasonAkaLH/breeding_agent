@@ -2,7 +2,7 @@
 
 - **项目**：breeding_agent
 - **范围**：后端执行可靠性、前端恢复体验、审计与 Runtime sidecar 可靠性、LLM provider fallback 策略
-- **文档状态**：PRD 草案（已完成设计确认，待实施计划拆解）
+- **文档状态**：PRD 加固版（document-perfectization 审查通过；待实施计划拆解）
 - **日期**：2026-05-24
 - **关联文档**：`docs/失败自检恢复与Fallback待补清单.md`
 
@@ -23,6 +23,47 @@
 9. 主代理 LLM provider failure 是否支持备用 provider / 更友好失败提示缺少正式产品策略。
 
 本 PRD 将这些缺口收敛为统一的 **可靠性控制层** 需求，而不是在各处零散补丁式修复。
+
+
+## 0.1 用户、干系人与受影响系统
+
+| 类型 | 对象 | 关切点 |
+|---|---|---|
+| 业务用户 | 内部业务对话台用户 | 任务失败原因可理解；网络短断、结果加载失败、附件失效时有恢复路径；不因系统问题误导用户重提问题 |
+| 运维 / 平台维护者 | 后端、前端、Runtime sidecar 与部署维护者 | 失败可定位；审计不阻断主路径；sidecar enforce 不破坏 fail-closed；默认策略可灰度 |
+| 能力开发者 | Skill / MCP / 主代理能力开发者 | 能力只需返回通用结构化错误；重试、超时、取消和重规划由平台统一处理 |
+| 安全与审计 | 权限、数据访问、审计日志与 Rust enforce gate 维护者 | 安全失败不得 fallback 成成功；审计脱敏；fallback 有证据；enforce 不回退 legacy |
+| 前端系统 | `frontend/` 业务对话台 | SSE 重连、artifact retry、upload warning、错误文案与气泡状态 |
+| 后端系统 | `src/api/`、`src/orchestration/`、`src/lifecycle/`、`src/storage/`、`src/integrations/` | 节点执行保护、事件发布、状态写入、sidecar retry、LLM fallback 配置 |
+| 外部/旁路系统 | LLM provider、MCP server、MySQL readonly、Runtime sidecar、audit sink | transient failure 的重试/降级边界，required/enforce 场景 fail-closed |
+
+## 0.2 当前状态证据
+
+本 PRD 的需求来自以下仓库证据，而不是仅凭记忆或抽象判断：
+
+| 证据点 | 仓库位置 | 结论 |
+|---|---|---|
+| 节点 retry/timeout 字段存在但执行层主要保存字段 | `src/orchestration/models.py`、`src/orchestration/service.py`、`src/storage/sqlite/repositories.py` | 可以在现有节点模型上补执行保护壳，无需新增核心节点模型 |
+| 节点执行边界当前可由外层任务 crash 收束 | `src/orchestration/service.py`、`src/api/runtime.py` | 应把可归属异常优先转为 node failed，让 completion / replan 接管 |
+| 后端事件已持久化并支持 replay | `src/api/runtime.py`、`src/api/sse.py` | 前端 SSE 重连可复用现有 replay，不需要新增事件快照 API |
+| 前端已有事件去重和终态补偿 | `frontend/src/domain/taskEvents.ts`、`frontend/src/App.tsx` | 自动重连应复用 event id 去重和现有 task status 查询 |
+| 上传解析会收集 missing upload ids | `src/api/runtime.py` | 可在现有 submit message 流程增加 warning / fail early，不需要重做 upload store |
+| sidecar contract 已有 retry plan helper | `src/storage/runtime_sidecar_facade.py` | enforce 写路径可接入统一 bounded retry，必须保留 contract 条件 |
+| shadow/safety 审计已有“失败不影响用户结果”口径 | `src/storage/runtime_sidecar_shadow.py`、`src/integrations/rust_safety_contract.py` | 事件发布中的 audit sink 也应采用旁路隔离语义 |
+| Planner provider failure 当前 fail closed | `src/orchestration/llm_workflow_provider.py` | fallback 必须是显式配置，且只针对 provider failure，不覆盖非法输出 |
+| 主代理 LLM 失败已有结构化错误和审计 | `src/capabilities/main_agent/executor.py` | 应优化用户提示和可选策略，不应默认生成伪成功回答 |
+
+## 0.3 Confidence 标准
+
+本 PRD 进入实施计划前必须满足以下标准：
+
+- 目标与问题一一对应，覆盖 9 个已识别缺口。
+- in-scope / out-of-scope 明确，特别是安全失败和 enforce 失败不得被 fallback 成成功。
+- 受影响用户、系统、集成点、配置项和事件契约明确。
+- 每个关键需求都有可测试验收标准。
+- NFR 覆盖可靠性、安全、隐私、观测、兼容、性能/成本与可回滚性。
+- 未启用可选 provider fallback 时，默认行为保持与当前系统兼容。
+- 任何未最终启用的业务策略都有安全默认值，不阻塞实施。
 
 ## 1. 目标
 
@@ -51,6 +92,20 @@
 - 不给所有 Skill 默认打开重试。
 - 不在前端展示内部审计细节。
 - 不在本 PRD 中实现具体代码；实现需后续实施计划拆解。
+
+
+## 2.1 非功能需求
+
+| 维度 | 要求 |
+|---|---|
+| 可靠性 | 可归属节点失败必须落成节点状态和事件；任务不得因可归属节点异常长期停在 running；SSE 断线恢复不得重复应用事件 |
+| 安全 | 权限、安全、schema、contract、trusted artifact、enforce gate 失败必须 fail closed；fallback 不得绕过 SQL Guard、账号隔离或 sidecar enforce |
+| 隐私 | 新增 warning、审计和 metadata 不得记录 prompt 原文、secret、token、数据库连接、本地路径、原始 sidecar payload 或未脱敏 upload 内容 |
+| 观测性 | 每个新增 fallback / retry / failover 必须有状态、事件或 audit-only 证据；audit sink 自身失败必须有降噪诊断 |
+| 兼容性 | 默认配置必须保持当前行为：节点默认 `max_attempts=1`，planner provider fallback disabled，main-agent provider fallback disabled |
+| 性能与成本 | retry 与 provider fallback 必须有上限；provider chain 与节点 retry 不得形成乘法爆炸；SSE 重连退避最大 5000ms |
+| 可回滚性 | 新能力应通过配置或局部代码路径可关闭；禁用后回到现有 fail-closed / structured failure 行为 |
+| 可测试性 | 每个 key path 必须能通过 fake capability、fake event source、fake audit sink、fake sidecar、fake LLM provider 做自动化验证 |
 
 ## 3. 核心原则
 
@@ -107,6 +162,36 @@ Planner provider failure、主代理 LLM provider failure 默认不隐式改变�
 3. **前端恢复体验层**：SSE 自动重连、artifact 重试、上传缺失提示、可重试错误展示。
 4. **旁路可靠性层**：audit sink 失败隔离、Runtime sidecar bounded retry、shadow/enforce 语义一致。
 5. **LLM fallback 策略层**：Planner / 主代理 provider fallback 的显式配置、审计、metadata 与用户语义。
+
+
+## 4.1 依赖与集成点
+
+| 集成点 | 依赖 / 约束 | 本 PRD 要求 |
+|---|---|---|
+| Orchestration service | 现有节点、计划、completion、replan 模型 | 新增执行保护壳必须复用现有 completion / replan，不另起编排状态机 |
+| Capability executor | 能力返回结构化结果或抛异常 | 保护壳必须同时处理返回错误和抛异常两种路径 |
+| Storage / Event log | 任务、节点、artifact、event 持久化 | 核心持久化失败不是 fallback 场景；不得吞掉 |
+| SSE broker | live 订阅与 frontend event replay | audit 失败不阻断投递；live 失败可由 replay 恢复 |
+| Frontend task state | 现有事件 reducer、App 运行态、artifact 加载 | 新增 reconnecting/result_load_failed/upload_warning 状态必须不污染正式历史正文 |
+| Upload store | 上传归属校验、缺失检测 | 普通任务 warning；显式文件能力 fail early；跨账号拒绝 |
+| Runtime sidecar | shadow/enforce、typed error、retry contract | enforce 只按 contract bounded retry；shadow 不影响用户可见结果 |
+| Audit sink | JSONL / 安全审计输出 | audit sink failure best-effort 隔离并降噪诊断 |
+| LLM runtime / Planner | provider failure、invalid output、配置注入 | provider fallback 默认关闭；非法输出不 fallback |
+| Skill/MCP manifests | 能力可重试性、文件依赖声明 | 文件类能力和可重试能力需要 manifest/config 明确声明 |
+
+## 4.2 需求追踪矩阵
+
+| 缺口 | PRD 覆盖章节 | 关键验收 |
+|---|---|---|
+| 节点异常直接 task crash | 5.1、5.2、11.1 | 能力抛异常 / 无可用实例 -> node.failed |
+| retry_policy / timeout_policy 未执行 | 5.3、5.4、11.1 | retriable 重试、timeout 失败、取消中停止 retry |
+| SSE 无自动重连 | 6.1、9.4、11.2 | active task 断线重连、replay 去重 |
+| artifact 加载失败无重试 | 6.3、9.4、11.2 | result_load_failed + retry 成功替换气泡 |
+| upload 缺失静默忽略 | 6.4、6.5、9.4、11.2 | 普通任务 warning、文件类 Skill fail early、越权拒绝 |
+| audit sink 阻断 SSE | 7.1、7.2、7.3、11.3 | audit 异常时 SSE 仍收到事件 |
+| sidecar retry helper 未接入 | 7.4、7.5、7.6、11.3 | transient bounded retry、不可重试 fail closed |
+| planner provider fallback 策略不清 | 8.2、11.4 | disabled 保持失败；enabled 仅 main_agent_only |
+| main-agent provider fallback 策略不清 | 8.3、8.4、11.4 | 默认友好失败；可选 failover 有审计和成本边界 |
 
 ## 5. 后端节点执行保护层需求
 
@@ -573,6 +658,22 @@ max_attempts
 
 `safe_message` 不得包含 prompt 原文、secret、token、数据库连接、本地文件路径或原始 sidecar payload。
 
+
+## 10.5 功能需求矩阵
+
+| ID | 需求 | 优先级 | 默认策略 | 验收锚点 |
+|---|---|---|---|---|
+| FR-1 | 所有可归属节点异常必须由节点执行保护壳转为节点失败 | P0 | 启用 | 11.1 |
+| FR-2 | 节点 retry / timeout 必须按节点策略执行 | P0 | `max_attempts=1`，不改变现状 | 11.1 |
+| FR-3 | retry 必须尊重取消状态，取消中不得发起新 attempt | P0 | 启用 | 11.1 |
+| FR-4 | SSE 断开且任务 active 时必须自动重连 | P1 | 启用 | 11.2 |
+| FR-5 | artifact 加载失败必须提供 retry 入口 | P1 | 启用 | 11.2 |
+| FR-6 | 上传缺失必须 warning 或 fail early，不能静默忽略 | P1 | 普通 warning，文件类 fail early | 11.2 |
+| FR-7 | audit sink failure 不得阻断 SSE 投递 | P1 | 启用 | 11.3 |
+| FR-8 | sidecar enforce transient 必须按 contract bounded retry | P1 | 仅 enforce 写路径 | 11.3 |
+| FR-9 | Planner provider fallback 必须配置启用且只允许 main_agent_only | P2 | disabled | 11.4 |
+| FR-10 | 主代理 provider fallback 默认关闭；完全失败时提供模型服务不可用提示 | P2 | failover disabled | 11.4 |
+
 ## 11. 验收标准
 
 ### 11.1 后端执行
@@ -635,6 +736,24 @@ max_attempts
 
 推荐验证命令沿用项目现有分层 unittest 与前端 Vitest/build 命令；涉及 Rust sidecar 或依赖变更时必须按仓库 License Requirement 运行 cargo-deny 相关检查。
 
+
+## 12.1 Rollout 与迁移要求
+
+| 阶段 | 行为 | 回滚方式 |
+|---|---|---|
+| Phase 1：后端保护壳 shadow-like 验证 | 默认 `max_attempts=1`，只改变异常归一和审计；不打开额外 retry | 关闭保护壳新增 retry 分支，保留外层 task.failed 收束 |
+| Phase 2：前端恢复体验 | 打开 SSE reconnect、artifact retry、upload warning；不改变后端核心安全策略 | 前端 feature flag 或配置回退到一次性状态查询 |
+| Phase 3：audit / sidecar 可靠性 | audit sink failure 隔离；sidecar enforce 写路径接入 bounded retry | 关闭 sidecar retry helper，回到现有 enforce fail-closed；audit 隔离可保留 |
+| Phase 4：LLM fallback 策略 | 默认只优化失败文案；planner/main-agent provider fallback 仍 disabled | 配置保持 disabled 即可回退 |
+| Phase 5：选择性启用 provider fallback | 仅在运维确认 provider、成本、审计后启用 | 配置回 disabled，恢复当前 fail-closed 行为 |
+
+迁移要求：
+
+- 新增状态 / 事件必须兼容旧历史任务；旧任务没有 attempt 审计或 upload warning 时，前端不得报错。
+- 新增配置必须有默认值；缺配置时保持现有行为。
+- 如需新增持久化字段，必须保持 SQLite 现有测试和未来 PostgreSQL 同构迁移口径。
+- PDF 本地导出物继续保持 git ignored，不属于产品交付 artifact。
+
 ## 13. 推进顺序建议
 
 虽然本 PRD 是大而全设计，实施仍建议分阶段：
@@ -645,13 +764,37 @@ max_attempts
 4. LLM fallback 策略：配置、审计、metadata、前端错误文案。
 5. 端到端回归与文档更新。
 
-## 14. 未决策项
+## 14. 风险、假设与默认决策
 
-本 PRD 已明确默认策略，但以下能力是否启用仍需实施前按配置确认：
+### 14.1 默认决策
 
-- Planner provider failure 是否在生产启用 `main_agent_only` fallback。
-- 主代理是否配置 backup provider chain。
-- 哪些 Skill 声明可安全重试。
-- 文件类 Skill 的 `requires_uploaded_artifact` manifest 字段命名与迁移方式。
+以下策略已有安全默认值，不阻塞实施：
 
-默认实现必须在这些策略未启用时保持现有行为。
+| 决策 | 默认值 | 原因 |
+|---|---|---|
+| Planner provider failure 是否生产启用 fallback | 默认 disabled | 保持当前 fail-closed；后续可配置打开 `main_agent_only` |
+| 主代理是否配置 backup provider chain | 默认 disabled | 避免成本和质量不可控；先优化失败提示 |
+| 哪些 Skill 可安全重试 | 默认没有 Skill 自动多次 retry | 避免重复副作用；仅 manifest/config 明确声明后启用 |
+| 文件类 Skill 依赖上传字段命名 | 默认采用 manifest/config 显式声明，实施计划确定字段名 | 不阻断普通 upload warning；字段命名属于实施细节 |
+
+### 14.2 风险
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| 节点 retry 导致外部服务重复调用 | 成本或副作用增加 | 默认 `max_attempts=1`；只给幂等或声明安全可重试能力启用 |
+| SSE 重连导致重复渲染 | 前端回答或进度重复 | 必须复用 event id 去重；测试 replay 重复事件 |
+| audit sink 失败被过度吞掉 | 审计故障不可见 | 记录降噪 warning、计数器和 recovered 事件 |
+| sidecar retry 掩盖 enforce 问题 | 状态一致性风险 | 只按 contract、幂等键、same sidecar、typed retriable error 重试 |
+| provider fallback 改变回答质量 | 用户信任和成本风险 | 默认 disabled；启用必须审计 metadata 和成本边界 |
+| 上传缺失 warning 影响用户理解 | 用户可能忽略附件未带入 | 前端必须展示明确文案；文件类能力 fail early |
+
+### 14.3 假设
+
+- 当前同一 conversation 内任务串行执行的约束保持不变。
+- 后端事件 replay 继续作为前端恢复的权威来源。
+- 所有新增用户可见 warning 都需要本地化中文文案。
+- 实施阶段可使用 fake capability / fake provider / fake sidecar / fake audit sink 构造自动化测试。
+
+### 14.4 Open Questions
+
+无阻断性 open question。所有可能影响生产策略的选项均已有默认关闭或 fail-closed 决策；如后续要启用 provider fallback 或 Skill retry，应在实施计划或部署配置评审中单独确认。
