@@ -69,6 +69,7 @@
 
 ### 当前开发焦点：Rust Runtime 迁移按 `docs/prd/rust` 顺序推进
 
+- 失败自检、恢复与 Fallback 控制层 PRD 完成 document-perfectization 加固：补齐用户/干系人、当前状态证据、confidence 标准、NFR、依赖与集成点、需求追踪矩阵、功能需求矩阵、rollout / migration、风险、假设与安全默认决策；无阻断性 open question，默认保持 provider fallback disabled 与 fail-closed 口径。
 - 失败自检、恢复与 Fallback 控制层 PRD 已落地：新增 `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`，覆盖节点执行保护壳、retry/timeout、前端 SSE 重连与 artifact retry、上传缺失提示、审计隔离、RuntimeSidecar bounded retry、Planner / 主代理 provider fallback 策略、状态事件契约与测试矩阵，并同步 PRD 索引。
 - 已实现 fallback / 失败自检恢复机制已导出为根目录本地 PDF：`已实现的Fallback失败自检恢复机制.pdf`，并将该 PDF 加入 `.gitignore`，避免作为本地导出物提交或推送。
 - 失败自检、恢复与 Fallback 缺口已落文档：新增 `docs/失败自检恢复与Fallback待补清单.md`，按 P0/P1/P2 记录节点级异常归一、retry/timeout 执行、SSE 重连、artifact 重试、上传缺失提示、审计隔离、sidecar bounded retry 与 planner/main-agent provider fallback 策略边界；本次仅文档化，不改运行时代码。
