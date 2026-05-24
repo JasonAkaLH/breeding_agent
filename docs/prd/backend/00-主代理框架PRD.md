@@ -85,6 +85,7 @@
 | Skill Executor 实现需求 | `docs/prd/backend/15-SkillExecutor实现需求PRD.md` | 定义 `skill.*` 一等执行器的职责边界、service binding、安全约束、artifact/event 归一化与 数据查询 Skill 化前置要求 |
 | Rust 化 Runtime 模块评估 | `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` | 评估主体 runtime substrate、Skill/MCP、storage/event、artifact 与 deterministic kernel 的 Rust native 下沉边界；不针对单个业务 Skill 做专项优化 |
 | MCP 长任务与流式 SSE | `docs/prd/backend/17-MCP长任务流式SSEPRD.md` | 将 MCP Runtime 从单条 SSE 兼容升级为完整长任务流式 SSE、断线恢复、progress、task status、取消与 API/SSE 事件桥接 |
+| 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
 | MCP Runtime 联合改造 Phase | `docs/prd/MCP/README.md` | 把 MCP 长任务流式 SSE 与 Rust MCP sidecar 作为同一最终交付目标拆成 Phase PRD |
 
 ## 5. 当前已定的关键决策摘要
@@ -227,6 +228,7 @@
 - Skill Executor 实现需求 PRD：`docs/prd/backend/15-SkillExecutor实现需求PRD.md`
 - Rust 化 Runtime 模块评估 PRD：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`
 - MCP 长任务与流式 SSE PRD：`docs/prd/backend/17-MCP长任务流式SSEPRD.md`
+- 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`
 - MCP Runtime 联合改造 Phase PRD：`docs/prd/MCP/README.md`
 

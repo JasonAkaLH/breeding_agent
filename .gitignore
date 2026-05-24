@@ -96,3 +96,6 @@ build.ninja
 
 # Rust build outputs
 native/target/
+
+# Local generated analysis exports
+/已实现的Fallback失败自检恢复机制.pdf

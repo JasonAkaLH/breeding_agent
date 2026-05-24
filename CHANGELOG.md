@@ -69,6 +69,9 @@
 
 ### 当前开发焦点：Rust Runtime 迁移按 `docs/prd/rust` 顺序推进
 
+- 失败自检、恢复与 Fallback 控制层 PRD 已落地：新增 `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`，覆盖节点执行保护壳、retry/timeout、前端 SSE 重连与 artifact retry、上传缺失提示、审计隔离、RuntimeSidecar bounded retry、Planner / 主代理 provider fallback 策略、状态事件契约与测试矩阵，并同步 PRD 索引。
+- 已实现 fallback / 失败自检恢复机制已导出为根目录本地 PDF：`已实现的Fallback失败自检恢复机制.pdf`，并将该 PDF 加入 `.gitignore`，避免作为本地导出物提交或推送。
+- 失败自检、恢复与 Fallback 缺口已落文档：新增 `docs/失败自检恢复与Fallback待补清单.md`，按 P0/P1/P2 记录节点级异常归一、retry/timeout 执行、SSE 重连、artifact 重试、上传缺失提示、审计隔离、sidecar bounded retry 与 planner/main-agent provider fallback 策略边界；本次仅文档化，不改运行时代码。
 - 多 Skill DAG 回答编排修复：新增 `response_role=intermediate|final` 轻量合约、全局 finalizer 自动追加、finalizer 阶段 skill auto-match 抑制，以及 assistant history / conversation memory 优先选择全局最终回答的回归测试；保持 Artifact / SQLite schema 不变。
 - PRD01-PRD07 cleanup：新增共享 `scripts/prd_evidence.py`，把 PRD03-PRD07 evidence validator 中重复的 JSON object 读取、pending gate 收集、required mapping、allowlist digest、CLI 输出与轻量模块加载逻辑收敛为 stdlib-only helper；CI path trigger 已纳入该 helper，PRD07 `provider_fallback` 仍仅作为范围排除标签，不是 runtime fallback。
 - PRD07 条件候选 guard 已落地：新增 `docs/prd/rust/evidence/prd07/orchestration_hotspot_release_gates.json`、`scripts/validate_prd07_orchestration_hotspot_evidence.py`、PRD07 evidence README、CI wiring 与 integration tests；当前状态为 `guarded`，明确不创建 `maf_orchestration_kernel` / WASM artifact，未来启动必须另开 implementation PRD 并补齐性能/可靠性、baseline/shadow compare、供应链、SLO、migration/DR、ops 与 legacy decommission gate。
