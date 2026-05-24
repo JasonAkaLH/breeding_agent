@@ -65,6 +65,19 @@
 - 未启用可选 provider fallback 时，默认行为保持与当前系统兼容。
 - 任何未最终启用的业务策略都有安全默认值，不阻塞实施。
 
+
+## 0.4 分步 PRD 拆分
+
+本文件作为 umbrella PRD 保留统一目标、边界、默认策略与总体验收。实施按以下分步 PRD 推进：
+
+| 顺序 | 文件 | 范围 |
+|---|---|---|
+| 18-01 | `docs/prd/backend/failure-recovery/18-01-节点执行保护壳PRD.md` | 节点异常归一、retry、timeout、attempt 审计、取消中停止 retry、node.failed 接入 replan |
+| 18-02 | `docs/prd/backend/failure-recovery/18-02-前端恢复体验PRD.md` | SSE 自动重连、replay 去重、artifact retry、upload warning、文件类 Skill 缺附件 fail early |
+| 18-03 | `docs/prd/backend/failure-recovery/18-03-审计与Sidecar可靠性PRD.md` | audit sink 失败隔离、审计故障诊断、RuntimeSidecar enforce bounded retry、shadow/enforce 边界 |
+| 18-04 | `docs/prd/backend/failure-recovery/18-04-LLMProviderFallback策略PRD.md` | Planner provider fallback、主代理 provider failure 友好错误、backup provider chain 成本边界 |
+| 18-05 | `docs/prd/backend/failure-recovery/18-05-端到端验收与RolloutPRD.md` | 总体验收矩阵、分阶段 rollout、回滚策略、e2e 场景、release gate |
+
 ## 1. 目标
 
 本 PRD 目标是设计并约束一套统一的失败自检、恢复与 fallback 控制层，使系统满足：

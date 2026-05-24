@@ -23,6 +23,7 @@
 - Rust 化 Runtime 模块评估 PRD：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`。
 - MCP 长任务与流式 SSE PRD：`docs/prd/backend/17-MCP长任务流式SSEPRD.md`。
 - 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
+- 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`。
 - MCP Runtime 联合改造 Phase PRD 入口：`docs/prd/MCP/README.md`。
 - MCP Client 四版本兼容 PRD 入口：`docs/prd/MCP/compatibility/README.md`。
