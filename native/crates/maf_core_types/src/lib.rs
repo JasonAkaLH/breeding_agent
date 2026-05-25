@@ -9,7 +9,7 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
-pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260525_user_token_only";
+pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260525_username_token";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +262,29 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
             ]),
         ),
         (
+            "AuthSession".to_owned(),
+            fields(&[
+                "session_id",
+                "username",
+                "expires_at",
+                "revoked_at",
+                "created_at",
+            ]),
+        ),
+        (
+            "AuthUser".to_owned(),
+            fields(&[
+                "username",
+                "password_hash",
+                "password_salt",
+                "password_scheme",
+                "status",
+                "created_at",
+                "updated_at",
+                "last_login_at",
+            ]),
+        ),
+        (
             "AuthUserToken".to_owned(),
             fields(&[
                 "username",
@@ -270,6 +293,17 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "token_last_used_at",
                 "created_at",
                 "updated_at",
+            ]),
+        ),
+        (
+            "CaptchaChallenge".to_owned(),
+            fields(&[
+                "captcha_id",
+                "code_hash",
+                "expires_at",
+                "attempt_count",
+                "consumed_at",
+                "created_at",
             ]),
         ),
         (
