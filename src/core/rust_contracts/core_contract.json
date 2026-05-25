@@ -1,7 +1,7 @@
 {
   "component": "maf_core_types",
   "contract_version": "core.v1",
-  "schema_hash": "maf_core_types_core_v1_schema_20260525_username_token_legacy_auth_removed",
+  "schema_hash": "maf_core_types_core_v1_schema_20260525_user_token_only",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
   "supported_features": [
     "core_contract_artifact",
