@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 旧认证上下文已完成硬删除：移除旧 AuthUser/CaptchaChallenge/AuthSession/AuthApiToken core/storage/Rust contract 残留，bootstrap 启动时幂等 drop 旧 SQLite auth 表，并保留当前 Authorization-only username token 行为；旧 Cookie/password/captcha/scoped-token 设计上下文已从 active docs 删除。
 - 旧认证残留清理进入 `$plan` 实施计划：新增 `.omx/plans/prd-20260525-legacy-auth-context-removal.md` 与 `.omx/plans/test-spec-20260525-legacy-auth-context-removal.md`，按 CP-0 至 CP-5 拆分 TDD、core/storage 删除、bootstrap drop 旧表、Rust contract 同步、历史上下文删除、静态扫描与 license gate；本轮仅规划，不改运行时代码。
 - 旧认证残留清理设计完成 document-perfectization 审查：加固 `docs/superpowers/specs/2026-05-25-legacy-auth-context-removal-design.md`，补充置信门槛、当前 Authorization-only 标识 allowlist、精确历史文档删除清单、bootstrap 顺序、混合测试改写要求与静态扫描防误伤规则；本轮仅修改文档，不改运行时代码。
 - 旧 Cookie/password/captcha/scoped API token 认证残留清理设计完成：新增 `docs/superpowers/specs/2026-05-25-legacy-auth-context-removal-design.md`，明确硬删除旧 core/storage/Rust contract/SQLite 表/历史上下文，保留 Authorization-only username token 行为不变；本轮仅设计文档，不改运行时代码。
