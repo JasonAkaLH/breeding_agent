@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 旧 Cookie/password/captcha/scoped API token 认证残留清理设计完成：新增 `docs/superpowers/specs/2026-05-25-legacy-auth-context-removal-design.md`，明确硬删除旧 core/storage/Rust contract/SQLite 表/历史上下文，保留 Authorization-only username token 行为不变；本轮仅设计文档，不改运行时代码。
 - Authorization-only username 登录态已按 Team/Ultragoal 计划集成：后端改为登录接口仅接 `username` 并返回单一当前 `access_token`，所有受保护 API / 上传 / SSE 仅从 `Authorization: Bearer` 定位用户，登出保留用户名并清空 token，刷新 token 原子替换旧 token；DTO 递归拒绝非登录 body 中的身份/token/session/captcha/password 伪造字段；SQLite 旧 `account_id` owner 表在 bootstrap 时回填并重建为 `username` schema；前端改用浏览器 localStorage 保存 token 并为 REST / multipart / SSE 注入 Authorization；README、静态 API 文档、Rust core contract 与前后端/存储/集成回归测试同步更新。
 - Authorization-only 内部登录态父计划与测试规格完成 document-perfectization 复审：在 `.omx/plans/prd-20260525-authorization-username-auth.md` 与 `.omx/plans/test-spec-20260525-authorization-username-auth.md` 中补充 CP-0 至 CP-5 可验证检查点、并行边界、阶段性 targeted test gate 与禁止用 Cookie/body username fallback 过门禁的规则；本轮仍未改运行时代码。
 - Authorization-only 内部登录态实施计划与测试规格已通过 `$plan` 落地：新增 `.omx/plans/prd-20260525-authorization-username-auth.md` 与 `.omx/plans/test-spec-20260525-authorization-username-auth.md`，明确 TDD 分层步骤、username owner 迁移、SSE token 当前性、前端 localStorage、文档更新、验证命令与 Team/Ultragoal 后续执行建议；本轮仍未改运行时代码。
