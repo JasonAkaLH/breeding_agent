@@ -49,14 +49,14 @@ class SQLiteAuthRepositoryTest(SQLiteStorageTestCase):
     def test_lists_conversations_for_account_only(self) -> None:
         with self.session_factory() as db_session:
             repo = SQLiteStateRepository(db_session)
-            repo.save_conversation(Conversation(conversation_id="conv-a1", account_id="alice", title="Alice 1"))
-            repo.save_conversation(Conversation(conversation_id="conv-b1", account_id="bob", title="Bob 1"))
-            repo.save_conversation(Conversation(conversation_id="conv-a2", account_id="alice", title="Alice 2"))
+            repo.save_conversation(Conversation(conversation_id="conv-a1", username="alice", title="Alice 1"))
+            repo.save_conversation(Conversation(conversation_id="conv-b1", username="bob", title="Bob 1"))
+            repo.save_conversation(Conversation(conversation_id="conv-a2", username="alice", title="Alice 2"))
             db_session.commit()
 
         with self.session_factory() as db_session:
             repo = SQLiteStateRepository(db_session)
-            listed = repo.list_conversations_for_account("alice")
+            listed = repo.list_conversations_for_username("alice")
 
         self.assertEqual([conversation.conversation_id for conversation in listed], ["conv-a2", "conv-a1"])
-        self.assertTrue(all(conversation.account_id == "alice" for conversation in listed))
+        self.assertTrue(all(conversation.username == "alice" for conversation in listed))

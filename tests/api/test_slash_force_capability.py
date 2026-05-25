@@ -10,7 +10,6 @@ class SlashForceCapabilityAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-1",
-                "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "force_capability",
                 "capability_id": None,
@@ -24,7 +23,6 @@ class SlashForceCapabilityAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-1",
-                "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "force_capability",
                 "capability_id": "skill.unknown",
@@ -39,7 +37,6 @@ class SlashForceCapabilityAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-1",
-                "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "force_capability",
                 "capability_id": GENERIC_DATA_SKILL_ID,

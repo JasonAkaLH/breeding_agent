@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -10,7 +12,7 @@ from src.core.enums import ArtifactType, EventVisibility, NodeStatus, TaskStatus
 from src.core.models import Artifact, EventRecord
 from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
 
-from ..auth import get_optional_owned_conversation, require_authenticated_user, require_task_owner
+from ..auth import get_optional_owned_conversation, require_authenticated_user, require_current_bearer_for_user, require_task_owner
 from ..dto import (
     AnswerInterruptRequest,
     AnswerInterruptResponse,
@@ -30,6 +32,7 @@ from ..runtime import ApiRuntime
 from ..sse import encode_sse_event
 
 router = APIRouter()
+SSE_AUTH_REVALIDATION_INTERVAL_SECONDS = 15.0
 
 UNFINISHED_TASK_STATUSES = {
     TaskStatus.ACCEPTED,
@@ -92,7 +95,7 @@ async def list_conversation_tasks(conversation_id: str, request: Request, scope:
     if scope not in {"unfinished", "all"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported task list scope: {scope}")
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     conversation = await get_optional_owned_conversation(runtime, conversation_id, user)
     if conversation is None:
         return TaskListResponse(conversation_id=conversation_id, tasks=[])
@@ -109,7 +112,7 @@ async def list_conversation_tasks(conversation_id: str, request: Request, scope:
 @router.get("/api/v1/tasks/{task_id}", response_model=TaskSummaryResponse)
 async def get_task(task_id: str, request: Request) -> TaskSummaryResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     task = await require_task_owner(runtime, task_id, user)
     return await _build_task_summary(runtime, task)
 
@@ -117,20 +120,57 @@ async def get_task(task_id: str, request: Request) -> TaskSummaryResponse:
 @router.get("/api/v1/tasks/{task_id}/events")
 async def stream_task_events(task_id: str, request: Request) -> EventSourceResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
 
     async def _event_stream():
-        async for event in runtime.iter_frontend_events(task_id):
+        async for event in _iter_authorized_frontend_events(runtime, task_id, request, user.username):
             yield encode_sse_event(event)
 
     return EventSourceResponse(_event_stream())
 
 
+async def _iter_authorized_frontend_events(
+    runtime: ApiRuntime,
+    task_id: str,
+    request: Request,
+    username: str,
+    *,
+    revalidation_interval_seconds: float = SSE_AUTH_REVALIDATION_INTERVAL_SECONDS,
+):
+    event_iterator = runtime.iter_frontend_events(task_id).__aiter__()
+    pending_next = asyncio.create_task(event_iterator.__anext__())
+    try:
+        while True:
+            done, _pending = await asyncio.wait(
+                {pending_next},
+                timeout=revalidation_interval_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            await require_current_bearer_for_user(request, username)
+            if not done:
+                continue
+            try:
+                event = pending_next.result()
+            except StopAsyncIteration:
+                return
+            yield event
+            pending_next = asyncio.create_task(event_iterator.__anext__())
+    finally:
+        if not pending_next.done():
+            pending_next.cancel()
+            with suppress(asyncio.CancelledError):
+                await pending_next
+        aclose = getattr(event_iterator, "aclose", None)
+        if callable(aclose):
+            with suppress(RuntimeError):
+                await aclose()
+
+
 @router.post("/api/v1/tasks/cancel", response_model=CancelTaskResponse, status_code=status.HTTP_202_ACCEPTED)
 async def cancel_task(body: CancelTaskRequest, request: Request) -> CancelTaskResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("task:control",))
+    user = await require_authenticated_user(request)
     task_id = body.task_id
     await require_task_owner(runtime, task_id, user)
     try:
@@ -143,7 +183,7 @@ async def cancel_task(body: CancelTaskRequest, request: Request) -> CancelTaskRe
 @router.get("/api/v1/tasks/{task_id}/interrupts", response_model=TaskInterruptsResponse)
 async def list_task_interrupts(task_id: str, request: Request) -> TaskInterruptsResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
     interrupts = await runtime.list_interrupts(task_id)
     return TaskInterruptsResponse(
@@ -162,7 +202,7 @@ async def answer_task_interrupt(
     request: Request,
 ) -> AnswerInterruptResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("task:control",))
+    user = await require_authenticated_user(request)
     task_id = body.task_id
     interrupt_id = body.interrupt_id
     await require_task_owner(runtime, task_id, user)
@@ -176,7 +216,7 @@ async def answer_task_interrupt(
 @router.get("/api/v1/tasks/{task_id}/graph", response_model=TaskGraphResponse)
 async def get_task_graph(task_id: str, request: Request) -> TaskGraphResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
     nodes = await runtime.storage.list_task_nodes_for_task(task_id)
     edges = await runtime.storage.list_task_edges(task_id)
@@ -210,7 +250,7 @@ async def get_task_graph(task_id: str, request: Request) -> TaskGraphResponse:
 @router.get("/api/v1/tasks/{task_id}/artifacts", response_model=TaskArtifactsResponse)
 async def get_task_artifacts(task_id: str, request: Request) -> TaskArtifactsResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     await require_task_owner(runtime, task_id, user)
     artifacts = await runtime.storage.list_artifacts_for_task(task_id)
     return TaskArtifactsResponse(
@@ -226,7 +266,7 @@ async def get_task_artifacts(task_id: str, request: Request) -> TaskArtifactsRes
 @router.get("/api/v1/artifacts/{artifact_id}/download")
 async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     artifact = await runtime.storage.get_artifact(artifact_id)
     if artifact is None or artifact.artifact_type != ArtifactType.FILE:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown artifact: {artifact_id}")

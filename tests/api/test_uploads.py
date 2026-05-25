@@ -47,7 +47,7 @@ class UploadReadLimitTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(UploadValidationError, "filename"):
             store.save(
-                account_id="acc-1",
+                username="acc-1",
                 conversation_id="conv-1",
                 filename="../secret.csv",
                 content_type="text/csv",
@@ -190,6 +190,17 @@ class UploadsAPITest(APITestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    async def test_upload_rejects_extra_identity_and_auth_form_fields(self) -> None:
+        for field_name in ("username", "auth_token", "session", "captcha", "password", "unexpected"):
+            with self.subTest(field_name=field_name):
+                response = await self.client.post(
+                    "/api/v1/conversations/uploads",
+                    data={"conversation_id": "conv-upload", field_name: "spoof"},
+                    files={"file": ("materials.csv", "ped_id,design_check\nA,0\n", "text/csv")},
+                )
+
+                self.assertEqual(response.status_code, 422, response.text)
+
     async def test_upload_rejects_oversized_file_with_configured_limit(self) -> None:
         self.runtime.upload_store.max_file_bytes = 16
 
@@ -211,8 +222,7 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(upload.status_code, 201)
         upload_id = upload.json()["upload_id"]
 
-        await self.runtime.create_user("bob", "bob-password1")
-        await self.login("bob", "bob-password1")
+        await self.login("bob")
 
         forbidden_upload = await self.client.post(
             "/api/v1/conversations/uploads",
@@ -231,7 +241,6 @@ class UploadsAPITest(APITestCase):
 
         submitted = await self.submit_message(
             conversation_id="conv-owned",
-            account_id="bob",
             content="用文件做RCBD",
             capability_id=None,
             metadata={"upload_ids": [upload_id], "blocks": 3},

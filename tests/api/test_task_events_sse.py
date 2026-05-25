@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+
 from datetime import datetime, timedelta
 
+from fastapi import HTTPException
+
+from src.api.routes.tasks import _iter_authorized_frontend_events
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Conversation, EventRecord, Message, Task
 from src.storage.rust_contract import resource_limit
@@ -14,7 +19,7 @@ class TaskEventsSSEAPITest(APITestCase):
         page_limit = resource_limit("replay_page_events")
         created_at = datetime(2026, 5, 15, 12, 0, 0)
         await self.runtime.storage.save_conversation(
-            Conversation(conversation_id="conv-page", account_id="account-page", created_at=created_at, updated_at=created_at)
+            Conversation(conversation_id="conv-page", username="account-page", created_at=created_at, updated_at=created_at)
         )
         await self.runtime.storage.save_message(
             Message(
@@ -55,18 +60,13 @@ class TaskEventsSSEAPITest(APITestCase):
         self.assertEqual(events[-1].event_type, "task.completed")
         self.assertEqual(events[-1].event_id, f"evt-api-page-{page_limit:04d}")
 
-    async def test_task_events_endpoint_accepts_bearer_read_scope(self) -> None:
+    async def test_task_events_endpoint_accepts_authorization_token(self) -> None:
         await self.logout()
-        await self.runtime.create_user("alice", "alice-password1")
-        await self.login("alice", "alice-password1")
-        create_token = await self.client.post(
-            "/api/v1/auth/api-tokens",
-            json={"client_name": "sse-client", "scopes": ["conversation:read"], "ttl_seconds": 3600},
-        )
-        self.assertEqual(create_token.status_code, 201, create_token.text)
-        access_token = create_token.json()["access_token"]
+        login = await self.client.post("/api/v1/auth/login", json={"username": "alice"})
+        self.assertEqual(login.status_code, 200, login.text)
+        access_token = login.json()["access_token"]
         await self.runtime.storage.save_conversation(
-            Conversation(conversation_id="conv-bearer-sse", account_id="alice")
+            Conversation(conversation_id="conv-bearer-sse", username="alice")
         )
         await self.runtime.storage.save_task(
             Task(
@@ -97,6 +97,101 @@ class TaskEventsSSEAPITest(APITestCase):
         self.assertIn("text/event-stream", response.headers.get("content-type", ""))
         self.assertIn("evt-bearer-sse", response.text)
         self.assertIn("task.completed", response.text)
+
+
+    async def test_open_task_event_stream_stops_after_token_refresh(self) -> None:
+        await self.logout()
+        login = await self.client.post("/api/v1/auth/login", json={"username": "alice"})
+        self.assertEqual(login.status_code, 200, login.text)
+        old_token = login.json()["access_token"]
+        created_at = datetime(2026, 5, 25, 13, 0, 0)
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id="conv-refresh-sse", username="alice", created_at=created_at, updated_at=created_at)
+        )
+        await self.runtime.storage.save_task(
+            Task(
+                task_id="task-refresh-sse",
+                conversation_id="conv-refresh-sse",
+                root_message_id="msg-refresh-sse",
+                status=TaskStatus.RUNNING,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        request = SimpleNamespace(
+            headers={"Authorization": f"Bearer {old_token}"},
+            app=SimpleNamespace(state=SimpleNamespace(runtime=self.runtime)),
+        )
+        iterator = _iter_authorized_frontend_events(
+            self.runtime,
+            "task-refresh-sse",
+            request,
+            "alice",
+        ).__aiter__()
+        pending = asyncio.create_task(iterator.__anext__())
+        await asyncio.sleep(0.05)
+
+        refreshed = await self.client.post(
+            "/api/v1/auth/refresh-token",
+            headers={"Authorization": f"Bearer {old_token}"},
+        )
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+
+        await self.runtime._record_event(
+            EventRecord(
+                event_id="evt-refresh-sse",
+                conversation_id="conv-refresh-sse",
+                task_id="task-refresh-sse",
+                event_type="task.completed",
+                payload={},
+                visibility=EventVisibility.FRONTEND,
+                created_at=created_at,
+            )
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            await asyncio.wait_for(pending, timeout=2)
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    async def test_idle_task_event_stream_revalidates_current_token_without_new_events(self) -> None:
+        await self.logout()
+        login = await self.client.post("/api/v1/auth/login", json={"username": "alice"})
+        self.assertEqual(login.status_code, 200, login.text)
+        old_token = login.json()["access_token"]
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id="conv-idle-sse", username="alice")
+        )
+        await self.runtime.storage.save_task(
+            Task(
+                task_id="task-idle-sse",
+                conversation_id="conv-idle-sse",
+                root_message_id="msg-idle-sse",
+                status=TaskStatus.RUNNING,
+            )
+        )
+        request = SimpleNamespace(
+            headers={"Authorization": f"Bearer {old_token}"},
+            app=SimpleNamespace(state=SimpleNamespace(runtime=self.runtime)),
+        )
+        iterator = _iter_authorized_frontend_events(
+            self.runtime,
+            "task-idle-sse",
+            request,
+            "alice",
+            revalidation_interval_seconds=0.05,
+        ).__aiter__()
+        pending = asyncio.create_task(iterator.__anext__())
+        await asyncio.sleep(0.08)
+
+        refreshed = await self.client.post(
+            "/api/v1/auth/refresh-token",
+            headers={"Authorization": f"Bearer {old_token}"},
+        )
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+
+        with self.assertRaises(HTTPException) as ctx:
+            await asyncio.wait_for(pending, timeout=1)
+        self.assertEqual(ctx.exception.status_code, 401)
 
     async def test_task_events_endpoint_replays_history_and_streams_live_completion(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()

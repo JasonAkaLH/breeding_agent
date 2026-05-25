@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import zipfile
 from pathlib import Path
 
@@ -203,8 +202,7 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'
             if artifact["artifact_type"] == "file"
         )
 
-        await self.runtime.create_user("acc-2", "password1")
-        await self.login("acc-2", "password1")
+        await self.login("acc-2")
         denied = await self.client.get(artifact["download_url"])
         self.assertEqual(denied.status_code, 404)
 

@@ -18,6 +18,7 @@ from src.core.models import (
     AuthApiToken,
     AuthSession,
     AuthUser,
+    AuthUserToken,
     CaptchaChallenge,
     Checkpoint,
     Conversation,
@@ -52,6 +53,7 @@ from .models import (
     AuthApiTokenRow,
     AuthSessionRow,
     AuthUserRow,
+    AuthUserTokenRow,
     CaptchaChallengeRow,
     CheckpointRow,
     ConversationRow,
@@ -71,7 +73,7 @@ from .models import (
 def _row_to_conversation(row: ConversationRow) -> Conversation:
     return Conversation(
         conversation_id=row.conversation_id,
-        account_id=row.account_id,
+        username=row.username,
         status=row.status,
         current_task_id=row.current_task_id,
         title=row.title,
@@ -84,7 +86,7 @@ def _row_to_conversation_memory_summary(row: ConversationMemorySummaryRow) -> Co
     return ConversationMemorySummary(
         summary_id=row.summary_id,
         conversation_id=row.conversation_id,
-        account_id=row.account_id,
+        username=row.username,
         covered_until_turn_id=row.covered_until_turn_id,
         covered_until_message_id=row.covered_until_message_id,
         covered_until_created_at=row.covered_until_created_at,
@@ -105,7 +107,7 @@ def _row_to_pending_skill_context(row: PendingSkillContextRow) -> PendingSkillCo
     return PendingSkillContext(
         context_id=row.context_id,
         conversation_id=row.conversation_id,
-        account_id=row.account_id,
+        username=row.username,
         capability_id=row.capability_id,
         skill_name=row.skill_name,
         source_task_id=row.source_task_id,
@@ -168,6 +170,17 @@ def _row_to_auth_api_token(row: AuthApiTokenRow) -> AuthApiToken:
         revoked_at=row.revoked_at,
         created_at=row.created_at,
         last_used_at=row.last_used_at,
+    )
+
+
+def _row_to_auth_user_token(row: AuthUserTokenRow) -> AuthUserToken:
+    return AuthUserToken(
+        username=row.username,
+        api_token_hash=row.api_token_hash,
+        token_issued_at=row.token_issued_at,
+        token_last_used_at=row.token_last_used_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -517,10 +530,105 @@ class SQLiteStateRepository:
             self._session.refresh(existing)
         return _row_to_auth_api_token(existing)
 
+    def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken:
+        row = AuthUserTokenRow(
+            username=token.username,
+            api_token_hash=token.api_token_hash,
+            token_issued_at=token.token_issued_at,
+            token_last_used_at=token.token_last_used_at,
+            created_at=token.created_at,
+            updated_at=token.updated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_auth_user_token(merged)
+
+    def get_auth_user_token(self, username: str) -> AuthUserToken | None:
+        row = self._session.get(AuthUserTokenRow, username)
+        return None if row is None else _row_to_auth_user_token(row)
+
+    def get_auth_user_token_by_hash(self, api_token_hash: str) -> AuthUserToken | None:
+        row = self._session.execute(
+            select(AuthUserTokenRow).where(AuthUserTokenRow.api_token_hash == api_token_hash)
+        ).scalar_one_or_none()
+        return None if row is None else _row_to_auth_user_token(row)
+
+    def touch_auth_user_token_last_used(
+        self,
+        username: str,
+        *,
+        api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None:
+        result = self._session.execute(
+            update(AuthUserTokenRow)
+            .where(
+                AuthUserTokenRow.username == username,
+                AuthUserTokenRow.api_token_hash == api_token_hash,
+            )
+            .values(token_last_used_at=at, updated_at=at)
+        )
+        if result.rowcount != 1:
+            self._session.flush()
+            return None
+        self._session.flush()
+        row = self._session.get(AuthUserTokenRow, username)
+        return None if row is None else _row_to_auth_user_token(row)
+
+    def clear_auth_user_token(
+        self,
+        username: str,
+        *,
+        api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None:
+        result = self._session.execute(
+            update(AuthUserTokenRow)
+            .where(
+                AuthUserTokenRow.username == username,
+                AuthUserTokenRow.api_token_hash == api_token_hash,
+            )
+            .values(api_token_hash=None, token_issued_at=None, token_last_used_at=None, updated_at=at)
+        )
+        if result.rowcount != 1:
+            self._session.flush()
+            return None
+        self._session.flush()
+        row = self._session.get(AuthUserTokenRow, username)
+        return None if row is None else _row_to_auth_user_token(row)
+
+    def rotate_auth_user_token(
+        self,
+        username: str,
+        *,
+        old_api_token_hash: str,
+        new_api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None:
+        result = self._session.execute(
+            update(AuthUserTokenRow)
+            .where(
+                AuthUserTokenRow.username == username,
+                AuthUserTokenRow.api_token_hash == old_api_token_hash,
+            )
+            .values(
+                api_token_hash=new_api_token_hash,
+                token_issued_at=at,
+                token_last_used_at=None,
+                updated_at=at,
+            )
+        )
+        if result.rowcount != 1:
+            self._session.flush()
+            return None
+        self._session.flush()
+        row = self._session.get(AuthUserTokenRow, username)
+        return None if row is None else _row_to_auth_user_token(row)
+
     def save_conversation(self, conversation: Conversation) -> Conversation:
         row = ConversationRow(
             conversation_id=conversation.conversation_id,
-            account_id=conversation.account_id,
+            username=conversation.username,
             status=conversation.status,
             current_task_id=conversation.current_task_id,
             title=conversation.title,
@@ -535,10 +643,10 @@ class SQLiteStateRepository:
         row = self._session.get(ConversationRow, conversation_id)
         return None if row is None else _row_to_conversation(row)
 
-    def list_conversations_for_account(self, account_id: str) -> list[Conversation]:
+    def list_conversations_for_username(self, username: str) -> list[Conversation]:
         rows = self._session.scalars(
             select(ConversationRow)
-            .where(ConversationRow.account_id == account_id)
+            .where(ConversationRow.username == username)
             .order_by(ConversationRow.updated_at.desc(), ConversationRow.conversation_id.desc())
         ).all()
         return [_row_to_conversation(row) for row in rows]
@@ -547,7 +655,7 @@ class SQLiteStateRepository:
         row = ConversationMemorySummaryRow(
             summary_id=summary.summary_id,
             conversation_id=summary.conversation_id,
-            account_id=summary.account_id,
+            username=summary.username,
             covered_until_turn_id=summary.covered_until_turn_id,
             covered_until_message_id=summary.covered_until_message_id,
             covered_until_created_at=summary.covered_until_created_at,
@@ -574,13 +682,13 @@ class SQLiteStateRepository:
         self,
         conversation_id: str,
         *,
-        account_id: str | None = None,
+        username: str | None = None,
     ) -> ConversationMemorySummary | None:
         statement = select(ConversationMemorySummaryRow).where(
             ConversationMemorySummaryRow.conversation_id == conversation_id
         )
-        if account_id is not None:
-            statement = statement.where(ConversationMemorySummaryRow.account_id == account_id)
+        if username is not None:
+            statement = statement.where(ConversationMemorySummaryRow.username == username)
         row = self._session.scalar(
             statement.order_by(
                 ConversationMemorySummaryRow.covered_until_created_at.desc(),
@@ -625,7 +733,7 @@ class SQLiteStateRepository:
         row = PendingSkillContextRow(
             context_id=context.context_id,
             conversation_id=context.conversation_id,
-            account_id=context.account_id,
+            username=context.username,
             capability_id=context.capability_id,
             skill_name=context.skill_name,
             source_task_id=context.source_task_id,
@@ -1266,14 +1374,70 @@ class SQLiteStorage(StoragePort):
             lambda state, collab: state.revoke_auth_api_token_for_user(username, token_id, revoked_at=revoked_at)
         )
 
+    async def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken:
+        return await self._run(lambda state, collab: state.save_auth_user_token(token))
+
+    async def get_auth_user_token(self, username: str) -> AuthUserToken | None:
+        return await self._run(lambda state, collab: state.get_auth_user_token(username))
+
+    async def get_auth_user_token_by_hash(self, api_token_hash: str) -> AuthUserToken | None:
+        return await self._run(lambda state, collab: state.get_auth_user_token_by_hash(api_token_hash))
+
+    async def touch_auth_user_token_last_used(
+        self,
+        username: str,
+        *,
+        api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None:
+        return await self._run(
+            lambda state, collab: state.touch_auth_user_token_last_used(
+                username,
+                api_token_hash=api_token_hash,
+                at=at,
+            )
+        )
+
+    async def clear_auth_user_token(
+        self,
+        username: str,
+        *,
+        api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None:
+        return await self._run(
+            lambda state, collab: state.clear_auth_user_token(
+                username,
+                api_token_hash=api_token_hash,
+                at=at,
+            )
+        )
+
+    async def rotate_auth_user_token(
+        self,
+        username: str,
+        *,
+        old_api_token_hash: str,
+        new_api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None:
+        return await self._run(
+            lambda state, collab: state.rotate_auth_user_token(
+                username,
+                old_api_token_hash=old_api_token_hash,
+                new_api_token_hash=new_api_token_hash,
+                at=at,
+            )
+        )
+
     async def save_conversation(self, conversation: Conversation) -> Conversation:
         return await self._run(lambda state, collab: state.save_conversation(conversation))
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None:
         return await self._run(lambda state, collab: state.get_conversation(conversation_id))
 
-    async def list_conversations_for_account(self, account_id: str) -> list[Conversation]:
-        return await self._run(lambda state, collab: state.list_conversations_for_account(account_id))
+    async def list_conversations_for_username(self, username: str) -> list[Conversation]:
+        return await self._run(lambda state, collab: state.list_conversations_for_username(username))
 
     async def delete_conversation(self, conversation_id: str) -> dict[str, int]:
         return await self._run(lambda state, collab: state.delete_conversation(conversation_id))
@@ -1287,12 +1451,12 @@ class SQLiteStorage(StoragePort):
     async def get_latest_conversation_memory_summary(
         self,
         conversation_id: str,
-        account_id: str | None = None,
+        username: str | None = None,
     ) -> ConversationMemorySummary | None:
         return await self._run(
             lambda state, collab: state.get_latest_conversation_memory_summary(
                 conversation_id,
-                account_id=account_id,
+                username=username,
             )
         )
 

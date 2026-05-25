@@ -14,7 +14,7 @@ class SQLitePendingSkillContextRepositoryTest(SQLiteStorageTestCase):
         return PendingSkillContext(
             context_id=context_id,
             conversation_id=conversation_id,
-            account_id="acc-1",
+            username="acc-1",
             capability_id="skill.need_variety",
             skill_name="need-variety",
             source_task_id="task-1",

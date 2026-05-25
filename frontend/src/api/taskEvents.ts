@@ -33,12 +33,10 @@ export function parseTaskEventData(data: string): TaskEventEnvelope | null {
 
 export function createBrowserEventSourceFactory(): EventSourceFactory {
   return (url, handlers) => {
-    const source = new EventSource(url, { withCredentials: true });
+    const expectedTaskId = taskIdFromEventsUrl(url);
+    const source = new EventSource(url);
     source.onmessage = (event) => {
-      const parsed = parseTaskEventData(event.data);
-      if (parsed) {
-        handlers.onMessage(parsed);
-      }
+      dispatchParsedTaskEvent(event.data, handlers, expectedTaskId);
     };
     source.onerror = (event) => {
       handlers.onError(event);
@@ -65,10 +63,7 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
     ];
     for (const eventName of knownEvents) {
       source.addEventListener(eventName, (event) => {
-        const parsed = parseTaskEventData((event as MessageEvent).data);
-        if (parsed) {
-          handlers.onMessage(parsed);
-        }
+        dispatchParsedTaskEvent((event as MessageEvent).data, handlers, expectedTaskId);
       });
     }
     return { close: () => source.close() };
@@ -85,6 +80,7 @@ export function createFetchTaskEventSourceFactory(options: FetchTaskEventSourceO
       Accept: 'text/event-stream',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
+    const expectedTaskId = taskIdFromEventsUrl(url);
 
     void fetcher(url, {
       method: 'GET',
@@ -95,7 +91,7 @@ export function createFetchTaskEventSourceFactory(options: FetchTaskEventSourceO
       if (!response.ok || !response.body) {
         throw new Error(`Task event stream failed with status ${response.status}`);
       }
-      await readTaskEventStream(response.body, handlers, () => closed);
+      await readTaskEventStream(response.body, handlers, () => closed, expectedTaskId);
     }).catch((error) => {
       if (!closed) {
         handlers.onError(error);
@@ -115,6 +111,7 @@ async function readTaskEventStream(
   body: ReadableStream<Uint8Array>,
   handlers: TaskEventHandlers,
   isClosed: () => boolean,
+  expectedTaskId: string | null = null,
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -131,14 +128,14 @@ async function readTaskEventStream(
       while (separatorIndex >= 0) {
         const block = buffer.slice(0, separatorIndex);
         buffer = buffer.slice(separatorIndex + 2);
-        dispatchTaskEventBlock(block, handlers);
+        dispatchTaskEventBlock(block, handlers, expectedTaskId);
         separatorIndex = buffer.indexOf('\n\n');
       }
     }
     buffer += decoder.decode();
     buffer = normalizeSseNewlines(buffer);
     if (buffer.trim()) {
-      dispatchTaskEventBlock(buffer, handlers);
+      dispatchTaskEventBlock(buffer, handlers, expectedTaskId);
     }
   } finally {
     reader.releaseLock();
@@ -149,7 +146,7 @@ function normalizeSseNewlines(value: string): string {
   return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
-function dispatchTaskEventBlock(block: string, handlers: TaskEventHandlers): void {
+function dispatchTaskEventBlock(block: string, handlers: TaskEventHandlers, expectedTaskId: string | null = null): void {
   const data = block
     .split('\n')
     .filter((line) => line.startsWith('data:'))
@@ -158,9 +155,23 @@ function dispatchTaskEventBlock(block: string, handlers: TaskEventHandlers): voi
   if (!data) {
     return;
   }
+  dispatchParsedTaskEvent(data, handlers, expectedTaskId);
+}
+
+function dispatchParsedTaskEvent(data: string, handlers: TaskEventHandlers, expectedTaskId: string | null): void {
   const parsed = parseTaskEventData(data);
-  if (parsed) {
+  if (parsed && (!expectedTaskId || parsed.task_id === expectedTaskId)) {
     handlers.onMessage(parsed);
+  }
+}
+
+function taskIdFromEventsUrl(url: string): string | null {
+  try {
+    const parsedUrl = new URL(url, 'https://local.invalid');
+    const match = parsedUrl.pathname.match(/\/api\/v1\/tasks\/([^/]+)\/events$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
   }
 }
 

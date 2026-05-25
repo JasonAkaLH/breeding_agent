@@ -29,7 +29,7 @@ def _runtime(request: Request) -> ApiRuntime:
 def _conversation_summary_response(conversation: Conversation) -> ConversationSummaryResponse:
     return ConversationSummaryResponse(
         conversation_id=conversation.conversation_id,
-        account_id=conversation.account_id,
+        username=conversation.username,
         status=str(conversation.status),
         current_task_id=conversation.current_task_id,
         title=conversation.title,
@@ -45,10 +45,10 @@ def _conversation_summary_response(conversation: Conversation) -> ConversationSu
 )
 async def submit_message(body: SubmitMessageRequest, request: Request) -> MessageAcceptedResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:write",))
+    user = await require_authenticated_user(request)
     conversation_id = body.conversation_id
     try:
-        message, task = await runtime.submit_message(conversation_id, body, authenticated_account_id=user.username)
+        message, task = await runtime.submit_message(conversation_id, body, authenticated_username=user.username)
     except ConversationBusyError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -67,8 +67,8 @@ async def submit_message(body: SubmitMessageRequest, request: Request) -> Messag
 @router.get("/api/v1/conversations", response_model=ConversationListResponse)
 async def list_conversations(request: Request) -> ConversationListResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
-    conversations = await runtime.storage.list_conversations_for_account(user.username)
+    user = await require_authenticated_user(request)
+    conversations = await runtime.storage.list_conversations_for_username(user.username)
     return ConversationListResponse(
         conversations=[_conversation_summary_response(conversation) for conversation in conversations]
     )
@@ -77,10 +77,10 @@ async def list_conversations(request: Request) -> ConversationListResponse:
 @router.patch("/api/v1/conversations", response_model=ConversationSummaryResponse)
 async def rename_conversation(body: RenameConversationRequest, request: Request) -> ConversationSummaryResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:write",))
+    user = await require_authenticated_user(request)
     conversation_id = body.conversation_id
     try:
-        conversation = await runtime.rename_conversation(conversation_id, body.title, account_id=user.username)
+        conversation = await runtime.rename_conversation(conversation_id, body.title, username=user.username)
     except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}") from exc
     except ValueError as exc:
@@ -93,7 +93,7 @@ async def rename_conversation(body: RenameConversationRequest, request: Request)
 @router.get("/api/v1/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)
 async def list_conversation_messages(conversation_id: str, request: Request) -> ConversationMessagesResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     await require_conversation_owner(runtime, conversation_id, user)
     await runtime.sync_assistant_history_messages(conversation_id)
     messages = await runtime.storage.list_messages_for_conversation(conversation_id)
@@ -117,11 +117,11 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
 @router.delete("/api/v1/conversations", response_model=DeleteConversationResponse)
 async def delete_conversation(body: DeleteConversationRequest, request: Request) -> DeleteConversationResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:write",))
+    user = await require_authenticated_user(request)
     conversation_id = body.conversation_id
     await require_conversation_owner(runtime, conversation_id, user)
     try:
-        result = await runtime.delete_conversation(conversation_id, account_id=user.username)
+        result = await runtime.delete_conversation(conversation_id, username=user.username)
     except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}") from exc
     except ValueError as exc:

@@ -1,10 +1,8 @@
 import type {
   CancelTaskResponse,
   AnswerInterruptResponse,
-  ApiTokenListResponse,
+  AuthTokenResponse,
   AuthUserResponse,
-  CaptchaChallengeResponse,
-  CreateApiTokenResponse,
   CapabilityListResponse,
   ChatMode,
   ConversationListResponse,
@@ -17,7 +15,6 @@ import type {
   TaskListResponse,
   MessageAcceptedResponse,
   ReasoningEffort,
-  RevokeApiTokenResponse,
   SubmitMessageRequest,
   TaskArtifactsResponse,
   TaskGraphResponse,
@@ -34,7 +31,6 @@ export interface UiModeOption {
 
 export interface SubmitMessageInput {
   conversationId: string;
-  accountId?: string;
   content: string;
   mode: ChatMode;
   deepThinking?: boolean;
@@ -46,14 +42,10 @@ export interface SubmitMessageInput {
 
 export interface ApiClient {
   uiModes: UiModeOption[];
-  createCaptcha(): Promise<CaptchaChallengeResponse>;
-  login(input: { username: string; password: string; captchaId: string; captchaCode: string }): Promise<AuthUserResponse>;
-  register(input: { username: string; password: string; captchaId: string; captchaCode: string }): Promise<AuthUserResponse>;
+  login(input: { username: string }): Promise<AuthTokenResponse>;
   logout(): Promise<LogoutResponse>;
   me(): Promise<AuthUserResponse>;
-  createApiToken(input: { clientName: string; scopes: string[]; ttlSeconds?: number | null }): Promise<CreateApiTokenResponse>;
-  listApiTokens(): Promise<ApiTokenListResponse>;
-  revokeApiToken(tokenId: string): Promise<RevokeApiTokenResponse>;
+  refreshToken(): Promise<AuthTokenResponse>;
   listConversationUploads(conversationId: string): Promise<UploadListResponse>;
   deleteConversationUpload(conversationId: string, uploadId: string): Promise<DeleteUploadResponse>;
   uploadConversationFile(conversationId: string, file: File): Promise<UploadFileResponse>;
@@ -67,6 +59,7 @@ export interface ApiClient {
   getTask(taskId: string): Promise<TaskSummaryResponse>;
   cancelTask(taskId: string): Promise<CancelTaskResponse>;
   getTaskArtifacts(taskId: string): Promise<TaskArtifactsResponse>;
+  downloadArtifact(artifactId: string, filename: string): Promise<void>;
   getTaskGraph(taskId: string): Promise<TaskGraphResponse>;
   listInterrupts(taskId: string): Promise<TaskInterruptsResponse>;
   answerInterrupt(taskId: string, interruptId: string, answerPayload: Record<string, unknown>): Promise<AnswerInterruptResponse>;
@@ -95,6 +88,7 @@ interface CreateApiClientOptions {
   fetcher?: typeof fetch;
   accessToken?: string;
   authHeaderProvider?: () => string | null | undefined;
+  onUnauthorized?: () => void;
 }
 
 export function createApiClient(options: CreateApiClientOptions = {}): ApiClient {
@@ -117,6 +111,9 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       },
     });
     if (!response.ok) {
+      if (response.status === 401) {
+        options.onUnauthorized?.();
+      }
       throw await toApiError(response);
     }
     return (await response.json()) as T;
@@ -124,40 +121,13 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
 
   return {
     uiModes: UI_MODES,
-    createCaptcha: () => request<CaptchaChallengeResponse>('/api/v1/auth/captcha', { method: 'POST' }),
-    login: (input) => request<AuthUserResponse>('/api/v1/auth/login', {
+    login: (input) => request<AuthTokenResponse>('/api/v1/auth/login', {
       method: 'POST',
-      body: JSON.stringify({
-        username: input.username,
-        password: input.password,
-        captcha_id: input.captchaId,
-        captcha_code: input.captchaCode,
-      }),
-    }),
-    register: (input) => request<AuthUserResponse>('/api/v1/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({
-        username: input.username,
-        password: input.password,
-        captcha_id: input.captchaId,
-        captcha_code: input.captchaCode,
-      }),
+      body: JSON.stringify({ username: input.username }),
     }),
     logout: () => request<LogoutResponse>('/api/v1/auth/logout', { method: 'POST' }),
     me: () => request<AuthUserResponse>('/api/v1/auth/me'),
-    createApiToken: (input) => request<CreateApiTokenResponse>('/api/v1/auth/api-tokens', {
-      method: 'POST',
-      body: JSON.stringify({
-        client_name: input.clientName,
-        scopes: input.scopes,
-        ttl_seconds: input.ttlSeconds ?? null,
-      }),
-    }),
-    listApiTokens: () => request<ApiTokenListResponse>('/api/v1/auth/api-tokens'),
-    revokeApiToken: (tokenId) => request<RevokeApiTokenResponse>('/api/v1/auth/api-tokens', {
-      method: 'DELETE',
-      body: JSON.stringify({ token_id: tokenId }),
-    }),
+    refreshToken: () => request<AuthTokenResponse>('/api/v1/auth/refresh-token', { method: 'POST' }),
     listConversationUploads: (conversationId) => request<UploadListResponse>(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/uploads`,
     ),
@@ -178,6 +148,9 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
         body: formData,
       });
       if (!response.ok) {
+        if (response.status === 401) {
+          options.onUnauthorized?.();
+        }
         throw await toApiError(response);
       }
       return (await response.json()) as UploadFileResponse;
@@ -191,7 +164,6 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       const capabilityId = explicitCapabilityId || mode.capabilityId;
       const body: SubmitMessageRequest = {
         conversation_id: input.conversationId,
-        account_id: input.accountId ?? 'session-user',
         content: input.content,
         routing_mode: capabilityId ? 'force_capability' : 'auto',
         capability_id: capabilityId,
@@ -233,6 +205,35 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       { method: 'POST', body: JSON.stringify({ task_id: taskId, interrupt_id: interruptId, answer_payload: answerPayload }) },
     ),
     getTaskArtifacts: (taskId) => request<TaskArtifactsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts`),
+    downloadArtifact: async (artifactId, filename) => {
+      const response = await fetcher(`${baseUrl}/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: authHeaders(),
+      });
+      if (!response.ok) {
+        if (response.status === 401) {
+          options.onUnauthorized?.();
+        }
+        throw await toApiError(response);
+      }
+      const blob = await response.blob();
+      if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename || artifactId;
+      link.rel = 'noreferrer';
+      try {
+        document.body.appendChild(link);
+        link.click();
+      } finally {
+        link.remove();
+        URL.revokeObjectURL(url);
+      }
+    },
     getTaskGraph: (taskId) => request<TaskGraphResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/graph`),
   };
 }

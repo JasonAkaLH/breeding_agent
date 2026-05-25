@@ -130,7 +130,6 @@ class ConversationTitleAPITest(APITestCase):
 
     async def test_rename_is_owner_scoped_and_validates_title(self) -> None:
         await self.reconfigure_runtime(main_agent_stream_generator=lambda _prompt: ["已收到。"])
-        await self.runtime.create_user("bob", "bob-password1")
         response = await self.submit_message(conversation_id="conv-owned-title", content="你好", capability_id=None)
         self.assertEqual(response.status_code, 202)
 
@@ -140,6 +139,6 @@ class ConversationTitleAPITest(APITestCase):
         too_long = await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-owned-title", "title": "超" * 61})
         self.assertEqual(too_long.status_code, 400)
 
-        await self.login("bob", "bob-password1")
+        await self.login("bob")
         forbidden = await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-owned-title", "title": "Bob 不能改"})
         self.assertEqual(forbidden.status_code, 404)

@@ -46,7 +46,7 @@ class TaskCancelAPITest(APITestCase):
         self.assertIn("task.cancelled", audit_log)
 
     async def test_cancel_terminal_task_is_idempotent_and_does_not_rewrite_status(self) -> None:
-        await self.runtime.storage.save_conversation(Conversation(conversation_id="conv-1", account_id="acc-1"))
+        await self.runtime.storage.save_conversation(Conversation(conversation_id="conv-1", username="acc-1"))
         task = Task(
             task_id="task-terminal-api",
             conversation_id="conv-1",

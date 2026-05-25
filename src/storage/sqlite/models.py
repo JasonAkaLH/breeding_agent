@@ -9,12 +9,12 @@ from .base import DateTimeText, JSONText, SQLiteBase
 class ConversationRow(SQLiteBase):
     __tablename__ = "conversation"
     __table_args__ = (
-        Index("idx_conversation_account_updated", "account_id", "updated_at"),
+        Index("idx_conversation_username_updated", "username", "updated_at"),
         Index("idx_conversation_current_task", "current_task_id"),
     )
 
     conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     current_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -25,13 +25,13 @@ class ConversationRow(SQLiteBase):
 class ConversationMemorySummaryRow(SQLiteBase):
     __tablename__ = "conversation_memory_summary"
     __table_args__ = (
-        Index("idx_conversation_memory_summary_scope_updated", "conversation_id", "account_id", "updated_at"),
+        Index("idx_conversation_memory_summary_scope_updated", "conversation_id", "username", "updated_at"),
         Index("idx_conversation_memory_summary_conversation_created", "conversation_id", "created_at"),
     )
 
     summary_id: Mapped[str] = mapped_column(Text, primary_key=True)
     conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
-    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
     covered_until_turn_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     covered_until_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     covered_until_created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
@@ -56,7 +56,7 @@ class PendingSkillContextRow(SQLiteBase):
 
     context_id: Mapped[str] = mapped_column(Text, primary_key=True)
     conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
-    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
     capability_id: Mapped[str] = mapped_column(Text, nullable=False)
     skill_name: Mapped[str] = mapped_column(Text, nullable=False)
     source_task_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -129,6 +129,21 @@ class AuthApiTokenRow(SQLiteBase):
     revoked_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     last_used_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class AuthUserTokenRow(SQLiteBase):
+    __tablename__ = "auth_user_token"
+    __table_args__ = (
+        UniqueConstraint("api_token_hash", name="uq_auth_user_token_hash"),
+        Index("idx_auth_user_token_updated", "updated_at"),
+    )
+
+    username: Mapped[str] = mapped_column(Text, primary_key=True)
+    api_token_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_issued_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    token_last_used_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
 class MessageRow(SQLiteBase):

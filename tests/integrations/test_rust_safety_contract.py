@@ -11,7 +11,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.api.upload_store import InMemoryUploadStore, UploadValidationError
-from src.auth.services import PasswordHasher
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryResult
 from src.integrations import rust_safety_contract
@@ -27,6 +26,24 @@ from src.integrations.rust_safety_contract import (
     sha256_hex,
     validate_data_access_shape,
 )
+
+
+class _PasswordHasherForSafetyContract:
+    scheme = "pbkdf2_sha256"
+    iterations = 200_000
+
+    def hash_password(self, password: str, *, salt: str = "fixed") -> tuple[str, str, str]:
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            self.iterations,
+        ).hex()
+        return digest, salt, self.scheme
+
+    def verify_password(self, password: str, user) -> bool:
+        expected, _, _ = self.hash_password(password, salt=user.password_salt)
+        return rust_safety_contract.verify_auth_token(expected, user.password_hash)
 
 
 class SafetyRustContractTest(unittest.TestCase):
@@ -122,7 +139,7 @@ class SafetyRustContractTest(unittest.TestCase):
         content = b"a\n" + b"x\n" * (resource_limit("upload_preview_bytes") // 2)
         with self.assertRaisesRegex(UploadValidationError, "preview"):
             store.save(
-                account_id="acc-1",
+                username="acc-1",
                 conversation_id="conv-1",
                 filename="large.csv",
                 content_type="text/csv",
@@ -231,7 +248,7 @@ class SafetyRustContractTest(unittest.TestCase):
     def test_password_hasher_uses_safety_auth_facade_in_enforce_mode(self) -> None:
         module = _fake_safety_pyo3_module()
         sys.modules[module.__name__] = module
-        hasher = PasswordHasher()
+        hasher = _PasswordHasherForSafetyContract()
         password_hash, password_salt, password_scheme = hasher.hash_password("secret123", salt="fixed")
         user = types.SimpleNamespace(
             password_hash=password_hash,

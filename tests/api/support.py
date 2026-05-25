@@ -89,7 +89,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
         runtime_sidecar_client=None,
-        auth_captcha_code_generator=lambda: "1234",
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
             runner=lambda sql: ReadonlyQueryResult(
@@ -118,7 +117,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             and main_agent_llm_config_path is None
             and main_agent_llm_client_factory is None
         ):
-            main_agent_stream_generator = lambda _prompt, **_kwargs: "测试回答"
+            def main_agent_stream_generator(_prompt, **_kwargs):
+                return "测试回答"
         effective_skill_roots = tuple(skill_roots) if skill_roots is not None else tuple(self.default_skill_roots())
         effective_public_skill_roots = (
             tuple(public_skill_roots)
@@ -165,34 +165,27 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
             runtime_sidecar_client=runtime_sidecar_client,
-            auth_captcha_code_generator=auth_captcha_code_generator,
         )
 
     async def _bind_client(self) -> None:
         self.app = create_app(runtime=self.runtime)
         self.transport = httpx.ASGITransport(app=self.app)
         self.client = httpx.AsyncClient(transport=self.transport, base_url="https://testserver")
-        await self.runtime.create_user("acc-1", "password1")
-        await self.login("acc-1", "password1")
+        await self.login("acc-1")
 
-    async def login(self, username: str, password: str) -> httpx.Response:
-        captcha = await self.client.post("/api/v1/auth/captcha")
-        captcha.raise_for_status()
+    async def login(self, username: str) -> httpx.Response:
         response = await self.client.post(
             "/api/v1/auth/login",
-            json={
-                "username": username,
-                "password": password,
-                "captcha_id": captcha.json()["captcha_id"],
-                "captcha_code": "1234",
-            },
+            json={"username": username},
         )
         response.raise_for_status()
+        self.client.headers["Authorization"] = f"Bearer {response.json()['access_token']}"
         return response
 
     async def logout(self) -> httpx.Response:
         response = await self.client.post("/api/v1/auth/logout")
         self.client.cookies.clear()
+        self.client.headers.pop("Authorization", None)
         return response
 
     async def reconfigure_runtime(
@@ -235,7 +228,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
         runtime_sidecar_client=None,
-        auth_captcha_code_generator=lambda: "1234",
     ) -> None:
         await self.client.aclose()
         await self.runtime.shutdown()
@@ -277,7 +269,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
             runtime_sidecar_client=runtime_sidecar_client,
-            auth_captcha_code_generator=auth_captcha_code_generator,
         )
         await self._bind_client()
 
@@ -285,7 +276,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         conversation_id: str = "conv-1",
-        account_id: str = "acc-1",
         content: str = "查询某个品种的基因型信息",
         capability_id: str | None = GENERIC_DATA_SKILL_ID,
         metadata: dict | None = None,
@@ -294,7 +284,6 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": conversation_id,
-                "account_id": account_id,
                 "content": content,
                 "routing_mode": "auto",
                 "capability_id": capability_id,

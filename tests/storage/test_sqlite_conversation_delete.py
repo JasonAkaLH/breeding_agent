@@ -78,7 +78,7 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
             state_repo.save_conversation(
                 Conversation(
                     conversation_id="conv-delete",
-                    account_id="alice",
+                    username="alice",
                     current_task_id="task-delete",
                     title="待删除会话",
                     created_at=now,

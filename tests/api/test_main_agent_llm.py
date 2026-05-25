@@ -18,7 +18,6 @@ class MainAgentLLMAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-main",
-                "account_id": "acc-1",
                 "content": "你好",
                 "routing_mode": "auto",
                 "capability_id": None,
@@ -54,7 +53,6 @@ class MainAgentLLMAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-main-reasoning",
-                "account_id": "acc-1",
                 "content": "请深度思考",
                 "routing_mode": "auto",
                 "capability_id": None,
@@ -132,7 +130,6 @@ class MainAgentLLMAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-auto-sql",
-                "account_id": "acc-1",
                 "content": "查询龙粳33的详细审定信息",
                 "routing_mode": "auto",
                 "capability_id": None,
@@ -191,7 +188,6 @@ class MainAgentLLMAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-llm-planner-sql",
-                "account_id": "acc-1",
                 "content": "查询龙粳33的详细审定信息",
                 "routing_mode": "auto",
                 "capability_id": None,
@@ -231,7 +227,6 @@ class MainAgentLLMAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-llm-planner-chat",
-                "account_id": "acc-1",
                 "content": "你好，介绍一下你能做什么",
                 "routing_mode": "auto",
                 "capability_id": None,
@@ -265,7 +260,6 @@ class MainAgentLLMAPITest(APITestCase):
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-llm-planner-fail",
-                "account_id": "acc-1",
                 "content": "查询龙粳33",
                 "routing_mode": "auto",
                 "capability_id": None,
@@ -418,7 +412,6 @@ triggers:
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-skill",
-                "account_id": "acc-1",
                 "content": "帮我写周报",
                 "routing_mode": "auto",
                 "capability_id": None,
@@ -530,7 +523,6 @@ triggers:
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-main-deep",
-                "account_id": "acc-1",
                 "content": "请深入分析",
                 "routing_mode": "auto",
                 "capability_id": None,

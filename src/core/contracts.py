@@ -10,6 +10,7 @@ from .models import (
     AuthApiToken,
     AuthSession,
     AuthUser,
+    AuthUserToken,
     Checkpoint,
     Conversation,
     ConversationMemorySummary,
@@ -89,11 +90,42 @@ class StoragePort(Protocol):
 
     async def revoke_auth_api_token_for_user(self, username: str, token_id: str, *, revoked_at: datetime) -> AuthApiToken | None: ...
 
+    async def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken: ...
+
+    async def get_auth_user_token(self, username: str) -> AuthUserToken | None: ...
+
+    async def get_auth_user_token_by_hash(self, api_token_hash: str) -> AuthUserToken | None: ...
+
+    async def touch_auth_user_token_last_used(
+        self,
+        username: str,
+        *,
+        api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None: ...
+
+    async def clear_auth_user_token(
+        self,
+        username: str,
+        *,
+        api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None: ...
+
+    async def rotate_auth_user_token(
+        self,
+        username: str,
+        *,
+        old_api_token_hash: str,
+        new_api_token_hash: str,
+        at: datetime,
+    ) -> AuthUserToken | None: ...
+
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
 
     async def get_conversation(self, conversation_id: str) -> Conversation | None: ...
 
-    async def list_conversations_for_account(self, account_id: str) -> list[Conversation]: ...
+    async def list_conversations_for_username(self, username: str) -> list[Conversation]: ...
 
     async def delete_conversation(self, conversation_id: str) -> dict[str, int]: ...
 
@@ -104,7 +136,7 @@ class StoragePort(Protocol):
     async def get_latest_conversation_memory_summary(
         self,
         conversation_id: str,
-        account_id: str | None = None,
+        username: str | None = None,
     ) -> ConversationMemorySummary | None: ...
 
     async def list_conversation_memory_summaries(self, conversation_id: str) -> list[ConversationMemorySummary]: ...

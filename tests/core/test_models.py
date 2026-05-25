@@ -11,7 +11,6 @@ from src.core.enums import (
     EventVisibility,
     MailboxChannel,
     MailboxDeliveryStatus,
-    MessageRole,
     NodeCriticality,
     NodeStatus,
     RoutingMode,
@@ -45,7 +44,7 @@ class CoreModelDefinitionTest(unittest.TestCase):
             Conversation,
             [
                 "conversation_id",
-                "account_id",
+                "username",
                 "status",
                 "current_task_id",
                 "title",
@@ -247,7 +246,7 @@ class CoreModelDefinitionTest(unittest.TestCase):
 
 class CoreModelDefaultValueTest(unittest.TestCase):
     def test_models_use_generic_defaults_not_business_specific_defaults(self) -> None:
-        conversation = Conversation(conversation_id="conv-1", account_id="acc-1")
+        conversation = Conversation(conversation_id="conv-1", username="acc-1")
         task = Task(
             task_id="task-1",
             conversation_id="conv-1",

@@ -34,7 +34,7 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
                         "resolved_user_message": "查询龙粳33的基因型信息",
                         "clarification_messages": [{"content": "补充信息：水稻"}],
                         "summary_id": "summary-secret-id",
-                        "account_id": "alice",
+                        "username": "alice",
                         "source_message_ids_hash": "hash-secret",
                         "model_metadata_safe": {"model": "fake"},
                         "last_error": "summary failed",
@@ -52,7 +52,7 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("系统根据历史补全后的 effective question", prompt)
         self.assertIn("查询龙粳33的基因型信息", prompt)
         self.assertIn("用户对上一问题的补充信息", prompt)
-        for forbidden in ("summary-secret-id", "hash-secret", "model_metadata_safe", "last_error", "account_id"):
+        for forbidden in ("summary-secret-id", "hash-secret", "model_metadata_safe", "last_error", "username"):
             self.assertNotIn(forbidden, prompt)
 
     async def test_prompt_does_not_include_sensitive_memory_fields(self) -> None:
