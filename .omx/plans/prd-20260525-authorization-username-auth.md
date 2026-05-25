@@ -74,6 +74,21 @@
 5. 改 API 文档和历史测试 fixture。
 6. 全量验证后再清理旧 Cookie/session/scope 路径残留。
 
+### 4.1 Split Decision — 父计划 + 可验证检查点
+
+这份 PRD 与关联 Test Spec 保持为唯一父计划，不再把产品决策拆成多份互相独立的 PRD。实际实施必须拆成下列可验证检查点推进；每个检查点有独立退出标准，下游写代码不得越过未通过的上游门禁。
+
+| Checkpoint | 覆盖步骤 | 目标 | 退出门禁 | 可并行性 |
+| --- | --- | --- | --- | --- |
+| CP-0 Contract red tests | Step 1 | 先把目标认证/API/迁移行为写成失败测试。 | 新增/更新测试能稳定指向旧行为失败；未改生产代码。 | 不并行；所有后续实现依赖它。 |
+| CP-1 Storage + token foundation | Step 2-3 | 落地 username owner、旧 account_id backfill、单 token hash 映射与 auth service。 | storage/auth service targeted tests 通过；旧库 fixture 可迁移；明文 token 不落库。 | 可由一个后端 lane 独立完成。 |
+| CP-2 API contract hard switch | Step 4 | FastAPI 改为 Bearer-only，删除 Cookie/scope 入口，DTO/response 改 username。 | auth API/isolation/docs schema targeted tests 通过；public endpoints 未误伤。 | 依赖 CP-1 contract；可与 CP-3 只读准备并行，不能并行改同一 route。 |
+| CP-3 Business owner + SSE currentness | Step 5-6 | runtime、memory、upload、task/SSE 继续按 owner 隔离，只改身份来源和字段名。 | memory/upload/task/SSE targeted tests 通过；旧 token stream 不再收业务事件。 | CP-2 DTO 稳定后可与 CP-4 并行。 |
+| CP-4 Frontend login/token flow | Step 7 | 前端 username-only login、localStorage token、REST/upload/SSE Authorization 注入。 | frontend targeted tests 与 build 通过；401 清 token 并关闭 SSE。 | CP-2 API contract 稳定后可与 CP-3 并行。 |
+| CP-5 Docs + sweep + full regression | Step 8-10 | 文档、README、静态残留、全量回归与最终证据。 | Required Verification Commands、`git diff --check` 与 `rg` allowlist 通过。 | 必须最后执行。 |
+
+实施口径：如果使用 `$team` 或 `$ultragoal`，可以把 CP-1、CP-3、CP-4 分配给不同 owner；但 CP-0、CP-2 的接口契约和 CP-5 的最终验收必须由一个主 owner 收口，防止不同 lane 重新解释 Authorization-only / username-only 决策。
+
 ## 5. Implementation Steps
 
 ### Step 1 — 后端认证契约测试先行
@@ -405,4 +420,5 @@ The chosen model is the simplest contract matching the confirmed product directi
 - File references: yes, baseline evidence maps to current files/lines.
 - Risks mitigated: yes.
 - Vague terms: bounded or tied to tests.
+- Execution split: yes, CP-0 through CP-5 define checkpoint gates and parallelization boundaries.
 - Saved under `.omx/plans/`: yes.

@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Authorization-only 内部登录态父计划与测试规格完成 document-perfectization 复审：在 `.omx/plans/prd-20260525-authorization-username-auth.md` 与 `.omx/plans/test-spec-20260525-authorization-username-auth.md` 中补充 CP-0 至 CP-5 可验证检查点、并行边界、阶段性 targeted test gate 与禁止用 Cookie/body username fallback 过门禁的规则；本轮仍未改运行时代码。
 - Authorization-only 内部登录态实施计划与测试规格已通过 `$plan` 落地：新增 `.omx/plans/prd-20260525-authorization-username-auth.md` 与 `.omx/plans/test-spec-20260525-authorization-username-auth.md`，明确 TDD 分层步骤、username owner 迁移、SSE token 当前性、前端 localStorage、文档更新、验证命令与 Team/Ultragoal 后续执行建议；本轮仍未改运行时代码。
 - Authorization-only 内部登录态设计完成 document-perfectization 审查：加固 `docs/superpowers/specs/2026-05-25-authorization-username-auth-design.md`，补齐当前状态证据、受影响系统、核心决策、NFR、下线旧认证接口、username 字段迁移、rollout/rollback、风险假设与验收矩阵；本轮仅文档审查，不改运行时代码。
 - 本周工作周报更新：重写根目录 `本周工作周报.md`，汇总 2026-05-18 至 2026-05-22 小奥 Agent 主项目与 `/Users/yinpeihai/Code_workspace/ocr_mcp` OCR MCP 项目的本周交付、验证和下周风险。

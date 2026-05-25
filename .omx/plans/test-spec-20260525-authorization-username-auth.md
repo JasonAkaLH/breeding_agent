@@ -17,6 +17,21 @@
 6. 前端使用 localStorage token，并对 REST、multipart、SSE 统一注入 Authorization。
 7. API 文档不再暴露旧 Cookie/password/captcha/scoped token 管理口径。
 
+### 1.1 Checkpoint Gate Matrix
+
+测试规格按父计划的 CP-0 到 CP-5 分阶段收口。每个 checkpoint 必须先通过本阶段 targeted tests，再进入下一阶段；只有 CP-3 与 CP-4 可在 CP-2 API contract 稳定后并行。
+
+| Checkpoint | 必跑 targeted tests / checks | 进入下一阶段条件 |
+| --- | --- | --- |
+| CP-0 Contract red tests | 新增或更新 `tests/api/test_authorization_username_auth.py`、storage migration/auth repository tests、frontend client/App red tests；运行对应 targeted tests，预期因旧实现失败。 | 失败信息对应目标 contract，且生产代码尚未修改。 |
+| CP-1 Storage + token foundation | `conda run -n multi_agent python -m unittest tests.storage.test_sqlite_username_auth_repository tests.storage.test_sqlite_username_migration tests.storage.test_sqlite_bootstrap tests.storage.test_sqlite_conversation_repository tests.storage.test_sqlite_conversation_memory_repository tests.storage.test_sqlite_pending_skill_context` | username owner、token hash 映射、logout token=NULL、旧 account_id backfill 均通过。 |
+| CP-2 API contract hard switch | `conda run -n multi_agent python -m unittest tests.api.test_authorization_username_auth tests.api.test_auth_login_and_isolation tests.api.test_developer_docs tests.api.test_cors_policy` | Bearer-only、旧认证接口下线、DTO/response username、CORS Authorization 均通过。 |
+| CP-3 Business owner + SSE currentness | `conda run -n multi_agent python -m unittest tests.api.test_task_events_sse tests.api.test_task_cancel tests.api.test_uploads tests.api.test_skill_output_artifacts tests.api.test_conversation_memory_runtime tests.orchestration.test_conversation_memory tests.capabilities.main_agent.test_conversation_memory_prompt` | conversation/task/upload/artifact/memory 隔离不变；token 覆盖/登出后旧 SSE 不再推业务事件。 |
+| CP-4 Frontend login/token flow | `cd frontend && npm test -- --run client.test.ts taskEvents.test.ts App.test.tsx`；`cd frontend && npm run build` | localStorage token、REST/upload/SSE Authorization、401 清理、submit body 无 account_id 均通过。 |
+| CP-5 Docs + sweep + full regression | Documentation tests、Static Sweep Tests、Required Verification Commands、`git diff --check`。 | 无未解释旧认证/`account_id` 残留；后端分层、前端、docs 与 build 均通过。 |
+
+Gate rule：任何 checkpoint 失败时，只允许修复该 checkpoint 或其上游依赖；不得通过临时 fallback、Cookie 兼容或 body username 兼容来让测试变绿。
+
 ## 2. Backend Auth API Tests
 
 ### 文件
@@ -181,7 +196,9 @@ Targeted:
 conda run -n multi_agent python -m unittest tests.api.test_authorization_username_auth
 conda run -n multi_agent python -m unittest tests.storage.test_sqlite_username_auth_repository tests.storage.test_sqlite_username_migration
 conda run -n multi_agent python -m unittest tests.api.test_auth_login_and_isolation tests.api.test_task_events_sse tests.api.test_developer_docs
+conda run -n multi_agent python -m unittest tests.api.test_task_cancel tests.api.test_uploads tests.api.test_skill_output_artifacts tests.api.test_conversation_memory_runtime tests.orchestration.test_conversation_memory tests.capabilities.main_agent.test_conversation_memory_prompt
 cd frontend && npm test -- --run client.test.ts taskEvents.test.ts App.test.tsx
+cd frontend && npm run build
 ```
 
 Regression:
