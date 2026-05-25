@@ -5,109 +5,1044 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小奥 Agent API 文档</title>
   <style>
-    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6;margin:2rem;max-width:1120px;color:#17231d;background:#fbf7ec}
-    h1,h2,h3{color:#123328} section{margin:2rem 0;padding:1rem 1.25rem;background:#fffdf8;border:1px solid rgba(31,91,69,.16);border-radius:16px}
-    code{background:#edf7ec;padding:.1rem .25rem;border-radius:4px} pre{background:#111827;color:#e5edf4;padding:1rem;overflow:auto;border-radius:8px}
-    table{border-collapse:collapse;width:100%;margin:.75rem 0}td,th{border:1px solid rgba(31,91,69,.16);padding:.5rem;text-align:left;vertical-align:top}th{background:#edf7ec}.method{font-weight:800;white-space:nowrap}.note{color:#66756d}
+    :root {
+      --soil-50: #fbf7ec;
+      --soil-100: #f3ead4;
+      --leaf-900: #123328;
+      --leaf-800: #174133;
+      --leaf-700: #1f5b45;
+      --leaf-600: #2c7a5b;
+      --leaf-500: #3fa374;
+      --mint-100: #dff4e7;
+      --sky-600: #2563eb;
+      --violet-600: #7c3aed;
+      --red-600: #dc2626;
+      --amber-600: #d97706;
+      --ink: #17231d;
+      --muted: #66756d;
+      --line: rgba(31, 91, 69, .16);
+      --panel: rgba(255, 255, 255, .82);
+      --panel-strong: #fffdf8;
+      --code-bg: #111827;
+      --code-line: #253144;
+      --code-ink: #e5edf4;
+      --shadow: 0 20px 60px rgba(18, 51, 40, .12);
+      --radius-lg: 28px;
+      --radius-md: 18px;
+      --sidebar: 264px;
+      --toolbox: 292px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 22px; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 6%, rgba(107, 169, 92, .25), transparent 28rem),
+        radial-gradient(circle at 90% 10%, rgba(244, 191, 94, .24), transparent 24rem),
+        linear-gradient(135deg, #f7f1df 0%, #edf7ec 50%, #f8fbf5 100%);
+      line-height: 1.58;
+    }
+    a { color: var(--leaf-700); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 3px solid rgba(63, 163, 116, .35);
+      outline-offset: 3px;
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: var(--sidebar) minmax(0, 1fr) var(--toolbox);
+      gap: 24px;
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .side-nav, .toolbox {
+      position: sticky;
+      top: 20px;
+      align-self: start;
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      border: 1px solid var(--line);
+      background: rgba(255, 253, 248, .74);
+      backdrop-filter: blur(18px);
+      box-shadow: var(--shadow);
+      border-radius: 24px;
+    }
+    .side-nav { padding: 18px; }
+    .brand-mark { display: flex; gap: 10px; align-items: center; margin-bottom: 18px; }
+    .brand-icon { width: 40px; height: 40px; border-radius: 14px; display: grid; place-items: center; background: linear-gradient(145deg, var(--leaf-600), #9ccf7f); color: white; box-shadow: 0 14px 30px rgba(31, 91, 69, .2); }
+    .brand-mark strong { display: block; color: var(--leaf-900); }
+    .brand-mark span { display: block; font-size: 12px; color: var(--muted); }
+    .nav-section { margin-top: 18px; }
+    .nav-section h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+    .nav-section a { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-radius: 12px; color: #31443a; font-size: 14px; }
+    .nav-section a:hover { background: rgba(63, 163, 116, .12); color: var(--leaf-800); text-decoration: none; }
+    .endpoint-nav-list { display: grid; gap: 10px; }
+    .endpoint-nav-group { border: 1px solid rgba(31, 91, 69, .08); border-radius: 16px; background: rgba(255, 255, 255, .38); padding: 6px; }
+    .endpoint-nav-group summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-radius: 12px; cursor: pointer; list-style: none; }
+    .endpoint-nav-group summary::-webkit-details-marker { display: none; }
+    .endpoint-nav-group summary::before { content: "▸"; color: var(--leaf-700); font-size: 11px; transition: transform .16s ease; }
+    .endpoint-nav-group[open] summary::before { transform: rotate(90deg); }
+    .endpoint-nav-group summary:hover { background: rgba(63, 163, 116, .12); }
+    .endpoint-nav-parent { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; font-weight: 900; color: var(--leaf-800) !important; }
+    .endpoint-nav-parent small { color: var(--muted); font-weight: 800; white-space: nowrap; }
+    .endpoint-nav-children { display: grid; gap: 2px; margin-top: 2px; }
+    .nav-section a.endpoint-nav-link { justify-content: flex-start; padding: 6px 8px 6px 14px; font-size: 12px; line-height: 1.25; color: #4c5d53; }
+    .endpoint-nav-method { flex: 0 0 auto; min-width: 42px; border-radius: 999px; padding: 3px 6px; background: rgba(31, 91, 69, .08); color: var(--leaf-800); font-size: 10px; font-weight: 900; text-align: center; }
+    .endpoint-nav-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    main { min-width: 0; }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(31, 91, 69, .14);
+      border-radius: var(--radius-lg);
+      padding: clamp(26px, 5vw, 48px);
+      background: linear-gradient(135deg, rgba(255, 253, 248, .92), rgba(230, 246, 232, .78));
+      box-shadow: var(--shadow);
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -70px;
+      top: -70px;
+      width: 280px;
+      height: 280px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(63, 163, 116, .28), transparent 66%);
+    }
+    .eyebrow { display: inline-flex; gap: 8px; align-items: center; padding: 7px 11px; border-radius: 999px; background: rgba(31, 91, 69, .08); color: var(--leaf-700); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { position: relative; z-index: 1; max-width: 900px; margin: 18px 0 12px; font-size: clamp(34px, 5vw, 64px); line-height: .98; letter-spacing: -.045em; color: var(--leaf-900); }
+    .subtitle { position: relative; z-index: 1; max-width: 860px; color: #425249; font-size: 18px; margin: 0; }
+    .hero-actions { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+    .primary-action, .ghost-action { border: 1px solid var(--line); border-radius: 999px; padding: 11px 16px; font-weight: 800; }
+    .primary-action { background: var(--leaf-700); color: white; box-shadow: 0 14px 28px rgba(31, 91, 69, .2); }
+    .ghost-action { background: rgba(255,255,255,.64); color: var(--leaf-800); }
+    .metric-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 18px 0 0; }
+    .metric { border: 1px solid var(--line); border-radius: 18px; padding: 13px; background: rgba(255,255,255,.68); }
+    .metric b { display: block; color: var(--leaf-900); font-size: 20px; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .panel { margin-top: 22px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); backdrop-filter: blur(18px); box-shadow: var(--shadow); padding: clamp(18px, 3vw, 28px); }
+    .panel-head { display: flex; justify-content: space-between; align-items: end; gap: 18px; margin-bottom: 18px; }
+    .panel h2 { margin: 0; font-size: clamp(23px, 3vw, 34px); color: var(--leaf-900); letter-spacing: -.025em; }
+    .panel-intro { margin: 8px 0 0; color: var(--muted); max-width: 860px; }
+    .quickstart-grid, .formal-flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .formal-flow { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px; }
+    .step-card { position: relative; min-height: 150px; padding: 18px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel-strong); }
+    .step-card .num { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 12px; background: var(--mint-100); color: var(--leaf-800); font-weight: 900; }
+    .step-card h3 { margin: 14px 0 7px; font-size: 16px; }
+    .step-card p { margin: 0; color: var(--muted); font-size: 14px; }
+    .inline-code { padding: 2px 6px; border-radius: 8px; background: rgba(31, 91, 69, .08); color: var(--leaf-800); font-size: .92em; overflow-wrap: anywhere; word-break: break-word; }
+    .console-toolbar { position: sticky; top: 12px; z-index: 4; display: grid; gap: 12px; margin: 20px 0; padding: 14px; border: 1px solid var(--line); border-radius: 22px; background: rgba(255, 253, 248, .9); backdrop-filter: blur(20px); box-shadow: 0 12px 30px rgba(18, 51, 40, .09); }
+    .search-row { display: flex; gap: 10px; align-items: center; }
+    .search-row input { width: 100%; border: 1px solid var(--line); background: #fffefb; border-radius: 14px; padding: 12px 14px; color: var(--ink); }
+    .bulk-actions { display: flex; gap: 8px; }
+    .bulk-actions button, .filter-chip { border: 1px solid var(--line); background: #fffefb; color: var(--leaf-800); border-radius: 999px; padding: 8px 12px; font-weight: 750; font-size: 13px; }
+    .filter-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .filter-chip.active { background: var(--leaf-700); color: white; border-color: var(--leaf-700); }
+    .endpoint-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 16px; align-items: stretch; margin-top: 20px; scroll-margin-top: 160px; }
+    .group-title { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 26px 0 0; color: var(--leaf-900); }
+    .group-title span { font-size: 22px; font-weight: 900; }
+    .group-title small { color: var(--muted); }
+    .endpoint-card { min-width: 0; height: 100%; display: flex; flex-direction: column; scroll-margin-top: 160px; border: 1px solid var(--line); border-radius: 24px; background: rgba(255, 253, 248, .9); box-shadow: 0 14px 40px rgba(18, 51, 40, .08); padding: 18px; margin: 0; }
+    .endpoint-card[hidden], .endpoint-group[hidden] { display: none; }
+    .endpoint-topline { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .endpoint-identity { min-width: 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .method { display: inline-grid; place-items: center; min-width: 70px; height: 32px; padding: 0 10px; border-radius: 12px; color: white; font-weight: 950; letter-spacing: .04em; font-size: 13px; }
+    .method.GET { background: var(--sky-600); }
+    .method.POST { background: var(--leaf-600); }
+    .method.PATCH { background: var(--violet-600); }
+    .method.DELETE { background: var(--red-600); }
+    .path-copy { min-width: 0; max-width: 100%; overflow-wrap: anywhere; border: 0; background: transparent; color: var(--leaf-900); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-weight: 850; font-size: 14px; text-align: left; padding: 4px 0; }
+    .path-copy:hover { color: var(--leaf-600); text-decoration: underline; }
+    .path-copy code { padding: 0; background: transparent; color: inherit; font: inherit; }
+    .endpoint-tag { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; background: rgba(31, 91, 69, .08); color: var(--leaf-800); font-size: 12px; font-weight: 800; }
+    .endpoint-summary { display: block; min-width: 0; margin-top: 14px; }
+    .endpoint-summary h3 { margin: 0 0 7px; font-size: 22px; color: var(--leaf-900); }
+    .endpoint-summary p { margin: 0; color: #4b5c53; }
+    .quick-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: end; }
+    .quick-actions button, .formal-example-head button, .path-copy.copy-ok { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; background: #fff; color: var(--leaf-800); font-size: 12px; font-weight: 850; }
+    .quick-actions button:hover, .formal-example-head button:hover { background: var(--mint-100); }
+    .endpoint-detail { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .endpoint-detail summary { cursor: pointer; color: var(--leaf-800); font-weight: 900; }
+    .detail-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 12px; }
+    .detail-grid div { min-width: 0; border: 1px solid var(--line); border-radius: 16px; background: rgba(237, 247, 236, .46); padding: 12px; }
+    .detail-grid div:first-child { background: rgba(255, 253, 248, .78); }
+    .detail-grid b { color: var(--leaf-900); }
+    .detail-grid p { margin: 6px 0 0; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+    .param-section, .response-section { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .param-section h4, .response-section h4 { margin: 0 0 8px; color: var(--leaf-900); font-size: 15px; }
+    .param-table { margin-top: 0; table-layout: fixed; }
+    .param-table th:nth-child(1) { width: 18%; }
+    .param-table th:nth-child(2) { width: 12%; }
+    .param-table th:nth-child(3) { width: 16%; }
+    .param-table th:nth-child(4) { width: 10%; }
+    .param-table th:nth-child(5) { width: 28%; }
+    .param-table th:nth-child(6) { width: 16%; }
+    .response-table th:nth-child(1) { width: 22%; }
+    .response-table th:nth-child(2) { width: 18%; }
+    .response-table th:nth-child(3) { width: 10%; }
+    .response-table th:nth-child(4) { width: 34%; }
+    .response-table th:nth-child(5) { width: 16%; }
+    .param-table td { overflow-wrap: anywhere; }
+    .formal-example-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 14px; }
+    .formal-example-card { min-width: 0; overflow: hidden; border: 1px solid var(--code-line); border-radius: 18px; background: var(--code-bg); }
+    .formal-example-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--code-line); color: #cbd5e1; }
+    .formal-example-head span { font-size: 12px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .formal-example-head button { border-color: #334155; background: #1f2937; color: #e5edf4; }
+    pre { margin: 0; padding: 14px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--code-ink); font-size: 12.5px; line-height: 1.55; }
+    .sse-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .7fr); gap: 16px; }
+    .event-list { display: grid; gap: 10px; }
+    .event-item { border: 1px solid var(--line); border-radius: 16px; background: var(--panel-strong); padding: 13px; }
+    .event-item b { display: block; color: var(--leaf-900); }
+    .event-item span { color: var(--muted); font-size: 14px; }
+    .schema-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+    .schema-card { border: 1px solid var(--line); border-radius: 18px; background: var(--panel-strong); padding: 12px; }
+    .schema-card summary { cursor: pointer; font-weight: 900; color: var(--leaf-900); }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+    th, td { padding: 10px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--leaf-900); background: rgba(31, 91, 69, .05); }
+    .error-grid, .source-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .note-card { min-width: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--panel-strong); padding: 14px; overflow: hidden; }
+    .note-card b { color: var(--leaf-900); }
+    .note-card p { margin: 7px 0 0; color: var(--muted); overflow-wrap: anywhere; word-break: break-word; }
+    .note-card .formal-example-card { margin-top: 10px; }
+    .toolbox { padding: 16px; }
+    .toolbox h2 { margin: 0 0 10px; color: var(--leaf-900); font-size: 16px; }
+    .tool-section { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+    .tool-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+    .base-url { display: grid; gap: 8px; }
+    .base-url input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 10px 11px; background: #fff; color: var(--ink); }
+    .tool-button { width: 100%; margin-top: 8px; border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: var(--leaf-700); color: white; font-weight: 900; }
+    .flow-list { display: grid; gap: 9px; padding: 0; margin: 0; list-style: none; }
+    .flow-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; align-items: start; font-size: 13px; color: #405248; }
+    .flow-list span { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 9px; background: var(--mint-100); color: var(--leaf-800); font-weight: 900; }
+    .toast { position: fixed; right: 20px; bottom: 20px; z-index: 50; padding: 12px 14px; border-radius: 14px; background: var(--leaf-900); color: white; box-shadow: var(--shadow); opacity: 0; transform: translateY(12px); pointer-events: none; transition: .18s ease; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .empty-state { display: none; margin: 18px 0; padding: 22px; border: 1px dashed rgba(31, 91, 69, .28); border-radius: 18px; color: var(--muted); background: rgba(255, 253, 248, .72); text-align: center; }
+    .empty-state.show { display: block; }
+    @media (max-width: 1260px) {
+      .shell { grid-template-columns: 220px minmax(0, 1fr); }
+      .toolbox { grid-column: 2; position: static; max-height: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+      .tool-section { border-top: 0; padding-top: 0; margin-top: 0; }
+      .quickstart-grid, .formal-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 900px) {
+      .shell { grid-template-columns: 1fr; padding: 14px; }
+      .side-nav, .toolbox, .console-toolbar { position: static; max-height: none; }
+      .side-nav { display: block; }
+      .metric-strip, .quickstart-grid, .formal-flow, .formal-example-grid, .sse-layout, .schema-grid, .error-grid, .source-grid, .toolbox { grid-template-columns: 1fr; }
+      .endpoint-summary { grid-template-columns: 1fr; }
+      .quick-actions { justify-content: start; }
+      .search-row { flex-direction: column; align-items: stretch; }
+      .bulk-actions { flex-wrap: wrap; }
+    }
   </style>
 </head>
 <body>
-  <h1>小奥 Agent API 文档</h1>
-  <p>当前认证模型为 Authorization-only username token：登录只提交 <code>username</code>，服务端返回当前有效 <code>access_token</code>；后续所有受保护 REST、multipart upload 与 SSE fetch-stream 请求都必须携带 <code>Authorization: Bearer &lt;access_token&gt;</code>。除登录外，请求体、query param 与业务 metadata 不承载用户身份。</p>
+  <div class="shell">
+    <aside class="side-nav" aria-label="API 文档目录">
+      <div class="brand-mark">
+        <div class="brand-icon" aria-hidden="true">🌾</div>
+        <div><strong><code class="inline-code">breeding_agent</code></strong><span>REST API 控制台</span></div>
+      </div>
+      <nav>
+        <div class="nav-section">
+          <h2>指南</h2>
+          <a href="#overview">概览</a>
+          <a href="#quickstart">快速接入</a>
+          <a href="#auth-model">认证方式</a>
+          <a href="#deploy-ports">部署端口</a>
+          <a href="#lifecycle">调用流程</a>
+          <a href="#console">接口控制台</a>
+          <a href="#sse"><code class="inline-code">SSE</code> 流式事件</a>
+          <a href="#schemas">数据结构</a>
+          <a href="#errors">错误码</a>
+          <a href="#source">来源映射</a>
+        </div>
+        <div class="nav-section"><h2>接口分组</h2><div id="endpoint-nav" class="endpoint-nav-list" aria-label="接口明细导航"></div></div>
+      </nav>
+    </aside>
 
-  <section id="auth">
-    <h2>认证</h2>
-    <table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
-      <tr><td class="method">POST</td><td><code>/api/v1/auth/login</code></td><td>请求体只允许 <code>username</code>。若用户名尚无映射则创建；无论是否已有映射，都会签发一个新的当前 token，旧 token 立即失效。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/auth/me</code></td><td>通过 Authorization token 定位当前用户。</td></tr>
-      <tr><td class="method">POST</td><td><code>/api/v1/auth/refresh-token</code></td><td>通过当前 token 定位用户，并原子替换为新的当前 token；旧 token 立即失效。</td></tr>
-      <tr><td class="method">POST</td><td><code>/api/v1/auth/logout</code></td><td>通过当前 token 定位用户并清空 token，保留用户名映射行。</td></tr>
-    </tbody></table>
-    <pre><code>curl -X POST "${BASE_URL}/api/v1/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice"}'</code></pre>
-    <pre><code>{
-  "user": { "username": "alice" },
-  "access_token": "maf_tok_xxx"
-}</code></pre>
-  </section>
+    <main>
+      <header class="hero" id="overview">
+        <span class="eyebrow">RESTful API 文档 · Authorization-only</span>
+        <h1>小奥 Agent API 文档</h1>
+        <p class="subtitle">覆盖认证、会话、消息提交、任务查询、<code class="inline-code">SSE</code> 实时事件、上传文件与产物下载。当前版本已按 Authorization header API token、username-only 登录、单 token 当前性、非 GET 业务 ID 入 body/form、GET path/query 参数规则和 Docker 新端口更新。</p>
+        <div class="hero-actions"><a class="primary-action" href="#console">查看接口控制台</a><a class="ghost-action" href="#quickstart">查看正式接入流程</a><a class="ghost-action" href="#deploy-ports">查看部署端口</a></div>
+        <div class="metric-strip" aria-label="文档摘要">
+          <div class="metric"><b>19</b><span><code class="inline-code">OpenAPI</code> 路径</span></div>
+          <div class="metric"><b>22</b><span><code class="inline-code">HTTP</code> 操作</span></div>
+          <div class="metric"><b><code class="inline-code">Authorization</code></b><span>唯一认证入口</span></div>
+          <div class="metric"><b><code class="inline-code">username</code></b><span>仅登录 body 提交</span></div>
+        </div>
+      </header>
 
-  <section id="conversations">
-    <h2>会话与消息</h2>
-    <table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
-      <tr><td class="method">POST</td><td><code>/api/v1/conversations/chat-messages</code></td><td>提交用户消息并创建任务。owner 只能由 Authorization token 解析出的 <code>username</code> 决定；请求体不允许身份字段。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/conversations</code></td><td>列出当前用户自己的会话。</td></tr>
-      <tr><td class="method">PATCH</td><td><code>/api/v1/conversations</code></td><td>按 <code>conversation_id</code> 重命名当前用户会话。</td></tr>
-      <tr><td class="method">DELETE</td><td><code>/api/v1/conversations</code></td><td>删除当前用户会话，并清理其消息、任务、事件与关联文件记录。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/conversations/{conversation_id}/messages</code></td><td>读取当前用户指定会话的历史消息。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/conversations/{conversation_id}/tasks?scope=unfinished|all</code></td><td>列出当前用户指定会话的任务；无权访问时返回空列表或 404 语义。</td></tr>
-    </tbody></table>
-    <pre><code>curl -X POST "${BASE_URL}/api/v1/conversations/chat-messages" \
-  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "conversation_id":"conv-1",
-    "content":"你好",
-    "routing_mode":"auto",
-    "capability_id":null,
-    "client_message_id":null,
-    "metadata":{}
-  }'</code></pre>
-  </section>
+      <section class="panel" id="quickstart">
+        <div class="panel-head"><div><h2>快速接入</h2><p class="panel-intro">最短接入链路：登录获取 token → 提交消息 → 监听任务事件。</p></div></div>
+        <div class="quickstart-grid">
+          <div class="step-card"><div class="num">1</div><h3>登录</h3><p>调用 <code class="inline-code">POST /api/v1/auth/login</code>，body 只传 <code class="inline-code">username</code>，响应返回 <code class="inline-code">access_token</code>。</p></div>
+          <div class="step-card"><div class="num">2</div><h3>保存 token</h3><p>后续 REST、multipart upload 与 SSE fetch-stream 都携带 <code class="inline-code">Authorization: Bearer</code>。</p></div>
+          <div class="step-card"><div class="num">3</div><h3>提交消息</h3><p>向会话提交内容，拿到 <code class="inline-code">task_id</code>。</p></div>
+          <div class="step-card"><div class="num">4</div><h3>监听 <code class="inline-code">SSE</code></h3><p>订阅任务事件，实时渲染节点输出、产物和中断。</p></div>
+        </div>
+        <div class="formal-flow" aria-label="正式接入规则">
+          <div class="note-card"><b>认证规则</b><p><code class="inline-code">Authorization</code> header 只放 API token。除登录接口外，所有受保护接口都不接收 <code class="inline-code">username</code>，服务端只通过 token 定位用户。</p></div>
+          <div class="note-card"><b>会话规则</b><p><code class="inline-code">conversation_id</code> 由调用方生成或复用；官方非 <code class="inline-code">GET</code> 路由不在 URL 中携带业务 ID，统一放入 JSON body 或 multipart form。</p></div>
+          <div class="note-card"><b>任务规则</b><p>提交消息返回 <code class="inline-code">task_id</code>；任务输出以 <code class="inline-code">SSE</code> 为主，任务摘要、图、等待输入和产物接口用于状态恢复与补充展示。</p></div>
+        </div>
+      </section>
 
-  <section id="uploads">
-    <h2>会话上传</h2>
-    <table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
-      <tr><td class="method">POST</td><td><code>/api/v1/conversations/uploads</code></td><td>multipart upload；<code>file</code> 放文件，<code>conversation_id</code> 放 form field，Authorization 放 header。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/conversations/{conversation_id}/uploads</code></td><td>列出当前用户会话的未过期上传。</td></tr>
-      <tr><td class="method">DELETE</td><td><code>/api/v1/conversations/uploads</code></td><td>按 <code>conversation_id</code> 与 <code>upload_id</code> 删除上传记录。</td></tr>
-    </tbody></table>
-  </section>
+      <section class="panel" id="auth-model">
+        <div class="panel-head"><div><h2>认证方式</h2><p class="panel-intro">当前系统不管理完整用户账户体系，仅维护 username 与当前 token 的映射关系。</p></div></div>
+        <div class="source-grid">
+          <div class="note-card"><b>登录</b><p><code class="inline-code">POST /api/v1/auth/login</code> 只接收 <code class="inline-code">username</code>。若用户名不存在则创建映射行；无论是否已有映射，都会生成新的当前 <code class="inline-code">access_token</code> 并返回。</p></div>
+          <div class="note-card"><b>登出</b><p><code class="inline-code">POST /api/v1/auth/logout</code> 通过 Authorization token 定位用户，只清空 token 字段，保留 username 记录。</p></div>
+          <div class="note-card"><b>刷新</b><p><code class="inline-code">POST /api/v1/auth/refresh-token</code> 通过当前 token 定位用户，生成新 token 替换旧 token，并返回新 token。</p></div>
+          <div class="note-card"><b>单 token 当前性</b><p>同一 username 只允许一个有效 token；旧设备或旧页面持有的 token 会在重新登录、刷新或登出后立即失效。</p></div>
+          <div class="note-card"><b>禁止伪造用户</b><p>除登录外，body、query、form、metadata 与 answer_payload 都不应携带用户或 token 字段；这类字段会被拒绝或忽略。</p></div>
+          <div class="note-card"><b>浏览器本地存储</b><p>前端可把 <code class="inline-code">access_token</code> 保存在浏览器 localStorage，并为 REST、multipart upload 与 SSE fetch-stream 注入 Authorization header。</p></div>
+        </div>
+      </section>
 
-  <section id="tasks">
-    <h2>任务、事件、产物与中断</h2>
-    <table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
-      <tr><td class="method">GET</td><td><code>/api/v1/tasks/{task_id}</code></td><td>读取当前用户任务摘要。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/tasks/{task_id}/events</code></td><td>SSE fetch-stream。token 不放 URL；服务端在事件发送前持续校验当前 token，刷新或登出后旧流不能继续收到事件。</td></tr>
-      <tr><td class="method">POST</td><td><code>/api/v1/tasks/cancel</code></td><td>请求取消当前用户任务，body 为 <code>{"task_id":"..."}</code>。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/tasks/{task_id}/interrupts</code></td><td>列出当前用户任务待回答的 interrupt。</td></tr>
-      <tr><td class="method">POST</td><td><code>/api/v1/tasks/interrupts/answer</code></td><td>提交 interrupt answer。<code>answer_payload</code> 不承载用户身份。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/tasks/{task_id}/graph</code></td><td>读取当前用户任务 DAG 节点与边。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/tasks/{task_id}/artifacts</code></td><td>列出当前用户任务产物。</td></tr>
-      <tr><td class="method">GET</td><td><code>/api/v1/artifacts/{artifact_id}/download</code></td><td>下载当前用户任务所属文件产物；无权访问返回 404。</td></tr>
-    </tbody></table>
-  </section>
+      <section class="panel" id="deploy-ports">
+        <div class="panel-head"><div><h2>部署地址与端口</h2><p class="panel-intro">本地开发端口和 Docker 部署端口不同，接入时请按运行方式选择 <code class="inline-code">BASE_URL</code>。</p></div></div>
+        <div class="source-grid">
+          <div class="note-card"><b>本地开发前端</b><p><code class="inline-code">http://127.0.0.1:5173/</code>，由 Vite dev server 提供。</p></div>
+          <div class="note-card"><b>本地开发后端</b><p><code class="inline-code">http://127.0.0.1:8000</code>，API 文档为 <code class="inline-code">http://127.0.0.1:8000/api-doc</code>。</p></div>
+          <div class="note-card"><b>Docker 前端</b><p><code class="inline-code">http://127.0.0.1:51999/</code>，nginx 服务 Vite build 产物并反代 <code class="inline-code">/api/</code> 与 <code class="inline-code">/api-doc</code>。</p></div>
+          <div class="note-card"><b>Docker 后端直连</b><p><code class="inline-code">http://127.0.0.1:51888</code>，后端容器内部仍监听 <code class="inline-code">8000</code>，宿主机映射为 <code class="inline-code">51888:8000</code>。</p></div>
+          <div class="note-card"><b>推荐接入</b><p>用户通过前端访问 <code class="inline-code">51999</code>；调试 API 或查看文档可访问 <code class="inline-code">51888/api-doc</code>。</p></div>
+          <div class="note-card"><b>数据持久化</b><p>Docker 运行时数据挂载到 <code class="inline-code">breeding-agent-runtime:/app/runtime</code>，升级镜像时不要删除该 volume。</p></div>
+        </div>
+      </section>
 
-  <section id="capabilities">
-    <h2>能力目录</h2>
-    <table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
-      <tr><td class="method">GET</td><td><code>/api/v1/capabilities</code></td><td>列出公开可用能力 / Skill；该目录为 public endpoint，无需 Authorization。</td></tr>
-    </tbody></table>
-  </section>
+      <section class="panel" id="lifecycle">
+        <div class="panel-head"><div><h2>推荐调用流程</h2><p class="panel-intro">业务对话台通常按下面顺序串联接口；<code class="inline-code">SSE</code> 是任务输出的主通道。</p></div></div>
+        <div class="source-grid">
+          <div class="note-card"><b>启动</b><p><code class="inline-code">GET /auth/me</code> 用 Authorization 校验登录态；<code class="inline-code">GET /capabilities</code> 初始化公开能力列表；<code class="inline-code">GET /conversations</code> 恢复历史会话。</p></div>
+          <div class="note-card"><b>对话</b><p>可先上传附件，再调用 <code class="inline-code">POST /conversations/chat-messages</code>；<code class="inline-code">conversation_id</code> 放在 body。响应中的 <code class="inline-code">task_id</code> 是后续查询核心。</p></div>
+          <div class="note-card"><b>收尾</b><p><code class="inline-code">SSE</code> 完成后读取 <code class="inline-code">messages</code> 与 <code class="inline-code">artifacts</code>；文件 <code class="inline-code">artifact</code> 用 <code class="inline-code">download_url</code> 或下载接口获取。</p></div>
+        </div>
+      </section>
 
-  <section id="schemas">
-    <h2>关键结构</h2>
-    <table><thead><tr><th>结构</th><th>字段</th></tr></thead><tbody>
-      <tr><th>LoginRequest</th><td><code>username</code></td></tr>
-      <tr><th>AuthTokenResponse</th><td><code>user.username</code>, <code>access_token</code></td></tr>
-      <tr><th>SubmitMessageRequest</th><td><code>conversation_id</code>, <code>content</code>, <code>routing_mode</code>, <code>capability_id</code>, <code>client_message_id</code>, <code>metadata</code></td></tr>
-      <tr><th>ConversationSummaryResponse</th><td><code>conversation_id</code>, <code>username</code>, <code>status</code>, <code>current_task_id</code>, <code>title</code>, <code>created_at</code>, <code>updated_at</code></td></tr>
-      <tr><th>TaskSummaryResponse</th><td><code>task_id</code>, <code>conversation_id</code>, <code>status</code>, node counts, cancel flag, timestamps</td></tr>
-      <tr><th>TaskEventEnvelope</th><td><code>event_id</code>, <code>conversation_id</code>, <code>task_id</code>, <code>event_type</code>, <code>payload</code>, <code>created_at</code></td></tr>
-      <tr><th>ArtifactResponse</th><td><code>artifact_id</code>, <code>producer_node_id</code>, <code>artifact_type</code>, <code>storage_ref</code>, <code>summary</code>, file metadata, <code>download_url</code></td></tr>
-      <tr><th>InterruptResponse</th><td><code>interrupt_id</code>, <code>conversation_id</code>, <code>task_id</code>, <code>node_id</code>, <code>question</code>, <code>required_fields</code>, <code>status</code></td></tr>
-    </tbody></table>
-  </section>
+      <section class="panel" id="console">
+        <div class="panel-head"><div><h2>接口控制台</h2><p class="panel-intro">按关键词搜索路径、方法、用途；按分类过滤；展开/收起所有接口；每个接口都标明必填参数、请求、响应、错误、后续调用关系，并提供正式 curl 调用模板与 response 样式。</p></div></div>
+        <div class="console-toolbar" aria-label="接口工具">
+          <div class="search-row"><input id="endpoint-search" type="search" placeholder="搜索路径 / 方法 / 关键词，例如 tasks、SSE、uploads、login" aria-label="搜索 API 接口" /><div class="bulk-actions"><button type="button" id="expand-all">全部展开</button><button type="button" id="collapse-all">全部收起</button></div></div>
+          <div class="filter-row" aria-label="分类过滤"><button type="button" class="filter-chip active" data-filter="all">全部</button><button type="button" class="filter-chip" data-filter="auth">认证</button><button type="button" class="filter-chip" data-filter="capabilities">能力</button><button type="button" class="filter-chip" data-filter="conversations">会话</button><button type="button" class="filter-chip" data-filter="uploads">上传</button><button type="button" class="filter-chip" data-filter="tasks">任务</button><button type="button" class="filter-chip" data-filter="artifacts">产物</button></div>
+        </div>
+        <div id="endpoint-empty" class="empty-state">没有匹配的接口。试试清空搜索或切回“全部”。</div>
+        <section class="endpoint-group" id="group-auth" data-group="auth"><div class="group-title"><span>认证</span><small>4 个操作</small></div>
+        <article class="endpoint-card" id="endpoint-post-api-v1-auth-login" data-category="auth" data-method="POST" data-search="auth post /api/v1/auth/login 登录并返回当前 token 只接收 username，返回当前 access_token；同一 username 新登录会让旧 token 立即失效。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method POST">POST</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/auth/login" aria-label="复制路径 /api/v1/auth/login"><code class="inline-code">/api/v1/auth/login</code></button>
+            </div>
+            <span class="endpoint-tag">公开 · 登录</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>登录并返回当前 token</h3><p>只接收 username，返回当前 access_token；同一 username 新登录会让旧 token 立即失效。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>LoginRequest；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>调用受保护接口时把 access_token 放入 Authorization header。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">username</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>登录用户名；这是唯一允许客户端提交 username 的接口。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 AuthTokenResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-post-api-v1-auth-login">复制</button></div><pre><code id="curl-endpoint-post-api-v1-auth-login">curl -X POST &quot;${BASE_URL}/api/v1/auth/login&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{&quot;username&quot;:&quot;alice&quot;}&#x27;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-post-api-v1-auth-login">复制</button></div><pre><code id="response-endpoint-post-api-v1-auth-login">{
+  &quot;user&quot;: { &quot;username&quot;: &quot;alice&quot; },
+  &quot;access_token&quot;: &quot;maf_tok_xxx&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-auth-me" data-category="auth" data-method="GET" data-search="auth get /api/v1/auth/me 读取当前用户 通过 authorization token 定位当前用户，不接收 body、query 或 metadata 中的 username。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/auth/me" aria-label="复制路径 /api/v1/auth/me"><code class="inline-code">/api/v1/auth/me</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>读取当前用户</h3><p>通过 Authorization token 定位当前用户，不接收 body、query 或 metadata 中的 username。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthUserResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>可用于前端启动时恢复登录态。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>格式为 Authorization: Bearer &lt;access_token&gt;。</td><td>Bearer token</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 AuthUserResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-auth-me">复制</button></div><pre><code id="curl-endpoint-get-api-v1-auth-me">curl -X GET &quot;${BASE_URL}/api/v1/auth/me&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-auth-me">复制</button></div><pre><code id="response-endpoint-get-api-v1-auth-me">{
+  &quot;user&quot;: { &quot;username&quot;: &quot;alice&quot; }
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-post-api-v1-auth-refresh-token" data-category="auth" data-method="POST" data-search="auth post /api/v1/auth/refresh-token 刷新 token 通过当前 token 定位用户，原子替换为新的当前 token；旧 token 立即失效。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method POST">POST</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/auth/refresh-token" aria-label="复制路径 /api/v1/auth/refresh-token"><code class="inline-code">/api/v1/auth/refresh-token</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>刷新 token</h3><p>通过当前 token 定位用户，原子替换为新的当前 token；旧 token 立即失效。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>客户端必须立即保存新 access_token 并停止使用旧 token。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前有效 token；刷新成功后旧 token 立即失效。</td><td>Bearer token</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 AuthTokenResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-post-api-v1-auth-refresh-token">复制</button></div><pre><code id="curl-endpoint-post-api-v1-auth-refresh-token">curl -X POST &quot;${BASE_URL}/api/v1/auth/refresh-token&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-post-api-v1-auth-refresh-token">复制</button></div><pre><code id="response-endpoint-post-api-v1-auth-refresh-token">{
+  &quot;user&quot;: { &quot;username&quot;: &quot;alice&quot; },
+  &quot;access_token&quot;: &quot;maf_tok_new&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-post-api-v1-auth-logout" data-category="auth" data-method="POST" data-search="auth post /api/v1/auth/logout 登出 通过当前 token 定位用户并清空 token，保留 username 映射记录。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method POST">POST</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/auth/logout" aria-label="复制路径 /api/v1/auth/logout"><code class="inline-code">/api/v1/auth/logout</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>登出</h3><p>通过当前 token 定位用户并清空 token，保留 username 映射记录。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">LogoutResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>登出后该 token 再访问受保护接口会返回 401。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前有效 token；登出会清空该 token。</td><td>Bearer token</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 LogoutResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-post-api-v1-auth-logout">复制</button></div><pre><code id="curl-endpoint-post-api-v1-auth-logout">curl -X POST &quot;${BASE_URL}/api/v1/auth/logout&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-post-api-v1-auth-logout">复制</button></div><pre><code id="response-endpoint-post-api-v1-auth-logout">{
+  &quot;logged_out&quot;: true
+}</code></pre></div>
+          </div>
+        </article>
+        </section><section class="endpoint-group" id="group-capabilities" data-group="capabilities"><div class="group-title"><span>能力</span><small>1 个操作</small></div>
+        <article class="endpoint-card" id="endpoint-get-api-v1-capabilities" data-category="capabilities" data-method="GET" data-search="capabilities get /api/v1/capabilities 列出公开能力 列出 public capability / skill，用于前端能力选择或 slash command 初始化。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/capabilities" aria-label="复制路径 /api/v1/capabilities"><code class="inline-code">/api/v1/capabilities</code></button>
+            </div>
+            <span class="endpoint-tag">公开</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>列出公开能力</h3><p>列出 public capability / Skill，用于前端能力选择或 slash command 初始化。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">CapabilityListResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>提交消息时可把 capability_id 放入 body 强制路由。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">无</code></td><td>—</td><td>—</td><td>否</td><td>公开接口，无请求参数。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 CapabilityListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-capabilities">复制</button></div><pre><code id="curl-endpoint-get-api-v1-capabilities">curl -X GET &quot;${BASE_URL}/api/v1/capabilities&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-capabilities">复制</button></div><pre><code id="response-endpoint-get-api-v1-capabilities">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        </section><section class="endpoint-group" id="group-conversations" data-group="conversations"><div class="group-title"><span>会话</span><small>5 个操作</small></div>
+        <article class="endpoint-card" id="endpoint-get-api-v1-conversations" data-category="conversations" data-method="GET" data-search="conversations get /api/v1/conversations 列出会话 列出当前 token 所属 username 的会话。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations" aria-label="复制路径 /api/v1/conversations"><code class="inline-code">/api/v1/conversations</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>列出会话</h3><p>列出当前 token 所属 username 的会话。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationListResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>进入会话后读取 messages、tasks、uploads。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 ConversationListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-conversations">复制</button></div><pre><code id="curl-endpoint-get-api-v1-conversations">curl -X GET &quot;${BASE_URL}/api/v1/conversations&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-conversations">复制</button></div><pre><code id="response-endpoint-get-api-v1-conversations">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-patch-api-v1-conversations" data-category="conversations" data-method="PATCH" data-search="conversations patch /api/v1/conversations 重命名会话 按 body.conversation_id 重命名当前用户会话；非 get 业务 id 放 body。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method PATCH">PATCH</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations" aria-label="复制路径 /api/v1/conversations"><code class="inline-code">/api/v1/conversations</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>重命名会话</h3><p>按 body.conversation_id 重命名当前用户会话；非 GET 业务 ID 放 body。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>RenameConversationRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationSummaryResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>成功后刷新会话列表或当前会话标题。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要重命名的会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">title</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>新标题。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 ConversationSummaryResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-patch-api-v1-conversations">复制</button></div><pre><code id="curl-endpoint-patch-api-v1-conversations">curl -X PATCH &quot;${BASE_URL}/api/v1/conversations&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ ... }&#x27;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-patch-api-v1-conversations">复制</button></div><pre><code id="response-endpoint-patch-api-v1-conversations">{
+  &quot;schema&quot;: &quot;RenameConversationRequest&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-delete-api-v1-conversations" data-category="conversations" data-method="DELETE" data-search="conversations delete /api/v1/conversations 删除会话 按 body.conversation_id 删除当前用户会话，并清理消息、任务、事件与关联文件记录。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method DELETE">DELETE</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations" aria-label="复制路径 /api/v1/conversations"><code class="inline-code">/api/v1/conversations</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>删除会话</h3><p>按 body.conversation_id 删除当前用户会话，并清理消息、任务、事件与关联文件记录。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteConversationRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">DeleteConversationResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>删除后从会话列表移除本会话。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要删除的会话 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 DeleteConversationResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-delete-api-v1-conversations">复制</button></div><pre><code id="curl-endpoint-delete-api-v1-conversations">curl -X DELETE &quot;${BASE_URL}/api/v1/conversations&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ ... }&#x27;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-delete-api-v1-conversations">复制</button></div><pre><code id="response-endpoint-delete-api-v1-conversations">{
+  &quot;schema&quot;: &quot;DeleteConversationRequest&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-messages" data-category="conversations" data-method="GET" data-search="conversations get /api/v1/conversations/{conversation_id}/messages 读取消息历史 读取 path 中 conversation_id 对应的当前用户消息历史。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}/messages" aria-label="复制路径 /api/v1/conversations/{conversation_id}/messages"><code class="inline-code">/api/v1/conversations/{conversation_id}/messages</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>读取消息历史</h3><p>读取 path 中 conversation_id 对应的当前用户消息历史。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationMessagesResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>用于刷新恢复或 SSE 完成后补齐最终消息。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取消息的会话 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 ConversationMessagesResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-conversations-conversation-id-messages">复制</button></div><pre><code id="curl-endpoint-get-api-v1-conversations-conversation-id-messages">curl -X GET &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/messages&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-conversations-conversation-id-messages">复制</button></div><pre><code id="response-endpoint-get-api-v1-conversations-conversation-id-messages">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-post-api-v1-conversations-chat-messages" data-category="conversations" data-method="POST" data-search="conversations post /api/v1/conversations/chat-messages 提交消息 提交用户消息并创建任务。资源归属只能由 authorization token 解析出的 username 决定，body 和 metadata 不允许伪造用户或 token。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method POST">POST</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/chat-messages" aria-label="复制路径 /api/v1/conversations/chat-messages"><code class="inline-code">/api/v1/conversations/chat-messages</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>提交消息</h3><p>提交用户消息并创建任务。资源归属只能由 Authorization token 解析出的 username 决定，body 和 metadata 不允许伪造用户或 token。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>SubmitMessageRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">MessageAcceptedResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>使用返回的 task_id 订阅 SSE 或查询任务摘要。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>目标会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">content</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>用户消息正文。</td><td>—</td></tr><tr><td><code class="inline-code">routing_mode</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>否</td><td>路由模式。</td><td>默认 auto</td></tr><tr><td><code class="inline-code">capability_id</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>指定 capability / Skill。</td><td>—</td></tr><tr><td><code class="inline-code">client_message_id</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>客户端幂等或追踪 ID。</td><td>—</td></tr><tr><td><code class="inline-code">metadata</code></td><td>Body</td><td><code class="inline-code">object</code></td><td>否</td><td>业务 metadata；不得携带用户或 token 字段。</td><td>默认 {}</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 MessageAcceptedResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-post-api-v1-conversations-chat-messages">复制</button></div><pre><code id="curl-endpoint-post-api-v1-conversations-chat-messages">curl -X POST &quot;${BASE_URL}/api/v1/conversations/chat-messages&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ ... }&#x27;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-post-api-v1-conversations-chat-messages">复制</button></div><pre><code id="response-endpoint-post-api-v1-conversations-chat-messages">{
+  &quot;schema&quot;: &quot;SubmitMessageRequest&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        </section><section class="endpoint-group" id="group-uploads" data-group="uploads"><div class="group-title"><span>上传</span><small>3 个操作</small></div>
+        <article class="endpoint-card" id="endpoint-post-api-v1-conversations-uploads" data-category="uploads" data-method="POST" data-search="uploads post /api/v1/conversations/uploads 上传会话文件 multipart/form-data 上传；conversation_id 与 file 放 form field，authorization 放 header。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method POST">POST</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/uploads" aria-label="复制路径 /api/v1/conversations/uploads"><code class="inline-code">/api/v1/conversations/uploads</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>上传会话文件</h3><p>multipart/form-data 上传；conversation_id 与 file 放 form field，Authorization 放 header。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>multipart/form-data；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadFileResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>提交消息时可在 metadata.upload_ids 中引用上传文件。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Form</td><td><code class="inline-code">string</code></td><td>是</td><td>上传所属会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">file</code></td><td>Form</td><td><code class="inline-code">file</code></td><td>是</td><td>上传文件。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 UploadFileResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-post-api-v1-conversations-uploads">复制</button></div><pre><code id="curl-endpoint-post-api-v1-conversations-uploads">curl -X POST &quot;${BASE_URL}/api/v1/conversations/uploads&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -F &quot;conversation_id={conversation_id}&quot; \
+  -F &quot;file=@/path/to/file&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-post-api-v1-conversations-uploads">复制</button></div><pre><code id="response-endpoint-post-api-v1-conversations-uploads">{
+  &quot;schema&quot;: &quot;UploadFileResponse&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-uploads" data-category="uploads" data-method="GET" data-search="uploads get /api/v1/conversations/{conversation_id}/uploads 列出上传 列出当前用户会话的未过期上传。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}/uploads" aria-label="复制路径 /api/v1/conversations/{conversation_id}/uploads"><code class="inline-code">/api/v1/conversations/{conversation_id}/uploads</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>列出上传</h3><p>列出当前用户会话的未过期上传。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadListResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>用于展示可引用文件或刷新上传状态。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要列出上传的会话 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 UploadListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-conversations-conversation-id-uploads">复制</button></div><pre><code id="curl-endpoint-get-api-v1-conversations-conversation-id-uploads">curl -X GET &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/uploads&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-conversations-conversation-id-uploads">复制</button></div><pre><code id="response-endpoint-get-api-v1-conversations-conversation-id-uploads">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-delete-api-v1-conversations-uploads" data-category="uploads" data-method="DELETE" data-search="uploads delete /api/v1/conversations/uploads 删除上传 按 body.conversation_id 与 body.upload_id 删除上传记录。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method DELETE">DELETE</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/uploads" aria-label="复制路径 /api/v1/conversations/uploads"><code class="inline-code">/api/v1/conversations/uploads</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>删除上传</h3><p>按 body.conversation_id 与 body.upload_id 删除上传记录。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteUploadRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">DeleteUploadResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>删除后该 upload_id 不应继续用于提交消息。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>上传所属会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">upload_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要删除的上传 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 DeleteUploadResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-delete-api-v1-conversations-uploads">复制</button></div><pre><code id="curl-endpoint-delete-api-v1-conversations-uploads">curl -X DELETE &quot;${BASE_URL}/api/v1/conversations/uploads&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ ... }&#x27;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-delete-api-v1-conversations-uploads">复制</button></div><pre><code id="response-endpoint-delete-api-v1-conversations-uploads">{
+  &quot;schema&quot;: &quot;DeleteUploadRequest&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        </section><section class="endpoint-group" id="group-tasks" data-group="tasks"><div class="group-title"><span>任务</span><small>8 个操作</small></div>
+        <article class="endpoint-card" id="endpoint-get-api-v1-conversations-conversation-id-tasks" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/conversations/{conversation_id}/tasks 列出会话任务 列出当前用户指定会话任务；scope 为 query，支持 unfinished 或 all。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/conversations/{conversation_id}/tasks" aria-label="复制路径 /api/v1/conversations/{conversation_id}/tasks"><code class="inline-code">/api/v1/conversations/{conversation_id}/tasks</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>列出会话任务</h3><p>列出当前用户指定会话任务；scope 为 query，支持 unfinished 或 all。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskListResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>用于刷新恢复当前任务或查看历史任务。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要查询任务的会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">scope</code></td><td>Query</td><td><code class="inline-code">string</code></td><td>否</td><td>任务列表范围。</td><td>unfinished / all；默认 unfinished</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskListResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-conversations-conversation-id-tasks">复制</button></div><pre><code id="curl-endpoint-get-api-v1-conversations-conversation-id-tasks">curl -X GET &quot;${BASE_URL}/api/v1/conversations/{conversation_id}/tasks&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-conversations-conversation-id-tasks">复制</button></div><pre><code id="response-endpoint-get-api-v1-conversations-conversation-id-tasks">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id} 读取任务摘要 读取当前用户任务摘要。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/{task_id}" aria-label="复制路径 /api/v1/tasks/{task_id}"><code class="inline-code">/api/v1/tasks/{task_id}</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>读取任务摘要</h3><p>读取当前用户任务摘要。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskSummaryResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>用于断线后回查任务状态。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取摘要的任务 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskSummaryResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-tasks-task-id">复制</button></div><pre><code id="curl-endpoint-get-api-v1-tasks-task-id">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-tasks-task-id">复制</button></div><pre><code id="response-endpoint-get-api-v1-tasks-task-id">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-events" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/events 订阅任务事件 返回 text/event-stream。token 必须放 authorization header，不能放 url；服务端会持续校验 token 当前性。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/{task_id}/events" aria-label="复制路径 /api/v1/tasks/{task_id}/events"><code class="inline-code">/api/v1/tasks/{task_id}/events</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>订阅任务事件</h3><p>返回 text/event-stream。token 必须放 Authorization header，不能放 URL；服务端会持续校验 token 当前性。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">text/event-stream</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>事件结束后读取 messages 和 artifacts。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token；禁止放入 URL。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要订阅事件的任务 ID。</td><td>—</td></tr><tr><td><code class="inline-code">Accept</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>建议</td><td>建议设置为 text/event-stream。</td><td>text/event-stream</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">event/id/data</code></td><td><code class="inline-code">SSE</code></td><td>是</td><td>每条事件含 id、event 与 JSON data。</td><td>data 解码为 TaskEventEnvelope</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-tasks-task-id-events">复制</button></div><pre><code id="curl-endpoint-get-api-v1-tasks-task-id-events">curl -N &quot;${BASE_URL}/api/v1/tasks/{task_id}/events&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: text/event-stream&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-tasks-task-id-events">复制</button></div><pre><code id="response-endpoint-get-api-v1-tasks-task-id-events">id: {event_id}
+event: task.updated
+data: {&quot;event_id&quot;:&quot;{event_id}&quot;,&quot;task_id&quot;:&quot;{task_id}&quot;,&quot;event_type&quot;:&quot;task.updated&quot;,&quot;payload&quot;:{}}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-post-api-v1-tasks-cancel" data-category="tasks" data-method="POST" data-search="tasks post /api/v1/tasks/cancel 取消任务 按 body.task_id 请求取消当前用户任务；非 get 业务 id 放 body。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method POST">POST</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/cancel" aria-label="复制路径 /api/v1/tasks/cancel"><code class="inline-code">/api/v1/tasks/cancel</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>取消任务</h3><p>按 body.task_id 请求取消当前用户任务；非 GET 业务 ID 放 body。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>CancelTaskRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">CancelTaskResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>前端可继续监听 SSE 或回查任务摘要确认终态。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要请求取消的任务 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 CancelTaskResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-post-api-v1-tasks-cancel">复制</button></div><pre><code id="curl-endpoint-post-api-v1-tasks-cancel">curl -X POST &quot;${BASE_URL}/api/v1/tasks/cancel&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ ... }&#x27;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-post-api-v1-tasks-cancel">复制</button></div><pre><code id="response-endpoint-post-api-v1-tasks-cancel">{
+  &quot;schema&quot;: &quot;CancelTaskRequest&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-interrupts" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/interrupts 列出中断 列出当前用户任务待回答的 interrupt。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/{task_id}/interrupts" aria-label="复制路径 /api/v1/tasks/{task_id}/interrupts"><code class="inline-code">/api/v1/tasks/{task_id}/interrupts</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>列出中断</h3><p>列出当前用户任务待回答的 interrupt。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskInterruptsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>收到 interrupt 事件后可调用本接口补齐状态。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要查询中断的任务 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskInterruptsResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-tasks-task-id-interrupts">复制</button></div><pre><code id="curl-endpoint-get-api-v1-tasks-task-id-interrupts">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}/interrupts&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-tasks-task-id-interrupts">复制</button></div><pre><code id="response-endpoint-get-api-v1-tasks-task-id-interrupts">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-post-api-v1-tasks-interrupts-answer" data-category="tasks" data-method="POST" data-search="tasks post /api/v1/tasks/interrupts/answer 回答中断 按 body.task_id 与 body.interrupt_id 提交回答；answer_payload 不允许伪造用户或 token。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method POST">POST</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/interrupts/answer" aria-label="复制路径 /api/v1/tasks/interrupts/answer"><code class="inline-code">/api/v1/tasks/interrupts/answer</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>回答中断</h3><p>按 body.task_id 与 body.interrupt_id 提交回答；answer_payload 不允许伪造用户或 token。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>AnswerInterruptRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AnswerInterruptResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>回答后继续监听同一 task 的 SSE。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>中断所属任务 ID。</td><td>—</td></tr><tr><td><code class="inline-code">interrupt_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要回答的中断 ID。</td><td>—</td></tr><tr><td><code class="inline-code">answer_payload</code></td><td>Body</td><td><code class="inline-code">object</code></td><td>否</td><td>回答内容；不得携带用户或 token 字段。</td><td>默认 {}</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 AnswerInterruptResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-post-api-v1-tasks-interrupts-answer">复制</button></div><pre><code id="curl-endpoint-post-api-v1-tasks-interrupts-answer">curl -X POST &quot;${BASE_URL}/api/v1/tasks/interrupts/answer&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -H &quot;Accept: application/json&quot; \
+  -d &#x27;{ ... }&#x27;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-post-api-v1-tasks-interrupts-answer">复制</button></div><pre><code id="response-endpoint-post-api-v1-tasks-interrupts-answer">{
+  &quot;schema&quot;: &quot;AnswerInterruptRequest&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-graph" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/graph 读取任务图 读取当前用户任务 dag 节点与边。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/{task_id}/graph" aria-label="复制路径 /api/v1/tasks/{task_id}/graph"><code class="inline-code">/api/v1/tasks/{task_id}/graph</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>读取任务图</h3><p>读取当前用户任务 DAG 节点与边。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskGraphResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>用于调试或前端节点状态展示。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取 DAG 的任务 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskGraphResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-tasks-task-id-graph">复制</button></div><pre><code id="curl-endpoint-get-api-v1-tasks-task-id-graph">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}/graph&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-tasks-task-id-graph">复制</button></div><pre><code id="response-endpoint-get-api-v1-tasks-task-id-graph">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        <article class="endpoint-card" id="endpoint-get-api-v1-tasks-task-id-artifacts" data-category="tasks" data-method="GET" data-search="tasks get /api/v1/tasks/{task_id}/artifacts 列出产物 列出当前用户任务产物。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/tasks/{task_id}/artifacts" aria-label="复制路径 /api/v1/tasks/{task_id}/artifacts"><code class="inline-code">/api/v1/tasks/{task_id}/artifacts</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>列出产物</h3><p>列出当前用户任务产物。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskArtifactsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>文件产物可使用 download_url 或下载接口获取。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要列出产物的任务 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">响应体</code></td><td><code class="inline-code">object</code></td><td>是</td><td>结构见 TaskArtifactsResponse。</td><td>详见数据结构章节</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-tasks-task-id-artifacts">复制</button></div><pre><code id="curl-endpoint-get-api-v1-tasks-task-id-artifacts">curl -X GET &quot;${BASE_URL}/api/v1/tasks/{task_id}/artifacts&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -H &quot;Accept: application/json&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-tasks-task-id-artifacts">复制</button></div><pre><code id="response-endpoint-get-api-v1-tasks-task-id-artifacts">{
+  &quot;schema&quot;: &quot;无 body&quot;
+}</code></pre></div>
+          </div>
+        </article>
+        </section><section class="endpoint-group" id="group-artifacts" data-group="artifacts"><div class="group-title"><span>产物</span><small>1 个操作</small></div>
+        <article class="endpoint-card" id="endpoint-get-api-v1-artifacts-artifact-id-download" data-category="artifacts" data-method="GET" data-search="artifacts get /api/v1/artifacts/{artifact_id}/download 下载文件产物 下载当前用户任务所属文件产物；不存在、非文件或不属于当前用户均返回 404。">
+          <div class="endpoint-topline">
+            <div class="endpoint-identity">
+              <span class="method GET">GET</span>
+              <button class="path-copy" type="button" data-copy-value="/api/v1/artifacts/{artifact_id}/download" aria-label="复制路径 /api/v1/artifacts/{artifact_id}/download"><code class="inline-code">/api/v1/artifacts/{artifact_id}/download</code></button>
+            </div>
+            <span class="endpoint-tag">需 Authorization</span>
+          </div>
+          <div class="endpoint-summary"><div><h3>下载文件产物</h3><p>下载当前用户任务所属文件产物；不存在、非文件或不属于当前用户均返回 404。</p></div></div>
+          <details class="endpoint-detail" open>
+            <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">文件流</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在或不属于当前用户；422：参数或 payload 不符合 schema。</p></div><div><b>下一步</b><p>成功时按附件形式返回文件内容。</p></div></div></details>
+          <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">artifact_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要下载的文件产物 ID。</td><td>—</td></tr></tbody></table></section>
+          <section class="response-section"><h4>返回参数明细</h4><table class="param-table response-table"><thead><tr><th>字段</th><th>类型</th><th>必返</th><th>简介</th><th>枚举 / 备注</th></tr></thead><tbody><tr><td><code class="inline-code">文件内容</code></td><td><code class="inline-code">binary</code></td><td>是</td><td>附件下载响应。</td><td>响应头含 Content-Disposition</td></tr></tbody></table></section>
+          <div class="formal-example-grid">
+            <div class="formal-example-card"><div class="formal-example-head"><span>正式 curl 调用模板</span><button type="button" data-copy-from="curl-endpoint-get-api-v1-artifacts-artifact-id-download">复制</button></div><pre><code id="curl-endpoint-get-api-v1-artifacts-artifact-id-download">curl -L &quot;${BASE_URL}/api/v1/artifacts/{artifact_id}/download&quot; \
+  -H &quot;Authorization: Bearer ${ACCESS_TOKEN}&quot; \
+  -o &quot;{filename}&quot;</code></pre></div>
+            <div class="formal-example-card"><div class="formal-example-head"><span>response 样式</span><button type="button" data-copy-from="response-endpoint-get-api-v1-artifacts-artifact-id-download">复制</button></div><pre><code id="response-endpoint-get-api-v1-artifacts-artifact-id-download">文件流响应。成功时响应头包含 Content-Disposition，文件类型由 artifact 元数据决定。</code></pre></div>
+          </div>
+        </article>
+        </section>
+      </section>
 
-  <section id="errors">
-    <h2>错误语义</h2>
-    <table><thead><tr><th>HTTP 状态</th><th>语义</th></tr></thead><tbody>
-      <tr><td>400</td><td>业务参数不合法或当前状态不允许。</td></tr>
-      <tr><td>401</td><td>缺少 Authorization、token 不存在、已被刷新替换或已登出。</td></tr>
-      <tr><td>404</td><td>资源不存在，或资源不属于当前用户。</td></tr>
-      <tr><td>409</td><td>会话已有未完成任务。</td></tr>
-      <tr><td>422</td><td>请求 schema 不合法，或 body / metadata / answer_payload 携带保留身份字段。</td></tr>
-    </tbody></table>
-  </section>
+      <section class="panel" id="sse">
+        <div class="panel-head"><div><h2><code class="inline-code">SSE</code> 流式事件</h2><p class="panel-intro"><code class="inline-code">GET /api/v1/tasks/{task_id}/events</code> 返回 <code class="inline-code">text/event-stream</code>。每条 <code class="inline-code">data</code> 是 <code class="inline-code">JSON</code> 字符串，解码后为 <code class="inline-code">TaskEventEnvelope</code>。</p></div></div>
+        <div class="sse-layout"><div class="event-list"><div class="event-item"><b>连接要求</b><span>客户端必须使用可设置 <code class="inline-code">Authorization</code> header 的 <code class="inline-code">fetch</code> stream 或等价 HTTP 客户端，禁止把 token 放入 URL。</span></div><div class="event-item"><b>token 当前性</b><span>服务端会在发送事件前周期性校验 token；token 被刷新或登出后，旧连接不能继续收到事件。</span></div><div class="event-item"><b>断线处理</b><span>客户端应按策略重连；需要校准状态时回查 <code class="inline-code">GET /api/v1/tasks/{task_id}</code>。</span></div></div><div class="event-list"><div class="event-item"><b><code class="inline-code">event_id</code></b><span><code class="inline-code">SSE</code> <code class="inline-code">id</code> 同值，可作为前端去重 / 日志追踪键。</span></div><div class="event-item"><b><code class="inline-code">event_type</code></b><span><code class="inline-code">SSE</code> <code class="inline-code">event</code> 同值；前端按类型分发渲染。</span></div><div class="event-item"><b><code class="inline-code">payload</code></b><span>事件载荷，可能包含文本增量、节点状态、产物或 <code class="inline-code">interrupt</code>。</span></div></div></div>
+      </section>
+
+      <section class="panel" id="schemas"><div class="panel-head"><div><h2>数据结构</h2><p class="panel-intro">字段速查来自当前后端 <code class="inline-code">OpenAPI</code> 与 <code class="inline-code">DTO</code>。</p></div></div><div class="schema-grid"><details class="schema-card" open><summary>Auth</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>LoginRequest</code></td><td><code class="inline-code">username</code> <span class="note">必填 · string</span></td></tr><tr><td><code>AuthTokenResponse</code></td><td><code class="inline-code">user</code> <span class="note">必填 · UserResponse</span>, <code class="inline-code">access_token</code> <span class="note">必填 · string</span></td></tr><tr><td><code>AuthUserResponse</code></td><td><code class="inline-code">user</code> <span class="note">必填 · UserResponse</span></td></tr><tr><td><code>UserResponse</code></td><td><code class="inline-code">username</code> <span class="note">必填 · string</span></td></tr><tr><td><code>LogoutResponse</code></td><td><code class="inline-code">logged_out</code> <span class="note">必填 · boolean</span></td></tr></tbody></table></details><details class="schema-card" open><summary>Conversation &amp; Message</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>SubmitMessageRequest</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">content</code> <span class="note">必填 · string</span>, <code class="inline-code">routing_mode</code> <span class="note">可选 · string</span>, <code class="inline-code">capability_id</code> <span class="note">可选 · string|null</span>, <code class="inline-code">client_message_id</code> <span class="note">可选 · string|null</span>, <code class="inline-code">metadata</code> <span class="note">可选 · object</span></td></tr><tr><td><code>MessageAcceptedResponse</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">message_id</code> <span class="note">必填 · string</span>, <code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span></td></tr><tr><td><code>ConversationListResponse</code></td><td><code class="inline-code">conversations</code> <span class="note">必填 · array</span></td></tr><tr><td><code>ConversationSummaryResponse</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">username</code> <span class="note">必填 · string</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span>, <code class="inline-code">current_task_id</code> <span class="note">必填 · string|null</span>, <code class="inline-code">title</code> <span class="note">必填 · string|null</span>, <code class="inline-code">created_at</code> <span class="note">必填 · string|null</span>, <code class="inline-code">updated_at</code> <span class="note">必填 · string|null</span></td></tr><tr><td><code>RenameConversationRequest</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">title</code> <span class="note">必填 · string</span></td></tr><tr><td><code>DeleteConversationRequest</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span></td></tr><tr><td><code>DeleteConversationResponse</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">deleted</code> <span class="note">必填 · boolean</span>, <code class="inline-code">cancelled_task_ids</code> <span class="note">可选 · array</span>, <code class="inline-code">deleted_counts</code> <span class="note">可选 · object</span></td></tr><tr><td><code>ConversationMessagesResponse</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">messages</code> <span class="note">必填 · array</span></td></tr><tr><td><code>MessageResponse</code></td><td><code class="inline-code">message_id</code> <span class="note">必填 · string</span>, <code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">role</code> <span class="note">必填 · string</span>, <code class="inline-code">content</code> <span class="note">必填 · string</span>, <code class="inline-code">task_id</code> <span class="note">必填 · string|null</span>, <code class="inline-code">stream_status</code> <span class="note">必填 · string|null</span>, <code class="inline-code">created_at</code> <span class="note">必填 · string|null</span></td></tr></tbody></table></details><details class="schema-card" open><summary>Task</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>TaskSummaryResponse</code></td><td><code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span>, <code class="inline-code">root_node_id</code> <span class="note">必填 · string|null</span>, <code class="inline-code">summary</code> <span class="note">必填 · string|null</span>, <code class="inline-code">requested_capability_id</code> <span class="note">必填 · string|null</span>, <code class="inline-code">active_node_count</code> <span class="note">必填 · integer</span>, <code class="inline-code">completed_node_count</code> <span class="note">必填 · integer</span>, <code class="inline-code">failed_node_count</code> <span class="note">必填 · integer</span>, <code class="inline-code">cancel_requested</code> <span class="note">必填 · boolean</span>, <code class="inline-code">created_at</code> <span class="note">必填 · string|null</span>, <code class="inline-code">updated_at</code> <span class="note">必填 · string|null</span></td></tr><tr><td><code>TaskListResponse</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">tasks</code> <span class="note">必填 · array</span></td></tr><tr><td><code>TaskGraphResponse</code></td><td><code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">nodes</code> <span class="note">必填 · array</span>, <code class="inline-code">edges</code> <span class="note">必填 · array</span></td></tr><tr><td><code>TaskNodeResponse</code></td><td><code class="inline-code">node_id</code> <span class="note">必填 · string</span>, <code class="inline-code">capability_id</code> <span class="note">必填 · string</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span>, <code class="inline-code">criticality</code> <span class="note">必填 · string</span>, <code class="inline-code">dependency_type</code> <span class="note">必填 · string</span>, <code class="inline-code">assigned_instance_id</code> <span class="note">必填 · string|null</span>, <code class="inline-code">started_at</code> <span class="note">必填 · string|null</span>, <code class="inline-code">finished_at</code> <span class="note">必填 · string|null</span></td></tr><tr><td><code>TaskEdgeResponse</code></td><td><code class="inline-code">from_node_id</code> <span class="note">必填 · string</span>, <code class="inline-code">to_node_id</code> <span class="note">必填 · string</span>, <code class="inline-code">edge_type</code> <span class="note">必填 · string</span>, <code class="inline-code">condition</code> <span class="note">必填 · string|null</span></td></tr><tr><td><code>TaskInterruptsResponse</code></td><td><code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">interrupts</code> <span class="note">必填 · array</span></td></tr><tr><td><code>InterruptResponse</code></td><td><code class="inline-code">interrupt_id</code> <span class="note">必填 · string</span>, <code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">node_id</code> <span class="note">必填 · string</span>, <code class="inline-code">question</code> <span class="note">必填 · string</span>, <code class="inline-code">reason_code</code> <span class="note">必填 · string</span>, <code class="inline-code">required_fields</code> <span class="note">必填 · object</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span></td></tr><tr><td><code>CancelTaskRequest</code></td><td><code class="inline-code">task_id</code> <span class="note">必填 · string</span></td></tr><tr><td><code>CancelTaskResponse</code></td><td><code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span>, <code class="inline-code">accepted</code> <span class="note">必填 · boolean</span></td></tr><tr><td><code>AnswerInterruptRequest</code></td><td><code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">interrupt_id</code> <span class="note">必填 · string</span>, <code class="inline-code">answer_payload</code> <span class="note">可选 · object</span></td></tr><tr><td><code>AnswerInterruptResponse</code></td><td><code class="inline-code">interrupt_id</code> <span class="note">必填 · string</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span>, <code class="inline-code">node_id</code> <span class="note">必填 · string</span>, <code class="inline-code">answer_payload</code> <span class="note">必填 · object</span></td></tr></tbody></table></details><details class="schema-card" open><summary>Upload &amp; Artifact</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>Body_upload_conversation_file_api_v1_conversations_uploads_post</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">file</code> <span class="note">必填 · string</span></td></tr><tr><td><code>UploadFileResponse</code></td><td><code class="inline-code">upload_id</code> <span class="note">必填 · string</span>, <code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">filename</code> <span class="note">必填 · string</span>, <code class="inline-code">content_type</code> <span class="note">必填 · string</span>, <code class="inline-code">file_type</code> <span class="note">必填 · string</span>, <code class="inline-code">size_bytes</code> <span class="note">必填 · integer</span>, <code class="inline-code">sha256</code> <span class="note">必填 · string</span>, <code class="inline-code">expires_at</code> <span class="note">必填 · string</span>, <code class="inline-code">preview</code> <span class="note">必填 · UploadPreviewResponse</span></td></tr><tr><td><code>UploadListResponse</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">uploads</code> <span class="note">必填 · array</span></td></tr><tr><td><code>UploadPreviewResponse</code></td><td><code class="inline-code">row_count</code> <span class="note">可选 · integer|null</span>, <code class="inline-code">columns</code> <span class="note">可选 · array</span>, <code class="inline-code">shape</code> <span class="note">可选 · string|null</span></td></tr><tr><td><code>DeleteUploadRequest</code></td><td><code class="inline-code">conversation_id</code> <span class="note">必填 · string</span>, <code class="inline-code">upload_id</code> <span class="note">必填 · string</span></td></tr><tr><td><code>DeleteUploadResponse</code></td><td><code class="inline-code">upload_id</code> <span class="note">必填 · string</span>, <code class="inline-code">deleted</code> <span class="note">必填 · boolean</span></td></tr><tr><td><code>ArtifactResponse</code></td><td><code class="inline-code">artifact_id</code> <span class="note">必填 · string</span>, <code class="inline-code">producer_node_id</code> <span class="note">必填 · string</span>, <code class="inline-code">artifact_type</code> <span class="note">必填 · string</span>, <code class="inline-code">storage_ref</code> <span class="note">必填 · string</span>, <code class="inline-code">summary</code> <span class="note">必填 · string|null</span>, <code class="inline-code">is_complete</code> <span class="note">必填 · boolean</span>, <code class="inline-code">created_at</code> <span class="note">必填 · string|null</span>, <code class="inline-code">filename</code> <span class="note">可选 · string|null</span>, <code class="inline-code">mime_type</code> <span class="note">可选 · string|null</span>, <code class="inline-code">size_bytes</code> <span class="note">可选 · integer|null</span>, <code class="inline-code">sha256</code> <span class="note">可选 · string|null</span>, <code class="inline-code">download_url</code> <span class="note">可选 · string|null</span>, <code class="inline-code">source_file_count</code> <span class="note">可选 · integer|null</span>, <code class="inline-code">archive_format</code> <span class="note">可选 · string|null</span>, <code class="inline-code">retention_status</code> <span class="note">可选 · string|null</span></td></tr><tr><td><code>TaskArtifactsResponse</code></td><td><code class="inline-code">task_id</code> <span class="note">必填 · string</span>, <code class="inline-code">artifacts</code> <span class="note">必填 · array</span></td></tr></tbody></table></details><details class="schema-card" open><summary>Capability</summary><table><thead><tr><th>数据结构</th><th>关键字段</th></tr></thead><tbody><tr><td><code>CapabilityResponse</code></td><td><code class="inline-code">capability_id</code> <span class="note">必填 · string</span>, <code class="inline-code">name</code> <span class="note">必填 · string</span>, <code class="inline-code">description</code> <span class="note">必填 · string</span>, <code class="inline-code">version</code> <span class="note">必填 · string</span>, <code class="inline-code">status</code> <span class="note">必填 · string</span>, <code class="inline-code">kind</code> <span class="note">可选 · string</span>, <code class="inline-code">source</code> <span class="note">可选 · string</span>, <code class="inline-code">source_path</code> <span class="note">可选 · string</span></td></tr><tr><td><code>CapabilityListResponse</code></td><td><code class="inline-code">capabilities</code> <span class="note">必填 · array</span></td></tr></tbody></table></details></div></section>
+
+      <section class="panel" id="errors"><div class="panel-head"><div><h2>错误与状态码</h2><p class="panel-intro">API 使用 <code class="inline-code">HTTP</code> <code class="inline-code">status</code> 表达通用错误；<code class="inline-code">FastAPI</code> 参数校验错误通常为 422。</p></div></div><div class="error-grid"><div class="note-card"><b>400 请求错误（Bad Request）</b><p>请求语义不合法，例如 <code class="inline-code">scope</code> 值非法、文件内容不符合要求。</p></div><div class="note-card"><b>401 未认证（Unauthorized）</b><p>缺少 Authorization、token 不存在、已被刷新替换或已登出。</p></div><div class="note-card"><b>404 未找到（Not Found）</b><p>会话、任务、上传或产物不存在，或不属于当前用户。</p></div><div class="note-card"><b>409 冲突（Conflict）</b><p>会话已有运行中任务，或 <code class="inline-code">interrupt</code> 已关闭等并发状态冲突。</p></div><div class="note-card"><b>422 校验错误（Validation Error）</b><p>路径、查询或请求体字段类型不满足 <code class="inline-code">OpenAPI</code> <code class="inline-code">schema</code>，或 payload 携带保留用户 / token 字段。</p></div></div></section>
+
+      <section class="panel" id="source"><div class="panel-head"><div><h2>来源与维护</h2><p class="panel-intro">本文档是静态单页，接口内容应随后端路由、<code class="inline-code">DTO</code>、前端 client 和认证配置变化同步更新。</p></div></div><div class="source-grid"><div class="note-card"><b>后端路由</b><p><code class="inline-code">src/api/routes/*.py</code>、<code class="inline-code">src/api/app.py</code></p></div><div class="note-card"><b>后端 <code class="inline-code">DTO</code></b><p><code class="inline-code">src/api/dto.py</code></p></div><div class="note-card"><b>前端客户端</b><p><code class="inline-code">frontend/src/api/client.ts</code>、<code class="inline-code">frontend/src/api/types.ts</code></p></div><div class="note-card"><b>部署文档</b><p><code class="inline-code">README.md</code>、<code class="inline-code">docker_cmd.md</code>、<code class="inline-code">docker-compose.yml</code></p></div></div></section>
+    </main>
+
+    <aside class="toolbox" aria-label="开发工具箱"><section class="tool-section"><h2>基础地址</h2><div class="base-url"><input id="base-url" value="http://127.0.0.1:51888" aria-label="基础地址" /><button class="tool-button" type="button" data-copy-from="base-url">复制基础地址</button></div><p class="panel-intro">Docker 后端直连默认端口为 <code class="inline-code">51888</code>；本地开发后端为 <code class="inline-code">8000</code>。</p></section><section class="tool-section"><h2>认证方式</h2><p class="panel-intro">所有受保护接口统一使用 <code class="inline-code">Authorization: Bearer</code>。登录只传 <code class="inline-code">username</code>，其他接口不传 username。</p></section><section class="tool-section"><h2>部署端口</h2><ol class="flow-list"><li><span>1</span><div>前端：<code class="inline-code">51999</code></div></li><li><span>2</span><div>后端：<code class="inline-code">51888</code></div></li><li><span>3</span><div>本地开发：<code class="inline-code">5173</code> / <code class="inline-code">8000</code></div></li></ol></section><section class="tool-section"><h2>接入流程</h2><ol class="flow-list"><li><span>1</span><div>登录获取 token</div></li><li><span>2</span><div>当前用户 → 能力列表 → 会话列表</div></li><li><span>3</span><div>可选上传 → 提交消息</div></li><li><span>4</span><div><code class="inline-code">SSE</code> → 消息历史 / 任务产物</div></li></ol></section></aside>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite">已复制</div>
+  <script>
+    (() => {
+      const searchInput = document.querySelector('#endpoint-search');
+      const filterButtons = [...document.querySelectorAll('[data-filter]')];
+      const cards = [...document.querySelectorAll('.endpoint-card')];
+      const groups = [...document.querySelectorAll('.endpoint-group')];
+      const endpointNav = document.querySelector('#endpoint-nav');
+      const emptyState = document.querySelector('#endpoint-empty');
+      const toast = document.querySelector('#toast');
+      let groupNavLinks = [];
+      let activeFilter = 'all';
+      let toastTimer = 0;
+
+      function buildEndpointNav() {
+        if (!endpointNav) return;
+        endpointNav.innerHTML = '';
+        groups.forEach((group) => {
+          const category = group.dataset.group || 'all';
+          const title = group.querySelector('.group-title span')?.textContent?.trim() || category;
+          const endpointCards = [...group.querySelectorAll(':scope > .endpoint-card')];
+          const details = document.createElement('details');
+          details.className = 'endpoint-nav-group';
+          details.open = true;
+
+          const summary = document.createElement('summary');
+          const parent = document.createElement('span');
+          parent.className = 'endpoint-nav-parent';
+          const parentTitle = document.createElement('span');
+          parentTitle.textContent = title;
+          const count = document.createElement('small');
+          count.textContent = `${endpointCards.length} 个`;
+          parent.append(parentTitle, count);
+          summary.append(parent);
+
+          const children = document.createElement('div');
+          children.className = 'endpoint-nav-children';
+          endpointCards.forEach((card) => {
+            const link = document.createElement('a');
+            const method = card.dataset.method || '';
+            const path = card.querySelector('.path-copy')?.textContent?.trim() || '';
+            const endpointTitle = card.querySelector('h3')?.textContent?.trim() || path || card.id;
+            link.href = `#${card.id}`;
+            link.className = 'endpoint-nav-link';
+            link.dataset.groupNav = category;
+            link.dataset.endpointNav = card.id;
+            link.title = `${method} ${path} ${endpointTitle}`.trim();
+
+            const methodLabel = document.createElement('span');
+            methodLabel.className = 'endpoint-nav-method';
+            methodLabel.textContent = method;
+            const titleLabel = document.createElement('span');
+            titleLabel.className = 'endpoint-nav-title';
+            titleLabel.textContent = endpointTitle;
+            link.append(methodLabel, titleLabel);
+            children.append(link);
+          });
+
+          details.append(summary, children);
+          endpointNav.append(details);
+        });
+      }
+
+      buildEndpointNav();
+      groupNavLinks = [...document.querySelectorAll('[data-group-nav]')];
+
+      function showToast(message) {
+        if (!toast) return;
+        toast.textContent = message;
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => toast.classList.remove('show'), 1400);
+      }
+
+      function textForCopy(trigger) {
+        const sourceId = trigger.getAttribute('data-copy-from');
+        if (sourceId) {
+          const source = document.getElementById(sourceId);
+          if (!source) return '';
+          if ('value' in source) return source.value;
+          return source.textContent || '';
+        }
+        return trigger.getAttribute('data-copy-value') || '';
+      }
+
+      async function copyText(text) {
+        const value = text.trim();
+        if (!value) return;
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(value);
+          } else {
+            const area = document.createElement('textarea');
+            area.value = value;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            document.execCommand('copy');
+            area.remove();
+          }
+          showToast('已复制');
+        } catch (error) {
+          showToast('复制失败');
+        }
+      }
+
+      document.addEventListener('click', (event) => {
+        const trigger = event.target.closest('[data-copy-from], [data-copy-value]');
+        if (!trigger) return;
+        copyText(textForCopy(trigger));
+      });
+
+      function applyFilters() {
+        const term = (searchInput?.value || '').trim().toLowerCase();
+        let visibleCount = 0;
+        cards.forEach((card) => {
+          const matchesFilter = activeFilter === 'all' || (card.dataset.category || '').split(/\s+/).includes(activeFilter);
+          const matchesSearch = !term || (card.dataset.search || '').includes(term);
+          const visible = matchesFilter && matchesSearch;
+          card.hidden = !visible;
+          if (visible) visibleCount += 1;
+        });
+        groups.forEach((group) => {
+          const hasVisibleCard = [...group.querySelectorAll('.endpoint-card')].some((card) => !card.hidden);
+          group.hidden = !hasVisibleCard;
+        });
+        emptyState?.classList.toggle('show', visibleCount === 0);
+      }
+
+      function setActiveFilter(nextFilter) {
+        activeFilter = nextFilter || 'all';
+        filterButtons.forEach((candidate) => {
+          candidate.classList.toggle('active', candidate.dataset.filter === activeFilter);
+        });
+        applyFilters();
+      }
+
+      function scrollToTarget(target, hash) {
+        if (!target) return;
+        const toolbar = document.querySelector('.console-toolbar');
+        const stickyOffset = toolbar ? toolbar.getBoundingClientRect().height + 28 : 28;
+        const top = target.getBoundingClientRect().top + window.scrollY - stickyOffset;
+        if (hash) window.history.pushState(null, '', hash);
+        window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+      }
+
+      searchInput?.addEventListener('input', applyFilters);
+      filterButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const nextFilter = button.dataset.filter || 'all';
+          setActiveFilter(nextFilter);
+          const target = nextFilter === 'all'
+            ? document.querySelector('#console')
+            : document.querySelector(`#group-${nextFilter}`) || cards.find((card) => (card.dataset.category || '').split(/\s+/).includes(nextFilter));
+          if (target) {
+            const hash = target.id ? `#${target.id}` : '';
+            window.requestAnimationFrame(() => scrollToTarget(target, hash));
+          }
+        });
+      });
+
+      groupNavLinks.forEach((link) => {
+        link.addEventListener('click', (event) => {
+          const targetId = link.dataset.endpointNav ? `#${link.dataset.endpointNav}` : link.getAttribute('href');
+          const target = targetId ? document.querySelector(targetId) : null;
+          if (!target) return;
+          event.preventDefault();
+          if (searchInput) searchInput.value = '';
+          setActiveFilter(link.dataset.groupNav || 'all');
+          window.requestAnimationFrame(() => scrollToTarget(target, targetId));
+        });
+      });
+
+      document.querySelector('#expand-all')?.addEventListener('click', () => {
+        document.querySelectorAll('.endpoint-detail').forEach((detail) => detail.open = true);
+      });
+      document.querySelector('#collapse-all')?.addEventListener('click', () => {
+        document.querySelectorAll('.endpoint-detail').forEach((detail) => detail.open = false);
+      });
+
+      applyFilters();
+    })();
+  </script>
 </body>
 </html>
