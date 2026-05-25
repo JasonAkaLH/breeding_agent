@@ -9,7 +9,7 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
-pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260525_user_token_only";
+pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260525_username_token_legacy_auth_removed";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
