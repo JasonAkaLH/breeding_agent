@@ -15,11 +15,7 @@ from src.core.contracts import StoragePort
 from src.core.enums import ArtifactType, EdgeType, TaskStatus
 from src.core.models import (
     Artifact,
-    AuthApiToken,
-    AuthSession,
-    AuthUser,
     AuthUserToken,
-    CaptchaChallenge,
     Checkpoint,
     Conversation,
     ConversationMemorySummary,
@@ -50,11 +46,7 @@ from src.storage.runtime_sidecar_shadow import (
 from .base import build_task_edge_id
 from .models import (
     ArtifactRow,
-    AuthApiTokenRow,
-    AuthSessionRow,
-    AuthUserRow,
     AuthUserTokenRow,
-    CaptchaChallengeRow,
     CheckpointRow,
     ConversationRow,
     ConversationMemorySummaryRow,
@@ -123,54 +115,6 @@ def _row_to_pending_skill_context(row: PendingSkillContextRow) -> PendingSkillCo
 
 def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def _row_to_auth_user(row: AuthUserRow) -> AuthUser:
-    return AuthUser(
-        username=row.username,
-        password_hash=row.password_hash,
-        password_salt=row.password_salt,
-        password_scheme=row.password_scheme,
-        status=row.status,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        last_login_at=row.last_login_at,
-    )
-
-
-def _row_to_captcha_challenge(row: CaptchaChallengeRow) -> CaptchaChallenge:
-    return CaptchaChallenge(
-        captcha_id=row.captcha_id,
-        code_hash=row.code_hash,
-        expires_at=row.expires_at,
-        attempt_count=row.attempt_count,
-        consumed_at=row.consumed_at,
-        created_at=row.created_at,
-    )
-
-
-def _row_to_auth_session(row: AuthSessionRow) -> AuthSession:
-    return AuthSession(
-        session_id=row.session_id,
-        username=row.username,
-        expires_at=row.expires_at,
-        revoked_at=row.revoked_at,
-        created_at=row.created_at,
-    )
-
-
-def _row_to_auth_api_token(row: AuthApiTokenRow) -> AuthApiToken:
-    return AuthApiToken(
-        token_id=row.token_id,
-        token_hash=row.token_hash,
-        username=row.username,
-        client_name=row.client_name,
-        scopes=tuple(str(scope) for scope in (row.scopes or ())),
-        expires_at=row.expires_at,
-        revoked_at=row.revoked_at,
-        created_at=row.created_at,
-        last_used_at=row.last_used_at,
-    )
 
 
 def _row_to_auth_user_token(row: AuthUserTokenRow) -> AuthUserToken:
@@ -408,127 +352,6 @@ def _ensure_runtime_store_write_allowed_by_rust_contract(operation_name: str) ->
 class SQLiteStateRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
-
-    def save_auth_user(self, user: AuthUser) -> AuthUser:
-        row = AuthUserRow(
-            username=user.username,
-            password_hash=user.password_hash,
-            password_salt=user.password_salt,
-            password_scheme=user.password_scheme,
-            status=user.status,
-            created_at=user.created_at,
-            updated_at=user.updated_at,
-            last_login_at=user.last_login_at,
-        )
-        merged = self._session.merge(row)
-        self._session.flush()
-        return _row_to_auth_user(merged)
-
-    def get_auth_user(self, username: str) -> AuthUser | None:
-        row = self._session.get(AuthUserRow, username)
-        return None if row is None else _row_to_auth_user(row)
-
-    def save_captcha_challenge(self, challenge: CaptchaChallenge) -> CaptchaChallenge:
-        row = CaptchaChallengeRow(
-            captcha_id=challenge.captcha_id,
-            code_hash=challenge.code_hash,
-            expires_at=challenge.expires_at,
-            attempt_count=challenge.attempt_count,
-            consumed_at=challenge.consumed_at,
-            created_at=challenge.created_at,
-        )
-        merged = self._session.merge(row)
-        self._session.flush()
-        return _row_to_captcha_challenge(merged)
-
-    def get_captcha_challenge(self, captcha_id: str) -> CaptchaChallenge | None:
-        row = self._session.get(CaptchaChallengeRow, captcha_id)
-        return None if row is None else _row_to_captcha_challenge(row)
-
-    def save_auth_session(self, session: AuthSession) -> AuthSession:
-        row = AuthSessionRow(
-            session_id=session.session_id,
-            username=session.username,
-            expires_at=session.expires_at,
-            revoked_at=session.revoked_at,
-            created_at=session.created_at,
-        )
-        merged = self._session.merge(row)
-        self._session.flush()
-        return _row_to_auth_session(merged)
-
-    def get_auth_session(self, session_id: str) -> AuthSession | None:
-        row = self._session.get(AuthSessionRow, session_id)
-        return None if row is None else _row_to_auth_session(row)
-
-    def save_auth_api_token(self, token: AuthApiToken) -> AuthApiToken:
-        row = AuthApiTokenRow(
-            token_id=token.token_id,
-            token_hash=token.token_hash,
-            username=token.username,
-            client_name=token.client_name,
-            scopes=list(token.scopes),
-            expires_at=token.expires_at,
-            revoked_at=token.revoked_at,
-            created_at=token.created_at,
-            last_used_at=token.last_used_at,
-        )
-        merged = self._session.merge(row)
-        self._session.flush()
-        return _row_to_auth_api_token(merged)
-
-    def get_auth_api_token(self, token_id: str) -> AuthApiToken | None:
-        row = self._session.get(AuthApiTokenRow, token_id)
-        return None if row is None else _row_to_auth_api_token(row)
-
-    def get_auth_api_token_by_hash(self, token_hash: str) -> AuthApiToken | None:
-        row = self._session.execute(
-            select(AuthApiTokenRow).where(AuthApiTokenRow.token_hash == token_hash)
-        ).scalar_one_or_none()
-        return None if row is None else _row_to_auth_api_token(row)
-
-    def list_auth_api_tokens_for_user(self, username: str) -> list[AuthApiToken]:
-        rows = self._session.execute(
-            select(AuthApiTokenRow)
-            .where(AuthApiTokenRow.username == username)
-            .order_by(AuthApiTokenRow.created_at.desc(), AuthApiTokenRow.token_id.desc())
-        ).scalars()
-        return [_row_to_auth_api_token(row) for row in rows]
-
-    def touch_auth_api_token_last_used(self, token_id: str, *, at: datetime) -> AuthApiToken | None:
-        result = self._session.execute(
-            update(AuthApiTokenRow)
-            .where(
-                AuthApiTokenRow.token_id == token_id,
-                AuthApiTokenRow.revoked_at.is_(None),
-                AuthApiTokenRow.expires_at > at,
-            )
-            .values(last_used_at=at)
-        )
-        if result.rowcount != 1:
-            self._session.flush()
-            return None
-        self._session.flush()
-        row = self._session.get(AuthApiTokenRow, token_id)
-        return None if row is None else _row_to_auth_api_token(row)
-
-    def revoke_auth_api_token_for_user(self, username: str, token_id: str, *, revoked_at: datetime) -> AuthApiToken | None:
-        existing = self._session.get(AuthApiTokenRow, token_id)
-        if existing is None or existing.username != username:
-            return None
-        if existing.revoked_at is None:
-            self._session.execute(
-                update(AuthApiTokenRow)
-                .where(
-                    AuthApiTokenRow.token_id == token_id,
-                    AuthApiTokenRow.username == username,
-                    AuthApiTokenRow.revoked_at.is_(None),
-                )
-                .values(revoked_at=revoked_at)
-            )
-            self._session.flush()
-            self._session.refresh(existing)
-        return _row_to_auth_api_token(existing)
 
     def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken:
         row = AuthUserTokenRow(
@@ -1335,44 +1158,6 @@ class SQLiteStorage(StoragePort):
                 return result
 
         return await asyncio.to_thread(_sync)
-
-    async def save_auth_user(self, user: AuthUser) -> AuthUser:
-        return await self._run(lambda state, collab: state.save_auth_user(user))
-
-    async def get_auth_user(self, username: str) -> AuthUser | None:
-        return await self._run(lambda state, collab: state.get_auth_user(username))
-
-    async def save_captcha_challenge(self, challenge: CaptchaChallenge) -> CaptchaChallenge:
-        return await self._run(lambda state, collab: state.save_captcha_challenge(challenge))
-
-    async def get_captcha_challenge(self, captcha_id: str) -> CaptchaChallenge | None:
-        return await self._run(lambda state, collab: state.get_captcha_challenge(captcha_id))
-
-    async def save_auth_session(self, session: AuthSession) -> AuthSession:
-        return await self._run(lambda state, collab: state.save_auth_session(session))
-
-    async def get_auth_session(self, session_id: str) -> AuthSession | None:
-        return await self._run(lambda state, collab: state.get_auth_session(session_id))
-
-    async def save_auth_api_token(self, token: AuthApiToken) -> AuthApiToken:
-        return await self._run(lambda state, collab: state.save_auth_api_token(token))
-
-    async def get_auth_api_token(self, token_id: str) -> AuthApiToken | None:
-        return await self._run(lambda state, collab: state.get_auth_api_token(token_id))
-
-    async def get_auth_api_token_by_hash(self, token_hash: str) -> AuthApiToken | None:
-        return await self._run(lambda state, collab: state.get_auth_api_token_by_hash(token_hash))
-
-    async def list_auth_api_tokens_for_user(self, username: str) -> list[AuthApiToken]:
-        return await self._run(lambda state, collab: state.list_auth_api_tokens_for_user(username))
-
-    async def touch_auth_api_token_last_used(self, token_id: str, *, at: datetime) -> AuthApiToken | None:
-        return await self._run(lambda state, collab: state.touch_auth_api_token_last_used(token_id, at=at))
-
-    async def revoke_auth_api_token_for_user(self, username: str, token_id: str, *, revoked_at: datetime) -> AuthApiToken | None:
-        return await self._run(
-            lambda state, collab: state.revoke_auth_api_token_for_user(username, token_id, revoked_at=revoked_at)
-        )
 
     async def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken:
         return await self._run(lambda state, collab: state.save_auth_user_token(token))
