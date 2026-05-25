@@ -12,9 +12,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     uiModes: [
       { key: 'chat', label: '普通对话', capabilityId: null },
     ],
-    createCaptcha: vi.fn(async () => ({ captcha_id: 'cap-1', image_svg: '<svg><text>1234</text></svg>', expires_in_seconds: 300 })),
-    login: vi.fn(async () => ({ user: { username: 'alice' } })),
-    register: vi.fn(async () => ({ user: { username: 'charlie' } })),
+    login: vi.fn(async () => ({ user: { username: 'alice' }, access_token: 'maf_tok_login' })),
     logout: vi.fn(async () => ({ logged_out: true })),
     me: vi.fn(async () => ({ user: { username: 'alice' } })),
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
@@ -49,7 +47,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     })),
     renameConversation: vi.fn(async (conversationId, title) => ({
       conversation_id: conversationId,
-      account_id: 'alice',
+      username: 'alice',
       status: 'active',
       current_task_id: null,
       title,
@@ -61,6 +59,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     answerInterrupt: vi.fn(async () => ({ interrupt_id: 'interrupt-1', status: 'answered', node_id: 'node-1', answer_payload: {} })),
     getTask: vi.fn(),
     getTaskArtifacts: vi.fn(async () => ({ task_id: 'task-1', artifacts: [] })),
+    downloadArtifact: vi.fn(async () => undefined),
     getTaskGraph: vi.fn(),
     ...overrides,
   };
@@ -161,7 +160,7 @@ describe('App', () => {
     vi.restoreAllMocks();
   });
 
-  it('shows login page when no session exists and logs in with captcha', async () => {
+  it('shows login page when no token exists and logs in with username only', async () => {
     const api = makeApi({
       me: vi.fn(async () => {
         throw new Error('unauthenticated');
@@ -170,55 +169,13 @@ describe('App', () => {
     render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
-    expect(api.createCaptcha).toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
-    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'alice-password' } });
-    fireEvent.change(screen.getByLabelText('4位验证码'), { target: { value: '1234' } });
     fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
 
-    await waitFor(() => expect(api.login).toHaveBeenCalledWith({
-      username: 'alice',
-      password: 'alice-password',
-      captchaId: 'cap-1',
-      captchaCode: '1234',
-    }));
+    await waitFor(() => expect(api.login).toHaveBeenCalledWith({ username: 'alice' }));
+    expect(localStorage.getItem('maf.frontend.access_token')).toBe('maf_tok_login');
     expect(await screen.findByText('小奥Agent')).toBeInTheDocument();
     expect(screen.queryByText('user: alice')).not.toBeInTheDocument();
-  });
-
-  it('creates a new user from the login page with a letter and digit password', async () => {
-    const api = makeApi({
-      me: vi.fn(async () => {
-        throw new Error('unauthenticated');
-      }),
-      register: vi.fn(async () => ({ user: { username: 'charlie' } })),
-    });
-    render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
-
-    expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '创建新用户' }));
-    expect(screen.getByText('创建小奥Agent用户')).toBeInTheDocument();
-    expect(screen.getByText('密码至少 8 位，并且必须同时包含字母和数字。')).toBeInTheDocument();
-
-    const submitButton = screen.getByRole('button', { name: '创建用户并登录' });
-    fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'charlie' } });
-    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'letters-only' } });
-    fireEvent.change(screen.getByLabelText('确认密码'), { target: { value: 'letters-only' } });
-    fireEvent.change(screen.getByLabelText('4位验证码'), { target: { value: '1234' } });
-    expect(submitButton).toBeDisabled();
-
-    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'charlie1' } });
-    fireEvent.change(screen.getByLabelText('确认密码'), { target: { value: 'charlie1' } });
-    fireEvent.click(submitButton);
-
-    await waitFor(() => expect(api.register).toHaveBeenCalledWith({
-      username: 'charlie',
-      password: 'charlie1',
-      captchaId: 'cap-1',
-      captchaCode: '1234',
-    }));
-    expect(await screen.findByText('小奥Agent')).toBeInTheDocument();
-    expect(screen.queryByText('user: charlie')).not.toBeInTheDocument();
   });
 
   it('does not render the old top-right task progress capsule', async () => {
@@ -337,7 +294,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -373,7 +330,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -431,7 +388,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -477,7 +434,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -507,7 +464,7 @@ describe('App', () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
       listConversations: vi.fn(async () => ({
-        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: null, title: '历史问题', created_at: null, updated_at: null }],
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: null, title: '历史问题', created_at: null, updated_at: null }],
       })),
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-history',
@@ -530,7 +487,7 @@ describe('App', () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
       listConversations: vi.fn(async () => ({
-        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
       })),
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-history',
@@ -545,7 +502,7 @@ describe('App', () => {
       event('task.graph_created', {}, 'restore-graph'),
       event('node.started', { capability_id: 'main_agent.respond' }, 'restore-node', 'node-main'),
       event('main_agent.output_delta', { delta: '已生成内容', response_role: 'final' }, 'restore-output'),
-    ];
+    ].map((item) => ({ ...item, task_id: 'task-running' }));
     const eventSource = makeInspectableEventSourceFactory(events);
 
     await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
@@ -565,7 +522,7 @@ describe('App', () => {
         throw new Error('unauthenticated');
       }),
       listConversations: vi.fn(async () => ({
-        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
       })),
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-history',
@@ -576,15 +533,13 @@ describe('App', () => {
       getTask: vi.fn(async () => taskSummary('task-running', 'running')),
     });
     const eventSource = makeInspectableEventSourceFactory([
-      event('main_agent.output_delta', { delta: '登录后恢复内容', response_role: 'final' }, 'restore-login-output'),
+      { ...event('main_agent.output_delta', { delta: '登录后恢复内容', response_role: 'final' }, 'restore-login-output'), task_id: 'task-running' },
     ]);
 
     render(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
 
     expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
-    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'alice-password' } });
-    fireEvent.change(screen.getByLabelText('4位验证码'), { target: { value: '1234' } });
     fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
 
     expect(await screen.findByText('登录前的问题')).toBeInTheDocument();
@@ -596,7 +551,7 @@ describe('App', () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
       listConversations: vi.fn(async () => ({
-        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-completed', title: '历史问题', created_at: null, updated_at: null }],
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-completed', title: '历史问题', created_at: null, updated_at: null }],
       })),
       listConversationMessages: vi.fn()
         .mockResolvedValueOnce({
@@ -628,7 +583,7 @@ describe('App', () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
       listConversations: vi.fn(async () => ({
-        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: null, title: '历史问题', created_at: null, updated_at: null }],
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: null, title: '历史问题', created_at: null, updated_at: null }],
       })),
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-history',
@@ -654,7 +609,7 @@ describe('App', () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
       listConversations: vi.fn(async () => ({
-        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-paused', title: '历史问题', created_at: null, updated_at: null }],
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-paused', title: '历史问题', created_at: null, updated_at: null }],
       })),
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-history',
@@ -678,7 +633,7 @@ describe('App', () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
     const api = makeApi({
       listConversations: vi.fn(async () => ({
-        conversations: [{ conversation_id: 'conv-history', account_id: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
       })),
       listConversationMessages: vi.fn(async () => ({
         conversation_id: 'conv-history',
@@ -731,7 +686,7 @@ describe('App', () => {
     const api = makeApi({
       listConversations: vi.fn(async () => ({
         conversations: [
-          { conversation_id: 'conv-other', account_id: 'alice', status: 'active', current_task_id: null, title: '另一个会话', created_at: null, updated_at: null },
+          { conversation_id: 'conv-other', username: 'alice', status: 'active', current_task_id: null, title: '另一个会话', created_at: null, updated_at: null },
         ],
       })),
       listConversationMessages: vi.fn(async () => ({
@@ -759,8 +714,8 @@ describe('App', () => {
     const api = makeApi({
       listConversations: vi.fn(async () => ({
         conversations: [
-          { conversation_id: 'conv-a', account_id: 'alice', status: 'active', current_task_id: null, title: '会话 A', created_at: null, updated_at: null },
-          { conversation_id: 'conv-b', account_id: 'alice', status: 'active', current_task_id: null, title: '会话 B', created_at: null, updated_at: null },
+          { conversation_id: 'conv-a', username: 'alice', status: 'active', current_task_id: null, title: '会话 A', created_at: null, updated_at: null },
+          { conversation_id: 'conv-b', username: 'alice', status: 'active', current_task_id: null, title: '会话 B', created_at: null, updated_at: null },
         ],
       })),
       listConversationMessages: vi.fn(async (conversationId) => {
@@ -794,7 +749,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -823,7 +778,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -851,7 +806,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -892,7 +847,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -923,7 +878,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -973,7 +928,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '旧会话名称',
@@ -983,7 +938,7 @@ describe('App', () => {
       })),
       renameConversation: vi.fn(async () => ({
         conversation_id: 'conv-history',
-        account_id: 'alice',
+        username: 'alice',
         status: 'active',
         current_task_id: null,
         title: '新的会话名称',
@@ -1006,7 +961,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '旧会话名称',
@@ -1030,7 +985,7 @@ describe('App', () => {
       listConversations: vi.fn(async () => ({
         conversations: [{
           conversation_id: 'conv-history',
-          account_id: 'alice',
+          username: 'alice',
           status: 'active',
           current_task_id: null,
           title: '历史问题',
@@ -1465,8 +1420,9 @@ describe('App', () => {
     expect(await screen.findByText('已生成文件。')).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByText('生成文件').length).toBeGreaterThan(0));
     expect(screen.getByText('layout.html')).toBeInTheDocument();
-    const link = screen.getByRole('link', { name: /下\s*载/ });
-    expect(link).toHaveAttribute('href', '/api/v1/artifacts/art-file-1/download');
+    const download = screen.getByRole('button', { name: /下\s*载/ });
+    fireEvent.click(download);
+    expect(api.downloadArtifact).toHaveBeenCalledWith('art-file-1', 'layout.html');
   });
 
   it('renders OCR raw text artifacts as a collapsible card inside the assistant bubble', async () => {

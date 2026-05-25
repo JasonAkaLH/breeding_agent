@@ -3,8 +3,8 @@ import { CopyOutlined, ExclamationCircleFilled, ReloadOutlined } from '@ant-desi
 import { Alert, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
-import { createBrowserEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
@@ -56,6 +56,7 @@ interface ConversationMessage {
 }
 
 type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
+type FileArtifactResult = Extract<CapabilityArtifactDisplay, { kind: 'file' }>['result'];
 
 interface PendingInterrupt {
   taskId: string;
@@ -71,6 +72,7 @@ interface TransientNotice {
   type: 'success' | 'warning';
 }
 
+const AUTH_TOKEN_STORAGE_KEY = 'maf.frontend.access_token';
 const CONVERSATION_STORAGE_KEY_PREFIX = 'maf.frontend.conversation_id';
 const WAITING_INPUT_CHECK_DELAY_MS = 8_000;
 const TRANSIENT_NOTICE_DURATION_MS = 5_000;
@@ -125,9 +127,22 @@ function isConversationViewAtBottom(element: HTMLElement) {
 }
 
 function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING_INPUT_CHECK_DELAY_MS }: AppProps) {
-  const api = useMemo(() => apiClient ?? createApiClient(), [apiClient]);
-  const createEventSource = useMemo(() => eventSourceFactory ?? createBrowserEventSourceFactory(), [eventSourceFactory]);
   const [authUser, setAuthUser] = useState<UserResponse | null | undefined>(undefined);
+  const tokenRef = useRef<string | null>(readStoredAccessToken());
+  const clearStoredAuth = useCallback(() => {
+    tokenRef.current = null;
+    writeStoredAccessToken(null);
+  }, []);
+  const api = useMemo(() => apiClient ?? createApiClient({
+    authHeaderProvider: () => tokenRef.current,
+    onUnauthorized: () => {
+      clearStoredAuth();
+      setAuthUser(null);
+    },
+  }), [apiClient, clearStoredAuth]);
+  const createEventSource = useMemo(() => eventSourceFactory ?? createFetchTaskEventSourceFactory({
+    authHeaderProvider: () => tokenRef.current,
+  }), [eventSourceFactory]);
   const [conversationId, setConversationId] = useState('');
   const mode: ChatMode = 'chat';
   const [deepThinking, setDeepThinking] = useState(false);
@@ -501,9 +516,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     subscribeToTask(taskId, restoredAssistantId, generation, targetConversationId);
   }
 
-  async function handleLogin(user: UserResponse) {
-    setAuthUser(user);
-    const nextConversationId = loadOrCreateConversationId(user.username);
+  async function handleLogin(result: AuthTokenResponse) {
+    tokenRef.current = result.access_token;
+    writeStoredAccessToken(result.access_token);
+    setAuthUser(result.user);
+    const nextConversationId = loadOrCreateConversationId(result.user.username);
     initializedWorkspaceConversationIdRef.current = null;
     setActiveConversationId(nextConversationId);
     setMessages([]);
@@ -513,6 +530,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   async function handleLogout() {
     await api.logout().catch(() => undefined);
+    clearStoredAuth();
     const targetConversationId = conversationId;
     const generation = beginRestoreGeneration();
     subscriptionRef.current?.close();
@@ -825,6 +843,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
   }
 
+  async function handleDownloadArtifact(result: FileArtifactResult) {
+    try {
+      await api.downloadArtifact(result.artifactId, result.filename);
+    } catch (error) {
+      showTransientNotice(friendlyError(error));
+    }
+  }
+
   function isFileDrag(event: DragEvent<HTMLDivElement>): boolean {
     const types = Array.from(event.dataTransfer.types ?? []);
     return types.length === 0 || types.includes('Files') || event.dataTransfer.files.length > 0;
@@ -912,6 +938,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     subscriptionRef.current = createEventSource(taskEventsUrl(taskId), {
       onMessage: (event) => {
         if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+        if (event.task_id !== taskId) return;
         handleTaskEvent(event, taskId, assistantId);
       },
       onError: () => {
@@ -1252,7 +1279,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         <main className="chat-workspace" aria-label="对话工作区">
           <section className="app-content" aria-label="当前对话面板">
             <div ref={conversationListRef} className="conversation-list" aria-label="对话内容" onScroll={handleConversationScroll}>
-              {messages.length === 0 ? <EmptyWelcome key={conversationId} /> : messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+              {messages.length === 0 ? <EmptyWelcome key={conversationId} /> : messages.map((message) => (
+                <MessageBubble key={message.id} message={message} onDownloadArtifact={handleDownloadArtifact} />
+              ))}
             </div>
             <div
               className={`chat-floating-stack${draggingUpload ? ' chat-floating-stack-dragging' : ''}`}
@@ -1417,72 +1446,23 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   );
 }
 
-function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (user: UserResponse) => void | Promise<void> }) {
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (result: AuthTokenResponse) => void | Promise<void> }) {
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [captchaCode, setCaptchaCode] = useState('');
-  const [captchaId, setCaptchaId] = useState('');
-  const [captchaSvg, setCaptchaSvg] = useState('');
-  const [loadingCaptcha, setLoadingCaptcha] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refreshCaptcha = useCallback(async () => {
-    setLoadingCaptcha(true);
-    try {
-      const challenge = await api.createCaptcha();
-      setCaptchaId(challenge.captcha_id);
-      setCaptchaSvg(challenge.image_svg);
-      setCaptchaCode('');
-    } catch {
-      setError('验证码加载失败，请刷新重试。');
-    } finally {
-      setLoadingCaptcha(false);
-    }
-  }, [api]);
-
-  useEffect(() => {
-    void refreshCaptcha();
-  }, [refreshCaptcha]);
-
   const trimmedUsername = username.trim();
-  const passwordHasLetterAndDigit = /[A-Za-z]/.test(password) && /\d/.test(password);
-  const passwordPolicyOk = password.length >= 8 && passwordHasLetterAndDigit;
-  const registerPasswordMismatch = authMode === 'register' && confirmPassword.length > 0 && password !== confirmPassword;
-  const canSubmit = authMode === 'login'
-    ? Boolean(trimmedUsername && password && captchaCode.length === 4 && captchaId)
-    : Boolean(trimmedUsername && passwordPolicyOk && password === confirmPassword && captchaCode.length === 4 && captchaId);
-
-  function switchAuthMode(nextMode: 'login' | 'register') {
-    setAuthMode(nextMode);
-    setPassword('');
-    setConfirmPassword('');
-    setCaptchaCode('');
-    setError(null);
-  }
+  const canSubmit = Boolean(trimmedUsername);
 
   async function submitAuth() {
     if (!canSubmit) return;
     setSubmitting(true);
     setError(null);
     try {
-      const result = authMode === 'login' ? await api.login({
-        username: trimmedUsername,
-        password,
-        captchaId,
-        captchaCode,
-      }) : await api.register({
-        username: trimmedUsername,
-        password,
-        captchaId,
-        captchaCode,
-      });
-      await onLogin(result.user);
+      const result = await api.login({ username: trimmedUsername });
+      await onLogin(result);
     } catch {
-      setError(authMode === 'login' ? '登录失败，请检查用户名、密码和验证码。' : '创建用户失败，请检查用户名、密码规则和验证码。');
-      void refreshCaptcha();
+      setError('登录失败，请检查用户名后重试。');
     } finally {
       setSubmitting(false);
     }
@@ -1490,7 +1470,7 @@ function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (user: UserRespo
 
   return (
     <Layout className="app-shell auth-shell">
-      <Card className="login-card" title={authMode === 'login' ? '登录小奥Agent' : '创建小奥Agent用户'}>
+      <Card className="login-card" title="登录小奥Agent">
         <Space direction="vertical" size="middle" className="login-form">
           {error ? <Alert type="error" showIcon message={error} /> : null}
           <Input
@@ -1498,43 +1478,10 @@ function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (user: UserRespo
             placeholder="用户名"
             value={username}
             onChange={(event) => setUsername(event.target.value)}
+            onPressEnter={() => void submitAuth()}
             autoComplete="username"
           />
-          <Input.Password
-            aria-label="密码"
-            placeholder="密码"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-          />
-          {authMode === 'register' ? (
-            <>
-              <Input.Password
-                aria-label="确认密码"
-                placeholder="确认密码"
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-                onPressEnter={() => void submitAuth()}
-                autoComplete="new-password"
-              />
-              <Typography.Text type={passwordPolicyOk ? 'success' : 'secondary'}>
-                密码至少 8 位，并且必须同时包含字母和数字。
-              </Typography.Text>
-              {registerPasswordMismatch ? <Typography.Text type="danger">两次输入的密码不一致。</Typography.Text> : null}
-            </>
-          ) : null}
-          <Space align="center" className="captcha-row">
-            <Input
-              aria-label="4位验证码"
-              placeholder="4位验证码"
-              value={captchaCode}
-              maxLength={4}
-              onChange={(event) => setCaptchaCode(event.target.value.replace(/\D/g, '').slice(0, 4))}
-              onPressEnter={() => void submitAuth()}
-            />
-            <div className="captcha-image" aria-label="验证码图片" dangerouslySetInnerHTML={{ __html: captchaSvg }} />
-            <Button onClick={() => void refreshCaptcha()} loading={loadingCaptcha}>刷新</Button>
-          </Space>
+          <Typography.Text type="secondary">输入内部用户名后会签发当前浏览器的 Authorization Bearer token。</Typography.Text>
           <Button
             type="primary"
             block
@@ -1542,13 +1489,8 @@ function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (user: UserRespo
             loading={submitting}
             disabled={!canSubmit}
           >
-            {authMode === 'login' ? '登录' : '创建用户并登录'}
+            登录
           </Button>
-          {authMode === 'login' ? (
-            <Button type="link" block onClick={() => switchAuthMode('register')}>创建新用户</Button>
-          ) : (
-            <Button type="link" block onClick={() => switchAuthMode('login')}>返回登录</Button>
-          )}
         </Space>
       </Card>
     </Layout>
@@ -1798,7 +1740,13 @@ function assistantActivityText(state: TaskEventState, progressText: string): str
   return progressText;
 }
 
-function MessageBubble({ message }: { message: ConversationMessage }) {
+function MessageBubble({
+  message,
+  onDownloadArtifact,
+}: {
+  message: ConversationMessage;
+  onDownloadArtifact: (result: FileArtifactResult) => void;
+}) {
   const className = message.role === 'user' ? 'message message-user' : 'message message-assistant';
   const shouldShowContent = Boolean(message.content);
   const shouldShowReasoning = message.role === 'assistant' && (message.reasoningRequested || message.reasoningContent);
@@ -1818,7 +1766,13 @@ function MessageBubble({ message }: { message: ConversationMessage }) {
         ) : shouldShowContent || message.artifactDisplays?.length ? (
           <>
             {shouldShowContent ? <MarkdownText content={message.content} /> : null}
-            {message.artifactDisplays?.map((display) => <CapabilityArtifactPanel key={capabilityArtifactDisplayKey(display)} display={display} />)}
+            {message.artifactDisplays?.map((display) => (
+              <CapabilityArtifactPanel
+                key={capabilityArtifactDisplayKey(display)}
+                display={display}
+                onDownloadArtifact={onDownloadArtifact}
+              />
+            ))}
           </>
         ) : message.activityText ? (
           <ActivityNotice text={message.activityText} status={message.activityStatus} />
@@ -1888,7 +1842,13 @@ async function copyTextToClipboard(text: string): Promise<void> {
   }
 }
 
-function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDisplay }) {
+function CapabilityArtifactPanel({
+  display,
+  onDownloadArtifact,
+}: {
+  display: CapabilityArtifactDisplay;
+  onDownloadArtifact: (result: FileArtifactResult) => void;
+}) {
   if (display.kind === 'data_query') {
     return <DataQueryResultCard result={display.result} />;
   }
@@ -1896,7 +1856,7 @@ function CapabilityArtifactPanel({ display }: { display: CapabilityArtifactDispl
     return <OcrRawTextCard result={display.result} />;
   }
   if (display.kind === 'file') {
-    return <FileArtifactCard result={display.result} />;
+    return <FileArtifactCard result={display.result} onDownloadArtifact={onDownloadArtifact} />;
   }
   return null;
 }
@@ -1940,7 +1900,13 @@ function OcrRawTextCard({ result }: { result: Extract<CapabilityArtifactDisplay,
   );
 }
 
-function FileArtifactCard({ result }: { result: Extract<CapabilityArtifactDisplay, { kind: 'file' }>['result'] }) {
+function FileArtifactCard({
+  result,
+  onDownloadArtifact,
+}: {
+  result: FileArtifactResult;
+  onDownloadArtifact: (result: FileArtifactResult) => void;
+}) {
   return (
     <Card size="small" className="capability-card" title="生成文件">
       <Space direction="vertical" size="small">
@@ -1951,7 +1917,7 @@ function FileArtifactCard({ result }: { result: Extract<CapabilityArtifactDispla
           {result.sourceFileCount && result.sourceFileCount > 1 ? <Tag>{result.sourceFileCount} 个文件</Tag> : null}
         </Space>
         <Typography.Text type="secondary">{result.summary}</Typography.Text>
-        <Button href={result.downloadUrl} target="_blank" rel="noreferrer">
+        <Button onClick={() => onDownloadArtifact(result)}>
           下载
         </Button>
       </Space>
@@ -2011,6 +1977,26 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
 
 function conversationStorageKey(username: string): string {
   return `${CONVERSATION_STORAGE_KEY_PREFIX}.${username}`;
+}
+
+function readStoredAccessToken(): string | null {
+  try {
+    return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredAccessToken(token: string | null): void {
+  try {
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures; auth state still lives in memory for this tab.
+  }
 }
 
 function loadOrCreateConversationId(username: string): string {

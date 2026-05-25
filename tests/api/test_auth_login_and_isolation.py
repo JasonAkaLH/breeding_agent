@@ -9,161 +9,102 @@ class AuthLoginAPITest(APITestCase):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         await self.logout()
-        await self.runtime.create_user("alice", "alice-password1")
 
-    async def test_login_requires_valid_password_and_captcha_then_me_restores_user(self) -> None:
-        captcha = await self.client.post("/api/v1/auth/captcha")
-        self.assertEqual(captcha.status_code, 200)
-        captcha_payload = captcha.json()
-        self.assertIn("captcha_id", captcha_payload)
-        self.assertIn("image_svg", captcha_payload)
+    async def test_login_accepts_username_only_and_me_uses_returned_bearer(self) -> None:
+        login = await self.client.post("/api/v1/auth/login", json={"username": "alice"})
 
-        wrong = await self.client.post(
-            "/api/v1/auth/login",
-            json={
-                "username": "alice",
-                "password": "wrong-password",
-                "captcha_id": captcha_payload["captcha_id"],
-                "captcha_code": "1234",
-            },
-        )
-        self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(login.status_code, 200, login.text)
+        payload = login.json()
+        self.assertEqual(payload["user"]["username"], "alice")
+        self.assertTrue(payload["access_token"].startswith("maf_tok_"))
+        self.assertNotIn("__Host-maf_session", self.client.cookies)
+        self.assertNotIn("set-cookie", {key.lower(): value for key, value in login.headers.items()})
 
-        captcha = await self.client.post("/api/v1/auth/captcha")
-        login = await self.client.post(
-            "/api/v1/auth/login",
-            json={
-                "username": "alice",
-                "password": "alice-password1",
-                "captcha_id": captcha.json()["captcha_id"],
-                "captcha_code": "1234",
-            },
-        )
-        self.assertEqual(login.status_code, 200)
-        self.assertEqual(login.json()["user"]["username"], "alice")
-        self.assertIn("__Host-maf_session", self.client.cookies)
-        session_cookie = self.client.cookies.get("__Host-maf_session")
-        self.assertIsInstance(session_cookie, str)
-        self.assertNotIn("alice", session_cookie)
-        self.assertNotIn("username", session_cookie.lower())
+        me_without_bearer = await self.client.get("/api/v1/auth/me")
+        self.assertEqual(me_without_bearer.status_code, 401)
 
-        me = await self.client.get("/api/v1/auth/me")
+        me = await self.client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {payload['access_token']}"})
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.json()["user"]["username"], "alice")
 
-    async def test_captcha_is_single_use(self) -> None:
-        captcha = await self.client.post("/api/v1/auth/captcha")
-        captcha_id = captcha.json()["captcha_id"]
-        first = await self.client.post(
-            "/api/v1/auth/login",
-            json={"username": "alice", "password": "alice-password1", "captcha_id": captcha_id, "captcha_code": "1234"},
-        )
-        self.assertEqual(first.status_code, 200)
-        await self.logout()
 
-        second = await self.client.post(
+    async def test_login_rejects_password_captcha_and_other_extra_fields(self) -> None:
+        response = await self.client.post(
             "/api/v1/auth/login",
-            json={"username": "alice", "password": "alice-password1", "captcha_id": captcha_id, "captcha_code": "1234"},
+            json={
+                "username": "alice",
+                "password": "old-password",
+                "captcha_id": "cap-old",
+                "captcha_code": "1234",
+            },
         )
-        self.assertEqual(second.status_code, 401)
+        self.assertEqual(response.status_code, 422, response.text)
+
+    async def test_relogin_and_refresh_invalidate_previous_token(self) -> None:
+        first = await self.client.post("/api/v1/auth/login", json={"username": "alice"})
+        self.assertEqual(first.status_code, 200)
+        first_token = first.json()["access_token"]
+
+        second = await self.client.post("/api/v1/auth/login", json={"username": "alice"})
+        self.assertEqual(second.status_code, 200)
+        second_token = second.json()["access_token"]
+        self.assertNotEqual(first_token, second_token)
+
+        expired_me = await self.client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {first_token}"})
+        self.assertEqual(expired_me.status_code, 401)
+
+        refreshed = await self.client.post("/api/v1/auth/refresh-token", headers={"Authorization": f"Bearer {second_token}"})
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        refreshed_token = refreshed.json()["access_token"]
+        self.assertNotEqual(second_token, refreshed_token)
+        self.assertEqual((await self.client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {second_token}"})).status_code, 401)
+        self.assertEqual((await self.client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {refreshed_token}"})).status_code, 200)
 
     async def test_business_api_requires_login(self) -> None:
         response = await self.submit_message(conversation_id="conv-no-login", content="你好", capability_id=None)
         self.assertEqual(response.status_code, 401)
 
-    async def test_register_creates_user_and_logs_in(self) -> None:
-        captcha = await self.client.post("/api/v1/auth/captcha")
-        captcha_id = captcha.json()["captcha_id"]
+    async def test_removed_password_auth_routes_are_not_available(self) -> None:
+        for method, path, kwargs in (
+            ("POST", "/api/v1/auth/captcha", {}),
+            ("POST", "/api/v1/auth/register", {"json": {"username": "charlie", "password": "charlie1"}}),
+            ("POST", "/api/v1/auth/api-tokens", {"json": {"client_name": "client", "scopes": ["conversation:read"]}}),
+            ("GET", "/api/v1/auth/api-tokens", {}),
+            ("DELETE", "/api/v1/auth/api-tokens", {"json": {"token_id": "tok-old"}}),
+        ):
+            response = await self.client.request(method, path, **kwargs)
+            self.assertIn(response.status_code, {404, 410}, f"{method} {path}: {response.text}")
 
+
+
+    async def test_interrupt_answer_rejects_reserved_identity_payload(self) -> None:
         response = await self.client.post(
-            "/api/v1/auth/register",
+            "/api/v1/tasks/interrupts/answer",
             json={
-                "username": "charlie",
-                "password": "charlie1",
-                "captcha_id": captcha_id,
-                "captcha_code": "1234",
+                "task_id": "task-any",
+                "interrupt_id": "interrupt-any",
+                "answer_payload": {"nested": {"USERNAME": "mallory"}},
             },
         )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["user"]["username"], "charlie")
-        self.assertIn("__Host-maf_session", self.client.cookies)
-        stored_user = await self.runtime.storage.get_auth_user("charlie")
-        self.assertIsNotNone(stored_user)
-        self.assertNotEqual(stored_user.password_hash, "charlie1")
-        me = await self.client.get("/api/v1/auth/me")
-        self.assertEqual(me.status_code, 200)
-        self.assertEqual(me.json()["user"]["username"], "charlie")
-
-    async def test_register_rejects_duplicate_username(self) -> None:
-        captcha = await self.client.post("/api/v1/auth/captcha")
-
-        response = await self.client.post(
-            "/api/v1/auth/register",
-            json={
-                "username": "alice",
-                "password": "alice-password2",
-                "captcha_id": captcha.json()["captcha_id"],
-                "captcha_code": "1234",
-            },
-        )
-
-        self.assertEqual(response.status_code, 409)
-
-    async def test_register_requires_letter_and_digit_password(self) -> None:
-        captcha = await self.client.post("/api/v1/auth/captcha")
-        no_digit = await self.client.post(
-            "/api/v1/auth/register",
-            json={
-                "username": "letters",
-                "password": "letters-only",
-                "captcha_id": captcha.json()["captcha_id"],
-                "captcha_code": "1234",
-            },
-        )
-        self.assertEqual(no_digit.status_code, 400)
-
-        captcha = await self.client.post("/api/v1/auth/captcha")
-        no_letter = await self.client.post(
-            "/api/v1/auth/register",
-            json={
-                "username": "digits",
-                "password": "12345678",
-                "captcha_id": captcha.json()["captcha_id"],
-                "captcha_code": "1234",
-            },
-        )
-        self.assertEqual(no_letter.status_code, 400)
-
-    async def test_register_requires_valid_captcha(self) -> None:
-        captcha = await self.client.post("/api/v1/auth/captcha")
-
-        response = await self.client.post(
-            "/api/v1/auth/register",
-            json={
-                "username": "captchauser",
-                "password": "captcha1",
-                "captcha_id": captcha.json()["captcha_id"],
-                "captcha_code": "0000",
-            },
-        )
-
-        self.assertEqual(response.status_code, 401)
-
+        self.assertEqual(response.status_code, 422, response.text)
 
 class AuthIsolationAPITest(APITestCase):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         await self.reconfigure_runtime(main_agent_stream_generator=lambda _prompt: ["已收到。"])
         await self.logout()
-        await self.runtime.create_user("alice", "alice-password1")
-        await self.runtime.create_user("bob", "bob-password1")
 
-    async def test_authenticated_submit_ignores_body_account_id_and_history_is_user_scoped(self) -> None:
-        await self.login("alice", "alice-password1")
+    async def test_authenticated_submit_ignores_body_username_and_history_is_user_scoped(self) -> None:
+        await self.login("alice")
+        spoof = await self.submit_message(
+            conversation_id="conv-alice",
+            metadata={"username": "mallory-body-spoof"},
+            content="你好",
+            capability_id=None,
+        )
+        self.assertEqual(spoof.status_code, 422)
         response = await self.submit_message(
             conversation_id="conv-alice",
-            account_id="mallory-body-spoof",
             content="你好",
             capability_id=None,
         )
@@ -173,7 +114,7 @@ class AuthIsolationAPITest(APITestCase):
 
         conversation = await self.runtime.storage.get_conversation("conv-alice")
         self.assertIsNotNone(conversation)
-        self.assertEqual(conversation.account_id, "alice")
+        self.assertEqual(conversation.username, "alice")
 
         conversations = await self.client.get("/api/v1/conversations")
         self.assertEqual(conversations.status_code, 200)
@@ -185,7 +126,7 @@ class AuthIsolationAPITest(APITestCase):
         self.assertIn("user", roles)
         self.assertIn("assistant", roles)
 
-        await self.login("bob", "bob-password1")
+        await self.login("bob")
         bob_conversations = await self.client.get("/api/v1/conversations")
         self.assertEqual(bob_conversations.status_code, 200)
         self.assertEqual(bob_conversations.json()["conversations"], [])
@@ -196,10 +137,9 @@ class AuthIsolationAPITest(APITestCase):
         self.assertEqual((await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})).status_code, 404)
 
     async def test_delete_conversation_is_owner_scoped_and_purges_history(self) -> None:
-        await self.login("alice", "alice-password1")
+        await self.login("alice")
         response = await self.submit_message(
             conversation_id="conv-delete",
-            account_id="mallory-body-spoof",
             content="你好",
             capability_id=None,
         )
@@ -209,11 +149,11 @@ class AuthIsolationAPITest(APITestCase):
         self.assertIsNotNone(await self.runtime.storage.get_conversation("conv-delete"))
         self.assertGreater(len(await self.runtime.storage.list_messages_for_conversation("conv-delete")), 0)
 
-        await self.login("bob", "bob-password1")
+        await self.login("bob")
         forbidden = await self.client.request("DELETE", "/api/v1/conversations", json={"conversation_id": "conv-delete"})
         self.assertEqual(forbidden.status_code, 404)
 
-        await self.login("alice", "alice-password1")
+        await self.login("alice")
         deleted = await self.client.request("DELETE", "/api/v1/conversations", json={"conversation_id": "conv-delete"})
         self.assertEqual(deleted.status_code, 200)
         payload = deleted.json()
@@ -232,15 +172,13 @@ class AuthIsolationAPITest(APITestCase):
         self.assertIsNone(await self.runtime.storage.get_conversation("conv-delete"))
         self.assertIsNone(await self.runtime.storage.get_task(task_id))
         self.assertEqual(await self.runtime.storage.list_events_for_task(task_id), [])
-        self.assertIsNotNone(await self.runtime.storage.get_auth_user("alice"))
+        self.assertIsNotNone(await self.runtime.storage.get_auth_user_token("alice"))
 
     async def test_delete_conversation_auto_cancels_running_task_before_purge(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
-        await self.runtime.create_user("alice", "alice-password1")
-        await self.runtime.create_user("bob", "bob-password1")
 
-        await self.login("alice", "alice-password1")
+        await self.login("alice")
         response = await self.submit_message(conversation_id="conv-running-delete", content="查询龙粳33", capability_id="skill.generic_data_lookup")
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
@@ -266,10 +204,8 @@ class AuthIsolationAPITest(APITestCase):
     async def test_non_owner_cannot_subscribe_to_sse_or_cancel_other_users_task(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
-        await self.runtime.create_user("alice", "alice-password1")
-        await self.runtime.create_user("bob", "bob-password1")
 
-        await self.login("alice", "alice-password1")
+        await self.login("alice")
         response = await self.submit_message(conversation_id="conv-alice", content="查询龙粳33", capability_id="skill.generic_data_lookup")
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
@@ -280,7 +216,7 @@ class AuthIsolationAPITest(APITestCase):
 
         await self.wait_for_condition(task_running)
 
-        await self.login("bob", "bob-password1")
+        await self.login("bob")
         stolen_submit = await self.submit_message(
             conversation_id="conv-alice",
             content="试图写入他人的忙碌会话",
@@ -292,7 +228,7 @@ class AuthIsolationAPITest(APITestCase):
         async with aconnect_sse(self.client, "GET", f"/api/v1/tasks/{task_id}/events") as event_source:
             self.assertEqual(event_source.response.status_code, 404)
 
-        await self.login("alice", "alice-password1")
+        await self.login("alice")
         cancel = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
         self.assertEqual(cancel.status_code, 202)
         release.set()

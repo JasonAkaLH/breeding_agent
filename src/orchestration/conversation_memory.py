@@ -258,12 +258,12 @@ class ConversationMemoryBuilder:
         self._resolution_generator = resolution_generator
         self._now_fn = now_fn or datetime.utcnow
 
-    async def build(self, request: OrchestrationRequest, *, account_id: str | None = None) -> ConversationMemoryContext:
+    async def build(self, request: OrchestrationRequest, *, username: str | None = None) -> ConversationMemoryContext:
         conversation = await self._storage.get_conversation(request.conversation_id)
         if conversation is None:
             return self._empty_context(request, fallback_reason="conversation_missing")
-        if account_id is not None and conversation.account_id != account_id:
-            raise PermissionError(f"Conversation does not belong to account: {request.conversation_id}")
+        if username is not None and conversation.username != username:
+            raise PermissionError(f"Conversation does not belong to username: {request.conversation_id}")
 
         messages = await self._storage.list_messages_for_conversation(request.conversation_id)
         tasks = await self._storage.list_tasks_for_conversation(request.conversation_id)
@@ -272,7 +272,7 @@ class ConversationMemoryBuilder:
         current_user_message = request.current_user_message or request.user_message
 
         history_messages = [message for message in messages if message.message_id != request.root_message_id]
-        latest_summary = await self._latest_valid_summary(request.conversation_id, conversation.account_id)
+        latest_summary = await self._latest_valid_summary(request.conversation_id, conversation.username)
         history_messages = _messages_after_summary_boundary(history_messages, latest_summary)
         post_boundary_task_ids = {message.task_id or message.message_id for message in history_messages}
         turns = await self._build_turns(
@@ -294,7 +294,7 @@ class ConversationMemoryBuilder:
 
         context = await self._compress(
             request=request,
-            account_id=conversation.account_id,
+            username=conversation.username,
             current_user_message=current_user_message,
             resolved_user_message=resolved_user_message,
             resolution_metadata=resolution_metadata,
@@ -308,12 +308,12 @@ class ConversationMemoryBuilder:
     async def _latest_valid_summary(
         self,
         conversation_id: str,
-        account_id: str,
+        username: str,
     ) -> ConversationMemorySummary | None:
         try:
             summary = await self._storage.get_latest_conversation_memory_summary(
                 conversation_id,
-                account_id=account_id,
+                username=username,
             )
         except AttributeError:
             return None
@@ -407,7 +407,7 @@ class ConversationMemoryBuilder:
         self,
         *,
         request: OrchestrationRequest,
-        account_id: str,
+        username: str,
         current_user_message: str,
         resolved_user_message: str | None,
         resolution_metadata: Mapping[str, Any],
@@ -449,7 +449,7 @@ class ConversationMemoryBuilder:
                             compression_level = "level_2"
                             await self._save_summary(
                                 request=request,
-                                account_id=account_id,
+                                username=username,
                                 summary_text=history_summary,
                                 older_turns=older_turns,
                                 existing_summary=existing_summary,
@@ -507,7 +507,7 @@ class ConversationMemoryBuilder:
         self,
         *,
         request: OrchestrationRequest,
-        account_id: str,
+        username: str,
         summary_text: str,
         older_turns: list[_BusinessTurn],
         existing_summary: ConversationMemorySummary | None,
@@ -523,7 +523,7 @@ class ConversationMemoryBuilder:
             ConversationMemorySummary(
                 summary_id=f"memory-summary-{uuid4().hex}",
                 conversation_id=request.conversation_id,
-                account_id=account_id,
+                username=username,
                 covered_until_turn_id=older_turns[-1].turn_id,
                 covered_until_message_id=last.message_id,
                 covered_until_created_at=last.created_at,

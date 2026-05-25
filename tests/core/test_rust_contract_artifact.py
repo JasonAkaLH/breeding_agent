@@ -4,7 +4,7 @@ import dataclasses
 import unittest
 
 from src.core import enums
-from src.core.models import Task
+from src.core.models import AuthUserToken, Conversation, ConversationMemorySummary, Task
 from src.core.rust_contract import load_core_contract
 
 
@@ -23,10 +23,16 @@ class CoreRustContractArtifactTest(unittest.TestCase):
 
     def test_core_model_fields_are_backed_by_rust_contract_artifact(self) -> None:
         contract = load_core_contract()
-        self.assertEqual(
-            contract["models"]["Task"],
-            [field.name for field in dataclasses.fields(Task)],
-        )
+        for model in (Task, Conversation, ConversationMemorySummary, AuthUserToken):
+            self.assertEqual(
+                contract["models"][model.__name__],
+                [field.name for field in dataclasses.fields(model)],
+                model.__name__,
+            )
+        self.assertIn("username", contract["models"]["Conversation"])
+        self.assertNotIn("account_id", contract["models"]["Conversation"])
+        self.assertIn("username", contract["models"]["ConversationMemorySummary"])
+        self.assertNotIn("account_id", contract["models"]["ConversationMemorySummary"])
 
     def test_core_error_codes_are_stable_and_prefixed(self) -> None:
         contract = load_core_contract()

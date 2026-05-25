@@ -240,7 +240,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
                                 "format": "markdown",
                                 "max_sections": 5,
                                 "topic": "planner topic should not win",
-                                "account_id": "planner-account",
+                                "username": "planner-account",
                             },
                         }
                     ]
@@ -261,7 +261,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             "max_sections": 5,
             "topic": "生成水稻品种分析报告",
         })
-        self.assertNotIn("account_id", plan.nodes[0].input_payload)
+        self.assertNotIn("username", plan.nodes[0].input_payload)
         self.assertEqual(plan.nodes[-1].capability_id, "main_agent.respond")
         self.assertIn("report.generate", prompts[0])
         self.assertIn("规划器 input_payload 允许字段：format, max_sections。", prompts[0])
@@ -326,7 +326,7 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
                             "capability_id": "report.generate",
                             "input_payload": {
                                 "format": "markdown",
-                                "account_id": "planner-account",
+                                "username": "planner-account",
                             },
                         }
                     ]

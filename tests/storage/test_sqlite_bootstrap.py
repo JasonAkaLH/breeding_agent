@@ -40,7 +40,7 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
 
     def test_sqlite_storage_async_facade_round_trip(self) -> None:
         storage = SQLiteStorage(self.session_factory)
-        conversation = Conversation(conversation_id="conv-async", account_id="acc-async")
+        conversation = Conversation(conversation_id="conv-async", username="acc-async")
 
         saved = asyncio.run(storage.save_conversation(conversation))
         loaded = asyncio.run(storage.get_conversation("conv-async"))

@@ -1,39 +1,110 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class SubmitMessageRequest(BaseModel):
+class StrictRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+_CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_KEY_SEPARATOR = re.compile(r"[^a-z0-9]+")
+_RESERVED_IDENTITY_KEY_SEGMENTS = frozenset({
+    "account",
+    "auth",
+    "authorization",
+    "bearer",
+    "captcha",
+    "identity",
+    "owner",
+    "password",
+    "session",
+    "token",
+    "user",
+    "username",
+})
+_RESERVED_IDENTITY_KEY_COMPACT = frozenset({
+    "accountid",
+    "accesstoken",
+    "apikey",
+    "apitoken",
+    "authentication",
+    "authorization",
+    "authtoken",
+    "bearertoken",
+    "captchaid",
+    "captchacode",
+    "identity",
+    "ownerusername",
+    "passwordhash",
+    "refreshtoken",
+    "sessionid",
+    "userid",
+    "username",
+})
+
+
+def _identity_key_parts(key: object) -> tuple[tuple[str, ...], str]:
+    key_text = str(key).strip()
+    separated = _CAMEL_CASE_BOUNDARY.sub("_", key_text)
+    normalized = _KEY_SEPARATOR.sub("_", separated.lower()).strip("_")
+    parts = tuple(part for part in normalized.split("_") if part)
+    compact = "".join(parts)
+    return parts, compact
+
+
+def is_reserved_identity_key(key: object) -> bool:
+    parts, compact = _identity_key_parts(key)
+    return compact in _RESERVED_IDENTITY_KEY_COMPACT or any(
+        part in _RESERVED_IDENTITY_KEY_SEGMENTS for part in parts
+    )
+
+
+def _reserved_identity_paths(value: Any, *, path: str = "payload") -> list[str]:
+    if isinstance(value, dict):
+        paths: list[str] = []
+        for key, child in value.items():
+            key_text = str(key)
+            child_path = f"{path}.{key_text}"
+            if is_reserved_identity_key(key_text):
+                paths.append(child_path)
+            paths.extend(_reserved_identity_paths(child, path=child_path))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for index, child in enumerate(value):
+            paths.extend(_reserved_identity_paths(child, path=f"{path}[{index}]"))
+        return paths
+    return []
+
+
+def _reject_reserved_identity_fields(value: dict[str, Any], *, field_name: str) -> dict[str, Any]:
+    forbidden = _reserved_identity_paths(value, path=field_name)
+    if forbidden:
+        raise ValueError(f"{field_name} contains reserved identity fields: {', '.join(sorted(forbidden))}")
+    return value
+
+
+class SubmitMessageRequest(StrictRequestModel):
     conversation_id: str
-    account_id: str
     content: str
     routing_mode: str = "auto"
     capability_id: str | None = None
     client_message_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("metadata")
+    @classmethod
+    def reject_identity_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _reject_reserved_identity_fields(value, field_name="metadata")
 
-class CaptchaChallengeResponse(BaseModel):
-    captcha_id: str
-    image_svg: str
-    expires_in_seconds: int
 
-
-class LoginRequest(BaseModel):
+class LoginRequest(StrictRequestModel):
     username: str
-    password: str
-    captcha_id: str
-    captcha_code: str
-
-
-class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    captcha_id: str
-    captcha_code: str
 
 
 class UserResponse(BaseModel):
@@ -44,41 +115,12 @@ class AuthUserResponse(BaseModel):
     user: UserResponse
 
 
-class LogoutResponse(BaseModel):
-    logged_out: bool
-
-
-class CreateApiTokenRequest(BaseModel):
-    client_name: str
-    scopes: list[str] = Field(default_factory=list)
-    ttl_seconds: int | None = None
-
-
-class ApiTokenResponse(BaseModel):
-    token_id: str
-    client_name: str
-    scopes: list[str]
-    expires_at: datetime
-    revoked_at: datetime | None = None
-    created_at: datetime | None = None
-    last_used_at: datetime | None = None
-
-
-class CreateApiTokenResponse(ApiTokenResponse):
+class AuthTokenResponse(AuthUserResponse):
     access_token: str
 
 
-class ApiTokenListResponse(BaseModel):
-    tokens: list[ApiTokenResponse]
-
-
-class RevokeApiTokenRequest(BaseModel):
-    token_id: str
-
-
-class RevokeApiTokenResponse(BaseModel):
-    token_id: str
-    revoked: bool
+class LogoutResponse(BaseModel):
+    logged_out: bool
 
 
 class MessageAcceptedResponse(BaseModel):
@@ -116,7 +158,7 @@ class DeleteUploadResponse(BaseModel):
     deleted: bool
 
 
-class DeleteUploadRequest(BaseModel):
+class DeleteUploadRequest(StrictRequestModel):
     conversation_id: str
     upload_id: str
 
@@ -145,7 +187,7 @@ class TaskListResponse(BaseModel):
 
 class ConversationSummaryResponse(BaseModel):
     conversation_id: str
-    account_id: str
+    username: str
     status: str
     current_task_id: str | None
     title: str | None
@@ -157,7 +199,7 @@ class ConversationListResponse(BaseModel):
     conversations: list[ConversationSummaryResponse]
 
 
-class RenameConversationRequest(BaseModel):
+class RenameConversationRequest(StrictRequestModel):
     conversation_id: str
     title: str
 
@@ -169,7 +211,7 @@ class DeleteConversationResponse(BaseModel):
     deleted_counts: dict[str, int] = Field(default_factory=dict)
 
 
-class DeleteConversationRequest(BaseModel):
+class DeleteConversationRequest(StrictRequestModel):
     conversation_id: str
 
 
@@ -241,7 +283,7 @@ class CancelTaskResponse(BaseModel):
     accepted: bool
 
 
-class CancelTaskRequest(BaseModel):
+class CancelTaskRequest(StrictRequestModel):
     task_id: str
 
 
@@ -261,10 +303,15 @@ class TaskInterruptsResponse(BaseModel):
     interrupts: list[InterruptResponse]
 
 
-class AnswerInterruptRequest(BaseModel):
+class AnswerInterruptRequest(StrictRequestModel):
     task_id: str
     interrupt_id: str
     answer_payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("answer_payload")
+    @classmethod
+    def reject_identity_answer_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _reject_reserved_identity_fields(value, field_name="answer_payload")
 
 
 class AnswerInterruptResponse(BaseModel):

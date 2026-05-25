@@ -28,7 +28,7 @@ JsonMapping = Mapping[str, Any]
 @dataclass(slots=True, frozen=True)
 class Conversation:
     conversation_id: str
-    account_id: str
+    username: str
     status: ConversationStatus = ConversationStatus.ACTIVE
     current_task_id: str | None = None
     title: str | None = None
@@ -40,7 +40,7 @@ class Conversation:
 class ConversationMemorySummary:
     summary_id: str
     conversation_id: str
-    account_id: str
+    username: str
     covered_until_turn_id: str | None
     covered_until_message_id: str | None
     covered_until_created_at: datetime | None
@@ -101,6 +101,16 @@ class AuthApiToken:
 
 
 @dataclass(slots=True, frozen=True)
+class AuthUserToken:
+    username: str
+    api_token_hash: str | None = None
+    token_issued_at: datetime | None = None
+    token_last_used_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class Message:
     message_id: str
     conversation_id: str
@@ -130,7 +140,7 @@ class Task:
 class PendingSkillContext:
     context_id: str
     conversation_id: str
-    account_id: str | None
+    username: str | None
     capability_id: str
     skill_name: str
     source_task_id: str

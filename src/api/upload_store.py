@@ -43,7 +43,7 @@ class UploadValidationError(ValueError):
 @dataclass(slots=True, frozen=True)
 class UploadedFileRecord:
     upload_id: str
-    account_id: str
+    username: str
     conversation_id: str
     filename: str
     content_type: str
@@ -98,7 +98,7 @@ class InMemoryUploadStore:
     def save(
         self,
         *,
-        account_id: str,
+        username: str,
         conversation_id: str,
         filename: str,
         content_type: str | None,
@@ -124,10 +124,10 @@ class InMemoryUploadStore:
             content_text = None
             preview = _build_binary_preview(file_type, len(content))
         now = self._now_fn()
-        self._enforce_account_quota(account_id)
+        self._enforce_account_quota(username)
         record = UploadedFileRecord(
             upload_id=f"upl-{uuid4().hex[:12]}",
-            account_id=account_id,
+            username=username,
             conversation_id=conversation_id,
             filename=normalized_filename,
             content_type=(content_type or "application/octet-stream"),
@@ -143,30 +143,30 @@ class InMemoryUploadStore:
         self._records[record.upload_id] = record
         return record
 
-    def get_for_message(self, *, upload_id: str, account_id: str, conversation_id: str) -> UploadedFileRecord:
+    def get_for_message(self, *, upload_id: str, username: str, conversation_id: str) -> UploadedFileRecord:
         self.cleanup_expired()
         record = self._records.get(upload_id)
         if record is None:
             raise UploadValidationError(f"Unknown or expired upload_id: {upload_id}")
-        if record.account_id != account_id or record.conversation_id != conversation_id:
+        if record.username != username or record.conversation_id != conversation_id:
             raise PermissionError(f"Upload does not belong to conversation: {upload_id}")
         return record
 
-    def list_for_conversation(self, *, account_id: str, conversation_id: str) -> list[UploadedFileRecord]:
+    def list_for_conversation(self, *, username: str, conversation_id: str) -> list[UploadedFileRecord]:
         self.cleanup_expired()
         records = [
             record
             for record in self._records.values()
-            if record.account_id == account_id and record.conversation_id == conversation_id
+            if record.username == username and record.conversation_id == conversation_id
         ]
         return sorted(records, key=lambda item: (item.created_at, item.upload_id))
 
-    def delete(self, *, upload_id: str, account_id: str, conversation_id: str) -> bool:
+    def delete(self, *, upload_id: str, username: str, conversation_id: str) -> bool:
         self.cleanup_expired()
         record = self._records.get(upload_id)
         if record is None:
             return False
-        if record.account_id != account_id or record.conversation_id != conversation_id:
+        if record.username != username or record.conversation_id != conversation_id:
             raise PermissionError(f"Upload does not belong to conversation: {upload_id}")
         self._records.pop(upload_id, None)
         return True
@@ -177,8 +177,8 @@ class InMemoryUploadStore:
         for upload_id in expired:
             self._records.pop(upload_id, None)
 
-    def _enforce_account_quota(self, account_id: str) -> None:
-        account_records = [record for record in self._records.values() if record.account_id == account_id]
+    def _enforce_account_quota(self, username: str) -> None:
+        account_records = [record for record in self._records.values() if record.username == username]
         overflow = len(account_records) - self.max_files_per_account + 1
         if overflow <= 0:
             return

@@ -1074,25 +1074,6 @@ body {
   margin-inline: -20px;
 }
 
-.captcha-row {
-  width: 100%;
-}
-
-.captcha-row .ant-input {
-  width: 128px;
-}
-
-.captcha-image {
-  display: flex;
-  min-width: 96px;
-  min-height: 36px;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface-strong);
-}
 
 .history-card {
   display: flex;

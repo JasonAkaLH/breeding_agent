@@ -99,7 +99,6 @@ outputs:
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": conversation_id,
-                "account_id": "acc-1",
                 "content": content,
                 "routing_mode": "force_capability",
                 "capability_id": "skill.need_variety",
@@ -188,7 +187,6 @@ outputs:
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-interrupt",
-                "account_id": "acc-1",
                 "content": "帮我查询一下",
                 "routing_mode": "force_capability",
                 "capability_id": "skill.generic_data_lookup",
@@ -210,7 +208,6 @@ outputs:
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": "conv-plain-failure",
-                "account_id": "acc-1",
                 "content": "请执行失败技能",
                 "routing_mode": "force_capability",
                 "capability_id": "skill.plain_fail",

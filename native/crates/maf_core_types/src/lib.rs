@@ -9,7 +9,7 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
-pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260515";
+pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260525_username_token";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +285,17 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
             ]),
         ),
         (
+            "AuthUserToken".to_owned(),
+            fields(&[
+                "username",
+                "api_token_hash",
+                "token_issued_at",
+                "token_last_used_at",
+                "created_at",
+                "updated_at",
+            ]),
+        ),
+        (
             "CaptchaChallenge".to_owned(),
             fields(&[
                 "captcha_id",
@@ -345,7 +356,7 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
             "Conversation".to_owned(),
             fields(&[
                 "conversation_id",
-                "account_id",
+                "username",
                 "status",
                 "current_task_id",
                 "title",
@@ -358,7 +369,7 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
             fields(&[
                 "summary_id",
                 "conversation_id",
-                "account_id",
+                "username",
                 "covered_until_turn_id",
                 "covered_until_message_id",
                 "covered_until_created_at",

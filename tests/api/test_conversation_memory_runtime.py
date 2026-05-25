@@ -168,7 +168,7 @@ class ConversationMemoryRuntimeAPITest(APITestCase):
 
     async def test_memory_builder_failure_falls_back_without_failing_task(self) -> None:
         class BrokenMemoryBuilder:
-            async def build(self, _request, *, account_id=None):
+            async def build(self, _request, *, username=None):
                 raise RuntimeError("memory unavailable")
 
         async def streamer(_prompt: str):

@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError, createApiClient } from './client';
 
 describe('createApiClient', () => {
-  it('uses cookie credentials for auth and business requests', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' } }), { status: 200 }));
+  it('uses same-origin requests while auth is carried by bearer headers when present', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' }, access_token: 'maf_tok_login' }), { status: 200 }));
     const api = createApiClient({ fetcher });
 
     await api.me();
@@ -13,7 +13,7 @@ describe('createApiClient', () => {
 
 
   it('adds bearer authorization headers when configured', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' } }), { status: 200 }));
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' }, access_token: 'maf_tok_login' }), { status: 200 }));
     const api = createApiClient({ fetcher, accessToken: 'maf_tok_client' });
 
     await api.me();
@@ -23,58 +23,38 @@ describe('createApiClient', () => {
     }));
   });
 
-  it('manages api tokens without putting ids in the URL', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({
-      token_id: 'tok-1',
-      client_name: 'client',
-      scopes: ['conversation:read'],
-      expires_at: '2026-05-21T12:00:00',
-      access_token: 'maf_tok_secret',
-    }), { status: 201 }));
+  it('logs in with username only and receives a bearer token', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' }, access_token: 'maf_tok_login' }), { status: 200 }));
     const api = createApiClient({ fetcher });
 
-    await api.createApiToken({ clientName: 'client', scopes: ['conversation:read'], ttlSeconds: 3600 });
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/api-tokens', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ client_name: 'client', scopes: ['conversation:read'], ttl_seconds: 3600 }),
-    }));
-
-    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ token_id: 'tok-1', revoked: true }), { status: 200 }));
-    await api.revokeApiToken('tok-1');
-    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/auth/api-tokens', expect.objectContaining({
-      method: 'DELETE',
-      body: JSON.stringify({ token_id: 'tok-1' }),
-    }));
-  });
-
-  it('logs in with username password and captcha fields', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' } }), { status: 200 }));
-    const api = createApiClient({ fetcher });
-
-    await api.login({ username: 'alice', password: 'secret', captchaId: 'cap-1', captchaCode: '1234' });
+    const result = await api.login({ username: 'alice' });
 
     expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/login', expect.objectContaining({ method: 'POST' }));
-    expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).toEqual({
-      username: 'alice',
-      password: 'secret',
-      captcha_id: 'cap-1',
-      captcha_code: '1234',
-    });
+    expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).toEqual({ username: 'alice' });
+    expect(result.access_token).toBe('maf_tok_login');
   });
 
-  it('registers with username password and captcha fields', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'charlie' } }), { status: 200 }));
-    const api = createApiClient({ fetcher });
 
-    await api.register({ username: 'charlie', password: 'charlie1', captchaId: 'cap-1', captchaCode: '1234' });
+  it('refreshes the current bearer token through Authorization', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' }, access_token: 'maf_tok_refreshed' }), { status: 200 }));
+    const api = createApiClient({ fetcher, accessToken: 'maf_tok_old' });
 
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/register', expect.objectContaining({ method: 'POST' }));
-    expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).toEqual({
-      username: 'charlie',
-      password: 'charlie1',
-      captcha_id: 'cap-1',
-      captcha_code: '1234',
-    });
+    const result = await api.refreshToken();
+
+    expect(result.access_token).toBe('maf_tok_refreshed');
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/auth/refresh-token', expect.objectContaining({
+      method: 'POST',
+      headers: expect.objectContaining({ Authorization: 'Bearer maf_tok_old' }),
+    }));
+  });
+
+  it('does not expose legacy token-management clients', () => {
+    const api = createApiClient();
+    expect('createCaptcha' in api).toBe(false);
+    expect('register' in api).toBe(false);
+    expect('createApiToken' in api).toBe(false);
+    expect('listApiTokens' in api).toBe(false);
+    expect('revokeApiToken' in api).toBe(false);
   });
 
   it('lists public capabilities', async () => {
@@ -91,7 +71,7 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', accountId: 'acc-1', content: '你好', mode: 'chat' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' });
 
     expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/chat-messages', expect.objectContaining({ method: 'POST' }));
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
@@ -106,7 +86,6 @@ describe('createApiClient', () => {
 
     await api.submitMessage({
       conversationId: 'conv-1',
-      accountId: 'acc-1',
       content: '查询龙粳33',
       mode: 'chat',
       capabilityId: 'skill.data_lookup',
@@ -131,7 +110,7 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', accountId: 'acc-1', content: '深入分析', mode: 'chat', deepThinking: true });
+    await api.submitMessage({ conversationId: 'conv-1', content: '深入分析', mode: 'chat', deepThinking: true });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
@@ -144,7 +123,7 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', accountId: 'acc-1', content: '分析', mode: 'chat', reasoningEffort: 'high' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', reasoningEffort: 'high' });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
@@ -158,7 +137,7 @@ describe('createApiClient', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ detail: 'Conversation is busy' }), { status: 409 }));
     const api = createApiClient({ fetcher });
 
-    await expect(api.submitMessage({ conversationId: 'conv-1', accountId: 'acc-1', content: '你好', mode: 'chat' })).rejects.toMatchObject({
+    await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' })).rejects.toMatchObject({
       userMessage: expect.stringContaining('当前会话已有任务'),
     });
   });
@@ -219,7 +198,7 @@ describe('createApiClient', () => {
   it('renames a conversation by conversation id', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       conversation_id: 'conv-1',
-      account_id: 'alice',
+      username: 'alice',
       status: 'active',
       current_task_id: null,
       title: '新会话名称',
@@ -289,6 +268,19 @@ describe('createApiClient', () => {
   });
 
 
+
+
+  it('clears auth state when multipart upload is unauthorized', async () => {
+    const onUnauthorized = vi.fn();
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ detail: 'expired' }), { status: 401 }));
+    const api = createApiClient({ fetcher, accessToken: 'maf_tok_client', onUnauthorized });
+    const file = new File(['a,b\n'], 'materials.csv', { type: 'text/csv' });
+
+    await expect(api.uploadConversationFile('conv-1', file)).rejects.toMatchObject({ status: 401 });
+
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
   it('adds bearer authorization headers to multipart uploads when configured', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       upload_id: 'upl-1',
@@ -309,6 +301,35 @@ describe('createApiClient', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/v1/conversations/uploads', expect.objectContaining({
       headers: { Authorization: 'Bearer maf_tok_client' },
     }));
+  });
+
+  it('downloads artifacts through fetch with bearer authorization instead of URL tokens', async () => {
+    const fetcher = vi.fn(async () => new Response('file-content', { status: 200 }));
+    const createObjectUrl = vi.fn(() => 'blob:artifact-download');
+    const revokeObjectUrl = vi.fn();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL = revokeObjectUrl as unknown as typeof URL.revokeObjectURL;
+    try {
+      const api = createApiClient({ fetcher, accessToken: 'maf_tok_client' });
+
+      await api.downloadArtifact('art-file-1', 'layout.html');
+
+      expect(fetcher).toHaveBeenCalledWith('/api/v1/artifacts/art-file-1/download', expect.objectContaining({
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { Authorization: 'Bearer maf_tok_client' },
+      }));
+      expect(createObjectUrl).toHaveBeenCalledOnce();
+      expect(click).toHaveBeenCalledOnce();
+      expect(revokeObjectUrl).toHaveBeenCalledWith('blob:artifact-download');
+    } finally {
+      URL.createObjectURL = originalCreateObjectUrl;
+      URL.revokeObjectURL = originalRevokeObjectUrl;
+      click.mockRestore();
+    }
   });
 
 });

@@ -3,12 +3,20 @@ from __future__ import annotations
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 
 from ..auth import require_authenticated_user
-from ..dto import DeleteUploadRequest, DeleteUploadResponse, UploadFileResponse, UploadListResponse, UploadPreviewResponse
+from ..dto import (
+    DeleteUploadRequest,
+    DeleteUploadResponse,
+    UploadFileResponse,
+    UploadListResponse,
+    UploadPreviewResponse,
+    is_reserved_identity_key,
+)
 from ..runtime import ApiRuntime
 from ..upload_store import UploadValidationError
 
 router = APIRouter()
 UPLOAD_READ_CHUNK_BYTES = 64 * 1024
+_UPLOAD_FORM_FIELDS = frozenset({"conversation_id", "file"})
 
 
 def _runtime(request: Request) -> ApiRuntime:
@@ -48,10 +56,23 @@ async def _read_upload_content_with_limit(
     return b"".join(chunks)
 
 
+async def _reject_unexpected_upload_form_fields(request: Request) -> None:
+    form = await request.form()
+    unexpected_fields = sorted(str(key) for key in form.keys() if str(key) not in _UPLOAD_FORM_FIELDS)
+    if not unexpected_fields:
+        return
+    reserved_fields = [field for field in unexpected_fields if is_reserved_identity_key(field)]
+    reason = "reserved identity fields" if reserved_fields else "unsupported fields"
+    raise HTTPException(
+        status_code=422,
+        detail=f"Upload form contains {reason}: {', '.join(unexpected_fields)}",
+    )
+
+
 @router.get("/api/v1/conversations/{conversation_id}/uploads", response_model=UploadListResponse)
 async def list_conversation_uploads(conversation_id: str, request: Request) -> UploadListResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("conversation:read",))
+    user = await require_authenticated_user(request)
     try:
         records = await runtime.list_uploads(conversation_id, user.username)
     except PermissionError as exc:
@@ -73,7 +94,8 @@ async def upload_conversation_file(
     file: UploadFile = File(...),
 ) -> UploadFileResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("upload:write",))
+    user = await require_authenticated_user(request)
+    await _reject_unexpected_upload_form_fields(request)
     try:
         await runtime.ensure_upload_allowed(conversation_id, user.username)
         content = await _read_upload_content_with_limit(
@@ -82,7 +104,7 @@ async def upload_conversation_file(
         )
         record = await runtime.save_upload(
             conversation_id=conversation_id,
-            account_id=user.username,
+            username=user.username,
             filename=file.filename or "upload",
             content_type=file.content_type,
             content=content,
@@ -98,7 +120,7 @@ async def upload_conversation_file(
 @router.delete("/api/v1/conversations/uploads", response_model=DeleteUploadResponse)
 async def delete_conversation_upload(body: DeleteUploadRequest, request: Request) -> DeleteUploadResponse:
     runtime = _runtime(request)
-    user = await require_authenticated_user(request, required_scopes=("upload:write",))
+    user = await require_authenticated_user(request)
     conversation_id = body.conversation_id
     upload_id = body.upload_id
     try:

@@ -14,16 +14,8 @@ from uuid import uuid4
 from sqlalchemy import Engine
 
 from src.auth import (
-    ApiTokenService,
-    AuthTokenScopeError,
     AuthTokenValidationError,
-    CaptchaService,
-    DuplicateUsernameError,
-    PasswordHasher,
-    SessionService,
-    normalize_username,
-    validate_password_policy,
-    validate_username,
+    UsernameTokenService,
 )
 from src.capabilities.main_agent import (
     MAIN_AGENT_CAPABILITY_DESCRIPTORS,
@@ -38,7 +30,7 @@ from src.capabilities.main_agent import (
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import EventVisibility, MessageRole, RoutingMode, TaskStatus
-from src.core.models import AuthUser, Conversation, EventRecord, InterruptAnswer, Message, PendingSkillContext, Task
+from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, PendingSkillContext, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import (
     SkillCapabilityRegistry,
@@ -147,10 +139,7 @@ class ApiRuntime:
         orchestration_service: OrchestrationService,
         workflow_provider: WorkflowRouter,
         mysql_adapter: MySQLReadonlyAdapter | None = None,
-        password_hasher: PasswordHasher | None = None,
-        captcha_service: CaptchaService | None = None,
-        session_service: SessionService | None = None,
-        api_token_service: ApiTokenService | None = None,
+        username_token_service: UsernameTokenService | None = None,
         conversation_title_generator: ConversationTitleGenerator | None = None,
         upload_store: InMemoryUploadStore | None = None,
         conversation_memory_builder: ConversationMemoryBuilder | None = None,
@@ -170,10 +159,7 @@ class ApiRuntime:
         self.orchestration_service = orchestration_service
         self.workflow_provider = workflow_provider
         self._mysql_adapter = mysql_adapter
-        self.password_hasher = password_hasher or PasswordHasher()
-        self.captcha_service = captcha_service
-        self.session_service = session_service
-        self.api_token_service = api_token_service
+        self.username_token_service = username_token_service
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
@@ -237,116 +223,47 @@ class ApiRuntime:
                 yield event
             after_event_id = page[-1].event_id
 
-    async def create_user(self, username: str, password: str, *, status: str = "active") -> AuthUser:
-        username = validate_username(username)
-        validate_password_policy(password)
-        now = self._utcnow_naive()
-        password_hash, password_salt, password_scheme = self.password_hasher.hash_password(password)
-        existing = await self.storage.get_auth_user(username)
-        user = AuthUser(
-            username=username,
-            password_hash=password_hash,
-            password_salt=password_salt,
-            password_scheme=password_scheme,
-            status=status,
-            created_at=existing.created_at if existing is not None else now,
-            updated_at=now,
-            last_login_at=existing.last_login_at if existing is not None else None,
-        )
-        return await self.storage.save_auth_user(user)
+    async def login_username(self, username: str):
+        if self.username_token_service is None:
+            raise RuntimeError("Username token service is not configured.")
+        return await self.username_token_service.login_username(username)
 
-    async def register_user(self, username: str, password: str, captcha_id: str, captcha_code: str):
-        if self.captcha_service is None or self.session_service is None:
-            raise RuntimeError("Authentication services are not configured.")
-        username = validate_username(username)
-        validate_password_policy(password)
-        if await self.storage.get_auth_user(username) is not None:
-            raise DuplicateUsernameError(f"Username already exists: {username}")
-        if not await self.captcha_service.verify(captcha_id, captcha_code):
-            return None
-        now = self._utcnow_naive()
-        user = await self.create_user(username, password)
-        await self.storage.save_auth_user(replace(user, last_login_at=now, updated_at=now))
-        return await self.session_service.create_session(username)
+    async def get_username_for_bearer(self, raw_token: str):
+        if self.username_token_service is None:
+            raise AuthTokenValidationError("Invalid API token.", code="authentication_expired")
+        return await self.username_token_service.get_current_token(raw_token)
 
-    async def create_captcha_challenge(self):
-        if self.captcha_service is None:
-            raise RuntimeError("Captcha service is not configured.")
-        return await self.captcha_service.create_challenge()
+    async def logout_bearer(self, raw_token: str):
+        if self.username_token_service is None:
+            raise AuthTokenValidationError("Invalid API token.", code="authentication_expired")
+        return await self.username_token_service.logout_bearer(raw_token)
 
-    async def login(self, username: str, password: str, captcha_id: str, captcha_code: str):
-        if self.captcha_service is None or self.session_service is None:
-            raise RuntimeError("Authentication services are not configured.")
-        captcha_ok = await self.captcha_service.verify(captcha_id, captcha_code)
-        username = normalize_username(username)
-        user = await self.storage.get_auth_user(username)
-        if user is None or user.status != "active" or not self.password_hasher.verify_password(password, user) or not captcha_ok:
-            return None
-        now = self._utcnow_naive()
-        await self.storage.save_auth_user(replace(user, last_login_at=now, updated_at=now))
-        return await self.session_service.create_session(username)
+    async def refresh_bearer(self, raw_token: str):
+        if self.username_token_service is None:
+            raise AuthTokenValidationError("Invalid API token.", code="authentication_expired")
+        return await self.username_token_service.refresh_bearer(raw_token)
 
-    async def get_session_user(self, session_id: str) -> AuthUser | None:
-        if self.session_service is None:
-            return None
-        return await self.session_service.get_active_user(session_id)
-
-    async def revoke_session(self, session_id: str) -> None:
-        if self.session_service is None:
-            return
-        await self.session_service.revoke_session(session_id)
-
-    async def create_api_token(
-        self,
-        *,
-        username: str,
-        client_name: str,
-        scopes: tuple[str, ...],
-        ttl_seconds: int | None = None,
-    ):
-        if self.api_token_service is None:
-            raise RuntimeError("API token service is not configured.")
-        return await self.api_token_service.create_token(
-            username=username,
-            client_name=client_name,
-            scopes=scopes,
-            ttl_seconds=ttl_seconds,
-        )
-
-    async def list_api_tokens_for_user(self, username: str):
-        if self.api_token_service is None:
-            raise RuntimeError("API token service is not configured.")
-        return await self.api_token_service.list_tokens_for_user(username)
-
-    async def revoke_api_token(self, *, username: str, token_id: str):
-        if self.api_token_service is None:
-            raise RuntimeError("API token service is not configured.")
-        return await self.api_token_service.revoke_token(username=username, token_id=token_id)
-
-    async def get_bearer_token_user(self, raw_token: str, *, required_scopes: tuple[str, ...] = ()):
-        if self.api_token_service is None:
-            return None
-        try:
-            return await self.api_token_service.get_active_user_for_bearer(raw_token, required_scopes=required_scopes)
-        except AuthTokenScopeError:
-            raise
-        except AuthTokenValidationError:
-            return None
+    async def bearer_token_is_current_for_username(self, raw_token: str, username: str) -> bool:
+        if self.username_token_service is None:
+            return False
+        return await self.username_token_service.token_is_current_for_username(raw_token, username)
 
     async def submit_message(
         self,
         conversation_id: str,
         request: SubmitMessageRequest,
         *,
-        authenticated_account_id: str | None = None,
+        authenticated_username: str | None = None,
     ) -> tuple[Message, Task]:
+        if authenticated_username is None:
+            raise ValueError("authenticated_username is required")
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if (
-            authenticated_account_id is not None
+            authenticated_username is not None
             and existing_conversation is not None
-            and existing_conversation.account_id != authenticated_account_id
+            and existing_conversation.username != authenticated_username
         ):
-            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+            raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
         await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._refresh_mcp_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._conversation_guard.ensure_conversation_available(conversation_id)
@@ -368,27 +285,27 @@ class ApiRuntime:
 
         upload_context = await self.resolve_uploads_for_message(
             conversation_id,
-            authenticated_account_id or request.account_id,
+            authenticated_username,
             request.metadata.get("upload_ids") or (),
         )
         now = self._utcnow_naive()
         message_id = request.client_message_id or self._make_id("msg")
         task_id = self._make_id("task")
-        account_id = authenticated_account_id or request.account_id
+        username = authenticated_username
 
         conversation = existing_conversation
         if conversation is None:
             conversation = Conversation(
                 conversation_id=conversation_id,
-                account_id=account_id,
+                username=username,
                 current_task_id=task_id,
                 created_at=now,
                 updated_at=now,
             )
         else:
-            if authenticated_account_id is not None and conversation.account_id != authenticated_account_id:
-                raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
-            conversation = replace(conversation, account_id=account_id, current_task_id=task_id, updated_at=now)
+            if authenticated_username is not None and conversation.username != authenticated_username:
+                raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+            conversation = replace(conversation, username=username, current_task_id=task_id, updated_at=now)
         await self.storage.save_conversation(conversation)
 
         message = Message(
@@ -523,15 +440,15 @@ class ApiRuntime:
         self,
         *,
         conversation_id: str,
-        account_id: str,
+        username: str,
         filename: str,
         content_type: str | None,
         content: bytes,
     ) -> UploadedFileRecord:
-        existing_conversation = await self.ensure_upload_allowed(conversation_id, account_id)
+        existing_conversation = await self.ensure_upload_allowed(conversation_id, username)
         now = self._utcnow_naive()
         record = self.upload_store.save(
-            account_id=account_id,
+            username=username,
             conversation_id=conversation_id,
             filename=filename,
             content_type=content_type,
@@ -541,35 +458,35 @@ class ApiRuntime:
             await self.storage.save_conversation(
                 Conversation(
                     conversation_id=conversation_id,
-                    account_id=account_id,
+                    username=username,
                     created_at=now,
                     updated_at=now,
                 )
             )
         return record
 
-    async def ensure_upload_allowed(self, conversation_id: str, account_id: str) -> Conversation | None:
+    async def ensure_upload_allowed(self, conversation_id: str, username: str) -> Conversation | None:
         existing_conversation = await self.storage.get_conversation(conversation_id)
-        if existing_conversation is not None and existing_conversation.account_id != account_id:
-            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+        if existing_conversation is not None and existing_conversation.username != username:
+            raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
         return existing_conversation
 
-    async def list_uploads(self, conversation_id: str, account_id: str) -> list[UploadedFileRecord]:
+    async def list_uploads(self, conversation_id: str, username: str) -> list[UploadedFileRecord]:
         existing_conversation = await self.storage.get_conversation(conversation_id)
-        if existing_conversation is not None and existing_conversation.account_id != account_id:
-            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
-        return self.upload_store.list_for_conversation(account_id=account_id, conversation_id=conversation_id)
+        if existing_conversation is not None and existing_conversation.username != username:
+            raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        return self.upload_store.list_for_conversation(username=username, conversation_id=conversation_id)
 
-    async def delete_upload(self, conversation_id: str, account_id: str, upload_id: str) -> bool:
+    async def delete_upload(self, conversation_id: str, username: str, upload_id: str) -> bool:
         existing_conversation = await self.storage.get_conversation(conversation_id)
-        if existing_conversation is not None and existing_conversation.account_id != account_id:
-            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
-        return self.upload_store.delete(upload_id=upload_id, account_id=account_id, conversation_id=conversation_id)
+        if existing_conversation is not None and existing_conversation.username != username:
+            raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        return self.upload_store.delete(upload_id=upload_id, username=username, conversation_id=conversation_id)
 
     async def resolve_uploads_for_message(
         self,
         conversation_id: str,
-        account_id: str,
+        username: str,
         upload_ids,
     ) -> dict[str, Any]:
         if upload_ids is None:
@@ -588,7 +505,7 @@ class ApiRuntime:
             try:
                 record = self.upload_store.get_for_message(
                     upload_id=upload_id_text,
-                    account_id=account_id,
+                    username=username,
                     conversation_id=conversation_id,
                 )
             except UploadValidationError:
@@ -694,8 +611,8 @@ class ApiRuntime:
             return request
         try:
             conversation = await self.storage.get_conversation(request.conversation_id)
-            account_id = conversation.account_id if conversation is not None else None
-            context = await self._conversation_memory_builder.build(request, account_id=account_id)
+            username = conversation.username if conversation is not None else None
+            context = await self._conversation_memory_builder.build(request, username=username)
         except PermissionError:
             raise
         except Exception as exc:
@@ -891,7 +808,7 @@ class ApiRuntime:
         context = PendingSkillContext(
             context_id=self._make_id("pending-skill-context"),
             conversation_id=request.conversation_id,
-            account_id=conversation.account_id if conversation is not None else None,
+            username=conversation.username if conversation is not None else None,
             capability_id=missing_input.capability_id,
             skill_name=missing_input.skill_name,
             source_task_id=request.task_id,
@@ -1024,12 +941,12 @@ class ApiRuntime:
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
         return task
 
-    async def delete_conversation(self, conversation_id: str, *, account_id: str | None = None) -> dict[str, object]:
+    async def delete_conversation(self, conversation_id: str, *, username: str | None = None) -> dict[str, object]:
         conversation = await self.storage.get_conversation(conversation_id)
         if conversation is None:
             raise ValueError(f"Unknown conversation: {conversation_id}")
-        if account_id is not None and conversation.account_id != account_id:
-            raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+        if username is not None and conversation.username != username:
+            raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
 
         unfinished_tasks = await self.storage.list_tasks_for_conversation(
             conversation_id,
@@ -1059,14 +976,14 @@ class ApiRuntime:
                 if is_active_skill_output_file(metadata):
                     self.artifact_file_store.delete(str(metadata.get("storage_key")))
 
-    async def rename_conversation(self, conversation_id: str, title: str, *, account_id: str | None = None) -> Conversation:
+    async def rename_conversation(self, conversation_id: str, title: str, *, username: str | None = None) -> Conversation:
         normalized_title = validate_conversation_title(title)
         async with self._lock:
             conversation = await self.storage.get_conversation(conversation_id)
             if conversation is None:
                 raise ValueError(f"Unknown conversation: {conversation_id}")
-            if account_id is not None and conversation.account_id != account_id:
-                raise PermissionError(f"Conversation does not belong to account: {conversation_id}")
+            if username is not None and conversation.username != username:
+                raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
             updated = replace(conversation, title=normalized_title, updated_at=self._utcnow_naive())
             return await self.storage.save_conversation(updated)
 
@@ -1645,9 +1562,6 @@ def build_api_runtime(
     mcp_sidecar_client: Any | None = None,
     mcp_runtime_state: MCPRuntimeState | None = None,
     runtime_replanner: RuntimeReplanner | None = None,
-    auth_captcha_code_generator: Callable[[], str] | None = None,
-    auth_captcha_ttl_seconds: int = 300,
-    auth_session_ttl_seconds: int = 28_800,
     auth_token_hash_secret: str | None = None,
     auth_token_hash_secret_required: bool | None = None,
     upload_store: InMemoryUploadStore | None = None,
@@ -1688,18 +1602,6 @@ def build_api_runtime(
         runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
     )
     artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
-    password_hasher = PasswordHasher()
-    captcha_service = CaptchaService(
-        storage,
-        now_fn=ApiRuntime._utcnow_naive,
-        code_generator=auth_captcha_code_generator,
-        ttl_seconds=auth_captcha_ttl_seconds,
-    )
-    session_service = SessionService(
-        storage,
-        now_fn=ApiRuntime._utcnow_naive,
-        ttl_seconds=auth_session_ttl_seconds,
-    )
     token_secret = auth_token_hash_secret if auth_token_hash_secret is not None else os.environ.get("MAF_AUTH_TOKEN_HASH_SECRET")
     deployment_env = (
         os.environ.get("MAF_API_ENV")
@@ -1715,7 +1617,7 @@ def build_api_runtime(
             or deployment_env in {"prod", "production"}
         )
     )
-    api_token_service = ApiTokenService(
+    username_token_service = UsernameTokenService(
         storage,
         now_fn=ApiRuntime._utcnow_naive,
         secret=token_secret,
@@ -1971,10 +1873,7 @@ def build_api_runtime(
             skill_provider=skill_workflow_provider,
         ),
         mysql_adapter=resolved_mysql_adapter,
-        password_hasher=password_hasher,
-        captcha_service=captcha_service,
-        session_service=session_service,
-        api_token_service=api_token_service,
+        username_token_service=username_token_service,
         conversation_title_generator=resolved_conversation_title_generator,
         upload_store=upload_store,
         conversation_memory_builder=resolved_conversation_memory_builder,

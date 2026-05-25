@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 import json
-from dataclasses import replace
 from datetime import datetime
 from typing import Iterable
 
@@ -54,12 +53,12 @@ class FakeStorage:
     async def list_events_for_task(self, task_id: str):
         return list(self.events_by_task.get(task_id, ()))
 
-    async def get_latest_conversation_memory_summary(self, conversation_id: str, account_id: str | None = None):
+    async def get_latest_conversation_memory_summary(self, conversation_id: str, username: str | None = None):
         if self.latest_summary is None:
             return None
         if self.latest_summary.conversation_id != conversation_id:
             return None
-        if account_id is not None and self.latest_summary.account_id != account_id:
+        if username is not None and self.latest_summary.username != username:
             return None
         return self.latest_summary
 
@@ -160,7 +159,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await builder.build(
             OrchestrationRequest("task-3", "conv-1", "msg-current", "那它的基因型呢？"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertEqual(context.resolved_user_message, "查询龙粳18的基因型信息")
@@ -208,7 +207,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await builder.build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertIsNone(context.resolved_user_message)
@@ -255,7 +254,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await builder.build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertEqual(context.resolved_user_message, "查询龙粳18的基因型信息")
@@ -300,7 +299,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await builder.build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertIsNone(context.resolved_user_message)
@@ -329,7 +328,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await builder.build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertEqual(context.resolved_user_message, "查询龙粳33的基因型信息")
@@ -352,7 +351,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await builder.build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型数据库里有什么？"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertEqual(context.current_user_message, "那它的基因型数据库里有什么？")
@@ -375,7 +374,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks, artifacts_by_task=artifacts)
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
-            account_id="alice",
+            username="alice",
         )
 
         rendered = "\n".join(message.content for message in context.recent_messages)
@@ -397,7 +396,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "按照你的操作继续生成。"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertIsNone(context.resolved_user_message)
@@ -417,7 +416,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks, artifacts_by_task=artifacts)
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertIn("artifact answer", "\n".join(message.content for message in context.recent_messages))
@@ -453,7 +452,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
-            account_id="alice",
+            username="alice",
         )
 
         rendered = "\n".join(message.content for message in context.recent_messages)
@@ -498,7 +497,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         )
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
-            account_id="alice",
+            username="alice",
         )
 
         rendered = "\n".join(message.content for message in context.recent_messages)
@@ -510,7 +509,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         builder = ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000))
 
         with self.assertRaises(PermissionError):
-            await builder.build(OrchestrationRequest("task-1", "conv-1", "msg-1", "你好"), account_id="bob")
+            await builder.build(OrchestrationRequest("task-1", "conv-1", "msg-1", "你好"), username="bob")
 
     async def test_builder_reuses_latest_summary_for_followup_resolution(self) -> None:
         now = datetime(2026, 5, 8, 9, 0, 0)
@@ -518,7 +517,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         summary = ConversationMemorySummary(
             summary_id="summary-1",
             conversation_id="conv-1",
-            account_id="alice",
+            username="alice",
             covered_until_turn_id="task-1",
             covered_until_message_id="task-1:assistant",
             covered_until_created_at=now,
@@ -552,7 +551,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
             OrchestrationRequest("task-3", "conv-1", "msg-current", "继续"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertEqual(context.history_summary, "旧摘要：用户查询过龙粳33。")
@@ -567,7 +566,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         summary = ConversationMemorySummary(
             summary_id="summary-1",
             conversation_id="conv-1",
-            account_id="alice",
+            username="alice",
             covered_until_turn_id="task-1",
             covered_until_message_id="task-1:assistant",
             covered_until_created_at=now,
@@ -600,7 +599,7 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
             OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
-            account_id="alice",
+            username="alice",
         )
 
         self.assertEqual(context.resolved_user_message, "查询龙粳33的基因型信息")

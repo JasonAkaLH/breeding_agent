@@ -12,7 +12,7 @@ class SQLiteConversationRepositoryTest(SQLiteStorageTestCase):
     def test_conversation_round_trip(self) -> None:
         conversation = Conversation(
             conversation_id="conv-1",
-            account_id="acc-1",
+            username="acc-1",
             status=ConversationStatus.ACTIVE,
             current_task_id="task-1",
             title="conversation title",
@@ -33,7 +33,7 @@ class SQLiteConversationRepositoryTest(SQLiteStorageTestCase):
         self.assertEqual(loaded, conversation)
 
     def test_message_round_trip_and_conversation_listing(self) -> None:
-        conversation = Conversation(conversation_id="conv-1", account_id="acc-1")
+        conversation = Conversation(conversation_id="conv-1", username="acc-1")
         message = Message(
             message_id="msg-1",
             conversation_id="conv-1",

@@ -17,7 +17,7 @@ class SQLiteConversationMemoryRepositoryTest(SQLiteStorageTestCase):
         older = ConversationMemorySummary(
             summary_id="summary-old",
             conversation_id="conv-1",
-            account_id="alice",
+            username="alice",
             covered_until_turn_id="task-1",
             covered_until_message_id="msg-1-assistant",
             covered_until_created_at=now,
@@ -34,7 +34,7 @@ class SQLiteConversationMemoryRepositoryTest(SQLiteStorageTestCase):
         newer = ConversationMemorySummary(
             summary_id="summary-new",
             conversation_id="conv-1",
-            account_id="alice",
+            username="alice",
             covered_until_turn_id="task-2",
             covered_until_message_id="msg-2-assistant",
             covered_until_created_at=now,
@@ -51,7 +51,7 @@ class SQLiteConversationMemoryRepositoryTest(SQLiteStorageTestCase):
         bob = ConversationMemorySummary(
             summary_id="summary-bob",
             conversation_id="conv-2",
-            account_id="bob",
+            username="bob",
             covered_until_turn_id="task-bob",
             covered_until_message_id="msg-bob",
             covered_until_created_at=now,
@@ -67,8 +67,8 @@ class SQLiteConversationMemoryRepositoryTest(SQLiteStorageTestCase):
 
         with self.session_factory() as session:
             repo = SQLiteStateRepository(session)
-            repo.save_conversation(Conversation(conversation_id="conv-1", account_id="alice"))
-            repo.save_conversation(Conversation(conversation_id="conv-2", account_id="bob"))
+            repo.save_conversation(Conversation(conversation_id="conv-1", username="alice"))
+            repo.save_conversation(Conversation(conversation_id="conv-2", username="bob"))
             repo.save_conversation_memory_summary(older)
             saved = repo.save_conversation_memory_summary(newer)
             repo.save_conversation_memory_summary(bob)
@@ -77,8 +77,8 @@ class SQLiteConversationMemoryRepositoryTest(SQLiteStorageTestCase):
         with self.session_factory() as session:
             repo = SQLiteStateRepository(session)
             loaded = repo.get_conversation_memory_summary("summary-new")
-            latest = repo.get_latest_conversation_memory_summary("conv-1", account_id="alice")
-            bob_blocked = repo.get_latest_conversation_memory_summary("conv-1", account_id="bob")
+            latest = repo.get_latest_conversation_memory_summary("conv-1", username="alice")
+            bob_blocked = repo.get_latest_conversation_memory_summary("conv-1", username="bob")
             listed = repo.list_conversation_memory_summaries("conv-1")
 
         self.assertEqual(saved, newer)
@@ -93,12 +93,12 @@ class SQLiteConversationMemoryRepositoryTest(SQLiteStorageTestCase):
         now = datetime(2026, 5, 8, 10, 0, 0)
         with self.session_factory() as session:
             repo = SQLiteStateRepository(session)
-            repo.save_conversation(Conversation(conversation_id="conv-delete-memory", account_id="alice"))
+            repo.save_conversation(Conversation(conversation_id="conv-delete-memory", username="alice"))
             repo.save_conversation_memory_summary(
                 ConversationMemorySummary(
                     summary_id="summary-delete",
                     conversation_id="conv-delete-memory",
-                    account_id="alice",
+                    username="alice",
                     covered_until_turn_id="task-1",
                     covered_until_message_id="msg-1",
                     covered_until_created_at=now,
