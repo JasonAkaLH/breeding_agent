@@ -69,10 +69,6 @@ class PendingSkillContextRow(SQLiteBase):
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
-
-
-
-
 class AuthUserTokenRow(SQLiteBase):
     __tablename__ = "auth_user_token"
     __table_args__ = (

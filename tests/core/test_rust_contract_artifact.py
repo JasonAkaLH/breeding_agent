@@ -23,12 +23,27 @@ class CoreRustContractArtifactTest(unittest.TestCase):
 
     def test_core_model_fields_are_backed_by_rust_contract_artifact(self) -> None:
         contract = load_core_contract()
+        self.assertIn("legacy_auth_removed", contract["schema_hash"])
+        for legacy_model in ("AuthUser", "AuthSession", "CaptchaChallenge", "AuthApiToken"):
+            self.assertNotIn(legacy_model, contract["models"])
+
         for model in (Task, Conversation, ConversationMemorySummary, AuthUserToken):
             self.assertEqual(
                 contract["models"][model.__name__],
                 [field.name for field in dataclasses.fields(model)],
                 model.__name__,
             )
+        self.assertEqual(
+            contract["models"]["AuthUserToken"],
+            [
+                "username",
+                "api_token_hash",
+                "token_issued_at",
+                "token_last_used_at",
+                "created_at",
+                "updated_at",
+            ],
+        )
         self.assertIn("username", contract["models"]["Conversation"])
         self.assertNotIn("account_id", contract["models"]["Conversation"])
         self.assertIn("username", contract["models"]["ConversationMemorySummary"])
