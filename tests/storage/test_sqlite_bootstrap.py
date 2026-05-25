@@ -36,18 +36,59 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
             }.issubset(table_names)
         )
 
-
     def test_bootstrap_drops_legacy_auth_tables_and_keeps_current_token_table(self) -> None:
         legacy_tables = {"auth_user", "auth_captcha_challenge", "auth_session", "auth_api_token"}
         with self.engine.begin() as connection:
-            connection.execute(text("CREATE TABLE auth_user (username TEXT PRIMARY KEY, password_hash TEXT, password_salt TEXT, password_scheme TEXT, status TEXT)"))
-            connection.execute(text("CREATE TABLE auth_captcha_challenge (captcha_id TEXT PRIMARY KEY, code_hash TEXT, expires_at TEXT)"))
-            connection.execute(text("CREATE TABLE auth_session (session_id TEXT PRIMARY KEY, username TEXT, expires_at TEXT)"))
-            connection.execute(text("CREATE TABLE auth_api_token (token_id TEXT PRIMARY KEY, token_hash TEXT, username TEXT)"))
-            connection.execute(text("INSERT INTO auth_user (username, password_hash, password_salt, password_scheme, status) VALUES ('alice', 'hash', 'salt', 'scheme', 'active')"))
-            connection.execute(text("INSERT INTO auth_captcha_challenge (captcha_id, code_hash, expires_at) VALUES ('captcha-1', 'hash', '2026-05-25T12:00:00')"))
-            connection.execute(text("INSERT INTO auth_session (session_id, username, expires_at) VALUES ('session-1', 'alice', '2026-05-25T12:00:00')"))
-            connection.execute(text("INSERT INTO auth_api_token (token_id, token_hash, username) VALUES ('token-1', 'hash', 'alice')"))
+            connection.execute(
+                text(
+                    "CREATE TABLE auth_user ("
+                    "username TEXT PRIMARY KEY, password_hash TEXT, password_salt TEXT, "
+                    "password_scheme TEXT, status TEXT)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE auth_captcha_challenge ("
+                    "captcha_id TEXT PRIMARY KEY, code_hash TEXT, expires_at TEXT)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE auth_session ("
+                    "session_id TEXT PRIMARY KEY, username TEXT, expires_at TEXT)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE auth_api_token ("
+                    "token_id TEXT PRIMARY KEY, token_hash TEXT, username TEXT)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO auth_user "
+                    "(username, password_hash, password_salt, password_scheme, status) "
+                    "VALUES ('alice', 'hash', 'salt', 'scheme', 'active')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO auth_captcha_challenge (captcha_id, code_hash, expires_at) "
+                    "VALUES ('captcha-1', 'hash', '2026-05-25T12:00:00')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO auth_session (session_id, username, expires_at) "
+                    "VALUES ('session-1', 'alice', '2026-05-25T12:00:00')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO auth_api_token (token_id, token_hash, username) "
+                    "VALUES ('token-1', 'hash', 'alice')"
+                )
+            )
 
         bootstrap_sqlite_database(self.engine)
 
@@ -65,7 +106,9 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
         bootstrap_sqlite_database(self.engine)
         table_names = set(inspect(self.engine).get_table_names())
         self.assertFalse(
-            {"auth_user", "auth_captcha_challenge", "auth_session", "auth_api_token"}.intersection(table_names)
+            {"auth_user", "auth_captcha_challenge", "auth_session", "auth_api_token"}.intersection(
+                table_names
+            )
         )
         self.assertIn("auth_user_token", table_names)
 
