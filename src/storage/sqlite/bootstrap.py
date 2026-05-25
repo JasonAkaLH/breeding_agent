@@ -5,9 +5,24 @@ from sqlalchemy import Connection, Engine, inspect, text
 from .base import SQLiteBase
 
 
+LEGACY_AUTH_TABLES = (
+    "auth_user",
+    "auth_captcha_challenge",
+    "auth_session",
+    "auth_api_token",
+)
+
+
 def bootstrap_sqlite_database(engine: Engine) -> None:
     _migrate_username_owner_columns(engine)
+    _drop_legacy_auth_tables(engine)
     SQLiteBase.metadata.create_all(engine)
+
+
+def _drop_legacy_auth_tables(engine: Engine) -> None:
+    with engine.begin() as connection:
+        for table_name in LEGACY_AUTH_TABLES:
+            connection.execute(text(f"DROP TABLE IF EXISTS {_quote(connection, table_name)}"))
 
 
 def _migrate_username_owner_columns(engine: Engine) -> None:
