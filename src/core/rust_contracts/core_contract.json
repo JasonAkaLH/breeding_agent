@@ -1,7 +1,7 @@
 {
   "component": "maf_core_types",
   "contract_version": "core.v1",
-  "schema_hash": "maf_core_types_core_v1_schema_20260525_user_token_only",
+  "schema_hash": "maf_core_types_core_v1_schema_20260525_username_token",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
   "supported_features": [
     "core_contract_artifact",
@@ -291,6 +291,23 @@
       "is_complete",
       "created_at"
     ],
+    "AuthSession": [
+      "session_id",
+      "username",
+      "expires_at",
+      "revoked_at",
+      "created_at"
+    ],
+    "AuthUser": [
+      "username",
+      "password_hash",
+      "password_salt",
+      "password_scheme",
+      "status",
+      "created_at",
+      "updated_at",
+      "last_login_at"
+    ],
     "AuthUserToken": [
       "username",
       "api_token_hash",
@@ -325,6 +342,14 @@
       "interrupt",
       "error",
       "metadata"
+    ],
+    "CaptchaChallenge": [
+      "captcha_id",
+      "code_hash",
+      "expires_at",
+      "attempt_count",
+      "consumed_at",
+      "created_at"
     ],
     "Checkpoint": [
       "checkpoint_id",
