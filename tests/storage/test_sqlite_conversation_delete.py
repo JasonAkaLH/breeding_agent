@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy import func, select
 
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, NodeStatus, TaskStatus
 from src.core.models import (
     Artifact,
-    AuthSession,
-    AuthUser,
-    CaptchaChallenge,
+    AuthUserToken,
     Checkpoint,
     Conversation,
     EventRecord,
@@ -25,9 +23,7 @@ from src.core.models import (
 )
 from src.storage.sqlite.models import (
     ArtifactRow,
-    AuthSessionRow,
-    AuthUserRow,
-    CaptchaChallengeRow,
+    AuthUserTokenRow,
     CheckpointRow,
     ConversationRow,
     EventRecordRow,
@@ -45,34 +41,18 @@ from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
-    def test_delete_conversation_purges_business_facts_but_keeps_auth_records(self) -> None:
+    def test_delete_conversation_purges_business_facts_but_keeps_current_auth_token(self) -> None:
         now = datetime(2026, 5, 4, 12, 0, 0)
         with self.session_factory() as session:
             state_repo = SQLiteStateRepository(session)
             collab_repo = SQLiteCollaborationRepository(session)
-            state_repo.save_auth_user(
-                AuthUser(
+            state_repo.save_auth_user_token(
+                AuthUserToken(
                     username="alice",
-                    password_hash="hash",
-                    password_salt="salt",
-                    password_scheme="pbkdf2",
+                    api_token_hash="token-hash",
+                    token_issued_at=now,
                     created_at=now,
-                )
-            )
-            state_repo.save_auth_session(
-                AuthSession(
-                    session_id="session-1",
-                    username="alice",
-                    expires_at=now + timedelta(hours=1),
-                    created_at=now,
-                )
-            )
-            state_repo.save_captcha_challenge(
-                CaptchaChallenge(
-                    captcha_id="captcha-1",
-                    code_hash="captcha-hash",
-                    expires_at=now + timedelta(minutes=5),
-                    created_at=now,
+                    updated_at=now,
                 )
             )
             state_repo.save_conversation(
@@ -211,6 +191,4 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                 CheckpointRow,
             ):
                 self.assertEqual(session.scalar(select(func.count()).select_from(row_type)), 0, row_type.__name__)
-            self.assertEqual(session.scalar(select(func.count()).select_from(AuthUserRow)), 1)
-            self.assertEqual(session.scalar(select(func.count()).select_from(AuthSessionRow)), 1)
-            self.assertEqual(session.scalar(select(func.count()).select_from(CaptchaChallengeRow)), 1)
+            self.assertEqual(session.scalar(select(func.count()).select_from(AuthUserTokenRow)), 1)
