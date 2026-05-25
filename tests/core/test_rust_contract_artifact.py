@@ -34,6 +34,14 @@ class CoreRustContractArtifactTest(unittest.TestCase):
         self.assertNotIn("account_id", contract["models"]["Conversation"])
         self.assertIn("username", contract["models"]["ConversationMemorySummary"])
         self.assertNotIn("account_id", contract["models"]["ConversationMemorySummary"])
+        self.assertEqual(
+            contract["models"]["AuthUserToken"],
+            [field.name for field in dataclasses.fields(AuthUserToken)],
+        )
+        self.assertNotIn("AuthUser", contract["models"])
+        self.assertNotIn("AuthSession", contract["models"])
+        self.assertNotIn("CaptchaChallenge", contract["models"])
+        self.assertNotIn("AuthApiToken", contract["models"])
 
 
     def test_legacy_auth_models_are_absent_from_python_and_contract(self) -> None:
