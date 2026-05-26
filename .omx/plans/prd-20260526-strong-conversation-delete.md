@@ -1,7 +1,7 @@
 # PRD — Strong Conversation Delete
 
-日期：2026-05-26  
-状态：Ready for implementation planning handoff  
+日期：2026-05-26
+状态：document-perfectization reviewed; ready for implementation handoff
 设计来源：`docs/superpowers/specs/2026-05-26-strong-conversation-delete-design.md`
 
 ## 1. Requirements Summary
@@ -18,6 +18,9 @@
 | Current runtime | `src/api/runtime.py:1048-1081` | 当前同步 delete 被请求生命周期承载，需要拆 runner、shield 和启动恢复。 |
 | Current storage | `src/storage/sqlite/repositories.py:705-777` | 当前 Python 搬运 task/mailbox/interrupt id；PostgreSQL 生产路径要 set-based delete。 |
 | Current list behavior | `src/storage/sqlite/repositories.py:539-545` | 当前按 username 返回所有状态；需要 active-only 普通列表。 |
+| Current task ownership | `src/api/auth.py:64-71` and `src/api/routes/tasks.py:125-360` | task/detail/events/graph/artifact routes authorize through task->conversation; `require_task_owner` must reject non-active conversations for ordinary users. |
+| Current uploads | `src/api/routes/uploads.py:72-130` and `src/api/runtime.py:508-524` | upload/list/delete currently allow an existing owned conversation regardless of status; upload helpers must reject deleting/deleting_failed. |
+| Current runtime shutdown | `src/api/runtime.py:1210-1222` | shutdown may cancel long-running in-process tasks after a short grace period; deletion must be recoverable from persisted `deleting` state. |
 | Current enum | `src/core/enums.py:17` plus runtime check | 当前 ConversationStatus 为 `active/archived/locked`；需新增 `deleting/deleting_failed` 并同步 Rust/core contract。 |
 | Test expectations | `tests/api/test_auth_login_and_isolation.py:139-202` | 现有 delete 测试要求 owner scoped、purge history、auto-cancel running task；新实现必须保持并扩展。 |
 
@@ -31,6 +34,7 @@
 6. 最小运维诊断/重试脚本或内部入口。
 7. API 文档更新。
 8. Unit / API / frontend / PostgreSQL integration/smoke 验证。
+9. Existing task/upload/artifact/SSE ordinary routes must enforce active-only visibility; deletion runner and cancellation internals may use explicit internal bypasses only where required to finish deletion.
 
 ## 4. Out of Scope
 
@@ -54,7 +58,9 @@
 | AC-8 | 应用启动扫描 `deleting` 并恢复 runner。 | Runtime assembly/startup test. |
 | AC-9 | 删除目标历史条目显示 spinner，只禁用该条目，其他会话仍可用。 | Frontend App tests. |
 | AC-10 | API docs 说明强删除、断线继续、失败不复活和新增响应字段。 | `tests/api/test_developer_docs.py`. |
-| AC-11 | 无依赖/许可策略变更；若触及 Rust/native contract only, cargo-deny not required unless dependencies change. | Final report License Requirement. |
+| AC-11 | Task/upload/artifact/cancel/interrupt routes do not expose deleting/deleting_failed conversations to ordinary users. | API tests covering `require_task_owner`, upload helpers, artifact download, cancel, interrupts, graph, events. |
+| AC-12 | Runtime shutdown or process restart after marking `deleting` does not permanently strand the delete. | Startup recovery test with persisted `deleting`; runner retry treats missing files as idempotent. |
+| AC-13 | 无依赖/许可策略变更；若触及 Rust/native contract only, cargo-deny not required unless dependencies change. | Final report License Requirement. |
 
 ## 6. Implementation Steps
 
@@ -105,9 +111,11 @@ Work:
    - PostgreSQL optimized `delete_conversation_physical(...)` or dialect-specific implementation.
 2. Make ordinary `list_conversations_for_username` return active only.
 3. Add explicit internal methods for runner/admin access to deleting/deleting_failed rows so ordinary user APIs do not accidentally expose them.
-4. Update owner helpers so user-facing read/write APIs reject `deleting` / `deleting_failed` with 404.
+4. Update owner helpers so user-facing read/write APIs reject `deleting` / `deleting_failed` with 404. This includes `require_conversation_owner`, `get_optional_owned_conversation`, and `require_task_owner` because task/artifact/SSE/cancel/interrupt routes authorize through tasks.
+5. Update upload helpers (`ensure_upload_allowed`, `list_uploads`, `delete_upload`) to reject existing non-active conversations for ordinary users while preserving behavior for not-yet-created active local conversation ids where current UX depends on it.
+6. Add explicit internal runner APIs for cancellation finalization and physical deletion so internal cleanup may read/write deleting conversations without reopening ordinary user access.
 
-Stop condition: user-facing API/storage tests prove deleting/deleting_failed are invisible and active rows still work.
+Stop condition: user-facing API/storage tests prove deleting/deleting_failed are invisible across conversation, task, artifact, upload, interrupt, cancel, and SSE routes while active rows still work.
 
 ### CP-3 — PostgreSQL set-based physical delete
 
@@ -146,8 +154,10 @@ Work:
    - DB physical delete in short transaction
    - failure to `deleting_failed`
 5. Preserve existing response core fields and add `delete_status`, `runner_id`, `started_at`, `finished_at`, `error_code`.
+6. Ensure runtime shutdown can cancel an in-process deletion runner only after the persisted state is already `deleting`; startup recovery must then re-enter the runner. Do not rely on in-memory task handles as the durable source of truth.
+7. Existing SSE connections for a task being cancelled by deletion should terminate through the normal terminal task event path; new SSE subscriptions for deleting/deleting_failed conversations must be rejected by `require_task_owner`.
 
-Stop condition: API tests prove success, failure, duplicate DELETE, client disconnect, and running-task cancellation semantics.
+Stop condition: API tests prove success, failure, duplicate DELETE, client disconnect, shutdown/recovery, existing-task cancellation terminal events, and running-task cancellation semantics.
 
 ### CP-5 — Startup recovery and ops entrypoints
 
@@ -242,6 +252,8 @@ Manual / smoke:
 | Client times out before response | Runner continues; ordinary list hides deleting/deleting_failed; ops metadata tracks progress. |
 | Schema drift on live PostgreSQL | Add schema reconciler tests for additive columns/indexes without DROP. |
 | Sensitive error leakage | Sanitize error summary and ops script output. |
+| Ordinary task/upload routes still expose deleting conversations | Update `require_task_owner`, upload helpers, artifact download/cancel/interrupt routes, and add API regression coverage. |
+| Shutdown cancels in-memory runner | Persist `deleting` before runner work and recover on startup; treat missing files idempotently during retry. |
 
 ## 8. ADR
 
@@ -265,7 +277,7 @@ Implement strong conversation delete as a deletion-state + runtime deletion runn
 ### Consequences
 
 - Requires new statuses, schema metadata, recovery scan, and ops tooling.
-- Ordinary user APIs become active-only by default.
+- Ordinary user APIs become active-only by default, including task-derived and upload routes.
 - Implementation is larger than a DELETE SQL optimization but matches production reliability requirements.
 
 ### Follow-ups

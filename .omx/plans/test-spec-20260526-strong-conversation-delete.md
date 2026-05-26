@@ -1,7 +1,7 @@
 # Test Spec — Strong Conversation Delete
 
-日期：2026-05-26  
-对应 PRD：`.omx/plans/prd-20260526-strong-conversation-delete.md`  
+日期：2026-05-26
+对应 PRD：`.omx/plans/prd-20260526-strong-conversation-delete.md`
 设计来源：`docs/superpowers/specs/2026-05-26-strong-conversation-delete-design.md`
 
 ## 1. Test Objectives
@@ -34,7 +34,7 @@ Assertions:
 Assertions:
 - `list_conversations_for_username` returns active conversations only.
 - Internal/admin storage method can still retrieve deleting/deleting_failed rows for runner/ops.
-- Owner helpers used by ordinary routes treat deleting/deleting_failed as not found.
+- Owner helpers used by ordinary routes treat deleting/deleting_failed as not found, including task-derived owner checks.
 
 ### ST-4 Mark deleting / failed transitions
 
@@ -83,13 +83,29 @@ Assertions:
 - Response includes cancelled task id.
 - Task rows/events/messages are gone after success.
 
-### API-3 Deleting state hides ordinary routes
+### API-3 Deleting state hides ordinary conversation routes
 
 Assertions during controlled paused runner:
 - `GET /api/v1/conversations` excludes target.
 - `GET /api/v1/conversations/{id}/messages` returns 404.
 - submit chat message returns 404 or equivalent ordinary not-found.
-- rename/upload/SSE subscribe/cancel task routes cannot operate through hidden conversation.
+- rename route returns 404.
+
+### API-3b Deleting state hides task-derived routes
+
+Assertions during controlled paused runner for an existing task under the deleting conversation:
+- `GET /api/v1/tasks/{task_id}` returns 404.
+- `GET /api/v1/tasks/{task_id}/events` refuses subscription before streaming.
+- `POST /api/v1/tasks/cancel` returns 404 for ordinary user.
+- interrupts list/answer, graph, task artifacts, and artifact download routes return 404.
+
+### API-3c Deleting state hides upload routes
+
+Assertions during controlled paused runner:
+- list conversation uploads returns 404.
+- upload to existing deleting conversation returns 404.
+- delete upload for deleting conversation returns 404 or equivalent not-found.
+- upload behavior for a new not-yet-created local conversation id remains compatible with current UX if no existing conversation row is present.
 
 ### API-4 Client disconnect does not cancel runner
 
@@ -131,12 +147,25 @@ Assertions:
 - Startup scan starts runner.
 - Runner completes physical delete or marks deleting_failed on injected failure.
 
+### API-7b Shutdown after marking deleting is recoverable
+
+Setup:
+- Mark conversation deleting and pause runner before DB delete.
+- Simulate runtime shutdown / task cancellation.
+- Build a new runtime with the same storage.
+
+Assertions:
+- Startup recovery re-enters runner.
+- Missing files from any previous partial file cleanup are accepted as idempotent success.
+- Final state is physical delete or deleting_failed, never ordinary active visibility.
+
 ### API-8 Other conversation remains usable
 
 During paused long delete:
 - List messages for another conversation succeeds.
 - Submit message to another conversation succeeds.
 - SSE events for another task continue.
+- Existing SSE for the deleting conversation terminates through normal task terminal event when deletion cancels a running task; new SSE subscribe is rejected by API-3b.
 
 ## 4. Frontend Tests
 
@@ -214,6 +243,8 @@ Targeted commands:
 conda run -n multi_agent python -m unittest tests.storage.test_sqlite_conversation_delete
 conda run -n multi_agent python -m unittest discover -s tests/storage -p 'test_postgres*.py'
 conda run -n multi_agent python -m unittest tests.api.test_auth_login_and_isolation
+conda run -n multi_agent python -m unittest tests.api.test_task_cancel
+conda run -n multi_agent python -m unittest tests.api.test_task_events_sse
 conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*conversation*.py'
 cd frontend && npm test -- --run
 cd frontend && npm run build
@@ -240,7 +271,7 @@ Manual smoke:
 ## 8. Exit Criteria
 
 - All targeted tests pass.
-- No ordinary route exposes deleting/deleting_failed conversation.
+- No ordinary conversation, task-derived, artifact, upload, cancel, interrupt, or SSE route exposes deleting/deleting_failed conversation.
 - Runner survives client disconnect and startup recovery.
 - PostgreSQL physical delete path is set-based.
 - Frontend item-level pending UX is verified.
