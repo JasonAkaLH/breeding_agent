@@ -87,6 +87,7 @@
 | MCP 长任务与流式 SSE | `docs/prd/backend/17-MCP长任务流式SSEPRD.md` | 将 MCP Runtime 从单条 SSE 兼容升级为完整长任务流式 SSE、断线恢复、progress、task status、取消与 API/SSE 事件桥接 |
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
+| PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
 | MCP Runtime 联合改造 Phase | `docs/prd/MCP/README.md` | 把 MCP 长任务流式 SSE 与 Rust MCP sidecar 作为同一最终交付目标拆成 Phase PRD |
 
 ## 5. 当前已定的关键决策摘要
@@ -110,6 +111,7 @@
 
 ### 5.3 状态存储决策
 
+- PostgreSQL State Platform 的生产化已拆分为专题 Phase PRD：Phase 0 driver/contract、Phase 1 schema/write queue kernel、Phase 2 command handlers/read store/StateService、Phase 3 runtime integration/fail-closed/observability、Phase 4 SQLite -> PostgreSQL migration/cutover；Phase 0-3 不执行数据迁移，Phase 4 单独处理 migration / cutover / rollback。
 - 主框架状态不落公司业务 MySQL。
 - 本地先 SQLite，同构迁移到 PostgreSQL。
 - PostgreSQL 存结构化状态与索引，不直接存大对象正文。
