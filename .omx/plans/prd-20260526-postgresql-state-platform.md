@@ -7,6 +7,20 @@
 - **非范围**：本计划不执行 SQLite -> PostgreSQL 数据迁移；不配置或连接远端 PostgreSQL；不切换生产启动方式；不删除 SQLite；不做生产 cutover / rollback 操作
 - **关键决策**：不以现有 `StoragePort` 作为长期生产架构核心；允许迁移期 adapter，但新能力必须围绕 State Platform 设计
 
+
+## 0. Document Perfectization Confidence Standard
+
+本次复审把这份 PRD 判定为可进入实现的标准如下：
+
+| 维度 | 必须满足 |
+| --- | --- |
+| 目标一致性 | 继承用户已确认的生产 PostgreSQL、读取已提交快照不阻塞、写入排队、不要以 `StoragePort` 为长期核心、今日不迁移。 |
+| 范围边界 | 实施计划必须覆盖生产 State Platform 基础能力，但不得隐式执行 SQLite 数据迁移、远端 DB 配置、生产 cutover 或 RuntimeSidecar canonical writer 切换。 |
+| 可实施性 | 每个 checkpoint 都能落到明确模块、测试文件和退出门禁；CP-0 必须先处理 PostgreSQL driver 依赖决策。 |
+| 可验证性 | 每条关键读写、队列、retry、fail-closed、readiness 和安全要求都必须能被单元、集成、故障注入或静态扫描验证。 |
+| 生产安全 | 任何缺配置、缺 driver、migration 未 ready、sidecar writer 冲突、权限/安全/contract 错误都必须 fail closed。 |
+| 证据边界 | 本文引用当前仓库事实；无法从仓库验证的内容以假设或后续门禁记录，不伪造生产 PostgreSQL 证据。 |
+
 ## 1. Requirements Summary
 
 实施已审定的生产级状态平台方向：
@@ -34,6 +48,18 @@
 | `native/crates/maf_runtime_sidecar/src/sqlite_adapter.rs:12-24` | RuntimeSidecar SQLite adapter 以进程内 `Mutex<Connection>` 串行化。 | Sidecar 不能与新 State Platform 同时作为 canonical writer；后续必须明确 shadow/enforce 边界，避免双写源。 |
 | `docs/superpowers/specs/2026-05-26-postgresql-state-platform-deadlock-design.md` | 已记录用户确认的读旧 committed snapshot、写排队、生产 PostgreSQL、今日不迁移等决策。 | 本 PRD 必须继承这些约束，不重新回到最小侵入或 SQLite 防锁补丁方向。 |
 
+
+## 2.5 Users, Stakeholders, and Affected Systems
+
+| 对象 | 目标 / 关注点 | 计划影响 |
+| --- | --- | --- |
+| 内部业务用户 | 对话、任务、上传、Skill 结果读取不能被状态写锁长期阻塞；允许读到最后已提交状态。 | ReadStore 不等待 queue；需要同步确认的写调用走 `execute_command_and_wait()`。 |
+| 后端维护者 | 状态写入要有 durable intent、幂等、可恢复、可审计和明确失败语义。 | 新增 `src/state/` contract、queue、handler、worker 和 error policy。 |
+| 运维 / 部署维护者 | 生产 PostgreSQL、writer worker、queue backlog、migration gate、dead-letter 要可观测可演练。 | 新增 health/readiness、runbook、fail-closed 配置和真实 PostgreSQL 集成门禁。 |
+| 安全 / 审计维护者 | secret、DSN、token、raw payload 不得进入 queue/audit/dead-letter；权限错误不能被 retry 成成功。 | 错误策略、脱敏测试、non-retry fail-closed 和 audit-safe metrics。 |
+| Skill / MCP / 主代理开发者 | 能力层不得在 DB transaction 内做外部调用；状态变更统一经 command handler。 | handler contract 和静态扫描限制 transaction 内外部 IO。 |
+| 受影响系统 | API runtime、orchestration、lifecycle、auth、artifact/upload、RuntimeSidecar、observability。 | CP-6 统一 runtime assembly；RuntimeSidecar 只能 shadow-only 或互斥，避免双 canonical writer。 |
+
 ## 3. Acceptance Criteria
 
 | ID | Criterion | Validation |
@@ -53,6 +79,23 @@
 | AC-13 | RuntimeSidecar 与 State Platform canonical writer 边界明确，不能出现两个 production writer 同时对同一业务表写入。 | Runtime assembly tests + docs check。 |
 | AC-14 | 本实施不执行 SQLite 数据迁移，不要求本地远端 DB 地址。 | Plan scope review + no migration/cutover scripts executed。 |
 | AC-15 | 如果新增 PostgreSQL driver 依赖，必须更新 `requirements.txt`，记录 license / supply-chain decision，并提供验证证据。 | Dependency decision artifact + final verification report。 |
+| AC-16 | State Platform 必须记录 NFR：可靠性、性能、安全、隐私、兼容、可观测性、运维和可测试性。 | NFR matrix + tests / runbook review。 |
+| AC-17 | 真实 PostgreSQL 行为不得只用 fake tests 代替；进入生产 ready 前必须有真实 PostgreSQL integration evidence。 | Integration gate report；无测试实例时最终报告必须 Not-tested。 |
+| AC-18 | 所有 queue/dead-letter/audit/health payload 必须脱敏，不得包含 DSN、token、secret、raw user payload。 | Redaction tests + audit snapshot tests。 |
+
+
+## 3.5 Non-functional Requirements
+
+| 维度 | 生产要求 | 验收 / 测试 |
+| --- | --- | --- |
+| Reliability | Durable enqueue 后 command 不能静默丢失；worker crash、lease expiry、DB transient failure 必须可恢复。 | worker crash / lease recovery / retry exhausted tests。 |
+| Performance | 读路径不等待 write queue；queue backlog 增长不能让普通 read query 等待 pending command。 | read-not-blocked integration test + mixed read/write smoke。 |
+| Security | 缺 DSN、缺 driver、migration 未 ready、sidecar writer 冲突、contract mismatch 必须 fail closed。 | production fail-closed API/runtime tests。 |
+| Privacy | DSN、token、secret、raw prompt/user payload 不进入 command metadata、dead-letter、audit 或 health。 | redaction snapshot tests。 |
+| Compatibility | 本地 dev/test 可继续 SQLite；production canonical backend 不能是 SQLite。 | config matrix tests。 |
+| Observability | readiness 必须暴露 queue backlog、oldest pending age、dead-letter、worker heartbeat、migration state、DB connectivity。 | observability tests + runbook check。 |
+| Operability | 必须支持 worker drain、stale lease recovery、dead-letter triage、migration gate 和 backup/restore 演练。 | runbook acceptance + ops drill evidence gate。 |
+| Testability | fake/contract tests 可用于本地 TDD，但生产 ready 需要真实 PostgreSQL integration evidence。 | test spec integration gate。 |
 
 ## 4. Implementation Strategy
 
@@ -105,6 +148,34 @@ src/state/
 | CP-7 Observability + readiness | 暴露 queue backlog、oldest age、dead-letter、worker heartbeat、migration state、DB connectivity。 | health/readiness API tests + audit/metrics payload tests。 | 可与 CP-6 并行。 |
 | CP-8 Full regression + docs sweep | 更新 README/API/PRD evidence，执行后端分层回归和静态检查。 | Required Verification Commands + `git diff --check` + dependency/license report。 | 最后执行。 |
 
+
+## 4.3 Dependencies and Integration Points
+
+| 依赖 / 集成点 | 当前证据 | 实施要求 |
+| --- | --- | --- |
+| PostgreSQL driver | `requirements.txt` 有 SQLAlchemy / PyMySQL，但无 PostgreSQL driver。 | CP-0 必须完成 driver ADR，确认 Python 3.13、SQLAlchemy 2.x async、license、error code、timeout/cancel 支持后才能新增依赖。 |
+| API runtime | `src/api/runtime.py` 当前创建 SQLite engine 并装配 `SQLiteStorage`。 | CP-6 新增 State Platform runtime factory；production 缺 PostgreSQL readiness fail closed。 |
+| Legacy storage | `src/core/contracts.py` 仍是 `StoragePort` repository-style 方法集合。 | 只允许作为迁移/dev adapter；新 queue/worker/health 语义不回填进 `StoragePort`。 |
+| SQLite bootstrap | `src/storage/sqlite/bootstrap.py` 会在启动期执行 SQLite migration / `create_all()`。 | PostgreSQL migration 必须独立于 API 普通启动；readiness 读取 migration ledger。 |
+| RuntimeSidecar | Python runtime 已有 sidecar shadow/enforce gate；Rust sidecar SQLite adapter 不是生产 State Platform。 | State Platform writer 与 RuntimeSidecar writer 必须互斥或 shadow-only，避免同一状态双 canonical writer。 |
+| Audit / observability | 现有 audit sink 和 sidecar shadow diff 已有脱敏模式。 | 复用 audit-safe payload 思路，新增 queue/worker/dead-letter/readiness 指标。 |
+| Remote production PostgreSQL | 用户后续部署并提供地址；当前本地不配置。 | 不把 DSN 写入 tracked 文件；配置通过 env / git-ignored config 注入。 |
+
+## 4.4 Requirement Traceability Matrix
+
+| Requirement | PRD section | Test spec coverage |
+| --- | --- | --- |
+| 读不阻塞 / last committed snapshot | §1、AC-3、CP-4 | Test Spec §7、§13 targeted read-not-blocked。 |
+| 写入排队 / durable command | §1、AC-2、CP-2 | Test Spec §5、§9。 |
+| Partition 保序 / 跨 partition 并行 | AC-4、AC-5、CP-2 | Test Spec §5 worker claim ordering。 |
+| Deadlock / lock timeout retry | AC-6、CP-3 | Test Spec §6 fault injection。 |
+| Non-retry fail closed | AC-7、NFR Security | Test Spec §3、§6、§10。 |
+| Production PostgreSQL fail-closed | AC-11、AC-12、CP-6 | Test Spec §10。 |
+| RuntimeSidecar 边界 | AC-13、Dependencies | Test Spec §10 sidecar conflict。 |
+| 脱敏与隐私 | AC-18、NFR Privacy | Test Spec §11、§14。 |
+| 真实 PostgreSQL 证据 | AC-17、NFR Testability | Test Spec §13 integration gate。 |
+| 今日不迁移 / 不配置远端库 | AC-14、Out of Scope | Test Spec §1、§13。 |
+
 ## 5. Implementation Steps
 
 ### Step 1 — CP-0 dependency decision 与 contract red tests
@@ -120,6 +191,7 @@ src/state/
 
 **实现要点**：
 - 评估 PostgreSQL driver：必须基于官方 / 上游文档确认 Python 3.13、SQLAlchemy 2.x async 支持、license、pool、timeout、cancel、server-side errors 暴露方式。
+- Dependency ADR 必须至少比较 `psycopg` / `asyncpg` / SQLAlchemy async dialect 组合，记录选择、拒绝项、license、维护状态、错误码映射、connection cancellation、statement timeout 设置方式。
 - Contract 定义：`StateService`、`StateReadStore`、`StateWriteQueue`、`StateCommandHandler`、`StateHealthProvider`。
 - Error policy 定义 retryable vs non-retryable，至少覆盖 `40P01`、`40001`、`55P03`、`57014`。
 - 测试先红：当前仓库无 `src/state`，目标测试应稳定失败。
@@ -306,6 +378,19 @@ LIMIT :batch_size;
 - Redis/Kafka/RabbitMQ 外部队列：第一阶段不引入；如 PostgreSQL queue 无法满足吞吐再评估。
 - 多区域 active-active：不在当前内部业务交付范围。
 
+
+## 7.5 Assumptions and Open Questions
+
+| 类型 | 内容 | 处理方式 |
+| --- | --- | --- |
+| Assumption | 用户会在后续阶段提供远端生产 PostgreSQL 地址和访问策略。 | 本计划只定义配置入口和 fail-closed 行为，不写入真实 DSN。 |
+| Assumption | 第一阶段 PostgreSQL internal queue 足以覆盖当前内部业务吞吐；暂不引入外部消息队列。 | CP-8 若压测不满足，再追加外部队列评估 PRD。 |
+| Assumption | SQLite 仍需要保留给本地开发 / 单元测试，但不能作为 production canonical store。 | Config matrix tests 固化 dev/test vs production 行为。 |
+| Open gate | PostgreSQL driver 尚未选择。 | CP-0 dependency ADR 解决；未通过不得进入实现。 |
+| Open gate | 真实 PostgreSQL integration 环境尚未配置。 | 可先用 fake/contract TDD；进入 production ready 前必须补真实 PostgreSQL evidence。 |
+| Open gate | SQLite -> PostgreSQL 数据迁移方案未设计。 | 后续独立 migration PRD；本计划不得隐式执行迁移。 |
+| Open gate | RuntimeSidecar 长期是否承载部分 StateCommandHandlers 尚未决定。 | 当前只要求互斥 / shadow-only；长期 Rust canonicalization 另开 PRD。 |
+
 ## 8. Verification Steps
 
 Targeted during implementation:
@@ -314,6 +399,7 @@ Targeted during implementation:
 conda run -n multi_agent python -m unittest tests.storage.test_state_platform_contract tests.storage.test_state_platform_error_policy
 conda run -n multi_agent python -m unittest tests.storage.test_postgres_state_schema_contract tests.storage.test_postgres_write_queue_contract tests.storage.test_postgres_worker_claim_ordering
 conda run -n multi_agent python -m unittest tests.storage.test_state_command_handlers tests.storage.test_postgres_read_store_contract tests.storage.test_state_service_execute_and_wait
+conda run -n multi_agent python -m unittest tests.storage.test_postgres_deadlock_retry tests.storage.test_postgres_lock_timeout_retry tests.storage.test_postgres_serialization_retry
 conda run -n multi_agent python -m unittest tests.api.test_state_platform_runtime_assembly tests.api.test_state_platform_production_fail_closed
 conda run -n multi_agent python -m unittest tests.observability.test_state_platform_health
 ```

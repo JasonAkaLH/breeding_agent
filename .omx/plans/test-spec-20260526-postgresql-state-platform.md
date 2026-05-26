@@ -20,11 +20,24 @@
 7. health/readiness 能暴露 DB、queue、worker、migration 和 dead-letter 状态。
 8. 本轮实施不执行真实生产迁移，也不要求用户提供远端 PostgreSQL 地址。
 
+## 1.5 Test Confidence Standard
+
+测试规格通过的标准：
+
+| 维度 | 必须证明 |
+| --- | --- |
+| Contract | State Platform contract、error policy、command DTO、health/readiness 字段稳定且可被实现。 |
+| Queue correctness | enqueue/idempotency/claim/lease/retry/dead-letter/partition ordering 在并发下可验证。 |
+| Read semantics | pending command 和未提交 writer transaction 不阻塞 read，reader 返回旧 committed snapshot。 |
+| Failure behavior | retryable PostgreSQL error bounded retry；non-retry business/security/contract errors fail closed。 |
+| Runtime safety | production backend 缺 PostgreSQL 配置、driver、migration readiness 或 writer 边界冲突时 fail closed。 |
+| Evidence honesty | fake/contract tests 不能替代真实 PostgreSQL integration；无 DB 实例时必须显式 Not-tested。 |
+
 ## 2. Checkpoint Gate Matrix
 
 | Checkpoint | 必跑 targeted tests / checks | 进入下一阶段条件 |
 | --- | --- | --- |
-| CP-0 Dependency + contract red tests | `tests.storage.test_state_platform_contract`、`tests.storage.test_state_platform_error_policy`、dependency decision document review。 | Tests 初始可红且指向缺失 contract；dependency decision 记录 driver/license/support 证据；未改 runtime。 |
+| CP-0 Dependency + contract red tests | `tests.storage.test_state_platform_contract`、`tests.storage.test_state_platform_error_policy`、dependency decision document review。 | Tests 初始可红且指向缺失 contract；dependency decision 记录 driver/license/support/error-code/cancel/timeout 证据；未改 runtime。 |
 | CP-1 PostgreSQL schema descriptors | `tests.storage.test_postgres_state_schema_contract`。 | `state_write_command`、partition cursor、dead-letter/archive、migration ledger 字段/索引/约束全部可测。 |
 | CP-2 Queue repository + worker claim | `tests.storage.test_postgres_write_queue_contract`、`tests.storage.test_postgres_worker_claim_ordering`。 | enqueue/claim/lease/complete/retry/dead-letter 通过；同 partition 不跳序。 |
 | CP-3 Command handler framework | `tests.storage.test_state_command_handlers`、`tests.storage.test_state_command_error_policy`。 | command type、payload schema、partition rule、idempotency、retry policy 全部声明并可测。 |
@@ -35,6 +48,36 @@
 | CP-8 Full regression | 后端分层 discover、前端 test/build、static sweep、`git diff --check`。 | 无 direct write bypass、无未解释 SQLite production fallback、license report 完整。 |
 
 Gate rule：任何 checkpoint 失败时，只允许修复该 checkpoint 或上游依赖；不得用 fallback 到 SQLite、跳过 queue、放宽 retry 分类或删除测试来变绿。
+
+## 2.5 Coverage Traceability Matrix
+
+| PRD acceptance | Test sections |
+| --- | --- |
+| AC-1 State Platform contract | §3 Contract and Error Policy Tests |
+| AC-2 all writes through command queue | §5 Write Queue、§8 Command Handler、§12 Static Sweep |
+| AC-3 read-not-blocked | §7 Read Store and Read-not-blocked Tests |
+| AC-4/AC-5 partition ordering and `SKIP LOCKED` | §5 Worker Claim Tests |
+| AC-6 retryable PostgreSQL errors | §6 Fault Injection Tests |
+| AC-7 non-retry fail closed | §3 Error Policy、§6 Fault Injection、§10 Runtime Fail-closed |
+| AC-8 command durable fields | §3 Contract、§4 Schema Contract |
+| AC-9 transaction timeouts / no external IO | §8 Command Handler、§12 Static Sweep |
+| AC-10 health/readiness | §11 Observability Tests |
+| AC-11/AC-12 production PostgreSQL fail-closed / no SQLite fallback | §10 Runtime Assembly Tests |
+| AC-13 RuntimeSidecar writer boundary | §10 sidecar canonical writer conflict |
+| AC-14 no migration / no remote DB config today | §1 Scope、§13 PostgreSQL integration gate |
+| AC-15 dependency/license | §14 License and Dependency Verification |
+| AC-16 NFR | §11 Observability、§13 Regression、§14 License and Dependency Verification |
+| AC-17 real PostgreSQL evidence | §13 PostgreSQL integration gate |
+| AC-18 redaction | §11 audit redaction、§14 dependency / secret rules |
+
+## 2.6 Fake, Contract, and Real PostgreSQL Test Layers
+
+| Layer | 用途 | 不能证明 |
+| --- | --- | --- |
+| Pure contract/unit tests | 本地 TDD、DTO、error policy、SQL string/schema descriptor、handler registry。 | 不能证明 PostgreSQL MVCC、`SKIP LOCKED`、真实 error code 和 lock timeout 行为。 |
+| Fake driver / fake queue tests | 可稳定注入 `40P01`、`40001`、`55P03`、`57014` 和 transient connection。 | 不能替代真实 PostgreSQL 并发与隔离级别验证。 |
+| Real PostgreSQL integration tests | 证明 MVCC read-not-blocked、`FOR UPDATE SKIP LOCKED`、lease reclaim、statement timeout、driver error mapping。 | 不使用用户生产库；不能替代后续生产 shadow/cutover evidence。 |
+| Production evidence | 用户后续远端库、迁移、shadow、ops drill、backup/restore。 | 不属于本计划今日范围；不得在本地测试中伪造。 |
 
 ## 3. Contract and Error Policy Tests
 
@@ -54,6 +97,8 @@ Gate rule：任何 checkpoint 失败时，只允许修复该 checkpoint 或上�
 | non-retryable business errors | schema/payload/ownership/idempotency/safety/state-machine/handler bug 默认 non-retry。 |
 | unknown error default | 未知错误默认 fail closed，不 retry。 |
 | idempotency required | 所有 write command 必须有 idempotency key，缺失时报 contract error。 |
+| driver error code extractor | error policy 能从后续选定 driver exception 中读取 SQLSTATE / timeout source；未支持 driver 时测试必须 fail。 |
+| redaction model fields | command metadata、error metadata、health payload 的 public representation 不含 DSN/token/secret/raw payload。 |
 
 ## 4. PostgreSQL Schema Contract Tests
 
@@ -75,6 +120,8 @@ Gate rule：任何 checkpoint 失败时，只允许修复该 checkpoint 或上�
 | dead letter/archive tables | dead-letter 与 archive 表可存储原 command、错误和审计 metadata。 |
 | migration ledger | migration ledger 可记录 version、checksum、started/completed、status、operator。 |
 | business tables pg types | conversation/task/message/event/artifact/auth 等业务表使用 timestamptz/jsonb/明确 FK 与索引。 |
+| migration ledger blocks startup | schema descriptor 支持 readiness 查询 migration ready / not-ready，不把 DDL 放到普通 API 启动路径。 |
+| command payload fingerprint | idempotency key 重复但 payload fingerprint 不一致时稳定冲突，不复用旧结果。 |
 
 ## 5. Write Queue and Worker Claim Tests
 
@@ -89,6 +136,7 @@ Gate rule：任何 checkpoint 失败时，只允许修复该 checkpoint 或上�
 | --- | --- | --- |
 | enqueue stores durable command | enqueue 一个 command | status=pending，partition_sequence 分配，idempotency key 可查。 |
 | idempotent enqueue returns existing | 相同 idempotency key enqueue 两次 | 返回同一 command，不创建重复写入。 |
+| payload fingerprint mismatch | 相同 idempotency key 但 payload 不同 | 返回稳定 conflict，不覆盖旧 command。 |
 | claim uses skip locked | 两个 worker 并发 claim | 不 claim 同一 command；SQL 包含 `FOR UPDATE SKIP LOCKED`。 |
 | no partition skip | partition A seq1 未完成，seq2 pending | worker 不得 claim seq2。 |
 | cross partition parallel | partition A/B 各有 pending | 多 worker 可同时 claim A/B。 |
@@ -138,6 +186,8 @@ Gate rule：任何 checkpoint 失败时，只允许修复该 checkpoint 或上�
 | read statement timeout set | 执行 read query | session / transaction 设置 statement timeout。 |
 | pagination enforced | list 大量 rows | query 有 limit 或分页 contract。 |
 | slow read observed | fake slow query | metrics/audit 记录脱敏 duration 与 query category。 |
+| read pool exhaustion | read pool timeout | 返回 typed transient/degraded error，不阻塞 writer lease。 |
+| no pending read-your-write promise | command 已 enqueue 未完成后立即 query | 文档/API 返回旧 committed 状态，不声称 read-your-queued-write。 |
 
 ## 8. Command Handler Tests
 
@@ -197,6 +247,8 @@ Gate rule：任何 checkpoint 失败时，只允许修复该 checkpoint 或上�
 | migration not ready fails readiness | migration ledger 未 ready | readiness=false。 |
 | sidecar canonical writer conflict | State Platform production writer + RuntimeSidecar enforce writer 同时启用 | fail closed 或强制 sidecar shadow-only。 |
 | old StoragePort adapter not production core | production code path 检查 | 不能直接暴露 `SQLiteStorage` 为 canonical state store。 |
+| production sqlite explicit reject | 显式设置 production + sqlite backend | fail closed，并提示 SQLite 仅 dev/test。 |
+| tracked config secret guard | 测试/静态扫描 tracked 文件 | 不出现真实 DSN、账号、密码或 token。 |
 
 ## 11. Observability and Runbook Tests
 
@@ -247,7 +299,7 @@ PY
 - Direct writes 只允许出现在 handler implementation、legacy adapter、tests 或明确 migration/dev-only path。
 - Production config 不允许 SQLite canonical fallback。
 - PostgreSQL timeout / locking SQL 只出现在 State Platform implementation 和 tests。
-- 文档无 unresolved placeholder。
+- 文档无未解决标记。
 
 ## 13. Required Verification Commands
 
@@ -282,12 +334,21 @@ git diff --check
 
 PostgreSQL integration gate：
 
+- 真实 PostgreSQL integration tests 必须使用独立测试库、临时 schema 或 service container；不得使用用户未来生产库。
 - 如果实现阶段提供本地 service container 或显式测试 DSN，可运行真实 PostgreSQL integration tests。
-- 如果没有 PostgreSQL 测试实例，必须至少通过 contract/fake tests，并在最终报告中把真实 PostgreSQL integration 记为 Not-tested，不得宣称生产 ready。
+- 如果没有 PostgreSQL 测试实例，必须至少通过 contract/fake tests，并在最终报告中把真实 PostgreSQL integration 记为 Not-tested，不得宣称 production ready。
+- 真实 PostgreSQL tests 至少覆盖：MVCC read-not-blocked、`FOR UPDATE SKIP LOCKED` 并发 claim、`lock_timeout` / `statement_timeout` 生效、driver SQLSTATE 映射、lease expiry reclaim。
 - 用户提供远端生产地址之前，不得把真实生产 connectivity / cutover / migration 伪造成已验证。
+
+Skip / xfail policy：
+
+- 本地没有 PostgreSQL 测试实例时，真实 integration tests 可以 skip，但 skip reason 必须明确 `postgres_test_dsn_not_configured`。
+- CI 或 production-ready gate 不允许仅靠 skip 通过；必须提供真实 PostgreSQL integration evidence 或保持 release gate pending。
+- 任何跳过真实 PostgreSQL evidence 的最终报告必须写入 `Not-tested`，不得用“contract tests passed”替代生产就绪声明。
 
 ## 14. License and Dependency Verification
 
 - 若新增 Python PostgreSQL driver：更新 `requirements.txt`，记录 license、版本、官方支持证据和 Python 3.13 / SQLAlchemy 2.x 兼容性验证。
+- Python dependency license report 至少记录 package name、version、license、source URL / official docs reference、选择理由、拒绝替代项。
 - 若不涉及 Rust / `native/` / `Cargo.lock` / `native/deny.toml`，最终报告明确：License Requirement：无 Rust 依赖/许可策略变更，未触发 cargo-deny 风险。
 - 若涉及 Rust workspace 或供应链策略，则必须运行 `cd native && cargo deny check` 并读取结果。
