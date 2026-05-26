@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
 from .llm_client import LLMClient, ReasoningEffort, load_config
+from .model_editions import config_with_model_edition, default_model_edition
 
 RuntimeReasoningRecorder = Callable[[str], Awaitable[None]]
 
@@ -30,11 +31,17 @@ class SharedLLMRuntime:
     ) -> None:
         self._client_factory = client_factory
         self._client = client
+        self._clients_by_model_edition: dict[str, Any] = {}
         self._config = dict(config) if config is not None else None
         self._config_source = config_source
         self.runtime_id = f"llm-runtime-{id(self):x}"
 
-    def static_metadata(self, *, reasoning_effort: ReasoningEffort | None = None) -> dict[str, Any]:
+    def static_metadata(
+        self,
+        *,
+        reasoning_effort: ReasoningEffort | None = None,
+        model_edition: str | None = None,
+    ) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "provider": "shared_llm_runtime",
             "config_source": self._config_source,
@@ -47,7 +54,7 @@ class SharedLLMRuntime:
             except Exception:
                 config = None
         if config is not None:
-            model = config.get("model_edition") or config.get("model")
+            model = model_edition or default_model_edition(config) or config.get("model_edition") or config.get("model")
             if model:
                 metadata["model"] = model
         if reasoning_effort:
@@ -63,8 +70,26 @@ class SharedLLMRuntime:
             self._client = self._client_factory(**kwargs)
         return self._client
 
-    def safe_metadata(self, *, reasoning_effort: ReasoningEffort | None = None) -> dict[str, Any]:
-        client = self.client
+    def client_for_model_edition(self, model_edition: str | None = None) -> Any:
+        if not model_edition:
+            return self.client
+        if self._client is not None and self._config is None:
+            return self._client
+        cached = self._clients_by_model_edition.get(model_edition)
+        if cached is not None:
+            return cached
+        config = self._config if self._config is not None else load_config()
+        client = self._client_factory(config=config_with_model_edition(config, model_edition))
+        self._clients_by_model_edition[model_edition] = client
+        return client
+
+    def safe_metadata(
+        self,
+        *,
+        reasoning_effort: ReasoningEffort | None = None,
+        model_edition: str | None = None,
+    ) -> dict[str, Any]:
+        client = self.client_for_model_edition(model_edition)
         metadata_provider = getattr(client, "safe_metadata", None)
         if callable(metadata_provider):
             metadata = dict(metadata_provider(config_source=self._config_source, reasoning_effort=reasoning_effort))
@@ -81,11 +106,17 @@ class SharedLLMRuntime:
         *,
         thinking: bool = False,
         reasoning_effort: ReasoningEffort = "minimal",
+        model_edition: str | None = None,
         on_reasoning_delta: RuntimeReasoningRecorder | None = None,
     ) -> str:
         if thinking and on_reasoning_delta is not None:
             chunks: list[str] = []
-            async for event in self.stream_events(prompt, thinking=thinking, reasoning_effort=reasoning_effort):
+            async for event in self.stream_events(
+                prompt,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                model_edition=model_edition,
+            ):
                 reasoning = event.get("reasoning")
                 if reasoning:
                     await on_reasoning_delta(reasoning)
@@ -94,7 +125,8 @@ class SharedLLMRuntime:
                     chunks.append(answer)
             return "".join(chunks)
 
-        generate_text = getattr(self.client, "generate_text", None)
+        client = self.client_for_model_edition(model_edition)
+        generate_text = getattr(client, "generate_text", None)
         if not callable(generate_text):
             raise TypeError("LLM runtime client must provide generate_text(prompt, ...).")
         result = generate_text(prompt, thinking=thinking, reasoning_effort=reasoning_effort)
@@ -108,13 +140,19 @@ class SharedLLMRuntime:
         *,
         thinking: bool = False,
         reasoning_effort: ReasoningEffort = "minimal",
+        model_edition: str | None = None,
     ) -> AsyncIterator[dict[str, str | None]]:
-        client = self.client
+        client = self.client_for_model_edition(model_edition)
         generator = getattr(client, "generate_text_with_thinking", None)
         if not callable(generator):
             generator = getattr(client, "stream_text", None)
         if not callable(generator):
-            text = await self.generate_text(prompt, thinking=thinking, reasoning_effort=reasoning_effort)
+            text = await self.generate_text(
+                prompt,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                model_edition=model_edition,
+            )
             if text:
                 yield {"answer": text, "reasoning": None}
             return

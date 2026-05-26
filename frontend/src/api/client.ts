@@ -14,6 +14,8 @@ import type {
   TaskInterruptsResponse,
   TaskListResponse,
   MessageAcceptedResponse,
+  ModelEdition,
+  ModelEditionsResponse,
   ReasoningEffort,
   SubmitMessageRequest,
   TaskArtifactsResponse,
@@ -33,6 +35,7 @@ export interface SubmitMessageInput {
   conversationId: string;
   content: string;
   mode: ChatMode;
+  modelEdition?: ModelEdition;
   deepThinking?: boolean;
   reasoningEffort?: ReasoningEffort;
   clientMessageId?: string;
@@ -50,6 +53,7 @@ export interface ApiClient {
   deleteConversationUpload(conversationId: string, uploadId: string): Promise<DeleteUploadResponse>;
   uploadConversationFile(conversationId: string, file: File): Promise<UploadFileResponse>;
   listCapabilities(): Promise<CapabilityListResponse>;
+  getModelEditions(): Promise<ModelEditionsResponse>;
   submitMessage(input: SubmitMessageInput): Promise<MessageAcceptedResponse>;
   listConversations(): Promise<ConversationListResponse>;
   listConversationMessages(conversationId: string): Promise<ConversationMessagesResponse>;
@@ -82,7 +86,6 @@ export class ApiError extends Error {
 export const UI_MODES: UiModeOption[] = [
   { key: 'chat', label: '普通对话', capabilityId: null },
 ];
-
 interface CreateApiClientOptions {
   baseUrl?: string;
   fetcher?: typeof fetch;
@@ -136,6 +139,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       { method: 'DELETE', body: JSON.stringify({ conversation_id: conversationId, upload_id: uploadId }) },
     ),
     listCapabilities: () => request<CapabilityListResponse>('/api/v1/capabilities'),
+    getModelEditions: () => request<ModelEditionsResponse>('/api/v1/config/model-editions'),
     uploadConversationFile: async (conversationId, file) => {
       const formData = new FormData();
       formData.append('conversation_id', conversationId);
@@ -162,16 +166,19 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       }
       const explicitCapabilityId = input.capabilityId ?? null;
       const capabilityId = explicitCapabilityId || mode.capabilityId;
+      const deepThinking = input.deepThinking ?? false;
+      const reasoningEffort = deepThinking ? (input.reasoningEffort ?? 'minimal') : 'minimal';
       const body: SubmitMessageRequest = {
         conversation_id: input.conversationId,
         content: input.content,
         routing_mode: capabilityId ? 'force_capability' : 'auto',
         capability_id: capabilityId,
         client_message_id: input.clientMessageId ?? null,
+        ...(input.modelEdition ? { model_edition: input.modelEdition } : {}),
         metadata: {
           ...(input.metadata ?? {}),
-          deep_thinking: input.deepThinking ?? false,
-          main_agent_reasoning_effort: input.reasoningEffort ?? 'medium',
+          deep_thinking: deepThinking,
+          main_agent_reasoning_effort: reasoningEffort,
         },
       };
       return request<MessageAcceptedResponse>('/api/v1/conversations/chat-messages', {

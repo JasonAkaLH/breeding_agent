@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from src.core.enums import ConversationStatus
 from src.core.models import Conversation
 from src.lifecycle.errors import ConversationBusyError
 
@@ -119,7 +120,13 @@ async def delete_conversation(body: DeleteConversationRequest, request: Request)
     runtime = _runtime(request)
     user = await require_authenticated_user(request)
     conversation_id = body.conversation_id
-    await require_conversation_owner(runtime, conversation_id, user)
+    conversation = await runtime.storage.get_conversation(conversation_id)
+    if (
+        conversation is None
+        or conversation.username != user.username
+        or conversation.status not in {ConversationStatus.ACTIVE, ConversationStatus.DELETING}
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}")
     try:
         result = await runtime.delete_conversation(conversation_id, username=user.username)
     except PermissionError as exc:
@@ -131,4 +138,9 @@ async def delete_conversation(body: DeleteConversationRequest, request: Request)
         deleted=bool(result["deleted"]),
         cancelled_task_ids=list(result["cancelled_task_ids"]),
         deleted_counts=dict(result["deleted_counts"]),
+        delete_status=str(result.get("delete_status") or "completed"),
+        runner_id=result.get("runner_id"),
+        started_at=result.get("started_at"),
+        finished_at=result.get("finished_at"),
+        error_code=result.get("error_code"),
     )

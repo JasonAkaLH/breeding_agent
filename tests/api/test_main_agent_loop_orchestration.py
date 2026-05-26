@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import textwrap
 from typing import Any
@@ -58,6 +59,72 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
         message = await self.runtime.storage.get_message("task-history-final-event:assistant")
         self.assertIsNotNone(message)
         self.assertEqual(message.content, "全局汇总")
+
+    async def test_assistant_history_sync_uses_filtered_final_events_when_full_replay_is_unavailable(self) -> None:
+        forbidden_reasoning = "SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY"
+        await self.runtime.storage.save_conversation(Conversation("conv-history-filtered", "acc-1"))
+        await self.runtime.storage.save_task(
+            Task(
+                "task-history-filtered",
+                "conv-history-filtered",
+                root_message_id="msg-history-filtered",
+                status=TaskStatus.COMPLETED,
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "aaa-intermediate",
+                "task-history-filtered",
+                "node-intermediate",
+                ArtifactType.TEXT,
+                "局部回答",
+                is_complete=True,
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "zzz-final",
+                "task-history-filtered",
+                "node-final",
+                ArtifactType.TEXT,
+                "最终回答内容",
+                is_complete=True,
+            )
+        )
+        await self.runtime.storage.append_event(
+            EventRecord(
+                "evt-reasoning-filtered",
+                "conv-history-filtered",
+                "task-history-filtered",
+                node_id="node-final",
+                event_type="main_agent.reasoning_delta",
+                payload={"delta": forbidden_reasoning},
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+        await self.runtime.storage.append_event(
+            EventRecord(
+                "evt-final-filtered",
+                "conv-history-filtered",
+                "task-history-filtered",
+                node_id="node-final",
+                event_type="main_agent.output_final",
+                payload={"response_role": "final"},
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+
+        async def fail_full_replay(_task_id: str):
+            raise AssertionError("full event replay must not be used for assistant history sync")
+
+        self.runtime.storage.list_events_for_task = fail_full_replay
+
+        response = await self.client.get("/api/v1/conversations/conv-history-filtered/messages")
+
+        self.assertEqual(response.status_code, 200)
+        assistant_messages = [message for message in response.json()["messages"] if message["role"] == "assistant"]
+        self.assertEqual([message["content"] for message in assistant_messages], ["最终回答内容"])
+        self.assertNotIn(forbidden_reasoning, json.dumps(response.json(), ensure_ascii=False))
 
     async def test_assistant_history_sync_tolerates_duplicate_write_race_only_after_message_exists(self) -> None:
         await self.runtime.storage.save_conversation(Conversation("conv-history-race", "acc-1"))
@@ -142,6 +209,137 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
                 "task-history-save-fail",
                 "conv-history-save-fail",
             )
+
+    async def test_messages_endpoint_isolates_assistant_history_sync_save_failure(self) -> None:
+        await self.runtime.storage.save_conversation(Conversation("conv-history-route-save-fail", "acc-1"))
+        await self.runtime.storage.save_task(
+            Task(
+                "task-history-route-save-fail",
+                "conv-history-route-save-fail",
+                root_message_id="msg-history-route-save-fail",
+                status=TaskStatus.COMPLETED,
+            )
+        )
+        await self.runtime.storage.save_artifact(
+            Artifact(
+                "art-final-route-save-fail",
+                "task-history-route-save-fail",
+                "node-final",
+                ArtifactType.TEXT,
+                "最终回答内容",
+                is_complete=True,
+            )
+        )
+        await self.runtime.storage.append_event(
+            EventRecord(
+                "evt-final-route-save-fail",
+                "conv-history-route-save-fail",
+                "task-history-route-save-fail",
+                node_id="node-final",
+                event_type="main_agent.output_final",
+                payload={"response_role": "final"},
+                visibility=EventVisibility.FRONTEND,
+            )
+        )
+
+        original_save_message = self.runtime.storage.save_message
+
+        async def fail_assistant_message_save(message):
+            if message.role == MessageRole.ASSISTANT:
+                raise RuntimeError("SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY")
+            return await original_save_message(message)
+
+        self.runtime.storage.save_message = fail_assistant_message_save
+
+        response = await self.client.get("/api/v1/conversations/conv-history-route-save-fail/messages")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["messages"], [])
+        task = await self.runtime.storage.get_task("task-history-route-save-fail")
+        self.assertEqual(task.status, TaskStatus.COMPLETED)
+        events = await self.runtime.storage.list_events_for_task("task-history-route-save-fail")
+        self.assertFalse(any(event.event_type == "task.failed" for event in events))
+        sync_failures = [event for event in events if event.event_type == "assistant_history_sync.failed"]
+        self.assertEqual(len(sync_failures), 1)
+        self.assertEqual(str(sync_failures[0].visibility), "audit_only")
+        self.assertNotIn(
+            "SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY",
+            json.dumps(sync_failures[0].payload, ensure_ascii=False),
+        )
+
+    async def test_post_completion_assistant_history_sync_failure_does_not_fail_completed_task(self) -> None:
+        release_stream = asyncio.Event()
+
+        async def streamer(_prompt: str, **_kwargs):
+            await release_stream.wait()
+            yield "最终回答"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
+        response = await self.submit_message(
+            conversation_id="conv-history-sync-failure",
+            content="你好",
+            capability_id=None,
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+
+        original_save_message = self.runtime.storage.save_message
+
+        async def fail_assistant_message_save(message):
+            if message.role == MessageRole.ASSISTANT:
+                raise RuntimeError("SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY")
+            return await original_save_message(message)
+
+        self.runtime.storage.save_message = fail_assistant_message_save
+        release_stream.set()
+
+        terminal = await self.wait_for_terminal_task(task_id)
+
+        self.assertEqual(terminal["status"], "completed")
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertTrue(any(event.event_type == "task.completed" for event in events))
+        self.assertFalse(any(event.event_type == "task.failed" for event in events))
+        sync_failures = [event for event in events if event.event_type == "assistant_history_sync.failed"]
+        self.assertEqual(len(sync_failures), 1)
+        self.assertEqual(str(sync_failures[0].visibility), "audit_only")
+        payload_json = json.dumps(sync_failures[0].payload, ensure_ascii=False)
+        self.assertIn("RuntimeError", payload_json)
+        self.assertNotIn("SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY", payload_json)
+
+    async def test_post_completion_filtered_event_read_failure_records_audit_without_failing_task(self) -> None:
+        release_stream = asyncio.Event()
+
+        async def streamer(_prompt: str, **_kwargs):
+            await release_stream.wait()
+            yield "最终回答"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
+        response = await self.submit_message(
+            conversation_id="conv-history-filter-failure",
+            content="你好",
+            capability_id=None,
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+
+        async def fail_filtered_replay(_task_id: str, **_kwargs):
+            raise RuntimeError("SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY")
+
+        self.runtime.storage.list_events_for_task_filtered = fail_filtered_replay
+        release_stream.set()
+
+        terminal = await self.wait_for_terminal_task(task_id)
+
+        self.assertEqual(terminal["status"], "completed")
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertTrue(any(event.event_type == "task.completed" for event in events))
+        self.assertFalse(any(event.event_type == "task.failed" for event in events))
+        sync_failures = [event for event in events if event.event_type == "assistant_history_sync.failed"]
+        self.assertEqual(len(sync_failures), 1)
+        self.assertEqual(str(sync_failures[0].visibility), "audit_only")
+        payload_json = json.dumps(sync_failures[0].payload, ensure_ascii=False)
+        self.assertIn("RuntimeError", payload_json)
+        self.assertNotIn("SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY", payload_json)
 
     async def test_platform_skill_plan_uses_single_shared_main_agent_runtime_and_finalizer(self) -> None:
         class FakeMainAgentLLM:

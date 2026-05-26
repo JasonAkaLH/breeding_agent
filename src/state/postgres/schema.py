@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.state.contracts import CommandStatus
+
+
 @dataclass(frozen=True, slots=True)
 class TableDescriptor:
     name: str
@@ -68,12 +70,21 @@ POSTGRES_STATE_TABLES = {
 }
 
 
-def build_schema_ddl() -> str:
+def build_schema_ddl(*, guarded: bool = False) -> str:
     status_values = ", ".join(f"'{status.value}'" for status in CommandStatus)
+    type_ddl = f"CREATE TYPE state_command_status AS ENUM ({status_values});"
+    if guarded:
+        type_ddl = f"""DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'state_command_status') THEN
+        CREATE TYPE state_command_status AS ENUM ({status_values});
+    END IF;
+END
+$$;"""
     return f"""
-CREATE TYPE state_command_status AS ENUM ({status_values});
+{type_ddl}
 
-CREATE TABLE state_write_command (
+CREATE TABLE IF NOT EXISTS state_write_command (
     command_id text PRIMARY KEY,
     command_type text NOT NULL,
     idempotency_key text NOT NULL,
@@ -97,15 +108,15 @@ CREATE TABLE state_write_command (
     CONSTRAINT uq_state_write_command_type_idempotency UNIQUE (command_type, idempotency_key),
     CONSTRAINT uq_state_write_partition_sequence UNIQUE (partition_key, partition_sequence)
 );
-CREATE INDEX ix_state_write_claim_ready ON state_write_command (status, available_at, priority DESC, created_at);
-CREATE INDEX ix_state_write_partition_outstanding ON state_write_command (partition_key, partition_sequence) WHERE status NOT IN ('succeeded', 'failed', 'dead_lettered', 'cancelled');
+CREATE INDEX IF NOT EXISTS ix_state_write_claim_ready ON state_write_command (status, available_at, priority DESC, created_at);
+CREATE INDEX IF NOT EXISTS ix_state_write_partition_outstanding ON state_write_command (partition_key, partition_sequence) WHERE status NOT IN ('succeeded', 'failed', 'dead_lettered', 'cancelled');
 
-CREATE TABLE state_partition_cursor (
+CREATE TABLE IF NOT EXISTS state_partition_cursor (
     partition_key text PRIMARY KEY,
     next_sequence bigint NOT NULL,
     updated_at timestamptz NOT NULL
 );
-CREATE TABLE state_write_dead_letter (
+CREATE TABLE IF NOT EXISTS state_write_dead_letter (
     dead_letter_id text PRIMARY KEY,
     command_id text NOT NULL,
     command_type text NOT NULL,
@@ -129,7 +140,7 @@ CREATE TABLE state_write_dead_letter (
     completed_at timestamptz,
     dead_lettered_at timestamptz NOT NULL
 );
-CREATE TABLE state_write_archive (
+CREATE TABLE IF NOT EXISTS state_write_archive (
     archived_at timestamptz NOT NULL,
     command_id text NOT NULL,
     command_type text NOT NULL,
@@ -152,7 +163,7 @@ CREATE TABLE state_write_archive (
     updated_at timestamptz NOT NULL,
     completed_at timestamptz
 );
-CREATE TABLE state_migration_ledger (
+CREATE TABLE IF NOT EXISTS state_migration_ledger (
     migration_id text PRIMARY KEY,
     schema_version text NOT NULL,
     status text NOT NULL,

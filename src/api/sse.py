@@ -60,6 +60,17 @@ class InMemoryEventBroker(EventSink):
         for queue in tuple(self._subscribers.get(event.task_id, ())):
             await queue.put(event)
 
+    async def publish_transient(self, event: EventRecord) -> None:
+        """Fan out an in-memory-only event without storage or full audit writes.
+
+        Transient stream deltas can contain user-visible answer/reasoning text.
+        They are allowed to exist only in the active process/SSE response and
+        therefore intentionally bypass the audit sink used by persistent events.
+        """
+
+        for queue in tuple(self._subscribers.get(event.task_id, ())):
+            await queue.put(event)
+
 
 def is_frontend_event(event: EventRecord) -> bool:
     return event.visibility == EventVisibility.FRONTEND

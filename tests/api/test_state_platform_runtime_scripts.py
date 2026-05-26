@@ -31,7 +31,6 @@ class StatePlatformRuntimeScriptsTest(unittest.TestCase):
                 "postgresql",
                 "--dsn-env",
                 "MAF_POSTGRES_STATE_DSN",
-                "--migration-ready",
                 "--simulate-missing-driver",
                 "--json",
             ],
@@ -76,7 +75,6 @@ class StatePlatformRuntimeScriptsTest(unittest.TestCase):
                 "postgresql",
                 "--dsn-env",
                 "MAF_POSTGRES_STATE_DSN",
-                "--migration-ready",
                 "--simulate-missing-driver",
                 "--allow-missing-driver",
                 "--json",
@@ -89,3 +87,37 @@ class StatePlatformRuntimeScriptsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         payload = json.loads(result.stdout)
         self.assertIn("driver psycopg is not installed", payload["error"])
+    def test_conversation_delete_ops_rejects_raw_dsn(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/conversation_delete_ops.py",
+                "--dsn",
+                "postgresql://user:secret@example/db",
+                "--json",
+                "list",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "failed")
+        self.assertIn("raw DSN CLI arguments are not allowed", payload["error"])
+        self.assertNotIn("secret", result.stdout)
+        self.assertNotIn("postgresql://", result.stdout)
+
+    def test_conversation_delete_ops_requires_dsn_env_without_leaking_secret(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "scripts/conversation_delete_ops.py", "--json", "list"],
+            check=False,
+            text=True,
+            capture_output=True,
+            env={},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "failed")
+        self.assertIn("MAF_POSTGRES_STATE_DSN", payload["error"])
+        self.assertNotIn("postgresql://", result.stdout)

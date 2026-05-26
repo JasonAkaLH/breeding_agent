@@ -4,7 +4,7 @@ import { Alert, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Sele
 import zhCN from 'antd/locale/zh_CN';
 import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
@@ -94,10 +94,9 @@ const INTERRUPT_OPTION_LABELS: Record<string, string> = {
   wheat: '小麦',
 };
 const REASONING_EFFORT_OPTIONS: { label: string; value: ReasoningEffort }[] = [
-  { label: '最底', value: 'minimal' },
-  { label: '低', value: 'low' },
-  { label: '中', value: 'medium' },
+  { label: '最低', value: 'minimal' },
   { label: '高', value: 'high' },
+  { label: '最高', value: 'max' },
 ];
 const AGRICULTURE_THEME: ThemeConfig = {
   algorithm: theme.defaultAlgorithm,
@@ -145,8 +144,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }), [eventSourceFactory]);
   const [conversationId, setConversationId] = useState('');
   const mode: ChatMode = 'chat';
+  const [modelEditionOptions, setModelEditionOptions] = useState<ModelEditionOption[]>([]);
+  const [defaultModelEdition, setDefaultModelEdition] = useState<ModelEdition | null>(null);
+  const [modelEdition, setModelEdition] = useState<ModelEdition | null>(null);
   const [deepThinking, setDeepThinking] = useState(false);
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('medium');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('minimal');
   const [input, setInput] = useState('');
   const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
@@ -237,6 +239,38 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         if (!mounted) return;
         setSkillCommands([]);
         showTransientNotice('Skill 列表加载失败，请刷新重试。');
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [api, authUser]);
+
+  useEffect(() => {
+    if (!authUser) {
+      setModelEditionOptions([]);
+      setDefaultModelEdition(null);
+      setModelEdition(null);
+      return undefined;
+    }
+    let mounted = true;
+    api.getModelEditions()
+      .then((result) => {
+        if (!mounted) return;
+        setModelEditionOptions(result.options);
+        setDefaultModelEdition(result.default_model_edition);
+        setModelEdition((current) => {
+          if (current && result.options.some((option) => option.value === current)) {
+            return current;
+          }
+          return result.default_model_edition ?? result.options[0]?.value ?? null;
+        });
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setModelEditionOptions([]);
+        setDefaultModelEdition(null);
+        setModelEdition(null);
+        showTransientNotice('模型版本配置加载失败，请刷新重试。');
       });
     return () => {
       mounted = false;
@@ -523,6 +557,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const nextConversationId = loadOrCreateConversationId(result.user.username);
     initializedWorkspaceConversationIdRef.current = null;
     setActiveConversationId(nextConversationId);
+    setModelEdition(defaultModelEdition);
     setMessages([]);
     setPendingUploads([]);
     clearCurrentTaskRuntime({ closeSubscription: true });
@@ -560,6 +595,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setActiveConversationId(nextConversationId);
     setMessages([]);
     setInput('');
+    setModelEdition(defaultModelEdition);
     setPendingUploads([]);
     setCurrentTaskId(null);
     setCurrentAssistantId(null);
@@ -599,16 +635,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
     clearTransientNotice();
     setDeletingConversationIds((current) => new Set(current).add(targetConversationId));
+    const deletingCurrentConversation = targetConversationId === conversationId;
+    if (deletingCurrentConversation) {
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      const next = createConversationId();
+      saveConversationId(authUser.username, next);
+      resetConversationWorkspace(next);
+    }
     try {
       const result = await api.deleteConversation(targetConversationId);
       setConversationHistory((current) => current.filter((item) => item.conversation_id !== targetConversationId));
-      if (targetConversationId === conversationId) {
-        subscriptionRef.current?.close();
-        subscriptionRef.current = null;
-        const next = createConversationId();
-        saveConversationId(authUser.username, next);
-        resetConversationWorkspace(next);
-      }
       showTransientNotice(result.cancelled_task_ids.length > 0
         ? '历史会话已删除，相关运行中任务已自动停止。'
         : '历史会话已删除。', 'success');
@@ -774,8 +811,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         conversationId: targetConversationId,
         content,
         mode,
+        modelEdition: modelEdition ?? undefined,
         deepThinking,
-        reasoningEffort,
+        reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
         capabilityId: forcedCommand?.capabilityId,
         metadata: {
           ...(pendingUploads.length > 0 ? { upload_ids: pendingUploads.map((upload) => upload.upload_id) } : {}),
@@ -1181,13 +1219,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         上传文件
       </Button>
       <Space size="small" align="center" className="composer-menu-row">
+        <Typography.Text type="secondary">模型版本</Typography.Text>
+        <Select
+          aria-label="模型版本"
+          value={modelEdition ?? undefined}
+          options={modelEditionOptions}
+          onChange={(value) => setModelEdition(value)}
+          disabled={interactionLocked || modelEditionOptions.length === 0}
+          size="small"
+          style={{ width: 176 }}
+        />
+      </Space>
+      <Space size="small" align="center" className="composer-menu-row">
         <Typography.Text type="secondary">思考强度</Typography.Text>
         <Select
           aria-label="思考强度"
           value={reasoningEffort}
           options={REASONING_EFFORT_OPTIONS}
           onChange={setReasoningEffort}
-          disabled={interactionLocked}
+          disabled={interactionLocked || !deepThinking}
           size="small"
           style={{ width: 104 }}
         />
@@ -1197,7 +1247,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         <Switch
           aria-label="深度思考"
           checked={deepThinking}
-          onChange={setDeepThinking}
+          onChange={(checked) => {
+            setDeepThinking(checked);
+            if (!checked) {
+              setReasoningEffort('minimal');
+            }
+          }}
           checkedChildren="开"
           unCheckedChildren="关"
           disabled={interactionLocked}
@@ -1551,16 +1606,23 @@ function ConversationHistoryPanel({
           {conversations.map((conversation) => {
             const title = conversation.title?.trim() || conversation.conversation_id.slice(0, 18);
             const active = conversation.conversation_id === activeConversationId;
+            const isDeleting = deletingConversationIds.has(conversation.conversation_id);
             return (
-              <div key={conversation.conversation_id} className="history-row" role="listitem">
+              <div key={conversation.conversation_id} className={`history-row${isDeleting ? ' history-row-deleting' : ''}`} role="listitem">
                 <button
                   type="button"
                   className={`history-item${active ? ' history-item-active' : ''}`}
-                  disabled={interactionLocked}
+                  disabled={interactionLocked || isDeleting}
                   aria-current={active ? 'page' : undefined}
+                  aria-busy={isDeleting ? 'true' : undefined}
                   onClick={() => onSelectConversation(conversation.conversation_id)}
                 >
                   <span className="history-item-title">{title}</span>
+                  {isDeleting ? (
+                    <span className="history-delete-indicator" role="status" aria-label={`正在删除历史会话 ${title}`}>
+                      <Spin size="small" />
+                    </span>
+                  ) : null}
                 </button>
                 <div className="history-actions" aria-label={`历史会话操作 ${title}`}>
                   <Button
@@ -1568,7 +1630,7 @@ function ConversationHistoryPanel({
                     size="small"
                     aria-label={`重命名历史会话 ${title}`}
                     loading={renamingConversationIds.has(conversation.conversation_id)}
-                    disabled={loading}
+                    disabled={loading || isDeleting}
                     onClick={() => onRenameConversation(conversation.conversation_id)}
                   >
                     重命名
@@ -1578,8 +1640,8 @@ function ConversationHistoryPanel({
                     type="text"
                     size="small"
                     aria-label={`删除历史会话 ${title}`}
-                    loading={deletingConversationIds.has(conversation.conversation_id)}
-                    disabled={loading}
+                    loading={isDeleting}
+                    disabled={loading || isDeleting}
                     onClick={() => onDeleteConversation(conversation.conversation_id)}
                   >
                     删除
@@ -1956,7 +2018,7 @@ function ReasoningBox({ content, complete }: { content: string; complete?: boole
         ) : null}
       </div>
       <div className="reasoning-box-content">
-        {content ? <MarkdownText content={content} /> : <Typography.Text type="secondary">{placeholder}</Typography.Text>}
+        {content ? <MarkdownText content={content} /> : <Typography.Text className="reasoning-placeholder" type="secondary">{placeholder}</Typography.Text>}
       </div>
     </section>
   );

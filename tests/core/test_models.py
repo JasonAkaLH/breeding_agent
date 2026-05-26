@@ -50,6 +50,14 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "title",
                 "created_at",
                 "updated_at",
+                "delete_runner_id",
+                "delete_requested_at",
+                "delete_started_at",
+                "delete_finished_at",
+                "delete_failed_at",
+                "delete_error_code",
+                "delete_error_summary",
+                "delete_phase",
             ],
         )
 

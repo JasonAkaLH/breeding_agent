@@ -7,11 +7,13 @@ from fastapi import HTTPException, Request, status
 from src.api.runtime import ApiRuntime
 from src.auth import AuthTokenValidationError
 from src.core.models import Conversation, Task
+from src.core.enums import ConversationStatus
 
 
 @dataclass(slots=True, frozen=True)
 class AuthenticatedUser:
     username: str
+    auth_generation: int
 
 
 def _runtime(request: Request) -> ApiRuntime:
@@ -37,18 +39,18 @@ async def require_authenticated_user(request: Request) -> AuthenticatedUser:
         username_token = await _runtime(request).get_username_for_bearer(token)
     except AuthTokenValidationError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication expired") from exc
-    return AuthenticatedUser(username=username_token.username)
+    return AuthenticatedUser(username=username_token.username, auth_generation=username_token.auth_generation)
 
 
-async def require_current_bearer_for_user(request: Request, username: str) -> None:
+async def require_current_bearer_for_user(request: Request, username: str, *, touch: bool = True) -> None:
     token = bearer_token_from_request(request)
-    if token is None or not await _runtime(request).bearer_token_is_current_for_username(token, username):
+    if token is None or not await _runtime(request).bearer_token_is_current_for_username(token, username, touch=touch):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication expired")
 
 
 async def require_conversation_owner(runtime: ApiRuntime, conversation_id: str, user: AuthenticatedUser) -> Conversation:
     conversation = await runtime.storage.get_conversation(conversation_id)
-    if conversation is None or conversation.username != user.username:
+    if conversation is None or conversation.username != user.username or conversation.status != ConversationStatus.ACTIVE:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}")
     return conversation
 
@@ -56,6 +58,8 @@ async def require_conversation_owner(runtime: ApiRuntime, conversation_id: str, 
 async def get_optional_owned_conversation(runtime: ApiRuntime, conversation_id: str, user: AuthenticatedUser) -> Conversation | None:
     conversation = await runtime.storage.get_conversation(conversation_id)
     if conversation is not None and conversation.username != user.username:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}")
+    if conversation is not None and conversation.status != ConversationStatus.ACTIVE:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}")
     return conversation
 
@@ -65,6 +69,6 @@ async def require_task_owner(runtime: ApiRuntime, task_id: str, user: Authentica
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown task: {task_id}")
     conversation = await runtime.storage.get_conversation(task.conversation_id)
-    if conversation is None or conversation.username != user.username:
+    if conversation is None or conversation.username != user.username or conversation.status != ConversationStatus.ACTIVE:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown task: {task_id}")
     return task

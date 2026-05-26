@@ -1,5 +1,6 @@
 export type ChatMode = 'chat';
-export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'minimal' | 'high' | 'max';
+export type ModelEdition = string;
 
 export interface UserResponse {
   username: string;
@@ -17,12 +18,23 @@ export interface LogoutResponse {
   logged_out: boolean;
 }
 
+export interface ModelEditionOption {
+  value: ModelEdition;
+  label: string;
+}
+
+export interface ModelEditionsResponse {
+  default_model_edition: ModelEdition | null;
+  options: ModelEditionOption[];
+}
+
 export interface SubmitMessageRequest {
   conversation_id: string;
   content: string;
   routing_mode: 'auto' | string;
   capability_id: string | null;
   client_message_id?: string | null;
+  model_edition?: ModelEdition | null;
   metadata: Record<string, unknown>;
 }
 
@@ -135,6 +147,11 @@ export interface DeleteConversationResponse {
   deleted: boolean;
   cancelled_task_ids: string[];
   deleted_counts: Record<string, number>;
+  delete_status?: 'completed' | 'failed' | string;
+  runner_id?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_code?: string | null;
 }
 
 export interface TaskNodeResponse {

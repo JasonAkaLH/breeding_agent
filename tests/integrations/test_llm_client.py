@@ -259,7 +259,7 @@ class LLMClientTest(unittest.TestCase):
                 async for event in client.generate_text_with_thinking(
                     "prompt",
                     thinking=True,
-                    reasoning_effort="low",
+                    reasoning_effort="max",
                 )
             ]
 
@@ -274,7 +274,7 @@ class LLMClientTest(unittest.TestCase):
             ],
         )
         call = fake_completions.calls[0]
-        self.assertEqual(call["reasoning_effort"], "low")
+        self.assertEqual(call["reasoning_effort"], "max")
         self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
         self.assertTrue(call["stream"])
 
@@ -342,6 +342,19 @@ class LLMClientTest(unittest.TestCase):
         answer = asyncio.run(client.generate_text("prompt", thinking=False, reasoning_effort="minimal"))
 
         self.assertEqual(answer, '{"mode":"answer"}')
+        call = fake_completions.calls[0]
+        self.assertFalse(call["stream"])
+        self.assertEqual(call["reasoning_effort"], "minimal")
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_generate_text_defaults_to_minimal_reasoning_without_thinking(self) -> None:
+        client = self.make_client()
+        fake_completions = _FakeCompletions(response=_completion("OK"))
+        client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+        answer = asyncio.run(client.generate_text("prompt"))
+
+        self.assertEqual(answer, "OK")
         call = fake_completions.calls[0]
         self.assertFalse(call["stream"])
         self.assertEqual(call["reasoning_effort"], "minimal")

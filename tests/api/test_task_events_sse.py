@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from datetime import datetime, timedelta
 
-from fastapi import HTTPException
 
 from src.api.routes.tasks import _iter_authorized_frontend_events
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
@@ -149,9 +148,9 @@ class TaskEventsSSEAPITest(APITestCase):
             )
         )
 
-        with self.assertRaises(HTTPException) as ctx:
-            await asyncio.wait_for(pending, timeout=2)
-        self.assertEqual(ctx.exception.status_code, 401)
+        event = await asyncio.wait_for(pending, timeout=2)
+        self.assertEqual(event.event_type, "auth.invalidated")
+        self.assertEqual(event.payload["reason"], "auth_generation_mismatch")
 
     async def test_idle_task_event_stream_revalidates_current_token_without_new_events(self) -> None:
         await self.logout()
@@ -189,9 +188,9 @@ class TaskEventsSSEAPITest(APITestCase):
         )
         self.assertEqual(refreshed.status_code, 200, refreshed.text)
 
-        with self.assertRaises(HTTPException) as ctx:
-            await asyncio.wait_for(pending, timeout=1)
-        self.assertEqual(ctx.exception.status_code, 401)
+        event = await asyncio.wait_for(pending, timeout=1)
+        self.assertEqual(event.event_type, "auth.invalidated")
+        self.assertEqual(event.payload["reason"], "auth_generation_mismatch")
 
     async def test_task_events_endpoint_replays_history_and_streams_live_completion(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()

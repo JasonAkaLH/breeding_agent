@@ -9,7 +9,10 @@ from tests.api.support import APITestCase
 
 class MainAgentLLMAPITest(APITestCase):
     async def test_default_message_uses_main_agent_and_streams_output_events(self) -> None:
+        release_stream = asyncio.Event()
+
         async def streamer(prompt: str):
+            await release_stream.wait()
             yield "你好"
             yield "，我是主代理"
 
@@ -27,24 +30,37 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
+        iterator = self.runtime.iter_frontend_events(task_id).__aiter__()
+        seen_types: set[str] = set()
+        deltas: list[str] = []
+
+        async def collect_events() -> None:
+            while "task.completed" not in seen_types:
+                event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+                seen_types.add(event.event_type)
+                if event.event_type == "main_agent.output_delta":
+                    deltas.append(event.payload["delta"])
+
+        collector = asyncio.create_task(collect_events())
+        await asyncio.sleep(0.05)
+        release_stream.set()
+        await collector
+
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["completed_node_count"], 1)
 
-        iterator = self.runtime.iter_frontend_events(task_id).__aiter__()
-        seen_types = set()
-        deltas: list[str] = []
-        while "task.completed" not in seen_types:
-            event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
-            seen_types.add(event.event_type)
-            if event.event_type == "main_agent.output_delta":
-                deltas.append(event.payload["delta"])
-
         self.assertEqual(deltas, ["你好", "，我是主代理"])
         self.assertIn("main_agent.output_final", seen_types)
+        persisted_events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in persisted_events))
+        self.assertTrue(any(event.event_type == "main_agent.output_final" for event in persisted_events))
 
     async def test_main_agent_reasoning_content_is_exposed_as_frontend_events(self) -> None:
+        release_stream = asyncio.Event()
+
         async def streamer(prompt: str, *, reasoning_effort: str = "minimal", thinking: bool = False):
+            await release_stream.wait()
             yield {"reasoning": "先分析", "answer": None}
             yield {"answer": "最终回答", "reasoning": None}
 
@@ -61,28 +77,39 @@ class MainAgentLLMAPITest(APITestCase):
         )
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
+
+        iterator = self.runtime.iter_frontend_events(task_id).__aiter__()
+        seen_types: set[str] = set()
+        frontend_reasoning: list[str] = []
+        frontend_answer: list[str] = []
+
+        async def collect_events() -> None:
+            while "task.completed" not in seen_types:
+                event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+                seen_types.add(event.event_type)
+                if event.event_type == "main_agent.reasoning_delta":
+                    frontend_reasoning.append(event.payload["delta"])
+                if event.event_type == "main_agent.output_delta":
+                    frontend_answer.append(event.payload["delta"])
+
+        collector = asyncio.create_task(collect_events())
+        await asyncio.sleep(0.05)
+        release_stream.set()
+        await collector
+
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
 
-        events = await self.runtime.storage.list_events_for_task(task_id)
-        frontend_reasoning = [
-            event.payload["delta"]
-            for event in events
-            if event.event_type == "main_agent.reasoning_delta" and str(event.visibility) == "frontend"
-        ]
-        frontend_answer = [
-            event.payload["delta"]
-            for event in events
-            if event.event_type == "main_agent.output_delta" and str(event.visibility) == "frontend"
-        ]
-
         self.assertEqual(frontend_reasoning, ["先分析"])
         self.assertEqual(frontend_answer, ["最终回答"])
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertFalse(any(event.event_type == "main_agent.reasoning_delta" for event in events))
+        self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in events))
         self.assertTrue(
             all(
                 event.created_at is not None
                 for event in events
-                if event.event_type in {"main_agent.reasoning_delta", "main_agent.output_delta", "main_agent.output_final"}
+                if event.event_type in {"main_agent.output_final"}
             )
         )
 
@@ -363,7 +390,7 @@ class MainAgentLLMAPITest(APITestCase):
                 "model": "fake-planner-model",
             },
             planner_llm_client_factory=FakePlannerLLMClient,
-            planner_reasoning_effort="low",
+            planner_reasoning_effort="max",
             skill_roots=None,
         )
         response = await self.submit_message(
@@ -376,7 +403,7 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(terminal["status"], "completed")
 
         self.assertEqual(factory_kwargs[0]["config"]["model"], "fake-planner-model")
-        self.assertEqual(planner_reasoning_efforts, ["low"])
+        self.assertEqual(planner_reasoning_efforts, ["minimal"])
         self.assertIn("main_agent.respond", planner_prompts[0])
 
     async def test_rejects_old_and_internal_generic_data_lookup_capability_ids(self) -> None:
@@ -455,7 +482,7 @@ triggers:
                 "model": "fake-main-agent-model",
             },
             main_agent_llm_client_factory=FakeLLMClient,
-            main_agent_reasoning_effort="low",
+            main_agent_reasoning_effort="max",
             skill_roots=None,
         )
 
@@ -473,11 +500,11 @@ triggers:
         llm_event = next(event for event in events if event.event_type == "main_agent.llm_call")
 
         self.assertEqual(factory_kwargs[0]["config"]["model"], "fake-main-agent-model")
-        self.assertEqual(reasoning_efforts, ["low"])
+        self.assertEqual(reasoning_efforts, ["minimal"])
         self.assertIn("你好，主代理", prompts[0])
         self.assertEqual(llm_event.payload["model"], "fake-main-agent-model")
         self.assertEqual(llm_event.payload["config_source"], "injected_config")
-        self.assertEqual(llm_event.payload["reasoning_effort"], "low")
+        self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
         self.assertNotIn("api_key", llm_event.payload)
         self.assertNotIn("secret-test-key", str(llm_event.payload))
 
@@ -526,7 +553,7 @@ triggers:
                 "content": "请深入分析",
                 "routing_mode": "auto",
                 "capability_id": None,
-                "metadata": {"deep_thinking": True, "main_agent_reasoning_effort": "medium"},
+                "metadata": {"deep_thinking": True, "main_agent_reasoning_effort": "max"},
             },
         )
         self.assertEqual(response.status_code, 202)
@@ -536,10 +563,48 @@ triggers:
 
         events = await self.runtime.storage.list_events_for_task(task_id)
         llm_event = next(event for event in events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(reasoning_efforts, ["medium"])
+        self.assertEqual(reasoning_efforts, ["max"])
         self.assertEqual(thinking_flags, [True])
-        self.assertEqual(llm_event.payload["reasoning_effort"], "medium")
+        self.assertEqual(llm_event.payload["reasoning_effort"], "max")
         self.assertTrue(llm_event.payload["thinking_enabled"])
+
+    async def test_metadata_forces_minimal_reasoning_when_thinking_is_disabled(self) -> None:
+        reasoning_efforts: list[str] = []
+        thinking_flags: list[bool] = []
+
+        async def streamer(
+            prompt: str,
+            *,
+            reasoning_effort: str = "minimal",
+            thinking: bool = False,
+        ) -> AsyncIterator[str]:
+            reasoning_efforts.append(reasoning_effort)
+            thinking_flags.append(thinking)
+            yield "普通回答"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
+
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-main-nonthinking-effort",
+                "content": "普通回答",
+                "routing_mode": "auto",
+                "capability_id": None,
+                "metadata": {"deep_thinking": False, "main_agent_reasoning_effort": "max"},
+            },
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        llm_event = next(event for event in events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(reasoning_efforts, ["minimal"])
+        self.assertEqual(thinking_flags, [False])
+        self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
+        self.assertFalse(llm_event.payload["thinking_enabled"])
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ use thiserror::Error;
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
 pub const SCHEMA_HASH: &str =
-    "maf_core_types_core_v1_schema_20260525_username_token_legacy_auth_removed";
+    "maf_core_types_core_v1_schema_20260526_auth_generation_strong_conversation_delete";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +139,8 @@ pub fn enum_contracts() -> BTreeMap<String, Vec<NamedValue>> {
                 ("ACTIVE", "active"),
                 ("ARCHIVED", "archived"),
                 ("LOCKED", "locked"),
+                ("DELETING", "deleting"),
+                ("DELETING_FAILED", "deleting_failed"),
             ]),
         ),
         (
@@ -269,6 +271,8 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "api_token_hash",
                 "token_issued_at",
                 "token_last_used_at",
+                "auth_generation",
+                "auth_generation_updated_at",
                 "created_at",
                 "updated_at",
             ]),
@@ -329,6 +333,14 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "title",
                 "created_at",
                 "updated_at",
+                "delete_runner_id",
+                "delete_requested_at",
+                "delete_started_at",
+                "delete_finished_at",
+                "delete_failed_at",
+                "delete_error_code",
+                "delete_error_summary",
+                "delete_phase",
             ]),
         ),
         (
@@ -587,6 +599,8 @@ mod tests {
                 "api_token_hash",
                 "token_issued_at",
                 "token_last_used_at",
+                "auth_generation",
+                "auth_generation_updated_at",
                 "created_at",
                 "updated_at",
             ]

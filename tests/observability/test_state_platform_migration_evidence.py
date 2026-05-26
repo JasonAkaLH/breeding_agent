@@ -2,29 +2,40 @@ from __future__ import annotations
 
 import unittest
 
-from src.state.migration import MigrationEvidence
+from src.state.cutover import FreshCutoverInput, build_postgres_fresh_cutover_plan
 
 
-class StatePlatformMigrationEvidenceTest(unittest.TestCase):
-    def test_migration_evidence_public_report_redacts_secret_and_tracks_pending_gates(self) -> None:
-        evidence = MigrationEvidence(
-            migration_id="mig-1",
-            status="pending",
-            row_counts={"conversation": 10},
-            checksums={"conversation": "sha256:abc"},
-            pending_gates=("postgres_test_dsn_not_configured", "operator_confirmation_missing"),
-            metadata={"dsn": "postgresql_fixture_dsn", "token": "<fixture>"},
+class StatePlatformCutoverEvidenceTest(unittest.TestCase):
+    def test_cutover_evidence_public_report_redacts_secret_and_has_no_sqlite_counts(self) -> None:
+        evidence = build_postgres_fresh_cutover_plan(
+            FreshCutoverInput(
+                postgres_dsn="postgresql://user:secret@example/db",
+                schema_ready=True,
+                runtime_smoke_ready=True,
+                queue_backlog=0,
+                dead_letter_count=0,
+                sqlite_history_abandoned=True,
+                metadata={"dsn": "postgresql_fixture_dsn", "token": "nested-token"},
+            )
         )
         public = evidence.public_dict()
-        self.assertIn("postgres_test_dsn_not_configured", public["pending_gates"])
+        self.assertTrue(public["ready"])
+        self.assertNotIn("row_counts", public)
+        self.assertNotIn("checksums", public)
         self.assertNotIn("postgresql://", repr(public))
-        self.assertNotIn("abc", repr(public["metadata"]))
+        self.assertNotIn("nested-token", repr(public))
 
-    def test_nested_migration_metadata_is_recursively_redacted(self) -> None:
-        evidence = MigrationEvidence(
-            migration_id="mig-2",
-            status="pending",
-            metadata={"nested": {"dsn": "postgresql_fixture_dsn", "token": "nested-token"}},
+    def test_nested_cutover_metadata_is_recursively_redacted(self) -> None:
+        evidence = build_postgres_fresh_cutover_plan(
+            FreshCutoverInput(
+                postgres_dsn="postgresql_fixture_dsn",
+                schema_ready=False,
+                runtime_smoke_ready=True,
+                queue_backlog=0,
+                dead_letter_count=0,
+                sqlite_history_abandoned=True,
+                metadata={"nested": {"dsn": "postgresql_fixture_dsn", "token": "nested-token"}},
+            )
         )
         public = evidence.public_dict()
         self.assertNotIn("postgresql_fixture_dsn", repr(public))

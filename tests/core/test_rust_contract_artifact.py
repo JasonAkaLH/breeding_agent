@@ -23,7 +23,7 @@ class CoreRustContractArtifactTest(unittest.TestCase):
 
     def test_core_model_fields_are_backed_by_rust_contract_artifact(self) -> None:
         contract = load_core_contract()
-        self.assertIn("legacy_auth_removed", contract["schema_hash"])
+        self.assertIn("auth_generation", contract["schema_hash"])
         for legacy_model in ("AuthUser", "AuthSession", "CaptchaChallenge", "AuthApiToken"):
             self.assertNotIn(legacy_model, contract["models"])
 
@@ -40,6 +40,8 @@ class CoreRustContractArtifactTest(unittest.TestCase):
                 "api_token_hash",
                 "token_issued_at",
                 "token_last_used_at",
+                "auth_generation",
+                "auth_generation_updated_at",
                 "created_at",
                 "updated_at",
             ],

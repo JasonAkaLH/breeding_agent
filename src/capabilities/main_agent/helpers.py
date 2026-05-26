@@ -13,6 +13,7 @@ from src.core.models import Artifact, EventRecord
 
 StreamGenerator = Callable[..., AsyncIterator[str] | Awaitable[str] | Iterable[str] | str]
 LiveEventRecorder = Callable[[EventRecord], Awaitable[None]]
+TransientEventPublisher = Callable[[EventRecord], Awaitable[None]]
 
 
 def make_event(
@@ -74,12 +75,14 @@ async def iter_stream_events(
     *,
     reasoning_effort: str | None = None,
     thinking: bool | None = None,
+    model_edition: str | None = None,
 ) -> AsyncIterator[dict[str, str | None]]:
     stream_options = _accepted_stream_options(
         generator,
         {
             "reasoning_effort": reasoning_effort,
             "thinking": thinking,
+            "model_edition": model_edition,
         },
     )
     produced = generator(prompt, **stream_options) if stream_options else generator(prompt)

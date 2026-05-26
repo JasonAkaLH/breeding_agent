@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
+
 from httpx_sse import aconnect_sse
+
+from src.core.enums import ConversationStatus, MessageRole, TaskStatus
+from src.core.models import Conversation, Message, Task
 
 from tests.api.support import APITestCase, blocking_mysql_adapter
 
@@ -174,6 +180,112 @@ class AuthIsolationAPITest(APITestCase):
         self.assertEqual(await self.runtime.storage.list_events_for_task(task_id), [])
         self.assertIsNotNone(await self.runtime.storage.get_auth_user_token("alice"))
 
+    async def test_deleting_conversation_is_hidden_from_ordinary_routes(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        await self.login("alice")
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-deleting",
+                username="alice",
+                status=ConversationStatus.DELETING,
+                current_task_id="task-deleting",
+                title="Deleting",
+                delete_runner_id="delete-test",
+                delete_requested_at=now,
+                delete_phase="deleting_db",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await self.runtime.storage.save_message(
+            Message(
+                message_id="msg-deleting",
+                conversation_id="conv-deleting",
+                role=MessageRole.USER,
+                content="hidden",
+                task_id="task-deleting",
+                created_at=now,
+            )
+        )
+        await self.runtime.storage.save_task(
+            Task(
+                task_id="task-deleting",
+                conversation_id="conv-deleting",
+                root_message_id="msg-deleting",
+                status=TaskStatus.RUNNING,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        conversations = await self.client.get("/api/v1/conversations")
+        self.assertEqual(conversations.status_code, 200)
+        self.assertNotIn("conv-deleting", [item["conversation_id"] for item in conversations.json()["conversations"]])
+        self.assertEqual((await self.client.get("/api/v1/conversations/conv-deleting/messages")).status_code, 404)
+        self.assertEqual((await self.client.patch("/api/v1/conversations", json={"conversation_id": "conv-deleting", "title": "Nope"})).status_code, 404)
+        self.assertEqual((await self.submit_message(conversation_id="conv-deleting", content="should fail", capability_id=None)).status_code, 404)
+        self.assertEqual((await self.client.get("/api/v1/tasks/task-deleting")).status_code, 404)
+        self.assertEqual((await self.client.post("/api/v1/tasks/cancel", json={"task_id": "task-deleting"})).status_code, 404)
+        self.assertEqual((await self.client.get("/api/v1/conversations/conv-deleting/uploads")).status_code, 404)
+
+    async def test_delete_runner_continues_after_waiter_cancellation(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-cancel-waiter",
+                username="alice",
+                title="cancel waiter",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        original_delete_physical = self.runtime.storage.delete_conversation_physical
+        delete_started = asyncio.Event()
+        release_delete = asyncio.Event()
+
+        async def slow_delete(conversation_id: str) -> dict[str, int]:
+            delete_started.set()
+            await release_delete.wait()
+            return await original_delete_physical(conversation_id)
+
+        self.runtime.storage.delete_conversation_physical = slow_delete  # type: ignore[method-assign]
+        waiter = asyncio.create_task(self.runtime.delete_conversation("conv-cancel-waiter", username="alice"))
+        await delete_started.wait()
+        waiter.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+
+        release_delete.set()
+
+        async def physically_deleted() -> bool:
+            return await self.runtime.storage.get_conversation("conv-cancel-waiter") is None
+
+        await self.wait_for_condition(physically_deleted)
+
+    async def test_startup_recovery_reenters_deleting_conversation_runner(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-recover-delete",
+                username="alice",
+                status=ConversationStatus.DELETING,
+                title="recover delete",
+                delete_runner_id="delete-recover",
+                delete_requested_at=now,
+                delete_started_at=now,
+                delete_phase="deleting_db",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        await self.runtime.recover_deleting_conversations()
+
+        async def physically_deleted() -> bool:
+            return await self.runtime.storage.get_conversation("conv-recover-delete") is None
+
+        await self.wait_for_condition(physically_deleted)
+
     async def test_delete_conversation_auto_cancels_running_task_before_purge(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
@@ -234,3 +346,92 @@ class AuthIsolationAPITest(APITestCase):
         release.set()
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "cancelled")
+    async def test_submit_does_not_revive_conversation_marked_deleting_mid_request(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        await self.login("alice")
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-race-delete",
+                username="alice",
+                title="race",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        original_refresh_skills = self.runtime._refresh_skills_for_new_conversation_if_needed
+
+        async def mark_deleting_during_submit(conversation_id, existing_conversation):
+            await original_refresh_skills(conversation_id, existing_conversation)
+            await self.runtime.storage.mark_conversation_deleting(
+                conversation_id,
+                runner_id="delete-race",
+                requested_at=now,
+                started_at=now,
+                phase="marking",
+            )
+
+        self.runtime._refresh_skills_for_new_conversation_if_needed = mark_deleting_during_submit  # type: ignore[method-assign]
+
+        response = await self.submit_message(conversation_id="conv-race-delete", content="should not revive", capability_id=None)
+
+        self.assertEqual(response.status_code, 404, response.text)
+        current = await self.runtime.storage.get_conversation("conv-race-delete")
+        self.assertIsNotNone(current)
+        assert current is not None
+        self.assertEqual(current.status, ConversationStatus.DELETING)
+        self.assertIsNone(current.current_task_id)
+        self.assertEqual(await self.runtime.storage.list_messages_for_conversation("conv-race-delete"), [])
+        self.assertEqual(await self.runtime.storage.list_tasks_for_conversation("conv-race-delete"), [])
+
+    async def test_delete_failure_after_waiter_cancellation_is_observed(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        await self.login("alice")
+        await self.runtime.storage.save_conversation(
+            Conversation(
+                conversation_id="conv-delete-fails-after-cancel",
+                username="alice",
+                title="failure after cancellation",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        original_delete_physical = self.runtime.storage.delete_conversation_physical
+        delete_started = asyncio.Event()
+        release_delete = asyncio.Event()
+        unhandled_contexts: list[dict[str, object]] = []
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+
+        def capture_unhandled(_loop, context):
+            unhandled_contexts.append(dict(context))
+
+        async def failing_delete(conversation_id: str) -> dict[str, int]:
+            delete_started.set()
+            await release_delete.wait()
+            raise ValueError(f"simulated physical delete failure for {conversation_id}")
+
+        self.runtime.storage.delete_conversation_physical = failing_delete  # type: ignore[method-assign]
+        loop.set_exception_handler(capture_unhandled)
+        try:
+            waiter = asyncio.create_task(self.runtime.delete_conversation("conv-delete-fails-after-cancel", username="alice"))
+            await delete_started.wait()
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+
+            release_delete.set()
+
+            async def marked_failed() -> bool:
+                current = await self.runtime.storage.get_conversation("conv-delete-fails-after-cancel")
+                return current is not None and current.status == ConversationStatus.DELETING_FAILED
+
+            await self.wait_for_condition(marked_failed)
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+            self.runtime.storage.delete_conversation_physical = original_delete_physical  # type: ignore[method-assign]
+
+        self.assertEqual(
+            [context.get("message") for context in unhandled_contexts],
+            [],
+        )

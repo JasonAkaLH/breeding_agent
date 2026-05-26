@@ -1,7 +1,7 @@
 {
   "component": "maf_core_types",
   "contract_version": "core.v1",
-  "schema_hash": "maf_core_types_core_v1_schema_20260525_username_token_legacy_auth_removed",
+  "schema_hash": "maf_core_types_core_v1_schema_20260526_auth_generation_strong_conversation_delete",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
   "supported_features": [
     "core_contract_artifact",
@@ -55,6 +55,14 @@
       {
         "name": "LOCKED",
         "value": "locked"
+      },
+      {
+        "name": "DELETING",
+        "value": "deleting"
+      },
+      {
+        "name": "DELETING_FAILED",
+        "value": "deleting_failed"
       }
     ],
     "DependencyType": [
@@ -296,6 +304,8 @@
       "api_token_hash",
       "token_issued_at",
       "token_last_used_at",
+      "auth_generation",
+      "auth_generation_updated_at",
       "created_at",
       "updated_at"
     ],
@@ -345,7 +355,15 @@
       "current_task_id",
       "title",
       "created_at",
-      "updated_at"
+      "updated_at",
+      "delete_runner_id",
+      "delete_requested_at",
+      "delete_started_at",
+      "delete_finished_at",
+      "delete_failed_at",
+      "delete_error_code",
+      "delete_error_summary",
+      "delete_phase"
     ],
     "ConversationMemorySummary": [
       "summary_id",

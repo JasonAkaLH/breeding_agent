@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import tempfile
 import textwrap
 import unittest
@@ -38,13 +37,21 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_executor_streams_answer_chunks_and_returns_text_artifact(self) -> None:
         seen_prompts: list[str] = []
+        transient_events = []
 
         async def streamer(prompt: str):
             seen_prompts.append(prompt)
             yield "hello"
             yield " world"
 
-        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=SkillCatalog(()),
+            transient_event_publisher=publish_transient,
+        )
         result = await executor.execute(
             CapabilityExecutionRequest(
                 capability_id="main_agent.respond",
@@ -63,10 +70,8 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要假定用户每次都知道自己要什么", seen_prompts[0])
         self.assertIn("a.txt", seen_prompts[0])
         self.assertNotIn("secret", seen_prompts[0])
-        self.assertEqual(
-            [event.event_type for event in result.events if event.event_type == "main_agent.output_delta"],
-            ["main_agent.output_delta", "main_agent.output_delta"],
-        )
+        self.assertEqual([event.event_type for event in transient_events], ["main_agent.output_delta", "main_agent.output_delta"])
+        self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in result.events))
 
     async def test_executor_injects_dependency_outputs_into_prompt(self) -> None:
         seen_prompts: list[str] = []
@@ -104,11 +109,20 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("龙粳18", seen_prompts[0])
 
     async def test_executor_streams_reasoning_content_as_separate_frontend_events(self) -> None:
+        transient_events = []
+
         async def streamer(prompt: str, *, reasoning_effort: str = "minimal", thinking: bool = False):
             yield {"reasoning": "先分析问题。", "answer": None}
             yield {"answer": "最终回答", "reasoning": None}
 
-        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=SkillCatalog(()),
+            transient_event_publisher=publish_transient,
+        )
         result = await executor.execute(
             CapabilityExecutionRequest(
                 capability_id="main_agent.respond",
@@ -120,8 +134,8 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        reasoning_events = [event for event in result.events if event.event_type == "main_agent.reasoning_delta"]
-        answer_events = [event for event in result.events if event.event_type == "main_agent.output_delta"]
+        reasoning_events = [event for event in transient_events if event.event_type == "main_agent.reasoning_delta"]
+        answer_events = [event for event in transient_events if event.event_type == "main_agent.output_delta"]
 
         self.assertEqual(result.output_payload["response_text"], "最终回答")
         self.assertEqual(result.artifacts[0].storage_ref, "最终回答")
@@ -148,7 +162,15 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
                 yield {"answer": "默认绑定回答", "reasoning": None}
 
         with patch("src.capabilities.main_agent.executor.LLMClient", return_value=FakeLLMClient()):
-            executor = MainAgentExecutor(skill_catalog=SkillCatalog(()))
+            transient_events = []
+
+            async def publish_transient(event):
+                transient_events.append(event)
+
+            executor = MainAgentExecutor(
+                skill_catalog=SkillCatalog(()),
+                transient_event_publisher=publish_transient,
+            )
             result = await executor.execute(
                 CapabilityExecutionRequest(
                     capability_id="main_agent.respond",
@@ -160,8 +182,9 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        reasoning_events = [event for event in result.events if event.event_type == "main_agent.reasoning_delta"]
+        reasoning_events = [event for event in transient_events if event.event_type == "main_agent.reasoning_delta"]
         self.assertEqual([event.payload["delta"] for event in reasoning_events], ["默认绑定思考"])
+        self.assertFalse(any(event.event_type == "main_agent.reasoning_delta" for event in result.events))
         self.assertEqual(result.output_payload["response_text"], "默认绑定回答")
 
     async def test_executor_records_safe_llm_metadata_on_success(self) -> None:
@@ -222,15 +245,51 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
                 task_id="task-1",
                 node_id="node-1",
                 input_payload={"user_message": "请深入分析"},
-                metadata={"deep_thinking": True, "main_agent_reasoning_effort": "medium"},
+                metadata={"deep_thinking": True, "main_agent_reasoning_effort": "max"},
             )
         )
 
-        self.assertEqual(seen_reasoning_efforts, ["medium"])
+        self.assertEqual(seen_reasoning_efforts, ["max"])
         self.assertEqual(seen_thinking_flags, [True])
         llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(llm_event.payload["reasoning_effort"], "medium")
+        self.assertEqual(llm_event.payload["reasoning_effort"], "max")
         self.assertTrue(llm_event.payload["thinking_enabled"])
+
+    async def test_executor_forces_minimal_reasoning_when_thinking_is_disabled(self) -> None:
+        seen_reasoning_efforts: list[str] = []
+        seen_thinking_flags: list[bool] = []
+
+        async def streamer(prompt: str, *, reasoning_effort: str = "minimal", thinking: bool = False):
+            seen_reasoning_efforts.append(reasoning_effort)
+            seen_thinking_flags.append(thinking)
+            yield "answer"
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={
+                "provider": "injected_stream",
+                "model": "test-model",
+                "reasoning_effort": "minimal",
+            },
+            skill_catalog=SkillCatalog(()),
+        )
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "普通回答"},
+                metadata={"deep_thinking": False, "main_agent_reasoning_effort": "max"},
+            )
+        )
+
+        self.assertEqual(seen_reasoning_efforts, ["minimal"])
+        self.assertEqual(seen_thinking_flags, [False])
+        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
+        self.assertFalse(llm_event.payload["thinking_enabled"])
 
     async def test_executor_records_safe_llm_metadata_on_provider_failure(self) -> None:
         async def broken_streamer(prompt: str):
@@ -260,10 +319,11 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        fallback_event = next(event for event in result.events if event.event_type == "main_agent.llm_fallback")
+        fallback_event = next(event for event in result.events if event.event_type == "main_agent.llm_stream_failed")
         self.assertEqual(result.error.code, "main_agent_llm_failed")
         self.assertEqual(fallback_event.payload["model"], "test-model")
-        self.assertEqual(fallback_event.payload["diagnostic"], "RuntimeError")
+        self.assertEqual(fallback_event.payload["error_type"], "RuntimeError")
+        self.assertTrue(fallback_event.payload["partial_output_discarded"])
         self.assertNotIn("prompt", fallback_event.payload)
         self.assertNotIn("api_key", fallback_event.payload)
         self.assertNotIn("secret-test-key", str(fallback_event.payload))
@@ -414,7 +474,32 @@ description: 生成周报
         self.assertIn("RCBD设计完成", prompts[0])
         final_event = next(event for event in result.events if event.event_type == "main_agent.output_final")
         self.assertEqual(final_event.payload["response_role"], RESPONSE_ROLE_FINAL)
-        delta_event = next(event for event in result.events if event.event_type == "main_agent.output_delta")
+        transient_events = []
+
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        # Re-run with a transient collector because output deltas are no longer persisted.
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=SkillCatalog(()),
+            transient_event_publisher=publish_transient,
+        )
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1b",
+                node_id="node-1b",
+                input_payload={"user_message": "请汇总"},
+                dependency_outputs={
+                    "node-a": {"response_text": "查到龙粳33", "response_role": "intermediate"},
+                    "node-b": {"response_text": "RCBD设计完成", "response_role": "intermediate"},
+                },
+                metadata={"response_role": RESPONSE_ROLE_FINAL},
+            )
+        )
+        delta_event = next(event for event in transient_events if event.event_type == "main_agent.output_delta")
         self.assertEqual(delta_event.payload["response_role"], RESPONSE_ROLE_FINAL)
         self.assertIn(":main_agent_response:final:", result.artifacts[0].artifact_id)
 

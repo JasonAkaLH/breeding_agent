@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -12,7 +14,7 @@ from src.core.enums import ArtifactType, EventVisibility, NodeStatus, TaskStatus
 from src.core.models import Artifact, EventRecord
 from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
 
-from ..auth import get_optional_owned_conversation, require_authenticated_user, require_current_bearer_for_user, require_task_owner
+from ..auth import get_optional_owned_conversation, require_authenticated_user, require_task_owner
 from ..dto import (
     AnswerInterruptRequest,
     AnswerInterruptResponse,
@@ -33,6 +35,17 @@ from ..sse import encode_sse_event
 
 router = APIRouter()
 SSE_AUTH_REVALIDATION_INTERVAL_SECONDS = 15.0
+
+
+@dataclass(frozen=True, slots=True)
+class SseConnectionContext:
+    username: str
+    conversation_id: str
+    task_id: str
+    auth_generation_at_connect: int
+    connected_at: datetime
+    connection_id: str
+
 
 UNFINISHED_TASK_STATUSES = {
     TaskStatus.ACCEPTED,
@@ -72,7 +85,7 @@ def _count_failed_nodes(nodes) -> int:
 
 async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
     if task.status == TaskStatus.COMPLETED:
-        await runtime.sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
+        await runtime.try_sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
     nodes = await runtime.storage.list_task_nodes_for_task(task.task_id)
     return TaskSummaryResponse(
         task_id=task.task_id,
@@ -121,10 +134,19 @@ async def get_task(task_id: str, request: Request) -> TaskSummaryResponse:
 async def stream_task_events(task_id: str, request: Request) -> EventSourceResponse:
     runtime = _runtime(request)
     user = await require_authenticated_user(request)
-    await require_task_owner(runtime, task_id, user)
+    task = await require_task_owner(runtime, task_id, user)
+    runtime.auth_generation_cache.apply(user.username, user.auth_generation, updated_at=runtime._utcnow_naive())
+    context = SseConnectionContext(
+        username=user.username,
+        conversation_id=task.conversation_id,
+        task_id=task_id,
+        auth_generation_at_connect=user.auth_generation,
+        connected_at=runtime._utcnow_naive(),
+        connection_id=f"sse-{uuid4().hex[:12]}",
+    )
 
     async def _event_stream():
-        async for event in _iter_authorized_frontend_events(runtime, task_id, request, user.username):
+        async for event in _iter_authorized_frontend_events(runtime, context, request):
             yield encode_sse_event(event)
 
     return EventSourceResponse(_event_stream())
@@ -132,13 +154,26 @@ async def stream_task_events(task_id: str, request: Request) -> EventSourceRespo
 
 async def _iter_authorized_frontend_events(
     runtime: ApiRuntime,
-    task_id: str,
-    request: Request,
-    username: str,
+    context: SseConnectionContext | str,
+    request: Request | None = None,
+    username: str | None = None,
     *,
     revalidation_interval_seconds: float = SSE_AUTH_REVALIDATION_INTERVAL_SECONDS,
 ):
-    event_iterator = runtime.iter_frontend_events(task_id).__aiter__()
+    # Backward-compatible call shape for older unit tests: (runtime, task_id, request, username).
+    if isinstance(context, str):
+        if username is None:
+            raise ValueError("username is required when context is a task_id")
+        cached_generation = runtime.auth_generation_cache.get(username)
+        context = SseConnectionContext(
+            username=username,
+            conversation_id="",
+            task_id=context,
+            auth_generation_at_connect=cached_generation.auth_generation if cached_generation is not None else 0,
+            connected_at=runtime._utcnow_naive(),
+            connection_id=f"sse-{uuid4().hex[:12]}",
+        )
+    event_iterator = runtime.iter_frontend_events(context.task_id).__aiter__()
     pending_next = asyncio.create_task(event_iterator.__anext__())
     try:
         while True:
@@ -147,7 +182,24 @@ async def _iter_authorized_frontend_events(
                 timeout=revalidation_interval_seconds,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            await require_current_bearer_for_user(request, username)
+            postgres_auth_bus = runtime.postgres_auth_invalidation_bus
+            if postgres_auth_bus is not None and not postgres_auth_bus.health.ready:
+                yield _auth_invalidated_event(
+                    runtime,
+                    context,
+                    reason="auth_generation_unavailable",
+                    current_auth_generation=None,
+                )
+                return
+            auth_check = runtime.auth_generation_cache.is_current(context.username, context.auth_generation_at_connect)
+            if not auth_check.current:
+                yield _auth_invalidated_event(
+                    runtime,
+                    context,
+                    reason="auth_generation_unknown" if not auth_check.known else "auth_generation_mismatch",
+                    current_auth_generation=auth_check.current_generation,
+                )
+                return
             if not done:
                 continue
             try:
@@ -165,6 +217,30 @@ async def _iter_authorized_frontend_events(
         if callable(aclose):
             with suppress(RuntimeError):
                 await aclose()
+
+
+def _auth_invalidated_event(
+    runtime: ApiRuntime,
+    context: SseConnectionContext,
+    *,
+    reason: str,
+    current_auth_generation: int | None,
+) -> EventRecord:
+    return EventRecord(
+        event_id=f"evt-{uuid4().hex[:12]}",
+        conversation_id=context.conversation_id,
+        task_id=context.task_id,
+        event_type="auth.invalidated",
+        payload={
+            "reason": reason,
+            "connection_id": context.connection_id,
+            "auth_generation_at_connect": context.auth_generation_at_connect,
+            "current_auth_generation": current_auth_generation,
+            "occurred_at": runtime._utcnow_naive().isoformat(),
+        },
+        visibility=EventVisibility.FRONTEND,
+        created_at=runtime._utcnow_naive(),
+    )
 
 
 @router.post("/api/v1/tasks/cancel", response_model=CancelTaskResponse, status_code=status.HTTP_202_ACCEPTED)

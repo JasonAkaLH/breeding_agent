@@ -22,7 +22,6 @@ class StatePlatformRuntimeConfig:
     backend: StatePlatformBackend
     release_gate_configured: bool
     dsn: str | None = field(default=None, repr=False)
-    migration_ready: bool = False
     reason: str | None = None
 
     def public_dict(self) -> dict[str, object]:
@@ -30,13 +29,8 @@ class StatePlatformRuntimeConfig:
             "backend": self.backend.value,
             "release_gate_configured": self.release_gate_configured,
             "dsn": "<configured>" if self.dsn else None,
-            "migration_ready": self.migration_ready,
             "reason": redact_text(self.reason),
         }
-
-
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on", "ready"}
 
 
 def _deployment_env(env: Mapping[str, str]) -> str:
@@ -72,15 +66,11 @@ def build_state_platform_runtime_config(
         driver_available = importlib.util.find_spec("psycopg") is not None
     if require_driver and not driver_available:
         raise StatePlatformConfigError("PostgreSQL driver psycopg is not installed")
-    migration_ready = _truthy(env.get("MAF_STATE_PLATFORM_MIGRATION_READY") or env.get("MAF_POSTGRES_STATE_MIGRATION_READY"))
-    if not migration_ready:
-        raise StatePlatformConfigError("PostgreSQL State Platform migration ledger is not ready")
     if (env.get("MAF_RUNTIME_SIDECAR_WRITER_MODE") or "").strip().lower() == "enforce":
         raise StatePlatformConfigError("State Platform canonical writer conflict with RuntimeSidecar enforce writer")
     return StatePlatformRuntimeConfig(
         backend=StatePlatformBackend.POSTGRESQL,
         release_gate_configured=True,
         dsn=dsn,
-        migration_ready=True,
-        reason="postgresql_state_platform_ready",
+        reason="postgresql_state_platform_configured",
     )
