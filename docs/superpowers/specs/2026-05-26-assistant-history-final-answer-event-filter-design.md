@@ -1,48 +1,59 @@
 # Assistant History Final Answer Event Filter Design
 
 日期：2026-05-26
-状态：Draft for user review
+状态：Reviewed / implementation-ready
 
-## 背景
+## 1. Problem statement
 
-深度思考开启后，主代理和 planner 会产生大量 `main_agent.reasoning_delta` 事件。当前 assistant 历史消息同步会读取任务的全量事件，再调用 `select_final_text_artifact()` 选择最终回答 artifact。当事件数量超过 RuntimeSidecar 的 event replay page limit 时，同步阶段会抛出 `event_log_replay_page_exceeded`。
+Deep-thinking requests can produce hundreds of `main_agent.reasoning_delta` events from the planner and the final answer node. The current assistant history sync path reads the full task event log before choosing the final text artifact. In the observed local failure, the task had already produced a final text artifact plus `main_agent.output_final`, but post-completion sync hit `event_log_replay_page_exceeded`, did not write `task_id:assistant` to `message`, and then marked the task failed. After refresh or re-login, the frontend loads only historical messages, so the final answer disappears.
 
-实测问题表现是：任务已生成最终回答 text artifact，并出现 `main_agent.output_final` 与 `task.completed`，但随后 assistant 历史消息同步失败，导致 `task_id:assistant` 没有写入 `message` 表。刷新网页或重新登录后，前端只读取历史 messages，因此最终回答不显示。
+## 2. Goals and non-goals
 
-## 用户确认的边界
+### Goals
 
-本设计采用 B 方案：保留现有 message / artifact 模型，增加受控事件过滤读取。明确不采用新增 `assistant_response` 表的 C 方案。
+1. After a completed deep-thinking task, refresh / re-login must show the final answer content.
+2. Assistant history sync must not read all task events solely to recover the final answer.
+3. Large volumes of `main_agent.reasoning_delta` must not affect final answer history recovery.
+4. Post-completion assistant history sync failure must not reverse a completed task to failed.
+5. The fix must preserve the current message / artifact storage model.
 
-本轮只修复最终 answer content 的历史恢复。
+### Non-goals
 
-### 明确要做
+1. Do not persist deep-thinking reasoning content.
+2. Do not return reasoning content from historical message APIs.
+3. Do not restore the “思考内容” card after refresh / re-login.
+4. Do not add an `assistant_response` table.
+5. Do not change realtime SSE behavior; realtime reasoning can still display from in-memory `reasoning_delta` events.
+6. Do not start PostgreSQL migration work in this fix.
 
-1. 深度思考任务完成后，刷新网页 / 重新登录仍能看到最终 answer content。
-2. assistant 历史消息同步只读取选择最终 answer 所需的最小事件集合。
-3. 大量 `main_agent.reasoning_delta` 不能触发历史同步失败。
-4. 已完成任务不能因为完成后的 assistant 历史同步失败而被反转成 failed。
+## 3. Users, stakeholders, and affected systems
 
-### 明确不做
+| Actor / system | Impact |
+| --- | --- |
+| End user | Sees final answers after refresh / re-login even when deep thinking was enabled. Does not see historical reasoning. |
+| Frontend chat UI | Continues to render `MessageResponse.content`; no reasoning restore contract is added. |
+| API runtime | Must isolate post-completion history sync failure from task terminal status. |
+| Storage layer | Must provide bounded event filtering without full event replay. |
+| Conversation memory | Should reuse bounded final-marker selection when falling back from messages to artifacts, so old broken tasks do not re-trigger full event replay. |
+| RuntimeSidecar contract | Existing event replay page limits remain respected; the fix avoids unnecessary full replay. |
 
-1. 不持久化深度思考内容。
-2. 不在历史消息 API 返回 reasoning 内容。
-3. 不从历史恢复“思考内容”卡片。
-4. 不新增 `assistant_response` 表。
-5. 不改变实时 SSE 展示：实时阶段仍可显示 reasoning 气泡与 answer。
+## 4. Current state and evidence
 
-## 当前证据
+| Evidence | Current behavior |
+| --- | --- |
+| `src/capabilities/main_agent/executor.py` | Final answers are emitted as text artifacts and `main_agent.output_final`; reasoning is emitted as `main_agent.reasoning_delta`. |
+| `src/api/runtime.py::_persist_assistant_history_message()` | Reads `storage.list_events_for_task(task_id)` before selecting final text artifact. |
+| `src/api/runtime.py::_run_execution()` | Wraps execution and post-completion history sync in one `try`; a sync exception reaches `_mark_task_failed()`. |
+| `src/storage/sqlite/repositories.py::list_events_for_task()` | Applies RuntimeSidecar replay limits to full event replay and raises `event_log_replay_page_exceeded` when too many events are returned. |
+| `src/api/routes/conversations.py::list_conversation_messages()` | Calls `sync_assistant_history_messages()` then returns rows from `message`. |
+| `frontend/src/App.tsx::messageFromHistory()` | Restores only historical `message.content` and completion flags. |
+| Local SQLite observation | Failed deep-thinking task had final text artifact and `main_agent.output_final`, but no `task_id:assistant` message; task later recorded `execution_crash: event_log_replay_page_exceeded`. |
 
-- `src/capabilities/main_agent/executor.py` 会把最终回答写成 text artifact，并发出 `main_agent.output_final`。
-- `src/api/runtime.py` 的 `_persist_assistant_history_message()` 当前通过 `storage.list_events_for_task(task_id)` 全量读取事件，再调用 `select_final_text_artifact(artifacts, events=events)`。
-- `src/api/routes/conversations.py` 的历史消息接口会调用 `sync_assistant_history_messages()`，然后返回 message 表内容。
-- `frontend/src/App.tsx` 的历史恢复只通过 `listConversationMessages()` 得到 `MessageResponse`，再用 `messageFromHistory()` 恢复 assistant 消息。
-- 本地运行数据中，失败任务已有 final text artifact 和 `main_agent.output_final`，但缺少 `task_id:assistant` message，且 task 后续被记录为 `execution_crash: event_log_replay_page_exceeded`。
+## 5. Proposed solution
 
-## 设计
+### 5.1 Add bounded filtered event reads
 
-### 1. Storage 增加过滤事件读取接口
-
-在 storage contract 增加只读接口，语义为数据库侧过滤，不允许先全量读取再 Python 过滤：
+Add a read-only storage API that filters at the database query level rather than loading all task events and filtering in Python.
 
 ```python
 async def list_events_for_task_filtered(
@@ -55,177 +66,205 @@ async def list_events_for_task_filtered(
 ) -> list[EventRecord]: ...
 ```
 
-SQLite 实现使用 SQL `WHERE` 条件过滤：
+Implementation requirements:
 
-- `task_id = :task_id`
-- `event_type IN (...)` when provided
-- `node_id = :node_id` when provided
-- `visibility = :visibility` when provided
-- `ORDER BY created_at, event_id`
-- `LIMIT :limit` when provided
+- Add the method to `StoragePort` and concrete SQLite storage classes.
+- Import / reference `EventVisibility` in the contract where needed.
+- SQLite must translate filters to SQL `WHERE` clauses:
+  - `task_id = :task_id`
+  - `event_type IN (...)` when provided
+  - `node_id = :node_id` when provided
+  - `visibility = :visibility` when provided
+  - `ORDER BY created_at, event_id`
+  - `LIMIT :limit` when provided
+- The method must remain bounded by RuntimeSidecar replay policy. If no explicit limit is provided, use the contract page limit. If a caller asks for more than the page limit, fail with the existing replay limit error.
+- The method must validate the filtered result against event count / payload byte limits after filtering.
+- The method must not call `list_events_for_task()` internally.
 
-该接口用于历史同步等 bounded 查询。原 `list_events_for_task()` 保持兼容，不扩大使用面。
+### 5.2 Use final-marker reads for assistant history sync
 
-### 2. Assistant 历史同步只读取 final marker
-
-将 `_persist_assistant_history_message()` 从全量事件读取：
+Change assistant history sync from full event replay:
 
 ```python
 events = await self.storage.list_events_for_task(task_id)
 ```
 
-改为只读取 final marker：
+to bounded final-marker reads:
 
 ```python
 final_events = await self.storage.list_events_for_task_filtered(
     task_id,
     event_types={"main_agent.output_final"},
     visibility=EventVisibility.FRONTEND,
+    limit=32,
 )
 ```
 
-然后继续复用：
+Then keep the existing artifact selection helper:
 
 ```python
-select_final_text_artifact(artifacts, events=final_events)
+text_artifact = select_final_text_artifact(artifacts, events=final_events)
 ```
 
-这样仍保留现有 answer selection 规则，但不再扫描 reasoning delta。
+Rationale:
 
-### 3. 完成后历史同步失败隔离
+- `select_final_text_artifact()` already prefers artifact IDs containing `:main_agent_response:final`.
+- For roleless historical artifacts, the final event’s node ID is enough to select the final answer.
+- `main_agent.reasoning_delta` events are irrelevant to final answer selection and must not be read by this path.
 
-`_run_execution()` 中主编排执行完成后，assistant 历史同步属于完成后 bookkeeping。它失败时不能调用 `_mark_task_failed()` 反转已完成任务。
+### 5.3 Apply the same bounded final-marker fallback to conversation memory
 
-建议结构：
+`src/orchestration/conversation_memory.py::_final_text_artifact()` also calls `list_events_for_task()` before `select_final_text_artifact()`. That path can re-trigger the same failure for old tasks that lack assistant messages.
 
-```python
-result = await execute_request(...)
-await handle_pending_skill_context(...)
-if result.completion_status == "completed":
-    await _sync_assistant_history_after_completion(...)
-```
+Requirement:
 
-其中 `_sync_assistant_history_after_completion()` 捕获异常并记录 audit-only event，例如：
+- If storage provides `list_events_for_task_filtered()`, conversation memory must use it with `event_types={"main_agent.output_final"}` and `visibility=EventVisibility.FRONTEND`.
+- If the filtered method is unavailable in a test fake, it may fall back to `events=()` rather than full event replay. It must not use full event replay solely to select final answer artifacts.
+
+### 5.4 Isolate post-completion history sync failures
+
+Move assistant history sync into a post-completion guard. Once `execute_request()` reports `completion_status == completed`, history sync failure must not call `_mark_task_failed()`.
+
+Required behavior:
 
 ```text
-assistant_history_sync.failed
+execute_request completed
+  -> handle pending skill context
+  -> try sync assistant history message
+      success: no extra event
+      failure: audit-only assistant_history_sync.failed
+  -> task remains completed
 ```
 
-payload 只包含脱敏字段：
+`assistant_history_sync.failed` must be audit-only and sanitized. Payload may include:
 
 - `task_id`
 - `conversation_id`
-- `code`
-- `diagnostic`
 - `history_message_id`
+- stable `code`
+- short `diagnostic`
 
-不得包含 prompt、answer 正文、API key、base_url、raw event payload。
+Payload must not include answer text, reasoning text, prompt, raw event payloads, API keys, provider base URLs, or database credentials.
 
-### 4. 前端行为保持不变
+## 6. Functional requirements
 
-实时阶段：
+| ID | Requirement |
+| --- | --- |
+| FR-1 | Storage must expose a bounded filtered event read API. |
+| FR-2 | Assistant history sync must use filtered final-marker reads, not full task event replay. |
+| FR-3 | Conversation memory final-text fallback must not full-replay task events solely to select final text artifacts. |
+| FR-4 | Completed tasks must remain completed if assistant history sync fails after execution completion. |
+| FR-5 | Historical message API must continue returning final answer via `message.content`. |
+| FR-6 | Historical message API must not return reasoning content. |
+| FR-7 | Existing realtime SSE reasoning and answer streaming must keep working. |
 
-```text
-SSE reasoning_delta -> 前端内存 reasoningContent -> 显示“思考内容”气泡
-SSE output_delta -> 前端内存 content -> 显示 answer
-```
+## 7. Non-functional requirements
 
-刷新 / 重新登录后：
+| Area | Requirement |
+| --- | --- |
+| Reliability | Deep-thinking event volume must not prevent final answer history recovery. |
+| Performance | Final answer history sync must read O(number of final markers), not O(total task events). |
+| Security / privacy | No reasoning text, prompts, secrets, raw provider URLs, or raw event payloads may be added to historical message payloads or sync failure diagnostics. |
+| Compatibility | Existing `message`, `artifact`, event schemas and frontend `MessageResponse` contract remain compatible. |
+| Observability | Sync failures after task completion must be visible as sanitized audit-only events. |
+| Accessibility / UX | No frontend visual behavior changes are required for historical reasoning; final answer visibility after refresh is the user-facing success criterion. |
 
-```text
-GET /conversations/{id}/messages -> message.content -> 显示最终 answer
-```
+## 8. Edge cases and failure modes
 
-不恢复 reasoning 气泡，符合用户确认的“不持久化深度思考内容”。
+| Case | Required behavior |
+| --- | --- |
+| Many reasoning events, one final answer | Assistant message is written from final text artifact; task remains completed. |
+| Multiple text artifacts | Prefer artifact ID role marker `final`; otherwise use filtered `main_agent.output_final` node ID; otherwise first non-empty text artifact as current helper does. |
+| No final text artifact | No assistant message is written; task status is not changed by history sync. |
+| Duplicate history sync race | Existing idempotency remains: if `task_id:assistant` exists after a save conflict, treat as success. |
+| Filtered event read itself fails | Record sanitized audit-only sync failure; do not emit frontend `task.failed`; do not change completed task status. |
+| Old tasks already marked failed by the old bug | This fix does not rewrite old task status automatically. If the user opens a conversation containing an already-written assistant message, it displays as before. |
+| Test fakes missing new method | Production paths must implement the method; tests may use explicit fakes or fall back to no events where final artifact ID role markers are sufficient. |
 
-## 数据流
+## 9. Acceptance criteria
 
-### 修复前
+| ID | Acceptance criterion | Verification |
+| --- | --- | --- |
+| AC-1 | A completed deep-thinking task with large reasoning event volume writes `task_id:assistant`. | API/runtime test with many reasoning events. |
+| AC-2 | `/api/v1/conversations/{conversation_id}/messages` returns the final answer content after sync. | API test. |
+| AC-3 | No historical API response contains reasoning content introduced by this fix. | DTO/API assertions. |
+| AC-4 | If post-completion history sync raises, task remains completed and no frontend `task.failed` event is added. | Runtime failure-isolation test. |
+| AC-5 | Filtered storage reads return only matching event types and do not call full replay. | Storage unit test / fake sentinel. |
+| AC-6 | Conversation memory final-text fallback no longer requires full event replay. | Conversation memory or storage fake test. |
+| AC-7 | Existing frontend history rendering still works with `message.content`. | Existing App history tests continue passing. |
 
-```text
-task completed
-  -> list all events for task
-  -> too many reasoning_delta events
-  -> event_log_replay_page_exceeded
-  -> assistant message not written
-  -> task may become failed
-  -> refresh shows no answer
-```
-
-### 修复后
-
-```text
-task completed
-  -> list text artifacts
-  -> list only main_agent.output_final events
-  -> select final text artifact
-  -> write task_id:assistant message
-  -> refresh shows answer
-```
-
-If history sync still fails unexpectedly:
-
-```text
-task remains completed
-  -> assistant_history_sync.failed audit event
-  -> no user-visible task failure regression
-```
-
-## Error handling
-
-1. Filtered event query failure during post-completion sync must not mark task failed.
-2. Missing final text artifact means no assistant history message is written; this remains a no-op, matching current behavior.
-3. Duplicate assistant message race remains idempotent: if `task_id:assistant` already exists, sync returns successfully.
-4. `assistant_history_sync.failed` must be audit-only and sanitized.
-
-## Testing plan
+## 10. Test plan
 
 ### Storage tests
 
-- `list_events_for_task_filtered()` returns only requested event types.
-- Filtering by visibility and node_id works.
-- Limit and ordering are deterministic.
-- Test proves implementation does not call all-event replay helper when event_types filter is provided, where practical.
+1. `list_events_for_task_filtered(event_types={"main_agent.output_final"})` returns only final events for the task.
+2. Filtering by `visibility` and `node_id` works.
+3. Ordering is deterministic by `created_at, event_id`.
+4. `limit` is honored and validated against replay policy.
+5. A sentinel test proves the filtered method does not delegate to `list_events_for_task()`.
 
 ### Runtime / API tests
 
-- Create a completed task with:
-  - many `main_agent.reasoning_delta` events,
-  - a final text artifact,
-  - a `main_agent.output_final` event.
-- Configure or fake all-event replay to raise `event_log_replay_page_exceeded` if called.
-- Call `sync_assistant_history_message_for_task()` or `GET /conversations/{id}/messages`.
-- Assert:
-  - `task_id:assistant` message exists,
-  - message content equals final answer,
-  - task remains completed,
-  - no full event replay was required.
+1. Build a completed task with:
+   - many `main_agent.reasoning_delta` events,
+   - a final text artifact,
+   - a `main_agent.output_final` event.
+2. Configure all-event replay to fail if used.
+3. Call `sync_assistant_history_message_for_task()` and/or `GET /conversations/{id}/messages`.
+4. Assert:
+   - `task_id:assistant` exists,
+   - content equals final answer,
+   - task remains completed,
+   - full event replay was not used.
 
 ### Failure isolation tests
 
-- Force `_persist_assistant_history_message()` to raise after task completion.
-- Assert:
-  - task remains completed,
-  - audit-only `assistant_history_sync.failed` event exists,
-  - no frontend `task.failed` event is emitted for that completed task.
+1. Force `_persist_assistant_history_message()` or the filtered event read to raise after task completion.
+2. Assert:
+   - task remains completed,
+   - `assistant_history_sync.failed` audit-only event exists,
+   - no frontend `task.failed` event is emitted due to post-completion sync failure.
+
+### Conversation memory tests
+
+1. Create a task with many reasoning events and a final artifact.
+2. Make full event replay fail.
+3. Assert conversation memory can select the final artifact or safely omit the fallback without crashing.
 
 ### Frontend tests
 
-Existing history restoration tests remain valid because API still returns `message.content`. No new reasoning restoration tests should be added because reasoning is intentionally not persisted.
+No new reasoning-history test is required. Existing history rendering tests should continue to pass because `MessageResponse.content` remains the only historical answer source.
 
-## Acceptance criteria
+## 11. Rollout and migration
 
-1. Deep-thinking tasks with large reasoning streams can complete and remain completed.
-2. Refreshing after completion shows final answer content.
-3. Re-login after completion shows final answer content.
-4. History sync never reads all task events solely to recover final answer.
-5. Reasoning content is not persisted into message history or returned by history API.
-6. License Requirement remains unaffected: no dependency or license policy changes.
+- No schema migration is required.
+- No frontend API contract migration is required.
+- Existing completed tasks with already-written assistant messages remain readable.
+- Existing tasks already marked failed by the old post-completion bug are not automatically repaired by this change; any backfill / repair tool would be a separate operational task.
 
-## Out of scope
+## 12. Risks and mitigations
 
-- Persisting reasoning content.
-- Returning reasoning in historical messages.
-- Adding `assistant_response` durable store.
-- Reworking SSE event storage architecture.
-- PostgreSQL migration of this path.
+| Risk | Mitigation |
+| --- | --- |
+| A roleless final artifact relies on final event node ID. | Read bounded `main_agent.output_final` events and keep existing selector behavior. |
+| A future task emits more than 32 final events. | `limit=32` is intentionally above expected cardinality; exceeding it should fail sync audit-only rather than task status. |
+| Another subsystem still uses full event replay for final artifact selection. | Include conversation memory in scope and search for remaining `select_final_text_artifact(... events=list_events_for_task(...))` call sites during implementation. |
+| Sync failure diagnostics could leak data. | Require sanitized audit-only payload and explicitly forbid answer/reasoning/prompt/raw event payloads. |
+| Implementers accidentally restore reasoning history. | Non-goals, FR-6, AC-3, and frontend test guidance explicitly prohibit reasoning persistence / historical return. |
+
+## 13. Dependencies
+
+- `src.core.contracts.StoragePort`
+- `src.storage.sqlite.repositories.SQLiteStorage` and sync state repository implementation
+- `src.api.runtime` assistant history sync and post-completion execution handling
+- `src.orchestration.answer_selection.select_final_text_artifact()`
+- `src.orchestration.conversation_memory` final text artifact fallback
+- Existing `EventVisibility` and RuntimeSidecar event replay policy helpers
+
+## 14. Open questions
+
+None. The user explicitly selected B and explicitly rejected reasoning persistence for this fix.
+
+## 15. License requirement
+
+No dependency, Rust crate, Cargo lockfile, or license policy change is expected. Final implementation notes must still state: “License Requirement：无依赖/许可变更，未触发 cargo-deny 风险” unless implementation scope changes.
