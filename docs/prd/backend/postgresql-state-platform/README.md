@@ -1,7 +1,7 @@
 # PostgreSQL State Platform 防死锁与写队列 Phase PRD 索引
 
 - **日期**：2026-05-26
-- **状态**：待实施
+- **状态**：repo-local foundation 已实施；真实 PostgreSQL integration / migration / cutover 仍为生产门禁 pending
 - **父计划**：`.omx/plans/prd-20260526-postgresql-state-platform.md`
 - **父测试规格**：`.omx/plans/test-spec-20260526-postgresql-state-platform.md`
 - **设计来源**：`docs/superpowers/specs/2026-05-26-postgresql-state-platform-deadlock-design.md`
