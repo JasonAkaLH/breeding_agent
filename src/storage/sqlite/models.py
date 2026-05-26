@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Index, Integer, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Index, Integer, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import DateTimeText, JSONText, SQLiteBase
@@ -9,8 +9,10 @@ from .base import DateTimeText, JSONText, SQLiteBase
 class ConversationRow(SQLiteBase):
     __tablename__ = "conversation"
     __table_args__ = (
+        Index("idx_conversation_username_status_updated", "username", "status", "updated_at"),
         Index("idx_conversation_username_updated", "username", "updated_at"),
         Index("idx_conversation_current_task", "current_task_id"),
+        Index("idx_conversation_delete_status_updated", "status", "delete_phase", "updated_at"),
     )
 
     conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -20,6 +22,14 @@ class ConversationRow(SQLiteBase):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    delete_runner_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delete_requested_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    delete_started_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    delete_finished_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    delete_failed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    delete_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delete_error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delete_phase: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ConversationMemorySummaryRow(SQLiteBase):
@@ -80,6 +90,8 @@ class AuthUserTokenRow(SQLiteBase):
     api_token_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_issued_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     token_last_used_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    auth_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    auth_generation_updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
@@ -198,6 +210,7 @@ class EventRecordRow(SQLiteBase):
 class MailboxMessageRow(SQLiteBase):
     __tablename__ = "mailbox_message"
     __table_args__ = (
+        Index("idx_mailbox_message_conversation_created", "conversation_id", "created_at"),
         Index("idx_mailbox_message_task_created", "task_id", "created_at"),
         Index("idx_mailbox_message_node_created", "node_id", "created_at"),
         Index("idx_mailbox_message_channel_type_created", "channel", "message_type", "created_at"),
@@ -227,6 +240,7 @@ class MailboxDeliveryRow(SQLiteBase):
     __tablename__ = "mailbox_delivery"
     __table_args__ = (
         UniqueConstraint("message_id", "recipient_agent"),
+        Index("idx_mailbox_delivery_message", "message_id"),
         Index("idx_mailbox_delivery_status_expires", "status", "expires_at"),
         Index("idx_mailbox_delivery_recipient_status", "recipient_agent", "status", "created_at"),
         Index("idx_mailbox_delivery_retry", "next_retry_at"),

@@ -5,6 +5,8 @@ import secrets
 from collections.abc import Callable
 from datetime import datetime
 
+from src.auth.generation_cache import AuthGenerationCache
+from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason, InMemoryAuthInvalidationBus
 from src.core.contracts import StoragePort
 from src.core.models import AuthUserToken
 from src.integrations.rust_safety_contract import hmac_sha256_hex
@@ -51,34 +53,41 @@ class UsernameTokenService:
         now_fn: NowFn,
         secret: str | None = None,
         require_secret: bool = False,
+        auth_generation_cache: AuthGenerationCache | None = None,
+        auth_invalidation_bus: InMemoryAuthInvalidationBus | None = None,
     ) -> None:
         if require_secret and not secret:
             raise AuthTokenValidationError("API token hash secret is required.", code="token_secret_required")
         self._storage = storage
         self._now_fn = now_fn
         self._secret = (secret or secrets.token_urlsafe(32)).encode("utf-8")
+        self._auth_generation_cache = auth_generation_cache
+        self._auth_invalidation_bus = auth_invalidation_bus
 
     async def login_username(self, username: str) -> tuple[AuthUserToken, str]:
         normalized_username = validate_username(username)
         raw_token = self._new_raw_token()
         now = self._now_fn()
-        existing = await self._storage.get_auth_user_token(normalized_username)
         token = AuthUserToken(
             username=normalized_username,
             api_token_hash=self._hash_token(raw_token),
             token_issued_at=now,
             token_last_used_at=None,
-            created_at=existing.created_at if existing is not None else now,
+            created_at=now,
             updated_at=now,
         )
-        return await self._storage.save_auth_user_token(token), raw_token
+        saved = await self._storage.save_auth_user_token(token, auth_generation_reason="login")
+        await self._publish_auth_generation_change(saved, "login")
+        return saved, raw_token
 
-    async def get_current_token(self, raw_token: str) -> AuthUserToken:
+    async def get_current_token(self, raw_token: str, *, touch: bool = True) -> AuthUserToken:
         normalized = self._normalize_raw_token(raw_token)
         api_token_hash = self._hash_token(normalized)
         token = await self._storage.get_auth_user_token_by_hash(api_token_hash)
         if token is None or token.api_token_hash != api_token_hash:
             raise AuthTokenValidationError("Invalid API token.", code="authentication_expired")
+        if not touch:
+            return token
         touched = await self._storage.touch_auth_user_token_last_used(
             token.username,
             api_token_hash=api_token_hash,
@@ -95,9 +104,11 @@ class UsernameTokenService:
             current.username,
             api_token_hash=current.api_token_hash,
             at=self._now_fn(),
+            auth_generation_reason="logout",
         )
         if cleared is None:
             raise AuthTokenValidationError("Invalid API token.", code="authentication_expired")
+        await self._publish_auth_generation_change(cleared, "logout")
         return cleared
 
     async def refresh_bearer(self, raw_token: str) -> tuple[AuthUserToken, str]:
@@ -113,17 +124,42 @@ class UsernameTokenService:
             old_api_token_hash=old_api_token_hash,
             new_api_token_hash=self._hash_token(new_raw_token),
             at=now,
+            auth_generation_reason="refresh",
         )
         if rotated is None:
             raise AuthTokenValidationError("Invalid API token.", code="authentication_expired")
+        await self._publish_auth_generation_change(rotated, "refresh")
         return rotated, new_raw_token
 
-    async def token_is_current_for_username(self, raw_token: str, username: str) -> bool:
+    async def token_is_current_for_username(self, raw_token: str, username: str, *, touch: bool = True) -> bool:
         try:
-            current = await self.get_current_token(raw_token)
+            current = await self.get_current_token(raw_token, touch=touch)
         except AuthTokenValidationError:
             return False
         return current.username == username
+
+    async def reconcile_auth_generations(self) -> None:
+        if self._auth_generation_cache is None:
+            return
+        tokens = await self._storage.list_auth_user_generations()
+        self._auth_generation_cache.reconcile({token.username: token.auth_generation for token in tokens})
+
+    async def _publish_auth_generation_change(self, token: AuthUserToken, reason: AuthGenerationReason) -> None:
+        if self._auth_generation_cache is not None:
+            self._auth_generation_cache.apply(
+                token.username,
+                token.auth_generation,
+                updated_at=token.auth_generation_updated_at or token.updated_at,
+            )
+        if self._auth_invalidation_bus is not None:
+            await self._auth_invalidation_bus.publish(
+                AuthGenerationChanged(
+                    username=token.username,
+                    auth_generation=token.auth_generation,
+                    changed_at=token.auth_generation_updated_at or token.updated_at or self._now_fn(),
+                    reason=reason,
+                )
+            )
 
     def fingerprint(self, raw_token: str) -> str:
         return self._hash_token(self._normalize_raw_token(raw_token))[:12]

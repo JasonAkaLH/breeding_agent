@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 
-from .enums import TaskStatus
+from .enums import EventVisibility, TaskStatus
 from .models import (
     Artifact,
     AuthUserToken,
@@ -62,11 +62,15 @@ class CapabilityExecutionResult:
 
 @runtime_checkable
 class StoragePort(Protocol):
-    async def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken: ...
+    async def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken: ...
 
     async def get_auth_user_token(self, username: str) -> AuthUserToken | None: ...
 
     async def get_auth_user_token_by_hash(self, api_token_hash: str) -> AuthUserToken | None: ...
+
+    async def get_auth_user_generation(self, username: str) -> AuthUserToken | None: ...
+
+    async def list_auth_user_generations(self) -> list[AuthUserToken]: ...
 
     async def touch_auth_user_token_last_used(
         self,
@@ -82,6 +86,7 @@ class StoragePort(Protocol):
         *,
         api_token_hash: str,
         at: datetime,
+        auth_generation_reason: str | None = None,
     ) -> AuthUserToken | None: ...
 
     async def rotate_auth_user_token(
@@ -91,6 +96,7 @@ class StoragePort(Protocol):
         old_api_token_hash: str,
         new_api_token_hash: str,
         at: datetime,
+        auth_generation_reason: str | None = None,
     ) -> AuthUserToken | None: ...
 
     async def save_conversation(self, conversation: Conversation) -> Conversation: ...
@@ -99,7 +105,51 @@ class StoragePort(Protocol):
 
     async def list_conversations_for_username(self, username: str) -> list[Conversation]: ...
 
+    async def list_deleting_conversations(self) -> list[Conversation]: ...
+
+    async def mark_conversation_deleting(
+        self,
+        conversation_id: str,
+        *,
+        runner_id: str,
+        requested_at: datetime,
+        started_at: datetime | None = None,
+        phase: str = "marking",
+    ) -> Conversation | None: ...
+
+    async def update_conversation_delete_phase(
+        self,
+        conversation_id: str,
+        *,
+        phase: str,
+        updated_at: datetime,
+        runner_id: str | None = None,
+    ) -> Conversation | None: ...
+
+    async def mark_conversation_delete_failed(
+        self,
+        conversation_id: str,
+        *,
+        failed_at: datetime,
+        phase: str,
+        error_code: str,
+        error_summary: str,
+        runner_id: str | None = None,
+    ) -> Conversation | None: ...
+
+    async def retry_failed_conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        runner_id: str,
+        requested_at: datetime,
+        started_at: datetime | None = None,
+        phase: str = "marking",
+    ) -> Conversation | None: ...
+
     async def delete_conversation(self, conversation_id: str) -> dict[str, int]: ...
+
+    async def delete_conversation_physical(self, conversation_id: str) -> dict[str, int]: ...
 
     async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary: ...
 
@@ -157,9 +207,21 @@ class StoragePort(Protocol):
 
     async def list_artifacts_for_task(self, task_id: str) -> list[Artifact]: ...
 
+    async def list_artifacts_for_conversation(self, conversation_id: str) -> list[Artifact]: ...
+
     async def append_event(self, event: EventRecord) -> EventRecord: ...
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]: ...
+
+    async def list_events_for_task_filtered(
+        self,
+        task_id: str,
+        *,
+        event_types: Iterable[str] | None = None,
+        node_id: str | None = None,
+        visibility: EventVisibility | str | None = None,
+        limit: int | None = None,
+    ) -> list[EventRecord]: ...
 
     async def list_event_page_for_task(
         self,

@@ -67,6 +67,21 @@ describe('createApiClient', () => {
     expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.data_lookup', kind: 'skill' });
   });
 
+  it('loads model edition choices from backend config', async () => {
+    const response = {
+      default_model_edition: 'deepseek-v4-flash-260425',
+      options: [
+        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash' },
+        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro' },
+      ],
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
+    const api = createApiClient({ fetcher });
+
+    await expect(api.getModelEditions()).resolves.toEqual(response);
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/config/model-editions', expect.any(Object));
+  });
+
   it('submits normal chat with capability_id null', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
@@ -77,6 +92,23 @@ describe('createApiClient', () => {
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.conversation_id).toBe('conv-1');
     expect(body.capability_id).toBeNull();
+    expect(body).not.toHaveProperty('model_edition');
+  });
+
+  it('submits selected model edition as a top-level request field', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
+    const api = createApiClient({ fetcher });
+
+    await api.submitMessage({
+      conversationId: 'conv-1',
+      content: '用 pro 模型回答',
+      mode: 'chat',
+      modelEdition: 'deepseek-v4-pro-260425',
+    });
+
+    const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
+    expect(body.model_edition).toBe('deepseek-v4-pro-260425');
+    expect(body.metadata).not.toHaveProperty('model_edition');
   });
 
 
@@ -101,12 +133,12 @@ describe('createApiClient', () => {
         forced_by_slash_command: true,
         slash_command: '/data-lookup',
         deep_thinking: false,
-        main_agent_reasoning_effort: 'medium',
+        main_agent_reasoning_effort: 'minimal',
       },
     });
   });
 
-  it('submits deep thinking metadata without changing reasoning effort', async () => {
+  it('submits deep thinking metadata with minimal reasoning by default', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
@@ -115,20 +147,33 @@ describe('createApiClient', () => {
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
       deep_thinking: true,
-      main_agent_reasoning_effort: 'medium',
+      main_agent_reasoning_effort: 'minimal',
     });
   });
 
-  it('submits selected reasoning effort metadata independently', async () => {
+  it('clamps reasoning effort to minimal when thinking is disabled', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
-    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', reasoningEffort: 'high' });
+    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', reasoningEffort: 'max' });
 
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
       deep_thinking: false,
-      main_agent_reasoning_effort: 'high',
+      main_agent_reasoning_effort: 'minimal',
+    });
+  });
+
+  it('submits selected reasoning effort only when deep thinking is enabled', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
+    const api = createApiClient({ fetcher });
+
+    await api.submitMessage({ conversationId: 'conv-1', content: '分析', mode: 'chat', deepThinking: true, reasoningEffort: 'max' });
+
+    const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
+    expect(body.metadata).toMatchObject({
+      deep_thinking: true,
+      main_agent_reasoning_effort: 'max',
     });
   });
 

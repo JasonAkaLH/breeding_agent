@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
-from src.core.enums import ArtifactType, EventVisibility, MessageRole, NodeStatus, TaskStatus
+from src.core.enums import ArtifactType, ConversationStatus, EventVisibility, MessageRole, NodeStatus, TaskStatus
 from src.core.models import (
     Artifact,
     AuthUserToken,
@@ -192,3 +192,159 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
             ):
                 self.assertEqual(session.scalar(select(func.count()).select_from(row_type)), 0, row_type.__name__)
             self.assertEqual(session.scalar(select(func.count()).select_from(AuthUserTokenRow)), 1)
+
+
+    def test_deleting_conversation_is_hidden_from_ordinary_history_and_keeps_metadata(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        with self.session_factory() as session:
+            state_repo = SQLiteStateRepository(session)
+            state_repo.save_conversation(
+                Conversation(
+                    conversation_id="conv-active",
+                    username="alice",
+                    title="active",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            state_repo.save_conversation(
+                Conversation(
+                    conversation_id="conv-deleting",
+                    username="alice",
+                    status=ConversationStatus.DELETING,
+                    title="deleting",
+                    delete_runner_id="delete-runner",
+                    delete_requested_at=now,
+                    delete_phase="deleting_db",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        storage = SQLiteStorage(self.session_factory)
+        visible = asyncio.run(storage.list_conversations_for_username("alice"))
+        self.assertEqual([conversation.conversation_id for conversation in visible], ["conv-active"])
+
+        deleting = asyncio.run(storage.list_deleting_conversations())
+        self.assertEqual([conversation.conversation_id for conversation in deleting], ["conv-deleting"])
+        self.assertEqual(deleting[0].delete_runner_id, "delete-runner")
+        self.assertEqual(deleting[0].delete_phase, "deleting_db")
+
+    def test_delete_failure_status_remains_hidden_and_sanitized(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        with self.session_factory() as session:
+            state_repo = SQLiteStateRepository(session)
+            state_repo.save_conversation(
+                Conversation(
+                    conversation_id="conv-fail",
+                    username="alice",
+                    title="will fail",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        storage = SQLiteStorage(self.session_factory)
+        marked = asyncio.run(storage.mark_conversation_deleting(
+            "conv-fail",
+            runner_id="runner-fail",
+            requested_at=now,
+            phase="deleting_files",
+        ))
+        self.assertIsNotNone(marked)
+        failed = asyncio.run(storage.mark_conversation_delete_failed(
+            "conv-fail",
+            failed_at=now,
+            phase="deleting_files",
+            error_code="FileDeleteError",
+            error_summary="password secret token should not be emitted in full" * 20,
+            runner_id="runner-fail",
+        ))
+        self.assertIsNotNone(failed)
+        self.assertEqual(failed.status, ConversationStatus.DELETING_FAILED)
+        self.assertEqual(failed.delete_error_code, "FileDeleteError")
+        self.assertLessEqual(len(failed.delete_error_summary or ""), 500)
+        self.assertEqual(asyncio.run(storage.list_conversations_for_username("alice")), [])
+    def test_retry_failed_conversation_delete_transitions_back_to_deleting(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        later = datetime(2026, 5, 26, 12, 5, 0)
+        with self.session_factory() as session:
+            state_repo = SQLiteStateRepository(session)
+            state_repo.save_conversation(
+                Conversation(
+                    conversation_id="conv-retry",
+                    username="alice",
+                    status=ConversationStatus.DELETING_FAILED,
+                    title="retry",
+                    delete_runner_id="old-runner",
+                    delete_requested_at=now,
+                    delete_started_at=now,
+                    delete_finished_at=now,
+                    delete_failed_at=now,
+                    delete_error_code="OldError",
+                    delete_error_summary="old sanitized error",
+                    delete_phase="deleting_db",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        storage = SQLiteStorage(self.session_factory)
+        retried = asyncio.run(storage.retry_failed_conversation_delete(
+            "conv-retry",
+            runner_id="new-runner",
+            requested_at=later,
+            started_at=later,
+            phase="marking",
+        ))
+
+        self.assertIsNotNone(retried)
+        assert retried is not None
+        self.assertEqual(retried.status, ConversationStatus.DELETING)
+        self.assertEqual(retried.delete_runner_id, "new-runner")
+        self.assertEqual(retried.delete_requested_at, later)
+        self.assertEqual(retried.delete_started_at, later)
+        self.assertIsNone(retried.delete_finished_at)
+        self.assertIsNone(retried.delete_failed_at)
+        self.assertIsNone(retried.delete_error_code)
+        self.assertIsNone(retried.delete_error_summary)
+        self.assertEqual(retried.delete_phase, "marking")
+        self.assertEqual(asyncio.run(storage.list_conversations_for_username("alice")), [])
+    def test_save_conversation_does_not_downgrade_deleting_to_active(self) -> None:
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        storage = SQLiteStorage(self.session_factory)
+        asyncio.run(storage.save_conversation(
+            Conversation(
+                conversation_id="conv-no-revive",
+                username="alice",
+                status=ConversationStatus.DELETING,
+                title="deleting",
+                delete_runner_id="runner",
+                delete_requested_at=now,
+                delete_phase="deleting_db",
+                created_at=now,
+                updated_at=now,
+            )
+        ))
+
+        with self.assertRaises(ValueError):
+            asyncio.run(storage.save_conversation(
+                Conversation(
+                    conversation_id="conv-no-revive",
+                    username="alice",
+                    status=ConversationStatus.ACTIVE,
+                    current_task_id="task-stale",
+                    title="stale active snapshot",
+                    created_at=now,
+                    updated_at=now,
+                )
+            ))
+
+        current = asyncio.run(storage.get_conversation("conv-no-revive"))
+        self.assertIsNotNone(current)
+        assert current is not None
+        self.assertEqual(current.status, ConversationStatus.DELETING)
+        self.assertIsNone(current.current_task_id)

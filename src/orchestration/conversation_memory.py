@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from src.core.enums import MessageRole, TaskStatus
+from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Artifact, ConversationMemorySummary, Message, Task
 from src.integrations.llm_client import load_config
 from src.integrations.token_counter import get_num_of_tokens_from_messages
@@ -372,9 +372,15 @@ class ConversationMemoryBuilder:
             artifacts = await self._storage.list_artifacts_for_task(task_id)
         except AttributeError:
             return None
-        try:
-            events = await self._storage.list_events_for_task(task_id)
-        except AttributeError:
+        filtered_reader = getattr(self._storage, "list_events_for_task_filtered", None)
+        if callable(filtered_reader):
+            events = await filtered_reader(
+                task_id,
+                event_types={"main_agent.output_final"},
+                visibility=EventVisibility.FRONTEND,
+                limit=32,
+            )
+        else:
             events = ()
         return select_final_text_artifact(artifacts, events=events)
 

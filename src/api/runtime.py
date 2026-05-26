@@ -14,7 +14,9 @@ from uuid import uuid4
 from sqlalchemy import Engine
 
 from src.auth import (
+    AuthGenerationCache,
     AuthTokenValidationError,
+    InMemoryAuthInvalidationBus,
     UsernameTokenService,
 )
 from src.capabilities.main_agent import (
@@ -29,7 +31,7 @@ from src.capabilities.main_agent import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import EventVisibility, MessageRole, RoutingMode, TaskStatus
+from src.core.enums import ConversationStatus, EventVisibility, MessageRole, RoutingMode, TaskStatus
 from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, PendingSkillContext, Task
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.codex_skills import (
@@ -51,6 +53,7 @@ from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcC
 from src.integrations.codex_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
+from src.integrations.model_editions import default_model_edition, model_edition_options, validate_model_edition
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.integrations.rust_safety_contract import configure_safety_shadow_sink
@@ -73,6 +76,7 @@ from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_router import WorkflowRouter
+from src.storage import StoragePort
 from src.storage.rust_contract import error_policy, mode_for_component as runtime_sidecar_mode_for_component
 from src.storage.runtime_sidecar_facade import (
     ensure_sidecar_write_allowed,
@@ -82,6 +86,9 @@ from src.storage.runtime_sidecar_facade import (
 from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
 from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write_sync
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
+from src.storage.postgres import PostgreSQLStorage, bootstrap_postgres_database, create_postgres_engine, create_postgres_session_factory
+from src.auth.postgres_invalidation_bus import PostgresAuthInvalidationBus
+from src.state.runtime_factory import StatePlatformBackend, build_state_platform_runtime_config
 from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
 
 from .conversation_titles import (
@@ -116,6 +123,18 @@ PENDING_SKILL_METADATA_KEYS = frozenset(
 )
 
 
+def _sanitize_delete_error(exc: BaseException) -> str:
+    message = str(exc).replace("\n", " ").replace("\r", " ").strip()
+    redacted = []
+    for token in message.split():
+        lower = token.lower()
+        if any(marker in lower for marker in ("password", "token", "secret", "apikey", "api_key", "postgresql://", "postgresql+psycopg://")):
+            redacted.append("[redacted]")
+        else:
+            redacted.append(token)
+    return " ".join(redacted)[:500] or exc.__class__.__name__
+
+
 @dataclass(frozen=True, slots=True)
 class _PendingSkillMissingInput:
     capability_id: str
@@ -130,7 +149,7 @@ class ApiRuntime:
         self,
         *,
         engine: Engine,
-        storage: SQLiteStorage,
+        storage: StoragePort,
         capability_registry: CapabilityRegistry,
         instance_registry: InstanceRegistry,
         event_broker: InMemoryEventBroker,
@@ -148,6 +167,11 @@ class ApiRuntime:
         skill_runtime_state: SkillRuntimeState | None = None,
         mcp_runtime_state: MCPRuntimeState | None = None,
         runtime_sidecar_client: Any | None = None,
+        model_edition_config: Mapping[str, Any] | None = None,
+        local_cancelled_task_ids: set[str] | None = None,
+        auth_generation_cache: AuthGenerationCache | None = None,
+        auth_invalidation_bus: InMemoryAuthInvalidationBus | None = None,
+        postgres_auth_invalidation_bus: PostgresAuthInvalidationBus | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -160,6 +184,9 @@ class ApiRuntime:
         self.workflow_provider = workflow_provider
         self._mysql_adapter = mysql_adapter
         self.username_token_service = username_token_service
+        self.auth_generation_cache = auth_generation_cache or AuthGenerationCache()
+        self.auth_invalidation_bus = auth_invalidation_bus
+        self.postgres_auth_invalidation_bus = postgres_auth_invalidation_bus
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
@@ -168,13 +195,18 @@ class ApiRuntime:
         self._skill_runtime_state = skill_runtime_state
         self._mcp_runtime_state = mcp_runtime_state
         self._runtime_sidecar_client = runtime_sidecar_client
+        self._model_edition_config = dict(model_edition_config or {})
         self._runtime_sidecar_shadow_sink = _build_runtime_sidecar_shadow_diff_sink(audit_sink)
         configure_safety_shadow_sink(_build_safety_kernel_shadow_diff_sink(audit_sink))
         self._conversation_guard = ConversationSerialGuard(storage)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._conversation_delete_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
+        self._locally_cancelled_task_ids = local_cancelled_task_ids if local_cancelled_task_ids is not None else set()
         self._running_title_tasks: set[asyncio.Task[None]] = set()
         self._task_skill_bundle_revisions: dict[str, str] = {}
         self._task_mcp_bundle_revisions: dict[str, str] = {}
+        self._assistant_history_sync_failure_task_ids: set[str] = set()
+        self._assistant_history_sync_failure_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
         self._mcp_refresh_lock = asyncio.Lock()
@@ -213,6 +245,10 @@ class ApiRuntime:
         await self.storage.append_event(event)
         await self.event_broker.publish(event)
 
+    async def _publish_transient_event(self, event: EventRecord) -> None:
+        event = _ensure_event_created_at(event)
+        await self.event_broker.publish_transient(event)
+
     async def _iter_event_replay_pages(self, task_id: str):
         after_event_id: str | None = None
         while True:
@@ -222,6 +258,16 @@ class ApiRuntime:
             for event in page:
                 yield event
             after_event_id = page[-1].event_id
+
+    def model_editions_payload(self) -> dict[str, Any]:
+        options = model_edition_options(self._model_edition_config)
+        return {
+            "default_model_edition": default_model_edition(self._model_edition_config),
+            "options": [{"value": option.value, "label": option.label} for option in options],
+        }
+
+    def _validate_requested_model_edition(self, model_edition: str | None) -> str | None:
+        return validate_model_edition(model_edition, config=self._model_edition_config)
 
     async def login_username(self, username: str):
         if self.username_token_service is None:
@@ -243,10 +289,10 @@ class ApiRuntime:
             raise AuthTokenValidationError("Invalid API token.", code="authentication_expired")
         return await self.username_token_service.refresh_bearer(raw_token)
 
-    async def bearer_token_is_current_for_username(self, raw_token: str, username: str) -> bool:
+    async def bearer_token_is_current_for_username(self, raw_token: str, username: str, *, touch: bool = True) -> bool:
         if self.username_token_service is None:
             return False
-        return await self.username_token_service.token_is_current_for_username(raw_token, username)
+        return await self.username_token_service.token_is_current_for_username(raw_token, username, touch=touch)
 
     async def submit_message(
         self,
@@ -257,6 +303,7 @@ class ApiRuntime:
     ) -> tuple[Message, Task]:
         if authenticated_username is None:
             raise ValueError("authenticated_username is required")
+        selected_model_edition = self._validate_requested_model_edition(request.model_edition)
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if (
             authenticated_username is not None
@@ -264,6 +311,8 @@ class ApiRuntime:
             and existing_conversation.username != authenticated_username
         ):
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
+            raise PermissionError(f"Conversation is not available: {conversation_id}")
         await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._refresh_mcp_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._conversation_guard.ensure_conversation_available(conversation_id)
@@ -293,7 +342,7 @@ class ApiRuntime:
         task_id = self._make_id("task")
         username = authenticated_username
 
-        conversation = existing_conversation
+        conversation = await self.storage.get_conversation(conversation_id)
         if conversation is None:
             conversation = Conversation(
                 conversation_id=conversation_id,
@@ -305,8 +354,15 @@ class ApiRuntime:
         else:
             if authenticated_username is not None and conversation.username != authenticated_username:
                 raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+            if conversation.status != ConversationStatus.ACTIVE:
+                raise PermissionError(f"Conversation is not available: {conversation_id}")
             conversation = replace(conversation, username=username, current_task_id=task_id, updated_at=now)
-        await self.storage.save_conversation(conversation)
+        try:
+            await self.storage.save_conversation(conversation)
+        except ValueError as exc:
+            if "Conversation is not available" in str(exc):
+                raise PermissionError(f"Conversation is not available: {conversation_id}") from exc
+            raise
 
         message = Message(
             message_id=message_id,
@@ -336,7 +392,11 @@ class ApiRuntime:
                 task_id=task_id,
                 conversation_id=conversation_id,
                 event_type="task.accepted",
-                payload={"message_id": message_id, "status": str(task.status)},
+                payload={
+                    "message_id": message_id,
+                    "status": str(task.status),
+                    **({"model_edition": selected_model_edition} if selected_model_edition else {}),
+                },
                 created_at=now,
             )
         )
@@ -353,6 +413,8 @@ class ApiRuntime:
             )
 
         metadata = self._drop_user_supplied_pending_skill_metadata(request.metadata)
+        if selected_model_edition:
+            metadata["model_edition"] = selected_model_edition
         if request.capability_id != requested_capability_id and request.capability_id is not None:
             metadata["requested_capability_alias"] = request.capability_id
             metadata["canonical_capability_id"] = requested_capability_id
@@ -469,18 +531,24 @@ class ApiRuntime:
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if existing_conversation is not None and existing_conversation.username != username:
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
+            raise PermissionError(f"Conversation is not available: {conversation_id}")
         return existing_conversation
 
     async def list_uploads(self, conversation_id: str, username: str) -> list[UploadedFileRecord]:
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if existing_conversation is not None and existing_conversation.username != username:
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
+            raise PermissionError(f"Conversation is not available: {conversation_id}")
         return self.upload_store.list_for_conversation(username=username, conversation_id=conversation_id)
 
     async def delete_upload(self, conversation_id: str, username: str, upload_id: str) -> bool:
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if existing_conversation is not None and existing_conversation.username != username:
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
+            raise PermissionError(f"Conversation is not available: {conversation_id}")
         return self.upload_store.delete(upload_id=upload_id, username=username, conversation_id=conversation_id)
 
     async def resolve_uploads_for_message(
@@ -594,7 +662,10 @@ class ApiRuntime:
             result = await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
             await self._handle_pending_skill_context_after_execution(request, result)
             if result.completion_status == str(TaskStatus.COMPLETED):
-                await self._persist_assistant_history_message(request.task_id, request.conversation_id)
+                try:
+                    await self._persist_assistant_history_message(request.task_id, request.conversation_id)
+                except Exception as exc:
+                    await self._record_assistant_history_sync_failure(request.task_id, request.conversation_id, exc)
         except Exception as exc:
             await self._mark_task_failed(request, exc)
         finally:
@@ -603,6 +674,7 @@ class ApiRuntime:
                 await self._release_task_skill_revision_if_terminal(request.task_id)
                 await self._release_task_mcp_revision_if_terminal(request.task_id)
             finally:
+                self._locally_cancelled_task_ids.discard(request.task_id)
                 async with self._lock:
                     self._running_tasks.pop(request.task_id, None)
 
@@ -673,17 +745,23 @@ class ApiRuntime:
     async def sync_assistant_history_messages(self, conversation_id: str) -> None:
         tasks = await self.storage.list_tasks_for_conversation(conversation_id, statuses={TaskStatus.COMPLETED})
         for task in tasks:
-            await self.sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
+            await self.try_sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
 
     async def sync_assistant_history_message_for_task(self, task_id: str, conversation_id: str) -> None:
         await self._persist_assistant_history_message(task_id, conversation_id)
+
+    async def try_sync_assistant_history_message_for_task(self, task_id: str, conversation_id: str) -> None:
+        try:
+            await self._persist_assistant_history_message(task_id, conversation_id)
+        except Exception as exc:
+            await self._record_assistant_history_sync_failure(task_id, conversation_id, exc)
 
     async def _persist_assistant_history_message(self, task_id: str, conversation_id: str) -> None:
         message_id = f"{task_id}:assistant"
         if await self.storage.get_message(message_id) is not None:
             return
         artifacts = await self.storage.list_artifacts_for_task(task_id)
-        events = await self.storage.list_events_for_task(task_id)
+        events = await self._list_final_answer_events(task_id)
         text_artifact = select_final_text_artifact(artifacts, events=events)
         if text_artifact is None:
             return
@@ -702,6 +780,56 @@ class ApiRuntime:
             if await self.storage.get_message(message_id) is not None:
                 return
             raise
+
+    async def _list_final_answer_events(self, task_id: str) -> Iterable[EventRecord]:
+        filtered_reader = getattr(self.storage, "list_events_for_task_filtered", None)
+        if not callable(filtered_reader):
+            return ()
+        return await filtered_reader(
+            task_id,
+            event_types={"main_agent.output_final"},
+            visibility=EventVisibility.FRONTEND,
+            limit=32,
+        )
+
+    async def _record_assistant_history_sync_failure(self, task_id: str, conversation_id: str, exc: Exception) -> None:
+        async with self._assistant_history_sync_failure_lock:
+            try:
+                if task_id in self._assistant_history_sync_failure_task_ids:
+                    return
+                if await self._assistant_history_sync_failure_already_recorded(task_id):
+                    self._assistant_history_sync_failure_task_ids.add(task_id)
+                    return
+                await self._record_event(
+                    self._make_event(
+                        task_id=task_id,
+                        conversation_id=conversation_id,
+                        event_type="assistant_history_sync.failed",
+                        payload={
+                            "code": "assistant_history_sync_failed",
+                            "error_type": type(exc).__name__,
+                        },
+                        visibility=EventVisibility.AUDIT_ONLY,
+                    )
+                )
+                self._assistant_history_sync_failure_task_ids.add(task_id)
+            except Exception:
+                return
+
+    async def _assistant_history_sync_failure_already_recorded(self, task_id: str) -> bool:
+        filtered_reader = getattr(self.storage, "list_events_for_task_filtered", None)
+        if not callable(filtered_reader):
+            return False
+        try:
+            events = await filtered_reader(
+                task_id,
+                event_types={"assistant_history_sync.failed"},
+                visibility=EventVisibility.AUDIT_ONLY,
+                limit=1,
+            )
+        except Exception:
+            return False
+        return bool(events)
 
     async def _handle_pending_skill_context_after_execution(
         self,
@@ -921,12 +1049,21 @@ class ApiRuntime:
             return
         if task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
             return
-        await self.storage.save_conversation(
-            replace(conversation, current_task_id=None, updated_at=self._utcnow_naive())
-        )
+        if conversation.status != ConversationStatus.ACTIVE:
+            return
+        try:
+            await self.storage.save_conversation(
+                replace(conversation, current_task_id=None, updated_at=self._utcnow_naive())
+            )
+        except ValueError as exc:
+            if "Conversation is not available" in str(exc):
+                return
+            raise
 
     async def cancel_task(self, task_id: str) -> Task:
         existing_task = await self.storage.get_task(task_id)
+        if existing_task is not None and existing_task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            self._locally_cancelled_task_ids.add(task_id)
         if existing_task is not None and self._mcp_runtime_state is not None:
             for envelope in await self._mcp_runtime_state.cancel_platform_task(task_id):
                 await self._record_event(
@@ -938,8 +1075,36 @@ class ApiRuntime:
                     )
                 )
         task = await self.cancellation_service.cancel_task_context(task_id)
+        if task.status not in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+            self._locally_cancelled_task_ids.discard(task_id)
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
         return task
+
+    def _track_conversation_delete_task(
+        self,
+        conversation_id: str,
+        task: asyncio.Task[dict[str, object]],
+    ) -> None:
+        self._conversation_delete_tasks[conversation_id] = task
+        task.add_done_callback(lambda handle, cid=conversation_id: self._finalize_conversation_delete_task(cid, handle))
+
+    def _finalize_conversation_delete_task(
+        self,
+        conversation_id: str,
+        task: asyncio.Task[dict[str, object]],
+    ) -> None:
+        self._conversation_delete_tasks.pop(conversation_id, None)
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is None:
+            return
+        if self._audit_sink is not None:
+            self._audit_sink.record_sync(
+                "conversation.delete_task_failed",
+                {"error_type": exception.__class__.__name__},
+                conversation_id=conversation_id,
+            )
 
     async def delete_conversation(self, conversation_id: str, *, username: str | None = None) -> dict[str, object]:
         conversation = await self.storage.get_conversation(conversation_id)
@@ -947,34 +1112,173 @@ class ApiRuntime:
             raise ValueError(f"Unknown conversation: {conversation_id}")
         if username is not None and conversation.username != username:
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        if conversation.status == ConversationStatus.DELETING_FAILED:
+            raise ValueError(f"Unknown conversation: {conversation_id}")
 
-        unfinished_tasks = await self.storage.list_tasks_for_conversation(
+        existing_task = self._conversation_delete_tasks.get(conversation_id)
+        if existing_task is not None and not existing_task.done():
+            return await asyncio.shield(existing_task)
+        if conversation.status == ConversationStatus.DELETING:
+            return await self._wait_for_external_conversation_delete(conversation_id, runner_id=conversation.delete_runner_id)
+        if conversation.status != ConversationStatus.ACTIVE:
+            raise ValueError(f"Unknown conversation: {conversation_id}")
+
+        runner_id = self._make_id("delete")
+        now = self._utcnow_naive()
+        marked = await self.storage.mark_conversation_deleting(
             conversation_id,
-            statuses=UNFINISHED_TASK_STATUSES,
+            runner_id=runner_id,
+            requested_at=conversation.delete_requested_at or now,
+            started_at=conversation.delete_started_at or now,
+            phase="marking",
         )
-        cancelled_task_ids: list[str] = []
-        for task in unfinished_tasks:
-            await self.cancel_task(task.task_id)
-            cancelled_task_ids.append(task.task_id)
-        for task_id in cancelled_task_ids:
-            await self._cancel_existing_execution(task_id)
+        if marked is None:
+            raise ValueError(f"Unknown conversation: {conversation_id}")
+        if marked.status == ConversationStatus.DELETING and marked.delete_runner_id != runner_id:
+            return await self._wait_for_external_conversation_delete(conversation_id, runner_id=marked.delete_runner_id)
+        task = asyncio.create_task(self._run_conversation_delete(marked, runner_id), name=f"delete-conversation:{conversation_id}")
+        self._track_conversation_delete_task(conversation_id, task)
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                self._conversation_delete_tasks.pop(conversation_id, None)
 
-        await self._delete_conversation_file_artifacts(conversation_id)
-        deleted_counts = await self.storage.delete_conversation(conversation_id)
-        return {
-            "conversation_id": conversation_id,
-            "deleted": deleted_counts.get("conversation", 0) > 0,
-            "cancelled_task_ids": cancelled_task_ids,
-            "deleted_counts": deleted_counts,
-        }
+    async def retry_failed_conversation_delete(self, conversation_id: str) -> dict[str, object]:
+        conversation = await self.storage.get_conversation(conversation_id)
+        if conversation is None or conversation.status != ConversationStatus.DELETING_FAILED:
+            raise ValueError(f"Unknown failed conversation deletion: {conversation_id}")
+        existing_task = self._conversation_delete_tasks.get(conversation_id)
+        if existing_task is not None and not existing_task.done():
+            return await asyncio.shield(existing_task)
+        runner_id = self._make_id("delete")
+        now = self._utcnow_naive()
+        marked = await self.storage.retry_failed_conversation_delete(
+            conversation_id,
+            runner_id=runner_id,
+            requested_at=now,
+            started_at=now,
+            phase="marking",
+        )
+        if marked is None:
+            raise ValueError(f"Unknown failed conversation deletion: {conversation_id}")
+        task = asyncio.create_task(self._run_conversation_delete(marked, runner_id), name=f"delete-conversation-retry:{conversation_id}")
+        self._track_conversation_delete_task(conversation_id, task)
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                self._conversation_delete_tasks.pop(conversation_id, None)
+
+    async def _wait_for_external_conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        runner_id: str | None,
+    ) -> dict[str, object]:
+        started_at = self._utcnow_naive()
+        while True:
+            current = await self.storage.get_conversation(conversation_id)
+            if current is None:
+                finished_at = self._utcnow_naive()
+                return {
+                    "conversation_id": conversation_id,
+                    "deleted": True,
+                    "cancelled_task_ids": [],
+                    "deleted_counts": {"conversation": 1},
+                    "delete_status": "completed",
+                    "runner_id": runner_id,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "error_code": None,
+                }
+            if current.status == ConversationStatus.DELETING_FAILED:
+                raise RuntimeError(f"Conversation deletion failed: {conversation_id}")
+            if current.status != ConversationStatus.DELETING:
+                raise ValueError(f"Unknown conversation: {conversation_id}")
+            await asyncio.sleep(0.25)
+
+    async def _run_conversation_delete(self, conversation: Conversation, runner_id: str) -> dict[str, object]:
+        conversation_id = conversation.conversation_id
+        cancelled_task_ids: list[str] = []
+        started_at = conversation.delete_started_at or self._utcnow_naive()
+        try:
+            await self.storage.update_conversation_delete_phase(
+                conversation_id,
+                phase="cancelling_tasks",
+                updated_at=self._utcnow_naive(),
+                runner_id=runner_id,
+            )
+            unfinished_tasks = await self.storage.list_tasks_for_conversation(
+                conversation_id,
+                statuses=UNFINISHED_TASK_STATUSES,
+            )
+            for task in unfinished_tasks:
+                await self.cancel_task(task.task_id)
+                cancelled_task_ids.append(task.task_id)
+            for task_id in cancelled_task_ids:
+                await self._cancel_existing_execution(task_id)
+
+            await self.storage.update_conversation_delete_phase(
+                conversation_id,
+                phase="deleting_files",
+                updated_at=self._utcnow_naive(),
+                runner_id=runner_id,
+            )
+            await self._delete_conversation_file_artifacts(conversation_id)
+
+            await self.storage.update_conversation_delete_phase(
+                conversation_id,
+                phase="deleting_db",
+                updated_at=self._utcnow_naive(),
+                runner_id=runner_id,
+            )
+            deleted_counts = await self.storage.delete_conversation_physical(conversation_id)
+            finished_at = self._utcnow_naive()
+            return {
+                "conversation_id": conversation_id,
+                "deleted": deleted_counts.get("conversation", 0) > 0,
+                "cancelled_task_ids": cancelled_task_ids,
+                "deleted_counts": deleted_counts,
+                "delete_status": "completed",
+                "runner_id": runner_id,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "error_code": None,
+            }
+        except Exception as exc:
+            failed_at = self._utcnow_naive()
+            phase = "failed"
+            try:
+                current = await self.storage.get_conversation(conversation_id)
+                phase = current.delete_phase or phase if current is not None else phase
+                await self.storage.mark_conversation_delete_failed(
+                    conversation_id,
+                    failed_at=failed_at,
+                    phase=phase,
+                    error_code=exc.__class__.__name__,
+                    error_summary=_sanitize_delete_error(exc),
+                    runner_id=runner_id,
+                )
+            except Exception as record_exc:
+                if self._audit_sink is not None:
+                    await self._audit_sink.record(
+                        "conversation.delete_failure_record_failed",
+                        {
+                            "error_type": record_exc.__class__.__name__,
+                            "original_error_type": exc.__class__.__name__,
+                            "runner_id": runner_id,
+                            "phase": phase,
+                        },
+                        conversation_id=conversation_id,
+                    )
+            raise
 
     async def _delete_conversation_file_artifacts(self, conversation_id: str) -> None:
-        tasks = await self.storage.list_tasks_for_conversation(conversation_id)
-        for task in tasks:
-            for artifact in await self.storage.list_artifacts_for_task(task.task_id):
-                metadata = parse_file_storage_ref(artifact.storage_ref)
-                if is_active_skill_output_file(metadata):
-                    self.artifact_file_store.delete(str(metadata.get("storage_key")))
+        for artifact in await self.storage.list_artifacts_for_conversation(conversation_id):
+            metadata = parse_file_storage_ref(artifact.storage_ref)
+            if is_active_skill_output_file(metadata):
+                self.artifact_file_store.delete(str(metadata.get("storage_key")))
 
     async def rename_conversation(self, conversation_id: str, title: str, *, username: str | None = None) -> Conversation:
         normalized_title = validate_conversation_title(title)
@@ -984,6 +1288,8 @@ class ApiRuntime:
                 raise ValueError(f"Unknown conversation: {conversation_id}")
             if username is not None and conversation.username != username:
                 raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+            if conversation.status != ConversationStatus.ACTIVE:
+                raise ValueError(f"Unknown conversation: {conversation_id}")
             updated = replace(conversation, title=normalized_title, updated_at=self._utcnow_naive())
             return await self.storage.save_conversation(updated)
 
@@ -1102,8 +1408,27 @@ class ApiRuntime:
         finally:
             subscription.close()
 
+
+    async def start(self) -> None:
+        if self.postgres_auth_invalidation_bus is not None:
+            await self.postgres_auth_invalidation_bus.start()
+        await self.recover_deleting_conversations()
+
+    async def recover_deleting_conversations(self) -> None:
+        for conversation in await self.storage.list_deleting_conversations():
+            if conversation.status != ConversationStatus.DELETING:
+                continue
+            if conversation.conversation_id in self._conversation_delete_tasks:
+                continue
+            runner_id = conversation.delete_runner_id or self._make_id("delete")
+            task = asyncio.create_task(
+                self._run_conversation_delete(conversation, runner_id),
+                name=f"delete-conversation-recovery:{conversation.conversation_id}",
+            )
+            self._track_conversation_delete_task(conversation.conversation_id, task)
+
     async def shutdown(self) -> None:
-        pending = [*self._running_tasks.values(), *self._running_title_tasks]
+        pending = [*self._running_tasks.values(), *self._running_title_tasks, *self._conversation_delete_tasks.values()]
         if pending:
             try:
                 await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2)
@@ -1115,6 +1440,8 @@ class ApiRuntime:
             await self._mysql_adapter.aclose()
         if self._mcp_runtime_state is not None:
             await self._mcp_runtime_state.aclose()
+        if self.postgres_auth_invalidation_bus is not None:
+            await self.postgres_auth_invalidation_bus.aclose()
         await asyncio.to_thread(self._engine.dispose)
 
     @staticmethod
@@ -1592,16 +1919,6 @@ def build_api_runtime(
         enable_conversation_memory=enable_conversation_memory,
     )
 
-    engine = create_sqlite_engine(database_path)
-    bootstrap_sqlite_database(engine)
-    resolved_runtime_sidecar_client = runtime_sidecar_client or _resolve_runtime_sidecar_client_from_env()
-    audit_sink = JsonlAuditSink(audit_log_path)
-    storage = SQLiteStorage(
-        create_sqlite_session_factory(engine),
-        runtime_sidecar_client=resolved_runtime_sidecar_client,
-        runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
-    )
-    artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
     token_secret = auth_token_hash_secret if auth_token_hash_secret is not None else os.environ.get("MAF_AUTH_TOKEN_HASH_SECRET")
     deployment_env = (
         os.environ.get("MAF_API_ENV")
@@ -1617,11 +1934,48 @@ def build_api_runtime(
             or deployment_env in {"prod", "production"}
         )
     )
+    if token_secret_required and not token_secret:
+        raise AuthTokenValidationError("Auth token hash secret is required.", code="token_secret_required")
+
+    _bootstrap_state_platform_config_env()
+    state_config = build_state_platform_runtime_config(
+        env=os.environ,
+        require_driver=True,
+    )
+    resolved_runtime_sidecar_client = runtime_sidecar_client or _resolve_runtime_sidecar_client_from_env()
+    audit_sink = JsonlAuditSink(audit_log_path)
+    auth_generation_cache = AuthGenerationCache()
+    auth_invalidation_bus = InMemoryAuthInvalidationBus()
+    postgres_auth_invalidation_bus = None
+    if state_config.backend == StatePlatformBackend.POSTGRESQL:
+        engine = create_postgres_engine(state_config.dsn or "")
+        bootstrap_postgres_database(engine)
+        storage = PostgreSQLStorage(
+            create_postgres_session_factory(engine),
+            runtime_sidecar_client=resolved_runtime_sidecar_client,
+            runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
+        )
+        if isinstance(engine, Engine):
+            postgres_auth_invalidation_bus = PostgresAuthInvalidationBus(engine, auth_generation_cache)
+            postgres_auth_invalidation_bus.check_permission()
+            postgres_auth_invalidation_bus.reconcile_once()
+        artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
+    else:
+        engine = create_sqlite_engine(database_path)
+        bootstrap_sqlite_database(engine)
+        storage = SQLiteStorage(
+            create_sqlite_session_factory(engine),
+            runtime_sidecar_client=resolved_runtime_sidecar_client,
+            runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
+        )
+        artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
     username_token_service = UsernameTokenService(
         storage,
         now_fn=ApiRuntime._utcnow_naive,
         secret=token_secret,
         require_secret=token_secret_required,
+        auth_generation_cache=auth_generation_cache,
+        auth_invalidation_bus=auth_invalidation_bus,
     )
 
     roots = tuple(skill_roots) if skill_roots is not None else _default_skill_roots()
@@ -1679,11 +2033,16 @@ def build_api_runtime(
             mcp_refresh_result,
         )
     event_broker = InMemoryEventBroker(audit_sink=audit_sink)
+    runtime_cancelled_task_ids: set[str] = set()
 
     async def record_live_event(event: EventRecord) -> None:
         event = _ensure_event_created_at(event)
         await storage.append_event(event)
         await event_broker.publish(event)
+
+    async def publish_transient_event(event: EventRecord) -> None:
+        event = _ensure_event_created_at(event)
+        await event_broker.publish_transient(event)
 
     main_agent_llm_runtime = _resolve_main_agent_llm_runtime(
         main_agent_llm_config=main_agent_llm_config,
@@ -1795,6 +2154,7 @@ def build_api_runtime(
         planner_text_generator=planner_text_generator,
         main_agent_llm_runtime=main_agent_llm_runtime,
         event_recorder=record_live_event,
+        reasoning_event_publisher=publish_transient_event,
         planner_reasoning_effort=planner_reasoning_effort,
         enable_llm_planner=enable_llm_planner,
     )
@@ -1840,7 +2200,8 @@ def build_api_runtime(
                     script_runner=skill_script_runner,
                     skill_input_text_generator=resolved_skill_input_text_generator,
                     skill_output_artifact_manager=skill_output_artifact_manager,
-                    live_event_recorder=record_live_event,
+                    transient_event_publisher=publish_transient_event,
+                    cancel_checker=lambda task_id: task_id in runtime_cancelled_task_ids,
                 ),
                 SkillExecutor(
                     runtime_state=skill_runtime_state,
@@ -1882,7 +2243,31 @@ def build_api_runtime(
         skill_runtime_state=skill_runtime_state,
         mcp_runtime_state=resolved_mcp_runtime_state,
         runtime_sidecar_client=resolved_runtime_sidecar_client,
+        local_cancelled_task_ids=runtime_cancelled_task_ids,
+        model_edition_config=_resolve_model_edition_config(
+            main_agent_llm_config=main_agent_llm_config,
+            planner_llm_config=planner_llm_config,
+            platform_llm_config=platform_llm_config,
+        ),
+        auth_generation_cache=auth_generation_cache,
+        auth_invalidation_bus=auth_invalidation_bus,
+        postgres_auth_invalidation_bus=postgres_auth_invalidation_bus,
     )
+
+
+def _resolve_model_edition_config(
+    *,
+    main_agent_llm_config: Mapping[str, Any] | None,
+    planner_llm_config: Mapping[str, Any] | None,
+    platform_llm_config: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    for config in (main_agent_llm_config, planner_llm_config, platform_llm_config):
+        if config is not None:
+            return config
+    try:
+        return load_config()
+    except Exception:
+        return {}
 
 
 def _bootstrap_runtime_config_env(
@@ -1954,6 +2339,35 @@ def _bootstrap_runtime_config_env(
         return
     bootstrap_config_env(DEFAULT_CONFIG_PATH, strict=False)
 
+
+
+def _bootstrap_state_platform_config_env() -> None:
+    if os.environ.get("MAF_STATE_STORE_BACKEND"):
+        return
+    config = load_config()
+    state_platform = config.get("state_platform")
+    bridge_enabled = os.environ.get("MAF_STATE_PLATFORM_CONFIG_BRIDGE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(state_platform, Mapping):
+        bridge_enabled = bridge_enabled or bool(state_platform.get("enabled"))
+    if not bridge_enabled:
+        return
+    if isinstance(state_platform, Mapping):
+        _set_env_from_config("MAF_STATE_STORE_BACKEND", state_platform.get("backend"))
+        postgres = state_platform.get("postgres")
+        if isinstance(postgres, Mapping):
+            _set_env_from_config("MAF_POSTGRES_STATE_DSN", postgres.get("dsn"))
+            _set_env_from_config("MAF_POSTGRES_STATE_SCHEMA", postgres.get("schema"))
+    postgres_state_env = config.get("postgres_state_env")
+    if isinstance(postgres_state_env, Mapping):
+        for key, value in postgres_state_env.items():
+            if str(key).startswith("MAF_"):
+                _set_env_from_config(str(key), value)
+
+
+def _set_env_from_config(key: str, value: object | None) -> None:
+    if value is None or key in os.environ:
+        return
+    os.environ[key] = str(value)
 
 def _resolve_runtime_sidecar_client_from_env() -> RuntimeSidecarGrpcClient | None:
     endpoint = os.environ.get("MAF_RUNTIME_SIDECAR_ENDPOINT", "").strip()
@@ -2641,6 +3055,7 @@ def _resolve_planner_text_generator(
     planner_text_generator: PlannerTextGenerator | None,
     main_agent_llm_runtime: SharedLLMRuntime,
     event_recorder: Callable[[EventRecord], Any],
+    reasoning_event_publisher: Callable[[EventRecord], Any] | None,
     planner_reasoning_effort: ReasoningEffort,
     enable_llm_planner: bool,
 ) -> PlannerTextGenerator | None:
@@ -2662,7 +3077,8 @@ def _resolve_planner_text_generator(
             if request is None:
                 return
             reasoning_ordinal += 1
-            maybe_result = event_recorder(
+            publisher = reasoning_event_publisher or event_recorder
+            maybe_result = publisher(
                 EventRecord(
                     event_id=f"{request.task_id}:main_agent.{stage}.reasoning:{call_id}:{reasoning_ordinal}",
                     conversation_id=request.conversation_id,
@@ -2684,20 +3100,30 @@ def _resolve_planner_text_generator(
 
         metadata = dict(request.metadata) if request is not None else {}
         thinking = _resolve_request_thinking_enabled(metadata)
-        reasoning_effort = _resolve_request_reasoning_effort(metadata, fallback=planner_reasoning_effort)
+        reasoning_effort = _resolve_request_reasoning_effort(
+            metadata, fallback=planner_reasoning_effort, thinking_enabled=thinking
+        )
         return await main_agent_llm_runtime.generate_text(
             prompt,
             thinking=thinking,
             reasoning_effort=reasoning_effort,
+            model_edition=_resolve_request_model_edition(metadata),
             on_reasoning_delta=record_reasoning,
         )
 
     return generate
 
 
-def _resolve_request_reasoning_effort(metadata: Mapping[str, Any], *, fallback: ReasoningEffort) -> ReasoningEffort:
+def _resolve_request_reasoning_effort(
+    metadata: Mapping[str, Any],
+    *,
+    fallback: ReasoningEffort,
+    thinking_enabled: bool,
+) -> ReasoningEffort:
+    if not thinking_enabled:
+        return "minimal"
     explicit = metadata.get("main_agent_reasoning_effort")
-    if isinstance(explicit, str) and explicit in {"minimal", "low", "medium", "high"}:
+    if isinstance(explicit, str) and explicit in {"minimal", "high", "max"}:
         return explicit  # type: ignore[return-value]
     return fallback
 
@@ -2706,6 +3132,14 @@ def _resolve_request_thinking_enabled(metadata: Mapping[str, Any]) -> bool:
     if "main_agent_thinking_enabled" in metadata:
         return _is_truthy(metadata.get("main_agent_thinking_enabled"))
     return _is_truthy(metadata.get("deep_thinking"))
+
+
+def _resolve_request_model_edition(metadata: Mapping[str, Any]) -> str | None:
+    value = metadata.get("model_edition")
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return None
 
 
 def _is_truthy(value: Any) -> bool:

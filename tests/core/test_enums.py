@@ -26,7 +26,7 @@ class CoreEnumDefinitionTest(unittest.TestCase):
         self.assertEqual([member.value for member in enum_cls], expected_values)
 
     def test_conversation_status_values(self) -> None:
-        self.assert_str_enum_values(ConversationStatus, ["active", "archived", "locked"])
+        self.assert_str_enum_values(ConversationStatus, ["active", "archived", "locked", "deleting", "deleting_failed"])
 
     def test_message_role_values(self) -> None:
         self.assert_str_enum_values(MessageRole, ["user", "assistant", "system"])

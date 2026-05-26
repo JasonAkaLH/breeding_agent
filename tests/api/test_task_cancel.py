@@ -9,6 +9,8 @@ from src.core.models import Conversation, Task
 
 from tests.api.support import APITestCase, blocking_mysql_adapter
 
+PARTIAL_SENTINEL = "PARTIAL_SHOULD_NOT_PERSIST_7f3a"
+
 
 class TaskCancelAPITest(APITestCase):
     async def test_cancel_endpoint_drives_real_cancellation_and_audit_output(self) -> None:
@@ -62,3 +64,50 @@ class TaskCancelAPITest(APITestCase):
         reloaded = await self.runtime.storage.get_task("task-terminal-api")
         self.assertEqual(reloaded.status, TaskStatus.COMPLETED)
         self.assertIsNone(reloaded.cancel_requested_at)
+
+    async def test_cancel_stops_transient_stream_and_discards_partial_answer(self) -> None:
+        release_first = asyncio.Event()
+        release_late = asyncio.Event()
+
+        async def streamer(_prompt: str):
+            await release_first.wait()
+            yield "第一段"
+            await release_late.wait()
+            yield PARTIAL_SENTINEL
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
+        response = await self.submit_message(
+            conversation_id="conv-cancel-stream",
+            content="生成一个长回答",
+            capability_id=None,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+
+        iterator = self.runtime.iter_frontend_events(task_id).__aiter__()
+        release_first.set()
+        first_delta = None
+        while first_delta is None:
+            event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+            if event.event_type == "main_agent.output_delta":
+                first_delta = event
+        self.assertEqual(first_delta.payload["delta"], "第一段")
+
+        cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
+        self.assertEqual(cancel_response.status_code, 202, cancel_response.text)
+        release_late.set()
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "cancelled")
+
+        async def _late_result_recorded() -> bool:
+            events = await self.runtime.storage.list_events_for_task(task_id)
+            return any(event.event_type == "task.late_result_discarded" for event in events)
+
+        await self.wait_for_condition(_late_result_recorded)
+
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertFalse(any(event.event_type == "main_agent.output_final" for event in events))
+        self.assertFalse(any(PARTIAL_SENTINEL in str(event.payload) for event in events))
+        self.assertTrue(any(event.event_type == "task.late_result_discarded" for event in events))
+        messages = await self.runtime.storage.list_messages_for_conversation("conv-cancel-stream")
+        self.assertFalse(any(str(message.role) == "assistant" for message in messages))

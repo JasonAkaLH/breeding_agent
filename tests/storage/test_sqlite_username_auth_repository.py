@@ -26,7 +26,7 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
         columns = {column["name"] for column in inspector.get_columns("auth_user_token")}
         self.assertGreaterEqual(
             columns,
-            {"username", "api_token_hash", "token_issued_at", "token_last_used_at", "created_at", "updated_at"},
+            {"username", "api_token_hash", "token_issued_at", "token_last_used_at", "auth_generation", "auth_generation_updated_at", "created_at", "updated_at"},
         )
 
     def test_single_token_mapping_round_trip_rotate_clear_and_touch(self) -> None:
@@ -40,6 +40,8 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
             session.commit()
         self.assertEqual(saved.username, "alice")
         self.assertEqual(saved.api_token_hash, "hash-1")
+        self.assertEqual(saved.auth_generation, 1)
+        self.assertEqual(saved.auth_generation_updated_at, now)
 
         with self.session_factory() as session:
             repo = SQLiteStateRepository(session)
@@ -59,6 +61,7 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
             )
             session.commit()
         self.assertEqual(rotated.api_token_hash, "hash-2")
+        self.assertEqual(rotated.auth_generation, 2)
 
         with self.session_factory() as session:
             repo = SQLiteStateRepository(session)
@@ -67,6 +70,7 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
             touched = repo.touch_auth_user_token_last_used("alice", api_token_hash="hash-2", at=datetime(2026, 5, 25, 12, 1, 0))
             session.commit()
         self.assertEqual(touched.token_last_used_at, datetime(2026, 5, 25, 12, 1, 0))
+        self.assertEqual(touched.auth_generation, 2)
 
         with self.session_factory() as session:
             repo = SQLiteStateRepository(session)
@@ -74,6 +78,7 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
             session.commit()
         self.assertEqual(cleared.username, "alice")
         self.assertIsNone(cleared.api_token_hash)
+        self.assertEqual(cleared.auth_generation, 3)
 
         with self.session_factory() as session:
             repo = SQLiteStateRepository(session)
@@ -90,6 +95,7 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
             )
             token_record, first = await service.login_username("alice")
             self.assertEqual(token_record.username, "alice")
+            self.assertEqual(token_record.auth_generation, 1)
             self.assertTrue(first.startswith("maf_tok_"))
 
             storage = SQLiteStorage(self.session_factory)
@@ -99,7 +105,8 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
             self.assertNotIn(first, repr(row))
             self.assertEqual((await service.get_current_token(first)).username, "alice")
 
-            _record, second = await service.refresh_bearer(first)
+            refreshed_record, second = await service.refresh_bearer(first)
+            self.assertEqual(refreshed_record.auth_generation, 2)
             self.assertNotEqual(first, second)
             with self.assertRaises(AuthTokenValidationError):
                 await service.get_current_token(first)
@@ -107,6 +114,7 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
 
             cleared = await service.logout_bearer(second)
             self.assertEqual(cleared.username, "alice")
+            self.assertEqual(cleared.auth_generation, 3)
             self.assertIsNone(cleared.api_token_hash)
             with self.assertRaises(AuthTokenValidationError):
                 await service.get_current_token(second)

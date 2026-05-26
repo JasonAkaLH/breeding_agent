@@ -34,6 +34,14 @@ class Conversation:
     title: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    delete_runner_id: str | None = None
+    delete_requested_at: datetime | None = None
+    delete_started_at: datetime | None = None
+    delete_finished_at: datetime | None = None
+    delete_failed_at: datetime | None = None
+    delete_error_code: str | None = None
+    delete_error_summary: str | None = None
+    delete_phase: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -62,6 +70,8 @@ class AuthUserToken:
     api_token_hash: str | None = None
     token_issued_at: datetime | None = None
     token_last_used_at: datetime | None = None
+    auth_generation: int = 0
+    auth_generation_updated_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

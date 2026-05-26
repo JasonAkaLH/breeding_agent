@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -7,6 +8,7 @@ from fastapi import FastAPI
 from .cors import configure_cors
 from .routes.auth import router as auth_router
 from .routes.capabilities import router as capabilities_router
+from .routes.config import router as config_router
 from .routes.conversations import router as conversations_router
 from .routes.developer_docs import router as developer_docs_router
 from .routes.tasks import router as tasks_router
@@ -15,11 +17,21 @@ from .runtime import ApiRuntime, build_api_runtime
 
 
 def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
-    app = FastAPI(title="breeding_agent API", version="0.1.0")
-    app.state.runtime = runtime or build_api_runtime(
+    resolved_runtime = runtime or build_api_runtime(
         database_path=Path("runtime/dev.sqlite3"),
         audit_log_path=Path("runtime/audit.jsonl"),
     )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await app.state.runtime.start()
+        try:
+            yield
+        finally:
+            await app.state.runtime.shutdown()
+
+    app = FastAPI(title="breeding_agent API", version="0.1.0", lifespan=lifespan)
+    app.state.runtime = resolved_runtime
     configure_cors(app)
     app.include_router(developer_docs_router)
     app.include_router(auth_router)
@@ -27,4 +39,5 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(uploads_router)
     app.include_router(capabilities_router)
+    app.include_router(config_router)
     return app

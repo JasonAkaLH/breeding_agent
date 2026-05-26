@@ -6,13 +6,15 @@ import inspect
 import json
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
+from src.auth.postgres_invalidation_bus import auth_generation_notify_sql
 from src.core.contracts import StoragePort
-from src.core.enums import ArtifactType, EdgeType, TaskStatus
+from src.core.enums import ArtifactType, ConversationStatus, EdgeType, EventVisibility, TaskStatus
 from src.core.models import (
     Artifact,
     AuthUserToken,
@@ -71,6 +73,14 @@ def _row_to_conversation(row: ConversationRow) -> Conversation:
         title=row.title,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        delete_runner_id=row.delete_runner_id,
+        delete_requested_at=row.delete_requested_at,
+        delete_started_at=row.delete_started_at,
+        delete_finished_at=row.delete_finished_at,
+        delete_failed_at=row.delete_failed_at,
+        delete_error_code=row.delete_error_code,
+        delete_error_summary=row.delete_error_summary,
+        delete_phase=row.delete_phase,
     )
 
 
@@ -123,6 +133,8 @@ def _row_to_auth_user_token(row: AuthUserTokenRow) -> AuthUserToken:
         api_token_hash=row.api_token_hash,
         token_issued_at=row.token_issued_at,
         token_last_used_at=row.token_last_used_at,
+        auth_generation=int(row.auth_generation or 0),
+        auth_generation_updated_at=row.auth_generation_updated_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -353,18 +365,38 @@ class SQLiteStateRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken:
-        row = AuthUserTokenRow(
-            username=token.username,
-            api_token_hash=token.api_token_hash,
-            token_issued_at=token.token_issued_at,
-            token_last_used_at=token.token_last_used_at,
-            created_at=token.created_at,
-            updated_at=token.updated_at,
-        )
-        merged = self._session.merge(row)
-        self._session.flush()
-        return _row_to_auth_user_token(merged)
+    def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken:
+        at = token.updated_at or token.auth_generation_updated_at or _utcnow_naive()
+        existing = self._session.execute(
+            select(AuthUserTokenRow).where(AuthUserTokenRow.username == token.username).with_for_update()
+        ).scalar_one_or_none()
+        if existing is None:
+            row = AuthUserTokenRow(
+                username=token.username,
+                api_token_hash=token.api_token_hash,
+                token_issued_at=token.token_issued_at,
+                token_last_used_at=token.token_last_used_at,
+                auth_generation=int(token.auth_generation or 1),
+                auth_generation_updated_at=at,
+                created_at=token.created_at or at,
+                updated_at=at,
+            )
+            self._session.add(row)
+            self._session.flush()
+            saved = _row_to_auth_user_token(row)
+        else:
+            existing.api_token_hash = token.api_token_hash
+            existing.token_issued_at = token.token_issued_at
+            existing.token_last_used_at = token.token_last_used_at
+            existing.auth_generation = int(existing.auth_generation or 0) + 1
+            existing.auth_generation_updated_at = at
+            existing.updated_at = at
+            if existing.created_at is None:
+                existing.created_at = token.created_at or at
+            self._session.flush()
+            saved = _row_to_auth_user_token(existing)
+        self._notify_auth_generation_change(saved, auth_generation_reason, changed_at=at)
+        return saved
 
     def get_auth_user_token(self, username: str) -> AuthUserToken | None:
         row = self._session.get(AuthUserTokenRow, username)
@@ -375,6 +407,13 @@ class SQLiteStateRepository:
             select(AuthUserTokenRow).where(AuthUserTokenRow.api_token_hash == api_token_hash)
         ).scalar_one_or_none()
         return None if row is None else _row_to_auth_user_token(row)
+
+    def get_auth_user_generation(self, username: str) -> AuthUserToken | None:
+        return self.get_auth_user_token(username)
+
+    def list_auth_user_generations(self) -> list[AuthUserToken]:
+        rows = self._session.scalars(select(AuthUserTokenRow).order_by(AuthUserTokenRow.username)).all()
+        return [_row_to_auth_user_token(row) for row in rows]
 
     def touch_auth_user_token_last_used(
         self,
@@ -404,6 +443,7 @@ class SQLiteStateRepository:
         *,
         api_token_hash: str,
         at: datetime,
+        auth_generation_reason: str | None = None,
     ) -> AuthUserToken | None:
         result = self._session.execute(
             update(AuthUserTokenRow)
@@ -411,14 +451,24 @@ class SQLiteStateRepository:
                 AuthUserTokenRow.username == username,
                 AuthUserTokenRow.api_token_hash == api_token_hash,
             )
-            .values(api_token_hash=None, token_issued_at=None, token_last_used_at=None, updated_at=at)
+            .values(
+                api_token_hash=None,
+                token_issued_at=None,
+                token_last_used_at=None,
+                auth_generation=AuthUserTokenRow.auth_generation + 1,
+                auth_generation_updated_at=at,
+                updated_at=at,
+            )
         )
         if result.rowcount != 1:
             self._session.flush()
             return None
         self._session.flush()
         row = self._session.get(AuthUserTokenRow, username)
-        return None if row is None else _row_to_auth_user_token(row)
+        saved = None if row is None else _row_to_auth_user_token(row)
+        if saved is not None:
+            self._notify_auth_generation_change(saved, auth_generation_reason, changed_at=at)
+        return saved
 
     def rotate_auth_user_token(
         self,
@@ -427,6 +477,7 @@ class SQLiteStateRepository:
         old_api_token_hash: str,
         new_api_token_hash: str,
         at: datetime,
+        auth_generation_reason: str | None = None,
     ) -> AuthUserToken | None:
         result = self._session.execute(
             update(AuthUserTokenRow)
@@ -438,6 +489,8 @@ class SQLiteStateRepository:
                 api_token_hash=new_api_token_hash,
                 token_issued_at=at,
                 token_last_used_at=None,
+                auth_generation=AuthUserTokenRow.auth_generation + 1,
+                auth_generation_updated_at=at,
                 updated_at=at,
             )
         )
@@ -446,9 +499,41 @@ class SQLiteStateRepository:
             return None
         self._session.flush()
         row = self._session.get(AuthUserTokenRow, username)
-        return None if row is None else _row_to_auth_user_token(row)
+        saved = None if row is None else _row_to_auth_user_token(row)
+        if saved is not None:
+            self._notify_auth_generation_change(saved, auth_generation_reason, changed_at=at)
+        return saved
+
+    def _notify_auth_generation_change(
+        self,
+        token: AuthUserToken,
+        reason: str | None,
+        *,
+        changed_at: datetime,
+    ) -> None:
+        if not reason:
+            return
+        bind = self._session.get_bind()
+        if bind is None or bind.dialect.name != "postgresql":
+            return
+        sql, params = auth_generation_notify_sql(
+            AuthGenerationChanged(
+                username=token.username,
+                auth_generation=token.auth_generation,
+                changed_at=changed_at,
+                reason=cast(AuthGenerationReason, reason),
+            )
+        )
+        self._session.execute(text(sql), params)
 
     def save_conversation(self, conversation: Conversation) -> Conversation:
+        existing = self._session.get(ConversationRow, conversation.conversation_id)
+        if (
+            existing is not None
+            and existing.status in {str(ConversationStatus.DELETING), str(ConversationStatus.DELETING_FAILED)}
+            and str(conversation.status) == str(ConversationStatus.ACTIVE)
+        ):
+            raise ValueError(f"Conversation is not available: {conversation.conversation_id}")
         row = ConversationRow(
             conversation_id=conversation.conversation_id,
             username=conversation.username,
@@ -457,6 +542,14 @@ class SQLiteStateRepository:
             title=conversation.title,
             created_at=conversation.created_at,
             updated_at=conversation.updated_at,
+            delete_runner_id=conversation.delete_runner_id,
+            delete_requested_at=conversation.delete_requested_at,
+            delete_started_at=conversation.delete_started_at,
+            delete_finished_at=conversation.delete_finished_at,
+            delete_failed_at=conversation.delete_failed_at,
+            delete_error_code=conversation.delete_error_code,
+            delete_error_summary=conversation.delete_error_summary,
+            delete_phase=conversation.delete_phase,
         )
         merged = self._session.merge(row)
         self._session.flush()
@@ -469,10 +562,115 @@ class SQLiteStateRepository:
     def list_conversations_for_username(self, username: str) -> list[Conversation]:
         rows = self._session.scalars(
             select(ConversationRow)
-            .where(ConversationRow.username == username)
+            .where(ConversationRow.username == username, ConversationRow.status == str(ConversationStatus.ACTIVE))
             .order_by(ConversationRow.updated_at.desc(), ConversationRow.conversation_id.desc())
         ).all()
         return [_row_to_conversation(row) for row in rows]
+
+    def list_deleting_conversations(self) -> list[Conversation]:
+        rows = self._session.scalars(
+            select(ConversationRow)
+            .where(ConversationRow.status.in_([str(ConversationStatus.DELETING), str(ConversationStatus.DELETING_FAILED)]))
+            .order_by(ConversationRow.updated_at.asc(), ConversationRow.conversation_id.asc())
+        ).all()
+        return [_row_to_conversation(row) for row in rows]
+
+    def mark_conversation_deleting(
+        self,
+        conversation_id: str,
+        *,
+        runner_id: str,
+        requested_at: datetime,
+        started_at: datetime | None = None,
+        phase: str = "marking",
+    ) -> Conversation | None:
+        row = self._session.get(ConversationRow, conversation_id)
+        if row is None:
+            return None
+        if row.status == str(ConversationStatus.DELETING_FAILED):
+            return _row_to_conversation(row)
+        if row.status != str(ConversationStatus.DELETING):
+            row.status = str(ConversationStatus.DELETING)
+            row.delete_requested_at = requested_at
+        row.delete_runner_id = row.delete_runner_id or runner_id
+        if started_at is not None:
+            row.delete_started_at = started_at
+        row.delete_phase = phase
+        row.delete_error_code = None
+        row.delete_error_summary = None
+        row.updated_at = requested_at
+        self._session.flush()
+        return _row_to_conversation(row)
+
+    def update_conversation_delete_phase(
+        self,
+        conversation_id: str,
+        *,
+        phase: str,
+        updated_at: datetime,
+        runner_id: str | None = None,
+    ) -> Conversation | None:
+        row = self._session.get(ConversationRow, conversation_id)
+        if row is None:
+            return None
+        row.delete_phase = phase
+        row.updated_at = updated_at
+        if phase != "marking" and row.delete_started_at is None:
+            row.delete_started_at = updated_at
+        if runner_id is not None:
+            row.delete_runner_id = runner_id
+        self._session.flush()
+        return _row_to_conversation(row)
+
+    def mark_conversation_delete_failed(
+        self,
+        conversation_id: str,
+        *,
+        failed_at: datetime,
+        phase: str,
+        error_code: str,
+        error_summary: str,
+        runner_id: str | None = None,
+    ) -> Conversation | None:
+        row = self._session.get(ConversationRow, conversation_id)
+        if row is None:
+            return None
+        row.status = str(ConversationStatus.DELETING_FAILED)
+        row.delete_failed_at = failed_at
+        row.delete_finished_at = failed_at
+        row.delete_phase = phase
+        row.delete_error_code = error_code[:120]
+        row.delete_error_summary = error_summary[:500]
+        if runner_id is not None:
+            row.delete_runner_id = runner_id
+        row.updated_at = failed_at
+        self._session.flush()
+        return _row_to_conversation(row)
+
+    def retry_failed_conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        runner_id: str,
+        requested_at: datetime,
+        started_at: datetime | None = None,
+        phase: str = "marking",
+    ) -> Conversation | None:
+        row = self._session.get(ConversationRow, conversation_id)
+        if row is None or row.status != str(ConversationStatus.DELETING_FAILED):
+            return None
+        row.status = str(ConversationStatus.DELETING)
+        row.delete_runner_id = runner_id
+        row.delete_requested_at = requested_at
+        row.delete_started_at = started_at
+        row.delete_finished_at = None
+        row.delete_failed_at = None
+        row.delete_error_code = None
+        row.delete_error_summary = None
+        row.delete_phase = phase
+        row.updated_at = requested_at
+        self._session.flush()
+        return _row_to_conversation(row)
 
     def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary:
         row = ConversationMemorySummaryRow(
@@ -706,6 +904,9 @@ class SQLiteStateRepository:
         self._session.flush()
         return deleted_counts
 
+    def delete_conversation_physical(self, conversation_id: str) -> dict[str, int]:
+        return self.delete_conversation(conversation_id)
+
     def save_message(self, message: Message) -> Message:
         row = MessageRow(
             message_id=message.message_id,
@@ -853,6 +1054,15 @@ class SQLiteStateRepository:
         ).all()
         return [_row_to_artifact(row) for row in rows]
 
+    def list_artifacts_for_conversation(self, conversation_id: str) -> list[Artifact]:
+        rows = self._session.scalars(
+            select(ArtifactRow)
+            .join(TaskRow, ArtifactRow.task_id == TaskRow.task_id)
+            .where(TaskRow.conversation_id == conversation_id)
+            .order_by(ArtifactRow.created_at, ArtifactRow.artifact_id)
+        ).all()
+        return [_row_to_artifact(row) for row in rows]
+
 
 class SQLiteCollaborationRepository:
     def __init__(self, session: Session) -> None:
@@ -886,6 +1096,37 @@ class SQLiteCollaborationRepository:
             .where(EventRecordRow.task_id == task_id)
             .order_by(EventRecordRow.created_at, EventRecordRow.event_id)
             .limit(event_limit + 1)
+        ).all()
+        events = [_row_to_event_record(row) for row in rows]
+        _ensure_event_replay_page_within_rust_contract(events, event_limit, byte_limit)
+        return events
+
+    def list_events_for_task_filtered(
+        self,
+        task_id: str,
+        *,
+        event_types: Iterable[str] | None = None,
+        node_id: str | None = None,
+        visibility: EventVisibility | str | None = None,
+        limit: int | None = None,
+    ) -> list[EventRecord]:
+        event_limit, byte_limit = _ensure_event_replay_policy_compatible_with_rust_contract()
+        resolved_limit = _resolve_event_replay_page_limit(limit, event_limit)
+        conditions = [EventRecordRow.task_id == task_id]
+        if event_types is not None:
+            resolved_event_types = tuple(str(event_type) for event_type in event_types)
+            if not resolved_event_types:
+                return []
+            conditions.append(EventRecordRow.event_type.in_(resolved_event_types))
+        if node_id is not None:
+            conditions.append(EventRecordRow.node_id == node_id)
+        if visibility is not None:
+            conditions.append(EventRecordRow.visibility == str(visibility))
+        rows = self._session.scalars(
+            select(EventRecordRow)
+            .where(*conditions)
+            .order_by(EventRecordRow.created_at, EventRecordRow.event_id)
+            .limit(resolved_limit)
         ).all()
         events = [_row_to_event_record(row) for row in rows]
         _ensure_event_replay_page_within_rust_contract(events, event_limit, byte_limit)
@@ -1159,14 +1400,20 @@ class SQLiteStorage(StoragePort):
 
         return await asyncio.to_thread(_sync)
 
-    async def save_auth_user_token(self, token: AuthUserToken) -> AuthUserToken:
-        return await self._run(lambda state, collab: state.save_auth_user_token(token))
+    async def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken:
+        return await self._run(lambda state, collab: state.save_auth_user_token(token, auth_generation_reason=auth_generation_reason))
 
     async def get_auth_user_token(self, username: str) -> AuthUserToken | None:
         return await self._run(lambda state, collab: state.get_auth_user_token(username))
 
     async def get_auth_user_token_by_hash(self, api_token_hash: str) -> AuthUserToken | None:
         return await self._run(lambda state, collab: state.get_auth_user_token_by_hash(api_token_hash))
+
+    async def get_auth_user_generation(self, username: str) -> AuthUserToken | None:
+        return await self._run(lambda state, collab: state.get_auth_user_generation(username))
+
+    async def list_auth_user_generations(self) -> list[AuthUserToken]:
+        return await self._run(lambda state, collab: state.list_auth_user_generations())
 
     async def touch_auth_user_token_last_used(
         self,
@@ -1189,12 +1436,14 @@ class SQLiteStorage(StoragePort):
         *,
         api_token_hash: str,
         at: datetime,
+        auth_generation_reason: str | None = None,
     ) -> AuthUserToken | None:
         return await self._run(
             lambda state, collab: state.clear_auth_user_token(
                 username,
                 api_token_hash=api_token_hash,
                 at=at,
+                auth_generation_reason=auth_generation_reason,
             )
         )
 
@@ -1205,6 +1454,7 @@ class SQLiteStorage(StoragePort):
         old_api_token_hash: str,
         new_api_token_hash: str,
         at: datetime,
+        auth_generation_reason: str | None = None,
     ) -> AuthUserToken | None:
         return await self._run(
             lambda state, collab: state.rotate_auth_user_token(
@@ -1212,6 +1462,7 @@ class SQLiteStorage(StoragePort):
                 old_api_token_hash=old_api_token_hash,
                 new_api_token_hash=new_api_token_hash,
                 at=at,
+                auth_generation_reason=auth_generation_reason,
             )
         )
 
@@ -1224,8 +1475,90 @@ class SQLiteStorage(StoragePort):
     async def list_conversations_for_username(self, username: str) -> list[Conversation]:
         return await self._run(lambda state, collab: state.list_conversations_for_username(username))
 
+    async def list_deleting_conversations(self) -> list[Conversation]:
+        return await self._run(lambda state, collab: state.list_deleting_conversations())
+
+    async def mark_conversation_deleting(
+        self,
+        conversation_id: str,
+        *,
+        runner_id: str,
+        requested_at: datetime,
+        started_at: datetime | None = None,
+        phase: str = "marking",
+    ) -> Conversation | None:
+        return await self._run(
+            lambda state, collab: state.mark_conversation_deleting(
+                conversation_id,
+                runner_id=runner_id,
+                requested_at=requested_at,
+                started_at=started_at,
+                phase=phase,
+            )
+        )
+
+    async def update_conversation_delete_phase(
+        self,
+        conversation_id: str,
+        *,
+        phase: str,
+        updated_at: datetime,
+        runner_id: str | None = None,
+    ) -> Conversation | None:
+        return await self._run(
+            lambda state, collab: state.update_conversation_delete_phase(
+                conversation_id,
+                phase=phase,
+                updated_at=updated_at,
+                runner_id=runner_id,
+            )
+        )
+
+    async def mark_conversation_delete_failed(
+        self,
+        conversation_id: str,
+        *,
+        failed_at: datetime,
+        phase: str,
+        error_code: str,
+        error_summary: str,
+        runner_id: str | None = None,
+    ) -> Conversation | None:
+        return await self._run(
+            lambda state, collab: state.mark_conversation_delete_failed(
+                conversation_id,
+                failed_at=failed_at,
+                phase=phase,
+                error_code=error_code,
+                error_summary=error_summary,
+                runner_id=runner_id,
+            )
+        )
+
+    async def retry_failed_conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        runner_id: str,
+        requested_at: datetime,
+        started_at: datetime | None = None,
+        phase: str = "marking",
+    ) -> Conversation | None:
+        return await self._run(
+            lambda state, collab: state.retry_failed_conversation_delete(
+                conversation_id,
+                runner_id=runner_id,
+                requested_at=requested_at,
+                started_at=started_at,
+                phase=phase,
+            )
+        )
+
     async def delete_conversation(self, conversation_id: str) -> dict[str, int]:
         return await self._run(lambda state, collab: state.delete_conversation(conversation_id))
+
+    async def delete_conversation_physical(self, conversation_id: str) -> dict[str, int]:
+        return await self._run(lambda state, collab: state.delete_conversation_physical(conversation_id))
 
     async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary:
         return await self._run(lambda state, collab: state.save_conversation_memory_summary(summary))
@@ -1506,6 +1839,9 @@ class SQLiteStorage(StoragePort):
             return [_artifact_from_sidecar_record(record) for record in envelope["artifacts"]]
         return await self._run(lambda state, collab: state.list_artifacts_for_task(task_id))
 
+    async def list_artifacts_for_conversation(self, conversation_id: str) -> list[Artifact]:
+        return await self._run(lambda state, collab: state.list_artifacts_for_conversation(conversation_id))
+
     async def append_event(self, event: EventRecord) -> EventRecord:
         sidecar_client = self._runtime_sidecar_client_for(
             component="event_log",
@@ -1561,6 +1897,25 @@ class SQLiteStorage(StoragePort):
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]:
         return await self._run(lambda state, collab: collab.list_events_for_task(task_id))
+
+    async def list_events_for_task_filtered(
+        self,
+        task_id: str,
+        *,
+        event_types: Iterable[str] | None = None,
+        node_id: str | None = None,
+        visibility: EventVisibility | str | None = None,
+        limit: int | None = None,
+    ) -> list[EventRecord]:
+        return await self._run(
+            lambda state, collab: collab.list_events_for_task_filtered(
+                task_id,
+                event_types=event_types,
+                node_id=node_id,
+                visibility=visibility,
+                limit=limit,
+            )
+        )
 
     async def list_event_page_for_task(
         self,

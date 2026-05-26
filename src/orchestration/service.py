@@ -454,13 +454,20 @@ class OrchestrationService:
         latest_task = await self._storage.get_task(request.task_id)
         latest_node = await self._storage.get_task_node(task_node.node_id) or running
         if latest_task is not None and latest_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+            diagnostic = result.output_payload.get("stream_diagnostic") if isinstance(result.output_payload, dict) else None
+            payload = {
+                "capability_id": node_plan.capability_id,
+                "partial_output_discarded": True,
+            }
+            if isinstance(diagnostic, dict):
+                payload.update({key: value for key, value in diagnostic.items() if key != "delta"})
             await self._record_event(
                 self._make_event(
                     task_id=request.task_id,
                     conversation_id=request.conversation_id,
                     node_id=task_node.node_id,
                     event_type="task.late_result_discarded",
-                    payload={"capability_id": node_plan.capability_id},
+                    payload=payload,
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
@@ -505,7 +512,7 @@ class OrchestrationService:
                     conversation_id=request.conversation_id,
                     node_id=task_node.node_id,
                     event_type="node.failed",
-                    payload={"code": result.error.code},
+                    payload={"code": result.error.code, **dict(result.error.metadata)},
                 )
             )
             return failed, dict(result.output_payload)

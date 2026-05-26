@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable
 from typing import Any, Mapping
@@ -25,14 +26,14 @@ from src.orchestration.answer_roles import (
     response_role_from_metadata,
 )
 
-from .helpers import LiveEventRecorder, StreamGenerator, iter_stream_events, make_event, make_text_artifact
+from .helpers import StreamGenerator, TransientEventPublisher, iter_stream_events, make_event, make_text_artifact
 from .prompt_builder import build_artifact_context, build_dependency_context, build_main_agent_prompt
 from .skill_output_artifacts import (
     SkillOutputArtifactManager,
 )
 from .workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS
 
-_REASONING_EFFORTS: set[str] = {"minimal", "low", "medium", "high"}
+_REASONING_EFFORTS: set[str] = {"minimal", "high", "max"}
 _SENSITIVE_STREAM_METADATA_KEYS = {
     "api_key",
     "authorization",
@@ -63,7 +64,8 @@ class MainAgentRespondCapability(CapabilityContract):
         script_runner: SkillScriptRunner | None = None,
         skill_input_text_generator: SkillInputTextGenerator | None = None,
         skill_output_artifact_manager: SkillOutputArtifactManager | None = None,
-        live_event_recorder: LiveEventRecorder | None = None,
+        transient_event_publisher: TransientEventPublisher | None = None,
+        cancel_checker: Callable[[str], bool | Any] | None = None,
     ) -> None:
         self._stream_generator = stream_generator
         self._stream_metadata = self._sanitize_stream_metadata(stream_metadata or {})
@@ -73,7 +75,8 @@ class MainAgentRespondCapability(CapabilityContract):
         self._script_runner = script_runner or SkillScriptRunner()
         self._skill_input_text_generator = skill_input_text_generator
         self._skill_output_artifact_manager = skill_output_artifact_manager
-        self._live_event_recorder = live_event_recorder
+        self._transient_event_publisher = transient_event_publisher
+        self._cancel_checker = cancel_checker
         self._script_execution_service = SkillScriptExecutionService(
             script_runner=self._script_runner,
             skill_input_text_generator=self._skill_input_text_generator,
@@ -100,8 +103,8 @@ class MainAgentRespondCapability(CapabilityContract):
         )
 
         events = [*forced_skill_events, *script_events]
-        reasoning_effort = self._resolve_reasoning_effort(request.metadata)
         thinking_enabled = self._resolve_thinking_enabled(request.metadata)
+        reasoning_effort = self._resolve_reasoning_effort(request.metadata, thinking_enabled=thinking_enabled)
         for match in skill_matches:
             events.append(
                 make_event(
@@ -124,21 +127,44 @@ class MainAgentRespondCapability(CapabilityContract):
         started_at = time.monotonic()
         chunks: list[str] = []
         stream_metadata: dict[str, Any] = dict(self._stream_metadata)
+        model_edition = self._resolve_model_edition(request.metadata)
+        answer_ordinal = 0
+        reasoning_ordinal = 0
+        answer_char_count = 0
+        reasoning_char_count = 0
         try:
             stream_generator, stream_metadata = self._resolve_stream_binding(reasoning_effort=reasoning_effort)
             stream_metadata["reasoning_effort"] = reasoning_effort
             stream_metadata["thinking_enabled"] = thinking_enabled
-            answer_ordinal = 0
-            reasoning_ordinal = 0
+            if model_edition:
+                stream_metadata["model"] = model_edition
+                stream_metadata["model_edition"] = model_edition
             async for stream_event in iter_stream_events(
                 stream_generator,
                 prompt,
                 reasoning_effort=reasoning_effort,
                 thinking=thinking_enabled,
+                model_edition=model_edition,
             ):
+                if await self._is_cancel_requested(request.task_id):
+                    return self._cancelled_result(
+                        request=request,
+                        events=events,
+                        stream_metadata=stream_metadata,
+                        started_at=started_at,
+                        matched_skills=skill_matches,
+                        script_results=script_results,
+                        script_artifacts=script_artifacts,
+                        response_role_payload=response_role_payload,
+                        answer_ordinal=answer_ordinal,
+                        reasoning_ordinal=reasoning_ordinal,
+                        answer_char_count=answer_char_count,
+                        reasoning_char_count=reasoning_char_count,
+                    )
                 reasoning_delta = stream_event.get("reasoning")
                 if thinking_enabled and reasoning_delta:
                     reasoning_ordinal += 1
+                    reasoning_char_count += len(reasoning_delta)
                     reasoning_event = make_event(
                         request,
                         event_type="main_agent.reasoning_delta",
@@ -146,11 +172,27 @@ class MainAgentRespondCapability(CapabilityContract):
                         visibility=EventVisibility.FRONTEND,
                         ordinal=reasoning_ordinal,
                     )
-                    await self._record_or_collect(reasoning_event, events)
+                    await self._publish_transient(reasoning_event)
 
                 answer_delta = stream_event.get("answer")
                 if answer_delta:
+                    if await self._is_cancel_requested(request.task_id):
+                        return self._cancelled_result(
+                            request=request,
+                            events=events,
+                            stream_metadata=stream_metadata,
+                            started_at=started_at,
+                            matched_skills=skill_matches,
+                            script_results=script_results,
+                            script_artifacts=script_artifacts,
+                            response_role_payload=response_role_payload,
+                            answer_ordinal=answer_ordinal,
+                            reasoning_ordinal=reasoning_ordinal,
+                            answer_char_count=answer_char_count,
+                            reasoning_char_count=reasoning_char_count,
+                        )
                     answer_ordinal += 1
+                    answer_char_count += len(answer_delta)
                     chunks.append(answer_delta)
                     delta_event = make_event(
                         request,
@@ -163,17 +205,29 @@ class MainAgentRespondCapability(CapabilityContract):
                         visibility=EventVisibility.FRONTEND,
                         ordinal=answer_ordinal,
                     )
-                    await self._record_or_collect(delta_event, events)
+                    await self._publish_transient(delta_event)
         except Exception as exc:
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            diagnostic_payload = self._stream_diagnostic_payload(
+                stream_metadata=stream_metadata,
+                status="failed",
+                stage="llm_stream",
+                error_code="main_agent_llm_failed",
+                error_type=exc.__class__.__name__,
+                retriable=True,
+                answer_chunk_count=answer_ordinal,
+                reasoning_chunk_count=reasoning_ordinal,
+                answer_char_count=answer_char_count,
+                reasoning_char_count=reasoning_char_count,
+                elapsed_ms=duration_ms,
+            )
             events.append(
                 make_event(
                     request,
-                    event_type="main_agent.llm_fallback",
+                    event_type="main_agent.llm_stream_failed",
                     payload={
-                        **stream_metadata,
-                        "fallback_reason": "provider_failed",
                         "prompt_recorded": False,
-                        "diagnostic": self._safe_exception_diagnostic(exc),
+                        **diagnostic_payload,
                     },
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
@@ -185,8 +239,9 @@ class MainAgentRespondCapability(CapabilityContract):
                 node_id=request.node_id,
                 output_payload={
                     "response_source": "llm",
-                    "fallback_used": True,
-                    "fallback_reason": "provider_failed",
+                    "fallback_used": False,
+                    "failure_reason": "provider_failed",
+                    "stream_diagnostic": diagnostic_payload,
                     "matched_skills": [match.manifest.name for match in skill_matches],
                     "script_results": script_results,
                     "prompt_recorded": False,
@@ -198,8 +253,24 @@ class MainAgentRespondCapability(CapabilityContract):
                     code="main_agent_llm_failed",
                     message="Main agent LLM call failed.",
                     retriable=True,
-                    metadata={"prompt_recorded": False},
+                    metadata={"prompt_recorded": False, **diagnostic_payload},
                 ),
+            )
+
+        if await self._is_cancel_requested(request.task_id):
+            return self._cancelled_result(
+                request=request,
+                events=events,
+                stream_metadata=stream_metadata,
+                started_at=started_at,
+                matched_skills=skill_matches,
+                script_results=script_results,
+                script_artifacts=script_artifacts,
+                response_role_payload=response_role_payload,
+                answer_ordinal=answer_ordinal,
+                reasoning_ordinal=reasoning_ordinal,
+                answer_char_count=answer_char_count,
+                reasoning_char_count=reasoning_char_count,
             )
 
         response_text = "".join(chunks)
@@ -209,11 +280,16 @@ class MainAgentRespondCapability(CapabilityContract):
             event_type="main_agent.output_final",
             payload={
                 "response_length": len(response_text),
+                "answer_chunk_count": answer_ordinal,
+                "reasoning_chunk_count": reasoning_ordinal,
+                "answer_char_count": answer_char_count,
+                "reasoning_char_count": reasoning_char_count,
+                "duration_ms": duration_ms,
                 **response_role_payload,
             },
             visibility=EventVisibility.FRONTEND,
         )
-        await self._record_or_collect(final_event, events)
+        events.append(final_event)
         events.append(
             make_event(
                 request,
@@ -520,7 +596,9 @@ class MainAgentRespondCapability(CapabilityContract):
             stream_generator = client.stream_text
         return stream_generator, self._sanitize_stream_metadata(metadata)
 
-    def _resolve_reasoning_effort(self, metadata: Mapping[str, Any]) -> ReasoningEffort:
+    def _resolve_reasoning_effort(self, metadata: Mapping[str, Any], *, thinking_enabled: bool) -> ReasoningEffort:
+        if not thinking_enabled:
+            return "minimal"
         explicit = metadata.get("main_agent_reasoning_effort")
         if isinstance(explicit, str) and explicit in _REASONING_EFFORTS:
             return explicit  # type: ignore[return-value]
@@ -530,6 +608,14 @@ class MainAgentRespondCapability(CapabilityContract):
         if "main_agent_thinking_enabled" in metadata:
             return self._is_truthy(metadata.get("main_agent_thinking_enabled"))
         return self._is_truthy(metadata.get("deep_thinking"))
+
+    @staticmethod
+    def _resolve_model_edition(metadata: Mapping[str, Any]) -> str | None:
+        value = metadata.get("model_edition")
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return None
 
     @staticmethod
     def _is_truthy(value: Any) -> bool:
@@ -603,15 +689,113 @@ class MainAgentRespondCapability(CapabilityContract):
             if str(key).lower() not in _SENSITIVE_STREAM_METADATA_KEYS
         }
 
-    @staticmethod
-    def _safe_exception_diagnostic(exc: Exception) -> str:
-        return exc.__class__.__name__
-
-    async def _record_or_collect(self, event, events: list) -> None:
-        if self._live_event_recorder is None:
-            events.append(event)
+    async def _publish_transient(self, event) -> None:
+        if self._transient_event_publisher is None:
             return
-        await self._live_event_recorder(event)
+        await self._transient_event_publisher(event)
+
+    async def _is_cancel_requested(self, task_id: str) -> bool:
+        if self._cancel_checker is None:
+            return False
+        result = self._cancel_checker(task_id)
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+
+    @staticmethod
+    def _stream_diagnostic_payload(
+        *,
+        stream_metadata: Mapping[str, Any],
+        status: str,
+        stage: str,
+        error_code: str,
+        error_type: str,
+        retriable: bool,
+        answer_chunk_count: int,
+        reasoning_chunk_count: int,
+        answer_char_count: int,
+        reasoning_char_count: int,
+        elapsed_ms: int,
+        cancel_source: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            **dict(stream_metadata),
+            "status": status,
+            "stage": stage,
+            "error_code": error_code,
+            "error_type": error_type,
+            "retriable": retriable,
+            "partial_output_discarded": True,
+            "answer_chunk_count": answer_chunk_count,
+            "reasoning_chunk_count": reasoning_chunk_count,
+            "answer_char_count": answer_char_count,
+            "reasoning_char_count": reasoning_char_count,
+            "elapsed_ms": elapsed_ms,
+        }
+        if cancel_source is not None:
+            payload["cancel_source"] = cancel_source
+        return payload
+
+    def _cancelled_result(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        events: list,
+        stream_metadata: Mapping[str, Any],
+        started_at: float,
+        matched_skills: list[SkillMatch],
+        script_results: list[dict[str, Any]],
+        script_artifacts: tuple,
+        response_role_payload: Mapping[str, Any],
+        answer_ordinal: int,
+        reasoning_ordinal: int,
+        answer_char_count: int,
+        reasoning_char_count: int,
+    ) -> CapabilityExecutionResult:
+        diagnostic_payload = self._stream_diagnostic_payload(
+            stream_metadata=stream_metadata,
+            status="cancelled",
+            stage="llm_stream",
+            error_code="main_agent_stream_cancelled",
+            error_type="CancelledByUser",
+            retriable=False,
+            answer_chunk_count=answer_ordinal,
+            reasoning_chunk_count=reasoning_ordinal,
+            answer_char_count=answer_char_count,
+            reasoning_char_count=reasoning_char_count,
+            elapsed_ms=int((time.monotonic() - started_at) * 1000),
+            cancel_source="user",
+        )
+        events.append(
+            make_event(
+                request,
+                event_type="main_agent.stream_cancelled",
+                payload={"prompt_recorded": False, **diagnostic_payload},
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload={
+                "response_source": "llm",
+                "fallback_used": False,
+                "stream_diagnostic": diagnostic_payload,
+                "matched_skills": [match.manifest.name for match in matched_skills],
+                "script_results": script_results,
+                "prompt_recorded": False,
+                **dict(response_role_payload),
+            },
+            artifacts=tuple(script_artifacts),
+            events=tuple(events),
+            error=CapabilityExecutionError(
+                code="main_agent_stream_cancelled",
+                message="Main agent stream was cancelled before completion.",
+                retriable=False,
+                metadata={"prompt_recorded": False, **diagnostic_payload},
+            ),
+        )
 
 
 class MainAgentExecutor(ExecutorPort):
@@ -626,7 +810,8 @@ class MainAgentExecutor(ExecutorPort):
         script_runner: SkillScriptRunner | None = None,
         skill_input_text_generator: SkillInputTextGenerator | None = None,
         skill_output_artifact_manager: SkillOutputArtifactManager | None = None,
-        live_event_recorder: LiveEventRecorder | None = None,
+        transient_event_publisher: TransientEventPublisher | None = None,
+        cancel_checker: Callable[[str], bool | Any] | None = None,
     ) -> None:
         self._capabilities: dict[str, CapabilityContract] = {
             "main_agent.respond": MainAgentRespondCapability(
@@ -638,7 +823,8 @@ class MainAgentExecutor(ExecutorPort):
                 script_runner=script_runner,
                 skill_input_text_generator=skill_input_text_generator,
                 skill_output_artifact_manager=skill_output_artifact_manager,
-                live_event_recorder=live_event_recorder,
+                transient_event_publisher=transient_event_publisher,
+                cancel_checker=cancel_checker,
             )
         }
 

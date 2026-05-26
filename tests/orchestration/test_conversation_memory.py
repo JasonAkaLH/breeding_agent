@@ -53,6 +53,28 @@ class FakeStorage:
     async def list_events_for_task(self, task_id: str):
         return list(self.events_by_task.get(task_id, ()))
 
+    async def list_events_for_task_filtered(
+        self,
+        task_id: str,
+        *,
+        event_types=None,
+        node_id: str | None = None,
+        visibility=None,
+        limit: int | None = None,
+    ):
+        events = list(self.events_by_task.get(task_id, ()))
+        if event_types is not None:
+            allowed = {str(event_type) for event_type in event_types}
+            events = [event for event in events if event.event_type in allowed]
+        if node_id is not None:
+            events = [event for event in events if event.node_id == node_id]
+        if visibility is not None:
+            events = [event for event in events if str(event.visibility) == str(visibility)]
+        events = sorted(events, key=lambda event: (event.created_at or datetime.min, event.event_id))
+        if limit is not None:
+            events = events[:limit]
+        return events
+
     async def get_latest_conversation_memory_summary(self, conversation_id: str, username: str | None = None):
         if self.latest_summary is None:
             return None
@@ -503,6 +525,73 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         rendered = "\n".join(message.content for message in context.recent_messages)
         self.assertIn("全局汇总", rendered)
         self.assertNotIn("局部回答", rendered)
+
+    async def test_builder_artifact_fallback_uses_filtered_final_events_when_full_replay_fails(self) -> None:
+        class FullReplayUnavailableStorage(FakeStorage):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.filtered_calls = []
+
+            async def list_events_for_task(self, task_id: str):
+                raise AssertionError("full event replay must not be used for conversation memory final artifact fallback")
+
+            async def list_events_for_task_filtered(self, task_id: str, **kwargs):
+                self.filtered_calls.append((task_id, kwargs))
+                return await super().list_events_for_task_filtered(task_id, **kwargs)
+
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "先查品种，再做设计", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "继续", task_id="task-2", created_at=now),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        artifacts = {
+            "task-1": [
+                Artifact("art-intermediate", "task-1", "node-intermediate", ArtifactType.TEXT, "局部回答", is_complete=True),
+                Artifact("art-final", "task-1", "node-final", ArtifactType.TEXT, "全局汇总", is_complete=True),
+            ]
+        }
+        events = {
+            "task-1": [
+                EventRecord(
+                    "evt-reasoning",
+                    "conv-1",
+                    "task-1",
+                    node_id="node-final",
+                    event_type="main_agent.reasoning_delta",
+                    payload={"delta": "SECRET_REASONING_SHOULD_NOT_BE_IN_HISTORY"},
+                    visibility=EventVisibility.FRONTEND,
+                ),
+                EventRecord(
+                    "evt-final",
+                    "conv-1",
+                    "task-1",
+                    node_id="node-final",
+                    event_type="main_agent.output_final",
+                    payload={"response_role": "final"},
+                    visibility=EventVisibility.FRONTEND,
+                ),
+            ]
+        }
+        storage = FullReplayUnavailableStorage(
+            conversation=Conversation("conv-1", "alice"),
+            messages=messages,
+            tasks=tasks,
+            artifacts_by_task=artifacts,
+            events_by_task=events,
+        )
+        context = await ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000)).build(
+            OrchestrationRequest("task-2", "conv-1", "msg-current", "继续"),
+            username="alice",
+        )
+
+        rendered = "\n".join(message.content for message in context.recent_messages)
+        self.assertIn("全局汇总", rendered)
+        self.assertNotIn("局部回答", rendered)
+        self.assertEqual(storage.filtered_calls[0][1]["event_types"], {"main_agent.output_final"})
 
     async def test_builder_rejects_owner_mismatch(self) -> None:
         storage = FakeStorage(conversation=Conversation("conv-1", "alice"))

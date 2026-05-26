@@ -23,7 +23,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dsn-env", default="MAF_POSTGRES_STATE_DSN")
     parser.add_argument("--allow-missing-driver", action="store_true", help="Only for non-production dry validation; production still requires driver.")
     parser.add_argument("--simulate-missing-driver", action="store_true", help="Test seam for fail-closed validation.")
-    parser.add_argument("--migration-ready", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     env = {
@@ -42,8 +41,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.dsn_env and os.environ.get(args.dsn_env):
         env["MAF_POSTGRES_STATE_DSN"] = os.environ[args.dsn_env]
-    if args.migration_ready:
-        env["MAF_STATE_PLATFORM_MIGRATION_READY"] = "1"
     normalized_env = args.env.strip().lower()
     allow_missing_driver = args.allow_missing_driver and normalized_env not in {"prod", "production"}
     try:

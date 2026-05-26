@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+
 class StrictRequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -95,12 +96,30 @@ class SubmitMessageRequest(StrictRequestModel):
     routing_mode: str = "auto"
     capability_id: str | None = None
     client_message_id: str | None = None
+    model_edition: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("metadata")
     @classmethod
     def reject_identity_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _reject_reserved_identity_fields(value, field_name="metadata")
+
+    @field_validator("model_edition")
+    @classmethod
+    def normalize_model_edition(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ModelEditionOptionResponse(BaseModel):
+    value: str
+    label: str
+
+
+class ModelEditionsResponse(BaseModel):
+    default_model_edition: str | None
+    options: list[ModelEditionOptionResponse]
 
 
 class LoginRequest(StrictRequestModel):
@@ -209,6 +228,11 @@ class DeleteConversationResponse(BaseModel):
     deleted: bool
     cancelled_task_ids: list[str] = Field(default_factory=list)
     deleted_counts: dict[str, int] = Field(default_factory=dict)
+    delete_status: str = "completed"
+    runner_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_code: str | None = None
 
 
 class DeleteConversationRequest(StrictRequestModel):

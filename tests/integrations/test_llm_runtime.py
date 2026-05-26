@@ -28,13 +28,13 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return {"provider": "fake", "config_source": config_source, "reasoning_effort": reasoning_effort}
 
         runtime = SharedLLMRuntime(client_factory=FakeClient, config={"model": "fake"}, config_source="injected_config")
-        text = await runtime.generate_text("p1", reasoning_effort="low")
+        text = await runtime.generate_text("p1", reasoning_effort="max")
         events = [event async for event in runtime.stream_events("p2", thinking=True, reasoning_effort="high")]
 
         self.assertEqual(text, "text-output")
         self.assertEqual(events, [{"answer": None, "reasoning": "r"}, {"answer": "a", "reasoning": None}])
         self.assertEqual(len(FakeClient.instances), 1)
-        self.assertEqual(FakeClient.instances[0].calls, ["text:p1:False:low", "stream:p2:True:high"])
+        self.assertEqual(FakeClient.instances[0].calls, ["text:p1:False:max", "stream:p2:True:high"])
 
     async def test_generate_text_can_collect_stream_reasoning_when_requested(self) -> None:
         class FakeClient:
@@ -52,6 +52,46 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(text, "answer")
         self.assertEqual(reasoning, ["think"])
+
+    async def test_model_edition_override_uses_separate_cached_client(self) -> None:
+        class FakeClient:
+            instances: list["FakeClient"] = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.model = kwargs["config"]["model_edition"]
+                self.calls: list[str] = []
+                FakeClient.instances.append(self)
+
+            async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
+                self.calls.append(prompt)
+                return self.model
+
+        runtime = SharedLLMRuntime(
+            client_factory=FakeClient,
+            config={
+                "api_key": "test",
+                "base_url": "http://example.test",
+                "model_editions": {
+                    "default": "deepseek-v4-flash-260425",
+                    "options": [
+                        {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"},
+                        {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro"},
+                    ],
+                },
+            },
+            config_source="injected_config",
+        )
+
+        first = await runtime.generate_text("p1", model_edition="deepseek-v4-flash-260425")
+        second = await runtime.generate_text("p2", model_edition="deepseek-v4-flash-260425")
+        third = await runtime.generate_text("p3", model_edition="deepseek-v4-pro-260425")
+
+        self.assertEqual(first, "deepseek-v4-flash-260425")
+        self.assertEqual(second, "deepseek-v4-flash-260425")
+        self.assertEqual(third, "deepseek-v4-pro-260425")
+        self.assertEqual([client.model for client in FakeClient.instances], ["deepseek-v4-flash-260425", "deepseek-v4-pro-260425"])
+        self.assertEqual(FakeClient.instances[0].calls, ["p1", "p2"])
 
 
 if __name__ == "__main__":

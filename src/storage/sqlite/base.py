@@ -4,9 +4,10 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import MetaData, Text
+from sqlalchemy import DateTime, MetaData, Text
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.types import TypeDecorator
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 NAMING_CONVENTION = {
@@ -26,14 +27,23 @@ class JSONText(TypeDecorator):
     impl = Text
     cache_ok = True
 
-    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(JSONB())
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
         if value is None:
             return None
+        if dialect.name == "postgresql":
+            return value
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
-    def process_result_value(self, value: str | None, dialect: Any) -> Any:
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
         if value is None:
             return None
+        if dialect.name == "postgresql" or not isinstance(value, str):
+            return value
         return json.loads(value)
 
 
@@ -41,14 +51,23 @@ class DateTimeText(TypeDecorator):
     impl = Text
     cache_ok = True
 
-    def process_bind_param(self, value: datetime | None, dialect: Any) -> str | None:
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(DateTime(timezone=True))
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value: datetime | None, dialect: Any) -> Any:
         if value is None:
             return None
+        if dialect.name == "postgresql":
+            return value
         return value.isoformat()
 
-    def process_result_value(self, value: str | None, dialect: Any) -> datetime | None:
+    def process_result_value(self, value: Any, dialect: Any) -> datetime | None:
         if value is None:
             return None
+        if isinstance(value, datetime):
+            return value
         return datetime.fromisoformat(value)
 
 

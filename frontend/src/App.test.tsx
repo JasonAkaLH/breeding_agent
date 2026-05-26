@@ -3,7 +3,7 @@ import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { ApiClient } from './api/client';
-import type { ConversationMessagesResponse, TaskEventEnvelope } from './api/types';
+import type { ConversationMessagesResponse, DeleteConversationResponse, TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
 import { WELCOME_PROMPTS } from './domain/welcomePrompts';
 
@@ -21,6 +21,13 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         { capability_id: 'skill.data_lookup', name: 'data-lookup', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' },
         { capability_id: 'skill.mini_breedstat_rcbd', name: 'mini-breedstat-rcbd', description: '生成 RCBD 随机区组设计', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'mini_breedstat_rcbd_skill/SKILL.md' },
         { capability_id: 'main_agent.respond', name: '普通对话', description: '主代理', version: '1', status: 'active', kind: 'builtin', source: 'builtin', source_path: '' },
+      ],
+    })),
+    getModelEditions: vi.fn(async () => ({
+      default_model_edition: 'deepseek-v4-flash-260425',
+      options: [
+        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash' },
+        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro' },
       ],
     })),
     listConversationUploads: vi.fn(async () => ({ conversation_id: 'conv-test', uploads: [] })),
@@ -841,6 +848,62 @@ describe('App', () => {
     })));
   });
 
+  it('shows a spinner only on the target history item while deletion is pending', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const pendingDelete = deferred<DeleteConversationResponse>();
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          {
+            conversation_id: 'conv-target',
+            username: 'alice',
+            status: 'active',
+            current_task_id: null,
+            title: '待删除会话',
+            created_at: null,
+            updated_at: null,
+          },
+          {
+            conversation_id: 'conv-other',
+            username: 'alice',
+            status: 'active',
+            current_task_id: null,
+            title: '其他会话',
+            created_at: null,
+            updated_at: null,
+          },
+        ],
+      })),
+      deleteConversation: vi.fn(() => pendingDelete.promise),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '删除历史会话 待删除会话' }));
+
+    expect(await screen.findByRole('status', { name: '正在删除历史会话 待删除会话' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^待删除会话/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '重命名历史会话 待删除会话' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '删除历史会话 待删除会话' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '其他会话' })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '其他会话' }));
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-other'));
+
+    pendingDelete.resolve({
+      conversation_id: 'conv-target',
+      deleted: true,
+      cancelled_task_ids: [],
+      deleted_counts: { conversation: 1 },
+      delete_status: 'completed',
+      runner_id: 'delete-test',
+      started_at: null,
+      finished_at: null,
+      error_code: null,
+    });
+    await waitFor(() => expect(screen.queryByRole('button', { name: '待删除会话' })).not.toBeInTheDocument());
+    confirm.mockRestore();
+  });
+
   it('deletes a historical conversation after confirmation and removes it from the list', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const api = makeApi({
@@ -1031,10 +1094,12 @@ describe('App', () => {
       event('task.completed'),
     ])} />);
 
+    await waitFor(() => expect(api.getModelEditions).toHaveBeenCalled());
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '你好' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'chat' })));
+    expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({ modelEdition: 'deepseek-v4-flash-260425' }));
     await screen.findByText('思考内容');
     await screen.findByText('先分析。');
     const reasoningBox = screen.getByText('思考内容').closest('.reasoning-box');
@@ -1353,7 +1418,26 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'chat',
       deepThinking: true,
-      reasoningEffort: 'medium',
+      reasoningEffort: 'minimal',
+    })));
+  });
+
+
+  it('disables reasoning effort selection while deep thinking is off', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
+    const effortSelect = screen.getAllByLabelText('思考强度')[0];
+    expect(effortSelect).toHaveClass('ant-select-disabled');
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '普通回答' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      deepThinking: false,
+      reasoningEffort: 'minimal',
     })));
   });
 

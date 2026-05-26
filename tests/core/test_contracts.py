@@ -76,6 +76,7 @@ class CoreContractShapeTest(unittest.TestCase):
             "save_artifact",
             "append_event",
             "list_events_for_task",
+            "list_events_for_task_filtered",
             "list_event_page_for_task",
             "save_mailbox_message",
             "get_mailbox_message",

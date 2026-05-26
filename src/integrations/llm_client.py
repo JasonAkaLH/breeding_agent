@@ -8,8 +8,10 @@ from typing import Any, Literal
 import yaml
 from openai import AsyncOpenAI
 
+from .model_editions import default_model_edition
 
-ReasoningEffort = Literal["minimal", "low", "medium", "high"]
+
+ReasoningEffort = Literal["minimal", "high", "max"]
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 CONFIG_ENV_PREFIX = "MAF_CONFIG_"
@@ -103,7 +105,7 @@ class LLMClient:
                 bootstrap_config_env(config_path, override=True)
             loaded_config = load_config()
 
-        self.model = model or loaded_config.get("model_edition") or loaded_config.get("model")
+        self.model = model or _resolve_model_from_config(loaded_config)
         self.temperature = temperature if temperature is not None else loaded_config.get("temperature", 0.0)
         api_key = api_key or loaded_config.get("api_key")
         base_url = base_url or loaded_config.get("base_url")
@@ -153,7 +155,7 @@ class LLMClient:
         prompt: str,
         *,
         thinking: bool = False,
-        reasoning_effort: ReasoningEffort = "high",
+        reasoning_effort: ReasoningEffort = "minimal",
     ) -> str:
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -188,7 +190,7 @@ class LLMClient:
         self,
         prompt: str,
         thinking: bool = False,
-        reasoning_effort: ReasoningEffort = "high",
+        reasoning_effort: ReasoningEffort = "minimal",
     ) -> AsyncIterator[dict[str, str | None]]:
         extra_body = {"thinking": {"type": "enabled" if thinking else "disabled"}}
         stream = await self.client.chat.completions.create(
@@ -212,6 +214,13 @@ class LLMClient:
                 yield {"answer": None, "reasoning": reasoning}
             if answer:
                 yield {"answer": answer, "reasoning": None}
+
+
+def _resolve_model_from_config(config: Mapping[str, Any]) -> Any:
+    selected_edition = config.get("_selected_model_edition")
+    if selected_edition:
+        return selected_edition
+    return default_model_edition(config) or config.get("model_edition") or config.get("model")
 
 
 def _iter_config_env_items(config: Mapping[str, Any], prefix: str = ""):
