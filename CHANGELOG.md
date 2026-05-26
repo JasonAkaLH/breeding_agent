@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- PostgreSQL State Platform 防死锁实施计划与测试规格已落地：新增 `.omx/plans/prd-20260526-postgresql-state-platform.md` 与 `.omx/plans/test-spec-20260526-postgresql-state-platform.md`，按 CP-0 至 CP-8 拆分 dependency decision、State Platform contract、PostgreSQL schema、write queue / worker claim、command handler、read-not-blocked、runtime fail-closed、health/readiness、静态扫描与全量回归门禁；继续明确今日不做 SQLite -> PostgreSQL 迁移、不配置远端库、不改运行时代码。
 - PostgreSQL State Platform 防死锁与写队列生产级设计已落文档并完成 document-perfectization 加固：新增 `docs/superpowers/specs/2026-05-26-postgresql-state-platform-deadlock-design.md`，明确 PostgreSQL canonical store、读已提交快照不阻塞、写命令队列、partition 保序、writer worker、deadlock/lock timeout bounded retry、health/readiness、依赖集成、风险假设、需求追踪、测试验收与“今日不做迁移/不配置远端库”边界；本轮仅设计文档，不改运行时代码。
 - REST API 静态文档已按 2026-05-25 Authorization-only username token 与 Docker 新端口同步：`docs/api/api-doc.html` 移除 Cookie/captcha/password/scoped API token/`account_id` 旧认证内容，补齐登录/登出/刷新 token、Authorization header、username-only 登录、token 当前性、SSE Authorization 校验、本地开发端口 `5173`/`8000` 与 Docker 端口 `51999`/`51888`，并加强 API 文档回归测试覆盖 OpenAPI path 与旧认证词清理。
 - 旧认证残留清理已按 G002 / Ralph + Team 收口：Python core/storage 删除 `AuthUser`、`CaptchaChallenge`、`AuthSession`、`AuthApiToken` 与对应 SQLite row/repository 旧接口，bootstrap 会在 owner 迁移后 drop `auth_user`、`auth_captcha_challenge`、`auth_session`、`auth_api_token`，Rust core contract / checked-in JSON snapshot 移除旧认证模型并用 `legacy_auth_removed` schema hash 防回归；旧 2026-05-21 Cookie auth 设计文档与旧 `.omx/plans` 上下文已删除，当前 Authorization-only username token 行为保持不变。
