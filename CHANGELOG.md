@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- REST API 静态文档按实际接口行为复核更新：`docs/api/api-doc.html` 补齐 `/api/v1/capabilities` 的 `display_name`、模型配置 schema、真实 response 样例，并按当前路由修正登录/Authorization、上传软创建、上传/任务空列表、删除上传 `deleted=false`、SSE 与状态码说明；新增本地校验覆盖 23 个 `/api/v1` 路由、schema 字段与 JSON response 示例。
 - Slash Command 选择框可读性优化：Skill 选项行加高并增加底部 meta 间距，鼠标悬停在任一 Skill 选项 500ms 后可通过悬浮提示查看完整 description。
 - 项目级 Skill 头部描述中文化：`skill/*/SKILL.md` 的结构化 `description` 已统一改为中文说明，便于中文用户在 capability / slash command 选择中理解每个 Skill 的用途。
 - Slash Command 展示名链路接入：项目级 Skill `SKILL.md` 头部 `display_name` 现在随 capability descriptor 暴露到 `/api/v1/capabilities`，前端 slash command 菜单与已选择 Skill badge 在 `/xxx` 后展示该中文展示名，`name` 继续保留为稳定内部名。
