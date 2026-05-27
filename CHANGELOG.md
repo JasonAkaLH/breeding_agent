@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Thread Event Log + Execution Checkpoint 时间旅行实施计划已落地：新增 `docs/checkpoint/2026-05-28-thread-event-checkpoint-time-travel-implementation-plan.md`，按 P0-P9 拆分 v2 新 PostgreSQL DB、thread event store、projection、run/node/artifact、execution checkpoint、time travel、物理删除、前端 branch UI、API 文档与总体验证，并绑定设计文档 FR/NFR、当前代码证据和后续 Team + Ultragoal 执行建议。
 - Thread Event Log + Execution Checkpoint 时间旅行设计完成 document-perfectization 复审：`docs/checkpoint/2026-05-28-thread-event-checkpoint-time-travel-design.md` 补齐用户/受影响系统、当前仓库证据、范围/非目标、功能验收矩阵、NFR、rollout/rollback、已确认业务决策与必要假设，继续明确 v2 fresh start、新 PostgreSQL DB、checkpoint 只保存执行状态快照、历史消息原文留在 event log/message projection、branch/thread/user 删除必须物理清理。
 - Field Analysis Docker 运行时修复并发布 backend 镜像 `0.1.3`：backend 镜像安装 `r-cran-jsonlite` / `locales` 并设置 UTF-8 locale，Field Analysis Python wrapper 传递最小 PATH 与 UTF-8 locale 给 Rscript，避免 Docker 内解析中文 `.R` 源码时报 `unexpected INCOMPLETE_STRING`；`Skill构建指南.md`、`docker_cmd.md` 与回归测试同步固化 R-backed Skill 必须具备 jsonlite 与 UTF-8 运行条件。
 - Docker 镜像部署版本提升到 `0.1.2`：backend 镜像内 PostgreSQL 状态库配置使用 `biobin_user` / `postgres:5432` / `biobin_db`，并将 `biobin_user` 连接密码切换为部署约定密码；frontend 同步提供 `0.1.2` 标签，`docker_cmd.md` 补充 backend 镜像配置脱敏检查、运行容器 DSN 环境变量覆盖、image id 对比、同镜像同网络 PostgreSQL 实连、backend 当前状态/最新日志与跨容器认证失败后的 `biobin_user` 密码重置判别命令，便于远端按同一版本拉取并判别配置是否生效。
