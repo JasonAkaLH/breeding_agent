@@ -107,6 +107,27 @@ The token trim policy remains strict:
 
 SQLQuery payloads and artifacts should carry an internal `truncated` state so the final answer can add the short user-facing disclaimer. The final answer should not list raw counters by default.
 
+
+## Frontend Failure Bubble Behavior
+
+When a task still fails after the backend has produced a terminal failure state, the frontend must not leave the assistant placeholder bubble in a waiting state such as “正在等待回答...”.
+
+Required behavior:
+
+1. Stop the pending/waiting visual state as soon as the task reaches a terminal failure status.
+2. Replace the waiting placeholder with a concise failure explanation.
+3. Prefer user-safe backend failure messages when available.
+4. If only a technical error code is available, map it to a natural Chinese message before showing it.
+5. Keep detailed technical diagnostics in logs/state, not in the user-facing bubble by default.
+
+For the SQLQuery row-overflow case, the preferred fix is still soft trimming so the task should complete. This frontend requirement covers remaining hard failures such as SQL guard rejection, DB timeout, non-row-limit safety errors, or unexpected execution errors.
+
+Example user-facing failure copy:
+
+> 查询没有完成：数据库查询超时了，请稍后重试或缩小查询范围。
+
+> 查询没有完成：当前查询条件返回的内容过大，请缩小范围后重试。
+
 ## Data Flow
 
 ```text
@@ -147,13 +168,15 @@ Add or update tests before implementation:
 4. `SQLQueryResultFilteringCapability` continues bottom-first token trim after row soft trim.
 5. A newest-row-too-large token test returns zero candidate rows and the natural-language narrow-query message.
 6. Artifact/user-facing summary tests assert natural wording and absence of technical names such as `db_row_limit` and `trim_max_tokens`.
-7. Integration regression for the previously failing broad rice-for-Henan style query shape: SQLQuery should complete with truncated data instead of failing at `sql_execute_readonly`.
+7. Frontend reducer/component tests assert terminal task failures remove the waiting placeholder and show a concise failure reason.
+8. Integration regression for the previously failing broad rice-for-Henan style query shape: SQLQuery should complete with truncated data instead of failing at `sql_execute_readonly`.
 
 ## Implementation Notes
 
 - Keep changes small and localized around `src/integrations/mysql_readonly.py`, `skill/sql-query/runtime/sql_query_skill/sql_execute_readonly.py`, and `skill/sql-query/runtime/sql_query_skill/result_filtering.py`.
 - Avoid changing the safety contract file unless needed to represent row-limit overflow as metadata instead of an exception.
 - Preserve audit/debug detail but avoid leaking sensitive DB config or raw hidden diagnostics to user-facing messages.
+- Update frontend task-event handling and assistant bubble rendering so terminal failures are visible instead of leaving a waiting placeholder.
 - No new dependency is needed.
 
 ## Open Decisions
@@ -163,4 +186,5 @@ None. The user confirmed:
 - row-limit overflow should be soft-trimmed;
 - soft trim applies only to row-limit overflow;
 - token overflow remains strict because data must fit the LLM context;
-- user-facing artifact wording should be short and non-technical.
+- user-facing artifact wording should be short and non-technical;
+- terminal task failures should stop the waiting assistant bubble and show a concise failure reason.
