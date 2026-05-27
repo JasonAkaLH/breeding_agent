@@ -53,7 +53,7 @@ from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcC
 from src.integrations.codex_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
-from src.integrations.model_editions import default_model_edition, model_edition_options, validate_model_edition
+from src.integrations.model_editions import config_for_model_edition, default_model_edition, model_edition_options, validate_model_edition
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.integrations.rust_safety_contract import configure_safety_shadow_sink
@@ -2114,6 +2114,11 @@ def build_api_runtime(
         enable_conversation_memory=enable_conversation_memory,
         resolution_generator=conversation_memory_resolution_generator,
         enable_resolution_llm=enable_conversation_memory_resolution_llm,
+        model_edition_config=_resolve_model_edition_config(
+            main_agent_llm_config=main_agent_llm_config,
+            planner_llm_config=planner_llm_config,
+            platform_llm_config=platform_llm_config,
+        ),
     )
 
     main_agent_workflow_provider = MainAgentWorkflowProvider()
@@ -2734,6 +2739,7 @@ def _resolve_conversation_memory_builder(
     enable_conversation_memory: bool,
     resolution_generator: ResolutionGenerator | None,
     enable_resolution_llm: bool,
+    model_edition_config: Mapping[str, Any] | None = None,
 ) -> ConversationMemoryBuilder | None:
     if conversation_memory_builder is not None:
         return conversation_memory_builder
@@ -2754,11 +2760,18 @@ def _resolve_conversation_memory_builder(
             reasoning_effort="minimal",
         )
 
+    def resolve_memory_config(request: OrchestrationRequest) -> ConversationMemoryConfig:
+        selected_model_edition = _resolve_request_model_edition(request.metadata)
+        return ConversationMemoryConfig.from_runtime_config(
+            config_for_model_edition(model_edition_config, selected_model_edition)
+        )
+
     return ConversationMemoryBuilder(
         storage=storage,
-        config=ConversationMemoryConfig.from_runtime_config(),
+        config=ConversationMemoryConfig.from_runtime_config(config_for_model_edition(model_edition_config, None)),
         summary_generator=generate_summary,
         resolution_generator=resolution_generator or (generate_resolution if enable_resolution_llm else None),
+        config_resolver=resolve_memory_config,
     )
 
 

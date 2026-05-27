@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 模型上下文裁剪预算改为 per-model 配置：`model_editions.options[]` 支持 `trim_max_tokens`，运行时按本次 `model_edition` 派生 LLM / conversation memory 配置；DeepSeek V4 Flash / Pro 当前均按 1024K = 1024000 tokens 维护在 git-ignored `config.yaml`，顶层 `trim_max_tokens` 已从生产配置移除。
 - Strong Conversation Delete 已按 Ralph/Ultragoal G007 进入实现收口：新增 `deleting` / `deleting_failed` 状态与 deletion metadata，普通用户 conversation/task/upload/SSE 相关入口 active-only，后端 deletion runner 支持客户端断开后继续执行、启动恢复、失败留痕与运维重试脚本，PostgreSQL 物理删除改为 set-based SQL，前端历史条目显示目标级 spinner 并只锁定被删条目；API 文档与 PostgreSQL runbook 同步强删除、无前端超时、失败不复活和诊断/重试口径。
 - SSE Auth Generation Invalidation 已按 Ralph/Ultragoal G006 落地：AuthUserToken / SQLite / PostgreSQL runtime schema 增加 auth_generation 与更新时间，auth login/refresh/logout 推进 generation 并更新本地 cache / invalidation bus，SSE 建连改用 SseConnectionContext，事件热路径移除 token DB lookup/touch；PostgreSQL LISTEN/NOTIFY listener 改为先 LISTEN 后 reconcile、启动等待 ready、规范化 `postgresql+psycopg://` DSN，并在 listener 不健康时让 SSE fail-closed 发送非持久化 `auth.invalidated` / `auth_generation_unavailable` 后关闭。
 - SSE Auth Generation Invalidation 实施计划完成 document-perfectization 复审：补齐 auth generation timestamp no-drop backfill、repository 原子 upsert/conditional update、auth write 与 PostgreSQL NOTIFY 同事务边界、本地 writer cache response 前更新、`auth.invalidated` 非持久化 SSE 控制事件、listener shutdown，以及测试目录/命令与当前仓库分层一致性。
