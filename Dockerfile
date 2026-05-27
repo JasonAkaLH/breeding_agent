@@ -12,6 +12,8 @@ RUN npm run build
 FROM ubuntu:22.04 AS backend
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     MAF_RUST_CORE_MODE=off \
     MAF_RUST_LIFECYCLE_MODE=off \
@@ -21,6 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MAF_RUST_AUDIT_SANITIZER_MODE=off \
     MAF_RUST_SKILL_RUNTIME_MODE=off
 
+# R-backed Skill bundles require UTF-8 source parsing and jsonlite JSON output.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
@@ -28,7 +31,9 @@ RUN apt-get update \
         curl \
         libgomp1 \
         libstdc++6 \
+        locales \
         r-base-core \
+        r-cran-jsonlite \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

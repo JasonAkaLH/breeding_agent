@@ -29,7 +29,7 @@ export BREEDING_AGENT_POSTGRES_PASSWORD='<biobin_user password>'
 ```bash
 docker run --rm --entrypoint python \
   -e BREEDING_AGENT_POSTGRES_PASSWORD \
-  registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.2 \
+  registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.3 \
   -c "from pathlib import Path; import os; import yaml; from sqlalchemy.engine import make_url; d=yaml.safe_load(Path('/app/config.yaml').read_text()); pg=(d.get('state_platform') or {}).get('postgres') or {}; u=make_url(pg.get('dsn') or ''); expected=os.environ.get('BREEDING_AGENT_POSTGRES_PASSWORD') or ''; print('backend=', (d.get('state_platform') or {}).get('backend')); print('user=', u.username); print('host=', u.host); print('port=', u.port); print('db=', u.database); print('password_matches_expected=', bool(expected) and u.password == expected); print('password_len=', len(u.password or ''))"
 ```
 
@@ -64,7 +64,7 @@ docker inspect breeding-agent-backend --format '{{range .Config.Env}}{{println .
 
 ```bash
 docker inspect breeding-agent-backend --format 'container_image_id={{.Image}}'
-docker image inspect registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.2 --format 'tag_image_id={{.Id}}'
+docker image inspect registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.3 --format 'tag_image_id={{.Id}}'
 ```
 
 期望结果：两行 ID 一致。如果不一致，说明当前 `breeding-agent-backend` 容器不是用刚检查过的 `0.1.2` 镜像创建的，删除并按下面的标准 `docker run` 命令重建 backend 容器。
@@ -75,7 +75,7 @@ docker image inspect registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-bac
 
 ```bash
 docker run --rm --network breeding-agent-net --entrypoint python \
-  registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.2 \
+  registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.3 \
   -c "from pathlib import Path; import yaml; from sqlalchemy import create_engine, text; d=yaml.safe_load(Path('/app/config.yaml').read_text()); dsn=d['state_platform']['postgres']['dsn']; e=create_engine(dsn, future=True, hide_parameters=True); c=e.connect(); print(c.execute(text('SELECT current_user, current_database()')).one()); c.close(); print('connect ok')"
 ```
 
@@ -124,7 +124,7 @@ docker volume create breeding-agent-runtime
 ```
 
 ```bash
-docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.2
+docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.3
 ```
 
 ```bash
@@ -149,7 +149,7 @@ docker inspect postgres-longrun --format '{{json .NetworkSettings.Networks.breed
 ```
 
 ```bash
-docker run -d --name breeding-agent-backend --network breeding-agent-net --network-alias backend -p 51888:8000 -e PYTHONPATH=/app -e PYTHONUNBUFFERED=1 -e MAF_RUST_CORE_MODE=off -e MAF_RUST_LIFECYCLE_MODE=off -e MAF_RUST_ARTIFACT_STORE_MODE=off -e MAF_RUST_AUTH_CORE_MODE=off -e MAF_RUST_DATA_ACCESS_MODE=off -e MAF_RUST_AUDIT_SANITIZER_MODE=off -e MAF_RUST_SKILL_RUNTIME_MODE=off -v breeding-agent-runtime:/app/runtime registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.2
+docker run -d --name breeding-agent-backend --network breeding-agent-net --network-alias backend -p 51888:8000 -e PYTHONPATH=/app -e PYTHONUNBUFFERED=1 -e MAF_RUST_CORE_MODE=off -e MAF_RUST_LIFECYCLE_MODE=off -e MAF_RUST_ARTIFACT_STORE_MODE=off -e MAF_RUST_AUTH_CORE_MODE=off -e MAF_RUST_DATA_ACCESS_MODE=off -e MAF_RUST_AUDIT_SANITIZER_MODE=off -e MAF_RUST_SKILL_RUNTIME_MODE=off -v breeding-agent-runtime:/app/runtime registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.3
 ```
 
 ```bash
