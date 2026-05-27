@@ -2,7 +2,7 @@
 
 日期：2026-05-28
 
-状态：设计确认稿
+状态：设计确认稿（document-perfectization 复审通过）
 
 范围：新 `dev` 分支上的后端状态底座、API v2、前端分支/时间旅行交互、PostgreSQL 新开发库
 
@@ -25,6 +25,58 @@ Thread Event Log + Execution Checkpoint + Branch + Projection
 5. 支持 interrupt resume、失败重试、checkpoint 恢复。
 6. 使用新的 PostgreSQL 开发 DB，fresh start，不迁移旧数据。
 7. API、后端模型、前端状态命名统一改为 `thread / branch / run / checkpoint`，不再沿用 `conversation / task` 作为新接口命名。
+
+
+### 1.1 问题陈述
+
+当前系统的事实记录、前端进度、执行恢复和 artifact 归属分散在 task / message / event / artifact / interrupt / checkpoint 多套表与接口中。现有 checkpoint 只提供薄恢复引用，不能独立表达“某一时刻可继续执行的完整状态”。因此系统难以支持节点级重新执行、长期 thread 状态序列、分支版本查看和可靠中断恢复。
+
+本设计要解决的问题是：把事实账本、执行状态快照和查询视图明确分层，使普通用户可以从任意稳定节点边界重新执行，同时保证历史不可被隐式改写，删除后没有业务残留。
+
+### 1.2 用户、干系人与受影响系统
+
+| 类别 | 影响 |
+| --- | --- |
+| 普通用户 | 可以在对话内查看分支版本，并从节点级重新执行点创建新版本。 |
+| 前端业务对话台 | 需要从 conversation/task 状态模型迁移到 thread/branch/run/checkpoint 状态模型，并实现 branch switcher。 |
+| 后端 API runtime | 需要提供 `/api/v2` thread/run/checkpoint 接口，并禁止 v2 runtime 回写 v1 表。 |
+| 编排服务 | 需要把 plan、node outputs、next nodes 和 runtime replan 状态写入 checkpoint。 |
+| Storage / PostgreSQL runtime | 需要以新 PostgreSQL DB 承载 event log、checkpoint、projection 和物理删除。 |
+| Skill / SQL / LLM capability | time travel 默认复用 checkpoint 前输出，checkpoint 后的节点可能重新执行并产生新 artifact。 |
+| 运维/开发者 | 需要新的 DB、schema bootstrap、删除清理验证、typed error 与审计证据。 |
+
+### 1.3 当前仓库证据
+
+| 证据 | 当前状态 | 对本设计的影响 |
+| --- | --- | --- |
+| `src/core/models.py` | `Task`、`TaskNode`、`EventRecord`、`Artifact` 与 `Checkpoint` 是分散模型；`Checkpoint` 仅包含 `snapshot_ref` / `resume_token` / `invalidated_at` 等薄字段。 | 需要把 checkpoint 升级为独立执行状态快照，而非继续依赖薄引用。 |
+| `src/core/contracts.py` | StoragePort 分别提供 task、node、artifact、event、interrupt、checkpoint 读写接口。 | v2 应新增 thread event store / checkpoint store contract，而不是只扩展旧 StoragePort 命名。 |
+| `src/orchestration/service.py` | `node_outputs` 是执行中的内存字典，节点完成/失败只写旧 task/node/event。 | checkpoint 必须持久化 node outputs / dependency outputs / next nodes，否则无法可靠 resume/time travel。 |
+| `src/api/runtime.py` | 提交消息会创建 conversation current_task、message、task 和 `task.accepted` event；assistant 历史由 final event/artifact 派生。 | v2 需要用 thread active branch + run projection 替代 current_task 语义。 |
+| `docs/prd/backend/postgresql-state-platform/` | 已有 PostgreSQL State Platform、write queue、fail-closed 和 fresh cutover 设计经验。 | v2 DB/schema bootstrap 可复用 PostgreSQL fail-closed 和 no silent fallback 原则。 |
+| `CHANGELOG.md` | 当前仓库已多次选择 fresh cutover / 不迁移旧 SQLite 历史。 | 本设计的 fresh start 与既有迁移策略一致。 |
+
+### 1.4 范围与非目标
+
+**范围内：**
+
+1. 新 PostgreSQL v2 DB schema。
+2. `/api/v2` thread / branch / run / checkpoint / artifact / interrupt 接口契约。
+3. Thread event log 事实账本。
+4. Execution checkpoint 执行状态快照。
+5. Projection 读模型。
+6. 普通用户可见 branch switcher 和节点级重新执行。
+7. Branch / thread / user 物理删除与清理验证。
+8. Fresh start 开发，不迁移旧数据。
+
+**明确非目标：**
+
+1. 不兼容 `/api/v1/conversations` / `/api/v1/tasks` 旧 URL。
+2. 不迁移旧 SQLite/PostgreSQL 历史数据。
+3. 不做 v1/v2 双写。
+4. 不把历史消息原文、artifact 内容或 provider secret 存进 checkpoint。
+5. 不支持删除后的恢复。
+6. 不在第一版支持同一 thread 多 active run 并发。
 
 ## 2. 总体架构原则
 
@@ -1083,3 +1135,70 @@ checkpoint 可用于 interrupt resume
 - branch activation 写账本事件。
 - branch/thread/user 删除都是物理清理。
 - 删除后 checkpoint/time travel/artifact 不得绕过恢复。
+
+
+## 18. 功能需求与验收矩阵
+
+| ID | 需求 | 验收标准 | 验证方式 |
+| --- | --- | --- | --- |
+| FR-1 | v2 runtime 必须使用新 PostgreSQL DB 和新 schema。 | 连接到 v1 DB、缺少 v2 schema 或 schema hash 不匹配时启动 fail closed。 | PostgreSQL bootstrap integration test；错误配置启动测试。 |
+| FR-2 | 所有新事实必须先进入 `thread_event_log`。 | message、run、node、artifact、interrupt、branch activation 都有对应 event，且同 branch `event_seq` 单调。 | Event store unit/integration tests。 |
+| FR-3 | checkpoint 必须保存执行状态快照。 | checkpoint 包含 plan、node_statuses、node_outputs、dependency_outputs、next_node_ids、refs、schema_version、state_hash；不包含历史消息原文。 | Checkpoint schema tests；敏感字段扫描测试。 |
+| FR-4 | 普通用户可以从节点级 checkpoint 重新执行。 | time travel 创建新 branch/run，自动设为 active branch，默认复用 checkpoint 前节点输出。 | API integration + frontend E2E。 |
+| FR-5 | Branch switcher 必须支持查看历史版本。 | 非 active branch 只读，不能发送消息；显式 activate 后才可写。 | Frontend state/reducer/App tests。 |
+| FR-6 | branch activation 必须入账。 | 每次设为当前版本都写 `branch.activated` event 并更新 active branch projection。 | API integration test。 |
+| FR-7 | interrupt resume 必须绑定 checkpoint。 | interrupt 缺 checkpoint、checkpoint 失效或引用缺失时 fail closed；正常回答后从 checkpoint 恢复。 | Lifecycle integration test。 |
+| FR-8 | branch/thread/user 删除必须物理清理。 | 删除后业务 API、artifact download、checkpoint time travel、resume 均不可访问对应历史。 | Deletion integration + artifact filesystem test。 |
+| FR-9 | Projection 必须与 event 同事务更新。 | event 写入和 projection 更新不能半成功；任一失败事务回滚。 | Transaction rollback integration test。 |
+| FR-10 | `/api/v2` 命名必须保持一致。 | 新接口和 DTO 使用 `thread_id`、`branch_id`、`run_id`、`checkpoint_id`，不暴露新 `conversation_id` / `task_id` 字段。 | API schema/static contract test。 |
+
+## 19. 非功能需求
+
+| 类别 | 要求 |
+| --- | --- |
+| 可靠性 | v2 写路径必须 fail closed；event/projection/checkpoint 不允许半成功；删除失败对象不得恢复为正常可见。 |
+| 一致性 | 同一 branch 内 event 顺序必须严格单调；active branch 切换与发送消息必须串行化。 |
+| 安全与隐私 | checkpoint、audit、错误响应不得包含 API key、DB 密码、provider header、历史消息全文、artifact 内容、大 SQL 结果或 reasoning 原文。 |
+| 可删除性 | branch/thread/user 删除后，业务 API、checkpoint、time travel、artifact download、projection 和物理文件均不得留可访问残留。 |
+| 可观测性 | branch fork、branch activation、checkpoint create、time travel fail、delete requested/completed/failed 必须有脱敏审计或结构化事件。 |
+| 兼容性 | v2 使用 fresh start；不保证 v1 数据可读；v1/v2 不双写。 |
+| 性能边界 | 第一版不得在 API 热路径全量 replay thread event log；必须通过 projection 读取消息、branch、run、artifact 列表。 |
+| 测试性 | 每个 PRD checkpoint 必须有单元/集成/E2E 验收，且删除、checkpoint 敏感字段、event ordering 必须纳入自动化测试。 |
+
+## 20. Rollout、Rollback 与开发门禁
+
+1. `dev` 分支使用新 PostgreSQL 开发 DB，例如 `breeding_agent_v2_dev`。
+2. v2 runtime 必须由显式配置启用，例如 `state_platform.backend=postgresql_v2` 或等价开关。
+3. 启动时必须校验目标 DB 名称、schema version、schema hash、关键索引和约束。
+4. 发现连接到旧 DB、schema 缺失或权限不足时必须 fail closed。
+5. Rollback 语义是停止 v2 runtime 并切回旧代码/旧 DB；不做 v2 数据回写 v1。
+6. 开发阶段允许破坏性重建 v2 DB；进入共享测试环境后，schema 变更必须走显式 migration ledger。
+7. 不得把真实生产敏感配置写入 tracked 文档或配置；文档只能保留脱敏示例。
+
+## 21. 已确认业务决策、假设与开放问题
+
+### 已确认业务决策
+
+| 决策 | 结果 |
+| --- | --- |
+| 架构路线 | 直接采用 Event-sourcing + Checkpoint，而不是轻量兼容阶段。 |
+| Git 分支 | 在新 `dev` 分支推进。 |
+| 数据策略 | 新 PostgreSQL DB fresh start，不迁移旧数据。 |
+| API 命名 | 使用 `/api/v2/threads`、`runs`、`checkpoints`，不沿用 conversation/task URL。 |
+| 用户入口 | 普通用户可用节点级重新执行。 |
+| Time travel 语义 | 创建新 branch，新 branch 自动 active，不覆盖旧 branch。 |
+| Branch 发送消息 | 只有 active branch 可写；历史 branch 只读。 |
+| 删除语义 | branch/thread/user 删除都是物理清理，默认级联删除子 branch。 |
+| 消息原文位置 | 存 event log / message projection，不存 checkpoint。 |
+
+### 必要假设
+
+| 假设 | 风险控制 |
+| --- | --- |
+| v2 可以使用独立开发 DB，不需要保留旧会话。 | PRD 明确 fresh start；rollback 只切回旧 runtime/DB。 |
+| 第一版同一 thread 只允许一个 active run。 | 保持与当前单任务串行会话假设一致，避免 branch/time travel 与多 run 并发叠加。 |
+| Projection 可以同事务维护。 | 第一版不做异步 projector；后续如需异步化必须另起 PRD。 |
+
+### 开放问题
+
+当前无阻塞型开放问题。后续进入实施计划时，仍需在 PRD-1 中确定具体 PostgreSQL schema DDL、schema hash 生成方式和 v2 DB 命名。
