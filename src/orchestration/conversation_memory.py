@@ -23,6 +23,7 @@ COMPRESSION_POLICY_VERSION = "conversation-memory-policy-v1"
 
 SummaryGenerator = Callable[[str], str | Awaitable[str]]
 ResolutionGenerator = Callable[[str], str | Awaitable[str]]
+MemoryConfigResolver = Callable[["OrchestrationRequest"], "ConversationMemoryConfig"]
 
 _BLOCKING_RESOLUTION_RISK_FLAGS = {
     "ambiguous_parallel_entities",
@@ -250,18 +251,26 @@ class ConversationMemoryBuilder:
         config: ConversationMemoryConfig | None = None,
         summary_generator: SummaryGenerator | None = None,
         resolution_generator: ResolutionGenerator | None = None,
+        config_resolver: MemoryConfigResolver | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._storage = storage
         self._config = config or ConversationMemoryConfig.from_runtime_config()
         self._summary_generator = summary_generator
         self._resolution_generator = resolution_generator
+        self._config_resolver = config_resolver
         self._now_fn = now_fn or datetime.utcnow
 
+    def _config_for_request(self, request: OrchestrationRequest) -> ConversationMemoryConfig:
+        if self._config_resolver is None:
+            return self._config
+        return self._config_resolver(request)
+
     async def build(self, request: OrchestrationRequest, *, username: str | None = None) -> ConversationMemoryContext:
+        config = self._config_for_request(request)
         conversation = await self._storage.get_conversation(request.conversation_id)
         if conversation is None:
-            return self._empty_context(request, fallback_reason="conversation_missing")
+            return self._empty_context(request, fallback_reason="conversation_missing", config=config)
         if username is not None and conversation.username != username:
             raise PermissionError(f"Conversation does not belong to username: {request.conversation_id}")
 
@@ -288,6 +297,7 @@ class ConversationMemoryBuilder:
         resolved_user_message, resolution_metadata = await self._resolve_user_message(
             current_user_message,
             turns,
+            config=config,
             summary_text=latest_summary.summary_text if latest_summary is not None else None,
             capability_summaries=capability_summaries,
         )
@@ -302,6 +312,7 @@ class ConversationMemoryBuilder:
             existing_summary=latest_summary,
             source_message_count=source_message_count,
             capability_summaries=capability_summaries,
+            config=config,
         )
         return context
 
@@ -421,8 +432,9 @@ class ConversationMemoryBuilder:
         existing_summary: ConversationMemorySummary | None,
         source_message_count: int,
         capability_summaries: tuple[dict[str, Any], ...],
+        config: ConversationMemoryConfig,
     ) -> ConversationMemoryContext:
-        token_budget = self._config.actual_memory_budget
+        token_budget = config.actual_memory_budget
         all_recent_messages = tuple(message for turn in turns for message in turn.memory_messages())
         existing_summary_text = existing_summary.summary_text if existing_summary is not None else None
         estimated_before = _estimate_context_tokens(
@@ -440,17 +452,17 @@ class ConversationMemoryBuilder:
 
         if estimated_before > token_budget:
             compression_level = "level_1"
-            kept_turns = turns[-self._config.recent_turns :] if self._config.recent_turns > 0 else []
+            kept_turns = turns[-config.recent_turns :] if config.recent_turns > 0 else []
             older_turns = turns[: max(0, len(turns) - len(kept_turns))]
             recent_messages = tuple(message for turn in kept_turns for message in turn.memory_messages())
             if older_turns:
-                if self._config.enable_summary_llm and self._summary_generator is not None:
+                if config.enable_summary_llm and self._summary_generator is not None:
                     prompt = self._build_summary_prompt(older_turns, existing_summary_text=existing_summary_text)
                     try:
                         generated = self._summary_generator(prompt)
                         if inspect.isawaitable(generated):
                             generated = await generated
-                        history_summary = str(generated or "").strip()[: self._config.effective_summary_max_tokens * 4]
+                        history_summary = str(generated or "").strip()[: config.effective_summary_max_tokens * 4]
                         if history_summary:
                             compression_level = "level_2"
                             await self._save_summary(
@@ -470,7 +482,7 @@ class ConversationMemoryBuilder:
                         fallback_reason = "summary_llm_failed"
                 else:
                     compression_level = "fallback"
-                    fallback_reason = "summary_llm_disabled" if not self._config.enable_summary_llm else "summary_llm_unavailable"
+                    fallback_reason = "summary_llm_disabled" if not config.enable_summary_llm else "summary_llm_unavailable"
                 if compression_level == "fallback":
                     truncated = True
 
@@ -556,6 +568,7 @@ class ConversationMemoryBuilder:
         current_user_message: str,
         turns: list[_BusinessTurn],
         *,
+        config: ConversationMemoryConfig,
         summary_text: str | None = None,
         capability_summaries: tuple[dict[str, Any], ...] = (),
     ) -> tuple[str | None, dict[str, Any]]:
@@ -565,6 +578,7 @@ class ConversationMemoryBuilder:
                 llm_resolution = await self._resolve_user_message_with_llm(
                     current_user_message,
                     turns,
+                    config=config,
                     summary_text=summary_text,
                     capability_summaries=capability_summaries,
                 )
@@ -590,6 +604,7 @@ class ConversationMemoryBuilder:
         current_user_message: str,
         turns: list[_BusinessTurn],
         *,
+        config: ConversationMemoryConfig,
         summary_text: str | None,
         capability_summaries: tuple[dict[str, Any], ...],
     ) -> tuple[str | None, dict[str, Any]] | None:
@@ -598,6 +613,7 @@ class ConversationMemoryBuilder:
         prompt = self._build_resolution_prompt(
             current_user_message,
             turns,
+            config=config,
             summary_text=summary_text,
             capability_summaries=capability_summaries,
         )
@@ -670,10 +686,11 @@ class ConversationMemoryBuilder:
         current_user_message: str,
         turns: list[_BusinessTurn],
         *,
+        config: ConversationMemoryConfig,
         summary_text: str | None,
         capability_summaries: tuple[dict[str, Any], ...],
     ) -> str:
-        resolver_turns = turns[-self._config.recent_turns :] if self._config.recent_turns > 0 else turns
+        resolver_turns = turns[-config.recent_turns :] if config.recent_turns > 0 else turns
         recent_messages = [message.to_prompt_dict() for turn in resolver_turns for message in turn.memory_messages()]
         prompt_payload = {
             "current_user_message": current_user_message,
@@ -739,7 +756,14 @@ class ConversationMemoryBuilder:
             return resolved, {"resolved": True, "strategy": strategy, "entity": entity}
         return None, {"resolved": False, "reason": "no_reference_signal", "entity": entity}
 
-    def _empty_context(self, request: OrchestrationRequest, *, fallback_reason: str) -> ConversationMemoryContext:
+    def _empty_context(
+        self,
+        request: OrchestrationRequest,
+        *,
+        fallback_reason: str,
+        config: ConversationMemoryConfig | None = None,
+    ) -> ConversationMemoryContext:
+        config = config or self._config
         return ConversationMemoryContext(
             conversation_id=request.conversation_id,
             root_message_id=request.root_message_id,
@@ -747,7 +771,7 @@ class ConversationMemoryBuilder:
             current_user_message=request.current_user_message or request.user_message,
             resolved_user_message=request.resolved_user_message,
             compression_level="fallback",
-            token_budget=self._config.actual_memory_budget,
+            token_budget=config.actual_memory_budget,
             fallback_reason=fallback_reason,
         )
 

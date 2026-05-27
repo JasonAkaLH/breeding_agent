@@ -75,8 +75,8 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "model_editions": {
                     "default": "deepseek-v4-flash-260425",
                     "options": [
-                        {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"},
-                        {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro"},
+                        {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
+                        {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro", "trim_max_tokens": 2048000},
                     ],
                 },
             },
@@ -91,7 +91,37 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second, "deepseek-v4-flash-260425")
         self.assertEqual(third, "deepseek-v4-pro-260425")
         self.assertEqual([client.model for client in FakeClient.instances], ["deepseek-v4-flash-260425", "deepseek-v4-pro-260425"])
+        self.assertEqual([client.kwargs["config"]["trim_max_tokens"] for client in FakeClient.instances], [1024000, 2048000])
         self.assertEqual(FakeClient.instances[0].calls, ["p1", "p2"])
+
+    async def test_model_edition_options_do_not_inherit_top_level_trim_budget(self) -> None:
+        class FakeClient:
+            instances: list["FakeClient"] = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                FakeClient.instances.append(self)
+
+            async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
+                return "ok"
+
+        runtime = SharedLLMRuntime(
+            client_factory=FakeClient,
+            config={
+                "api_key": "test",
+                "base_url": "http://example.test",
+                "trim_max_tokens": 123,
+                "model_editions": {
+                    "default": "deepseek-v4-flash-260425",
+                    "options": [{"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"}],
+                },
+            },
+            config_source="injected_config",
+        )
+
+        await runtime.generate_text("p", model_edition="deepseek-v4-flash-260425")
+
+        self.assertNotIn("trim_max_tokens", FakeClient.instances[0].kwargs["config"])
 
 
 if __name__ == "__main__":

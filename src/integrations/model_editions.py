@@ -9,6 +9,7 @@ from typing import Any
 class ModelEditionOption:
     value: str
     label: str
+    trim_max_tokens: int | None = None
 
 
 _MODEL_EDITION_CONTAINER_KEYS = (
@@ -42,7 +43,13 @@ def model_edition_options(config: Mapping[str, Any] | None = None) -> tuple[Mode
 
     legacy = _clean_text(config.get("model_edition") or config.get("model"))
     if legacy:
-        return (ModelEditionOption(value=legacy, label=legacy),)
+        return (
+            ModelEditionOption(
+                value=legacy,
+                label=legacy,
+                trim_max_tokens=_coerce_positive_int(config.get("trim_max_tokens")),
+            ),
+        )
     return ()
 
 
@@ -89,7 +96,36 @@ def config_with_model_edition(config: Mapping[str, Any], model_edition: str) -> 
     next_config = dict(config)
     next_config["model_edition"] = model_edition
     next_config["_selected_model_edition"] = model_edition
+    trim_max_tokens = trim_max_tokens_for_model_edition(model_edition, config=config)
+    if trim_max_tokens is not None:
+        next_config["trim_max_tokens"] = trim_max_tokens
+    elif model_edition_options(config):
+        next_config.pop("trim_max_tokens", None)
     return next_config
+
+
+def trim_max_tokens_for_model_edition(model_edition: str | None, *, config: Mapping[str, Any] | None = None) -> int | None:
+    config = config or {}
+    selected = _clean_text(model_edition) or default_model_edition(config)
+    options = model_edition_options(config)
+    if selected:
+        for option in options:
+            if option.value == selected:
+                return option.trim_max_tokens
+    if options:
+        return None
+    return _coerce_positive_int(config.get("trim_max_tokens"))
+
+
+def config_for_model_edition(config: Mapping[str, Any] | None, model_edition: str | None) -> dict[str, Any]:
+    base = dict(config or {})
+    selected = _clean_text(model_edition) or default_model_edition(base)
+    if selected:
+        return config_with_model_edition(base, selected)
+    trim_max_tokens = trim_max_tokens_for_model_edition(None, config=base)
+    if trim_max_tokens is not None:
+        base["trim_max_tokens"] = trim_max_tokens
+    return base
 
 
 def _parse_options_container(value: Any) -> tuple[ModelEditionOption, ...]:
@@ -124,11 +160,26 @@ def _parse_option(value: Any) -> ModelEditionOption | None:
         if not option_value:
             return None
         label = _clean_text(value.get("label") or value.get("name")) or option_value
-        return ModelEditionOption(value=option_value, label=label)
+        trim_max_tokens = _coerce_positive_int(
+            value.get("trim_max_tokens")
+            or value.get("context_window_tokens")
+            or value.get("max_context_tokens")
+        )
+        return ModelEditionOption(value=option_value, label=label, trim_max_tokens=trim_max_tokens)
     option_value = _clean_text(value)
     if not option_value:
         return None
     return ModelEditionOption(value=option_value, label=option_value)
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _container_default(value: Any) -> str | None:
