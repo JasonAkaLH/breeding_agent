@@ -52,6 +52,23 @@ def find_rscript() -> str:
     raise RuntimeError("Rscript is not available in the backend runtime")
 
 
+def _utf8_locale(value: str | None) -> str:
+    text = str(value or "").strip()
+    normalized = text.upper().replace("_", "-")
+    if "UTF-8" in normalized or "UTF8" in normalized:
+        return text
+    return "C.UTF-8"
+
+
+def _rscript_env() -> dict[str, str]:
+    return {
+        "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "LANG": _utf8_locale(os.environ.get("LANG")),
+        "LC_ALL": _utf8_locale(os.environ.get("LC_ALL") or os.environ.get("LANG")),
+        "LC_CTYPE": _utf8_locale(os.environ.get("LC_CTYPE") or os.environ.get("LC_ALL") or os.environ.get("LANG")),
+    }
+
+
 def _safe_run_id(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -273,7 +290,7 @@ def main() -> int:
             stderr=subprocess.PIPE,
             timeout=300,
             check=False,
-            env={"PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+            env=_rscript_env(),
         )
         if process.returncode != 0:
             diagnostic = (process.stderr or process.stdout or "R field analysis failed")[-1200:]

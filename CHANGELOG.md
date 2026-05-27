@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Field Analysis Docker 运行时修复并发布 backend 镜像 `0.1.3`：backend 镜像安装 `r-cran-jsonlite` / `locales` 并设置 UTF-8 locale，Field Analysis Python wrapper 传递最小 PATH 与 UTF-8 locale 给 Rscript，避免 Docker 内解析中文 `.R` 源码时报 `unexpected INCOMPLETE_STRING`；`Skill构建指南.md`、`docker_cmd.md` 与回归测试同步固化 R-backed Skill 必须具备 jsonlite 与 UTF-8 运行条件。
 - Docker 镜像部署版本提升到 `0.1.2`：backend 镜像内 PostgreSQL 状态库配置使用 `biobin_user` / `postgres:5432` / `biobin_db`，并将 `biobin_user` 连接密码切换为部署约定密码；frontend 同步提供 `0.1.2` 标签，`docker_cmd.md` 补充 backend 镜像配置脱敏检查、运行容器 DSN 环境变量覆盖、image id 对比、同镜像同网络 PostgreSQL 实连、backend 当前状态/最新日志与跨容器认证失败后的 `biobin_user` 密码重置判别命令，便于远端按同一版本拉取并判别配置是否生效。
 - Docker 远端启动命令补充 PostgreSQL 容器网络接入：`docker_cmd.md` 明确将既有 `postgres-longrun` 加入 `breeding-agent-net` 并设置 `postgres` 别名，镜像内 `config.yaml` 使用 `postgresql://biobin_user:<password>@postgres:5432/biobin_db` 连接状态库，后端 docker run 可保持原有形态且避免容器内误用 `127.0.0.1` / 宿主机映射端口。
 - REST API 静态文档按实际接口行为复核更新：`docs/api/api-doc.html` 补齐 `/api/v1/capabilities` 的 `display_name`、模型配置 schema、真实 response 样例，并按当前路由修正登录/Authorization、上传软创建、上传/任务空列表、删除上传 `deleted=false`、SSE 与状态码说明；新增本地校验覆盖 23 个 `/api/v1` 路由、schema 字段与 JSON response 示例。

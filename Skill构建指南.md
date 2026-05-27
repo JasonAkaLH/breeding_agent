@@ -435,17 +435,20 @@ Rust 型 Skill 上线前必须提供：
 
 | Runtime / Package | 当前验证版本 | 用途 |
 |---|---:|---|
-| `Rscript` | `R 4.6.0` | 执行包内 `.R` 脚本 |
-| `jsonlite` | `2.0.0` | R 脚本 JSON stdin/stdout |
+| `Rscript` | Docker backend：Ubuntu 22.04 `r-base-core`（当前 apt 版本 4.1.x） | 执行包内 `.R` 脚本 |
+| `jsonlite` | Docker backend：Ubuntu 22.04 `r-cran-jsonlite`（当前 apt 版本 1.7.x） | R 脚本 JSON stdin/stdout |
+| UTF-8 locale | Docker backend：`LANG=C.UTF-8`、`LC_ALL=C.UTF-8` | 解析包含中文字符串的 `.R` 源码 |
 
 R Skill 约束：
 - 不要在 Skill 执行时安装 R 包。
+- Docker backend 必须在 `Dockerfile` 中安装 `locales`、`r-base-core`、`r-cran-jsonlite`，并设置 `LANG=C.UTF-8` / `LC_ALL=C.UTF-8`；不能只依赖本机开发环境已有 R 包。
 - 不要依赖 RStudio、GUI R app 或交互式输入。
 - `.R` 文件必须放在 Skill 包目录内，例如 `scripts/analyze.R`。
 - Python wrapper 必须用包内相对路径定位 `.R` 文件，不能要求主代理读取本地路径。
 - Python wrapper 应从受控候选路径查找 `Rscript`；找不到时输出清晰错误。
-- Python wrapper 调用 Rscript 时必须显式传入最小可用 `PATH`，否则 R 进程可能找不到系统工具或 Rscript。
+- Python wrapper 调用 Rscript 时必须显式传入最小可用 `PATH` 和 UTF-8 locale（至少 `LANG`、`LC_ALL`、`LC_CTYPE`），否则 R 进程可能找不到系统工具 / Rscript，或在 Docker 的非 UTF-8 环境中把中文字符串解析成 `unexpected INCOMPLETE_STRING`。
 - `.R` 脚本 stdout 必须是 JSON object，stderr 只作为诊断。
+- 新增或修改 R-backed Skill 时，必须补充/维护 Dockerfile 与 wrapper 环境回归测试，至少覆盖 `r-cran-jsonlite`、UTF-8 locale 和 R subprocess env 不被裁掉。
 
 推荐 Python wrapper 中使用的 `Rscript` 查找方式：
 

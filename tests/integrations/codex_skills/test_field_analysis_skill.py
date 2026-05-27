@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
+import os
 import shutil
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from src.integrations.codex_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
@@ -31,6 +34,32 @@ class FieldAnalysisSkillCompatibilityTest(unittest.TestCase):
         self.skill_file = Path("skill/field-analysis/SKILL.md")
         if not self.skill_file.exists():
             self.skipTest("field-analysis skill is not present")
+
+    def test_backend_dockerfile_installs_r_runtime_requirements(self) -> None:
+        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("LANG=C.UTF-8", dockerfile)
+        self.assertIn("LC_ALL=C.UTF-8", dockerfile)
+        self.assertIn("locales", dockerfile)
+        self.assertIn("r-base-core", dockerfile)
+        self.assertIn("r-cran-jsonlite", dockerfile)
+        self.assertIn("R-backed Skill bundles require UTF-8 source parsing and jsonlite JSON output.", dockerfile)
+
+    def test_wrapper_builds_utf8_rscript_environment(self) -> None:
+        module_path = Path("skill/field-analysis/scripts/run_field_analysis.py")
+        spec = importlib.util.spec_from_file_location("field_analysis_wrapper", module_path)
+        if spec is None or spec.loader is None:
+            self.fail("Unable to load field-analysis wrapper")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with mock.patch.dict(os.environ, {"LANG": "C", "LC_ALL": "POSIX", "LC_CTYPE": "C"}, clear=False):
+            env = module._rscript_env()
+
+        self.assertEqual(env["LANG"], "C.UTF-8")
+        self.assertEqual(env["LC_ALL"], "C.UTF-8")
+        self.assertEqual(env["LC_CTYPE"], "C.UTF-8")
+        self.assertEqual(env["PATH"], "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 
     def _skip_without_rscript(self) -> None:
         candidates = (
