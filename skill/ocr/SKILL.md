@@ -1,6 +1,7 @@
 ---
 name: ocr
 capability_id: skill.ocr
+display_name: OCR 文档识别
 description: 调用远端 OCR MCP 服务识别图片或 PDF；当用户要求 OCR、识别图片文字、提取扫描件文本、解析图片/PDF 为 Markdown 或 JSON 时使用。
 triggers:
   - OCR识别

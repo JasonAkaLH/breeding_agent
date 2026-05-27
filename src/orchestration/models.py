@@ -24,6 +24,7 @@ class CapabilityDescriptor:
     capability_id: str
     name: str
     description: str
+    display_name: str = ""
     version: str = "1"
     enabled: bool = True
     public: bool = True

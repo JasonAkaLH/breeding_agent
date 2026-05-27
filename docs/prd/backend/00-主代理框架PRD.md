@@ -188,7 +188,7 @@
 - `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust sidecar / kernel。
 - 优先 Rust 化确定性、安全敏感、并发敏感和可重放模块：`src/core/` contract、`src/lifecycle/` 状态机、`src/storage/` durable store、通用 Skill runtime trust gate、MCP protocol/runtime、artifact/upload/file safety。
 - LLM provider glue、FastAPI route、DTO、主代理 prompt 产品语义和前端 UI 不应整体 Rust 化；只在 sanitizer、token budget、大 payload 处理等热点处抽小 kernel。
-- Skill-owned Rust runtime 必须放在各自 Skill bundle 内部，并按 `Codex-Skill构建指南.md` 的 Rust 型 Skill runtime 限制适配框架 contract；框架不反向兼容某个 Skill 的任意 Rust 形态。
+- Skill-owned Rust runtime 必须放在各自 Skill bundle 内部，并按 `Skill构建指南.md` 的 Rust 型 Skill runtime 限制适配框架 contract；框架不反向兼容某个 Skill 的任意 Rust 形态。
 
 ## 6. 当前验收基线与归档证据
 

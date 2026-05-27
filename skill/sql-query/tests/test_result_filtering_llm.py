@@ -20,7 +20,13 @@ GENERATE_OUTPUT = {
 }
 
 
-def request_for_filtering(*, rows: list[dict] | None = None, row_count: int | None = None) -> object:
+def request_for_filtering(
+    *,
+    rows: list[dict] | None = None,
+    row_count: int | None = None,
+    source_row_count: int | None = None,
+    truncated: bool | None = None,
+) -> object:
     rows = rows if rows is not None else [
         {"source_db": "approval", "variety_name": "龙粳33"},
         {"source_db": "approval", "variety_name": "龙粳331"},
@@ -34,6 +40,8 @@ def request_for_filtering(*, rows: list[dict] | None = None, row_count: int | No
                 "columns": ["source_db", "variety_name"],
                 "rows": rows,
                 "row_count": len(rows) if row_count is None else row_count,
+                **({"source_row_count": source_row_count} if source_row_count is not None else {}),
+                **({"truncated": truncated} if truncated is not None else {}),
             },
             "generate": GENERATE_OUTPUT,
         },
@@ -170,6 +178,55 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
         self.assertEqual(result.output_payload["token_trim_removed_row_count"], 1)
         self.assertEqual(result.output_payload["candidate_row_count"], 2)
         self.assertTrue(result.output_payload["truncated"])
+
+    def test_row_soft_trim_source_count_survives_result_filtering(self) -> None:
+        captured_prompts: list[str] = []
+
+        async def llm_text_generator(prompt: str) -> str:
+            captured_prompts.append(prompt)
+            return json.dumps({"keep_row_indexes": [0]})
+
+        rows = [
+            {"variety_name": "retained-newer-1"},
+            {"variety_name": "retained-newer-2"},
+        ]
+        capability = SQLQueryResultFilteringCapability(llm_text_generator=llm_text_generator)
+
+        result = asyncio.run(
+            capability.execute(
+                request_for_filtering(rows=rows, row_count=2, source_row_count=502, truncated=True)
+            )
+        )
+
+        self.assertEqual(result.output_payload["source_row_count"], 502)
+        self.assertEqual(result.output_payload["source_preview_row_count"], 2)
+        self.assertEqual(result.output_payload["candidate_row_count"], 2)
+        self.assertTrue(result.output_payload["truncated"])
+        self.assertIn('"source_row_count": 502', captured_prompts[0])
+
+    def test_newest_row_over_token_budget_returns_empty_without_llm_call(self) -> None:
+        async def llm_text_generator(_: str) -> str:
+            raise AssertionError("LLM should not be called when no row fits the token budget")
+
+        rows = [
+            {"variety_name": "old-row", "detail": "old"},
+            {"variety_name": "new-row", "detail": "new row detail that exceeds one token"},
+        ]
+        capability = SQLQueryResultFilteringCapability(
+            llm_text_generator=llm_text_generator,
+            trim_max_tokens=1,
+        )
+
+        result = asyncio.run(capability.execute(request_for_filtering(rows=rows, row_count=2)))
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload["rows"], [])
+        self.assertEqual(result.output_payload["candidate_row_count"], 0)
+        self.assertEqual(result.output_payload["row_count"], 0)
+        self.assertTrue(result.output_payload["token_trim_applied"])
+        self.assertTrue(result.output_payload["truncated"])
+        self.assertIn("缩小查询范围", result.output_payload["filter_reason"])
+        self.assertIn("缩小查询范围", result.output_payload["satisfaction"]["message"])
 
     def test_invalid_llm_indexes_fall_back_to_domain_filtered_table(self) -> None:
         async def llm_text_generator(_: str) -> str:

@@ -4,7 +4,7 @@
 - **文档状态**：PRD 草案
 - **日期**：2026-05-12
 - **关联文档**：
-  - `Codex-Skill构建指南.md`
+  - `Skill构建指南.md`
   - `docs/数据查询 Skill-Skill化迁移计划.md`
   - `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`
   - `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`

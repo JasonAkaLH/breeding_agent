@@ -1,7 +1,8 @@
 ---
 name: sql-query
 capability_id: skill.sql_query
-description: 通过项目级 Skill platform-service 安全回答品种、审定、基因型、表型和数据库类只读查询问题；适用于需要从受控 MySQL 只读库检索业务数据并返回表格预览的请求。
+display_name: 审定品种与基因型数据库查询
+description: 通过项目级 Skill 平台服务安全回答品种、审定、基因型、表型和数据库类只读查询问题；适用于需要从受控 MySQL 只读库检索业务数据并返回表格预览的请求。
 triggers:
   - 查询品种
   - 查询审定品种

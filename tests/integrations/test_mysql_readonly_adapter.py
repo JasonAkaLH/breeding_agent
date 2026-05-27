@@ -10,14 +10,15 @@ from src.integrations.rust_safety_contract import DataAccessContractError, resou
 
 
 class _FakeResult:
-    def __init__(self) -> None:
-        self._rows = [SimpleNamespace(_mapping={"variety_name": "龙粳33"})]
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self._rows = [SimpleNamespace(_mapping=row) for row in (rows or [{"variety_name": "龙粳33"}])]
 
     def __iter__(self):
         return iter(self._rows)
 
     def keys(self):
-        return ("variety_name",)
+        first = self._rows[0]._mapping if self._rows else {"variety_name": None}
+        return tuple(first.keys())
 
 
 class _FakeConnection:
@@ -32,14 +33,15 @@ class _FakeConnection:
 
     def execute(self, statement):
         self._engine.executed_sql.append(str(statement))
-        return _FakeResult()
+        return _FakeResult(self._engine.rows)
 
 
 class _FakeEngine:
-    def __init__(self) -> None:
+    def __init__(self, rows: list[dict] | None = None) -> None:
         self.connect_count = 0
         self.dispose_count = 0
         self.executed_sql: list[str] = []
+        self.rows = rows
 
     def connect(self) -> _FakeConnection:
         self.connect_count += 1
@@ -100,17 +102,41 @@ class MySQLReadonlyAdapterTest(unittest.TestCase):
         self.assertEqual(context.exception.code, "data_access_deadline_exceeded")
         self.assertEqual(calls, 1)
 
-    def test_result_shape_errors_preserve_stable_data_access_codes(self) -> None:
+    def test_row_limit_overflow_keeps_latest_rows_with_trim_metadata(self) -> None:
+        row_limit = resource_limit("db_row_limit")
+        rows = tuple({"id": index} for index in range(row_limit + 1))
+        adapter = MySQLReadonlyAdapter(
+            runner=lambda _sql: ReadonlyQueryResult(columns=("id",), rows=rows, row_count=len(rows)),
+        )
+
+        result = asyncio.run(adapter.execute_readonly("SELECT id FROM users", guard_pass_token="guard:test"))
+
+        self.assertEqual(result.rows, rows[-row_limit:])
+        self.assertEqual(result.row_count, row_limit)
+        self.assertEqual(result.source_row_count, row_limit + 1)
+        self.assertTrue(result.row_limit_trimmed)
+        self.assertEqual(result.row_limit, row_limit)
+        self.assertEqual(result.row_limit_removed_row_count, 1)
+        self.assertTrue(result.truncated)
+
+    def test_runner_source_row_count_overflow_does_not_invent_missing_rows(self) -> None:
+        row_limit = resource_limit("db_row_limit")
+        retained_rows = tuple({"id": index} for index in range(row_limit - 2, row_limit))
+        adapter = MySQLReadonlyAdapter(
+            runner=lambda _sql: ReadonlyQueryResult(columns=("id",), rows=retained_rows, row_count=row_limit + 5),
+        )
+
+        result = asyncio.run(adapter.execute_readonly("SELECT id FROM users", guard_pass_token="guard:test"))
+
+        self.assertEqual(result.rows, retained_rows)
+        self.assertEqual(result.row_count, len(retained_rows))
+        self.assertEqual(result.source_row_count, row_limit + 5)
+        self.assertTrue(result.row_limit_trimmed)
+        self.assertEqual(result.row_limit_removed_row_count, row_limit + 5 - len(retained_rows))
+
+    def test_non_row_result_shape_errors_preserve_stable_data_access_codes(self) -> None:
         wide_columns = tuple(f"c{index}" for index in range(resource_limit("db_column_limit") + 1))
         cases = [
-            (
-                "data_access_row_limit_exceeded",
-                ReadonlyQueryResult(
-                    columns=("id",),
-                    rows=tuple({"id": index} for index in range(resource_limit("db_row_limit") + 1)),
-                    row_count=resource_limit("db_row_limit") + 1,
-                ),
-            ),
             (
                 "data_access_column_limit_exceeded",
                 ReadonlyQueryResult(
@@ -158,6 +184,19 @@ class MySQLReadonlyAdapterTest(unittest.TestCase):
         self.assertEqual(engine.dispose_count, 1)
         self.assertEqual(first.rows, ({"variety_name": "龙粳33"},))
         self.assertEqual(second.columns, ("variety_name",))
+
+    def test_engine_path_uses_tail_buffer_for_row_limit_overflow(self) -> None:
+        row_limit = resource_limit("db_row_limit")
+        engine = _FakeEngine(rows=[{"id": index} for index in range(row_limit + 2)])
+        adapter = MySQLReadonlyAdapter(engine_factory=lambda: engine)
+
+        result = asyncio.run(adapter.execute_readonly("SELECT id FROM users", guard_pass_token="guard:test"))
+
+        self.assertEqual(result.row_count, row_limit)
+        self.assertEqual(result.source_row_count, row_limit + 2)
+        self.assertEqual(result.rows[0], {"id": 2})
+        self.assertEqual(result.rows[-1], {"id": row_limit + 1})
+        self.assertTrue(result.row_limit_trimmed)
 
 
 if __name__ == "__main__":

@@ -1414,7 +1414,7 @@ body {
 }
 
 .slash-command-menu {
-  --slash-command-option-height: 72px;
+  --slash-command-option-height: 80px;
 
   margin: 0 8px;
   max-height: calc(var(--slash-command-option-height) * 3 + 2px);
@@ -1432,7 +1432,7 @@ body {
 .slash-command-option {
   box-sizing: border-box;
   height: var(--slash-command-option-height);
-  padding: 10px 14px;
+  padding: 11px 14px 12px;
   border-left: 3px solid transparent;
   cursor: pointer;
   outline: none;
@@ -1491,7 +1491,7 @@ body {
 }
 
 .slash-command-meta {
-  margin-top: 3px;
+  margin-top: 5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1500,4 +1500,17 @@ body {
 
 .slash-command-empty {
   padding: 12px 14px;
+}
+
+.slash-command-tooltip .ant-tooltip-inner {
+  max-width: 520px;
+  padding: 10px 12px;
+  border: 1px solid rgba(47, 64, 31, 0.16);
+  border-radius: 12px;
+  background: rgba(36, 46, 29, 0.94);
+  box-shadow: 0 14px 34px rgba(31, 42, 24, 0.24);
+  color: #fffdf7;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: normal;
 }

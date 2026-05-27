@@ -353,5 +353,7 @@ function failureMessage(payload: Record<string, unknown>, nodeId: string | null)
   }
   if (code === 'guard_token_missing') return '查询安全校验未通过，请调整问题后重试。';
   if (code === 'db_transient_error') return '数据库暂时不可用，请稍后重试。';
+  if (code === 'data_access_deadline_exceeded') return '数据库查询超时，请稍后重试或缩小查询范围。';
+  if (code === 'data_access_result_too_large' || code === 'data_access_column_limit_exceeded') return '查询结果内容过大，请缩小查询范围后重试。';
   return '本次任务未完成，请调整问题后重试。';
 }

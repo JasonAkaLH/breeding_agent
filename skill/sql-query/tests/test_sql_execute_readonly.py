@@ -7,6 +7,7 @@ import unittest
 
 from sql_query_skill.sql_execute_readonly import SQLQuerySQLExecuteReadonlyCapability
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter, TransientReadonlyExecutionError
+from src.integrations.rust_safety_contract import resource_limit
 
 from support import fake_query_result, make_request
 
@@ -96,8 +97,9 @@ class SQLQuerySQLExecuteReadonlyTest(unittest.TestCase):
         self.assertEqual(result.error.code, "data_access_deadline_exceeded")
         self.assertFalse(result.error.retriable)
 
-    def test_result_shape_error_preserves_data_access_code(self) -> None:
-        rows = tuple({"id": index} for index in range(501))
+    def test_row_limit_overflow_keeps_latest_rows_and_trim_metadata(self) -> None:
+        row_limit = resource_limit("db_row_limit")
+        rows = tuple({"id": index} for index in range(row_limit + 1))
         capability = SQLQuerySQLExecuteReadonlyCapability(
             adapter=MySQLReadonlyAdapter(
                 runner=lambda _sql: fake_query_result(columns=("id",), rows=rows),
@@ -110,6 +112,11 @@ class SQLQuerySQLExecuteReadonlyTest(unittest.TestCase):
 
         result = asyncio.run(capability.execute(request))
 
-        self.assertIsNotNone(result.error)
-        self.assertEqual(result.error.code, "data_access_row_limit_exceeded")
-        self.assertFalse(result.error.retriable)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.output_payload["rows"], [{"id": index} for index in range(1, row_limit + 1)])
+        self.assertEqual(result.output_payload["row_count"], row_limit)
+        self.assertEqual(result.output_payload["source_row_count"], row_limit + 1)
+        self.assertTrue(result.output_payload["row_limit_trimmed"])
+        self.assertTrue(result.output_payload["truncated"])
+        self.assertEqual(result.output_payload["row_limit_removed_row_count"], 1)
+        self.assertNotIn("db_row_limit", result.artifacts[0].summary)

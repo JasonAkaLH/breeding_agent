@@ -125,12 +125,22 @@ class SafetyRustContractTest(unittest.TestCase):
         self.assertEqual(result.row_count, 1)
         self.assertEqual(calls, ["SELECT 1"])
 
+        with self.assertRaisesRegex(RuntimeError, "row limit"):
+            validate_data_access_shape(
+                row_count=resource_limit("db_row_limit") + 1,
+                column_count=1,
+                result_bytes=32,
+            )
+
         too_many_rows = tuple({"id": index} for index in range(resource_limit("db_row_limit") + 1))
         limited = MySQLReadonlyAdapter(
             runner=lambda _: ReadonlyQueryResult(columns=("id",), rows=too_many_rows, row_count=len(too_many_rows))
         )
-        with self.assertRaisesRegex(RuntimeError, "row limit"):
-            asyncio.run(limited.execute_readonly("SELECT id FROM t", guard_pass_token="guard:test"))
+        trimmed = asyncio.run(limited.execute_readonly("SELECT id FROM t", guard_pass_token="guard:test"))
+        self.assertEqual(trimmed.row_count, resource_limit("db_row_limit"))
+        self.assertEqual(trimmed.source_row_count, resource_limit("db_row_limit") + 1)
+        self.assertTrue(trimmed.row_limit_trimmed)
+        self.assertEqual(trimmed.rows[0], {"id": 1})
 
     def test_upload_preview_limit_consumes_rust_safety_contract(self) -> None:
         store = InMemoryUploadStore(max_file_bytes=resource_limit("upload_preview_bytes") + 10)

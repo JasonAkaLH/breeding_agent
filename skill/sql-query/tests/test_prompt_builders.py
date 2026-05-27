@@ -177,6 +177,23 @@ class SQLQueryPromptBuildersTest(unittest.TestCase):
         self.assertTrue(payload["result_context"]["truncated"])
         self.assertIn("new-row-3", prompt)
 
+    def test_result_filtering_prompt_prefers_source_row_count_after_row_soft_trim(self) -> None:
+        execute_context = {
+            "sql": "SELECT variety_name FROM variety WHERE suitable_area LIKE '%河南%'",
+            "columns": ["variety_name"],
+            "rows": [{"variety_name": f"retained-row-{index}"} for index in range(1, 4)],
+            "row_count": 3,
+            "source_row_count": 503,
+            "row_limit_trimmed": True,
+            "truncated": True,
+        }
+
+        payload = build_result_filtering_prompt_payload(execute_context)
+
+        self.assertEqual(payload["result_context"]["source_row_count"], 503)
+        self.assertEqual(payload["result_context"]["candidate_row_count"], 3)
+        self.assertTrue(payload["result_context"]["truncated"])
+
 
 if __name__ == "__main__":
     unittest.main()

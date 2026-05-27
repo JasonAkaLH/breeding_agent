@@ -49,15 +49,15 @@ stable_set_order <- function(values) {
 }
 
 standardize_rows <- function(df) {
-  mapping <- c(plot_id = "plots", block = "r", ped_id = "trt")
+  mapping <- c(plot_id = "plots", block = "r", design_check = "hyb_check")
   for (src in names(mapping)) {
     dst <- mapping[[src]]
     if (src %in% names(df) && !(dst %in% names(df))) {
       names(df)[names(df) == src] <- dst
     }
   }
-  keep <- c("plots", "r", "trt", "ranges", "pass", "set", "set_index", "set_ncols",
-            "design_check", "hyb_type")
+  keep <- c("plots", "r", "ped_id", "ranges", "pass", "set", "set_index", "set_ncols",
+            "hyb_check", "hyb_type")
   df <- df[, intersect(keep, names(df)), drop = FALSE]
   row.names(df) <- NULL
   df
@@ -75,6 +75,27 @@ script_dir <- function() {
   normalizePath(dirname(sys.frame(1)$ofile %||% "."), winslash = "/", mustWork = FALSE)
 }
 
+skill_dir <- function() {
+  normalizePath(file.path(script_dir(), ".."), winslash = "/", mustWork = FALSE)
+}
+
+is_absolute_path <- function(path) {
+  grepl("^([A-Za-z]:[/\\\\]|/|\\\\\\\\)", path)
+}
+
+resolve_input_path <- function(path, root_dir) {
+  if (is_absolute_path(path) || file.exists(path)) {
+    return(normalizePath(path, winslash = "/", mustWork = TRUE))
+  }
+  normalizePath(file.path(root_dir, path), winslash = "/", mustWork = TRUE)
+}
+
+resolve_output_path <- function(path, root_dir) {
+  if (is.null(path)) return(NULL)
+  if (is_absolute_path(path)) return(normalizePath(path, winslash = "/", mustWork = FALSE))
+  normalizePath(path, winslash = "/", mustWork = FALSE)
+}
+
 run_one_design <- function(data, blocks, planter, seed, check_constraint, test_constraint, core_path) {
   if (!planter %in% c("serpentine", "cartesian")) {
     stop("planter must be 'serpentine' or 'cartesian'", call. = FALSE)
@@ -82,9 +103,28 @@ run_one_design <- function(data, blocks, planter, seed, check_constraint, test_c
 
   source(core_path)
 
+  has_cross_set_check_conflict <- function(previous_out, current_out) {
+    if (is.null(previous_out) || nrow(previous_out) == 0 || nrow(current_out) == 0) {
+      return(FALSE)
+    }
+    previous_row <- max(previous_out$ranges)
+    current_row <- min(current_out$ranges)
+    if (current_row != previous_row + 1L) {
+      return(FALSE)
+    }
+
+    previous_checks <- previous_out[previous_out$ranges == previous_row & previous_out$hyb_type == "ck", , drop = FALSE]
+    current_checks <- current_out[current_out$ranges == current_row & current_out$hyb_type == "ck", , drop = FALSE]
+    if (nrow(previous_checks) == 0 || nrow(current_checks) == 0) {
+      return(FALSE)
+    }
+    length(intersect(previous_checks$pass, current_checks$pass)) > 0
+  }
+
   sets <- stable_set_order(data$set)
   all_rows <- list()
   sets_payload <- list()
+  warnings <- list()
   plot_output_offset <- 0
   current_row_start <- 1L
 
@@ -96,33 +136,64 @@ run_one_design <- function(data, blocks, planter, seed, check_constraint, test_c
     set_seed <- seed + set_index * 1000L
     set_nrows <- blocks
 
-    res <- rcbd_design_core(
-      ped.list = set_data,
-      blocks = blocks,
-      nrows = set_nrows,
-      ncols = set_ncols,
-      seed = set_seed,
-      planter = "serpentine",
-      ck_constrain = check_constraint,
-      hyb_constrain = test_constraint,
-      plot_id_start = (current_row_start - 1L) * set_ncols + 1L,
-      block_start = 1L
-    )
+    max_boundary_tries <- 200L
+    accepted <- FALSE
+    out <- NULL
+    run_seed <- set_seed
+    retry_count <- 0L
 
-    out <- res$out_design
-    physical_row <- current_row_start + out$block - 1L
-    position_in_row <- out$plot_within_block
-    out$ranges <- physical_row
-    out$pass <- ifelse(
-      planter == "serpentine" & physical_row %% 2L == 0L,
-      set_ncols + 1L - position_in_row,
-      position_in_row
-    )
-    out$set <- set_label
-    out$set_index <- set_index
-    out$set_ncols <- set_ncols
-    out <- standardize_rows(out)
-    row.names(out) <- NULL
+    for (boundary_try in seq_len(max_boundary_tries)) {
+      run_seed <- set_seed + (boundary_try - 1L) * 1000000L
+      res <- rcbd_design_core(
+        ped.list = set_data,
+        blocks = blocks,
+        nrows = set_nrows,
+        ncols = set_ncols,
+        seed = run_seed,
+        planter = "serpentine",
+        ck_constrain = check_constraint,
+        hyb_constrain = test_constraint,
+        plot_id_start = (current_row_start - 1L) * set_ncols + 1L,
+        block_start = 1L
+      )
+
+      candidate <- res$out_design
+      physical_row <- current_row_start + candidate$block - 1L
+      position_in_row <- candidate$plot_within_block
+      candidate$ranges <- physical_row
+      candidate$pass <- ifelse(
+        planter == "serpentine" & physical_row %% 2L == 0L,
+        set_ncols + 1L - position_in_row,
+        position_in_row
+      )
+      candidate$set <- set_label
+      candidate$set_index <- set_index
+      candidate$set_ncols <- set_ncols
+      candidate <- standardize_rows(candidate)
+      row.names(candidate) <- NULL
+
+      previous_out <- if (length(all_rows) > 0) all_rows[[length(all_rows)]] else NULL
+      if (check_constraint && has_cross_set_check_conflict(previous_out, candidate)) {
+        retry_count <- retry_count + 1L
+        next
+      }
+
+      out <- candidate
+      accepted <- TRUE
+      break
+    }
+
+    if (!accepted) {
+      stop(sprintf("Set %s: cross-set check position constraint solution not found", set_label), call. = FALSE)
+    }
+    if (retry_count > 0L) {
+      warnings[[length(warnings) + 1L]] <- sprintf(
+        "Set %s was regenerated %d time(s) to avoid cross-set adjacent check conflicts.",
+        set_label,
+        retry_count
+      )
+    }
+
     out$plots <- plot_output_offset + seq_len(nrow(out))
     plot_output_offset <- max(out$plots)
     current_row_start <- current_row_start + blocks
@@ -135,7 +206,9 @@ run_one_design <- function(data, blocks, planter, seed, check_constraint, test_c
         set_index = set_index,
         blocks = blocks,
         set_ncols = set_ncols,
-        seed = set_seed
+        seed = run_seed,
+        base_seed = set_seed,
+        cross_set_boundary_retries = retry_count
       )
     )
   }
@@ -156,7 +229,7 @@ run_one_design <- function(data, blocks, planter, seed, check_constraint, test_c
       check_position_constraint = check_constraint,
       test_position_constraint = test_constraint
     ),
-    warnings = list(),
+    warnings = warnings,
     assumptions = list()
   )
 }
@@ -171,8 +244,9 @@ main <- function() {
 
   input <- opts[["input"]]
   if (is.null(input)) stop("Missing required argument --input", call. = FALSE)
-  input_path <- normalizePath(input, winslash = "/", mustWork = TRUE)
-  output_path <- opts[["output"]]
+  root_dir <- skill_dir()
+  input_path <- resolve_input_path(input, root_dir)
+  output_path <- resolve_output_path(opts[["output"]], root_dir)
 
   blocks <- as_int(opts[["blocks"]], "blocks")
   planter <- opts[["planter"]]
@@ -269,7 +343,7 @@ result <- tryCatch(
     payload <- make_error("local_rcbd_error", conditionMessage(e))
     json <- jsonlite::toJSON(payload, pretty = TRUE, auto_unbox = TRUE, null = "null")
     args_parsed <- tryCatch(parse_args(args), error = function(...) list())
-    output_path <- args_parsed[["output"]]
+    output_path <- tryCatch(resolve_output_path(args_parsed[["output"]], skill_dir()), error = function(...) args_parsed[["output"]])
     if (!is.null(output_path)) {
       dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
       writeLines(json, output_path, useBytes = TRUE)

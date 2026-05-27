@@ -4,6 +4,7 @@ export interface SlashCommand {
   command: string;
   capabilityId: string;
   name: string;
+  displayName: string;
   description: string;
   sourcePath: string;
   hasCommandConflict: boolean;
@@ -29,6 +30,7 @@ export function deriveSlashCommands(capabilities: CapabilityResponse[]): SlashCo
       command: capabilityIdToSlashCommand(capability.capability_id),
       capabilityId: capability.capability_id,
       name: capability.name,
+      displayName: displayName(capability),
       description: capability.description,
       sourcePath: capability.source_path,
       hasCommandConflict: false,
@@ -52,7 +54,7 @@ export function slashMenuCandidates(input: string, commands: SlashCommand[]): Sl
   if (!query) return commands;
   const normalized = normalizeSearchText(query);
   return commands.filter((command) => {
-    const haystack = [command.command, command.name, command.description, command.capabilityId, command.sourcePath]
+    const haystack = [command.command, command.displayName, command.name, command.description, command.capabilityId, command.sourcePath]
       .map(normalizeSearchText)
       .join(' ');
     return haystack.includes(normalized);
@@ -116,6 +118,11 @@ function capabilityIdToSlashCommand(capabilityId: string): string {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   return `/${normalized || 'skill'}`;
+}
+
+function displayName(capability: CapabilityResponse): string {
+  const value = capability.display_name?.trim();
+  return value || capability.name;
 }
 
 function normalizeSearchText(value: string): string {

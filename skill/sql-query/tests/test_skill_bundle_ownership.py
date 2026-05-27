@@ -32,6 +32,19 @@ FORBIDDEN_SYSTEM_PATTERNS = (
     "skill.sql_query.platform_handler",
     "llm.sql_query",
 )
+FORBIDDEN_DOC_SYSTEM_PATTERNS = (
+    "skill.sql_query",
+    "src.sql_query",
+    "src/sql_query",
+    "configs/sql_query",
+    "tests/sql_query",
+    "SQLQueryPlatformHandler",
+    "SQLQueryWorkflowProvider",
+    "SQLQueryExecutor",
+    "SQLQueryRuntimeReplanner",
+    "skill.sql_query.platform_handler",
+    "llm.sql_query",
+)
 FORBIDDEN_CHANGELOG_PATTERNS = (
     "src.sql_query",
     "src/sql_query",
@@ -73,12 +86,12 @@ class SQLQuerySkillBundleOwnershipTest(unittest.TestCase):
             for path in (REPO_ROOT / root_name).rglob("*.md"):
                 rel = path.relative_to(REPO_ROOT).as_posix()
                 text = path.read_text(encoding="utf-8", errors="ignore")
-                if any(pattern in text for pattern in FORBIDDEN_SYSTEM_PATTERNS):
+                if any(pattern in text for pattern in FORBIDDEN_DOC_SYSTEM_PATTERNS):
                     offenders.append(rel)
-        for file_name in ("README.md", "AGENTS.md", "Codex-Skill构建指南.md"):
+        for file_name in ("README.md", "AGENTS.md", "Skill构建指南.md"):
             path = REPO_ROOT / file_name
             text = path.read_text(encoding="utf-8", errors="ignore")
-            if any(pattern in text for pattern in FORBIDDEN_SYSTEM_PATTERNS):
+            if any(pattern in text for pattern in FORBIDDEN_DOC_SYSTEM_PATTERNS):
                 offenders.append(file_name)
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8", errors="ignore")
         if any(pattern in changelog for pattern in FORBIDDEN_CHANGELOG_PATTERNS):

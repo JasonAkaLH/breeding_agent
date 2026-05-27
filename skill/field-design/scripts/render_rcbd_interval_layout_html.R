@@ -1,6 +1,6 @@
 suppressPackageStartupMessages({
   if (!requireNamespace("jsonlite", quietly = TRUE)) {
-    stop("R package 'jsonlite' is required for the RCBD layout renderer.")
+    stop("R package 'jsonlite' is required for the RCBD/Interval layout renderer.")
   }
 })
 
@@ -24,6 +24,34 @@ parse_args <- function(args) {
     }
   }
   out
+}
+
+script_dir <- function() {
+  file_arg <- grep("^--file=", commandArgs(FALSE), value = TRUE)
+  if (length(file_arg) > 0) {
+    return(normalizePath(dirname(sub("^--file=", "", file_arg[[1]])), winslash = "/", mustWork = FALSE))
+  }
+  normalizePath(".", winslash = "/", mustWork = FALSE)
+}
+
+skill_dir <- function() {
+  normalizePath(file.path(script_dir(), ".."), winslash = "/", mustWork = FALSE)
+}
+
+is_absolute_path <- function(path) {
+  grepl("^([A-Za-z]:[/\\\\]|/|\\\\\\\\)", path)
+}
+
+resolve_input_path <- function(path, root_dir) {
+  if (is_absolute_path(path) || file.exists(path)) {
+    return(normalizePath(path, winslash = "/", mustWork = TRUE))
+  }
+  normalizePath(file.path(root_dir, path), winslash = "/", mustWork = TRUE)
+}
+
+resolve_output_path <- function(path, root_dir) {
+  if (is_absolute_path(path)) return(normalizePath(path, winslash = "/", mustWork = FALSE))
+  normalizePath(path, winslash = "/", mustWork = FALSE)
 }
 
 html_escape <- function(x) {
@@ -68,14 +96,22 @@ if (is.null(input)) stop("Missing required argument --input", call. = FALSE)
 if (is.null(output)) stop("Missing required argument --output", call. = FALSE)
 if (is.null(title)) title <- "RCBD Field Layout"
 
-input_path <- normalizePath(input, winslash = "/", mustWork = TRUE)
+root_dir <- skill_dir()
+input_path <- resolve_input_path(input, root_dir)
+output_path <- resolve_output_path(output, root_dir)
 payload <- jsonlite::fromJSON(input_path, simplifyVector = FALSE)
 if (isFALSE(payload$ok)) {
   stop("Cannot render layout for a failed design result.", call. = FALSE)
 }
 
 fieldbook <- extract_fieldbook(payload)
-required <- c("plots", "ranges", "pass", "r", "set", "trt", "design_check", "hyb_type")
+if (!"ped_id" %in% names(fieldbook) && "trt" %in% names(fieldbook)) {
+  names(fieldbook)[names(fieldbook) == "trt"] <- "ped_id"
+}
+if (!"hyb_check" %in% names(fieldbook) && "design_check" %in% names(fieldbook)) {
+  names(fieldbook)[names(fieldbook) == "design_check"] <- "hyb_check"
+}
+required <- c("plots", "ranges", "pass", "r", "set", "ped_id", "hyb_check", "hyb_type")
 missing_required <- setdiff(required, names(fieldbook))
 if (length(missing_required) > 0) {
   stop(sprintf("out_design is missing required columns: %s", paste(missing_required, collapse = ", ")), call. = FALSE)
@@ -86,8 +122,8 @@ fieldbook$ranges <- as.integer(fieldbook$ranges)
 fieldbook$pass <- as.integer(fieldbook$pass)
 fieldbook$r <- as.integer(fieldbook$r)
 fieldbook$set <- as.character(fieldbook$set)
-fieldbook$trt <- as.character(fieldbook$trt)
-fieldbook$design_check <- as.character(fieldbook$design_check)
+fieldbook$ped_id <- as.character(fieldbook$ped_id)
+fieldbook$hyb_check <- as.character(fieldbook$hyb_check)
 fieldbook$hyb_type <- as.character(fieldbook$hyb_type)
 fieldbook <- fieldbook[order(fieldbook$ranges, fieldbook$pass), , drop = FALSE]
 
@@ -210,7 +246,7 @@ main {
   padding: 4px;
   cursor: pointer;
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: auto 1fr auto;
   gap: 2px;
   position: relative;
   transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
@@ -220,8 +256,8 @@ main {
   filter: grayscale(0.8);
 }
 .cell.ck {
-  background: linear-gradient(180deg, #ffe08a, #f4b84a);
-  border-color: #d89522;
+  background: linear-gradient(180deg, var(--ck-light, #ffe08a), var(--ck-color, #f4b84a));
+  border-color: var(--ck-border, #d89522);
 }
 .cell.hyb {
   background: linear-gradient(180deg, var(--set-light, #dcebff), var(--set-color, #78aee8));
@@ -236,46 +272,6 @@ main {
   outline: 3px solid var(--active);
   outline-offset: 1px;
 }
-.cell.arrow-right::after,
-.cell.arrow-left::before,
-.cell.arrow-right .path-arrow,
-.cell.arrow-left .path-arrow {
-  position: absolute;
-  pointer-events: none;
-}
-.cell.arrow-right::after,
-.cell.arrow-left::before {
-  content: "";
-  top: 50%;
-  width: 25px;
-  height: 4px;
-  background: #334155;
-  border-radius: 999px;
-  transform: translateY(-50%);
-}
-.cell.arrow-right::after {
-  right: -30px;
-}
-.cell.arrow-left::before {
-  left: -30px;
-}
-.cell.arrow-right .path-arrow,
-.cell.arrow-left .path-arrow {
-  top: 50%;
-  width: 0;
-  height: 0;
-  border-top: 7px solid transparent;
-  border-bottom: 7px solid transparent;
-  transform: translateY(-50%);
-}
-.cell.arrow-right .path-arrow {
-  right: -36px;
-  border-left: 11px solid #334155;
-}
-.cell.arrow-left .path-arrow {
-  left: -36px;
-  border-right: 11px solid #334155;
-}
 .coord {
   display: flex;
   justify-content: space-between;
@@ -283,17 +279,21 @@ main {
   font-size: 10px;
   color: rgba(31,41,51,0.74);
 }
+.set-repeat {
+  font-weight: 700;
+}
+.cell.even-rep .set-repeat {
+  color: #b42318;
+}
 .trt {
-  align-self: end;
+  align-self: start;
   font-size: clamp(10px, 1.1vw, 13px);
   font-weight: 700;
   overflow-wrap: anywhere;
   line-height: 1.05;
+  color: #1f2933;
 }
 .cell.even-rep .trt {
-  color: #b42318;
-}
-.cell.odd-rep .trt {
   color: #1f2933;
 }
 .tags {
@@ -390,7 +390,7 @@ aside {
   <label>Set<select id="setFilter"></select></label>
   <label>重复<select id="blockFilter"></select></label>
   <label>类型<select id="typeFilter"><option value="all">全部</option><option value="ck">对照</option><option value="hyb">测试材料</option></select></label>
-  <label>搜索<input id="searchBox" type="search" placeholder="trt / plot"></label>
+  <label>搜索<input id="searchBox" type="search" placeholder="ped_id / plot"></label>
 </section>
 <main>
   <section class="layout-wrap">
@@ -424,6 +424,16 @@ const setPalette = [
   { color: "#78bfc7", light: "#d9f2f4", border: "#4f8f96" }
 ];
 const setColors = Object.fromEntries(sets.map((set, index) => [set, setPalette[index % setPalette.length]]));
+const ckPalette = [
+  { color: "#f4b84a", light: "#ffe08a", border: "#d89522" },
+  { color: "#e7a936", light: "#ffd776", border: "#c98218" },
+  { color: "#f0c35d", light: "#ffecac", border: "#cc9a2b" },
+  { color: "#d99a2b", light: "#f8cf74", border: "#ad7415" },
+  { color: "#f6c86a", light: "#fff0bd", border: "#c89124" },
+  { color: "#e0ad3f", light: "#f9dc88", border: "#b9821d" }
+];
+const ckNames = [...new Set(rows.filter(d => d.hyb_type === "ck").map(d => d.ped_id))].sort();
+const ckColors = Object.fromEntries(ckNames.map((name, index) => [name, ckPalette[index % ckPalette.length]]));
 let selected = rows[0];
 
 function fillSelect(select, values, allLabel) {
@@ -441,8 +451,10 @@ function fillSelect(select, values, allLabel) {
 }
 
 function renderMeta() {
+  const planterLabel = planter === "serpentine" ? "蛇形排列" : "顺序排列（笛卡尔排列）";
   byId("meta").innerHTML = [
     `来源 ${meta.source}`,
+    `排列方式 ${planterLabel}`,
     `小区 ${meta.rows}`,
     `Set ${sets.join(", ")}`,
     `重复 ${blocks.join(", ")}`,
@@ -466,7 +478,7 @@ function isVisible(d) {
   if (setValue !== "all" && d.set !== setValue) return false;
   if (blockValue !== "all" && String(d.r) !== blockValue) return false;
   if (typeValue !== "all" && d.hyb_type !== typeValue) return false;
-  if (search && !`${d.trt} ${d.plots}`.toLowerCase().includes(search)) return false;
+  if (search && !`${d.ped_id} ${d.plots}`.toLowerCase().includes(search)) return false;
   return true;
 }
 
@@ -488,22 +500,24 @@ function renderGrid() {
       }
       cell.classList.add(d.hyb_type === "ck" ? "ck" : "hyb");
       cell.classList.add(d.r % 2 === 0 ? "even-rep" : "odd-rep");
-      if (d.hyb_type !== "ck") {
+      if (d.hyb_type === "ck") {
+        const color = ckColors[d.ped_id] || ckPalette[0];
+        cell.style.setProperty("--ck-color", color.color);
+        cell.style.setProperty("--ck-light", color.light);
+        cell.style.setProperty("--ck-border", color.border);
+      } else {
         const color = setColors[d.set];
         cell.style.setProperty("--set-color", color.color);
         cell.style.setProperty("--set-light", color.light);
         cell.style.setProperty("--set-border", color.border);
       }
-      const rowDirection = planter === "serpentine" && range % 2 === 0 ? "left" : "right";
-      if (rowDirection === "right" && d.pass < maxPass) cell.classList.add("arrow-right");
-      if (rowDirection === "left" && d.pass > 1) cell.classList.add("arrow-left");
       if (!isVisible(d)) cell.classList.add("hidden");
       if (selected && selected.plots === d.plots) cell.classList.add("selected");
-      cell.setAttribute("aria-label", `${d.trt}, range ${d.ranges}, pass ${d.pass}`);
+      cell.setAttribute("aria-label", `${d.ped_id}, range ${d.ranges}, pass ${d.pass}`);
       cell.innerHTML = `
-        <div class="trt">${d.trt}</div>
-        <div class="coord"><span>R${d.ranges} P${d.pass}</span><span>${d.set}/${d.r}</span></div>
-        <span class="path-arrow"></span>
+        <div class="trt">${d.ped_id}</div>
+        <div></div>
+        <div class="coord"><span>R${d.ranges} P${d.pass}</span><span class="set-repeat">${d.set}/${d.r}</span></div>
       `;
       cell.addEventListener("mouseenter", event => showTooltip(event, d));
       cell.addEventListener("mousemove", event => moveTooltip(event));
@@ -520,12 +534,12 @@ function renderGrid() {
 
 function tooltipHtml(d) {
   return `
-    <strong>${d.trt}</strong>
+    <strong>${d.ped_id}</strong>
     <div class="tooltip-row"><span>plot</span><b>${d.plots}</b></div>
     <div class="tooltip-row"><span>range / pass</span><b>${d.ranges} / ${d.pass}</b></div>
     <div class="tooltip-row"><span>set / repeat</span><b>${d.set} / ${d.r}</b></div>
     <div class="tooltip-row"><span>type</span><b>${d.hyb_type}</b></div>
-    <div class="tooltip-row"><span>design_check</span><b>${d.design_check}</b></div>
+    <div class="tooltip-row"><span>hyb_check</span><b>${d.hyb_check}</b></div>
   `;
 }
 
@@ -560,13 +574,13 @@ function renderDetail() {
   }
   byId("detail").innerHTML = [
     ["plot", d.plots],
-    ["trt", d.trt],
+    ["ped_id", d.ped_id],
     ["set", d.set],
     ["repeat", d.r],
     ["range", d.ranges],
     ["pass", d.pass],
     ["type", d.hyb_type],
-    ["design_check", d.design_check]
+    ["hyb_check", d.hyb_check]
   ].map(([k, v]) => `<div class="detail-row"><span>${k}</span><strong>${v}</strong></div>`).join("");
 }
 
@@ -583,5 +597,5 @@ renderDetail();
 </html>
 ')
 
-dir.create(dirname(output), recursive = TRUE, showWarnings = FALSE)
-writeLines(html, output, useBytes = TRUE)
+dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+writeLines(html, output_path, useBytes = TRUE)

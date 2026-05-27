@@ -23,6 +23,8 @@ _VARIETY_LIKE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+_TOKEN_BUDGET_TOO_SMALL_MESSAGE = "查询结果内容过长，当前无法整理成可靠总结。请缩小查询范围后重试。"
+
 
 @dataclass(frozen=True)
 class _TokenTrimResult:
@@ -55,13 +57,17 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             ("user_question", "route_id", "schema_profile_id"),
         )
         raw_rows = self._normalize_rows(upstream.get("rows", []))
-        raw_source_row_count = self._int_or_default(upstream.get("row_count"), len(raw_rows))
+        raw_source_row_count = self._int_or_default(
+            upstream.get("source_row_count"),
+            self._int_or_default(upstream.get("row_count"), len(raw_rows)),
+        )
         llm_enabled = raw_source_row_count > 0 and self._llm_text_generator is not None
         token_trim = self._trim_rows_for_llm(raw_rows) if llm_enabled else self._no_token_trim(raw_rows)
         source_rows = token_trim.rows
         filter_upstream = dict(upstream)
         filter_upstream["rows"] = source_rows
-        filter_upstream["row_count"] = raw_source_row_count
+        filter_upstream["row_count"] = len(source_rows)
+        filter_upstream["source_row_count"] = raw_source_row_count
         if token_trim.applied:
             filter_upstream["truncated"] = True
 
@@ -80,6 +86,28 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             question_context=question_context,
         )
         domain_filter_applied = domain_keep_indexes is not None
+
+        if raw_source_row_count > 0 and token_trim.applied and not source_rows:
+            return self._success_result(
+                request,
+                columns=columns,
+                rows=[],
+                kept_row_indexes=[],
+                filter_source="deterministic",
+                fallback_used=False,
+                fallback_reason=None,
+                source_row_count=source_row_count,
+                source_preview_row_count=source_preview_row_count,
+                candidate_row_count=candidate_row_count,
+                truncated=True,
+                route_id=question_context.get("route_id") or upstream.get("route_id"),
+                schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
+                filter_reason=_TOKEN_BUDGET_TOO_SMALL_MESSAGE,
+                domain_filter_applied=False,
+                domain_filter_reason=None,
+                token_trim=token_trim,
+                events=(),
+            )
 
         if source_row_count == 0 or self._llm_text_generator is None:
             kept_row_indexes = domain_keep_indexes if domain_keep_indexes is not None else list(range(len(source_rows)))

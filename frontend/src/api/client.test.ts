@@ -58,13 +58,13 @@ describe('createApiClient', () => {
   });
 
   it('lists public capabilities', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ capabilities: [{ capability_id: 'skill.data_lookup', name: 'data-lookup', description: '查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' }] }), { status: 200 }));
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ capabilities: [{ capability_id: 'skill.data_lookup', name: 'data-lookup', display_name: '数据查询', description: '查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' }] }), { status: 200 }));
     const api = createApiClient({ fetcher });
 
     const result = await api.listCapabilities();
 
     expect(fetcher).toHaveBeenCalledWith('/api/v1/capabilities', expect.any(Object));
-    expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.data_lookup', kind: 'skill' });
+    expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.data_lookup', display_name: '数据查询', kind: 'skill' });
   });
 
   it('loads model edition choices from backend config', async () => {

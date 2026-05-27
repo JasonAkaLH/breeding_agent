@@ -13,7 +13,7 @@ from uuid import uuid4
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Artifact, ConversationMemorySummary, Message, Task
 from src.integrations.llm_client import load_config
-from src.integrations.token_counter import get_num_of_tokens_from_messages
+from src.integrations.token_counter import get_num_of_tokens_from_messages_async
 
 from .answer_selection import select_final_text_artifact
 from .models import OrchestrationRequest
@@ -43,6 +43,7 @@ class ConversationMemoryConfig:
     summary_max_tokens: int | None = None
     enable_summary_llm: bool = True
     reserved_tokens: int | None = None
+    tokenization_config: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_runtime_config(cls, config: Mapping[str, Any] | None = None) -> "ConversationMemoryConfig":
@@ -56,6 +57,7 @@ class ConversationMemoryConfig:
             recent_turns=recent_turns,
             summary_max_tokens=summary_max_tokens,
             enable_summary_llm=enable_summary_llm,
+            tokenization_config=loaded,
         )
 
     @property
@@ -437,12 +439,13 @@ class ConversationMemoryBuilder:
         token_budget = config.actual_memory_budget
         all_recent_messages = tuple(message for turn in turns for message in turn.memory_messages())
         existing_summary_text = existing_summary.summary_text if existing_summary is not None else None
-        estimated_before = _estimate_context_tokens(
+        estimated_before = await _estimate_context_tokens(
             all_recent_messages,
             existing_summary_text,
             capability_summaries,
             current_user_message,
             resolved_user_message,
+            config=config.tokenization_config,
         )
         compression_level = "none"
         history_summary: str | None = existing_summary_text
@@ -471,6 +474,7 @@ class ConversationMemoryBuilder:
                                 summary_text=history_summary,
                                 older_turns=older_turns,
                                 existing_summary=existing_summary,
+                                config=config,
                             )
                         else:
                             history_summary = existing_summary_text
@@ -486,7 +490,14 @@ class ConversationMemoryBuilder:
                 if compression_level == "fallback":
                     truncated = True
 
-        estimated_after = _estimate_context_tokens(recent_messages, history_summary, capability_summaries, current_user_message, resolved_user_message)
+        estimated_after = await _estimate_context_tokens(
+            recent_messages,
+            history_summary,
+            capability_summaries,
+            current_user_message,
+            resolved_user_message,
+            config=config.tokenization_config,
+        )
         return ConversationMemoryContext(
             conversation_id=request.conversation_id,
             root_message_id=request.root_message_id,
@@ -529,6 +540,7 @@ class ConversationMemoryBuilder:
         summary_text: str,
         older_turns: list[_BusinessTurn],
         existing_summary: ConversationMemorySummary | None,
+        config: ConversationMemoryConfig,
     ) -> None:
         if not hasattr(self._storage, "save_conversation_memory_summary"):
             return
@@ -554,7 +566,10 @@ class ConversationMemoryBuilder:
                         *(message.message_id for message in messages),
                     ]
                 ),
-                estimated_tokens=get_num_of_tokens_from_messages([summary_text]),
+                estimated_tokens=await get_num_of_tokens_from_messages_async(
+                    [summary_text],
+                    config=config.tokenization_config,
+                ),
                 summary_version=SUMMARY_VERSION,
                 compression_policy_version=COMPRESSION_POLICY_VERSION,
                 model_metadata_safe={"provider": "conversation_memory_summary_generator"},
@@ -1027,12 +1042,14 @@ def _looks_like_non_entity_number(candidate: str) -> bool:
     return bool(re.fullmatch(rf"(?:{prefixes})\d{{1,4}}号?", candidate))
 
 
-def _estimate_context_tokens(
+async def _estimate_context_tokens(
     messages: Iterable[ConversationMemoryMessage],
     history_summary: str | None,
     capability_summaries: Iterable[Mapping[str, Any]],
     current_user_message: str,
     resolved_user_message: str | None,
+    *,
+    config: Mapping[str, Any] | None = None,
 ) -> int:
     parts = [message.content for message in messages]
     if history_summary:
@@ -1042,7 +1059,7 @@ def _estimate_context_tokens(
         parts.append(resolved_user_message)
     parts.extend(json.dumps(dict(summary), ensure_ascii=False, sort_keys=True, default=str) for summary in capability_summaries)
     try:
-        return get_num_of_tokens_from_messages(parts)
+        return await get_num_of_tokens_from_messages_async(parts, config=config)
     except Exception:
         return max(1, sum(len(part) for part in parts) // 2)
 

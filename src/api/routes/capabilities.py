@@ -20,6 +20,7 @@ async def list_capabilities(request: Request) -> CapabilityListResponse:
             CapabilityResponse(
                 capability_id=descriptor.capability_id,
                 name=descriptor.name,
+                display_name=descriptor.display_name,
                 description=descriptor.description,
                 version=descriptor.version,
                 status="active" if descriptor.enabled else "disabled",

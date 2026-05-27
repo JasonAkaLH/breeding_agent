@@ -219,6 +219,15 @@ describe('applyTaskEvent', () => {
 
   });
 
+  it('maps data access failures to friendly terminal messages', () => {
+    let state = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'data_access_deadline_exceeded' }, 'timeout-failed'));
+    expect(state.phase).toBe('failed');
+    expect(state.errorMessage).toContain('数据库查询超时');
+
+    state = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'data_access_result_too_large' }, 'too-large-failed'));
+    expect(state.errorMessage).toContain('查询结果内容过大');
+  });
+
 
   it('keeps SQL Guard blocked message when a later task.failed event arrives', () => {
     let state = createInitialTaskEventState();
