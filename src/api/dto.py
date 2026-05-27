@@ -348,6 +348,7 @@ class AnswerInterruptResponse(BaseModel):
 class CapabilityResponse(BaseModel):
     capability_id: str
     name: str
+    display_name: str = ""
     description: str
     version: str
     status: str

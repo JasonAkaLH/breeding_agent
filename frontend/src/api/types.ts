@@ -41,6 +41,7 @@ export interface SubmitMessageRequest {
 export interface CapabilityResponse {
   capability_id: string;
   name: string;
+  display_name?: string;
   description: string;
   version: string;
   status: string;

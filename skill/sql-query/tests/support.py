@@ -17,14 +17,12 @@ class _SQLQueryRuntimeMixin:
         self,
         *,
         conversation_id: str = "conv-1",
-        account_id: str = "acc-1",
         content: str = "查询某个品种的基因型信息",
         capability_id: str | None = "skill.sql_query",
         metadata: dict | None = None,
     ):
         return await super().submit_message(
             conversation_id=conversation_id,
-            account_id=account_id,
             content=content,
             capability_id=capability_id,
             metadata=metadata,

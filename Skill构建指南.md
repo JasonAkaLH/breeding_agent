@@ -1,13 +1,13 @@
-# Codex Skill 构建指南（适配本系统）
+# Skill 构建指南（适配本系统）
 
-- **适用对象**：使用 Oh-my-codex / Codex 的 `skill-creator` 创建 Skill，并希望这些 Skill 能被本项目后端 `main_agent.respond` / `SkillExecutor` 使用的开发者。
-- **适配范围**：本系统的 Codex Skill 兼容层，而不是完整 Codex 本地 runtime。
-- **当前实现入口**：`src/integrations/codex_skills/`、`src/capabilities/main_agent/`、`src/capabilities/skill_tool/`、`src/api/runtime.py`。
+- **适用对象**：创建可被本项目后端 `main_agent.respond` / `SkillExecutor` 使用的 Skill 的开发者。
+- **适配范围**：本系统的 Skill 兼容层，而不是通用本地 agent runtime。
+- **当前实现入口**：项目 Skill 兼容层、`src/capabilities/main_agent/`、`src/capabilities/skill_tool/`、`src/api/runtime.py`。
 - **更新时间**：2026-05-18
 
 ## 1. 一句话结论
 
-本系统可以加载 Codex 风格的 `SKILL.md`，并支持三类后端执行形态：
+本系统可以加载项目约定格式的 `SKILL.md`，并支持三类后端执行形态：
 
 1. **instruction-only Skill**：匹配后把 Skill 正文注入 `main_agent.respond`。
 2. **`python_subprocess` Skill**：受控执行 manifest 声明的 Python 脚本，并把 JSON 输出注入主代理。
@@ -15,7 +15,7 @@
 
 Rust 不是第四种 execution mode；Rust 只能作为 Skill-owned runtime 的内部实现，放在 `skill/<skill-name>/native/`，并通过本指南允许的 PyO3 wheel、native binary 或 sidecar adapter 接回 `platform_service` / 受控 handler contract。
 
-但本系统**不是完整 Codex runtime**：不会自动读取 Skill 的 `references/`，不会执行 Markdown 代码块，不支持 shell 脚本 / plugin runtime，不会在运行时 `cargo build` / 下载 Rust 依赖 / 执行任意 native binary，也不会给脚本继承完整本机环境变量或 secret。
+但本系统**不是通用本地 agent runtime**：不会自动读取 Skill 的 `references/`，不会执行 Markdown 代码块，不支持 shell 脚本 / plugin runtime，不会在运行时 `cargo build` / 下载 Rust 依赖 / 执行任意 native binary，也不会给脚本继承完整本机环境变量或 secret。
 
 ## 2. Skill 放在哪里
 
@@ -23,7 +23,6 @@ Rust 不是第四种 execution mode；Rust 只能作为 Skill-owned runtime 的�
 
 ```text
 <项目根目录>/skill/**/SKILL.md
-~/.codex/skills/**/SKILL.md
 ```
 
 测试或定制 runtime 可通过 `build_api_runtime(..., skill_roots=[...])` 或 `skill_catalog=...` 显式注入。
@@ -44,7 +43,7 @@ skill/my-skill/
 - `SKILL.md` 是唯一必需文件。
 - `scripts/` 可选，仅当需要确定性处理或结构化预处理时使用。
 - `native/` 可选，仅允许项目级 trusted Skill 放置 Rust source / adapter；普通用户级 Skill 不得要求后端自动编译或执行 Rust。
-- `references/`、`assets/` 可以作为 Codex 人工构建过程的辅助资源，但本系统后端不会自动加载它们给 LLM。
+- `references/`、`assets/` 可以作为人工构建过程的辅助资源，但本系统后端不会自动加载它们给 LLM。
 
 ## 3. 兼容字段
 
@@ -73,6 +72,7 @@ triggers:
 | 字段 | 是否建议 | 当前系统行为 |
 |---|---:|---|
 | `name` | 必填 | 解析必需；也参与匹配打分。 |
+| `display_name` | 必填 | 用户可见名称；应使用简短、稳定、可读的中文或中英混合名称，不参与 capability id 生成。 |
 | `description` | 强烈建议 | 参与匹配打分；应写清楚“什么时候使用”。 |
 | `triggers` | 强烈建议 | 按子串命中，分数最高；中文 Skill 必须尽量列出自然触发表达。 |
 | `capability_id` | 公开 Skill 必填 | 公开到 capability pool 的稳定 ID；项目 Skill 使用 `skill.*`，例如 `skill.report_writer`。 |
@@ -750,14 +750,14 @@ result = {
 print(json.dumps(result, ensure_ascii=False))
 ```
 
-## 9. Oh-my-codex `skill-creator` 提示词模板
+## 9. Skill 创建提示词模板
 
-把下面这段作为创建 Skill 的约束交给 Oh-my-codex `skill-creator`：
+把下面这段作为创建 Skill 的约束：
 
 ```text
-请创建一个适配 breeding_agent 后端的 Codex Skill。必须遵守：
+请创建一个适配 breeding_agent 后端的 Skill。必须遵守：
 1. Skill 包只能依赖 SKILL.md；可选 scripts/ 下的 Python 脚本；只有项目级 trusted Skill 才能在 native/ 放 Rust runtime。
-2. SKILL.md frontmatter 必须包含 name、description；中文任务必须包含高质量 triggers。
+2. SKILL.md frontmatter 必须包含 name、display_name、description；中文任务必须包含高质量 triggers。
 3. 本系统只会把 SKILL.md body 注入 LLM，不会自动读取 references/ 或 assets/。
 4. 如需脚本，只能声明 scripts[].runtime=python，path 必须是包内相对路径，不能使用绝对路径、..、symlink、shell、node、runtime:rust 或任意命令。
 5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；如需业务参数，必须用 parameters/input_parameters 声明可解析字段，LLM 只会在缺参时生成候选并由系统校验后注入，不要依赖主代理口头承诺传参；stdout 必须是 JSON object。若需要下载文件，写入 MAF_SKILL_OUTPUT_DIR 并用 output_files 声明；若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
@@ -774,6 +774,7 @@ print(json.dumps(result, ensure_ascii=False))
 
 - [ ] `SKILL.md` 存在，且以 YAML frontmatter 开头和闭合。
 - [ ] `name` 非空，稳定且不和已有 Skill 重名。
+- [ ] `display_name` 非空，适合作为用户界面 / 进度展示名称。
 - [ ] `description` 说明“什么时候使用”，不是泛泛描述。
 - [ ] 中文 Skill 有明确 `triggers`。
 - [ ] body 非空，且是主代理可直接遵循的操作说明。
@@ -809,53 +810,21 @@ print(json.dumps(result, ensure_ascii=False))
 
 ## 11. 验证方法
 
-### 11.1 验证 parser 能读取 Skill
+### 11.1 最小静态检查
 
-```bash
-python - <<'PY'
-from pathlib import Path
-from src.integrations.codex_skills import parse_skill_file
+- 确认 `SKILL.md` 以 YAML frontmatter 开头并闭合。
+- 确认 `name`、`description`、中文 `triggers`、`execution`、`parameters`、`scripts` 与 `outputs.required` 符合本指南。
+- 确认 `SKILL.md` 中不写产品名、secret、内网地址、绝对本地路径或个人环境路径。
 
-manifest = parse_skill_file(Path('skill/my-skill/SKILL.md'))
-print(manifest.name)
-print(manifest.triggers)
-print([script.name for script in manifest.scripts])
-PY
-```
+### 11.2 脚本本地 smoke
 
-### 11.2 验证 catalog 能发现并匹配 Skill
+对脚本型 Skill，使用仓库统一 Python 环境直接给 wrapper 传入最小 JSON stdin，检查 stdout 是 JSON object，并至少包含 `answer` / `response_text` / `summary` 之一。
 
-```bash
-python - <<'PY'
-from src.integrations.codex_skills import SkillCatalog, match_skills
+### 11.3 项目回归
 
-catalog = SkillCatalog.from_roots(['skill'])
-matches = match_skills('帮我写周报', catalog)
-print([(m.manifest.name, m.score, m.reason) for m in matches])
-PY
-```
-
-### 11.3 验证脚本能通过受控 runner
-
-```bash
-python - <<'PY'
-import asyncio
-from pathlib import Path
-from src.integrations.codex_skills import SkillScriptRunner, parse_skill_file
-
-manifest = parse_skill_file(Path('skill/my-skill/SKILL.md'))
-script = manifest.scripts[0]
-result = asyncio.run(SkillScriptRunner().run(manifest, script, {'query': '测试输入'}))
-print(result)
-PY
-```
-
-### 11.4 运行现有回归
-
-```bash
-python -m unittest discover -s tests/integrations/codex_skills -p 'test_*.py'
-python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
-```
+- 新增或修改 Skill 后，应补对应 integration 回归测试，覆盖 manifest 解析、匹配、缺参返回、成功执行和 output files 安全声明。
+- 执行与该 Skill 直接相关的 integration 测试；如触及主代理、API 或前端契约，再追加相应分层测试。
+- 如果修改 Rust、依赖或供应链策略，按仓库 License Requirement 运行许可门禁。
 
 ## 12. 常见错误
 
@@ -875,21 +844,21 @@ python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 | 以为 `outputs.required` 字段会原样进入主代理 prompt | finalizer 看不到预期内容 | 输出短 `answer` / `summary` / `response_text`，并依赖归一化后的 dependency context |
 | 把 `output_files` 当作 prompt 内容 | finalizer 不会读取文件正文 | 用 `output_files` 交付下载产物，同时用 `answer` / `summary` 描述文件内容 |
 
-## 13. 和标准 Codex Skill 的差异
+## 13. 和通用本地 Skill runtime 的差异
 
-| 能力 | 标准 Codex / Oh-my-codex | 本系统后端当前支持 |
+| 能力 | 通用本地 Skill runtime | 本系统后端当前支持 |
 |---|---|---|
 | `SKILL.md` frontmatter | 支持 | 支持 `name` / `description` / `triggers` 等 |
 | `SKILL.md` body | 触发后加载 | 匹配后注入主代理 prompt |
 | `agents/openai.yaml` | UI metadata | 当前后端不读取 |
-| `references/` | Codex 可按需读取 | 当前后端不自动读取 |
-| `assets/` | Codex 可用于产物 | 当前后端不自动使用 |
+| `references/` | 可能按需读取 | 当前后端不自动读取 |
+| `assets/` | 可能用于产物 | 当前后端不自动使用 |
 | Python 脚本 | 可作为资源 | 仅 manifest 声明且 auto_run 时受控执行 |
-| Shell / 任意命令 | Codex 环境可能可执行 | 不支持 |
-| Rust runtime | Codex 可在本地自行编译/运行 | 仅项目级 trusted Skill 可通过 `native/` + platform-service + allowlist adapter 接入；不自动编译或执行 |
-| R 脚本 | Codex 可通过本地命令自行运行 | 当前通过 `runtime: python` wrapper 调用 `Rscript`，不支持直接 `runtime: r` |
-| MCP / plugin runtime | Codex 插件可提供 | 不支持 |
-| 本地文件访问 | Codex agent 可读 workspace | 主代理 LLM 不具备；脚本只可读自己包内可定位资源 |
+| Shell / 任意命令 | 某些本地环境可能可执行 | 不支持 |
+| Rust runtime | 某些本地环境可自行编译/运行 | 仅项目级 trusted Skill 可通过 `native/` + platform-service + allowlist adapter 接入；不自动编译或执行 |
+| R 脚本 | 某些本地环境可通过本地命令运行 | 当前通过 `runtime: python` wrapper 调用 `Rscript`，不支持直接 `runtime: r` |
+| MCP / plugin runtime | 插件可提供 | 不支持 |
+| 本地文件访问 | 本地 agent 可能可读 workspace | 主代理 LLM 不具备；脚本只可读自己包内可定位资源 |
 
 ## 14. 给 Skill creator 的推荐默认策略
 

@@ -102,6 +102,7 @@ def build_skill_capability_registry(
         descriptors[capability_id] = CapabilityDescriptor(
             capability_id=capability_id,
             name=skill.name,
+            display_name=_descriptor_display_name(skill),
             description=_descriptor_description(skill),
             version=str(_metadata_value(skill, "version") or "1"),
             enabled=True,
@@ -181,6 +182,13 @@ def _descriptor_description(skill: SkillManifest) -> str:
     if len(description) > 240:
         return description[:237] + "..."
     return description
+
+
+def _descriptor_display_name(skill: SkillManifest) -> str:
+    display_name = _metadata_value(skill, "display_name")
+    if isinstance(display_name, str):
+        return display_name.strip()
+    return ""
 
 
 def _unsupported_runtime(skill: SkillManifest) -> str:

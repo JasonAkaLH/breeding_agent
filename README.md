@@ -8,17 +8,18 @@
 |---|---|
 | `AGENTS.md` | 仓库级 AI Agent 协作、编码、测试与文档约束。 |
 | `CHANGELOG.md` | 仓库级变更日志；开始任何分析、设计、编码或文档修改前应先阅读最近条目。 |
+| `Skill构建指南.md` | 项目级 Skill 构建、manifest、脚本执行与产物约束。 |
 | `requirements.txt` | `multi_agent` Conda 环境依赖快照。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
-| `docs/` 其他文件 | Capability 接入指南、Codex Skill 构建指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
-| `skill/` | 项目级 Codex Skill 目录；后端默认扫描 `skill/**/SKILL.md`，具体构建约束见 `Codex-Skill构建指南.md`。 |
+| `docs/` 其他文件 | Capability 接入指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
+| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，具体构建约束见 `Skill构建指南.md`。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |
 | `src/lifecycle/` | task / node / mailbox / interrupt / cancel / conversation guard 生命周期规则。 |
 | `src/orchestration/` | capability registry、scheduler、workflow plan、主代理 LLM 高层规划、router、validator、expander、运行时受控重编排与编排服务。 |
 | `src/capabilities/main_agent/` | `main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。 |
-| `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Codex Skill 兼容层、MCP Python facade、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
+| `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Skill 兼容层、MCP Python facade、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
 | `native/` | Rust workspace；当前包含 Core/Lifecycle、Runtime Store/Event/Dispatcher、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter、Skill Runtime policy / SkillSandboxService + tonic gRPC binding + `maf-skill-sandbox` 二进制入口与受限进程执行基线（client version / handler allowlist、相对 argv、sandbox root、timeout、stdin 上限、stdout/stderr 并发有界 drain、`env_clear` 最小环境、process-group cleanup）、MCP Runtime sidecar contract/kernel + `maf-mcp-runtime-sidecar` 二进制入口、Artifact/Auth/DataAccess/Audit 等 Rust contract/kernel crates 与 sidecar proto。部分 Python facade 已消费 Rust contract resource limits；Core/Lifecycle、Skill Runtime policy 与 Artifact/Auth/DataAccess/Audit safety kernels 已具备预构建 PyO3 module 加载 facade、Rust JSON bridge、`maturin` wheel build/import smoke 路径；RuntimeSidecar Python h2c / mTLS gRPC client 与 SkillSandbox Python h2c gRPC client 已可连接外部 Rust sidecar binary 做 runtime store/event/dispatcher RPC 与 Skill policy/sandbox RPC；MCP Runtime 目前仍是 Phase 0/1 sidecar contract/facade + evidence gate，MCP tool 真实执行仍走 Python legacy client，Phase 2-5 canonical runtime operations 待完成；RuntimeSidecar、Skill Runtime 与 MCP Runtime 均具备 artifact provenance / benchmark / promotion / ops / decommission gate + Python fail-closed validator；真实 production shadow / benchmark / ops drill / allowlist promotion evidence 仍按 PRD phase 门禁推进。 |
 | `skill/<domain-query>/` | 可移除 数据查询 Skill bundle，包含 manifest、领域 runtime、配置与 Skill 专属测试；移除该目录后系统只保留 generic Skill loader。 |
 | `scripts/` | 显式手工 smoke / 维护脚本，包含主代理真实 LLM smoke 与全栈开发启动脚本。 |

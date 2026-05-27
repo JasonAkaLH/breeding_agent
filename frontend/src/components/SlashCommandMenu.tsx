@@ -1,3 +1,4 @@
+import { Tooltip } from 'antd';
 import { useEffect, useRef } from 'react';
 import type { SlashCommand } from '../domain/slashCommands';
 
@@ -20,34 +21,41 @@ export default function SlashCommandMenu({ candidates, activeIndex, emptyMessage
       {candidates.length === 0 ? (
         <div className="slash-command-empty" role="status">{emptyMessage}</div>
       ) : candidates.map((candidate, index) => (
-        <div
+        <Tooltip
           key={`${candidate.capabilityId}:${candidate.command}`}
-          ref={(element) => {
-            optionRefs.current[index] = element;
-          }}
-          role="option"
-          aria-selected={index === activeIndex}
-          tabIndex={0}
-          className={`slash-command-option${index === activeIndex ? ' slash-command-option-active' : ''}${candidate.hasCommandConflict ? ' slash-command-option-conflict' : ''}`}
-          onClick={() => onSelect(candidate)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              onSelect(candidate);
-            }
-          }}
+          title={candidate.description}
+          mouseEnterDelay={0.5}
+          placement="right"
+          classNames={{ root: 'slash-command-tooltip' }}
         >
-          <div className="slash-command-option-main">
-            <span className="slash-command-name">{candidate.command}</span>
-            <span className="slash-command-title">{candidate.name}</span>
-          </div>
-          <div className="slash-command-description">{candidate.description}</div>
-          {candidate.sourcePath || candidate.hasCommandConflict ? (
-            <div className="slash-command-meta">
-              {candidate.hasCommandConflict ? '命令冲突，请点选具体 capability · ' : ''}{candidate.capabilityId}{candidate.sourcePath ? ` · ${candidate.sourcePath}` : ''}
+          <div
+            ref={(element) => {
+              optionRefs.current[index] = element;
+            }}
+            role="option"
+            aria-selected={index === activeIndex}
+            tabIndex={0}
+            className={`slash-command-option${index === activeIndex ? ' slash-command-option-active' : ''}${candidate.hasCommandConflict ? ' slash-command-option-conflict' : ''}`}
+            onClick={() => onSelect(candidate)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                onSelect(candidate);
+              }
+            }}
+          >
+            <div className="slash-command-option-main">
+              <span className="slash-command-name">{candidate.command}</span>
+              <span className="slash-command-title">{candidate.displayName}</span>
             </div>
-          ) : null}
-        </div>
+            <div className="slash-command-description">{candidate.description}</div>
+            {candidate.sourcePath || candidate.hasCommandConflict ? (
+              <div className="slash-command-meta">
+                {candidate.hasCommandConflict ? '命令冲突，请点选具体 capability · ' : ''}{candidate.capabilityId}{candidate.sourcePath ? ` · ${candidate.sourcePath}` : ''}
+              </div>
+            ) : null}
+          </div>
+        </Tooltip>
       ))}
     </div>
   );

@@ -28,6 +28,7 @@ class CapabilitiesListAPITest(APITestCase):
         (skill_dir / "SKILL.md").write_text(
             """---
 name: mini-breedstat-rcbd
+display_name: 田间试验设计
 description: 生成 RCBD 随机区组设计
 triggers:
   - 随机区组
@@ -64,6 +65,7 @@ description: 私人工具
         self.assertEqual(capabilities["skill.mini_breedstat_rcbd"]["kind"], "skill")
         self.assertEqual(capabilities["skill.mini_breedstat_rcbd"]["source"], "skill")
         self.assertEqual(capabilities["skill.mini_breedstat_rcbd"]["source_path"], "rcbd/SKILL.md")
+        self.assertEqual(capabilities["skill.mini_breedstat_rcbd"]["display_name"], "田间试验设计")
 
         audit_records = [
             json.loads(line)

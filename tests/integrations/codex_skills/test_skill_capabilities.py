@@ -31,7 +31,13 @@ triggers:
     def test_project_skill_becomes_public_skill_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir) / "skill"
-            self._write_skill(project_root, "rcbd", name="mini-breedstat-rcbd", description="生成 RCBD 随机区组设计")
+            self._write_skill(
+                project_root,
+                "rcbd",
+                name="mini-breedstat-rcbd",
+                description="生成 RCBD 随机区组设计",
+                metadata="  display_name: 田间试验设计\n",
+            )
             catalog = SkillCatalog.from_roots([project_root])
 
             registry = build_skill_capability_registry(catalog, public_skill_roots=(project_root,))
@@ -39,6 +45,7 @@ triggers:
         self.assertEqual(tuple(registry.descriptors_by_id), ("skill.mini_breedstat_rcbd",))
         descriptor = registry.descriptors_by_id["skill.mini_breedstat_rcbd"]
         self.assertEqual(descriptor.name, "mini-breedstat-rcbd")
+        self.assertEqual(descriptor.display_name, "田间试验设计")
         self.assertEqual(descriptor.kind, "skill")
         self.assertEqual(descriptor.source, "skill")
         self.assertEqual(descriptor.source_path, "rcbd/SKILL.md")

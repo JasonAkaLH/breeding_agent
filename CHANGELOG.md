@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+- Slash Command 选择框可读性优化：Skill 选项行加高并增加底部 meta 间距，鼠标悬停在任一 Skill 选项 500ms 后可通过悬浮提示查看完整 description。
+- 项目级 Skill 头部描述中文化：`skill/*/SKILL.md` 的结构化 `description` 已统一改为中文说明，便于中文用户在 capability / slash command 选择中理解每个 Skill 的用途。
+- Slash Command 展示名链路接入：项目级 Skill `SKILL.md` 头部 `display_name` 现在随 capability descriptor 暴露到 `/api/v1/capabilities`，前端 slash command 菜单与已选择 Skill badge 在 `/xxx` 后展示该中文展示名，`name` 继续保留为稳定内部名。
+- SQLQuery 行数超限改为软剪裁并补齐失败气泡：MySQL readonly adapter 对 row limit overflow 保留结果尾部继续执行并记录 source/trim metadata，SQLQuery 执行与 result_filtering / prompt payload 传播剪裁状态且 token 预算仍严格；前端 terminal failure 气泡现在展示映射后的失败原因，不再停留在“正在等待回答...”。
+- Field Analysis Skill 接入规范化：`skill/field-analysis` 补齐 `skill.field_analysis` capability、中文/英文 triggers、`python_subprocess` manifest、artifact/design/run_id 参数契约、JSON output files 约束与 Python wrapper；wrapper 受控调用包内 Rscript 生成 `field-analysis-report-v1` 报告，并新增 Skill 兼容回归测试。
+- Skill 构建文档命名与产出口径统一：根目录指南重命名为 `Skill构建指南.md`，移除指南与 `skill/**/SKILL.md` 中的产品名表述，并同步 README、AGENTS 与相关测试引用。
+- Field Design Skill 接入规范化：`skill/field-design` 补齐 `skill.field_design` capability、triggers、`python_subprocess` manifest、材料 artifact / design / RCBD blocks / ncols / CK spec 参数契约与 CSV/HTML output files 约束；新增 Python wrapper 受控调用包内 Rscript，支持 RCBD/Diagonal 完整设计与 Interval CK 参数收集，并补充 Skill 兼容回归测试。
+- RiceGenie Skill 接入规范化：`skill/rice-genie` 补齐 `skill.rice_genie` capability、triggers、`python_subprocess` manifest、VCF/gene_check artifact 与 sample 参数契约、Markdown report output files 约束；新增 Python wrapper 受控调用 QTN matching 与 key-trait report 解释脚本，默认只向用户输出证据边界报告与 Markdown artifact，并补充 Skill 兼容回归测试。
+- 项目级 Skill manifest 展示名收口：所有 `skill/*/SKILL.md` 均声明 `display_name`，`Skill构建指南.md` 将其列为必填，并新增项目 Skill manifest contract 回归防止遗漏。
+- Token 计数改为优先使用火山方舟 OpenAI-compatible `/tokenization` 接口：`src/integrations/token_counter.py` 新增同步/异步批量计数、`total_tokens` 解析、LRU 缓存与 tiktoken 可控 fallback；conversation memory 异步热路径改用 async token counter，并保留 `trim_max_tokens` per-model 预算口径。
 - 模型上下文裁剪预算改为 per-model 配置：`model_editions.options[]` 支持 `trim_max_tokens`，运行时按本次 `model_edition` 派生 LLM / conversation memory 配置；DeepSeek V4 Flash / Pro 当前均按 1024K = 1024000 tokens 维护在 git-ignored `config.yaml`，顶层 `trim_max_tokens` 已从生产配置移除。
 - Strong Conversation Delete 已按 Ralph/Ultragoal G007 进入实现收口：新增 `deleting` / `deleting_failed` 状态与 deletion metadata，普通用户 conversation/task/upload/SSE 相关入口 active-only，后端 deletion runner 支持客户端断开后继续执行、启动恢复、失败留痕与运维重试脚本，PostgreSQL 物理删除改为 set-based SQL，前端历史条目显示目标级 spinner 并只锁定被删条目；API 文档与 PostgreSQL runbook 同步强删除、无前端超时、失败不复活和诊断/重试口径。
 - SSE Auth Generation Invalidation 已按 Ralph/Ultragoal G006 落地：AuthUserToken / SQLite / PostgreSQL runtime schema 增加 auth_generation 与更新时间，auth login/refresh/logout 推进 generation 并更新本地 cache / invalidation bus，SSE 建连改用 SseConnectionContext，事件热路径移除 token DB lookup/touch；PostgreSQL LISTEN/NOTIFY listener 改为先 LISTEN 后 reconcile、启动等待 ready、规范化 `postgresql+psycopg://` DSN，并在 listener 不健康时让 SSE fail-closed 发送非持久化 `auth.invalidated` / `auth_generation_unavailable` 后关闭。
@@ -98,7 +108,7 @@
 - 前端临时 Skill 状态行：多 / 单 Skill 进度现在以当前页灰色轻量行显示在 assistant 气泡外，不写入聊天正文、历史或记忆；刷新 / 历史会话不恢复，最终回答仍只在 assistant 气泡内展示。
 - 多 Skill final-only DAG 收口：保留显式单 Skill `requires_finalizer` 的最终回答节点，同时抑制 LLM Planner 多 Skill 宏展开中的 per-skill 中间 finalizer；全局 finalizer 会汇总所有 answer-producing skill，assistant history 同步对并发重复写入保持幂等。
 - 本地全栈开发会话收尾：按需重启并最终清理 `maf-fullstack-dev` tmux 会话、uvicorn / Vite 后台进程，确认 `8000` / `5173` 端口已释放。
-- Skill finalizer 输出契约修复：`answer` / `summary` 现在在 Skill executor 边界归一化为 `response_text`，覆盖 `python_subprocess` 与 `platform_service`，使 `requires_finalizer` 的主代理 dependency context 能读取 answer-only Skill 中间结果；同步更新《Codex-Skill构建指南.md》并补充 helper / executor / API 多 Skill DAG 回归测试。
+- Skill finalizer 输出契约修复：`answer` / `summary` 现在在 Skill executor 边界归一化为 `response_text`，覆盖 `python_subprocess` 与 `platform_service`，使 `requires_finalizer` 的主代理 dependency context 能读取 answer-only Skill 中间结果；同步更新《Skill构建指南.md》并补充 helper / executor / API 多 Skill DAG 回归测试。
 - Skill 脚本上传文件边界修复：public `skill.*` 的 `python_subprocess` 执行路径现在优先消费 `skill_artifacts` 中的完整上传文件内容，LLM / finalizer prompt 仍只接收脱敏 `uploaded_artifacts` 摘要；补充 script-only artifact helper、SkillExecutor / API 回归，并验证 RCBD sample CSV 可生成 3 重复 30 行 fieldbook。
 
 
@@ -149,7 +159,7 @@
 ### 历史基线摘要
 
 - 主代理一期 Phase 0~8 已完成：核心 contract、SQLite 状态存储、task/node/mailbox/interrupt/cancel 生命周期、orchestration scheduler / planner / router / validator / expander、API/SSE、main_agent capability、LLM runtime、audit 与前端 v1 均已形成可测试基线。
-- Skill 一等 Capability、动态加载 / 热部署、Codex Skill 兼容层、Capability 接入指南、对话上下文记忆与压缩、上传文件暂存、登录权限与用户隔离历史等能力已落地；后续修改应复用既有边界，不要回到硬编码 capability 或前端专属渲染。
+- Skill 一等 Capability、动态加载 / 热部署、Skill 兼容层、Capability 接入指南、对话上下文记忆与压缩、上传文件暂存、登录权限与用户隔离历史等能力已落地；后续修改应复用既有边界，不要回到硬编码 capability 或前端专属渲染。
 - MCP 服务器开发对接指南、MCP 长任务流式 SSE PRD、MCP Phase 0-5 PRD、Rust Runtime 专题 PRD、SQLQuery Skill 化迁移计划等文档已建立；新增重大运行时或跨模块边界变更前，应先更新对应 PRD 与测试计划。
 
 ---

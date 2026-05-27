@@ -21,6 +21,7 @@ const capabilities: CapabilityResponse[] = [
   {
     capability_id: 'skill.mini_breedstat_rcbd',
     name: 'mini-breedstat-rcbd',
+    display_name: '田间试验设计',
     description: '生成 RCBD 随机区组设计',
     version: '1',
     status: 'active',
@@ -56,7 +57,7 @@ describe('slashCommands', () => {
 
     expect(commands).toEqual([
       expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup', hasCommandConflict: false }),
-      expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd', hasCommandConflict: false }),
+      expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd', displayName: '田间试验设计', hasCommandConflict: false }),
     ]);
     expect(commands.map((command) => command.capabilityId)).not.toContain('main_agent.respond');
     expect(commands.map((command) => command.capabilityId)).not.toContain('skill.disabled_demo');
@@ -74,11 +75,12 @@ describe('slashCommands', () => {
     expect(parseDirectSlashCommand('/demo-query hello', commands)).toEqual({ kind: 'conflict', command: '/demo-query' });
   });
 
-  it('filters menu candidates by command, name, description, and capability id', () => {
+  it('filters menu candidates by command, display name, name, description, and capability id', () => {
     const commands = deriveSlashCommands(capabilities);
 
     expect(slashMenuCandidates('/', commands).map((command) => command.command)).toEqual(['/data-lookup', '/mini-breedstat-rcbd']);
     expect(slashMenuCandidates('/data', commands).map((command) => command.command)).toEqual(['/data-lookup']);
+    expect(slashMenuCandidates('/田间', commands).map((command) => command.command)).toEqual(['/mini-breedstat-rcbd']);
     expect(slashMenuCandidates('/随机', commands).map((command) => command.command)).toEqual(['/mini-breedstat-rcbd']);
     expect(slashMenuCandidates('/skill.data', commands).map((command) => command.command)).toEqual(['/data-lookup']);
   });

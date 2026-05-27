@@ -302,9 +302,19 @@ def build_result_filtering_prompt_payload(
         }
         for index, row in enumerate(rows)
     ]
-    row_count = int(execute_context.get("row_count", len(rows)))
+    row_count = int(
+        execute_context.get(
+            "source_row_count",
+            execute_context.get("row_count", len(rows)),
+        )
+    )
     candidate_row_count = len(candidate_rows)
-    truncated = row_count > candidate_row_count or len(rows) > candidate_row_count
+    truncated = (
+        bool(execute_context.get("truncated"))
+        or bool(execute_context.get("row_limit_trimmed"))
+        or row_count > candidate_row_count
+        or len(rows) > candidate_row_count
+    )
     question = dict(question_context or {})
     sql = execute_context.get("sql") or question.get("sql")
     return {

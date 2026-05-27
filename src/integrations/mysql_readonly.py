@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
@@ -17,6 +18,11 @@ class ReadonlyQueryResult:
     columns: tuple[str, ...]
     rows: tuple[dict[str, Any], ...]
     row_count: int
+    source_row_count: int | None = None
+    row_limit_trimmed: bool = False
+    row_limit: int | None = None
+    row_limit_removed_row_count: int = 0
+    truncated: bool = False
 
 
 class TransientReadonlyExecutionError(RuntimeError):
@@ -62,6 +68,7 @@ class MySQLReadonlyAdapter:
                     asyncio.to_thread(self._execute_sync, sql),
                     timeout=self._deadline_ms / 1000,
                 )
+                result = _soft_trim_row_limit(result)
                 _ensure_result_limits(result)
                 return result
             except TimeoutError as exc:
@@ -88,9 +95,24 @@ class MySQLReadonlyAdapter:
         engine = self._get_engine()
         with engine.connect() as connection:
             result = connection.execute(text(sql))
-            rows = tuple(dict(row._mapping) for row in result)
             columns = tuple(result.keys())
-        return ReadonlyQueryResult(columns=columns, rows=rows, row_count=len(rows))
+            row_limit = resource_limit("db_row_limit")
+            retained_rows: deque[dict[str, Any]] = deque(maxlen=row_limit)
+            source_row_count = 0
+            for row in result:
+                source_row_count += 1
+                retained_rows.append(dict(row._mapping))
+            rows = tuple(retained_rows)
+        return ReadonlyQueryResult(
+            columns=columns,
+            rows=rows,
+            row_count=len(rows),
+            source_row_count=source_row_count,
+            row_limit_trimmed=source_row_count > len(rows),
+            row_limit=row_limit if source_row_count > len(rows) else None,
+            row_limit_removed_row_count=max(source_row_count - len(rows), 0),
+            truncated=source_row_count > len(rows),
+        )
 
     def _get_engine(self) -> Any:
         with self._engine_lock:
@@ -119,9 +141,42 @@ def _ensure_result_limits(result: ReadonlyQueryResult) -> None:
         ).encode("utf-8")
     )
     validate_data_access_shape(
-        row_count=max(result.row_count, len(result.rows)),
+        row_count=len(result.rows),
         column_count=len(result.columns),
         result_bytes=result_size,
+    )
+
+
+def _soft_trim_row_limit(result: ReadonlyQueryResult) -> ReadonlyQueryResult:
+    row_limit = resource_limit("db_row_limit")
+    rows = tuple(result.rows)
+    source_row_count = getattr(result, "source_row_count", None)
+    if source_row_count is None:
+        source_row_count = max(result.row_count, len(rows))
+
+    row_limit_trimmed = bool(getattr(result, "row_limit_trimmed", False))
+    retained_rows = rows
+    if len(rows) > row_limit:
+        retained_rows = rows[-row_limit:]
+        row_limit_trimmed = True
+    elif source_row_count > len(rows):
+        row_limit_trimmed = True
+
+    existing_removed = int(getattr(result, "row_limit_removed_row_count", 0) or 0)
+    removed_row_count = (
+        max(source_row_count - len(retained_rows), 0)
+        if row_limit_trimmed
+        else existing_removed
+    )
+    return ReadonlyQueryResult(
+        columns=tuple(result.columns),
+        rows=retained_rows,
+        row_count=len(retained_rows),
+        source_row_count=source_row_count,
+        row_limit_trimmed=row_limit_trimmed,
+        row_limit=row_limit if row_limit_trimmed else getattr(result, "row_limit", None),
+        row_limit_removed_row_count=removed_row_count,
+        truncated=bool(getattr(result, "truncated", False) or row_limit_trimmed),
     )
 
 

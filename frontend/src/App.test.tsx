@@ -18,8 +18,8 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })),
     listCapabilities: vi.fn(async () => ({
       capabilities: [
-        { capability_id: 'skill.data_lookup', name: 'data-lookup', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' },
-        { capability_id: 'skill.mini_breedstat_rcbd', name: 'mini-breedstat-rcbd', description: '生成 RCBD 随机区组设计', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'mini_breedstat_rcbd_skill/SKILL.md' },
+        { capability_id: 'skill.data_lookup', name: 'data-lookup', display_name: '数据查询', description: '只读数据库查询', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'data-lookup/SKILL.md' },
+        { capability_id: 'skill.mini_breedstat_rcbd', name: 'mini-breedstat-rcbd', display_name: '试验设计', description: '生成 RCBD 随机区组设计', version: '1', status: 'active', kind: 'skill', source: 'skill', source_path: 'mini_breedstat_rcbd_skill/SKILL.md' },
         { capability_id: 'main_agent.respond', name: '普通对话', description: '主代理', version: '1', status: 'active', kind: 'builtin', source: 'builtin', source_path: '' },
       ],
     })),
@@ -1116,18 +1116,21 @@ describe('App', () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
       event('task.accepted'),
-      event('task.failed', { error: '执行失败' }, 'task-failed'),
+      event('node.started', { capability_id: 'skill.data_lookup', skill_name: 'data-lookup' }, 'node-started', 'node-data'),
+      event('node.failed', { code: 'data_access_deadline_exceeded' }, 'node-failed', 'node-data'),
+      event('task.failed', {}, 'task-failed'),
     ])} />);
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '触发失败' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    const failureText = await screen.findByText('本次任务未完成');
+    const failureText = await screen.findByText('数据库查询超时，请稍后重试或缩小查询范围。');
     const notice = failureText.closest('.activity-notice') as HTMLElement;
     expect(notice).not.toBeNull();
     expect(notice).toHaveClass('activity-notice-failed');
     expect(within(notice).getByLabelText('任务失败')).toBeInTheDocument();
     expect(notice.querySelector('.ant-spin')).toBeNull();
+    expect(screen.queryByText('正在等待回答...')).not.toBeInTheDocument();
   });
 
   it('submits long composer input without a character cap', async () => {
@@ -1208,9 +1211,11 @@ describe('App', () => {
 
     expect(await screen.findByRole('listbox', { name: 'Skill 命令列表' })).toBeInTheDocument();
     expect(screen.getByText('/data-lookup')).toBeInTheDocument();
+    expect(screen.getByText('数据查询')).toBeInTheDocument();
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
 
     expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/data-lookup');
+    expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('数据查询');
     fireEvent.change(input, { target: { value: '查询龙粳33' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -1254,6 +1259,7 @@ describe('App', () => {
     fireEvent.change(input, { target: { value: '/' } });
     fireEvent.click(await screen.findByText('/mini-breedstat-rcbd'));
     expect(await screen.findByRole('status', { name: '已选择 Skill' })).toHaveTextContent('/mini-breedstat-rcbd');
+    expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('试验设计');
   });
 
   it('submits direct slash command input as a forced Skill call with cleaned content', async () => {

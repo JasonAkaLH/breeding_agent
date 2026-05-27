@@ -6,7 +6,7 @@
 
 ## 1. 背景
 
-原后端 PRD 主要覆盖主代理编排内核与 数据查询 Skill MVP。当前实现已经新增普通主代理消息入口、Codex Skill 兼容层、上传文件上下文注入、主代理 streaming LLM 输出、真实 provider runtime 绑定和手工 smoke 脚本，因此需要补齐正式 PRD。
+原后端 PRD 主要覆盖主代理编排内核与 数据查询 Skill MVP。当前实现已经新增普通主代理消息入口、Skill 兼容层、上传文件上下文注入、主代理 streaming LLM 输出、真实 provider runtime 绑定和手工 smoke 脚本，因此需要补齐正式 PRD。
 
 ## 2. 目标
 
@@ -50,7 +50,7 @@ provider 失败时输出：
 - `main_agent.llm_fallback`：audit-only，记录 fallback 原因与安全 diagnostic；
 - capability result 返回 retriable error，供上层调度 / API 处理。
 
-## 5. Codex Skill 兼容层契约
+## 5. Skill 兼容层契约
 
 ### 5.1 Skill 解析
 
@@ -169,4 +169,4 @@ Smoke 验收重点：
 
 ## 11. Skill 构建指南
 
-面向 Oh-my-codex `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `Codex-Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 Codex runtime 能力。
+面向 Oh-my-codex `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 Codex runtime 能力。

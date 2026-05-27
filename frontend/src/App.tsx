@@ -1003,10 +1003,15 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (next.reasoningText !== previous.reasoningText) {
         updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
       }
-      if (nextProgressText !== previousProgressText) {
+      if (next.phase === 'failed') {
+        updateAssistantMessage(assistantId, {
+          activityText: next.errorMessage ?? next.statusText,
+          activityStatus: 'failed',
+        });
+      } else if (nextProgressText !== previousProgressText) {
         updateAssistantMessage(assistantId, {
           activityText: assistantActivityText(next, nextProgressText),
-          activityStatus: next.phase === 'failed' ? 'failed' : 'pending',
+          activityStatus: 'pending',
         });
       }
       if (['task.failed', 'node.failed'].includes(event.event_type)) {
@@ -1379,7 +1384,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   ) : null}
                   {selectedSkillCommand ? (
                     <div className="selected-skill-command" role="status" aria-label="已选择 Skill">
-                      <span>将使用 <strong>{selectedSkillCommand.command}</strong></span>
+                      <span>将使用 <strong>{selectedSkillCommand.command}</strong> {selectedSkillCommand.displayName}</span>
                       <Button
                         type="link"
                         size="small"

@@ -65,6 +65,11 @@ class SQLQuerySQLExecuteReadonlyCapability(CapabilityContract):
                 error=CapabilityExecutionError(code="db_execution_failed", message=str(exc), retriable=False),
             )
 
+        source_row_count = getattr(query_result, "source_row_count", None)
+        row_limit_trimmed = bool(getattr(query_result, "row_limit_trimmed", False))
+        row_limit = getattr(query_result, "row_limit", None)
+        row_limit_removed_row_count = int(getattr(query_result, "row_limit_removed_row_count", 0) or 0)
+        truncated = bool(getattr(query_result, "truncated", False))
         output = {
             "route_id": upstream.get("route_id"),
             "schema_profile_id": upstream.get("schema_profile_id"),
@@ -73,15 +78,19 @@ class SQLQuerySQLExecuteReadonlyCapability(CapabilityContract):
             "columns": list(query_result.columns),
             "rows": list(query_result.rows),
             "row_count": query_result.row_count,
+            "source_row_count": source_row_count if source_row_count is not None else query_result.row_count,
             "preview_row_count": len(query_result.rows),
-            "truncated": False,
+            "truncated": truncated,
+            "row_limit_trimmed": row_limit_trimmed,
+            "row_limit": row_limit,
+            "row_limit_removed_row_count": row_limit_removed_row_count,
         }
         artifact = make_artifact(
             name="query_result_preview",
             task_id=request.task_id,
             node_id=request.node_id,
             payload=output,
-            summary=f"query executed with {query_result.row_count} rows",
+            summary="query executed with retained rows" if truncated else f"query executed with {query_result.row_count} rows",
         )
         return CapabilityExecutionResult(
             capability_id=request.capability_id,
