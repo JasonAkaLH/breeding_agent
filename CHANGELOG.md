@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Interrupt answer resume 修复复用原 Skill 节点：回答缺参 interrupt 后，后端现在会把原 interrupted `skill.*` 节点 ID 和原 finalizer 节点 ID 作为内部 resume metadata 传入 Skill plan，复用 `ready_to_resume` 节点继续执行并保留原任务图 root，不再额外创建第二个 `task:skill_execute` 节点；同时过滤用户 metadata / answer_payload 中伪造的 resume 内部字段。
 - 主代理最终回答补齐文件下载硬约束：finalizer prompt 现在明确只有存在平台 `output_files.download_url`（`/api/v1/artifacts/.../download`）时才能声称文件已生成/可下载，Skill 失败或缺少 file artifact 时必须说明未生成/需补充信息，并禁止输出 `sandbox:/mnt/data`、本地路径或 `outputs/...` 伪下载链接；上游能力上下文只透传脱敏后的平台 file descriptor。
 - REST API 静态文档同步新 API 行为：`docs/api/api-doc.html` 补充 Skill 软绑定的外部提交方式、`soft_skill_binding.decision` + `main_agent.output_delta` 流式答疑与历史追问语义，并明确只有平台 file artifact 的 `/api/v1/artifacts/{artifact_id}/download` 才是可下载入口，`sandbox:/mnt/data`、本地路径和 `outputs/...` 不得被客户端当作下载链接。
 - Docker 远端启动文档修正 PostgreSQL 网络别名检查命令：`docker inspect` 访问带横杠的 `breeding-agent-net` 网络名时改用 Go template `index` 写法，避免 `.NetworkSettings.Networks.breeding-agent-net.Aliases` 被模板解析器误判为非法字段路径。
