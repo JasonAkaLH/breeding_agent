@@ -145,7 +145,7 @@ docker network connect --alias postgres breeding-agent-net postgres-longrun
 确认别名已经生效：
 
 ```bash
-docker inspect postgres-longrun --format '{{json .NetworkSettings.Networks.breeding-agent-net.Aliases}}'
+docker inspect postgres-longrun --format '{{json ((index .NetworkSettings.Networks "breeding-agent-net").Aliases)}}'
 ```
 
 ```bash
