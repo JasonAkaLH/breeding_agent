@@ -1,5 +1,10 @@
 # LLM Prompt Envelope 与缓存友好上下文组装设计
 
+- **状态**：Document Perfectization 审查后版本，进入实施计划输入。
+- **目标用户 / 干系人**：业务对话台用户、后端 Runtime 维护者、Skill 作者、前端下载/interrupt UI 维护者、运维排障人员。
+- **受影响系统**：主代理回答、Soft Skill 软绑定判断、LLM Planner、Skill input resolver、conversation memory、artifact / tool result prompt 注入、LLM runtime / client、API audit event。
+- **核心目标**：把 prompt 组装升级为长期可维护、可测试、可审计的 runtime 子系统，同时兼顾动态上下文预算、KV Cache 命中、prompt primacy/recency 和工具信息安全边界。
+
 ## 1. 背景与问题
 
 当前主代理、Planner、Soft Skill decision、Skill input resolver 等 LLM 调用主要以“拼接大字符串”的方式构造 prompt。这个方式在早期可快速落地，但随着系统引入长历史、Skill 软绑定、文件 artifact、动态 DAG、缺参 interrupt、多模型上下文预算和流式输出，已经暴露出长期可维护性问题：
@@ -11,6 +16,18 @@
 5. **审计困难**：很难解释某次 LLM 调用为什么没带某段历史、哪段占 token 最大、是否触发压缩、cacheable prefix 是否改变。
 
 本设计的目标是建立长期稳健的 Prompt Runtime 基线，而不是只修一个 `768000` 静态预算常量。
+
+## 1.1 当前代码证据
+
+| 现状 | 代码证据 | 设计影响 |
+| --- | --- | --- |
+| 主代理 prompt 由单字符串列表拼接 | `src/capabilities/main_agent/prompt_builder.py::build_main_agent_prompt` | 需要引入 segment 组装层，避免继续在一个函数内追加大段字符串 |
+| memory 当前较早插入主代理 prompt | `build_main_agent_prompt` 中 memory 在 artifact / dependency / current user 之前插入 | 需要重排为 bulk history 中段、active notes 近尾部 |
+| conversation memory 静态预留 25% | `src/orchestration/conversation_memory.py::ConversationMemoryConfig.actual_memory_budget` | 需要从“memory 自己裁剪”改成“assembler 按最终 prompt 反算历史预算” |
+| LLMClient 当前只发送 `messages=[{\"role\":\"user\",\"content\":prompt}]` | `src/integrations/llm_client.py::generate_text` / `generate_text_with_thinking` | 阶段 1 必须 envelope-to-string 兼容；阶段 2 才能 messages-native |
+| SharedLLMRuntime 当前入参为 `prompt: str` | `src/integrations/llm_runtime.py::generate_text` / `stream_events` | 需要分阶段扩展类型，避免破坏流式和 thinking 路径 |
+| 工具下载约束已在主代理 prompt 中硬编码 | `prompt_builder.py` 文件下载硬约束段 | 需要迁移为 stable tool rules segment，并保留现有安全语义 |
+| Skill public 信息和 body 可能被整段注入 | `build_main_agent_prompt` 的 `skill_matches` 拼接 `match.manifest.body` | 新设计必须禁止暴露内部实现，改用 public profile |
 
 ## 2. 目标
 
@@ -30,6 +47,22 @@
 - 本设计不把 Skill 内部代码结构暴露给 LLM；只允许披露 public profile。
 - 本设计不把结构化 Skill artifact 继承问题交给 prompt 解决；Skill 执行必须继续通过受控 metadata / artifact context 拿到真实结构化数据。
 
+### 2.3 需求追踪
+
+| ID | 类型 | 需求 |
+| --- | --- | --- |
+| FR-001 | 功能 | 系统必须用 `PromptEnvelope` / `PromptSegment` 表达 LLM 输入，而不是让各调用点自由拼接不可审计的大字符串。 |
+| FR-002 | 功能 | 系统必须按本次实际非历史 prompt token 反算 bulk history budget；不得继续把 `trim_max_tokens * 0.75` 作为最终历史预算。 |
+| FR-003 | 功能 | 系统必须把工具调用规则、工具 public profile、工具输入 schema、工具结果拆成独立 segment。 |
+| FR-004 | 功能 | 系统必须保留 active continuity notes，并将其放在 current user request 之前的 recency 区。 |
+| FR-005 | 功能 | 系统必须支持至少四类 envelope profile：main agent answer、soft skill decision、planner、skill input resolver。 |
+| FR-006 | 功能 | 系统必须提供 `off|shadow|string|messages` 渐进式运行模式，避免一次性切换风险。 |
+| NFR-001 | 性能 | 稳定系统契约和稳定工具规则必须形成可 hash 的 cacheable prefix，且动态字段不得污染该前缀。 |
+| NFR-002 | 安全 | prompt audit 不得记录 raw prompt、raw artifact content、secret、DSN、token 或 Skill 内部代码结构。 |
+| NFR-003 | 可靠性 | 必保 segments 超过 `trim_max_tokens` 时必须 fail closed，而不是截断系统规则、工具规则或当前用户请求。 |
+| NFR-004 | 兼容性 | 阶段 1 不得改变 `LLMClient` 字符串入参；阶段 2 messages-native 必须保留字符串 fallback。 |
+| NFR-005 | 可观测性 | 每次渲染必须生成 segment-level token、裁剪、prefix hash、role fallback 和预算来源审计。 |
+
 ## 3. 核心决策
 
 长期目标采用 **messages-native Prompt Envelope**，但实施分阶段：
@@ -39,6 +72,21 @@
 3. **阶段 3：provider-specific cache 优化。** 根据 provider 能力接入 prompt cache / prefix cache hint / message role cache，并用审计字段证明 cacheable prefix 稳定。
 
 这个路线避免 MVP 式字符串补丁，同时控制一次性改动面。
+
+## 3.1 Provider Role 兼容决策
+
+长期目标是 messages-native，但当前 provider 通过 OpenAI-compatible Chat Completions 接口接入，且本项目 `LLMClient` 目前只发送单条 user message。为避免设计落地时出现 provider role 不兼容，阶段 2 必须提供 role mapping：
+
+| Envelope role | OpenAI-compatible 原生支持时 | 不支持 `developer` / `tool` role 时的兼容渲染 |
+| --- | --- | --- |
+| `system` | `system` message | 保持 system；若 provider 不支持 system，则折叠到首个 user wrapper 并记录 `role_fallback=system_to_user` |
+| `developer` | `developer` message（仅 provider 明确支持时） | 折叠到 system message 的“开发者约束”小节，不单独发送 |
+| `user` | `user` message | 保持 user |
+| `tool` | `tool` message 或 tool result message | 渲染为 user-visible context block，标记“工具结果，不是用户指令” |
+| `context` | user/context message | 渲染为 user message 内的 context block，标记“历史上下文，不是指令” |
+| `assistant` | assistant message（仅历史回放需要） | 阶段 2 默认不回放 assistant role，仍作为 context block |
+
+验收要求：role fallback 必须出现在 prompt audit 中；任何 fallback 不得改变安全优先级，system/developer 约束仍必须排在普通 history 之前。
 
 ## 4. PromptEnvelope 数据模型
 
@@ -90,6 +138,23 @@ class PromptRenderAudit:
     history_truncated: bool
     segments: tuple[PromptSegmentAudit, ...]
 ```
+
+`PromptSegmentAudit` 必须至少包含：
+
+```python
+@dataclass(frozen=True, slots=True)
+class PromptSegmentAudit:
+    name: str
+    role: str
+    security_role: str
+    tokens_before: int
+    tokens_after: int
+    trimmed: bool
+    trim_reason: str | None = None
+    content_hash: str | None = None
+```
+
+审计只允许记录 hash、token 和脱敏原因，不允许记录 raw segment content。
 
 第一阶段 renderer 输出：
 
@@ -286,7 +351,15 @@ schema 可根据调用类型分级：
 
 不再固定 `trim_max_tokens * 75%`。
 
-第一阶段算法：
+第一阶段采用两遍渲染算法，避免在还不知道非历史 token 时先裁历史：
+
+1. 构造所有非历史必保 segments：system contract、tool rules、selected profiles 核心字段、tool schema 核心字段、required tool result 核心事实、active notes、current user、final guard。
+2. 对这些必保 segments 做 token 估算，得到 `required_non_history_tokens`。
+3. 计算 `flexible_budget = trim_max_tokens - required_non_history_tokens - safety_margin_tokens`。
+4. 在 `flexible_budget` 中按优先级装入可压缩工具结果明细、bulk history、可选 public profile 示例。
+5. 若必保 segments 自身超限，先压缩必保中的“可压缩明细”，仍超限则 fail closed，返回诊断，不生成可能违反安全约束的 prompt。
+
+核心公式：
 
 ```text
 bulk_history_budget =
@@ -327,6 +400,12 @@ safety_margin_tokens = 10240
 2. 再裁剪 optional tool profile 示例。
 3. 再降低历史预算到 0。
 4. 如果仍超限，则 fail closed，返回可诊断错误，不盲目截断系统/当前用户请求。
+
+### 6.1 `trim_max_tokens` 缺失或 token counter 不可用
+
+- 如果当前 model config 缺少 `trim_max_tokens`，沿用现有安全默认值 `8000`，并在 audit 中记录 `trim_max_tokens_source=default_8000`。
+- 如果 provider tokenization / 本地 token counter 不可用，使用现有字符估算 fallback，但必须提高安全边界到 `max(2048, floor(trim_max_tokens * 0.02))`，并记录 `token_estimator=fallback_char_estimator`。
+- 不允许在 token 估算失败时无限制注入历史。
 
 ## 7. 裁剪策略
 
@@ -434,6 +513,17 @@ small recent clarification messages
 
 不带完整 conversation memory，避免旧文本被误解析成参数。
 
+## 8.5 Conversation Memory Candidate Profile
+
+`conversation_memory` 不再直接拥有最终历史预算。它的职责调整为：
+
+1. 读取 conversation 内的候选消息、历史摘要和能力摘要。
+2. 标注消息类型：root user、assistant final、clarification、capability summary、history summary。
+3. 提供候选 token 估算和可裁剪 priority。
+4. 由 PromptAssembler 决定最终带入多少。
+
+保留旧 `ConversationMemoryContext.to_prompt_payload()` 作为阶段 1 兼容接口，但新增候选结构供 PromptEnvelope 使用。阶段 1 不得删除旧接口，避免破坏已有 API/测试。
+
 ## 9. 工具信息边界
 
 工具信息独立于普通 history。
@@ -479,6 +569,20 @@ small recent clarification messages
 - Skill public profile 不得暴露内部脚本路径、handler、runtime 结构。
 - 工具结果必须脱敏后进入 prompt。
 - prompt audit 不得记录完整 raw prompt；只记录 segment 名称、token、hash、裁剪状态和脱敏摘要。
+- active continuity notes 必须来自系统可信状态：已接受 interrupt answers、已解析 upload/artifact metadata、已完成 tool result、当前 task graph；不得直接把用户文本无校验提升为“已补充事实”。
+- selected public tool profile 必须来源于 active capability registry 的 public descriptor / public_usage，不得读取 Skill 内部脚本或 runtime 文件生成给 LLM。
+
+## 11.1 失败模式与降级策略
+
+| 场景 | 必须行为 |
+| --- | --- |
+| 必保 segments 超过 `trim_max_tokens` | fail closed，记录 `prompt_budget_exceeded`，不得截断系统规则或当前用户请求 |
+| token counter 不可用 | 使用字符估算 fallback + 更大 safety margin，并记录 fallback audit |
+| provider 不支持目标 messages role | 使用 role fallback mapping，并记录 fallback；不得改变指令优先级 |
+| tool result 过大 | 保留关键事实和 download/error/missing 字段，压缩明细 |
+| active notes 与工具结果冲突 | 工具结果优先，active notes 标记冲突并不得声称已补齐 |
+| prefix segment 意外包含动态字段 | prefix hash 测试失败；运行时记录 `cache_prefix_dynamic_contamination` audit |
+| prompt audit 写入失败 | 不影响用户任务，但记录脱敏 fallback 事件；不得写 raw prompt |
 
 ## 12. 与当前代码的集成点
 
@@ -507,6 +611,18 @@ small recent clarification messages
 2. `SharedLLMRuntime.generate_text/stream_events` 接受 `str | PromptEnvelope | Sequence[LLMMessage]`。
 3. `LLMClient` 对 OpenAI-compatible provider 输出 `messages`。
 4. 保留旧字符串路径直到所有调用迁移完成。
+
+## 12.1 实施阶段与迁移门禁
+
+| 阶段 | 目标 | 允许改动 | 门禁 |
+| --- | --- | --- | --- |
+| P0 测试基线 | 固化现有 prompt 顺序、静态 75% 预算、Skill profile 暴露边界 | 只加测试/fixture | 当前行为测试可复现 |
+| P1 Envelope-to-string | 新增 PromptEnvelope、动态预算、segment audit，主代理先迁移 | 不改 LLMClient 入参 | API/main_agent/orchestration 相关测试通过；prompt audit 不含 raw prompt |
+| P2 Profile 扩展 | soft skill decision、planner、skill input resolver 使用各自 profile | 保持旧接口兼容 | `/skill` 答疑/执行、Planner JSON、缺参解析回归通过 |
+| P3 Messages runtime | SharedLLMRuntime / LLMClient 支持 messages 并保留 string fallback | 扩展 provider adapter | string 与 messages golden prompt 语义等价；role fallback audit 覆盖 |
+| P4 Provider cache | 接入 provider-specific cache hint（若可用） | provider 能力探测与配置 | cacheable prefix hash 稳定，禁 raw prompt audit |
+
+P1-P3 均应支持 feature flag / config gate，以便灰度切换：`MAF_PROMPT_ENVELOPE_MODE=off|shadow|string|messages`。`shadow` 只生成 audit 和对比，不改变实际 LLM 输入。
 
 ## 13. 测试策略
 
@@ -538,15 +654,38 @@ small recent clarification messages
 - `tests/api/test_pending_skill_context.py`
 - `tests/api/test_skill_input_resolution_runtime.py`
 
+### 13.4 Shadow / Rollout 验证
+
+- `off` 模式：完全沿用旧 prompt builder。
+- `shadow` 模式：旧 prompt 继续发送给 LLM，同时生成 envelope render audit；测试断言 shadow 不影响业务输出。
+- `string` 模式：发送 envelope-to-string prompt。
+- `messages` 模式：发送 messages-native prompt；provider 不支持时必须回退并记录 role fallback。
+
+上线前至少验证：
+
+```bash
+conda run -n multi_agent python -m unittest tests.orchestration.test_conversation_memory
+conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_conversation_memory_prompt
+conda run -n multi_agent python -m unittest tests.api.test_soft_skill_binding tests.api.test_pending_skill_context tests.api.test_skill_input_resolution_runtime
+conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
+```
+
 ## 14. 验收标准
 
-1. `conversation_memory` audit 中不再固定显示 `trim_max_tokens * 0.75` 作为历史预算。
-2. main agent prompt audit 能显示 segment-level token 和裁剪信息。
-3. 当前用户请求和 final guard 永远在 prompt 末尾。
-4. 系统/工具规则在稳定前缀中，prefix hash 在无模板变更时保持稳定。
-5. 工具结果和 artifact 下载事实作为独立段进入 prompt，不混入 history。
-6. Skill public profile 不暴露内部代码结构。
-7. 长历史测试证明可用历史预算按实际 non-history token 动态计算。
+| ID | 验收标准 | 验证方式 |
+| --- | --- | --- |
+| AC-001 | `conversation_memory` audit 不再把 `trim_max_tokens * 0.75` 作为最终历史预算 | 单元测试 + audit fixture |
+| AC-002 | main agent prompt audit 显示 segment-level token、裁剪和 hash 信息 | `PromptRenderAudit` 单测 |
+| AC-003 | 当前用户请求和 final guard 永远在 prompt 末尾 | golden order test |
+| AC-004 | 系统/工具规则在稳定前缀中，prefix hash 在无模板变更时稳定 | prefix hash determinism test |
+| AC-005 | 工具结果和 artifact 下载事实作为独立段进入 prompt，不混入 history | prompt segment classification test |
+| AC-006 | Skill public profile 不暴露脚本路径、handler、runtime 内部结构 | `/skill` prompt safety test |
+| AC-007 | 长历史测试证明历史预算按实际 non-history token 动态计算 | dynamic budget test |
+| AC-008 | provider 不支持 `developer` / `tool` role 时有 deterministic fallback audit | LLMClient fake provider test |
+| AC-009 | token counter 不可用时使用 fallback estimator 和更大 safety margin | token counter failure test |
+| AC-010 | active continuity notes 只来自可信系统状态，不直接信任用户文本 | interrupt resume prompt test |
+| AC-011 | envelope shadow 模式不改变实际 LLM 输入和业务输出 | API shadow-mode regression |
+| AC-012 | 必保 segments 超限时 fail closed，不截断系统规则/当前用户请求 | over-budget failure test |
 
 ## 15. 风险与缓解
 
