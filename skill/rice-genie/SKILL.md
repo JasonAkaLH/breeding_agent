@@ -110,6 +110,8 @@ Use this flow for the customer-facing rice gene check agent:
 
 The project backend executes `scripts/run_rice_genie.py`. Do not ask the main agent to run Markdown code blocks. The wrapper receives JSON stdin, resolves uploaded VCF/VCF.GZ or existing gene_check JSON content, calls the bundled matching and interpretation scripts, and returns a structured report plus a Markdown artifact.
 
+When the wrapper detects a missing VCF / gene_check input, it must return the structured `missing_input` contract from `Skill构建指南.md`: `ok: false`, `is_error: true`, `error.type: missing_input`, `missing: ["rice_input"]`, and a user-readable `answer`.
+
 Manual local run from the project root:
 
 ```powershell

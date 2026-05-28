@@ -45,6 +45,7 @@ class OCRSkillError(RuntimeError):
 def main() -> None:
     payload = _read_payload()
     try:
+        file_bytes, filename, mime_type = _resolve_input_file(payload)
         config = _read_config(payload)
         _set_progress_enabled(config)
         _progress(
@@ -54,7 +55,6 @@ def main() -> None:
             poll_interval_seconds=config["poll_interval_seconds"],
             auth_configured=bool(config["token"]),
         )
-        file_bytes, filename, mime_type = _resolve_input_file(payload)
         _progress("input_resolved", filename=filename, mime_type=mime_type, size_bytes=len(file_bytes))
         upload_id = _run_stage("upload", True, _upload, config, file_bytes, filename, mime_type)
         _progress("upload_done", upload_id=upload_id, filename=filename)
@@ -115,17 +115,35 @@ def main() -> None:
             error=error_message,
         )
         _print_json(
+            _failure_payload(
+                error_message=error_message,
+                error=error,
+            )
+        )
+
+
+def _failure_payload(*, error_message: str, error: OCRSkillError) -> dict[str, Any]:
+    is_missing_input = error.error_type == "missing_input"
+    base: dict[str, Any] = {
+        "ok": False,
+        "is_error": True,
+        "answer": error_message if is_missing_input else f"OCR 失败：{error_message}",
+        "error_code": error.error_code,
+        "error_type": error.error_type,
+        "stage": error.stage,
+        "retriable": error.retriable,
+        "status": "missing_input" if is_missing_input else "failed",
+    }
+    if is_missing_input:
+        base.update(
             {
-                "ok": False,
-                "answer": f"OCR 失败：{error_message}",
-                "error": error_message,
-                "error_code": error.error_code,
-                "error_type": error.error_type,
-                "stage": error.stage,
-                "retriable": error.retriable,
-                "status": "failed",
+                "error": {"type": "missing_input", "message": error_message},
+                "missing": ["file_path"],
             }
         )
+    else:
+        base["error"] = error_message
+    return base
 
 
 def _read_payload() -> dict[str, Any]:
@@ -318,7 +336,13 @@ def _resolve_input_file(payload: dict[str, Any]) -> tuple[bytes, str, str]:
             if resolved:
                 return resolved
 
-    raise RuntimeError("缺少 OCR 输入文件。请上传图片/PDF，或提供 file_path。")
+    raise OCRSkillError(
+        "缺少 OCR 输入文件。请上传图片/PDF，或提供 file_path。",
+        error_code="ocr_input_missing",
+        stage="input",
+        retriable=False,
+        error_type="missing_input",
+    )
 
 
 def _extract_path_from_query(query: str) -> str | None:

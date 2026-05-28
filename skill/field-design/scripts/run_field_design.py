@@ -22,7 +22,12 @@ def emit(payload: Mapping[str, Any]) -> None:
 
 
 def fail(answer: str, *, missing: list[str] | None = None, error_type: str = "field_design_error", **extra: Any) -> dict[str, Any]:
-    result: dict[str, Any] = {"ok": False, "answer": answer, "error": {"type": error_type, "message": answer}}
+    result: dict[str, Any] = {
+        "ok": False,
+        "is_error": True,
+        "answer": answer,
+        "error": {"type": error_type, "message": answer},
+    }
     if missing:
         result["missing"] = missing
     result.update(extra)
@@ -341,16 +346,16 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
             answer = "已识别 Interval/间比法 CK 材料。请补充每个 CK 的起始位置和间隔，格式：ck_no,start_pos,interval；多个 CK 用分号分隔。"
             if ncols is None:
                 answer += " 同时请提供 ncols/田块列数。"
-            return {
-                "ok": True,
-                "status": "needs_ck_parameters",
-                "answer": answer,
-                "design": "interval",
-                "missing": [item for item in ("ncols" if ncols is None else "", "ck_spec") if item],
-                "ck_table": ck_table,
-                "columns": ["ck_no", "ped_id", "set"],
-                "rows": ck_table[:10],
-            }
+            return fail(
+                answer,
+                missing=[item for item in ("ncols" if ncols is None else "", "ck_spec") if item],
+                error_type="missing_input",
+                status="needs_ck_parameters",
+                design="interval",
+                ck_table=ck_table,
+                columns=["ck_no", "ped_id", "set"],
+                rows=ck_table[:10],
+            )
         if ncols is None:
             return fail("缺少 Interval 必需参数 ncols/田块列数。", missing=["ncols"], error_type="missing_input")
         randomize = get_bool(payload, "randomize", True)

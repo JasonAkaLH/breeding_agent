@@ -1787,6 +1787,107 @@ describe('App', () => {
     expect(api.cancelTask).not.toHaveBeenCalled();
   });
 
+  it('allows uploading a file while answering an artifact interrupt', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:skill_field_design', capability_id: 'skill.field_design', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => waitingGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_field_design',
+          question: '试验设计智能体 还缺少：试验材料 CSV/JSON 文件。请上传对应文件后继续。',
+          reason_code: 'missing_material_data',
+          required_fields: { material_data: { type: 'artifact', accepts_upload: true, description: '请上传试验材料文件。' } },
+          status: 'open',
+        }],
+      })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [event('task.accepted', {}, 'accepted-before-artifact-interrupt')],
+        [event('task.accepted', {}, 'accepted-after-artifact-interrupt')],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '生成随机区组设计' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
+    expect(screen.getByText('试验材料文件')).toBeInTheDocument();
+    expect(screen.getByText('可直接上传文件，或回复文字后继续当前任务。')).toBeInTheDocument();
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件') as HTMLInputElement;
+    expect(uploadInput).not.toBeDisabled();
+    const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'materials.csv', { type: 'text/csv' });
+    fireEvent.change(uploadInput, { target: { files: [file] } });
+
+    await screen.findByText(/materials.csv/);
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', {
+      material_data: { text: '', upload_ids: ['upl-1'], filenames: ['materials.csv'] },
+      upload_ids: ['upl-1'],
+    }));
+  });
+
+  it('does not allow upload-only answers for scalar interrupts', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:skill_rice_genie', capability_id: 'skill.rice_genie', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => waitingGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_rice_genie',
+          question: '请补充品种名称。',
+          reason_code: 'missing_variety',
+          required_fields: { variety: { type: 'string', description: '例如 龙粳31' } },
+          status: 'open',
+        }],
+      })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [event('task.accepted', {}, 'accepted-before-scalar-interrupt')],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查品种信息' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
+    expect(screen.getByText('品种名称')).toBeInTheDocument();
+    expect(screen.getByText('回复后将继续当前任务。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect(screen.getByRole('button', { name: '选择 JSON、CSV、图片或 PDF 文件' })).toBeDisabled();
+    expect(screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
+    expect(api.answerInterrupt).not.toHaveBeenCalled();
+  });
+
   it('keeps the final assistant answer visible with capability results after interrupt resume', async () => {
     const waitingGraph = {
       task_id: 'task-1',

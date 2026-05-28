@@ -259,6 +259,7 @@ ocr_mcp:
 
         result = json.loads(stdout.getvalue())
         self.assertFalse(result["ok"])
+        self.assertIs(result["is_error"], True)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], "ocr_mcp_connection_failed")
         self.assertEqual(result["error_type"], "RuntimeError")
@@ -267,13 +268,14 @@ ocr_mcp:
         self.assertIn("OCR 失败：连接 OCR MCP 失败", result["answer"])
         self.assertNotIn("SECRET_TOKEN", json.dumps(result, ensure_ascii=False))
 
-    def test_main_returns_structured_error_when_ocr_base_url_is_missing(self) -> None:
+    def test_main_returns_missing_input_when_ocr_file_is_missing(self) -> None:
         run_ocr = _load_run_ocr_module()
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tmpdir:
-            missing_config_path = Path(tmpdir) / "missing-config.yaml"
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text("base_url: http://ocr.example.test\n", encoding="utf-8")
             with (
-                patch.object(run_ocr, "OCR_CONFIG_PATH", missing_config_path),
+                patch.object(run_ocr, "OCR_CONFIG_PATH", config_path),
                 patch.object(sys, "stdin", io.StringIO(json.dumps({"query": "识别图片"}))),
                 patch.object(sys, "stdout", stdout),
             ):
@@ -281,6 +283,42 @@ ocr_mcp:
 
         result = json.loads(stdout.getvalue())
         self.assertFalse(result["ok"])
+        self.assertIs(result["is_error"], True)
+        self.assertEqual(result["error"]["type"], "missing_input")
+        self.assertEqual(result["error_code"], "ocr_input_missing")
+        self.assertEqual(result["error_type"], "missing_input")
+        self.assertEqual(result["stage"], "input")
+        self.assertEqual(result["status"], "missing_input")
+        self.assertIn("file_path", result["missing"])
+        self.assertIn("请上传图片/PDF", result["answer"])
+
+    def test_main_returns_structured_error_when_ocr_base_url_is_missing(self) -> None:
+        run_ocr = _load_run_ocr_module()
+        png_content = b"\x89PNG\r\n\x1a\nocr-test"
+        payload = {
+            "query": "识别图片",
+            "uploaded_artifacts": [
+                {
+                    "filename": "scan.png",
+                    "content_type": "image/png",
+                    "encoding": "base64",
+                    "content_base64": base64.b64encode(png_content).decode("ascii"),
+                }
+            ],
+        }
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_config_path = Path(tmpdir) / "missing-config.yaml"
+            with (
+                patch.object(run_ocr, "OCR_CONFIG_PATH", missing_config_path),
+                patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                patch.object(sys, "stdout", stdout),
+            ):
+                run_ocr.main()
+
+        result = json.loads(stdout.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertIs(result["is_error"], True)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], "ocr_mcp_config_missing")
         self.assertEqual(result["error_type"], "ValueError")
