@@ -262,8 +262,13 @@ class MainAgentRuntimeReplanner:
 
     @staticmethod
     def _output_requests_replan(output: Mapping[str, Any]) -> bool:
+        decision = output.get("soft_skill_decision")
+        if isinstance(decision, Mapping):
+            return False
         satisfaction = output.get("satisfaction")
         if isinstance(satisfaction, Mapping):
+            if satisfaction.get("reason_code") == "soft_skill_execute":
+                return False
             if satisfaction.get("replan_recommended") is True:
                 return True
             return satisfaction.get("satisfied") is False

@@ -35,6 +35,24 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.nodes[0].capability_id, "main_agent.respond")
         self.assertEqual(plan.nodes[0].input_payload["user_message"], "你好")
 
+    async def test_workflow_provider_allows_replan_budget_only_for_soft_skill_binding(self) -> None:
+        provider = MainAgentWorkflowProvider()
+        plan = provider.build_plan(
+            OrchestrationRequest(
+                task_id="task-soft",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="请执行",
+                requested_capability_id="main_agent.respond",
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo", "skill_bundle_revision": "skillrev-1"}},
+            )
+        )
+
+        self.assertEqual(plan.nodes[0].capability_id, "main_agent.respond")
+        self.assertEqual(plan.nodes[0].metadata["soft_skill_binding"]["capability_id"], "skill.demo")
+        self.assertEqual(plan.max_replans, 1)
+        self.assertEqual(plan.max_dynamic_nodes, 4)
+
     async def test_executor_streams_answer_chunks_and_returns_text_artifact(self) -> None:
         seen_prompts: list[str] = []
         transient_events = []
@@ -72,6 +90,185 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", seen_prompts[0])
         self.assertEqual([event.event_type for event in transient_events], ["main_agent.output_delta", "main_agent.output_delta"])
         self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in result.events))
+
+    async def test_soft_skill_binding_answer_uses_public_profile_without_running_scripts_or_raw_body(self) -> None:
+        seen_prompts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    display_name: 演示 Skill
+                    description: 解释公开用法。
+                    public_usage:
+                      overview: 公开字段说明
+                      input_formats:
+                        - name: demo_data
+                          description: CSV 表格。
+                      examples:
+                        - /demo 怎么填 demo_data？
+                      outputs:
+                        - 公开结果
+                    scripts:
+                      - name: run_demo
+                        path: scripts/run_demo.py
+                        runtime: python
+                    ---
+                    # Internal body
+                    scripts/run_demo.py Rscript wrapper handler secret details.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        async def streamer(prompt: str):
+            seen_prompts.append(prompt)
+            if "Skill 软绑定判断器" in prompt:
+                yield '{"decision":"answer","target_capability_id":"skill.demo","reason_code":"usage_question"}'
+            else:
+                yield "demo_data 需要上传 CSV 表格。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "demo_data 怎么填？"},
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo"}},
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_source"], "llm")
+        self.assertEqual(result.output_payload["response_text"], "demo_data 需要上传 CSV 表格。")
+        self.assertNotIn("soft_skill_decision", result.output_payload)
+        self.assertEqual([event.event_type for event in result.events], ["soft_skill_binding.decision", "main_agent.output_final"])
+        self.assertIn("公开字段说明", seen_prompts[0])
+        self.assertIn("公开字段说明", seen_prompts[1])
+        combined_prompts = "\n".join(seen_prompts)
+        self.assertNotIn("scripts/run_demo.py", combined_prompts)
+        self.assertNotIn("Rscript", combined_prompts)
+        self.assertNotIn("handler", combined_prompts)
+
+    async def test_soft_skill_binding_execute_returns_deterministic_replan_signal_without_user_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    description: 执行演示。
+                    public_usage:
+                      overview: 执行演示。
+                      input_formats:
+                        - name: demo_data
+                          description: CSV 表格。
+                      examples:
+                        - /demo 执行
+                      outputs:
+                        - 结果
+                    ---
+                    Body.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        async def streamer(_prompt: str):
+            yield '{"decision":"execute","target_capability_id":"skill.demo","confidence":0.94,"reason_code":"ready_to_execute"}'
+
+        transient_events = []
+
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=catalog,
+            transient_event_publisher=publish_transient,
+        )
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "执行"},
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo"}},
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_source"], "soft_skill_decision")
+        self.assertEqual(result.output_payload["soft_skill_decision"]["decision"], "execute")
+        self.assertTrue(result.output_payload["satisfaction"]["replan_recommended"])
+        self.assertEqual(result.artifacts, ())
+        self.assertFalse(transient_events)
+        self.assertEqual([event.event_type for event in result.events], ["soft_skill_binding.decision"])
+
+    async def test_soft_skill_binding_low_confidence_execute_downgrades_to_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    description: 执行演示。
+                    public_usage:
+                      overview: 公开字段说明
+                      input_formats:
+                        - name: demo_data
+                          description: CSV 表格。
+                      examples:
+                        - /demo 执行
+                      outputs:
+                        - 结果
+                    ---
+                    Raw body.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        async def streamer(prompt: str):
+            if "Skill 软绑定判断器" in prompt:
+                yield '{"decision":"execute","target_capability_id":"skill.demo","confidence":"low","reason_code":"unclear"}'
+            else:
+                yield "请先补充 demo_data。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "帮我做一下"},
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo"}},
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_source"], "llm")
+        self.assertEqual(result.output_payload["response_text"], "请先补充 demo_data。")
+        self.assertNotIn("soft_skill_decision", result.output_payload)
+        decision_event = next(event for event in result.events if event.event_type == "soft_skill_binding.decision")
+        self.assertEqual(decision_event.payload["reason_code"], "low_confidence")
 
     async def test_executor_injects_dependency_outputs_into_prompt(self) -> None:
         seen_prompts: list[str] = []

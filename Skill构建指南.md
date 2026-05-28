@@ -3,13 +3,13 @@
 - **适用对象**：创建可被本项目后端 `main_agent.respond` / `SkillExecutor` 使用的 Skill 的开发者。
 - **适配范围**：本系统的 Skill 兼容层，而不是通用本地 agent runtime。
 - **当前实现入口**：项目 Skill 兼容层、`src/capabilities/main_agent/`、`src/capabilities/skill_tool/`、`src/api/runtime.py`。
-- **更新时间**：2026-05-18
+- **更新时间**：2026-05-28
 
 ## 1. 一句话结论
 
-本系统可以加载项目约定格式的 `SKILL.md`，并支持三类后端执行形态：
+本系统可以加载项目约定格式的 `SKILL.md`，并支持 slash 软绑定下的公开用法说明与三类后端执行形态：
 
-1. **instruction-only Skill**：匹配后把 Skill 正文注入 `main_agent.respond`。
+1. **instruction-only Skill**：用于非软绑定兼容和内部维护的主代理指令；slash 软绑定回答应使用 `public_usage` 生成的公开 profile。
 2. **`python_subprocess` Skill**：受控执行 manifest 声明的 Python 脚本，并把 JSON 输出注入主代理。
 3. **`platform_service` Skill**：仅限项目信任 Skill，通过 runtime 预注册 / allowlist 的 handler 绑定受控服务。
 
@@ -76,6 +76,7 @@ triggers:
 | `description` | 强烈建议 | 参与匹配打分；应写清楚“什么时候使用”。 |
 | `triggers` | 强烈建议 | 按子串命中，分数最高；中文 Skill 必须尽量列出自然触发表达。 |
 | `capability_id` | 公开 Skill 必填 | 公开到 capability pool 的稳定 ID；项目 Skill 使用 `skill.*`，例如 `skill.report_writer`。 |
+| `public_usage` | 项目级公开 Skill 必填 | slash 软绑定和公开 profile 使用的用户可见说明；用于回答“怎么填 / 支持什么 / 示例是什么”，不得包含脚本路径、handler、service、secret、DB/LLM provider 等内部实现。 |
 | `inputs` | 可选 | 会被解析；顶层 `inputs.required` 当前不阻塞主代理执行，主要作为契约说明。 |
 | `outputs` | 脚本 / 服务 Skill 建议 | 顶层 `outputs.required` / `scripts[].outputs.required` 是执行校验契约：用于判断脚本 / handler 输出是否满足声明；不表示这些字段会原样注入主代理 prompt。 |
 | `parameters` / `input_parameters` | 脚本 / 服务 Skill 建议 | 声明执行前需要解析的业务参数；系统先做确定性解析，仍缺少文本型标量参数时才让 LLM 生成候选 JSON，最终只有通过系统校验的值会作为入参注入。 |
@@ -116,7 +117,7 @@ triggers:
 
 ## 5. Skill 正文怎么写
 
-本系统会把匹配到的 Skill body 原文注入 `main_agent.respond` prompt，所以正文应该是短、清晰、可执行的指令。
+Skill body 仍用于内部维护和非软绑定兼容流程；slash 软绑定回答必须使用 `public_usage` 生成的公开 profile，不得依赖或泄漏 body 原文。因此正文仍应短、清晰、可执行，并且不要包含敏感信息。
 
 推荐结构：
 
@@ -148,7 +149,39 @@ triggers:
 - 不要放 API key、数据库密码、内网地址等敏感信息。
 - 如果需要确定性处理，写脚本并通过 `scripts` 显式声明。
 
-## 6. 平台服务型 Skill
+## 6. Slash 软绑定与 `public_usage`
+
+用户通过 `/skill-name` 点名 Skill 时，客户端必须提交 `main_agent.respond` 加 `metadata.soft_skill_binding`，由主代理先判断用户是在询问用法、缺少执行参数，还是明确要求执行 Skill。外部 API 不允许直接提交 `capability_id=skill.*` 来硬执行；直接提交会在 API 边界拒绝。
+
+`public_usage` 是软绑定 prompt 的主要资料源。项目级公开 Skill 必须在 frontmatter 中提供该字段，结构建议如下：
+
+```yaml
+public_usage:
+  overview: 这个 Skill 能帮助用户完成什么，也能回答哪些用法问题。
+  input_formats:
+    - name: material_data
+      required: true
+      description: 用户可见的数据格式、每行代表什么、常见列和取值口径。
+      example_columns: [material_id, hyb_check, set]
+  parameters:
+    - name: blocks
+      description: 用户自然语言里“3 个重复”等表达对应的业务含义。
+  examples:
+    - /field-design hyb_check 怎么填？
+    - /field-design 用这个 CSV 做 RCBD，3 个重复
+  outputs:
+    - CSV fieldbook
+    - HTML layout preview
+```
+
+写作要求：
+
+- 只写用户可见的业务信息：输入数据怎么准备、字段值是什么、参数含义、典型示例、输出是什么。
+- 不写内部实现：`source_path`、脚本路径、wrapper、`Rscript`、`platform_service`、handler、sidecar、socket、secret、token、数据库连接串、LLM provider、内网 endpoint 或本机绝对路径。
+- `public_usage` 不替代 `parameters`：参数仍要在 `parameters` / `input_parameters` 中声明，便于缺参 interrupt 和执行校验；`public_usage` 负责让主代理安全回答用户问题。
+- 当用户只是问“字段怎么填 / 参数是什么意思 / 支持什么格式”时，应基于 `public_usage` 回答，不运行 Skill；当用户明确要求执行且材料与参数齐全时，系统内部再展开绑定 Skill。
+
+## 7. 平台服务型 Skill
 
 `platform_service` 用于把项目内受控业务服务包装成公开 `skill.*` capability。它不是普通脚本模式，也不是 native capability：编排层只看见 Skill capability，handler 与服务由 API runtime 显式注册并 allowlist。
 
@@ -182,13 +215,13 @@ execution:
 服务型 Skill 仅以 `skill.*` capability 公开；planner/public capability、测试入口与 handler key 均应使用当前 Skill contract。框架不会为某个 Skill 额外增加 API route、capability kind、前端协议或 orchestration 特判。
 
 
-## 7. Rust 型 Skill runtime 接入限制
+## 8. Rust 型 Skill runtime 接入限制
 
 Rust 只能作为 Skill-owned runtime 的内部实现，不能成为新的公开 capability 类型，也不能绕过 `platform_service` / service allowlist / artifact-event-audit contract。
 
 核心原则：**Skill 来兼容框架，不是框架兼容 Skill。**框架定义可接受的 Rust 形态、目录、构建、运行和审计边界；Skill 作者必须按这些边界构建 Skill。若 Skill 需要框架新增专属 route、专属 executor、专属前端协议或专属 secret 注入，则该 Skill 不符合接入要求。
 
-### 7.1 目录与所有权
+### 8.1 目录与所有权
 
 项目级 Rust Skill 使用固定目录：
 
@@ -213,7 +246,7 @@ skill/<skill-name>/
 - 业务规则必须集中在 shared Rust core crate；PyO3 / CLI / sidecar adapter 只能做协议转换，不得复制业务逻辑。
 - 普通用户级 Skill 不允许携带需要后端编译、安装或执行的 Rust runtime。
 
-### 7.2 可接受 Rust 形态
+### 8.2 可接受 Rust 形态
 
 | 形态 | 允许场景 | 接入方式 | 必须满足 |
 |---|---|---|---|
@@ -241,7 +274,7 @@ Rust Skill 产物供应链规则冻结：PyO3 wheel、native binary、sidecar im
 
 Rust Skill 性能与运维规则冻结：上线前必须提供 shared core / adapter benchmark，覆盖关键输入规模、P50/P95/P99、CPU、memory、输出大小与 sidecar queue / timeout 行为；sidecar adapter 必须具备 health/readiness/version、dashboard、alert、drain / restart / rollback、artifact quarantine、secret / identity failure 演练证据。没有 provenance、benchmark、runbook 或演练证据的 Rust Skill 不得作为项目级交付 Skill 接入。
 
-### 7.3 Manifest 建议元数据
+### 8.3 Manifest 建议元数据
 
 `x_runtime.rust` 是建议 metadata，不会自动赋予执行能力。只有当 platform handler、runtime allowlist、构建产物和部署配置全部就绪时，才允许使用对应 adapter。
 
@@ -271,7 +304,7 @@ execution:
     - progress_events
 ```
 
-### 7.4 构建、测试与审计
+### 8.4 构建、测试与审计
 
 Rust 型 Skill 上线前必须提供：
 
@@ -286,9 +319,9 @@ Rust 型 Skill 上线前必须提供：
 - 运维证据：sidecar adapter 的 health/readiness/version、dashboard、alert、drain / restart / rollback、artifact quarantine、secret / identity failure 演练。
 - 审计说明：不读取未授权环境变量、secret、本地路径，不输出真实文件路径、完整 prompt 或敏感配置。
 
-## 8. 脚本型 Skill
+## 9. 脚本型 Skill
 
-### 8.1 支持范围
+### 9.1 支持范围
 
 当前 `SkillScriptRunner` 只支持：
 
@@ -313,7 +346,7 @@ Rust 型 Skill 上线前必须提供：
 - 交互式 stdin
 
 
-### 8.2 运行环境与依赖口径
+### 9.2 运行环境与依赖口径
 
 脚本运行在公司后端统一 Python 运行环境中：
 
@@ -555,7 +588,7 @@ cat(toJSON(result, auto_unbox = TRUE, null = "null"))
 ```
 
 
-### 8.3 脚本收到什么输入
+### 9.3 脚本收到什么输入
 
 自动执行脚本的 stdin 是 JSON object：
 
@@ -622,7 +655,7 @@ parameters:
 `source: artifact` 表示该必填参数由 `uploaded_artifacts` 是否存在来满足；脚本仍通过 `uploaded_artifacts` 读取实际文件内容，`material_data` 顶层字段只是可审计的可用性标记。
 `analysis_mode` 是带默认值的可选枚举参数；如果 stdin 中没有该字段，脚本应使用 `anova`，并拒绝不在 `enum` 列表中的其他值。
 
-### 8.4 缺参、补充信息与 interrupt 标准
+### 9.4 缺参、补充信息与 interrupt 标准
 
 缺少用户输入时必须先区分两条链路，不能混用：
 
@@ -680,7 +713,7 @@ parameters:
 - 认为 `node.waiting_for_input` 等价于 open interrupt；二者不是同一契约。
 - 认为 `skill.input_missing` 是前端可见事件；当前它是审计事件，前端不能直接用它渲染具体补充卡片。
 
-### 8.5 脚本必须输出什么
+### 9.5 脚本必须输出什么
 
 stdout 必须是 JSON object，例如：
 
@@ -747,7 +780,7 @@ outputs:
       mime_types: [text/html]
 ```
 
-### 8.6 脚本型 Skill 示例
+### 9.6 脚本型 Skill 示例
 
 目录：
 
@@ -811,7 +844,7 @@ result = {
 print(json.dumps(result, ensure_ascii=False))
 ```
 
-## 9. Skill 创建提示词模板
+## 10. Skill 创建提示词模板
 
 把下面这段作为创建 Skill 的约束：
 
@@ -819,7 +852,7 @@ print(json.dumps(result, ensure_ascii=False))
 请创建一个适配 breeding_agent 后端的 Skill。必须遵守：
 1. Skill 包只能依赖 SKILL.md；可选 scripts/ 下的 Python 脚本；只有项目级 trusted Skill 才能在 native/ 放 Rust runtime。
 2. SKILL.md frontmatter 必须包含 name、display_name、description；中文任务必须包含高质量 triggers。
-3. 本系统只会把 SKILL.md body 注入 LLM，不会自动读取 references/ 或 assets/。
+3. slash 软绑定只把 `public_usage` 生成的公开 profile 注入主代理；不要依赖 SKILL.md body、references/ 或 assets/ 来回答用户用法问题。
 4. 如需脚本，只能声明 scripts[].runtime=python，path 必须是包内相对路径，不能使用绝对路径、..、symlink、shell、node、runtime:rust 或任意命令。
 5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；如需业务参数，必须用 parameters/input_parameters 声明可解析字段，LLM 只会在缺参时生成候选并由系统校验后注入，不要依赖主代理口头承诺传参；stdout 必须是 JSON object。若需要下载文件，写入 MAF_SKILL_OUTPUT_DIR 并用 output_files 声明；若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
 6. 只有项目信任、runtime 已注册 handler/service allowlist 的 Skill 才能声明 execution.mode=platform_service；不要把 platform handler 写成动态 import 路径，不要让 python_subprocess 绑定服务。Rust 只能作为 platform_service 背后的受控实现，不能要求框架自动编译或执行。
@@ -830,7 +863,7 @@ print(json.dumps(result, ensure_ascii=False))
 11. 输出最终文件树和每个文件内容。
 ```
 
-## 10. 构建检查清单
+## 11. 构建检查清单
 
 交付 Skill 前逐项检查：
 
@@ -839,6 +872,8 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] `display_name` 非空，适合作为用户界面 / 进度展示名称。
 - [ ] `description` 说明“什么时候使用”，不是泛泛描述。
 - [ ] 中文 Skill 有明确 `triggers`。
+- [ ] 项目级公开 Skill 已声明 `public_usage`，且覆盖 overview、input_formats、examples、outputs。
+- [ ] `public_usage` 只包含用户可见业务说明，没有脚本路径、handler、service、secret、token、DB/LLM provider、本机绝对路径或内部 endpoint。
 - [ ] body 非空，且是主代理可直接遵循的操作说明。
 - [ ] 没有把 secret、完整数据库连接串、API key 写进 Skill。
 - [ ] 如果声明 `platform_service`，`capability_id` 使用 `skill.*`，`execution.handler` 是 runtime 预注册 handler key，`answer_mode` 已显式声明。
@@ -872,25 +907,25 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] Rust sidecar adapter（如存在）有 health/readiness/version、dashboard、alert、drain / restart / rollback、artifact quarantine、secret / identity failure 演练证据。
 - [ ] Rust Skill 移除后，主体框架不会残留该 Skill 的 PyO3 module、binary、sidecar endpoint、artifact allowlist、capability 注册或专属前端 / API 分支。
 
-## 11. 验证方法
+## 12. 验证方法
 
-### 11.1 最小静态检查
+### 12.1 最小静态检查
 
 - 确认 `SKILL.md` 以 YAML frontmatter 开头并闭合。
 - 确认 `name`、`description`、中文 `triggers`、`execution`、`parameters`、`scripts` 与 `outputs.required` 符合本指南。
 - 确认 `SKILL.md` 中不写产品名、secret、内网地址、绝对本地路径或个人环境路径。
 
-### 11.2 脚本本地 smoke
+### 12.2 脚本本地 smoke
 
 对脚本型 Skill，使用仓库统一 Python 环境直接给 wrapper 传入最小 JSON stdin，检查 stdout 是 JSON object，并至少包含 `answer` / `response_text` / `summary` 之一。
 
-### 11.3 项目回归
+### 12.3 项目回归
 
 - 新增或修改 Skill 后，应补对应 integration 回归测试，覆盖 manifest 解析、匹配、缺参返回、成功执行和 output files 安全声明。
 - 执行与该 Skill 直接相关的 integration 测试；如触及主代理、API 或前端契约，再追加相应分层测试。
 - 如果修改 Rust、依赖或供应链策略，按仓库 License Requirement 运行许可门禁。
 
-## 12. 常见错误
+## 13. 常见错误
 
 | 错误 | 结果 | 修正 |
 |---|---|---|
@@ -910,7 +945,7 @@ print(json.dumps(result, ensure_ascii=False))
 | 以为审计事件 `skill.input_missing` 本身就是前端 open interrupt | 前端只显示泛化“等待补充信息”或只在历史里显示缺参消息 | 需要实时补充卡片时，声明完整 manifest / input contract 让系统合成 interrupt，或由 platform_service / native handler 返回 `interrupt`；脚本运行后发现的条件缺参必须输出 structured `missing_input` 和清晰 `answer` |
 | `missing` 写中文句子或脚本内部变量名 | pending context 难以续接，用户不知道补哪个 manifest 参数 | 使用 manifest 参数名，用户说明写入 `answer` / `response_text` / interrupt `question` |
 
-## 13. 和通用本地 Skill runtime 的差异
+## 14. 和通用本地 Skill runtime 的差异
 
 | 能力 | 通用本地 Skill runtime | 本系统后端当前支持 |
 |---|---|---|
@@ -926,7 +961,7 @@ print(json.dumps(result, ensure_ascii=False))
 | MCP / plugin runtime | 插件可提供 | 不支持 |
 | 本地文件访问 | 本地 agent 可能可读 workspace | 主代理 LLM 不具备；脚本只可读自己包内可定位资源 |
 
-## 14. 给 Skill creator 的推荐默认策略
+## 15. 给 Skill creator 的推荐默认策略
 
 - 首选 prompt-only Skill：简单、稳定、最符合当前主代理注入方式。
 - 只有在需要确定性解析、统计、格式转换时才加 Python 脚本。

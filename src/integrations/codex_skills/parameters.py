@@ -12,6 +12,8 @@ class SkillParameterSpec:
     sources: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
     patterns: tuple[str, ...] = ()
+    default: Any | None = None
+    enum: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, name: str, value: Any) -> "SkillParameterSpec":
@@ -24,6 +26,8 @@ class SkillParameterSpec:
             sources=_string_tuple(value.get("sources") or value.get("source")),
             aliases=_string_tuple(value.get("aliases") or value.get("alias")),
             patterns=_string_tuple(value.get("patterns") or value.get("pattern")),
+            default=value.get("default"),
+            enum=_string_tuple(value.get("enum") or value.get("choices")),
         )
 
 

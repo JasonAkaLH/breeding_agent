@@ -75,7 +75,7 @@ describe('slashCommands', () => {
     expect(parseDirectSlashCommand('/demo-query hello', commands)).toEqual({ kind: 'conflict', command: '/demo-query' });
   });
 
-  it('filters menu candidates by command, display name, name, description, and capability id', () => {
+  it('filters menu candidates by command, display name, name, description, and capability id without source path exposure', () => {
     const commands = deriveSlashCommands(capabilities);
 
     expect(slashMenuCandidates('/', commands).map((command) => command.command)).toEqual(['/data-lookup', '/mini-breedstat-rcbd']);
@@ -83,9 +83,10 @@ describe('slashCommands', () => {
     expect(slashMenuCandidates('/田间', commands).map((command) => command.command)).toEqual(['/mini-breedstat-rcbd']);
     expect(slashMenuCandidates('/随机', commands).map((command) => command.command)).toEqual(['/mini-breedstat-rcbd']);
     expect(slashMenuCandidates('/skill.data', commands).map((command) => command.command)).toEqual(['/data-lookup']);
+    expect(slashMenuCandidates('/SKILL.md', commands)).toEqual([]);
   });
 
-  it('parses exact slash command input into cleaned content and metadata', () => {
+  it('parses exact slash command input into cleaned content and soft binding metadata', () => {
     const commands = deriveSlashCommands(capabilities);
 
     expect(parseDirectSlashCommand('/data-lookup 查询龙粳33', commands)).toEqual({
@@ -97,7 +98,12 @@ describe('slashCommands', () => {
       kind: 'ready',
       content: '查询龙粳33',
       command: expect.objectContaining({ command: '/data-lookup', capabilityId: 'skill.data_lookup' }),
-      metadata: { forced_by_slash_command: true, slash_command: '/data-lookup' },
+      capabilityId: 'main_agent.respond',
+      metadata: {
+        forced_by_slash_command: true,
+        slash_command: '/data-lookup',
+        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
+      },
     });
   });
 
@@ -108,7 +114,12 @@ describe('slashCommands', () => {
       kind: 'ready',
       content: '',
       command: expect.objectContaining({ command: '/data-lookup' }),
-      metadata: { forced_by_slash_command: true, slash_command: '/data-lookup' },
+      capabilityId: 'main_agent.respond',
+      metadata: {
+        forced_by_slash_command: true,
+        slash_command: '/data-lookup',
+        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
+      },
     });
     expect(slashSubmitIntent('/unknown args', commands, null)).toEqual({ kind: 'blocked', reason: 'not_found', command: '/unknown' });
   });
@@ -121,7 +132,12 @@ describe('slashCommands', () => {
       kind: 'ready',
       content: '/data-lookup 查询龙粳33',
       command: expect.objectContaining({ command: '/mini-breedstat-rcbd', capabilityId: 'skill.mini_breedstat_rcbd' }),
-      metadata: { forced_by_slash_command: true, slash_command: '/mini-breedstat-rcbd' },
+      capabilityId: 'main_agent.respond',
+      metadata: {
+        forced_by_slash_command: true,
+        slash_command: '/mini-breedstat-rcbd',
+        soft_skill_binding: { capability_id: 'skill.mini_breedstat_rcbd', command: '/mini-breedstat-rcbd' },
+      },
     });
   });
 });

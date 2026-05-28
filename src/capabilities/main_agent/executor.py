@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any, Mapping
@@ -16,6 +18,7 @@ from src.integrations.codex_skills import (
     SkillScriptRunner,
     match_skills,
     normalize_skill_response_payload,
+    build_public_skill_profile,
     resolve_skill_execution_config,
 )
 from src.integrations.codex_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
@@ -91,6 +94,14 @@ class MainAgentRespondCapability(CapabilityContract):
         response_role = response_role_from_metadata(request.metadata)
         answer_scope = answer_scope_from_metadata(request.metadata)
         response_role_payload = self._response_role_payload(response_role=response_role, answer_scope=answer_scope)
+        soft_binding_result = await self._maybe_execute_soft_skill_binding(
+            request=request,
+            user_message=user_message,
+            artifact_context=artifact_context,
+            response_role_payload=response_role_payload,
+        )
+        if soft_binding_result is not None:
+            return soft_binding_result
         skill_matches, forced_skill_events = self._resolve_skill_matches(request, user_message)
         script_results, script_events, script_artifacts, missing_interrupt = await self._run_auto_scripts(
             request,
@@ -352,6 +363,302 @@ class MainAgentRespondCapability(CapabilityContract):
             },
             artifacts=(*script_artifacts, artifact),
             events=tuple(events),
+        )
+
+    async def _maybe_execute_soft_skill_binding(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        user_message: str,
+        artifact_context: list[dict[str, Any]],
+        response_role_payload: dict[str, Any],
+    ) -> CapabilityExecutionResult | None:
+        soft_binding = request.metadata.get("soft_skill_binding")
+        if not isinstance(soft_binding, Mapping):
+            return None
+        capability_id = str(soft_binding.get("capability_id") or "").strip()
+        if not capability_id.startswith("skill."):
+            return None
+        revision = str(soft_binding.get("skill_bundle_revision") or self._skill_bundle_revision(request) or "").strip() or None
+        manifest = self._resolve_skill_manifest_by_capability_id(capability_id, revision)
+        if manifest is None:
+            return self._soft_binding_answer_result(
+                request=request,
+                answer="这个 Skill 当前不可用，请刷新 Skill 列表后重试。",
+                decision={"decision": "answer", "reason_code": "skill_unavailable", "target_capability_id": capability_id},
+                response_role_payload=response_role_payload,
+            )
+
+        profile = build_public_skill_profile(manifest, capability_id=capability_id).to_dict()
+        decision_prompt = self._build_soft_skill_decision_prompt(
+            user_message=user_message,
+            artifact_context=artifact_context,
+            profile=profile,
+        )
+        raw_decision = await self._generate_non_stream_text(
+            decision_prompt,
+            request=request,
+            stage="soft_skill_decision",
+        )
+        decision = self._parse_soft_skill_decision(raw_decision)
+        target_capability_id = str(decision.get("target_capability_id") or "").strip()
+        execute_allowed = (
+            decision.get("decision") == "execute"
+            and target_capability_id == capability_id
+            and self._is_high_confidence(decision.get("confidence"))
+        )
+        if execute_allowed:
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={
+                    "response_source": "soft_skill_decision",
+                    "prompt_recorded": False,
+                    "soft_skill_decision": {
+                        "decision": "execute",
+                        "target_capability_id": capability_id,
+                        "confidence": decision.get("confidence"),
+                        "reason_code": decision.get("reason_code") or "soft_skill_execute",
+                    },
+                    "satisfaction": {
+                        "satisfied": False,
+                        "replan_recommended": True,
+                        "reason_code": "soft_skill_execute",
+                    },
+                    **response_role_payload,
+                },
+                events=(
+                    make_event(
+                        request,
+                        event_type="soft_skill_binding.decision",
+                        payload={
+                            "decision": "execute",
+                            "target_capability_id": capability_id,
+                            "confidence": decision.get("confidence"),
+                            "reason_code": decision.get("reason_code") or "soft_skill_execute",
+                        },
+                        visibility=EventVisibility.AUDIT_ONLY,
+                    ),
+                ),
+            )
+
+        answer_reason_code = decision.get("reason_code") or "soft_skill_answer"
+        if decision.get("decision") == "execute" and target_capability_id != capability_id:
+            answer_reason_code = "target_mismatch"
+        elif decision.get("decision") == "execute" and not self._is_high_confidence(decision.get("confidence")):
+            answer_reason_code = "low_confidence"
+        answer_prompt = self._build_soft_skill_answer_prompt(
+            user_message=user_message,
+            artifact_context=artifact_context,
+            profile=profile,
+            decision_reason_code=str(answer_reason_code),
+        )
+        answer = (
+            await self._generate_non_stream_text(
+                answer_prompt,
+                request=request,
+                stage="soft_skill_answer",
+            )
+        ).strip()
+        if not answer:
+            answer = str(decision.get("answer") or "").strip()
+        if not answer:
+            answer = "我可以先说明这个 Skill 的用途、所需数据格式和参数；如果你要执行，请补充目标数据与必要参数。"
+        return self._soft_binding_answer_result(
+            request=request,
+            answer=answer,
+            decision={
+                "decision": "answer",
+                "target_capability_id": capability_id,
+                "confidence": decision.get("confidence"),
+                "reason_code": answer_reason_code,
+            },
+            response_role_payload=response_role_payload,
+        )
+
+    def _resolve_skill_manifest_by_capability_id(self, capability_id: str, revision: str | None):
+        catalog = self._resolve_skill_catalog(revision)
+        for manifest in catalog.skills:
+            if self._manifest_capability_id(manifest) == capability_id:
+                return manifest
+        return None
+
+    @staticmethod
+    def _manifest_capability_id(manifest: Any) -> str:
+        direct = str(getattr(manifest, "metadata", {}).get("capability_id") or "").strip()
+        if direct:
+            return direct
+        nested_metadata = getattr(manifest, "metadata", {}).get("metadata")
+        if isinstance(nested_metadata, Mapping):
+            nested = str(nested_metadata.get("capability_id") or "").strip()
+            if nested:
+                return nested
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(manifest.name).lower()).strip("_")
+        normalized = re.sub(r"_+", "_", normalized)
+        return f"skill.{normalized or 'unnamed'}"
+
+    @staticmethod
+    def _build_soft_skill_decision_prompt(
+        *,
+        user_message: str,
+        artifact_context: list[dict[str, Any]],
+        profile: dict[str, Any],
+    ) -> str:
+        schema = {
+            "decision": "answer | execute",
+            "target_capability_id": "must equal the provided public profile capability_id when executing",
+            "confidence": "0.0-1.0",
+            "reason_code": "short snake_case reason",
+            "answer": "required when decision=answer; explain usage/data format without internal implementation details",
+        }
+        return (
+            "你是主代理的 Skill 软绑定判断器。\n"
+            "用户用 slash command 点名了一个公开 Skill，但这不等于必须执行。\n"
+            "如果用户是在询问 Skill 用法、字段含义、数据格式、示例或边界，返回 decision=answer，并在 answer 中直接解释。\n"
+            "如果用户明确要求执行、目标数据和必要参数已经由文本或上传摘要提供，返回 decision=execute。\n"
+            "禁止暴露 Skill 内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。\n"
+            "只返回 JSON object，不要 Markdown。\n\n"
+            f"公开 Skill profile：\n{json.dumps(profile, ensure_ascii=False, indent=2, default=str)}\n\n"
+            f"上传摘要（已脱敏）：\n{json.dumps(artifact_context, ensure_ascii=False, indent=2, default=str)}\n\n"
+            f"用户问题：{user_message}\n\n"
+            f"输出结构：\n{json.dumps(schema, ensure_ascii=False, indent=2)}"
+        )
+
+    @staticmethod
+    def _build_soft_skill_answer_prompt(
+        *,
+        user_message: str,
+        artifact_context: list[dict[str, Any]],
+        profile: dict[str, Any],
+        decision_reason_code: str,
+    ) -> str:
+        return (
+            "你是主代理的 Skill 软绑定公开回答器。\n"
+            "用户用 slash command 点名了一个公开 Skill；当前应先回答用法、字段、数据格式、示例或缺失信息，而不是执行 Skill。\n"
+            "请只基于公开 Skill profile 和上传摘要作答，不要暴露内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。\n"
+            "如果用户实际想执行但信息不足，请明确说明缺少哪些用户可补充的数据或参数。\n\n"
+            f"判定原因：{decision_reason_code}\n\n"
+            f"公开 Skill profile：\n{json.dumps(profile, ensure_ascii=False, indent=2, default=str)}\n\n"
+            f"上传摘要（已脱敏）：\n{json.dumps(artifact_context, ensure_ascii=False, indent=2, default=str)}\n\n"
+            f"用户问题：{user_message}"
+        )
+
+    async def _generate_non_stream_text(
+        self,
+        prompt: str,
+        *,
+        request: CapabilityExecutionRequest,
+        stage: str,
+    ) -> str:
+        stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort="minimal")
+        chunks: list[str] = []
+        async for stream_event in iter_stream_events(
+            stream_generator,
+            prompt,
+            reasoning_effort="minimal",
+            thinking=False,
+            model_edition=self._resolve_model_edition(request.metadata),
+            stage=stage,
+        ):
+            answer = stream_event.get("answer")
+            if answer:
+                chunks.append(str(answer))
+        return "".join(chunks)
+
+    @staticmethod
+    def _parse_soft_skill_decision(raw_output: str) -> dict[str, Any]:
+        stripped = str(raw_output or "").strip()
+        if not stripped:
+            return {"decision": "answer", "reason_code": "empty_decision"}
+        if not stripped.startswith("{"):
+            start = stripped.find("{")
+            end = stripped.rfind("}")
+            if start >= 0 and end > start:
+                stripped = stripped[start : end + 1]
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return {"decision": "answer", "reason_code": "invalid_json"}
+        if not isinstance(payload, dict):
+            return {"decision": "answer", "reason_code": "invalid_payload"}
+        decision = str(payload.get("decision") or "answer").strip().lower()
+        if decision not in {"answer", "execute"}:
+            decision = "answer"
+        return {
+            "decision": decision,
+            "target_capability_id": str(payload.get("target_capability_id") or "").strip(),
+            "confidence": payload.get("confidence"),
+            "reason_code": str(payload.get("reason_code") or "").strip(),
+            "answer": str(payload.get("answer") or "").strip(),
+        }
+
+    @staticmethod
+    def _is_high_confidence(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int | float):
+            return float(value) >= 0.7
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        if text in {"high", "certain", "sure", "true", "yes"}:
+            return True
+        if text in {"low", "medium", "uncertain", "false", "no"}:
+            return False
+        try:
+            return float(text) >= 0.7
+        except ValueError:
+            return False
+
+    def _soft_binding_answer_result(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        answer: str,
+        decision: Mapping[str, Any],
+        response_role_payload: dict[str, Any],
+    ) -> CapabilityExecutionResult:
+        final_event = make_event(
+            request,
+            event_type="main_agent.output_final",
+            payload={
+                "response_length": len(answer),
+                "answer_chunk_count": 0,
+                "reasoning_chunk_count": 0,
+                "answer_char_count": len(answer),
+                "reasoning_char_count": 0,
+                "duration_ms": 0,
+                **response_role_payload,
+            },
+            visibility=EventVisibility.FRONTEND,
+        )
+        artifact = make_text_artifact(
+            task_id=request.task_id,
+            node_id=request.node_id,
+            text=answer,
+            response_role=response_role_from_metadata(request.metadata),
+        )
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload={
+                "response_text": answer,
+                "response_source": "llm",
+                "prompt_recorded": False,
+                **response_role_payload,
+            },
+            artifacts=(artifact,),
+            events=(
+                make_event(
+                    request,
+                    event_type="soft_skill_binding.decision",
+                    payload=dict(decision),
+                    visibility=EventVisibility.AUDIT_ONLY,
+                ),
+                final_event,
+            ),
         )
 
     def _resolve_skill_matches(self, request: CapabilityExecutionRequest, user_message: str) -> tuple[list[SkillMatch], list[Any]]:

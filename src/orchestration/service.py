@@ -22,6 +22,9 @@ _SYSTEM_NODE_METADATA_KEYS = frozenset(
         "forced_skill_capability_id",
         "forced_skill_name",
         "forced_skill_source",
+        "soft_skill_binding",
+        "soft_skill_binding_source",
+        "soft_skill_binding_requested_capability_id",
     }
 )
 
