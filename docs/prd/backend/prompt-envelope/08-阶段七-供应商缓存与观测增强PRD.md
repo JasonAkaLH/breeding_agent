@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/orchestration/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：cacheable prefix hash、prefix 动态污染检测、provider cache hint 配置、prompt render metrics、audit-only 观测
 - **非范围**：不依赖单一 provider 专有能力；不记录 raw prompt；不改变业务回答语义
