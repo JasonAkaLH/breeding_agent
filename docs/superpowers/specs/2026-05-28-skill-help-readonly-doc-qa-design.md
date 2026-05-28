@@ -2,20 +2,20 @@
 
 日期：2026-05-28
 状态：已通过 document-perfectization 复审，待实施计划
-范围：为主代理增加按需读取项目 Skill `SKILL.md` 的只读问答能力，支持显式 `/skill-help` 与高置信自然语言触发。
+范围：为主代理增加按需读取项目 Skill `SKILL.md` 的只读问答能力，仅支持显式 `/skill-help` 触发；普通/自然语言对话不自动进入该 capability。
 
 ## 问题陈述
 
 用户在执行业务 Skill 前或排查缺参提示时，经常只想了解某个 Skill 的用途、字段含义、输入格式、参数约束或示例模板。当前系统只有“自动匹配/强制执行 Skill”链路：主代理在匹配或强制执行时才注入 `SKILL.md` 正文，且匹配后可能运行脚本、生成 artifact 或触发 interrupt。这不适合只读解释场景。
 
-需要一个系统级、只读、按需加载的 Skill 文档问答能力：用户明确询问 Skill 文档时，系统读取对应 `SKILL.md` 并基于文档回答；普通对话不把所有 Skill 文档发送给 LLM；目标 Skill 不被执行；答案不暴露内部代码结构。
+需要一个系统级、只读、按需加载的 Skill 文档问答能力：只有用户显式使用 `/skill-help` 时，系统才读取对应 `SKILL.md` 并基于文档回答；普通/自然语言对话不做 Skill Help 解析、不进入 `skill_help.respond`、不把 Skill 文档发送给 LLM；目标 Skill 不被执行；答案不暴露内部代码结构。
 
 ## 当前状态与证据
 
 - `src/integrations/codex_skills/parser.py` 已将 `SKILL.md` 解析为 `SkillManifest`，其中 `display_name`、`capability_id` 等未知 frontmatter 字段进入 `metadata`。
 - `src/integrations/codex_skills/catalog.py` 的 `SkillCatalog` 当前只支持按 Skill name 获取 manifest。
 - `src/integrations/codex_skills/skill_runtime_state.py` 已维护 active bundle 与 revision；新任务会在 metadata 中携带 `skill_bundle_revision`。
-- `src/orchestration/workflow_router.py` 当前只特殊路由 `main_agent.*` 与 `skill.*`；新增 `skill_help.respond` 不能落入默认 LLM planner。
+- `src/orchestration/workflow_router.py` 当前只特殊路由 `main_agent.*` 与 `skill.*`；新增 `skill_help.respond` 只能由显式 `/skill-help` / force capability 进入，不能落入默认 LLM planner 或被自动 planner 选择。
 - `src/orchestration/llm_workflow_provider.py` 与 `src/capabilities/main_agent/runtime_replanner.py` 当前只把 `main_agent.respond` 和 `skill.*` 视为 answer-producing；`skill_help.respond` 必须补入，否则会被追加不必要的 finalizer。
 - `src/capabilities/main_agent/prompt_builder.py` 当前把匹配 Skill 的 `manifest.body` 直接注入主代理 prompt；新能力不能沿用“匹配即注入/执行”的路径。
 - `frontend/src/domain/slashCommands.ts` 当前只从 active `skill.*` capabilities 派生 slash 命令；`/skill-help` 必须作为内置命令单独注册，不能依赖 `skill_help.respond` 的 capability id 自动派生。
@@ -24,8 +24,7 @@
 ## 目标
 
 - 支持用户通过 `/skill-help` 显式查看 Skill 用法、字段说明、数据格式、参数约束或示例模板。
-- 支持高置信自然语言问题自动进入 Skill 文档问答，例如“field-design 的 hyb_check 有什么要求？”。
-- 只在触发 Skill 文档问答时读取目标 Skill 的 `SKILL.md`；普通对话不把所有 Skill 文档发送给 LLM。
+- 只在显式 `/skill-help` 触发时读取目标 Skill 的 `SKILL.md`；普通/自然语言对话不做 Skill Help 解析，不把 Skill 文档发送给 LLM。
 - 回答必须严格基于对应 `SKILL.md`；文档未说明时明确回答“该 Skill 文档未说明”。
 - 不执行目标 Skill，不产生业务 artifact，不触发 interrupt，不消费 pending interrupt answer。
 - 不向用户暴露内部代码结构、脚本路径、handler/module/runtime、source_path、本地路径、服务 allowlist 或调试命令。
@@ -37,6 +36,7 @@
 - 不用 `/skill-help` 触发业务执行。
 - 不让前端承担 Skill 文档解析、字段解释或权限判断。
 - 不保证能回答 `SKILL.md` 未写明的业务规则。
+- 不对普通/自然语言对话做 Skill Help 意图解析；不通过 LLM 自动判断是否应该进入 `skill_help.respond`。
 - MVP 不改变 conversation serial guard；如果当前 conversation 已有 active / waiting task，`/skill-help` 是否允许旁路查询需要在实施计划中作为独立检查点验证，不能静默吞掉为 interrupt answer。
 
 ## 用户、干系人与受影响系统
@@ -44,7 +44,7 @@
 | 对象 | 需求 / 影响 |
 | --- | --- |
 | 业务用户 | 在不运行 Skill 的情况下了解某个 Skill 的用途、输入格式、字段含义和下一步准备材料。 |
-| 主代理 / planner | 能把“问 Skill 文档”的需求与“执行 Skill”的需求区分开。 |
+| 主代理 / planner | 默认不解析 Skill Help 意图；只有显式 `/skill-help` 才进入只读文档问答，其他对话保持既有路由。 |
 | 项目级 Skill 作者 | 需要让 `SKILL.md` 的用户可见说明可被系统安全解释，同时内部实现细节不会外泄。 |
 | 后端编排系统 | 新增只读 capability、路由、执行器、payload policy、answer-producing 判定与审计。 |
 | 前端业务对话台 | 新增内置 `/skill-help` slash 命令，并按普通助手消息展示结果。 |
@@ -66,19 +66,19 @@
 | --- | --- | --- |
 | FR-1 | 系统必须注册 public builtin capability `skill_help.respond`。 | `/api/v1/capabilities` 可返回该 capability，且 `kind/source` 为 builtin/help 类语义，不是 `skill`。 |
 | FR-2 | 显式 `/skill-help` 必须优先进入 `skill_help.respond`，不得进入目标业务 Skill 执行链路。 | `/skill-help field-design ...` 不产生 `skill.field_design` 节点。 |
-| FR-3 | 高置信自然语言文档问题可自动进入 `skill_help.respond`。 | “field-design 的 hyb_check 有什么要求？”生成单节点 help 计划或等价只读计划。 |
+| FR-3 | 非 `/skill-help` 的普通/自然语言对话不得自动进入 `skill_help.respond`。 | “field-design 的 hyb_check 有什么要求？”在默认对话中不生成 help 计划；只有加 `/skill-help` 才进入 help。 |
 | FR-4 | Skill 解析必须支持 capability id、Skill name、display name 和 normalized loose match。 | `skill.field_design`、`field-design`、`试验设计智能体` 均解析到同一 Skill。 |
 | FR-5 | display name 或问题文本含空格时，解析必须使用最长前缀匹配或引号语法，而不是只取第一个空格 token。 | `/skill-help OCR 文档识别 需要什么输入` 能识别 `OCR 文档识别`。 |
 | FR-6 | 文档问答必须只基于 `SKILL.md` 的安全视图。 | prompt / safe view 不含脚本路径、handler/module/runtime、source_path、本地路径或调试命令。 |
 | FR-7 | 文档未说明的内容必须回答“该 Skill 文档未说明”。 | 对不存在字段/枚举提问时不编造。 |
 | FR-8 | `/skill-help` 输出必须是普通 assistant 文本。 | 无 artifact、无 interrupt、无 Skill 运行状态卡片。 |
 | FR-9 | 未知或多匹配 Skill 必须不调用 LLM。 | 返回候选/澄清消息，LLM fake 未被调用。 |
-| FR-10 | 如果用户混合“解释 + 执行”意图，系统必须先澄清。 | “怎么用，顺便帮我跑”不直接执行 Skill。 |
+| FR-10 | LLM planner / runtime replanner 在 auto 模式不得选择 `skill_help.respond`。 | planner public capability 列表或 plan validation 使 help 只可由 explicit force 使用。 |
 
 ## 非功能需求
 
 - **安全 / 隐私**：必须默认剔除内部代码结构、路径、脚本、handler/module/runtime、source_path、allowlist、secret-like 字段；不能把上传文件内容作为文档问答依据。
-- **可靠性**：无匹配、多匹配、空问题、过长文档、LLM 失败都必须有可解释失败路径；未知 Skill 不应进入 planner 兜底执行。
+- **可靠性**：无匹配、多匹配、空问题、过长文档、LLM 失败都必须有可解释失败路径；未知 Skill 不应进入 planner 兜底执行；`skill_help.respond` 不应被 auto planner 选中。
 - **兼容性**：不得破坏现有 `skill.*` slash command、pending Skill context、upload interrupt、artifact 展示和主代理普通对话。
 - **可观测性**：后端应记录脱敏审计事件，例如 `skill_help.invoked`、`skill_help.resolve_failed`、`skill_help.llm_failed`，只包含 capability id / Skill name / display name / reason / revision，不记录内部路径或原始 prompt。
 - **性能**：普通对话不加载所有 Skill 正文进 LLM；只读问答只加载一个目标 Skill 的安全视图。过长正文应先裁剪用户可见部分。
@@ -105,20 +105,16 @@
 - 未知 Skill 返回可见候选列表。
 - 多个 Skill 匹配时返回澄清问题和候选列表，不调用 LLM。
 
-### 自然语言触发
+### 普通对话不触发
 
-高置信触发需同时满足：
-
-1. 能唯一识别一个 Skill；
-2. 用户意图是文档帮助、用法、参数、字段含义、输入输出、限制、数据格式或示例；
-3. 用户没有要求执行业务动作。
+除非用户消息以 `/skill-help` 开头，系统不得执行 Skill Help 意图解析，也不得让 LLM planner 在 auto 模式选择 `skill_help.respond`。
 
 示例：
 
-- “field-design 的 hyb_check 有什么要求？”→ `skill_help.respond`
-- “试验设计智能体需要什么表头？”→ `skill_help.respond`
-- “帮我跑 field-design 做 RCBD 设计”→ 业务 Skill 执行链路，不是 help
-- “field-design 怎么用，顺便帮我跑一下”→ 先澄清用户要查看说明还是执行 Skill
+- “field-design 的 hyb_check 有什么要求？”→ 不进入 `skill_help.respond`；保持既有普通对话 / planner 路由。
+- “试验设计智能体需要什么表头？”→ 不进入 `skill_help.respond`；保持既有普通对话 / planner 路由。
+- “帮我跑 field-design 做 RCBD 设计”→ 保持既有业务 Skill / 主代理执行链路。
+- `/skill-help field-design hyb_check 有什么要求` → 进入 `skill_help.respond`。
 
 ## 后端架构
 
@@ -137,8 +133,8 @@
 - `CapabilityRegistry` 注册 `skill_help.respond` public descriptor。
 - `InstanceRegistry` 注册支持 `skill_help.respond` 的本地 instance。
 - `CompositeExecutor` 包含 `SkillHelpExecutor`。
-- `WorkflowRouter` 对 `requested_capability_id == "skill_help.respond"` 或 `startswith("skill_help.")` 必须路由到 `SkillHelpWorkflowProvider`，不得落入默认 LLM planner。
-- `LLMWorkflowProvider._is_answer_producing` 与 `MainAgentRuntimeReplanner._is_answer_producing` 必须把 `skill_help.respond` 视为 answer-producing，避免追加主代理 finalizer。
+- `WorkflowRouter` 对 `requested_capability_id == "skill_help.respond"` 或 `startswith("skill_help.")` 必须路由到 `SkillHelpWorkflowProvider`，不得落入默认 LLM planner。该 requested capability 只应由 `/skill-help` / explicit force 设置。
+- `LLMWorkflowProvider` 在 auto planning 时不得把 `skill_help.respond` 暴露为可选 public capability；若 explicit force 已生成 help node，`LLMWorkflowProvider._is_answer_producing` 与 `MainAgentRuntimeReplanner._is_answer_producing` 必须把它视为 answer-producing，避免追加主代理 finalizer。
 
 ### Planner payload policy
 
@@ -149,11 +145,11 @@
   "user_message": "<effective_user_message>",
   "skill_ref": "<slash 或 policy 解析出的引用，可为空>",
   "skill_question": "<去掉命令和 Skill 引用后的问题，可为空>",
-  "source": "slash_command | auto_detected | planner_selected"
+  "source": "slash_command"
 }
 ```
 
-Planner 提供的 payload 字段必须最小化；如果允许 planner 填 `skill_ref` / `skill_question`，executor 仍必须重新解析并校验，不得直接信任 planner 选择。系统 payload 必须覆盖同名 planner 字段。
+Planner 不应在 auto 模式构造 `skill_help.respond` payload；该 payload 仅由 `/skill-help` 确定性解析生成。executor 仍必须重新解析并校验 `skill_ref`，不得信任前端或 planner 传入的目标 Skill。
 
 ### Skill 解析规则
 
@@ -257,7 +253,7 @@ Slash command 菜单新增内置项：
 | 匹配到多个 Skill | 不调用 LLM，直接要求用户明确选择，附候选列表。 |
 | display name 含空格 | 使用最长前缀或引号解析，不把第一个词误判为完整 Skill。 |
 | 问题超出文档 | 回答“该 Skill 文档未说明”。 |
-| 用户要求执行 | `/skill-help` 场景仍只解释；自然语言混合帮助与执行意图时先澄清。 |
+| 用户要求执行 | `/skill-help` 场景仍只解释；不带 `/skill-help` 的自然语言请求保持既有普通对话 / Skill 路由，不进入 help。 |
 | `SKILL.md` 过长 | 安全裁剪，优先保留用户可见说明、输入、输出、参数、示例和约束。 |
 | safe view 为空或仅剩内部内容 | 返回“该 Skill 文档未提供可安全展示的说明”，不调用或不继续 LLM。 |
 | LLM 失败 | 返回可恢复错误，不执行目标 Skill。 |
@@ -275,8 +271,8 @@ Slash command 菜单新增内置项：
 6. safe view / prompt 不包含 `source_path`、脚本路径、handler/module/runtime、Rscript、PowerShell、wrapper 等内部字段或命令块。
 7. 文档未说明时，prompt 和响应约束要求返回“该 Skill 文档未说明”。
 8. `/skill-help` 不产生 interrupt、不创建业务 artifact、不执行目标 Skill。
-9. 自然语言高置信文档问题生成 `skill_help.respond` 计划，并被视为 answer-producing，不追加 main_agent finalizer。
-10. 混合“解释 + 执行”意图返回澄清，不直接执行。
+9. 非 `/skill-help` 的自然语言文档问题不会生成 `skill_help.respond` 计划；auto planner 也不能选择该 capability。
+10. explicit help node 被视为 answer-producing，不追加 main_agent finalizer。
 11. 任务绑定 `skill_bundle_revision` 时，从对应 revision 读取 Skill 文档。
 12. pending interrupt 场景下，`/skill-help` 不会写入 interrupt answer。
 
@@ -292,9 +288,9 @@ Slash command 菜单新增内置项：
 
 ## 验收标准
 
-- 用户询问 Skill 用法、字段、参数、输入输出或数据格式时，系统能基于目标 `SKILL.md` 安全视图回答。
+- 用户通过 `/skill-help` 询问 Skill 用法、字段、参数、输入输出或数据格式时，系统能基于目标 `SKILL.md` 安全视图回答。
 - 显式 `/skill-help` 不会执行目标 Skill。
-- 高置信自然语言文档问题能自动进入 `skill_help.respond`。
+- 非 `/skill-help` 的普通/自然语言对话不会自动进入 `skill_help.respond`。
 - 文档未说明的内容不会被编造。
 - 答案不会暴露内部代码结构、本地路径、脚本命令或调试信息。
 - 前端展示为普通助手回复，不出现 interrupt 或 Skill 执行态。
@@ -304,7 +300,7 @@ Slash command 菜单新增内置项：
 
 1. 后端新增 `src/capabilities/skill_help/`，包含 capability、executor、workflow descriptor、payload policy 与 safe view builder。
 2. 注册 `skill_help.respond` descriptor、instance、executor，并更新 `WorkflowRouter`、LLM planner / runtime replanner answer-producing 判定。
-3. 路由层增加 `/skill-help` 确定性解析；自然语言高置信触发可先通过 planner descriptor + policy 实现，必要时再加 deterministic pre-router。
+3. 路由层增加 `/skill-help` 确定性解析；不得实现自然语言触发或 deterministic pre-router。
 4. 扩展 Skill 解析 helper，支持 capability id / name / display name / normalized loose / 最长前缀匹配。
 5. 前端 slash command 模块改为支持内置 `/skill-help`，并处理 pending interrupt 不误消费。
 6. 增加后端和前端回归测试。
@@ -316,7 +312,7 @@ Slash command 菜单新增内置项：
 | --- | --- | --- |
 | 假设 | `SKILL.md` 是 Skill 用户说明的唯一权威来源。 | 已写入非目标：不读取脚本/源码补充答案。 |
 | 风险 | 现有 Skill 正文混有内部命令，若 safe view 只靠 prompt 约束可能泄露。 | 必须实现安全视图剔除/改写，并加测试。 |
-| 风险 | `skill_help.respond` 如果未加入 router / instance / answer-producing 判定，会被默认 planner 或 finalizer 误处理。 | 已纳入后端架构和测试计划。 |
+| 风险 | `skill_help.respond` 如果暴露给 auto planner，普通问题可能误入 help；如果未加入 router / instance / answer-producing 判定，explicit help 会被默认 planner 或 finalizer 误处理。 | 已纳入后端架构和测试计划：auto 不可选，explicit 可路由。 |
 | 风险 | 前端现有 slash 命令只支持 `skill.*`，内置 `/skill-help` 若未单独注册会被当 unknown slash 阻止。 | 已纳入前端实现要求。 |
 | 假设 | MVP 可先阻止 pending interrupt 期间的 `/skill-help`，只要不误消费 interrupt answer。 | 实施计划需确认是否做只读旁路；无论选择哪种都必须测试。 |
 
