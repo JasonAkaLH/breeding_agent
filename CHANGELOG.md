@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Skill Slash Command 软绑定追问补齐对话历史：soft-binding 的 decision / answer 专用 prompt 现在与普通主代理一样消费同一 conversation memory（最近原文、历史摘要与安全能力摘要），第一轮 `/skill` 答疑完成后会写入 assistant history，后续 `/skill` 追问可看到上一轮用户请求与答复；新增 API 回归覆盖历史落库与追问 prompt 注入。
 - Skill Slash Command 软绑定答疑恢复流式输出：`soft_skill_decision` 仍使用非流式 JSON 判定，但判定为 answer / 低置信执行降级时，公开回答阶段会重新通过 `main_agent.output_delta` transient SSE 推送分段内容，最终回答仍按 completion-only 方式持久化。
 - Skill Slash Command 软绑定主代理判断已落地：外部 API 直接提交 `capability_id=skill.*` 现在 fail-closed，前端 `/skill-name` 统一提交 `main_agent.respond` 并附带 `metadata.soft_skill_binding`；主代理仅基于 public Skill profile 判断“执行还是答疑”，执行决策由 deterministic replanner 在内部展开到目标 Skill，缺参 interrupt 可续接被中断的 Skill 节点；项目级 Skill 补齐 `public_usage`，`Skill构建指南.md` 与静态 API 文档同步明确不得暴露 Skill 内部代码结构。
 - Skill 构建指南与项目级 Skill 缺参补充链路补齐：明确结构化 open interrupt、`python_subprocess` missing_input 与 pending Skill context 兜底边界；系统层现在会基于 manifest / 脚本 stdout structured `missing_input` 合成 open interrupt，platform service 的 `skill_input_missing` error 也会转成具体 interrupt；前端等待补充卡片补齐项目级字段标签，artifact/file/data 缺参期间允许上传文件后续答，标量缺参则禁止仅上传文件续答；同步修复 field-design / field-analysis / rice-genie / OCR 的 structured missing_input / `is_error:true` 输出，其中 field-design Interval CK 参数缺失不再以成功结果返回。

@@ -144,3 +144,72 @@ class SoftSkillBindingAPITest(APITestCase):
         self.assertEqual(deltas, ["这个 Skill ", "需要品种名或上传数据。"])
         persisted_events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in persisted_events))
+
+    async def test_soft_skill_binding_followup_uses_prior_turn_from_conversation_history(self) -> None:
+        seen_prompts: list[tuple[str | None, str]] = []
+        answer_count = 0
+
+        async def streamer(prompt: str, *, stage: str | None = None, **_kwargs):
+            nonlocal answer_count
+            if stage in {"soft_skill_decision", "soft_skill_answer"}:
+                seen_prompts.append((stage, prompt))
+            if stage == "soft_skill_decision":
+                yield (
+                    '{"decision":"answer","target_capability_id":"'
+                    + GENERIC_DATA_SKILL_ID
+                    + '","confidence":0.91,"reason_code":"usage_or_followup"}'
+                )
+            elif stage == "soft_skill_answer":
+                answer_count += 1
+                if answer_count == 1:
+                    yield "第一轮解释：需要品种名或上传 CSV。"
+                else:
+                    yield "追问解释：结合上一轮，CSV 至少包含样本列。"
+            else:
+                yield "普通回答"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer)
+        first = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-soft-followup",
+                "content": "这个 Skill 需要什么数据？",
+                "routing_mode": "force_capability",
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "soft_skill_binding": {
+                        "capability_id": GENERIC_DATA_SKILL_ID,
+                        "command": "/generic-data-lookup",
+                    },
+                },
+            },
+        )
+        self.assertEqual(first.status_code, 202, first.text)
+        await self.wait_for_terminal_task(first.json()["task_id"])
+
+        messages = await self.runtime.storage.list_messages_for_conversation("conv-soft-followup")
+        self.assertTrue(any(message.content == "这个 Skill 需要什么数据？" for message in messages))
+        self.assertTrue(any(message.content == "第一轮解释：需要品种名或上传 CSV。" for message in messages))
+
+        second = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-soft-followup",
+                "content": "再说清楚一点",
+                "routing_mode": "force_capability",
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "soft_skill_binding": {
+                        "capability_id": GENERIC_DATA_SKILL_ID,
+                        "command": "/generic-data-lookup",
+                    },
+                },
+            },
+        )
+        self.assertEqual(second.status_code, 202, second.text)
+        await self.wait_for_terminal_task(second.json()["task_id"])
+
+        second_turn_prompts = [prompt for _stage, prompt in seen_prompts[-2:]]
+        self.assertTrue(all("对话记忆上下文" in prompt for prompt in second_turn_prompts))
+        self.assertTrue(all("这个 Skill 需要什么数据？" in prompt for prompt in second_turn_prompts))
+        self.assertTrue(all("第一轮解释：需要品种名或上传 CSV。" in prompt for prompt in second_turn_prompts))
