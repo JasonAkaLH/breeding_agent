@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from src.core.enums import RoutingMode
 from tests.api.support import APITestCase, GENERIC_DATA_SKILL_ID
 
@@ -94,3 +96,51 @@ class SoftSkillBindingAPITest(APITestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unsupported soft_skill_binding capability_id", response.text)
+
+    async def test_soft_skill_binding_answer_streams_output_deltas(self) -> None:
+        async def streamer(_prompt: str, *, stage: str | None = None, **_kwargs):
+            if stage == "soft_skill_decision":
+                yield (
+                    '{"decision":"answer","target_capability_id":"'
+                    + GENERIC_DATA_SKILL_ID
+                    + '","confidence":0.91,"reason_code":"usage_question"}'
+                )
+            elif stage == "soft_skill_answer":
+                yield "这个 Skill "
+                yield "需要品种名或上传数据。"
+            else:
+                yield "普通回答"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer)
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-soft-answer-stream",
+                "content": "这个 Skill 需要什么数据？",
+                "routing_mode": "force_capability",
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "soft_skill_binding": {
+                        "capability_id": GENERIC_DATA_SKILL_ID,
+                        "command": "/generic-data-lookup",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        iterator = self.runtime.iter_frontend_events(task_id).__aiter__()
+        seen_types: set[str] = set()
+        deltas: list[str] = []
+        while "task.completed" not in seen_types:
+            event = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+            seen_types.add(event.event_type)
+            if event.event_type == "main_agent.output_delta":
+                deltas.append(event.payload["delta"])
+
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(deltas, ["这个 Skill ", "需要品种名或上传数据。"])
+        persisted_events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in persisted_events))

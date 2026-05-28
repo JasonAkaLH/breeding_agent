@@ -454,17 +454,19 @@ class MainAgentRespondCapability(CapabilityContract):
             profile=profile,
             decision_reason_code=str(answer_reason_code),
         )
-        answer = (
-            await self._generate_non_stream_text(
-                answer_prompt,
-                request=request,
-                stage="soft_skill_answer",
-            )
-        ).strip()
+        answer, answer_chunk_count, answer_char_count, duration_ms = await self._generate_streaming_answer_text(
+            answer_prompt,
+            request=request,
+            stage="soft_skill_answer",
+            response_role_payload=response_role_payload,
+        )
+        answer = answer.strip()
         if not answer:
             answer = str(decision.get("answer") or "").strip()
+            answer_char_count = len(answer)
         if not answer:
             answer = "我可以先说明这个 Skill 的用途、所需数据格式和参数；如果你要执行，请补充目标数据与必要参数。"
+            answer_char_count = len(answer)
         return self._soft_binding_answer_result(
             request=request,
             answer=answer,
@@ -475,6 +477,9 @@ class MainAgentRespondCapability(CapabilityContract):
                 "reason_code": answer_reason_code,
             },
             response_role_payload=response_role_payload,
+            answer_chunk_count=answer_chunk_count,
+            answer_char_count=answer_char_count,
+            duration_ms=duration_ms,
         )
 
     def _resolve_skill_manifest_by_capability_id(self, capability_id: str, revision: str | None):
@@ -566,6 +571,49 @@ class MainAgentRespondCapability(CapabilityContract):
                 chunks.append(str(answer))
         return "".join(chunks)
 
+    async def _generate_streaming_answer_text(
+        self,
+        prompt: str,
+        *,
+        request: CapabilityExecutionRequest,
+        stage: str,
+        response_role_payload: dict[str, Any],
+    ) -> tuple[str, int, int, int]:
+        stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort="minimal")
+        started_at = time.monotonic()
+        chunks: list[str] = []
+        answer_ordinal = 0
+        answer_char_count = 0
+        async for stream_event in iter_stream_events(
+            stream_generator,
+            prompt,
+            reasoning_effort="minimal",
+            thinking=False,
+            model_edition=self._resolve_model_edition(request.metadata),
+            stage=stage,
+        ):
+            answer_delta = stream_event.get("answer")
+            if not answer_delta:
+                continue
+            answer_text = str(answer_delta)
+            answer_ordinal += 1
+            answer_char_count += len(answer_text)
+            chunks.append(answer_text)
+            await self._publish_transient(
+                make_event(
+                    request,
+                    event_type="main_agent.output_delta",
+                    payload={
+                        "delta": answer_text,
+                        "ordinal": answer_ordinal,
+                        **response_role_payload,
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                    ordinal=answer_ordinal,
+                )
+            )
+        return "".join(chunks), answer_ordinal, answer_char_count, int((time.monotonic() - started_at) * 1000)
+
     @staticmethod
     def _parse_soft_skill_decision(raw_output: str) -> dict[str, Any]:
         stripped = str(raw_output or "").strip()
@@ -618,17 +666,20 @@ class MainAgentRespondCapability(CapabilityContract):
         answer: str,
         decision: Mapping[str, Any],
         response_role_payload: dict[str, Any],
+        answer_chunk_count: int = 0,
+        answer_char_count: int | None = None,
+        duration_ms: int = 0,
     ) -> CapabilityExecutionResult:
         final_event = make_event(
             request,
             event_type="main_agent.output_final",
             payload={
                 "response_length": len(answer),
-                "answer_chunk_count": 0,
+                "answer_chunk_count": answer_chunk_count,
                 "reasoning_chunk_count": 0,
-                "answer_char_count": len(answer),
+                "answer_char_count": answer_char_count if answer_char_count is not None else len(answer),
                 "reasoning_char_count": 0,
-                "duration_ms": 0,
+                "duration_ms": duration_ms,
                 **response_role_payload,
             },
             visibility=EventVisibility.FRONTEND,
