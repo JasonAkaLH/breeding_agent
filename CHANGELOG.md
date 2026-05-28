@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Skill Slash Command 软绑定主代理判断已落地：外部 API 直接提交 `capability_id=skill.*` 现在 fail-closed，前端 `/skill-name` 统一提交 `main_agent.respond` 并附带 `metadata.soft_skill_binding`；主代理仅基于 public Skill profile 判断“执行还是答疑”，执行决策由 deterministic replanner 在内部展开到目标 Skill，缺参 interrupt 可续接被中断的 Skill 节点；项目级 Skill 补齐 `public_usage`，`Skill构建指南.md` 与静态 API 文档同步明确不得暴露 Skill 内部代码结构。
 - Skill 构建指南与项目级 Skill 缺参补充链路补齐：明确结构化 open interrupt、`python_subprocess` missing_input 与 pending Skill context 兜底边界；系统层现在会基于 manifest / 脚本 stdout structured `missing_input` 合成 open interrupt，platform service 的 `skill_input_missing` error 也会转成具体 interrupt；前端等待补充卡片补齐项目级字段标签，artifact/file/data 缺参期间允许上传文件后续答，标量缺参则禁止仅上传文件续答；同步修复 field-design / field-analysis / rice-genie / OCR 的 structured missing_input / `is_error:true` 输出，其中 field-design Interval CK 参数缺失不再以成功结果返回。
 - Field Analysis Docker 运行时修复并发布 backend 镜像 `0.1.3`：backend 镜像安装 `r-cran-jsonlite` / `locales` 并设置 UTF-8 locale，Field Analysis Python wrapper 传递最小 PATH 与 UTF-8 locale 给 Rscript，避免 Docker 内解析中文 `.R` 源码时报 `unexpected INCOMPLETE_STRING`；`Skill构建指南.md`、`docker_cmd.md` 与回归测试同步固化 R-backed Skill 必须具备 jsonlite 与 UTF-8 运行条件。
 - Docker 镜像部署版本提升到 `0.1.2`：backend 镜像内 PostgreSQL 状态库配置使用 `biobin_user` / `postgres:5432` / `biobin_db`，并将 `biobin_user` 连接密码切换为部署约定密码；frontend 同步提供 `0.1.2` 标签，`docker_cmd.md` 补充 backend 镜像配置脱敏检查、运行容器 DSN 环境变量覆盖、image id 对比、同镜像同网络 PostgreSQL 实连、backend 当前状态/最新日志与跨容器认证失败后的 `biobin_user` 密码重置判别命令，便于远端按同一版本拉取并判别配置是否生效。

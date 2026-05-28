@@ -74,6 +74,7 @@ from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
 from src.orchestration.runtime_replanner import CompositeRuntimeReplanner, RuntimeReplanner
 from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
+from src.orchestration.soft_skill_replanner import SoftSkillBindingReplanner
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_router import WorkflowRouter
 from src.storage import StoragePort
@@ -119,6 +120,17 @@ PENDING_SKILL_METADATA_KEYS = frozenset(
         "pending_skill_original_user_message",
         "pending_skill_assistant_message",
         "defer_task_completed_until_pending_skill_context_processed",
+    }
+)
+SOFT_SKILL_BINDING_METADATA_KEY = "soft_skill_binding"
+SOFT_SKILL_INTERNAL_METADATA_KEYS = frozenset(
+    {
+        "forced_skill_name",
+        "forced_skill_capability_id",
+        "forced_skill_source",
+        "macro_source",
+        "skill_execution_mode",
+        "soft_skill_decision",
     }
 )
 
@@ -320,11 +332,26 @@ class ApiRuntime:
         if routing_mode == RoutingMode.FORCE_CAPABILITY and not request.capability_id:
             raise ValueError("capability_id is required when routing_mode is force_capability")
         requested_capability_id = self._canonical_capability_id(request.capability_id)
+        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
+            self._record_direct_skill_execution_rejected(
+                capability_id=requested_capability_id,
+                routing_mode=str(routing_mode),
+                conversation_id=conversation_id,
+            )
+            raise ValueError(
+                "direct_skill_execution_disabled: Direct skill execution is disabled; "
+                "submit main_agent.respond with metadata.soft_skill_binding instead."
+            )
+        soft_skill_binding = self._normalize_soft_skill_binding(request.metadata)
+        if soft_skill_binding is not None:
+            requested_capability_id = "main_agent.respond"
         self._ensure_supported_capability(requested_capability_id)
         explicit_force_capability = routing_mode == RoutingMode.FORCE_CAPABILITY and requested_capability_id is not None
         continued_pending_context: PendingSkillContext | None = None
         superseded_pending_count = 0
-        if explicit_force_capability:
+        if soft_skill_binding is not None:
+            superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
+        elif explicit_force_capability:
             superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
         elif requested_capability_id is None:
             continued_pending_context = await self.storage.get_active_pending_skill_context(conversation_id)
@@ -413,6 +440,10 @@ class ApiRuntime:
             )
 
         metadata = self._drop_user_supplied_pending_skill_metadata(request.metadata)
+        if soft_skill_binding is not None:
+            metadata[SOFT_SKILL_BINDING_METADATA_KEY] = soft_skill_binding
+            metadata["soft_skill_binding_source"] = "slash_command"
+            metadata["soft_skill_binding_requested_capability_id"] = requested_capability_id
         if selected_model_edition:
             metadata["model_edition"] = selected_model_edition
         if request.capability_id != requested_capability_id and request.capability_id is not None:
@@ -426,7 +457,11 @@ class ApiRuntime:
             execution_user_message = self._format_pending_skill_continuation_message(continued_pending_context, request.content)
             current_user_message = request.content
             resolved_user_message = execution_user_message
-        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
+        if (
+            soft_skill_binding is None
+            and requested_capability_id is not None
+            and requested_capability_id.startswith("skill.")
+        ):
             metadata["defer_task_completed_until_pending_skill_context_processed"] = True
         if self._skill_runtime_state is not None:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
@@ -460,7 +495,57 @@ class ApiRuntime:
         values = dict(metadata)
         for key in PENDING_SKILL_METADATA_KEYS:
             values.pop(key, None)
+        for key in SOFT_SKILL_INTERNAL_METADATA_KEYS:
+            values.pop(key, None)
         return values
+
+    def _normalize_soft_skill_binding(self, metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+        raw = metadata.get(SOFT_SKILL_BINDING_METADATA_KEY)
+        if raw in (None, ""):
+            return None
+        if not isinstance(raw, Mapping):
+            raise ValueError("metadata.soft_skill_binding must be an object")
+        capability_id = self._canonical_capability_id(self._metadata_text(raw.get("capability_id")))
+        if not capability_id or not capability_id.startswith("skill."):
+            raise ValueError("metadata.soft_skill_binding.capability_id must be a public skill capability")
+        descriptor = self.capability_registry.get(capability_id)
+        if descriptor is None or not descriptor.public or not _is_skill_descriptor(descriptor):
+            raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
+        if self._skill_runtime_state is not None:
+            bundle = self._skill_runtime_state.active_bundle
+            if capability_id not in bundle.skill_capabilities.skill_name_by_capability_id:
+                raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
+            revision = bundle.revision
+        else:
+            revision = ""
+        command = self._metadata_text(raw.get("command")) or self._metadata_text(metadata.get("slash_command")) or ""
+        normalized = {
+            "capability_id": capability_id,
+        }
+        if command:
+            normalized["command"] = command
+        if revision:
+            normalized["skill_bundle_revision"] = revision
+        return normalized
+
+    def _record_direct_skill_execution_rejected(
+        self,
+        *,
+        capability_id: str,
+        routing_mode: str,
+        conversation_id: str,
+    ) -> None:
+        if self._audit_sink is None:
+            return
+        self._audit_sink.record_sync(
+            "skill.direct_execution_rejected",
+            {
+                "capability_id": capability_id,
+                "routing_mode": routing_mode,
+                "conversation_id": conversation_id,
+                "reason": "direct_skill_execution_disabled",
+            },
+        )
 
     @staticmethod
     def _pending_skill_continuation_metadata(context: PendingSkillContext) -> dict[str, Any]:
@@ -1369,13 +1454,19 @@ class ApiRuntime:
                     *upload_context["skill_artifacts"],
                 ]
         await self._await_existing_execution(task.task_id)
+        resume_capability_id = task.requested_capability_id
+        interrupted_node = await self.storage.get_task_node(interrupt.node_id)
+        if interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
+            resume_capability_id = interrupted_node.capability_id
+        elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
+            resume_capability_id = interrupt.source_agent
         await self._schedule_execution(
             OrchestrationRequest(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 root_message_id=task.root_message_id,
                 user_message=combined_message,
-                requested_capability_id=task.requested_capability_id,
+                requested_capability_id=resume_capability_id,
                 metadata=resume_metadata,
             )
         )
@@ -2214,6 +2305,13 @@ def build_api_runtime(
             return skill_workflow_provider
         return None
 
+    def resolve_active_skill_revision(capability_id: str) -> str | None:
+        return (
+            skill_runtime_state.active_revision
+            if capability_id in skill_runtime_state.active_bundle.skill_capabilities.skill_name_by_capability_id
+            else None
+        )
+
     macro_providers = {}
 
     auto_workflow_provider = AutoWorkflowProvider(
@@ -2238,6 +2336,12 @@ def build_api_runtime(
         payload_policies=planner_payload_policies,
     )
     default_replanners: list[RuntimeReplanner] = [
+        SoftSkillBindingReplanner(
+            capability_registry=capability_registry,
+            macro_providers=macro_providers,
+            macro_provider_resolver=resolve_macro_provider,
+            active_skill_revision_resolver=resolve_active_skill_revision,
+        ),
         MainAgentRuntimeReplanner(
             capability_registry=capability_registry,
             macro_providers=macro_providers,

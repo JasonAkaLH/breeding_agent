@@ -32,6 +32,7 @@ from .matcher import SkillMatch, match_skills
 from .parameters import SkillParameterSpec
 from .parser import SkillParseError, parse_skill_file
 from .pyo3_policy import SkillRuntimePyo3PolicyClient, try_load_skill_runtime_pyo3_policy_client
+from .public_profile import PublicSkillProfile, build_public_skill_profile
 from .script_manifest import SkillScriptEntrypoint
 from .script_runner import SkillSandboxUnavailableError, SkillScriptError, SkillScriptOutputValidationError, SkillScriptRunner, SkillScriptTimeoutError
 from .skill_capabilities import SkillCapabilityDiagnostic, SkillCapabilityRegistry, build_skill_capability_registry
@@ -75,10 +76,12 @@ __all__ = [
     "SkillRuntimeRefreshResult",
     "SkillRuntimeState",
     "SkillRuntimePyo3PolicyClient",
+    "PublicSkillProfile",
     "build_skill_artifact_context",
     "build_skill_script_artifact_context",
     "build_skill_safe_metadata",
     "build_skill_capability_registry",
+    "build_public_skill_profile",
     "call_platform_handler",
     "coerce_skill_response_text",
     "match_skills",

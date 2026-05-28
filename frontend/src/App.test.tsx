@@ -1201,7 +1201,7 @@ describe('App', () => {
   });
 
 
-  it('opens the slash Skill picker, selects a Skill with the keyboard, and submits a forced route from the badge', async () => {
+  it('opens the slash Skill picker, selects a Skill with the keyboard, and submits a soft-bound main-agent route from the badge', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -1221,8 +1221,12 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'skill.data_lookup',
-      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/data-lookup' }),
+      capabilityId: 'main_agent.respond',
+      metadata: expect.objectContaining({
+        forced_by_slash_command: true,
+        slash_command: '/data-lookup',
+        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
+      }),
     })));
   });
 
@@ -1241,7 +1245,7 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '普通问题',
-      capabilityId: undefined,
+      capabilityId: null,
     })));
   });
 
@@ -1262,7 +1266,7 @@ describe('App', () => {
     expect(screen.getByRole('status', { name: '已选择 Skill' })).toHaveTextContent('试验设计');
   });
 
-  it('submits direct slash command input as a forced Skill call with cleaned content', async () => {
+  it('submits direct slash command input as a soft-bound main-agent call with cleaned content', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
     const input = screen.getByLabelText('请输入问题');
@@ -1272,8 +1276,12 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '查询龙粳33',
-      capabilityId: 'skill.data_lookup',
-      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/data-lookup' }),
+      capabilityId: 'main_agent.respond',
+      metadata: expect.objectContaining({
+        forced_by_slash_command: true,
+        slash_command: '/data-lookup',
+        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
+      }),
     })));
   });
 
@@ -1287,8 +1295,12 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '',
-      capabilityId: 'skill.data_lookup',
-      metadata: expect.objectContaining({ forced_by_slash_command: true, slash_command: '/data-lookup' }),
+      capabilityId: 'main_agent.respond',
+      metadata: expect.objectContaining({
+        forced_by_slash_command: true,
+        slash_command: '/data-lookup',
+        soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
+      }),
     })));
   });
 
@@ -1305,7 +1317,7 @@ describe('App', () => {
     expect(await screen.findByText('未找到 Skill')).toBeInTheDocument();
   });
 
-  it('submits uploaded files and slash forced capability metadata together', async () => {
+  it('submits uploaded files and slash soft-binding metadata together', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
@@ -1318,11 +1330,12 @@ describe('App', () => {
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: '用这个文件做3个区组RCBD',
-      capabilityId: 'skill.mini_breedstat_rcbd',
+      capabilityId: 'main_agent.respond',
       metadata: expect.objectContaining({
         upload_ids: ['upl-1'],
         forced_by_slash_command: true,
         slash_command: '/mini-breedstat-rcbd',
+        soft_skill_binding: { capability_id: 'skill.mini_breedstat_rcbd', command: '/mini-breedstat-rcbd' },
       }),
     })));
   });

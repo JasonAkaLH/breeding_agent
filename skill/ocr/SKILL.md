@@ -13,6 +13,28 @@ triggers:
   - 文档OCR
   - 图片转文字
   - 解析扫描件
+public_usage:
+  overview: >-
+    识别用户上传的图片、截图、扫描件或 PDF 中的文字，并按用户需要整理为 Markdown、JSON 或简短摘要；也可以回答可上传文件和输出格式的用法问题。
+  input_formats:
+    - name: file_path
+      required: false
+      description: 用户可提供图片或 PDF 文件路径，也可通过会话上传文件；上传优先用于正式识别。
+    - name: uploaded_file
+      required: false
+      description: 会话上传的图片、扫描件或 PDF。
+  parameters:
+    - name: output_format
+      description: 输出格式，默认 Markdown；可选择 JSON 或同时返回 Markdown 与 JSON。
+      examples: [markdown, json, both]
+  examples:
+    - /ocr 识别这张图片里的文字
+    - /ocr 把上传 PDF 转成 Markdown
+    - /ocr 可以输出 JSON 吗？
+  outputs:
+    - OCR 文本内容
+    - Markdown 版识别结果
+    - 按用户要求整理的 JSON 摘要
 execution:
   mode: python_subprocess
   answer_mode: requires_finalizer
