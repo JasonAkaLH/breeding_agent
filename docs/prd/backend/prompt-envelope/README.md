@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/orchestration/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
 - **设计来源**：`docs/superpowers/specs/2026-05-28-llm-prompt-envelope-cache-aware-design.md`
 - **总目标**：把主代理、Planner、Runtime Replanner、Soft Skill、Skill input resolver、conversation memory 与 LLM runtime 的 prompt 组装升级为结构化、可审计、缓存友好、可灰度迁移的提示词信封子系统。
 
