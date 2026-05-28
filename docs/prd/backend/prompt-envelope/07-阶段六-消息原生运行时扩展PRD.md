@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父总纲 PRD**：`docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：`LLMMessage`、`SharedLLMRuntime` messages 入参、`LLMClient` OpenAI-compatible messages 调用、role fallback、thinking/streaming 兼容
 - **非范围**：不默认启用 messages 模式；不接入 provider-specific cache hint；不移除 string fallback

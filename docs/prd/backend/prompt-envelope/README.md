@@ -2,14 +2,14 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父总纲 PRD**：`docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`
 - **设计来源**：`docs/superpowers/specs/2026-05-28-llm-prompt-envelope-cache-aware-design.md`
 - **总目标**：把主代理、Planner、Runtime Replanner、Soft Skill、Skill input resolver、conversation memory 与 LLM runtime 的 prompt 组装升级为结构化、可审计、缓存友好、可灰度迁移的提示词信封子系统。
 
 ## 拆分原则
 
-1. 父实施计划保留总体架构、运行模式和跨阶段验收矩阵；本目录按实施步骤拆成可独立开发、验收、回滚的阶段 PRD。
-2. 每个阶段都必须先补测试，再实现；跨阶段共享的不变量以父计划为准。
+1. 父总纲 PRD 保留总体架构、运行模式和跨阶段验收矩阵；本目录按实施步骤拆成可独立开发、验收、回滚的阶段 PRD。
+2. 每个阶段都必须先补测试，再实现；跨阶段共享的不变量以父总纲 PRD 为准。
 3. 阶段零至阶段五默认不改变 LLM provider 调用形态，除明确启用 `MAF_PROMPT_ENVELOPE_MODE=string` 的路径外，必须保留 `off` / `shadow` 回滚能力。
 4. 阶段六才允许启用 messages-native runtime；阶段七才允许 provider-specific cache hint。
 5. 本专题默认不做数据库 schema 迁移；prompt audit 通过现有 audit-only event payload 扩展承载，且不得记录 raw prompt、raw artifact、secret、DSN 或内部路径。

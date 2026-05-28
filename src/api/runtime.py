@@ -1458,10 +1458,16 @@ class ApiRuntime:
         )
 
         root_message = await self.storage.get_message(task.root_message_id)
-        combined_message = self._combine_resume_message(root_message.content if root_message is not None else task.summary or "", answer_payload)
+        answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
+        merged_answer_payload = self._merge_answer_payloads(answer_payloads)
+        combined_message = self._combine_resume_message(
+            root_message.content if root_message is not None else task.summary or "",
+            merged_answer_payload,
+        )
         resume_metadata = self._resume_skill_revision_metadata(task.task_id)
-        resume_metadata.update(self._answer_payload_metadata(answer_payload))
-        upload_ids = self._answer_upload_ids(answer_payload)
+        for payload in answer_payloads:
+            resume_metadata.update(self._answer_payload_metadata(payload))
+        upload_ids = self._merged_answer_upload_ids(answer_payloads)
         if upload_ids:
             conversation = await self.storage.get_conversation(task.conversation_id)
             if conversation is None:
@@ -1997,6 +2003,40 @@ class ApiRuntime:
         else:
             raise UploadValidationError("answer_payload.upload_ids must be a list")
         return tuple(str(value).strip() for value in values if str(value).strip())
+
+    async def _task_interrupt_answer_payloads(self, task_id: str) -> tuple[dict[str, object], ...]:
+        rows: list[tuple[datetime, str, dict[str, object]]] = []
+        for task_interrupt in await self.storage.list_interrupts_for_task(task_id):
+            for saved_answer in await self.storage.list_interrupt_answers(task_interrupt.interrupt_id):
+                payload = saved_answer.answer_payload
+                if isinstance(payload, Mapping):
+                    rows.append((saved_answer.created_at, saved_answer.interrupt_answer_id, dict(payload)))
+        rows.sort(key=lambda item: (item[0], item[1]))
+        return tuple(payload for _created_at, _answer_id, payload in rows)
+
+    @classmethod
+    def _merge_answer_payloads(cls, answer_payloads: Iterable[Mapping[str, object]]) -> dict[str, object]:
+        merged: dict[str, object] = {}
+        upload_ids: list[str] = []
+        for payload in answer_payloads:
+            for key, value in payload.items():
+                key_text = str(key).strip()
+                if not key_text:
+                    continue
+                if key_text == "upload_ids":
+                    upload_ids.extend(cls._answer_upload_ids(payload))
+                    continue
+                merged[key_text] = value
+        if upload_ids:
+            merged["upload_ids"] = list(dict.fromkeys(upload_ids))
+        return merged
+
+    @classmethod
+    def _merged_answer_upload_ids(cls, answer_payloads: Iterable[Mapping[str, object]]) -> tuple[str, ...]:
+        upload_ids: list[str] = []
+        for payload in answer_payloads:
+            upload_ids.extend(cls._answer_upload_ids(payload))
+        return tuple(dict.fromkeys(upload_ids))
 
     @classmethod
     def _format_answer_message(cls, answer_payload: dict[str, object]) -> str:

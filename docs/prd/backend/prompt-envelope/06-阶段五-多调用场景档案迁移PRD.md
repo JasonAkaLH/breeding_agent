@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父总纲 PRD**：`docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：Soft Skill decision / answer、Planner / repair、Runtime Replanner、Skill input resolver、conversation memory resolver / summary 的 PromptEnvelope profile
 - **非范围**：不启用 messages-native；不改变 public capability validation；不改变 conversation memory 存储模型
