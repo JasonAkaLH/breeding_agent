@@ -138,6 +138,8 @@ If the user has not provided enough information, ask only for the missing items:
 
 For a bare `$field-design` invocation, show only the exact welcome message above. Do not run scripts until the required inputs are available.
 
+When the declared Python wrapper detects missing required user input, it must return the structured `missing_input` contract from `Skill构建指南.md`: `ok: false`, `is_error: true`, `error.type: missing_input`, `missing` with manifest parameter names, and a user-readable `answer`. For Interval designs, the CK lookup prompt (`status: needs_ck_parameters`) is still missing input, not a successful design result.
+
 ## Choose The Workflow
 
 Use `RCBD` when the request mentions randomized complete block design, 随机区组, RCBD, blocks, reps, replicates, or repeated complete sets of entries.

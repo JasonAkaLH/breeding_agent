@@ -622,7 +622,65 @@ parameters:
 `source: artifact` 表示该必填参数由 `uploaded_artifacts` 是否存在来满足；脚本仍通过 `uploaded_artifacts` 读取实际文件内容，`material_data` 顶层字段只是可审计的可用性标记。
 `analysis_mode` 是带默认值的可选枚举参数；如果 stdin 中没有该字段，脚本应使用 `anova`，并拒绝不在 `enum` 列表中的其他值。
 
-### 8.4 脚本必须输出什么
+### 8.4 缺参、补充信息与 interrupt 标准
+
+缺少用户输入时必须先区分两条链路，不能混用：
+
+1. **结构化 interrupt 链路**：适用于需要前端实时显示“需要补充信息”卡片、输入框进入续答模式、用户下一条消息继续同一任务的场景。capability / platform-service handler 可以直接返回 `CapabilityExecutionResult.interrupt` 或 `SkillPlatformHandlerResult.interrupt`；`python_subprocess` Skill 在 manifest / input contract 缺参，或脚本 stdout 返回标准 `missing_input` 时，系统也会基于 manifest 参数合成 open interrupt。只有后端保存为 open interrupt 后，前端才会展示具体 question、required fields、options / upload 提示。
+2. **脚本缺参 / pending Skill context 兜底链路**：仅用于没有 open interrupt 的兼容路径。若任务运行态只看到 `node.waiting_for_input` 且没有 open interrupt，前端只能显示泛化的“正在等待任务给出补充信息”，不能展示具体问题卡片；这属于需要补 manifest / structured missing_input 或 handler interrupt 的缺陷。
+
+因此：
+
+- 如果产品体验要求“实时等待补充信息 + 具体问题卡片”，必须保证缺参路径能产生 open interrupt：优先声明完整 `parameters`（稳定参数名、type、required、source/aliases/patterns），必要时由受控 `platform_service` / native capability handler 显式返回 `interrupt`。
+- `python_subprocess` 的 pre-run 缺参会由系统按 manifest 合成 interrupt；脚本运行后才发现的条件缺参必须输出 structured `missing_input`（见下方 stdout 示例），系统才能继续合成 interrupt。
+- `missing` 数组中的值必须使用 manifest 中声明的稳定参数名（例如 `blocks`、`material_data`），不要使用随意中文句子或脚本内部临时变量名；用户可见说明放在 `answer` / `response_text` 或 interrupt `question` 中。
+- 对前端可见的 interrupt，`required_fields` key 会用于构造补充答案 payload；文件 / artifact 字段必须声明为 `type: artifact|file|data` 或稳定字段名（如 `material_data`、`field_data`、`rice_input`、`file_path`），以便前端允许在等待补充期间上传文件。不要把敏感信息、完整文件内容、SQL、token 或内网地址放入 `question` / `required_fields`。
+
+结构化 interrupt 至少应包含：
+
+```json
+{
+  "interrupt_id": "<stable task/node scoped id>",
+  "conversation_id": "<conversation_id>",
+  "task_id": "<task_id>",
+  "node_id": "<node_id>",
+  "source_agent": "skill.<name>",
+  "source_message_id": "<root or source message id>",
+  "question": "请补充随机区组设计的重复数 / blocks。",
+  "reason_code": "missing_blocks",
+  "required_fields": {
+    "blocks": {
+      "type": "integer",
+      "description": "随机区组重复数，例如 3"
+    }
+  },
+  "status": "open"
+}
+```
+
+脚本缺参 stdout 至少应包含：
+
+```json
+{
+  "ok": false,
+  "is_error": true,
+  "error": {
+    "type": "missing_input",
+    "message": "缺少随机区组重复数 blocks。"
+  },
+  "missing": ["blocks"],
+  "answer": "还不能生成 RCBD 设计，缺少重复数 / blocks。请补充后我再继续。"
+}
+```
+
+禁止做法：
+
+- 在缺少必填参数时继续生成半成品、猜默认值或把“请补充”混入成功结果。
+- 只输出 `ok:false` 但不提供 `missing`，导致 runtime 无法建立可续接上下文。
+- 认为 `node.waiting_for_input` 等价于 open interrupt；二者不是同一契约。
+- 认为 `skill.input_missing` 是前端可见事件；当前它是审计事件，前端不能直接用它渲染具体补充卡片。
+
+### 8.5 脚本必须输出什么
 
 stdout 必须是 JSON object，例如：
 
@@ -689,7 +747,7 @@ outputs:
       mime_types: [text/html]
 ```
 
-### 8.5 脚本型 Skill 示例
+### 8.6 脚本型 Skill 示例
 
 目录：
 
@@ -766,9 +824,10 @@ print(json.dumps(result, ensure_ascii=False))
 5. 自动脚本必须设置 auto_run: true，stdin 为 JSON object，至少包含 query、uploaded_artifacts、metadata；如需业务参数，必须用 parameters/input_parameters 声明可解析字段，LLM 只会在缺参时生成候选并由系统校验后注入，不要依赖主代理口头承诺传参；stdout 必须是 JSON object。若需要下载文件，写入 MAF_SKILL_OUTPUT_DIR 并用 output_files 声明；若需要 R 语言逻辑，不要声明 runtime:r；请创建 runtime:python 的 wrapper 调用包内 .R 脚本和 Rscript。
 6. 只有项目信任、runtime 已注册 handler/service allowlist 的 Skill 才能声明 execution.mode=platform_service；不要把 platform handler 写成动态 import 路径，不要让 python_subprocess 绑定服务。Rust 只能作为 platform_service 背后的受控实现，不能要求框架自动编译或执行。
 7. 如果声明 outputs.required 或 scripts[].outputs.required，脚本 stdout 必须包含这些字段；这只是执行校验契约，不代表字段会原样注入 prompt。推荐输出 answer / response_text / summary，其中 answer / summary 会在 finalizer 使用前归一化为 response_text。
-8. 不要创建 README、安装指南、CHANGELOG 等额外说明文件；除非脚本需要，不要创建 references/ 或 assets/。
-9. Skill 正文保持精简，写 Use when、Workflow、Output、Boundaries；不要放 secret、内网地址、数据库密码或要求模型读取本地路径。
-10. 输出最终文件树和每个文件内容。
+8. 缺少必填输入时必须选择正确链路：需要前端实时具体问题卡片时，受控 platform_service / native handler 可直接返回 open interrupt；普通 `python_subprocess` 在 manifest / input contract 层面缺参时，系统会按 `parameters` / `inputs.required` 合成 open interrupt；脚本运行后才发现的条件缺参必须返回 structured `missing_input`，系统才会继续合成 open interrupt。pending Skill context 只是不具备 open interrupt 时的兼容兜底。missing 字段使用 manifest 参数名，用户可见问题写入 answer / response_text 或 interrupt question。
+9. 不要创建 README、安装指南、CHANGELOG 等额外说明文件；除非脚本需要，不要创建 references/ 或 assets/。
+10. Skill 正文保持精简，写 Use when、Workflow、Output、Boundaries；不要放 secret、内网地址、数据库密码或要求模型读取本地路径。
+11. 输出最终文件树和每个文件内容。
 ```
 
 ## 10. 构建检查清单
@@ -796,6 +855,8 @@ print(json.dumps(result, ensure_ascii=False))
 - [ ] 如果脚本需要业务参数，已在 `parameters` / `input_parameters` 中列出所有可接受字段、类型、required、默认值、aliases 或 patterns，并在脚本内保留最终校验。
 - [ ] 没有默认值且脚本必须依赖的业务参数已声明 `required: true`；有默认值的业务参数声明为非必填并写明 `default`，脚本默认值与 manifest 一致。
 - [ ] 枚举型参数已用 `enum` 列出所有可接受值，脚本会拒绝不在枚举范围内的值。
+- [ ] 缺少必填输入时的 UX 链路已明确：受控 handler 可直接返回 open interrupt；`python_subprocess` 的 `parameters` / `input_contract` pre-run 缺参会由系统合成 open interrupt；脚本运行后发现的条件缺参输出 structured `missing_input` 和清晰 `answer`，由系统合成 open interrupt；pending Skill context 只作为无 open interrupt 时的兼容兜底。
+- [ ] `missing` 数组只使用 manifest 参数名；interrupt `question` / `reason_code` / `required_fields` 不包含 secret、原始文件正文或内部异常。
 - [ ] 不依赖执行时安装新包。
 - [ ] 不依赖 cwd 指向 Skill 目录。
 - [ ] 如果使用 R，Skill 仍通过 Python wrapper 暴露；`.R` 文件在包内，且 R stdout 是 JSON object。
@@ -846,6 +907,8 @@ print(json.dumps(result, ensure_ascii=False))
 | 输出字段和 `outputs.required` 不一致 | 脚本结果失败 | 对齐 required 字段 |
 | 以为 `outputs.required` 字段会原样进入主代理 prompt | finalizer 看不到预期内容 | 输出短 `answer` / `summary` / `response_text`，并依赖归一化后的 dependency context |
 | 把 `output_files` 当作 prompt 内容 | finalizer 不会读取文件正文 | 用 `output_files` 交付下载产物，同时用 `answer` / `summary` 描述文件内容 |
+| 以为审计事件 `skill.input_missing` 本身就是前端 open interrupt | 前端只显示泛化“等待补充信息”或只在历史里显示缺参消息 | 需要实时补充卡片时，声明完整 manifest / input contract 让系统合成 interrupt，或由 platform_service / native handler 返回 `interrupt`；脚本运行后发现的条件缺参必须输出 structured `missing_input` 和清晰 `answer` |
+| `missing` 写中文句子或脚本内部变量名 | pending context 难以续接，用户不知道补哪个 manifest 参数 | 使用 manifest 参数名，用户说明写入 `answer` / `response_text` / interrupt `question` |
 
 ## 13. 和通用本地 Skill runtime 的差异
 

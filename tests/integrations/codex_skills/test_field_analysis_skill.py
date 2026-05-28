@@ -116,6 +116,7 @@ class FieldAnalysisSkillCompatibilityTest(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
+        self.assertIs(result["is_error"], True)
         self.assertIn("answer", result)
         self.assertEqual(result["error"]["type"], "missing_input")
         self.assertIn("design", result["missing"])

@@ -875,7 +875,7 @@ class ApiRuntime:
         if not capability_id.startswith("skill."):
             return None
         interrupts = await self.storage.list_interrupts_for_task(request.task_id)
-        if any(str(interrupt.status) == "open" for interrupt in interrupts):
+        if interrupts:
             return None
 
         events = await self.storage.list_events_for_task(request.task_id)
@@ -1347,6 +1347,27 @@ class ApiRuntime:
 
         root_message = await self.storage.get_message(task.root_message_id)
         combined_message = self._combine_resume_message(root_message.content if root_message is not None else task.summary or "", answer_payload)
+        resume_metadata = self._resume_skill_revision_metadata(task.task_id)
+        resume_metadata.update(self._answer_payload_metadata(answer_payload))
+        upload_ids = self._answer_upload_ids(answer_payload)
+        if upload_ids:
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is None:
+                raise ValueError(f"Unknown conversation: {task.conversation_id}")
+            upload_context = await self.resolve_uploads_for_message(
+                task.conversation_id,
+                conversation.username,
+                upload_ids,
+            )
+            if upload_context["uploaded_artifacts"]:
+                resume_metadata["uploaded_artifacts"] = [
+                    *self._metadata_list(resume_metadata.get("uploaded_artifacts")),
+                    *upload_context["uploaded_artifacts"],
+                ]
+                resume_metadata["skill_artifacts"] = [
+                    *self._metadata_list(resume_metadata.get("skill_artifacts")),
+                    *upload_context["skill_artifacts"],
+                ]
         await self._await_existing_execution(task.task_id)
         await self._schedule_execution(
             OrchestrationRequest(
@@ -1355,7 +1376,7 @@ class ApiRuntime:
                 root_message_id=task.root_message_id,
                 user_message=combined_message,
                 requested_capability_id=task.requested_capability_id,
-                metadata=self._resume_skill_revision_metadata(task.task_id),
+                metadata=resume_metadata,
             )
         )
         return {
@@ -1818,8 +1839,53 @@ class ApiRuntime:
         return {}
 
     @staticmethod
-    def _format_answer_message(answer_payload: dict[str, object]) -> str:
-        return "；".join(f"{key}={value}" for key, value in answer_payload.items())
+    def _answer_payload_metadata(answer_payload: Mapping[str, object]) -> dict[str, object]:
+        metadata: dict[str, object] = {}
+        for key, value in answer_payload.items():
+            key_text = str(key).strip()
+            if not key_text or key_text == "upload_ids":
+                continue
+            if isinstance(value, Mapping) and "text" in value:
+                value = value.get("text")
+            metadata[key_text] = value
+        return metadata
+
+    @staticmethod
+    def _answer_upload_ids(answer_payload: Mapping[str, object]) -> tuple[str, ...]:
+        raw_upload_ids = answer_payload.get("upload_ids")
+        if raw_upload_ids is None:
+            return ()
+        if isinstance(raw_upload_ids, str):
+            values = [raw_upload_ids]
+        elif isinstance(raw_upload_ids, list | tuple):
+            values = raw_upload_ids
+        else:
+            raise UploadValidationError("answer_payload.upload_ids must be a list")
+        return tuple(str(value).strip() for value in values if str(value).strip())
+
+    @classmethod
+    def _format_answer_message(cls, answer_payload: dict[str, object]) -> str:
+        parts: list[str] = []
+        for key, value in answer_payload.items():
+            if key == "upload_ids":
+                continue
+            parts.append(f"{key}={cls._format_answer_value(value)}")
+        if parts:
+            return "；".join(parts)
+        if cls._answer_upload_ids(answer_payload):
+            return "已上传补充文件"
+        return ""
+
+    @staticmethod
+    def _format_answer_value(value: object) -> object:
+        if isinstance(value, Mapping):
+            filenames = value.get("filenames")
+            if isinstance(filenames, list | tuple) and filenames:
+                return "、".join(str(item) for item in filenames if str(item).strip())
+            upload_ids = value.get("upload_ids")
+            if isinstance(upload_ids, list | tuple) and upload_ids:
+                return "已上传文件"
+        return value
 
     @classmethod
     def _combine_resume_message(cls, root_content: str, answer_payload: dict[str, object]) -> str:

@@ -106,67 +106,82 @@ outputs:
             },
         )
 
-    async def test_force_skill_missing_input_creates_persistent_context_and_allows_next_message(self) -> None:
+    async def _wait_for_open_interrupt(self, task_id: str) -> dict[str, object]:
+        await self.runtime._await_existing_execution(task_id)
+
+        async def has_open_interrupt() -> bool:
+            interrupts = await self.runtime.storage.list_interrupts_for_task(task_id)
+            return any(str(interrupt.status) == "open" for interrupt in interrupts)
+
+        await self.wait_for_condition(has_open_interrupt)
+        interrupts = await self.runtime.list_interrupts(task_id)
+        return next(interrupt for interrupt in interrupts if interrupt["status"] == "open")
+
+    async def test_force_skill_missing_input_creates_open_interrupt_for_frontend_card(self) -> None:
         first = await self._force_need_variety("请查询")
         self.assertEqual(first.status_code, 202)
         first_task_id = first.json()["task_id"]
-        first_terminal = await self.wait_for_terminal_task(first_task_id)
-        self.assertEqual(first_terminal["status"], "completed")
+        interrupt = await self._wait_for_open_interrupt(first_task_id)
 
-        context = await self.runtime.storage.get_active_pending_skill_context("conv-pending")
-        self.assertIsNotNone(context)
-        self.assertEqual(context.capability_id, "skill.need_variety")
-        self.assertEqual(context.missing_requirements, ("variety",))
-        self.assertEqual(context.original_user_message, "请查询")
+        self.assertEqual(interrupt["reason_code"], "missing_variety")
+        self.assertIn("品种名称", interrupt["question"])
+        self.assertIn("variety", interrupt["required_fields"])
+        self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-pending"))
         events = await self.runtime.storage.list_events_for_task(first_task_id)
-        self.assertIn("pending_skill_context.created", [event.event_type for event in events])
+        self.assertIn("skill.input_missing", [event.event_type for event in events])
+        self.assertNotIn("pending_skill_context.created", [event.event_type for event in events])
 
-        messages = await self.runtime.storage.list_messages_for_conversation("conv-pending")
-        self.assertTrue(any(message.role == "assistant" and "variety" in message.content for message in messages))
         conversation = await self.runtime.storage.get_conversation("conv-pending")
-        self.assertIsNone(conversation.current_task_id)
+        self.assertEqual(conversation.current_task_id, first_task_id)
 
-    async def test_next_plain_message_continues_pending_skill_and_consumes_context(self) -> None:
+    async def test_interrupt_answer_resumes_skill_and_consumes_no_pending_context(self) -> None:
         first = await self._force_need_variety("请查询")
         self.assertEqual(first.status_code, 202)
-        await self.wait_for_terminal_task(first.json()["task_id"])
-        context = await self.runtime.storage.get_active_pending_skill_context("conv-pending")
-        self.assertIsNotNone(context)
+        task_id = first.json()["task_id"]
+        interrupt = await self._wait_for_open_interrupt(task_id)
 
-        second = await self.submit_message(conversation_id="conv-pending", content="品种是龙粳33", capability_id=None)
-        self.assertEqual(second.status_code, 202)
-        task_id = second.json()["task_id"]
+        answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={"task_id": task_id, "interrupt_id": interrupt["interrupt_id"], "answer_payload": {"variety": "龙粳33"}},
+        )
+        self.assertEqual(answer.status_code, 202)
+        await self.runtime._await_existing_execution(task_id)
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
 
         task = await self.runtime.storage.get_task(task_id)
-        self.assertEqual(task.routing_mode, RoutingMode.AUTO)
+        self.assertEqual(task.routing_mode, RoutingMode.FORCE_CAPABILITY)
         self.assertEqual(task.requested_capability_id, "skill.need_variety")
-        consumed = await self.runtime.storage.get_pending_skill_context(context.context_id)
-        self.assertEqual(consumed.status, "consumed")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-pending"))
         events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertIn("task.interrupt_answered", [event.event_type for event in events])
         self.assertIn("skill.execution_completed", [event.event_type for event in events])
-        self.assertIn("pending_skill_context.consumed", [event.event_type for event in events])
-        plan = next(event for event in events if event.event_type == "workflow.plan_built")
-        self.assertEqual(plan.payload["metadata"]["continued_from_pending_skill_context"], context.context_id)
+        self.assertNotIn("pending_skill_context.consumed", [event.event_type for event in events])
 
-    async def test_new_force_skill_supersedes_existing_pending_context(self) -> None:
+    async def test_new_force_skill_after_interrupt_answer_does_not_supersede_context(self) -> None:
         first = await self._force_need_variety("请查询", conversation_id="conv-supersede")
         self.assertEqual(first.status_code, 202)
-        await self.wait_for_terminal_task(first.json()["task_id"])
-        old = await self.runtime.storage.get_active_pending_skill_context("conv-supersede")
-        self.assertIsNotNone(old)
+        first_task_id = first.json()["task_id"]
+        interrupt = await self._wait_for_open_interrupt(first_task_id)
+        self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-supersede"))
+
+        answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={"task_id": first_task_id, "interrupt_id": interrupt["interrupt_id"], "answer_payload": {"variety": "龙粳31"}},
+        )
+        self.assertEqual(answer.status_code, 202)
+        await self.runtime._await_existing_execution(first_task_id)
+        await self.wait_for_terminal_task(first_task_id)
 
         second = await self._force_need_variety("品种是龙粳31", conversation_id="conv-supersede")
         self.assertEqual(second.status_code, 202)
-        await self.wait_for_terminal_task(second.json()["task_id"])
+        second_task_id = second.json()["task_id"]
+        await self.runtime._await_existing_execution(second_task_id)
+        await self.wait_for_terminal_task(second_task_id)
 
-        superseded = await self.runtime.storage.get_pending_skill_context(old.context_id)
-        self.assertEqual(superseded.status, "superseded")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-supersede"))
-        events = await self.runtime.storage.list_events_for_task(second.json()["task_id"])
-        self.assertIn("pending_skill_context.superseded", [event.event_type for event in events])
+        events = await self.runtime.storage.list_events_for_task(second_task_id)
+        self.assertNotIn("pending_skill_context.superseded", [event.event_type for event in events])
 
     async def test_user_metadata_cannot_forge_pending_continuation(self) -> None:
         response = await self.submit_message(
@@ -196,11 +211,8 @@ outputs:
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
-        async def task_waiting() -> bool:
-            task = await self.runtime.storage.get_task(task_id)
-            return task is not None and task.status == TaskStatus.RUNNING
-
-        await self.wait_for_condition(task_waiting)
+        interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(interrupt["status"], "open")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-interrupt"))
 
     async def test_plain_failure_text_does_not_create_pending_context(self) -> None:

@@ -15,8 +15,10 @@ from src.integrations.codex_skills import (
     SkillScriptExecutionService,
     SkillScriptRunner,
     match_skills,
+    normalize_skill_response_payload,
     resolve_skill_execution_config,
 )
+from src.integrations.codex_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
 from src.integrations.llm_client import LLMClient, ReasoningEffort
 from src.orchestration.answer_roles import (
     ANSWER_SCOPE_METADATA_KEY,
@@ -90,21 +92,14 @@ class MainAgentRespondCapability(CapabilityContract):
         answer_scope = answer_scope_from_metadata(request.metadata)
         response_role_payload = self._response_role_payload(response_role=response_role, answer_scope=answer_scope)
         skill_matches, forced_skill_events = self._resolve_skill_matches(request, user_message)
-        script_results, script_events, script_artifacts = await self._run_auto_scripts(request, user_message, artifact_context, skill_matches)
-        prompt = build_main_agent_prompt(
-            user_message=user_message,
-            skill_matches=skill_matches,
-            artifact_context=artifact_context,
-            script_results=script_results,
-            dependency_context=dependency_context,
-            memory_context=self._memory_context_from_metadata(request.metadata),
-            response_role=response_role,
-            answer_scope=answer_scope,
+        script_results, script_events, script_artifacts, missing_interrupt = await self._run_auto_scripts(
+            request,
+            user_message,
+            artifact_context,
+            skill_matches,
         )
 
         events = [*forced_skill_events, *script_events]
-        thinking_enabled = self._resolve_thinking_enabled(request.metadata)
-        reasoning_effort = self._resolve_reasoning_effort(request.metadata, thinking_enabled=thinking_enabled)
         for match in skill_matches:
             events.append(
                 make_event(
@@ -123,6 +118,36 @@ class MainAgentRespondCapability(CapabilityContract):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
+
+        if missing_interrupt is not None:
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={
+                    "response_source": "skill_input_missing",
+                    "matched_skills": [match.manifest.name for match in skill_matches],
+                    "script_results": script_results,
+                    "prompt_recorded": False,
+                    **response_role_payload,
+                },
+                artifacts=tuple(script_artifacts),
+                events=tuple(events),
+                interrupt=missing_interrupt,
+            )
+
+        prompt = build_main_agent_prompt(
+            user_message=user_message,
+            skill_matches=skill_matches,
+            artifact_context=artifact_context,
+            script_results=script_results,
+            dependency_context=dependency_context,
+            memory_context=self._memory_context_from_metadata(request.metadata),
+            response_role=response_role,
+            answer_scope=answer_scope,
+        )
+        thinking_enabled = self._resolve_thinking_enabled(request.metadata)
+        reasoning_effort = self._resolve_reasoning_effort(request.metadata, thinking_enabled=thinking_enabled)
 
         started_at = time.monotonic()
         chunks: list[str] = []
@@ -423,6 +448,7 @@ class MainAgentRespondCapability(CapabilityContract):
         script_results: list[dict[str, Any]] = []
         pending_file_artifacts = []
         events = []
+        missing_interrupt = None
         raw_script_artifacts = request.metadata.get("skill_artifacts")
         script_input_artifacts = raw_script_artifacts if isinstance(raw_script_artifacts, list | tuple) else artifact_context
         for match in skill_matches:
@@ -481,6 +507,14 @@ class MainAgentRespondCapability(CapabilityContract):
                         missing=execution.missing,
                         resolved_fields=resolution.resolved_fields if resolution is not None else (),
                     )
+                    if missing_interrupt is None:
+                        missing_interrupt = build_missing_input_interrupt(
+                            request=request,
+                            manifest=match.manifest,
+                            skill_name=match.manifest.name,
+                            entrypoint=script.name,
+                            missing=execution.missing,
+                        )
                     continue
                 events.append(
                     make_event(
@@ -500,7 +534,31 @@ class MainAgentRespondCapability(CapabilityContract):
                         )
                     )
                     continue
-                output = dict(execution.output)
+                output = normalize_skill_response_payload(execution.output)
+                script_missing = missing_input_fields_from_payload(output)
+                if script_missing:
+                    script_results.append({"skill_name": match.manifest.name, "entrypoint": script.name, "output": output})
+                    events.append(
+                        make_event(
+                            request,
+                            event_type="skill.input_missing",
+                            payload={
+                                "skill_name": match.manifest.name,
+                                "entrypoint": script.name,
+                                "missing": list(script_missing),
+                            },
+                            visibility=EventVisibility.AUDIT_ONLY,
+                        )
+                    )
+                    if missing_interrupt is None:
+                        missing_interrupt = build_missing_input_interrupt(
+                            request=request,
+                            manifest=match.manifest,
+                            skill_name=match.manifest.name,
+                            entrypoint=script.name,
+                            missing=script_missing,
+                        )
+                    continue
                 artifact = execution.artifact
                 if artifact is not None:
                     discard_diagnostics = self._discard_pending_skill_artifacts(pending_file_artifacts, script_results)
@@ -557,7 +615,7 @@ class MainAgentRespondCapability(CapabilityContract):
                         visibility=EventVisibility.AUDIT_ONLY,
                     )
                 )
-        return script_results, tuple(events), tuple(pending_file_artifacts)
+        return script_results, tuple(events), tuple(pending_file_artifacts), missing_interrupt
 
     def _discard_pending_skill_artifacts(self, script_artifacts: list, script_results: list[dict[str, Any]]) -> tuple[dict[str, str], ...]:
         cleanup_diagnostics: list[dict[str, str]] = []
