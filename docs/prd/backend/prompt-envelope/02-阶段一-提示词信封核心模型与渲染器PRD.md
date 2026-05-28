@@ -33,7 +33,7 @@
 | --- | --- | --- |
 | P1-FR-1 | 必须定义不可变或低副作用的数据模型。 | `PromptSegment`、`PromptEnvelope`、`PromptSegmentAudit`、`PromptRenderAudit`、`RenderedPrompt` 可被单元测试 import。 |
 | P1-FR-2 | 必须实现 deterministic segment order。 | 同一组 segments 输入顺序不同，输出顺序一致。 |
-| P1-FR-3 | 必须实现动态历史预算。 | `bulk_history_budget = trim_max_tokens - required_non_history_tokens - safety_margin`；不再固定 75%。 |
+| P1-FR-3 | 必须实现动态历史预算。 | `bulk_history_budget = trim_max_tokens - required_non_history_tokens - safety_margin`；精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`；不再固定 75%。 |
 | P1-FR-4 | 必须实现 required 超限 fail closed。 | 必保 segment 超预算时抛出明确异常或返回 fail-closed 结果，不截断必保内容。 |
 | P1-FR-5 | 必须实现可压缩/可丢弃裁剪。 | flexible history segment 可按策略裁剪，并在 audit 中记录 tokens_before/after、trim_reason。 |
 | P1-FR-6 | 必须实现 cacheable prefix hash。 | 只覆盖 `cache_affinity=prefix` 且 `mutability=stable` 的 segment。 |
@@ -52,7 +52,7 @@
 2. 新增 `tests/orchestration/test_prompt_envelope.py`。
 3. 先写 segment order、dynamic budget、fail-closed、audit no-raw、prefix hash red/green 测试。
 4. 实现数据模型和 renderer。
-5. 为 token counter fallback 增加更大 safety margin 测试，例如 fallback 时 margin 至少为 `max(2048, trim_max_tokens * 0.02)` 或实施时确认的等价规则。
+5. 为 token counter fallback 增加更大 safety margin 测试：fallback 时必须使用 `max(2048, floor(trim_max_tokens * 0.02))`，精确/可信估算使用 `max(1024, floor(trim_max_tokens * 0.01))`。
 6. 保持所有业务调用点不接入，降低阶段风险。
 
 ## 7. 验收标准

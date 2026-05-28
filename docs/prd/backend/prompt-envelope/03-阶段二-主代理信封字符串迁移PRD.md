@@ -23,7 +23,7 @@
 
 ## 3. 非目标
 
-- 不把 Skill public profile 安全替换作为本阶段完成条件；阶段二可保留现状或仅为阶段四预留 segment。
+- 不把全量工具信息分层和 Skill public profile 安全替换作为本阶段完成条件；但阶段二不得把仍含 `manifest.body` 的 Skill match 路径作为生产 `string` 流量。涉及 Skill match / `/skill` 软绑定时，必须继续走 `off/shadow` 或等待阶段四安全门禁通过。
 - 不改变 `LLMClient` / `SharedLLMRuntime`。
 - 不改前端 UI。
 - 不在 audit 中记录 raw prompt。
@@ -38,10 +38,12 @@
 | P2-FR-4 | `string` 模式必须发送 envelope-to-string prompt。 | fake stream generator 收到新顺序 prompt；current user 与 final guard 接近末尾。 |
 | P2-FR-5 | 文件下载硬约束必须保留。 | string 模式 prompt 仍禁止 `sandbox:/mnt/data`、`file://`、`outputs/...`，并只允许平台 download_url。 |
 | P2-FR-6 | audit event 不影响 SSE。 | 前端可见 `main_agent.output_delta` / `main_agent.output_final` 语义不变。 |
+| P2-FR-7 | `string` 生产放量必须有 Skill 安全门禁。 | 无 Skill match 的主代理回答可独立灰度；含 Skill match / `/skill` 软绑定的 `string` 流量必须等阶段四证明 public profile 不泄漏内部结构后才能放量。 |
 
 ## 5. 非功能需求
 
 - **Backward compatibility**：默认 mode 不得直接切到 `string`；合并时默认应为 `off` 或 `shadow`。
+- **Rollout safety**：P2 的 `string` 仅能作为无 Skill match 场景或开发/测试流量；含 Skill 的生产 `string` 放量属于 P4 后置门禁。
 - **Observability**：`main_agent.llm_call` 或新增 audit-only event 包含 render audit 摘要。
 - **Security**：audit 不含 raw prompt / raw artifact；artifact_context 仍使用现有脱敏逻辑。
 
@@ -52,6 +54,7 @@
 3. 在 `MainAgentRespondCapability.execute` 收集 rendered audit 并写入 audit-only event 或扩展 `main_agent.llm_call` payload。
 4. 更新主代理 prompt 测试，覆盖 `off`、`shadow`、`string`。
 5. 跑 API/main_agent targeted tests，确认 streaming completion-only 行为不变。
+6. 增加含 Skill match 的 mode guard 测试，证明 P4 之前不会把未脱敏 Skill body 经 `string` 送入生产 LLM 调用。
 
 ## 7. 验收标准
 
@@ -59,6 +62,7 @@
 - `conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_main_agent_workflow_and_executor` 通过。
 - `conda run -n multi_agent python -m unittest tests.api.test_main_agent_llm` 通过或等价 API 回归通过。
 - shadow 模式不改变实际 prompt，有测试证据。
+- 含 Skill match / `/skill` 软绑定的 `string` 生产放量被 guard 阻止或显式依赖 P4 安全完成证据。
 - License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 
 ## 8. 风险与缓解
@@ -66,5 +70,6 @@
 | 风险 | 缓解 |
 | --- | --- |
 | prompt 顺序变化影响模型输出。 | 默认 `off/shadow`，string 需显式启用；先用 fake/provider smoke 比较。 |
+| P2 未完成 Skill 脱敏却被生产启用。 | mode guard 禁止含 Skill match 的生产 `string` 流量，直到 P4 public profile 安全门禁通过。 |
 | audit 写入污染前端事件。 | 只使用 `EventVisibility.AUDIT_ONLY`；增加 SSE 回归。 |
 | builder 与旧函数并存导致分叉。 | 明确旧函数只是兼容包装，新增行为在 rendered seam 测试。 |

@@ -17,7 +17,7 @@
 2. `SharedLLMRuntime.generate_text/stream_events` 支持 `str | PromptEnvelope | Sequence[LLMMessage]`。
 3. `LLMClient.generate_text/generate_text_with_thinking/stream_text` 支持 messages。
 4. OpenAI-compatible provider 支持 messages 时发送分 role messages。
-5. provider 不支持 `developer` / `tool` / `system` role 时按父计划 deterministic fallback，并写入 audit。
+5. provider role capability 必须来自启动期 config 或测试显式 config；未知 provider 默认视为不支持扩展 role，并按父计划 deterministic fallback 写入 audit。
 6. thinking / reasoning_delta streaming 不回归。
 
 ## 3. 非目标
@@ -32,7 +32,7 @@
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
 | P6-FR-1 | runtime 必须兼容 str 与 messages。 | 现有 string tests 继续通过；新增 messages fake client tests 通过。 |
-| P6-FR-2 | role fallback 必须 deterministic。 | `developer` 可折叠到 system；`tool` 可渲染为 context block；fallback 进入 audit。 |
+| P6-FR-2 | role fallback 必须 deterministic。 | `developer` 可折叠到 system；`tool` 可渲染为 context block；未知/不支持 provider 默认 fallback；fallback 进入 audit。 |
 | P6-FR-3 | thinking streaming 不回归。 | `reasoning_delta` / `answer` stream 事件仍按当前语义输出。 |
 | P6-FR-4 | messages 模式必须受 feature flag 控制。 | 未设置 `MAF_PROMPT_ENVELOPE_MODE=messages` 时不走 messages-native。 |
 | P6-FR-5 | string 与 messages 语义等价。 | golden 测试对比关键规则、用户请求、tool result、final guard 均存在。 |

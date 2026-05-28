@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Prompt Envelope 分步 PRD 完成目录级 document-perfectization 复审：补齐目录级置信标准、依赖与集成点矩阵、token safety margin 默认规则、P2 `string` + Skill 脱敏后置门禁、阶段零禁止默认红测试、P3 已接受 interrupt answer / 上传 artifact metadata 的可信上下文优先级，以及 messages-native provider role capability 默认 fallback 口径。
 - Interrupt 多轮补充答案 resume 现在会合并同一任务已接受的历史 interrupt answer payload 与上传 artifact metadata：第二次补充标量参数时仍能复用第一次上传的文件上下文，避免 Skill 因缺少早前上传而失败；新增 API 回归覆盖“先上传材料、再补列数”的多缺参链路。
 - 大语言模型提示词信封父总纲 PRD 已迁入 `docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`，并同步更新分步 PRD、索引和历史记录中的引用路径。
 - 大语言模型提示词信封实施计划已拆分为 `docs/prd/backend/prompt-envelope/` 下 8 份阶段 PRD 与索引，覆盖测试基线、核心模型、主代理迁移、对话记忆候选、工具信息安全、多调用场景档案、消息原生运行时与供应商缓存观测，并同步 PRD 总索引与后端总览。
