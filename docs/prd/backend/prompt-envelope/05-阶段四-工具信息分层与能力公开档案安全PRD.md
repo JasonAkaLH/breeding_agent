@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父总纲 PRD**：`docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：工具规则、工具公开档案、工具输入 schema、工具结果 segment、Skill public profile 复用、内部结构泄漏防回归
 - **非范围**：不改变 Skill 执行器 contract；不改变 artifact 下载 API；不修复 Skill resume artifact 继承
