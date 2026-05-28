@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/orchestration/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：`PromptEnvelope`、`PromptSegment`、render audit、segment 排序、动态预算、裁剪策略、prefix hash、字符串渲染核心
 - **非范围**：不接入主代理生产路径；不改 conversation memory 生成逻辑；不扩展 LLMClient messages-native

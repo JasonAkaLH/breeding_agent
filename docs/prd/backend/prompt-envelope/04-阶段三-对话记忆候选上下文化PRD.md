@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/orchestration/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：conversation memory candidate payload、动态历史预算接入、history / clarification / capability summary 优先级、memory audit 字段
 - **非范围**：不改变历史落库模型；不修复 Skill artifact 继承；不改前端历史展示
