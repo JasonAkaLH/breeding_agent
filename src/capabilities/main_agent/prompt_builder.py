@@ -8,6 +8,16 @@ from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL, RESPONSE_ROLE_IN
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 
 _SENSITIVE_ARTIFACT_KEYS = {"content", "raw", "text", "storage_ref", "path", "file_path", "local_path"}
+_SAFE_OUTPUT_FILE_KEYS = (
+    "artifact_id",
+    "filename",
+    "mime_type",
+    "summary",
+    "download_url",
+    "size_bytes",
+    "source_file_count",
+    "archive_format",
+)
 
 
 def build_main_agent_prompt(
@@ -27,6 +37,14 @@ def build_main_agent_prompt(
         "你必须用第一性原理理解用户需求：不要假定用户每次都知道自己要什么、该选哪个 capability 或该提供哪些参数；先从用户真实目标、上下文和可用能力出发推断最有帮助的下一步。",
         "遇到宽泛问题时，优先给出可验证的初步答案、合理假设和下一步建议；只有在缺少关键事实会导致误导或无法安全执行时，才提出一个最关键的澄清问题。",
         "不要编造未提供的文件内容；上传文件只可信任下方 artifact 摘要和 metadata。",
+        (
+            "# 文件和下载链接硬约束\n"
+            "只有当已执行的能力结果中存在 output_files，且其中包含以 /api/v1/artifacts/ 开头、以 /download 结尾的 download_url 时，"
+            "才可以说“文件已生成/可下载”，并且只能引用该平台 download_url 或提示前端下载卡片。\n"
+            "如果 Skill 输出包含 ok=false、is_error=true、error、missing 或 output_file_diagnostics，且没有有效 output_files.download_url，"
+            "必须说明文件未生成或需要补充的信息，不得声称文件已生成，不得编造文件内容、文件名或下载入口。\n"
+            "禁止输出 sandbox:/mnt/data、sandbox:、file://、/mnt/data、本地绝对路径或 outputs/... 作为下载链接；这些都不是本系统的可下载 artifact。"
+        ),
     ]
     memory_payload = sanitize_memory_prompt_payload(memory_context or {})
     if memory_payload:
@@ -178,4 +196,39 @@ def _sanitize_dependency_output(output: Mapping[str, Any]) -> dict[str, Any]:
         "output_size_bytes",
         "external_content_notice",
     )
-    return {key: output[key] for key in allowlist if key in output}
+    safe = {key: output[key] for key in allowlist if key in output}
+    safe_files = _sanitize_output_files(output.get("output_files"))
+    if safe_files:
+        safe["output_files"] = safe_files
+    return safe
+
+
+def _sanitize_output_files(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    files: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        download_url = item.get("download_url")
+        if not _is_platform_download_url(download_url):
+            continue
+        safe = {
+            key: item[key]
+            for key in _SAFE_OUTPUT_FILE_KEYS
+            if key in item and _is_safe_output_file_value(item[key])
+        }
+        if safe:
+            files.append(safe)
+    return files
+
+
+def _is_platform_download_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return text.startswith("/api/v1/artifacts/") and text.endswith("/download")
+
+
+def _is_safe_output_file_value(value: Any) -> bool:
+    return isinstance(value, str | int | float | bool) or value is None
