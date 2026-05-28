@@ -11,6 +11,7 @@ class PendingSkillContextAPITest(APITestCase):
         await super().asyncSetUp()
         root = self.workspace / "pending-skills"
         self._write_need_variety_skill(root)
+        self._write_material_ncols_skill(root)
         self._write_plain_fail_skill(root)
         await self.reconfigure_runtime(
             skill_roots=(self.default_project_skill_root, root),
@@ -59,6 +60,72 @@ parameters:
 ---
 
 # Need Variety
+""",
+            encoding="utf-8",
+        )
+
+    def _write_material_ncols_skill(self, root) -> None:
+        skill_dir = root / "material-ncols"
+        scripts = skill_dir / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "answer.py").write_text(
+            textwrap.dedent(
+                """
+                import json, sys
+
+                payload = json.load(sys.stdin)
+                if not payload.get("ncols"):
+                    print(json.dumps({
+                        "answer": "缺少田块列数",
+                        "error": {"type": "missing_input"},
+                        "missing": ["ncols"],
+                        "message": "缺少田块列数",
+                    }, ensure_ascii=False))
+                    raise SystemExit(0)
+                print(json.dumps({
+                    "answer": "材料和列数都已收到",
+                    "ncols": payload.get("ncols"),
+                    "artifact_count": len(payload.get("uploaded_artifacts") or []),
+                }, ensure_ascii=False))
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: material-ncols
+capability_id: skill.material_ncols
+description: 需要先上传材料、再补充列数的测试 Skill
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    runtime: python
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  material_data:
+    type: artifact
+    required: true
+    aliases:
+      - 材料清单
+      - material_data
+  ncols:
+    type: integer
+    required: false
+    aliases:
+      - ncols
+      - 田块列数
+    patterns:
+      - 'ncols\\s*[=：:]\\s*(\\d+)'
+      - '(\\d+)\\s*个田块'
+---
+
+# Material Ncols
 """,
             encoding="utf-8",
         )
@@ -199,6 +266,74 @@ outputs:
         self.assertIn("task.interrupt_answered", [event.event_type for event in events])
         self.assertIn("skill.execution_completed", [event.event_type for event in events])
         self.assertNotIn("pending_skill_context.consumed", [event.event_type for event in events])
+
+    async def test_interrupt_resume_reuses_previous_upload_answer_across_multiple_missing_inputs(self) -> None:
+        response = await self.submit_message(
+            conversation_id="conv-multi-interrupt",
+            content="请做一个增广对角线设计方案",
+            capability_id="skill.material_ncols",
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+
+        material_interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(material_interrupt["reason_code"], "missing_material_data")
+        self.assertIn("material_data", material_interrupt["required_fields"])
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-multi-interrupt"},
+            files={"file": ("materials.csv", "ped_id,hyb_check,set\nCK,CK,A\nA001,Test,A\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201)
+        upload_id = upload.json()["upload_id"]
+
+        first_answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={
+                "task_id": task_id,
+                "interrupt_id": material_interrupt["interrupt_id"],
+                "answer_payload": {
+                    "material_data": {"filenames": ["materials.csv"], "text": "", "upload_ids": [upload_id]},
+                    "upload_ids": [upload_id],
+                },
+            },
+        )
+        self.assertEqual(first_answer.status_code, 202)
+
+        ncols_interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(ncols_interrupt["reason_code"], "missing_ncols")
+        self.assertIn("ncols", ncols_interrupt["required_fields"])
+
+        second_answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={
+                "task_id": task_id,
+                "interrupt_id": ncols_interrupt["interrupt_id"],
+                "answer_payload": {"ncols": "20个田块"},
+            },
+        )
+        self.assertEqual(second_answer.status_code, 202)
+        await self.runtime._await_existing_execution(task_id)
+
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(terminal["active_node_count"], 0)
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_nodes = [node for node in nodes if node.capability_id == "skill.material_ncols"]
+        self.assertEqual(len(skill_nodes), 1)
+        self.assertEqual(str(skill_nodes[0].status), "completed")
+
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        resolved_events = [event for event in events if event.event_type == "skill.input_resolved"]
+        self.assertTrue(
+            any(
+                "material_data" in event.payload.get("resolved_fields", ())
+                and "ncols" in event.payload.get("resolved_fields", ())
+                for event in resolved_events
+            )
+        )
 
     async def test_new_force_skill_after_interrupt_answer_does_not_supersede_context(self) -> None:
         first = await self._force_need_variety("请查询", conversation_id="conv-supersede")

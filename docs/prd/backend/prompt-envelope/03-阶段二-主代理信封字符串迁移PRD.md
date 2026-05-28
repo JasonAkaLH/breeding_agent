@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父总纲 PRD**：`docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：主代理 prompt envelope builder、`off|shadow|string` 模式、主代理 audit-only event、文件下载硬约束迁移、主代理回归
 - **非范围**：不迁移 Planner/Soft Skill/Skill resolver；不改 LLMClient 入参；不启用 messages-native

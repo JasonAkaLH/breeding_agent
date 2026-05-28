@@ -2,7 +2,7 @@
 
 - **日期**：2026-05-29
 - **状态**：待实施
-- **父实施计划**：`docs/prd/backend/prompt-envelope/大语言模型提示词信封与缓存友好上下文组装实施计划.md`
+- **父总纲 PRD**：`docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：主代理现有 prompt 顺序、conversation memory 静态预算、Skill prompt 安全风险、旧 LLM runtime 字符串路径、关键 API 回归基线
 - **非范围**：不新增 PromptEnvelope 核心实现；不改变生产 prompt；不改 LLMClient / SharedLLMRuntime；不修复 Skill resume artifact 继承问题
