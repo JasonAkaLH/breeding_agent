@@ -6,7 +6,7 @@
 
 ## 1. 测试目标
 
-验证 `skill_help.respond` 提供只读 Skill 文档问答：能解析目标 Skill、基于 `SKILL.md` 安全视图回答、不会执行目标 Skill、不会泄露内部代码结构，并且前端 `/skill-help` 不误入普通 Skill slash 或 interrupt answer 流程。
+验证 `skill_help.respond` 提供 slash-only 只读 Skill 文档问答：只有显式 `/skill-help` 才进入该 capability；普通/自然语言对话不做 Skill Help 解析、不默认进入 help；该能力能解析目标 Skill、基于 `SKILL.md` 安全视图回答、不会执行目标 Skill、不会泄露内部代码结构，并且前端 `/skill-help` 不误入普通 Skill slash 或 interrupt answer 流程。
 
 ## 2. 测试矩阵
 
@@ -29,9 +29,9 @@
 | T15 | capability | safe view 内部过滤 | field-design SKILL.md | prompt 不含 `scripts/run_field_design.py`、`Rscript`、`Set-Variable`、`source_path` |
 | T16 | capability | 文档未说明 | 问不存在字段 | 回答包含“该 Skill 文档未说明” |
 | T17 | capability | 数据格式模板 | 问 `hyb_check` / 输入表 | 回答可包含安全 CSV 模板，不编造完整枚举 |
-| T18 | api | 自然语言 help | `field-design 的 hyb_check 有什么要求？` | 高置信进入 `skill_help.respond` |
-| T19 | api | 执行类请求 | `帮我跑 field-design 做 RCBD` | 不被 help pre-router 截走 |
-| T20 | api | 混合意图 | `field-design 怎么用，顺便帮我跑` | 澄清，不直接执行 Skill |
+| T18 | api | 非 slash 自然语言文档问题 | `field-design 的 hyb_check 有什么要求？` | 不进入 `skill_help.respond`；保持既有普通对话 / planner 路由 |
+| T19 | api | 执行类请求 | `帮我跑 field-design 做 RCBD` | 不进入 `skill_help.respond`；保持既有 Skill / 主代理路线 |
+| T20 | api | 非 slash 混合意图 | `field-design 怎么用，顺便帮我跑` | 不进入 `skill_help.respond`；不做 Skill Help 解析 |
 | T21 | frontend | slash menu | 输入 `/` | 出现内置 `/skill-help` |
 | T22 | frontend | submit metadata | `/skill-help field-design x` | `capabilityId=skill_help.respond`，metadata `skill_help=true` |
 | T23 | frontend | menu 不泄露路径 | `/skill-help` 菜单/候选 | 不显示 `source_path` |
@@ -51,7 +51,7 @@
    - 构造 `display_name=OCR 文档识别` 和另一个 `OCR` 前缀候选。
    - `/skill-help "OCR 文档识别" 需要什么输入` 与 `/skill-help OCR 文档识别 需要什么输入` 都解析完整 display name。
 
-3. `test_ambiguous_or_unknown_skill_returns_deterministic_result_without_llm`
+3. `test_ambiguous_or_unknown_skill_returns_slash_help_result_without_llm`
    - 注入 fake text generator，统计调用次数。
    - unknown / duplicate normalized match 时调用次数为 0。
 
@@ -118,20 +118,24 @@
    - 提交 capability `skill_help.respond`，content `field-design ...`。
    - nodes 只含 `skill_help.respond`，不含 `skill.field_design`。
 
-4. `test_natural_language_skill_doc_question_routes_to_skill_help`
+4. `test_non_slash_skill_doc_question_does_not_route_to_skill_help`
    - content `field-design 的 hyb_check 有什么要求？`。
-   - task/nodes 进入 help。
+   - task/nodes 不进入 `skill_help.respond`；assert 无 help node。
 
 5. `test_execution_request_is_not_routed_to_skill_help`
    - content `帮我跑 field-design 做 RCBD`。
-   - 不被 deterministic help resolver 截走。
+   - 不进入 `skill_help.respond`。
 
-6. `test_skill_help_does_not_supersede_pending_skill_context`
+6. `test_auto_planner_cannot_select_skill_help`
+   - fake planner 尝试输出 `skill_help.respond`。
+   - plan validation / capability filter 拒绝或修复为非 help，除非 request 是 explicit `/skill-help`。
+
+7. `test_skill_help_does_not_supersede_pending_skill_context`
    - 预置 pending skill context。
    - 提交 force `skill_help.respond`。
    - pending context 仍 active，未 superseded。
 
-7. `test_skill_help_no_interrupt_no_business_artifacts`
+8. `test_skill_help_no_interrupt_no_business_artifacts`
    - 完成后 interrupts 列表为空。
    - artifacts 只有 text 类型，无 file/json/data-query artifact。
 
@@ -263,15 +267,15 @@ npm run build
 3. 期望普通助手文本包含：`hyb_check=0` 的规则、非零/Diagonal/Interval 中相应规则、来源为“试验设计智能体 Skill 文档”。
 4. 确认 Chrome/前端无“等待补充信息”、无上传卡片、无业务 Skill 状态卡片。
 5. 检查任务节点：没有 `skill.field_design`。
-6. 输入 “field-design 的 hyb_check 有什么要求？” 验证自然语言 help。
-7. 输入 “帮我跑 field-design 做 RCBD” 验证不被 help 截走。
+6. 输入 “field-design 的 hyb_check 有什么要求？” 验证不会进入 `skill_help.respond`。
+7. 输入 “帮我跑 field-design 做 RCBD” 验证不会进入 `skill_help.respond`，保持既有执行路由。
 8. 触发一个 Skill missing-input interrupt 后输入 `/skill-help field-design x`，确认前端阻止而非提交补充答案。
 
 ## 8. 通过标准
 
 - T1-T24 全部通过。
 - No-leak sentinel 扫描通过。
-- `/skill-help` 与普通 `skill.*` slash command 都保持可用。
+- `/skill-help` 与普通 `skill.*` slash command 都保持可用；非 `/skill-help` 对话不进入 `skill_help.respond`。
 - pending interrupt / pending Skill context 不被 help 请求消费或 supersede。
 - 所有 targeted + 分层回归通过。
 - License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。

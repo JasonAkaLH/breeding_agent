@@ -6,13 +6,13 @@
 
 ## 1. 目标
 
-新增系统级只读 capability `skill_help.respond`，让用户可以通过 `/skill-help` 或高置信自然语言问题查看某个项目 Skill 的 `SKILL.md` 说明，而不会执行目标 Skill、不会触发 interrupt、不会生成业务 artifact，也不会暴露内部代码结构。
+新增系统级只读 capability `skill_help.respond`，让用户只能通过显式 `/skill-help` 查看某个项目 Skill 的 `SKILL.md` 说明，而不会执行目标 Skill、不会触发 interrupt、不会生成业务 artifact，也不会暴露内部代码结构。普通/自然语言对话不做 Skill Help 解析，默认不进入该 capability。
 
 成功后：
 
 - `/skill-help field-design hyb_check 有什么要求` 返回基于 `field-design` `SKILL.md` 的普通助手文本。
 - `/skill-help skill.field_design ...`、`/skill-help field-design ...`、`/skill-help 试验设计智能体 ...` 均能解析同一 Skill。
-- 自然语言“field-design 的 hyb_check 有什么要求？”在高置信条件下进入只读 help，而不是执行 `skill.field_design`。
+- 自然语言“field-design 的 hyb_check 有什么要求？”不进入 `skill_help.respond`；只有 `/skill-help field-design hyb_check 有什么要求` 进入只读 help。
 - `SKILL.md` 未说明的内容明确回答“该 Skill 文档未说明”。
 - 答案不包含脚本路径、Rscript/PowerShell 命令、handler/module/runtime、`source_path`、本地路径、allowlist 或调试文件。
 - pending interrupt / pending Skill context 不会被 `/skill-help` 误消费或误 supersede。
@@ -24,8 +24,8 @@
 | `parse_skill_file` 已读取 `SKILL.md` 正文，未知 frontmatter 进入 `metadata`，`source_path`、`scripts` 也在 manifest 中 | `src/integrations/codex_skills/parser.py:23-52` | help 能复用 manifest，但必须构造 safe view，不能把 manifest 全量给 LLM |
 | `SkillCatalog.get` 只按 Skill name 匹配 | `src/integrations/codex_skills/catalog.py:31-35` | 需要新增解析 helper 支持 capability id、display name、loose/最长前缀匹配 |
 | `SkillRuntimeState` 支持 active/revision bundle 和 `catalog_for_revision` | `src/integrations/codex_skills/skill_runtime_state.py:83-108` | help 必须使用任务绑定 revision，不能临时扫描磁盘 |
-| `WorkflowRouter` 当前只特殊路由 `main_agent.*` 和 `skill.*` | `src/orchestration/workflow_router.py:14-22` | `skill_help.respond` 必须新增 provider 分支，不能落入 default planner |
-| LLM planner / runtime replanner 当前只把 `main_agent.respond` 和 `skill.*` 视为 answer-producing | `src/orchestration/llm_workflow_provider.py:230-232`, `src/capabilities/main_agent/runtime_replanner.py:242-244` | help 计划必须加入 answer-producing 判定，避免被追加 finalizer |
+| `WorkflowRouter` 当前只特殊路由 `main_agent.*` 和 `skill.*` | `src/orchestration/workflow_router.py:14-22` | `skill_help.respond` 必须新增 provider 分支；且只能由 explicit `/skill-help` / force capability 进入，不能落入或暴露给 auto planner |
+| LLM planner / runtime replanner 当前只把 `main_agent.respond` 和 `skill.*` 视为 answer-producing | `src/orchestration/llm_workflow_provider.py:230-232`, `src/capabilities/main_agent/runtime_replanner.py:242-244` | explicit help 计划必须加入 answer-producing 判定，避免被追加 finalizer；auto planner 不得选择 help |
 | 主代理 prompt 当前把匹配 Skill 的 `manifest.body` 原样注入 | `src/capabilities/main_agent/prompt_builder.py:44-53` | help 不能复用匹配即注入路径；safe view 必须先过滤 |
 | 主代理执行时匹配 Skill 后会进入 `_run_auto_scripts`，可能产生 interrupt/artifact | `src/capabilities/main_agent/executor.py:87-145`, `src/capabilities/main_agent/executor.py:447-466` | help 必须独立 executor，不能走 `MainAgentRespondCapability` forced Skill 路径 |
 | runtime 当前只注册 main agent descriptors，然后注册 skill runtime descriptors | `src/api/runtime.py:2050-2068` | 需要注册 `skill_help.respond` descriptor 与 local instance |
@@ -45,6 +45,7 @@
 - 不改变现有 `skill.*` slash command 的强制执行语义。
 - 不在本计划中重写所有 `SKILL.md` 的内容结构；只更新 `Skill构建指南.md` 的 authoring 规则，并让 safe view 对现有文档 fail-closed。
 - MVP 不做 pending interrupt 期间的只读旁路；前端阻止该提交并提示用户先处理/取消当前补充信息。
+- 不实现自然语言 Skill Help 触发；不通过 LLM 判断普通对话是否应该进入 `skill_help.respond`。
 
 ## 4. 需求
 
@@ -65,12 +66,12 @@
 - `WorkflowRouter` 对 `skill_help.respond` 必须进入 `SkillHelpWorkflowProvider`，生成单节点 plan。
 - 该路径不得创建 `skill.*` 节点，不得进入 `SkillWorkflowProvider`。
 
-### R3. 自然语言高置信触发
+### R3. 普通对话 / auto planner 隔离
 
-- 新增 `SkillHelpIntentResolver` 或等价 helper，在没有 explicit capability、没有 pending interrupt answer、没有执行类动词时做 deterministic pre-router。
-- 触发条件：唯一 Skill 命中 + 文档/用法/字段/参数/格式/示例/限制类意图 + 无执行类意图。
-- 命中后设置 `requested_capability_id=skill_help.respond`，metadata 标记 `skill_help_source=auto_detected`。
-- 不确定、多 Skill 命中或混合“解释 + 执行”时不自动执行目标 Skill；返回澄清或让主代理普通回答澄清。
+- 除非用户显式输入 `/skill-help`，系统不得执行 Skill Help 意图解析。
+- 不新增自然语言 deterministic pre-router；不通过 LLM 判断普通对话是否应该进入 `skill_help.respond`。
+- `skill_help.respond` 在 auto planning 时不得作为 LLM planner 可选 capability 暴露；只允许 explicit force 路由使用。
+- “field-design 的 hyb_check 有什么要求？”等不带 `/skill-help` 的问题保持既有普通对话 / planner 路由，不生成 help 节点。
 
 ### R4. Skill 引用解析
 
@@ -93,7 +94,7 @@
 
 - `SkillHelpRespondCapability` 使用非流式 text generator 或等价 LLM seam 生成回答。
 - prompt 必须要求：严格基于 safe view；文档未说明则答“该 Skill 文档未说明”；不暴露内部结构；来源只写 display name/name。
-- 未知 Skill、多匹配、空 `/skill-help`、safe view 为空等 deterministic 场景不调用 LLM，直接返回普通助手文本。
+- 未知 Skill、多匹配、空 `/skill-help`、safe view 为空等 explicit help 场景不调用 LLM，直接返回普通助手文本。
 - LLM 失败返回可恢复错误文本或 capability error；不得改路由执行目标 Skill。
 - 输出为 text artifact + `skill_help.output_final` / audit-only 脱敏事件；不产生业务 artifact 或 interrupt。
 
@@ -123,6 +124,7 @@
 
 - `skill_help.respond` 未注册时 force capability 不可用。
 - 当前 `WorkflowRouter` 会把 `skill_help.respond` 落到 default provider。
+- 当前 auto planner 可能看到所有 public capabilities；help 必须从 auto planner 可选列表排除。
 - 当前 LLM/replanner answer-producing 判定会给非 `skill.*` help 节点追加 finalizer。
 - 当前 frontend slash parser 会把 `/skill-help` 当 unknown slash。
 - 当前 pending interrupt 会把提交当 interrupt answer。
@@ -160,6 +162,7 @@
   - `CompositeExecutor` 增加 `SkillHelpExecutor`。
   - assembly 注入 `skill_runtime_state.catalog_for_revision`、text generator/audit seam。
   - explicit `skill_help.respond` 不 supersede pending Skill context。
+  - auto 模式不得把 `skill_help.respond` 暴露给 LLM planner；可通过 planner capability filter / provider policy / validator denylist 实现。
 - `src/orchestration/workflow_router.py`
   - 构造参数增加 `skill_help_provider`。
   - `capability_id == "skill_help.respond"` 或 `startswith("skill_help.")` 路由到 help provider。
@@ -169,23 +172,22 @@
 
 验收：force `skill_help.respond` 生成单节点 help plan；无 default planner；无 main agent finalizer。
 
-### CP-3: Skill Help intent 与解析 helper
+### CP-3: Slash-only command parser 与 Skill 引用解析 helper
 
-实现 `SkillHelpIntentResolver` / `SkillReferenceResolver`：
+实现 `SkillHelpCommandParser` / `SkillReferenceResolver`：
 
-- `parse_skill_help_command(content)`：识别 raw `/skill-help`，返回 skill_ref/question。
+- `parse_skill_help_command(content)`：只识别 raw `/skill-help`，返回 skill_ref/question。
 - `resolve_skill_reference(catalog, registry, text)`：支持 capability id/name/display_name/normalized/longest-prefix/quoted forms。
-- `detect_skill_help_intent(user_message, catalog, registry)`：高置信自然语言检测。
-- 明确执行动词 denylist，例如“帮我跑/运行/生成/分析/执行/开始/run/generate/analyze/execute”等；文档类 allowlist，例如“怎么用/字段/参数/格式/示例/要求/说明/help/usage/input/output/limit”。
+- 不实现 `detect_skill_help_intent`，不扫描普通自然语言消息，不维护执行动词 denylist / 文档类 allowlist。
 - ambiguous result 返回候选，不调用 LLM。
 
 接线：
 
-- `ApiRuntime.submit_message` 在 `_ensure_supported_capability` 前做 backend `/skill-help` fallback canonicalization。
-- requested capability 为空且无 pending continuation 时，调用 deterministic help intent resolver。
-- explicit `/skill-help` 设置 metadata `skill_help_source=slash_command`；auto 设置 `auto_detected`。
+- `ApiRuntime.submit_message` 在 `_ensure_supported_capability` 前只做 backend `/skill-help` fallback canonicalization。
+- requested capability 为空且消息不以 `/skill-help` 开头时，不调用任何 Skill Help resolver。
+- explicit `/skill-help` 设置 metadata `skill_help_source=slash_command`。
 
-验收：各种引用形态和自然语言测试通过。
+验收：各种 `/skill-help` 引用形态通过；非 `/skill-help` 自然语言不会进入 help。
 
 ### CP-4: Safe view builder 与 prompt
 
@@ -264,7 +266,7 @@ cd frontend && npm run build
 2. 输入 `/skill-help field-design hyb_check 有什么要求`。
 3. 期望普通助手文本回答字段规则，来源为“试验设计智能体 Skill 文档”。
 4. 确认没有 `skill.field_design` node、无 interrupt 卡片、无业务 artifact。
-5. 输入“field-design 的 hyb_check 有什么要求？”验证高置信自然语言触发。
+5. 输入“field-design 的 hyb_check 有什么要求？”验证不会进入 `skill_help.respond`，仍走既有普通对话 / planner 路由。
 6. 在 pending interrupt 状态输入 `/skill-help ...`，确认前端阻止而不是提交补充答案。
 
 ## 6. 验收标准
@@ -274,7 +276,7 @@ cd frontend && npm run build
 - AC-3：回答、prompt 记录、audit payload、artifact text 均不含 `scripts/run_field_design.py`、`Rscript`、`Set-Variable`、`source_path`、`handler`、`runtime` 等内部泄露词。
 - AC-4：capability id、Skill name、display name、含空格 display name 均可解析。
 - AC-5：未知/多匹配 Skill 不调用 LLM，并返回候选/澄清文本。
-- AC-6：自然语言高置信文档问题能进入 help；执行类请求仍进入正常 Skill/主代理路线。
+- AC-6：非 `/skill-help` 的自然语言文档问题不会进入 help；执行类请求仍进入正常 Skill/主代理路线。
 - AC-7：pending interrupt 时 `/skill-help` 不调用 interrupt answer，不 supersede pending Skill context。
 - AC-8：前端 slash 菜单显示 `/skill-help`，提交 capability id 为 `skill_help.respond`，不展示 source path。
 - AC-9：任务完成后前端按普通助手消息显示 help 文本，不显示等待补充卡片或业务 artifact 卡片。
@@ -286,7 +288,7 @@ cd frontend && npm run build
 | --- | --- | --- |
 | Safe view 过滤过松导致内部命令泄露 | 用户看到内部路径/代码结构 | fail-closed 过滤 + internal-token tests + post-check |
 | Safe view 过滤过严导致回答“未说明”过多 | 用户体验下降 | 保留结构化 frontmatter、Input Schema、Welcome、字段/参数段；后续逐步改善 Skill authoring |
-| Natural language 自动触发误判 | 用户想执行却只收到说明，或反之 | help allowlist + execution denylist + 混合意图澄清 + tests |
+| Auto planner 误选 help | 普通问题被错误变成文档问答 | `skill_help.respond` 从 auto planner 可选列表排除；仅 `/skill-help` explicit force 可用 |
 | `skill_help.respond` 未接入 answer-producing | 多一个 main_agent finalizer，可能重复/泄露 | planner/replanner tests 锁定 |
 | pending context 被 help supersede | 用户原业务补全链丢失 | explicit help 不调用 supersede；前端 pending interrupt 阻止；storage/API tests |
 | 前端内置命令与现有 skill command 冲突 | slash UX 混乱 | builtin command 单独 registry，不参与 skill command conflict |
