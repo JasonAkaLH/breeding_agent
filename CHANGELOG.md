@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- 主代理最终回答补齐文件下载硬约束：finalizer prompt 现在明确只有存在平台 `output_files.download_url`（`/api/v1/artifacts/.../download`）时才能声称文件已生成/可下载，Skill 失败或缺少 file artifact 时必须说明未生成/需补充信息，并禁止输出 `sandbox:/mnt/data`、本地路径或 `outputs/...` 伪下载链接；上游能力上下文只透传脱敏后的平台 file descriptor。
+- REST API 静态文档同步新 API 行为：`docs/api/api-doc.html` 补充 Skill 软绑定的外部提交方式、`soft_skill_binding.decision` + `main_agent.output_delta` 流式答疑与历史追问语义，并明确只有平台 file artifact 的 `/api/v1/artifacts/{artifact_id}/download` 才是可下载入口，`sandbox:/mnt/data`、本地路径和 `outputs/...` 不得被客户端当作下载链接。
 - Skill Slash Command 软绑定追问补齐对话历史：soft-binding 的 decision / answer 专用 prompt 现在与普通主代理一样消费同一 conversation memory（最近原文、历史摘要与安全能力摘要），第一轮 `/skill` 答疑完成后会写入 assistant history，后续 `/skill` 追问可看到上一轮用户请求与答复；新增 API 回归覆盖历史落库与追问 prompt 注入。
 - Skill Slash Command 软绑定答疑恢复流式输出：`soft_skill_decision` 仍使用非流式 JSON 判定，但判定为 answer / 低置信执行降级时，公开回答阶段会重新通过 `main_agent.output_delta` transient SSE 推送分段内容，最终回答仍按 completion-only 方式持久化。
 - Skill Slash Command 软绑定主代理判断已落地：外部 API 直接提交 `capability_id=skill.*` 现在 fail-closed，前端 `/skill-name` 统一提交 `main_agent.respond` 并附带 `metadata.soft_skill_binding`；主代理仅基于 public Skill profile 判断“执行还是答疑”，执行决策由 deterministic replanner 在内部展开到目标 Skill，缺参 interrupt 可续接被中断的 Skill 节点；项目级 Skill 补齐 `public_usage`，`Skill构建指南.md` 与静态 API 文档同步明确不得暴露 Skill 内部代码结构。
