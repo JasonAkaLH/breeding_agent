@@ -777,7 +777,9 @@ parameters:
         self.assertFalse(output["ok"])
         self.assertEqual(output["error"]["type"], "missing_input")
         self.assertEqual(output["missing"], ["blocks"])
-        self.assertIn("blocks", prompts[0])
+        self.assertEqual(prompts, [])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("blocks", result.interrupt.required_fields)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)
@@ -953,6 +955,8 @@ parameters:
         self.assertFalse(sentinel.exists())
         output = result.output_payload["script_results"][0]["output"]
         self.assertEqual(output["missing"], ["blocks"])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("blocks", result.interrupt.required_fields)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertIn("skill.input_resolution_diagnostic", event_types)
@@ -1026,6 +1030,9 @@ parameters:
         self.assertFalse(sentinel.exists())
         output = result.output_payload["script_results"][0]["output"]
         self.assertEqual(output["missing"], ["material_data"])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("material_data", result.interrupt.required_fields)
+        self.assertIs(result.interrupt.required_fields["material_data"].get("accepts_upload"), True)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)
@@ -1172,6 +1179,8 @@ outputs:
         self.assertFalse(sentinel.exists())
         output = result.output_payload["script_results"][0]["output"]
         self.assertEqual(output["missing"], ["user_id"])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("user_id", result.interrupt.required_fields)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)

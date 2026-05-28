@@ -94,6 +94,7 @@ class FieldDesignSkillCompatibilityTest(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
+        self.assertIs(result["is_error"], True)
         self.assertIn("answer", result)
         self.assertEqual(result["error"]["type"], "missing_input")
         self.assertIn("material_data", result["missing"])
@@ -151,7 +152,9 @@ class FieldDesignSkillCompatibilityTest(unittest.TestCase):
             )
         )
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertIs(result["is_error"], True)
+        self.assertEqual(result["error"]["type"], "missing_input")
         self.assertEqual(result["status"], "needs_ck_parameters")
         self.assertEqual(result["design"], "interval")
         self.assertIn("ck_spec", result["missing"])

@@ -80,9 +80,21 @@ const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const INTERRUPT_FIELD_LABELS: Record<string, string> = {
+  blocks: '区组数/重复数',
+  ck_spec: 'CK 起始位置和间隔',
   crop: '作物类型',
+  design: '设计类型',
+  field_data: '田间表型数据文件',
+  file_path: '图片/PDF 文件',
+  material_data: '试验材料文件',
   missing_info: '补充信息',
+  ncols: '田块列数',
+  query: '查询问题',
   region: '地区',
+  rice_input: '水稻 VCF/gene_check 文件',
+  sample: '样本名',
+  samples: '样本列表',
+  variety: '品种名称',
   route_id: '查询范围',
   year_range: '年份范围',
 };
@@ -698,10 +710,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     : Math.min(slashMenuActiveIndex, slashCandidates.length - 1);
   const directSlashParse = useMemo(() => parseDirectSlashCommand(input, skillCommands), [input, skillCommands]);
   const slashInputBlocked = !selectedSkillCommand && (directSlashParse.kind === 'not_found' || directSlashParse.kind === 'conflict');
+  const pendingInterruptAcceptsUpload = pendingInterrupt !== null && interruptAcceptsUpload(pendingInterrupt);
+  const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && pendingUploads.length > 0;
+  const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
   const canSubmitComposer = !slashInputBlocked && (
     Boolean(input.trim())
     || selectedSkillCommand !== null
     || directSlashParse.kind === 'matched'
+    || canSubmitUploadOnlyInterruptAnswer
   );
   const slashMenuEmptyMessage = skillCommands.length === 0 ? '暂无可用 Skill' : '未找到 Skill';
 
@@ -782,7 +798,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (!conversationId) {
       setActiveConversationId(targetConversationId);
     }
-    if (!content && intent.kind !== 'ready') return;
+    if (!content && intent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
     clearTransientNotice();
     if (pendingInterrupt) {
       await handleInterruptAnswer(content, pendingInterrupt);
@@ -848,7 +864,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleUploadFile(file: File | undefined) {
-    if (!authUser || !conversationId || !file || interactionLocked || uploadingFile) return;
+    if (!authUser || !conversationId || !file || !canUploadInCurrentComposer || uploadingFile) return;
     clearTransientNotice();
     setUploadingFile(true);
     try {
@@ -895,7 +911,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   function canAcceptDraggedUpload(): boolean {
-    return Boolean(authUser && conversationId && !interactionLocked && !uploadingFile);
+    return Boolean(authUser && conversationId && canUploadInCurrentComposer && !uploadingFile);
   }
 
   function handleUploadDragEnter(event: DragEvent<HTMLDivElement>) {
@@ -927,11 +943,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleInterruptAnswer(content: string, interrupt: PendingInterrupt) {
+    const uploads = interruptAcceptsUpload(interrupt) ? pendingUploads.slice() : [];
     const targetConversationId = conversationIdRef.current;
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     const resumeProgressText = '补充信息已提交，正在继续任务';
-    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content, mode: interrupt.mode };
+    const displayContent = content || uploadAnswerDisplayText(uploads);
+    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode: interrupt.mode };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
       role: 'assistant',
@@ -953,9 +971,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }));
 
     try {
-      await api.answerInterrupt(interrupt.taskId, interrupt.interruptId, buildInterruptAnswerPayload(interrupt, content));
+      await api.answerInterrupt(interrupt.taskId, interrupt.interruptId, buildInterruptAnswerPayload(interrupt, content, uploads));
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(interrupt.taskId, interrupt.mode);
+      setPendingUploads([]);
       setPendingInterrupt(null);
       setCurrentTaskId(interrupt.taskId);
       subscribeToTask(interrupt.taskId, assistantMessage.id, generation, targetConversationId);
@@ -1218,7 +1237,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         block
         aria-label="选择 JSON、CSV、图片或 PDF 文件"
         onClick={() => uploadInputRef.current?.click()}
-        disabled={interactionLocked || uploadingFile}
+        disabled={!canUploadInCurrentComposer || uploadingFile}
         loading={uploadingFile}
       >
         上传文件
@@ -1373,7 +1392,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                             size="small"
                             aria-label={`删除文件 ${upload.filename}`}
                             loading={deletingUploadIds.has(upload.upload_id)}
-                            disabled={interactionLocked}
+                            disabled={active}
                             onClick={() => void handleDeleteUpload(upload)}
                           >
                             删除
@@ -1493,7 +1512,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                     aria-label="上传 JSON、CSV、图片或 PDF 文件"
                     type="file"
                     accept=".json,.csv,.png,.jpg,.jpeg,.pdf,application/json,text/csv,image/png,image/jpeg,application/pdf"
-                    disabled={interactionLocked || uploadingFile}
+                    disabled={!canUploadInCurrentComposer || uploadingFile}
                     onChange={(event) => void handleUploadFile(event.target.files?.[0])}
                   />
                 </Space>
@@ -1715,12 +1734,31 @@ function EmptyWelcome() {
   );
 }
 
-function buildInterruptAnswerPayload(interrupt: PendingInterrupt, content: string): Record<string, unknown> {
+function buildInterruptAnswerPayload(
+  interrupt: PendingInterrupt,
+  content: string,
+  uploads: UploadFileResponse[] = [],
+): Record<string, unknown> {
   const fieldNames = Object.keys(interrupt.requiredFields ?? {});
+  const uploadIds = uploads.map((upload) => upload.upload_id);
+  const filenames = uploads.map((upload) => upload.filename);
+  const payload: Record<string, unknown> = {};
   if (fieldNames.length === 1) {
-    return { [fieldNames[0]]: content };
+    payload[fieldNames[0]] = uploadIds.length > 0
+      ? { text: content, upload_ids: uploadIds, filenames }
+      : content;
+  } else {
+    payload.answer = content;
   }
-  return { answer: content };
+  if (uploadIds.length > 0) {
+    payload.upload_ids = uploadIds;
+  }
+  return payload;
+}
+
+function uploadAnswerDisplayText(uploads: UploadFileResponse[]): string {
+  if (uploads.length === 0) return '';
+  return `已上传文件：${uploads.map((upload) => upload.filename).join('、')}`;
 }
 
 function InterruptPromptCard({ interrupt }: { interrupt: PendingInterrupt }) {
@@ -1742,7 +1780,7 @@ function InterruptPromptCard({ interrupt }: { interrupt: PendingInterrupt }) {
           <Space size={[6, 6]} wrap>{optionLabels.map((option) => <Tag key={option}>{option}</Tag>)}</Space>
         </div>
       ) : null}
-      <Typography.Text className="interrupt-card-hint" type="secondary">回复后将继续当前任务。</Typography.Text>
+      <Typography.Text className="interrupt-card-hint" type="secondary">{interruptAcceptsUpload(interrupt) ? '可直接上传文件，或回复文字后继续当前任务。' : '回复后将继续当前任务。'}</Typography.Text>
     </section>
   );
 }
@@ -1758,6 +1796,14 @@ function InterruptInputBanner({ interrupt, onCancel, cancelling }: { interrupt: 
 
 function interruptFieldLabels(interrupt: PendingInterrupt): string[] {
   return Object.keys(interrupt.requiredFields ?? {}).map((field) => INTERRUPT_FIELD_LABELS[field] ?? field);
+}
+
+function interruptAcceptsUpload(interrupt: PendingInterrupt): boolean {
+  return Object.values(interrupt.requiredFields ?? {}).some((field) => {
+    if (!field || typeof field !== 'object') return false;
+    const metadata = field as { accepts_upload?: unknown; type?: unknown };
+    return metadata.accepts_upload === true || ['artifact', 'file', 'data'].includes(String(metadata.type ?? ''));
+  });
 }
 
 function interruptFieldSummary(interrupt: PendingInterrupt): string {
