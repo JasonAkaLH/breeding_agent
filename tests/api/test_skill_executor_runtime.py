@@ -309,7 +309,7 @@ outputs:
         self.assertEqual(terminal['status'], 'completed')
 
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
-        self.assertEqual([node.capability_id for node in nodes], ['skill.answer_direct'])
+        self.assertEqual([node.capability_id for node in nodes], ['main_agent.respond', 'skill.answer_direct'])
         artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
         self.assertEqual([str(artifact.artifact_type) for artifact in artifacts], ['text'])
         self.assertEqual(artifacts[0].storage_ref, 'RCBD 设计已完成')
@@ -415,7 +415,7 @@ outputs:
         self.assertEqual(terminal['status'], 'completed')
 
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
-        self.assertEqual([node.capability_id for node in nodes], ['skill.echo'])
+        self.assertEqual([node.capability_id for node in nodes], ['main_agent.respond', 'skill.echo'])
         artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
         self.assertEqual([str(artifact.artifact_type) for artifact in artifacts], ['text'])
         self.assertEqual(artifacts[0].storage_ref, 'echo: hello skill')

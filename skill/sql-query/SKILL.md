@@ -35,6 +35,24 @@ triggers:
   - 籼粳稻
   - 粳型
   - 籼型
+public_usage:
+  overview: >-
+    面向品种、审定、基因型、表型和业务资料的只读查询问答；适合用户用自然语言询问品种信息、审定公告、基因型位点或表型记录。
+  input_formats:
+    - name: query
+      required: true
+      description: 用户自然语言查询；应说明查询对象、条件、地区、年份、品种名称、基因或性状等业务限定。
+  parameters:
+    - name: query
+      description: 查询问题本身；系统只返回只读结果摘要和表格预览，不执行写入、修改或删除。
+  examples:
+    - /sql-query 查询某品种的审定信息
+    - /sql-query 对比这些品种的基因型记录
+    - /sql-query 查找 2020 年以后某地区的审定公告
+  outputs:
+    - 查询结果摘要
+    - 表格预览
+    - 必要的数据口径和筛选说明
 parameters:
   query:
     type: string

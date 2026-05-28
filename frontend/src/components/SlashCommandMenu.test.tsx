@@ -10,7 +10,6 @@ function command(index: number): SlashCommand {
     name: `Skill ${index}`,
     displayName: `技能 ${index}`,
     description: `第 ${index} 个 Skill`,
-    sourcePath: `skill-${index}/SKILL.md`,
     hasCommandConflict: false,
   };
 }
@@ -65,6 +64,27 @@ describe('SlashCommandMenu', () => {
         { timeout: 900 },
       );
       expect(screen.getByRole('tooltip').closest('.ant-tooltip')).toHaveClass('slash-command-tooltip');
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
+  });
+
+  it('does not render Skill source paths in the option metadata', () => {
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      render(
+        <SlashCommandMenu
+          candidates={[command(1)]}
+          activeIndex={0}
+          emptyMessage="未找到 Skill"
+          onSelect={vi.fn()}
+        />,
+      );
+
+      expect(screen.queryByText(/SKILL\.md/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/skill-1\/SKILL\.md/)).not.toBeInTheDocument();
     } finally {
       Element.prototype.scrollIntoView = originalScrollIntoView;
     }

@@ -792,6 +792,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
     const content = intent.content;
     const forcedCommand = intent.kind === 'ready' ? intent.command : null;
+    const forcedCapabilityId = intent.kind === 'ready' ? intent.capabilityId : null;
     const forcedMetadata = intent.kind === 'ready' ? intent.metadata : {};
     const targetConversationId = authUser ? (conversationId || loadOrCreateConversationId(authUser.username)) : '';
     if (!authUser || !targetConversationId || active) return;
@@ -800,6 +801,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }
     if (!content && intent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
     clearTransientNotice();
+    if (pendingInterrupt && intent.kind === 'ready') {
+      setSlashMenuOpen(true);
+      showTransientNotice('当前任务正在等待补充信息。请先回答补充问题或取消当前任务，再使用新的 Skill 命令。');
+      return;
+    }
     if (pendingInterrupt) {
       await handleInterruptAnswer(content, pendingInterrupt);
       return;
@@ -830,7 +836,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         modelEdition: modelEdition ?? undefined,
         deepThinking,
         reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
-        capabilityId: forcedCommand?.capabilityId,
+        capabilityId: forcedCapabilityId,
         metadata: {
           ...(pendingUploads.length > 0 ? { upload_ids: pendingUploads.map((upload) => upload.upload_id) } : {}),
           ...forcedMetadata,

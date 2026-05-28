@@ -23,6 +23,9 @@ MAIN_AGENT_PLANNER_PAYLOAD_POLICIES = {
 class MainAgentWorkflowProvider:
     def build_plan(self, request: OrchestrationRequest) -> WorkflowPlan:
         node_id = f"{request.task_id}:main_agent.respond"
+        soft_binding = request.metadata.get("soft_skill_binding")
+        is_soft_binding = isinstance(soft_binding, dict) and str(soft_binding.get("capability_id") or "").startswith("skill.")
+        node_metadata = {"soft_skill_binding": dict(soft_binding)} if is_soft_binding else {}
         return WorkflowPlan(
             task_id=request.task_id,
             nodes=(
@@ -30,14 +33,15 @@ class MainAgentWorkflowProvider:
                     node_id=node_id,
                     capability_id="main_agent.respond",
                     input_payload={"user_message": request.effective_user_message},
+                    metadata=node_metadata,
                     criticality=NodeCriticality.REQUIRED,
                     retry_policy={"max_attempts": 1},
                     timeout_policy={"seconds": 60},
                 ),
             ),
-            metadata={"route": "main_agent"},
-            max_replans=0,
-            max_dynamic_nodes=0,
+            metadata={"route": "main_agent", **({"soft_skill_binding": dict(soft_binding)} if is_soft_binding else {})},
+            max_replans=1 if is_soft_binding else 0,
+            max_dynamic_nodes=4 if is_soft_binding else 0,
         )
 
 

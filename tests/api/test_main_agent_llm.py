@@ -118,7 +118,7 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 2)
+        self.assertEqual(terminal["completed_node_count"], 3)
 
     async def test_explicit_generic_data_lookup_capability_bypasses_llm_planner(self) -> None:
         def planner(_prompt: str) -> str:
@@ -140,7 +140,7 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 2)
+        self.assertEqual(terminal["completed_node_count"], 3)
 
     async def test_default_database_question_auto_builds_legacyquery_then_main_agent_dag(self) -> None:
         prompts: list[str] = []

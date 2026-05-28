@@ -231,6 +231,45 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         self.assertIsNone(decision)
         self.assertEqual(calls, [])
 
+    def test_does_not_consume_soft_skill_execute_signal(self) -> None:
+        calls: list[str] = []
+
+        async def text_generator(prompt: str, **_: object) -> str:
+            calls.append(prompt)
+            return json.dumps({"action": "replan", "nodes": [{"node_id": "bad", "capability_id": "skill.generic_data_lookup"}]})
+
+        context = RuntimeReplanContext(
+            request=OrchestrationRequest(
+                task_id="task-soft",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="执行",
+                metadata={"soft_skill_binding": {"capability_id": "skill.generic_data_lookup"}},
+            ),
+            plan=WorkflowPlan(
+                task_id="task-soft",
+                nodes=(WorkflowNodePlan(node_id="answer", capability_id="main_agent.respond"),),
+                max_replans=1,
+                max_dynamic_nodes=4,
+            ),
+            nodes={"answer": TaskNode("answer", "task-soft", "main_agent.respond", status=NodeStatus.COMPLETED)},
+            node_outputs={
+                "answer": {
+                    "soft_skill_decision": {"decision": "execute", "target_capability_id": "skill.generic_data_lookup"},
+                    "satisfaction": {"satisfied": False, "replan_recommended": True, "reason_code": "soft_skill_execute"},
+                }
+            },
+            completion_status=CompletionStatus.RUNNING,
+        )
+        replanner = MainAgentRuntimeReplanner(
+            capability_registry=self._registry(),
+            macro_providers=self._macro_providers(),
+            text_generator=text_generator,
+        )
+
+        self.assertIsNone(asyncio.run(replanner.build_replan(context)))
+        self.assertEqual(calls, [])
+
     def test_replan_prompt_uses_sanitized_observation_without_sensitive_outputs(self) -> None:
         prompts: list[str] = []
 

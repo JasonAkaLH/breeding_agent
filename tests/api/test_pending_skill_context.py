@@ -101,8 +101,12 @@ outputs:
                 "conversation_id": conversation_id,
                 "content": content,
                 "routing_mode": "force_capability",
-                "capability_id": "skill.need_variety",
-                "metadata": {"forced_by_slash_command": True, "slash_command": "/need-variety"},
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "forced_by_slash_command": True,
+                    "slash_command": "/need-variety",
+                    "soft_skill_binding": {"capability_id": "skill.need_variety", "command": "/need-variety"},
+                },
             },
         )
 
@@ -204,8 +208,12 @@ outputs:
                 "conversation_id": "conv-interrupt",
                 "content": "帮我查询一下",
                 "routing_mode": "force_capability",
-                "capability_id": "skill.generic_data_lookup",
-                "metadata": {"forced_by_slash_command": True, "slash_command": "/generic-data-lookup"},
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "forced_by_slash_command": True,
+                    "slash_command": "/generic-data-lookup",
+                    "soft_skill_binding": {"capability_id": "skill.generic_data_lookup", "command": "/generic-data-lookup"},
+                },
             },
         )
         self.assertEqual(response.status_code, 202)
@@ -222,8 +230,12 @@ outputs:
                 "conversation_id": "conv-plain-failure",
                 "content": "请执行失败技能",
                 "routing_mode": "force_capability",
-                "capability_id": "skill.plain_fail",
-                "metadata": {"forced_by_slash_command": True, "slash_command": "/plain-fail"},
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "forced_by_slash_command": True,
+                    "slash_command": "/plain-fail",
+                    "soft_skill_binding": {"capability_id": "skill.plain_fail", "command": "/plain-fail"},
+                },
             },
         )
         self.assertEqual(response.status_code, 202)

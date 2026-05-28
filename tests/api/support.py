@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import re
 import tempfile
 import threading
 import unittest
@@ -118,7 +120,33 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             and main_agent_llm_client_factory is None
         ):
             def main_agent_stream_generator(_prompt, **_kwargs):
+                prompt = str(_prompt)
+                if _kwargs.get("stage") == "soft_skill_decision" or "Skill 软绑定判断器" in prompt:
+                    match = re.search(r'"capability_id":\s*"(skill\.[^"]+)"', prompt)
+                    capability_id = match.group(1) if match else GENERIC_DATA_SKILL_ID
+                    return (
+                        '{"decision":"execute","target_capability_id":"'
+                        + capability_id
+                        + '","confidence":0.95,"reason_code":"test_fixture_execute"}'
+                    )
                 return "测试回答"
+        elif main_agent_stream_generator is not None and not self._stream_generator_accepts_explicit_stage(main_agent_stream_generator):
+            delegated_main_agent_stream_generator = main_agent_stream_generator
+
+            def main_agent_stream_generator(_prompt, **_kwargs):
+                prompt = str(_prompt)
+                if _kwargs.get("stage") == "soft_skill_decision" or "Skill 软绑定判断器" in prompt:
+                    match = re.search(r'"capability_id":\s*"(skill\.[^"]+)"', prompt)
+                    capability_id = match.group(1) if match else GENERIC_DATA_SKILL_ID
+                    return (
+                        '{"decision":"execute","target_capability_id":"'
+                        + capability_id
+                        + '","confidence":0.95,"reason_code":"test_fixture_execute"}'
+                    )
+                return delegated_main_agent_stream_generator(
+                    _prompt,
+                    **self._stream_generator_supported_options(delegated_main_agent_stream_generator, _kwargs),
+                )
         effective_skill_roots = tuple(skill_roots) if skill_roots is not None else tuple(self.default_skill_roots())
         effective_public_skill_roots = (
             tuple(public_skill_roots)
@@ -283,16 +311,56 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         capability_id: str | None = GENERIC_DATA_SKILL_ID,
         metadata: dict | None = None,
     ) -> httpx.Response:
+        request_metadata = dict(metadata or {})
+        request_capability_id = capability_id
+        routing_mode = "auto"
+        if capability_id is not None and capability_id.startswith("skill."):
+            request_capability_id = "main_agent.respond"
+            routing_mode = "force_capability"
+            request_metadata.setdefault("forced_by_slash_command", True)
+            request_metadata.setdefault("slash_command", f"/{capability_id.removeprefix('skill.').replace('_', '-')}")
+            request_metadata["soft_skill_binding"] = {
+                "capability_id": capability_id,
+                "command": request_metadata["slash_command"],
+            }
         return await self.client.post(
             "/api/v1/conversations/chat-messages",
             json={
                 "conversation_id": conversation_id,
                 "content": content,
-                "routing_mode": "auto",
-                "capability_id": capability_id,
-                "metadata": dict(metadata or {}),
+                "routing_mode": routing_mode,
+                "capability_id": request_capability_id,
+                "metadata": request_metadata,
             },
         )
+
+    @staticmethod
+    def _stream_generator_accepts_explicit_stage(generator) -> bool:
+        try:
+            signature = inspect.signature(generator)
+        except (TypeError, ValueError):
+            return False
+        parameter = signature.parameters.get("stage")
+        return parameter is not None and parameter.kind in {
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }
+
+    @staticmethod
+    def _stream_generator_supported_options(generator, options: dict) -> dict:
+        try:
+            signature = inspect.signature(generator)
+        except (TypeError, ValueError):
+            return {}
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        return {
+            key: value
+            for key, value in options.items()
+            if key != "stage" and value is not None and (accepts_kwargs or key in signature.parameters)
+        }
 
     def default_skill_roots(self) -> tuple[Path, ...]:
         return (self.default_project_skill_root,)
