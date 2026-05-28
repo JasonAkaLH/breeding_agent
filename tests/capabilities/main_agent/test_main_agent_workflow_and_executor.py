@@ -132,9 +132,19 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
             if "Skill 软绑定判断器" in prompt:
                 yield '{"decision":"answer","target_capability_id":"skill.demo","reason_code":"usage_question"}'
             else:
-                yield "demo_data 需要上传 CSV 表格。"
+                yield "demo_data 需要"
+                yield "上传 CSV 表格。"
 
-        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+        transient_events = []
+
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=catalog,
+            transient_event_publisher=publish_transient,
+        )
         result = await executor.execute(
             CapabilityExecutionRequest(
                 capability_id="main_agent.respond",
@@ -150,6 +160,12 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output_payload["response_text"], "demo_data 需要上传 CSV 表格。")
         self.assertNotIn("soft_skill_decision", result.output_payload)
         self.assertEqual([event.event_type for event in result.events], ["soft_skill_binding.decision", "main_agent.output_final"])
+        self.assertEqual(
+            [event.payload["delta"] for event in transient_events if event.event_type == "main_agent.output_delta"],
+            ["demo_data 需要", "上传 CSV 表格。"],
+        )
+        final_event = next(event for event in result.events if event.event_type == "main_agent.output_final")
+        self.assertEqual(final_event.payload["answer_chunk_count"], 2)
         self.assertIn("公开字段说明", seen_prompts[0])
         self.assertIn("公开字段说明", seen_prompts[1])
         combined_prompts = "\n".join(seen_prompts)
