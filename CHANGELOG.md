@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 大语言模型提示词信封实施计划已拆分为 `docs/prd/backend/prompt-envelope/` 下 8 份阶段 PRD 与索引，覆盖测试基线、核心模型、主代理迁移、对话记忆候选、工具信息安全、多调用场景档案、消息原生运行时与供应商缓存观测，并同步 PRD 总索引与后端总览。
 - 大语言模型提示词信封实施计划完成 document-perfectization 复核：补齐 Runtime Replanner、conversation memory resolver / summary、planner repair、现有 public Skill profile 复用、PromptEnvelope 配置与审计出口、无数据库 schema 迁移、安全/观测/回滚要求，并扩展验收矩阵和验证命令。
 - 大语言模型提示词信封实施计划已落入 `docs/orchestration/大语言模型提示词信封与缓存友好上下文组装实施计划.md`：按 P0-P7 拆分测试基线、PromptEnvelope core、主代理 envelope-to-string、conversation memory candidate、工具信息分层、Soft Skill/Planner/Resolver profile、messages-native runtime 与 provider cache 观测，补齐运行模式、验收矩阵、验证命令和 Team lanes。
 - LLM Prompt Envelope 长期设计已落文档并完成 document-perfectization 加固：新增缓存友好 prompt 组装设计，明确 messages-native Prompt Envelope 作为目标架构、第一阶段 envelope-to-string 兼容落地、动态历史预算按本次实际非历史 token 反算，并补齐 KV Cache、primacy/recency、工具信息分层、active continuity notes、provider role fallback、shadow rollout、失败模式与 segment-level 审计验收矩阵。
