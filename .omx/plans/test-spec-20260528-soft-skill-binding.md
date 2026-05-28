@@ -40,8 +40,9 @@
 
 - 返回 4xx。
 - 错误码 `direct_skill_execution_disabled`。
-- 不创建 accepted task 或不进入 orchestration（按现有 API 错误策略确定）。
+- 不创建 accepted task、message 或 orchestration request。
 - 不保存任何会触发 Skill 的 node。
+- 若有审计断言，使用 runtime/audit logger 或结构化日志；不要求 task event，因为 task 不应创建。
 
 ### API-02 soft binding force main_agent 被接受
 
@@ -61,14 +62,15 @@
 
 断言：
 
-- 后端可选择规范到 `main_agent.respond` 或明确记录 soft binding 后让 default planner 进入主代理；实际实现必须稳定。
-- 不允许 default planner 直接把外部请求当 hard skill 执行。
+- 后端 orchestration request 的 `requested_capability_id` 被规范为 `main_agent.respond`。
+- task 可保留原始 routing mode 供审计，但执行计划必须从 `main_agent.respond` 开始。
+- default planner 不会先于主代理判断直接规划目标 `skill.*`。
 
 ### API-04 soft binding target 不存在
 
 请求绑定 `skill.not_exists`。
 
-断言：4xx，错误码建议 `invalid_soft_skill_binding`。
+断言：4xx，错误码 `invalid_soft_skill_binding`。
 
 ### API-05 soft binding target 非 skill
 
@@ -88,15 +90,19 @@
 
 ### API-07 direct skill 非 force 情况
 
-请求 `routing_mode=auto` 但 `capability_id=skill.field_design`。
+请求 `routing_mode=auto` 但显式 `capability_id=skill.field_design`。
 
-断言：同样 fail-closed，避免调用方绕过 force check。
+断言：同样在创建 message/task 前 fail-closed，错误码 `direct_skill_execution_disabled`，避免调用方绕过 force check。
 
 ### API-08 pending context 行为
 
-存在 active pending Skill context 时提交 soft binding。
+存在 active pending Skill context 或 open interrupt 时提交 soft binding。
 
-断言：遵循产品确定规则：若视为新任务则 supersede pending；若 conversation guard 禁止新任务则阻断。无论哪种，不把 `/skill-name ...` 当作旧 interrupt answer 静默消费。
+断言：
+
+- 若只是 pending Skill context 兼容兜底，soft binding 作为显式新意图 supersede 旧 pending context。
+- 若存在 open interrupt 且 conversation guard 不允许新任务，前端 / 后端明确阻断新 soft binding。
+- 任一情况下都不得把 `/skill-name ...` 当作旧 interrupt answer 静默消费。
 
 ## 4. Public profile 测试用例
 
@@ -140,13 +146,13 @@
 
 ### PROF-04 public_usage 优先
 
-manifest metadata 有 `public_usage` 时，profile 使用其用户可见描述；没有时 fallback 到 description / parameters / outputs。
+manifest metadata 有 `public_usage` 时，profile 使用其用户可见描述；只有非项目级测试 fixture 缺少 `public_usage` 时才允许 fallback 到 description / parameters / outputs。项目级 Skill 缺少 `public_usage` 必须由 PROF-05 失败暴露。
 
 ### PROF-05 public_usage schema contract
 
 项目级 `skill/*/SKILL.md` 均满足：
 
-- `public_usage` 不为空，或明确允许 fallback 的测试豁免。
+- `public_usage` 不为空；项目级 Skill 不允许用 fallback 豁免通过 completion gate。
 - `public_usage` 不包含内部路径、脚本名、handler、secret。
 - 输入数据字段说明足够回答“数据怎么构建、值是什么”。
 
@@ -177,6 +183,7 @@ LLM decision fixture：`decision=execute`、`confidence=high`、target matches�
 - output payload 含 `soft_skill_decision.decision=execute`。
 - satisfaction `replan_recommended=true`、`reason_code=soft_skill_execute`。
 - 不生成用户可见“已完成”最终 answer。
+- 不发送用户可见 `main_agent.output_delta/output_final` 正文；若框架需要结果 artifact，只能是内部/非前端展示的 decision payload。
 
 ### MA-03 低置信 execute 降级 answer
 
@@ -258,6 +265,12 @@ binding revision 与 active catalog mismatch / target 不在 revision catalog。
 
 断言 fail-closed，不 fallback 到最新 Skill。
 
+### ORCH-08 通用 LLM replanner 不消费 soft execute 信号
+
+SoftSkillBindingReplanner 因 target mismatch / missing binding / revision mismatch 拒绝 execute signal。
+
+断言后续 `MainAgentRuntimeReplanner` 不会把 `satisfaction.reason_code=soft_skill_execute` 当普通 replan 推荐交给 LLM 规划任意 DAG。
+
 ## 7. Frontend 测试用例
 
 ### FE-01 direct slash ready intent
@@ -307,9 +320,13 @@ slash soft binding + 已上传文件。
 
 ### FE-08 pending interrupt 下 slash 行为
 
-当 App 有 pendingInterrupt 时输入 `/field-design ...`。
+当 App 有 open `pendingInterrupt` 时输入 `/field-design ...`。
 
-断言行为符合实现规则：要么明确阻断新任务，要么作为新 soft binding submit 并 supersede；不得把 slash 文本当旧 interrupt answer 静默提交。
+断言：
+
+- 前端明确阻断新 soft binding submit，并提示需要先完成或取消当前补充信息。
+- 不调用 interrupt answer API，也不把 slash 文本当旧 interrupt answer 静默提交。
+- 仅后端 pending Skill context 兼容兜底（无 open interrupt 卡片）才允许 soft binding 作为新意图 supersede。
 
 ## 8. E2E / smoke 场景
 
@@ -390,6 +407,7 @@ python scripts/run_fullstack_dev.py
 - API direct `skill.*` fail-closed。
 - Slash 前端不再提交 `capability_id=skill.*`。
 - soft binding answer / execute / missing-input 三条路径都有自动化测试。
+- 现有 API 层旧 hard-skill submit 测试已迁移，不再把外部 `capability_id=skill.*` 当合法客户端请求。
 - Public profile no-leak 测试覆盖所有项目级 Skill。
 - `Skill构建指南.md` 和 API 文档已同步。
 - 前后端 targeted + layered regression 通过，或明确记录不可运行原因。

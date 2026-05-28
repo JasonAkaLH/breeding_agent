@@ -14,7 +14,7 @@
 1. `/field-design hyb_check 怎么填？` 只返回字段/格式解释，不运行 `skill.field_design`。
 2. `/field-design 用这个 CSV 做 RCBD，3 个重复` 在上传和参数齐全时直接执行内部 Skill，不二次确认。
 3. `/field-design 帮我做 RCBD` 在缺材料或参数时生成 open interrupt，前端展示具体 question / required fields。
-4. 外部 API 直接提交 `routing_mode=force_capability, capability_id=skill.*` fail-closed，错误码稳定为 `direct_skill_execution_disabled`。
+4. 外部 API 只要直接提交 `capability_id=skill.*`（不论 `routing_mode` 是 `force_capability` 还是 `auto`）都必须 fail-closed，错误码稳定为 `direct_skill_execution_disabled`。
 5. 软绑定 prompt 只注入 allowlisted public Skill profile，不注入 raw `SKILL.md` body，不泄漏 `source_path`、script path、wrapper、Rscript、handler、sidecar、secret、DB/LLM provider 等内部信息。
 6. 非 slash 普通消息、LLM 自动规划、内部 `skill.*` DAG 展开、Skill finalizer、interrupt 续答不回归。
 
@@ -31,6 +31,7 @@
 - `SkillManifest` 已包含 `name`、`description`、`triggers`、`inputs`、`outputs`、`scripts`、`parameters`、`metadata`，足够从 manifest 构造 allowlisted public profile（`src/integrations/codex_skills/manifest.py:12-23`）。
 - `build_skill_capability_registry()` 已能根据 public roots 生成 active public `skill.*` descriptor，并提供 `display_name` / `description` / `source_path` 等字段；soft profile 需要复用 public 判断但不能把 `source_path` 暴露给 LLM（`src/integrations/codex_skills/skill_capabilities.py:39-83`, `src/integrations/codex_skills/skill_capabilities.py:101-118`）。
 - runtime replanner 已有 `RuntimeReplanner` interface 与 `CompositeRuntimeReplanner`，可插入 deterministic soft-binding replanner，并在 runtime assembly 中排在 `MainAgentRuntimeReplanner` 之前（`src/orchestration/runtime_replanner.py:14-35`, `src/orchestration/runtime_replanner.py:43-56`, `src/api/runtime.py:2240-2249`）。
+- 现有 API / 前端 / orchestration 回归中有多处直接通过 submit-message 或测试 helper 传 `capability_id=skill.*`；实施时必须区分“外部 API direct skill 请求下线”和“内部 orchestration / macro provider 仍允许 skill.* 节点”，并迁移 API 层旧测试，避免旧测试继续把 hard execution 当作合法客户端行为（例如 `tests/api/test_slash_force_capability.py`、`tests/api/test_task_list.py`、`tests/api/test_pending_skill_context.py`、`frontend/src/api/client.test.ts`）。
 
 ## 3. 范围
 
@@ -44,7 +45,8 @@
 - deterministic soft Skill replanner。
 - 缺参 interrupt / finalizer 回归。
 - `Skill构建指南.md`、API 文档、相关测试更新。
-- 项目级 Skill `SKILL.md` 如需要，补充用户可见 `public_usage` 信息，避免依赖 raw body 回答字段格式。
+- 迁移现有 API 层 hard-skill submit 测试：客户端 submit-message 不再用 `capability_id=skill.*` 作为合法路径；需要验证 Skill 执行时改走 soft binding execute、LLM planner fixture、或更低层 orchestration / SkillWorkflowProvider 测试。
+- 项目级 Skill `SKILL.md` 必须补充用户可见 `public_usage` 信息，避免依赖 raw body 回答字段格式；fallback 仅允许测试 fixture 或非项目级临时 Skill 使用。
 
 ### 3.2 不包含
 
@@ -58,7 +60,7 @@
 
 ### D1. 外部 direct `skill.*` fail-closed
 
-API 边界拒绝外部 `force_capability + capability_id=skill.*`，返回稳定错误码 `direct_skill_execution_disabled`。内部 planner / replanner 生成的 `skill.*` 节点不受影响。
+API 边界拒绝任何外部 submit-message 直接指定 `capability_id=skill.*` 的请求；该规则不依赖 `routing_mode`。无论调用方传 `force_capability`、`auto`，还是未来新增的外部 routing mode，只要 requested capability 是 `skill.*`，都返回稳定错误码 `direct_skill_execution_disabled`。内部 planner / replanner 生成的 `skill.*` 节点不受影响。
 
 理由：用户已明确“不保留硬执行接口，以防不看文档的同事还在调老接口”。静默兼容会延续误执行风险。
 
@@ -91,7 +93,7 @@ API 边界拒绝外部 `force_capability + capability_id=skill.*`，返回稳定
 
 ### D5. `public_usage` 作为长期 Skill 写作入口
 
-`SkillManifest.metadata` 已可承载未知 frontmatter。建议在项目级 `SKILL.md` frontmatter 增加可选 `public_usage` mapping，例如：
+`SkillManifest.metadata` 已可承载未知 frontmatter。项目级 `SKILL.md` frontmatter 必须增加 `public_usage` mapping；测试 fixture 或非项目级临时 Skill 可使用 fallback。例如：
 
 ```yaml
 public_usage:
@@ -107,7 +109,18 @@ public_usage:
     - HTML layout preview
 ```
 
-profile builder 优先使用 `public_usage`，fallback 到 description / triggers / parameters / outputs；不得 fallback 到 raw body。
+profile builder 对项目级 Skill 必须优先使用 `public_usage`，并可合并 description / triggers / parameters / outputs 形成结构化摘要；不得 fallback 到 raw body。仅测试 fixture 或非项目级临时 Skill 可以在没有 `public_usage` 时 fallback 到 description / parameters / outputs。
+
+## 4.5 非功能需求
+
+| 维度 | 要求 |
+| --- | --- |
+| 安全 / 隐私 | 软绑定 prompt 必须只使用 public profile；任何 raw `SKILL.md` body、source path、脚本路径、secret、DB/LLM provider、内部 endpoint 都不得进入 LLM prompt 或前端展示。 |
+| 可靠性 | direct `skill.*` 外部请求必须在创建业务 task / node 前 fail-closed；不得出现“先接受任务再失败执行”的半状态。 |
+| 可观测性 | direct reject、soft binding decision、execute signal validation reject 必须有脱敏审计或结构化日志；如果拒绝发生在 task 创建前，使用 runtime/audit logger 而不是 task event。 |
+| 兼容性 | `/api/v1/capabilities` 仍可暴露 public Skill 用于发现和 slash picker；但 capability descriptor 的可发现不代表 submit-message 可直接请求。 |
+| 可测试性 | answer / execute / missing-input 三条路径必须有自动化测试；no-leak 断言覆盖所有项目级 Skill。 |
+| 用户体验 | 明确执行且输入齐全时不二次确认；询问型输入不显示 Skill progress，不生成业务 artifact。 |
 
 ## 5. 分阶段实施计划
 
@@ -118,6 +131,7 @@ profile builder 优先使用 `public_usage`，fallback 到 description / trigger
 新增 / 修改测试：
 
 - `tests/api/test_soft_skill_binding.py`
+- 迁移旧 hard-skill submit 测试：`tests/api/test_slash_force_capability.py` 应改为 direct skill reject；`tests/api/test_task_list.py`、`tests/api/test_message_submission.py`、`tests/api/test_pending_skill_context.py` 等若需要 Skill 结果，必须改用 soft binding execute fixture、planner fixture 或内部 orchestration 层测试，不再把外部 direct `skill.*` submit 当合法客户端路径。
 - `tests/integrations/codex_skills/test_public_skill_profile.py`
 - `tests/capabilities/main_agent/test_soft_skill_binding.py`
 - `tests/orchestration/test_soft_skill_replanner.py`
@@ -133,13 +147,14 @@ profile builder 优先使用 `public_usage`，fallback 到 description / trigger
 
 步骤：
 
-1. 在 submit 前置校验中识别外部 direct `skill.*`：`routing_mode=force_capability` 且 canonical capability 以 `skill.` 开头时拒绝。
+1. 在 submit 前置校验中识别外部 direct `skill.*`：只要请求体显式 `capability_id` canonical 后以 `skill.` 开头就拒绝，不论 `routing_mode`。该拒绝应发生在保存 message/task 前。
 2. 新增 soft binding 解析 helper：校验 `metadata.soft_skill_binding.capability_id` 是 active public Skill descriptor。
 3. 标准化 metadata：写入 `soft_skill_binding.capability_id`、`soft_skill_binding.command`、`soft_skill_binding_source`、`skill_bundle_revision`。
 4. drop 用户伪造的内部字段：继续防 `forced_skill_name` / `macro_source` / `skill_execution_mode` / `forced_skill_capability_id` 等进入执行 metadata。
-5. soft binding 请求如果 `capability_id` 为空或 auto，可规范成 `main_agent.respond`；如果显式 force，则只允许 `main_agent.respond`。
-6. soft binding 初始请求不设置 `defer_task_completed_until_pending_skill_context_processed`；该 flag 只应由内部 Skill 执行节点相关路径设置。
-7. direct reject 记录 audit-only 事件或结构化日志，避免泄漏用户全文或上传内容。
+5. soft binding 请求必须在 orchestration request 层规范成 `requested_capability_id=main_agent.respond`。客户端可以传 `routing_mode=auto` 或 `force_capability + main_agent.respond`，但后端不得让 default planner 抢先把 soft binding 当 hard Skill 执行。
+6. soft binding 是显式新意图：若只有 pending Skill context 兼容兜底，应 supersede 旧 pending context；若存在 open interrupt 且 conversation guard 不允许新任务，前端 / 后端应明确阻断新 soft binding，而不是把 slash 文本当作旧 interrupt answer 消费。
+7. soft binding 初始请求不设置 `defer_task_completed_until_pending_skill_context_processed`；该 flag 只应由内部 Skill 执行节点相关路径设置。
+8. direct reject 记录脱敏 audit/log。由于拒绝发生在 task 创建前，默认使用 runtime/audit logger 或结构化日志；只有实现选择先创建 rejected task 时才允许 task audit-only event。
 
 验收：API 测试覆盖 reject / accept / invalid binding / malicious metadata。
 
@@ -184,8 +199,9 @@ profile builder 优先使用 `public_usage`，fallback 到 description / trigger
 4. 使用现有 LLM runtime 做静默 decision 生成：可复用 stream generator 收集 JSON，或注入独立 decision generator；实现时优先选择最少侵入方式。
 5. 解析 decision：仅允许 `answer|execute`；低置信 / JSON 无效 / target mismatch / 非绑定 Skill 一律降级 answer。
 6. answer 路径调用正常 streaming answer prompt，但注入 public profile 而不是 raw Skill body，且禁用 auto scripts。
-7. execute 路径返回 output payload：`soft_skill_decision` + `satisfaction.replan_recommended=true`，不展示伪最终答案。
+7. execute 路径返回 output payload：`soft_skill_decision` + `satisfaction.replan_recommended=true`，并标记 `response_source=soft_skill_decision`；不得发送用户可见 `main_agent.output_delta/output_final` 正文，也不得持久化“已完成/将执行”伪最终答案。
 8. 输出 audit-only 事件：`soft_skill_binding.decision`，记录 decision / reason_code / confidence / target capability，不记录 raw prompt。
+9. soft-binding execute signal 必须是 deterministic replanner 专用信号；通用 `MainAgentRuntimeReplanner` 不得在 soft replanner 拒绝后再消费 `reason_code=soft_skill_execute` 去让 LLM 规划任意 DAG。
 
 验收：询问型输入不产生 script result；execute 型输入产生 deterministic signal；无效 JSON 安全降级。
 
@@ -202,6 +218,7 @@ profile builder 优先使用 `public_usage`，fallback 到 description / trigger
 5. 通过现有 `WorkflowExpander` 展开，复用 `SkillWorkflowProvider` finalizer / executor 逻辑。
 6. `max_replans` / `max_dynamic_nodes` 只在 soft-binding initial main-agent plan 上开放；普通主代理仍为 0。
 7. 在 runtime assembly 的 `CompositeRuntimeReplanner` 中排在 `MainAgentRuntimeReplanner` 之前。
+8. 更新 `MainAgentRuntimeReplanner` 或其输入过滤：对 `satisfaction.reason_code=soft_skill_execute` / `soft_skill_decision` 输出不做通用 LLM replan，防止 deterministic validation reject 后被 LLM replanner 兜底执行。
 
 验收：execute signal 可以展开到 Skill 执行节点；target mismatch / missing binding / budget exhausted 均拒绝。
 
@@ -225,7 +242,7 @@ profile builder 优先使用 `public_usage`，fallback 到 description / trigger
 步骤：
 
 1. 在 `Skill构建指南.md` 增加 soft binding / public usage 标准：说明写什么、禁止写什么、如何描述数据格式与字段值。
-2. 为项目级 Skill 补充 `public_usage`（至少 field-design、field-analysis、ocr、rice-genie、sql-query），避免软绑定回答依赖 raw body。
+2. 为所有项目级 Skill 补充 `public_usage`（当前至少 field-design、field-analysis、ocr、rice-genie、sql-query），避免软绑定回答依赖 raw body；项目级 Skill 不允许用“无 public_usage 但 fallback 可用”通过 completion gate。
 3. API 文档更新 submit-message：direct `skill.*` 禁止；点名 Skill 使用 `metadata.soft_skill_binding`。
 4. capability list 文档说明 `skill.*` capability 仍用于发现和内部编排，不代表客户端可直接 request。
 
@@ -295,11 +312,11 @@ Canonical metadata 应由后端规范化，不信任用户附带的 `skill_name`
 | --- | --- |
 | LLM 误执行询问型输入 | execute 需要 valid JSON + medium/high confidence + target matches binding；失败默认 answer；测试覆盖“怎么填/支持什么/示例是什么”。 |
 | 软绑定 answer 泄漏内部实现 | public profile allowlist；不读取 raw body；forbidden token tests。 |
-| 老客户端因 hard skill API 下线失败 | fail-closed 错误码明确；API 文档同步；audit 记录 direct reject。 |
+| 老客户端因 hard skill API 下线失败 | fail-closed 错误码明确；API 文档同步；runtime/audit log 记录 direct reject。 |
 | execute 后缺参仍泛化等待 | CP-8 验证 open interrupt；继续使用 manifest / structured missing_input contract。 |
 | 普通 main_agent 被意外重编排 | 只有 soft binding plan 开 replan budget；普通 plan 保持 0。 |
 | LLM 输出任意 DAG | LLM 只输出 bound execute signal；DAG 由 deterministic replanner 构造。 |
-| Skill public_usage 维护成本 | 指南和 manifest tests 将其变为项目级 Skill contract，fallback 保证已有参数仍可解释。 |
+| Skill public_usage 维护成本 | 指南和 manifest tests 将其变为项目级 Skill contract；fallback 只服务非项目级测试 fixture，项目级 Skill 必须补齐 public_usage。 |
 
 ## 8. 验证命令
 
