@@ -6,13 +6,24 @@
 - **设计来源**：`docs/superpowers/specs/2026-05-28-llm-prompt-envelope-cache-aware-design.md`
 - **总目标**：把主代理、Planner、Runtime Replanner、Soft Skill、Skill input resolver、conversation memory 与 LLM runtime 的 prompt 组装升级为结构化、可审计、缓存友好、可灰度迁移的提示词信封子系统。
 
+## 目录级置信标准
+
+本目录作为一组 PRD 交付，而不是互不相干的文档集合。审查与实施时必须同时满足以下置信标准：
+
+- **目标一致**：所有阶段都服务于结构化、可审计、缓存友好、可灰度回滚的 LLM 输入组装，不把单点 bugfix 包装成 PromptEnvelope。
+- **范围继承**：各阶段默认继承父总纲 PRD 的干系人、受影响系统、数据/安全/观测边界；阶段 PRD 只记录本阶段新增或收窄的范围。
+- **测试先行**：每个阶段必须先补能失败描述目标行为的测试，再实现；默认回归套件不得留下未标注、未隔离的红测试。
+- **启用门禁**：任何会改变实际发送给 LLM 内容的模式，都必须满足对应阶段的安全门禁后才能用于生产流量。
+- **回滚可证**：`off` / `shadow` / `string` / `messages` 的切换、fallback 与 audit 行为必须有自动化测试或可重复的 fake-provider 验证。
+
 ## 拆分原则
 
 1. 父总纲 PRD 保留总体架构、运行模式和跨阶段验收矩阵；本目录按实施步骤拆成可独立开发、验收、回滚的阶段 PRD。
 2. 每个阶段都必须先补测试，再实现；跨阶段共享的不变量以父总纲 PRD 为准。
 3. 阶段零至阶段五默认不改变 LLM provider 调用形态，除明确启用 `MAF_PROMPT_ENVELOPE_MODE=string` 的路径外，必须保留 `off` / `shadow` 回滚能力。
-4. 阶段六才允许启用 messages-native runtime；阶段七才允许 provider-specific cache hint。
-5. 本专题默认不做数据库 schema 迁移；prompt audit 通过现有 audit-only event payload 扩展承载，且不得记录 raw prompt、raw artifact、secret、DSN 或内部路径。
+4. 阶段二即使支持 `string`，也只能作为无 Skill 匹配场景或受控开发 / shadow 灰度；凡涉及 Skill match / `/skill` 软绑定的生产 `string` 流量，必须等阶段四完成 public Skill profile 安全替换并通过敏感信息扫描后才允许放量。
+5. 阶段六才允许启用 messages-native runtime；阶段七才允许 provider-specific cache hint。
+6. 本专题默认不做数据库 schema 迁移；prompt audit 通过现有 audit-only event payload 扩展承载，且不得记录 raw prompt、raw artifact、secret、DSN 或内部路径。
 
 ## 阶段文件
 
@@ -32,7 +43,7 @@
 - `MAF_PROMPT_ENVELOPE_MODE=off` 必须始终可回滚到旧 prompt 路径。
 - `shadow` 模式只允许增加 audit，不得改变实际发送给 LLM 的 prompt。
 - 稳定 system / tool rules 是 cacheable prefix；task_id、conversation_id、username、当前用户问题、history、artifact、dependency result 不得进入 stable prefix。
-- 历史预算必须按 `trim_max_tokens - required_non_history_tokens - safety_margin` 反算，不得继续把 `trim_max_tokens * 0.75` 当最终历史预算。
+- 历史预算必须按 `trim_max_tokens - required_non_history_tokens - safety_margin` 反算，不得继续把 `trim_max_tokens * 0.75` 当最终历史预算；默认精确/可信 token 估算 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`。
 - 必保 segment 超限必须 fail closed，不得截断系统规则、工具规则、当前用户请求或最终安全 guard。
 - Skill public profile 只允许使用用户可见信息；不得暴露脚本路径、handler、runtime、sidecar、内部目录、配置、DSN、token 或 secret。
 - Prompt audit 只记录 hash、token、segment name、trim reason、fallback reason 和 role fallback；不得记录 raw prompt 或 raw artifact content。
