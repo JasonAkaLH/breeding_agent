@@ -129,8 +129,37 @@ SOFT_SKILL_INTERNAL_METADATA_KEYS = frozenset(
         "forced_skill_capability_id",
         "forced_skill_source",
         "macro_source",
+        "macro_expansion",
+        "macro_input_payload",
+        "requires_public_skill_dependency",
+        "requires_skill_dependency",
         "skill_execution_mode",
         "soft_skill_decision",
+    }
+)
+RESUME_SKILL_INTERNAL_METADATA_KEYS = frozenset(
+    {
+        "resume_interrupted_node_id",
+        "resume_finalizer_node_id",
+    }
+)
+SYSTEM_MANAGED_METADATA_KEYS = frozenset(
+    {
+        "skill_bundle_revision",
+        "mcp_bundle_revision",
+        "uploaded_artifacts",
+        "skill_artifacts",
+        "artifacts",
+        "conversation_memory",
+        "memory_context",
+    }
+)
+USER_SUPPLIED_METADATA_DENYLIST = frozenset(
+    {
+        *PENDING_SKILL_METADATA_KEYS,
+        *SOFT_SKILL_INTERNAL_METADATA_KEYS,
+        *RESUME_SKILL_INTERNAL_METADATA_KEYS,
+        *SYSTEM_MANAGED_METADATA_KEYS,
     }
 )
 
@@ -439,7 +468,7 @@ class ApiRuntime:
                 )
             )
 
-        metadata = self._drop_user_supplied_pending_skill_metadata(request.metadata)
+        metadata = self._drop_user_supplied_system_metadata(request.metadata)
         if soft_skill_binding is not None:
             metadata[SOFT_SKILL_BINDING_METADATA_KEY] = soft_skill_binding
             metadata["soft_skill_binding_source"] = "slash_command"
@@ -491,11 +520,9 @@ class ApiRuntime:
         return message, task
 
     @staticmethod
-    def _drop_user_supplied_pending_skill_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    def _drop_user_supplied_system_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         values = dict(metadata)
-        for key in PENDING_SKILL_METADATA_KEYS:
-            values.pop(key, None)
-        for key in SOFT_SKILL_INTERNAL_METADATA_KEYS:
+        for key in USER_SUPPLIED_METADATA_DENYLIST:
             values.pop(key, None)
         return values
 
@@ -1458,6 +1485,10 @@ class ApiRuntime:
         interrupted_node = await self.storage.get_task_node(interrupt.node_id)
         if interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
             resume_capability_id = interrupted_node.capability_id
+            resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
+            resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupted_node.node_id)
+            if resume_finalizer_node_id:
+                resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
         elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
             resume_capability_id = interrupt.source_agent
         await self._schedule_execution(
@@ -1936,10 +1967,23 @@ class ApiRuntime:
             key_text = str(key).strip()
             if not key_text or key_text == "upload_ids":
                 continue
+            if key_text in USER_SUPPLIED_METADATA_DENYLIST:
+                continue
             if isinstance(value, Mapping) and "text" in value:
                 value = value.get("text")
             metadata[key_text] = value
         return metadata
+
+    async def _resume_finalizer_node_id(self, task_id: str, interrupted_node_id: str) -> str | None:
+        nodes = {node.node_id: node for node in await self.storage.list_task_nodes_for_task(task_id)}
+        edges = await self.storage.list_task_edges(task_id)
+        for edge in edges:
+            if edge.from_node_id != interrupted_node_id:
+                continue
+            node = nodes.get(edge.to_node_id)
+            if node is not None and node.capability_id == "main_agent.respond":
+                return node.node_id
+        return None
 
     @staticmethod
     def _answer_upload_ids(answer_payload: Mapping[str, object]) -> tuple[str, ...]:

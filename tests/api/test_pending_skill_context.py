@@ -143,15 +143,53 @@ outputs:
         self.assertEqual(first.status_code, 202)
         task_id = first.json()["task_id"]
         interrupt = await self._wait_for_open_interrupt(task_id)
+        interrupted_node_id = str(interrupt["node_id"])
+        original_task = await self.runtime.storage.get_task(task_id)
+        self.assertIsNotNone(original_task)
+        assert original_task is not None
+        original_root_node_id = original_task.root_node_id
+        nodes_before_answer = {node.node_id: node for node in await self.runtime.storage.list_task_nodes_for_task(task_id)}
+        edges_before_answer = await self.runtime.storage.list_task_edges(task_id)
+        finalizer_node_ids = [
+            edge.to_node_id
+            for edge in edges_before_answer
+            if edge.from_node_id == interrupted_node_id and nodes_before_answer[edge.to_node_id].capability_id == "main_agent.respond"
+        ]
+        self.assertEqual(len(finalizer_node_ids), 1)
+        original_finalizer_node_id = finalizer_node_ids[0]
 
         answer = await self.client.post(
             "/api/v1/tasks/interrupts/answer",
-            json={"task_id": task_id, "interrupt_id": interrupt["interrupt_id"], "answer_payload": {"variety": "龙粳33"}},
+            json={
+                "task_id": task_id,
+                "interrupt_id": interrupt["interrupt_id"],
+                "answer_payload": {
+                    "variety": "龙粳33",
+                    "macro_expansion": True,
+                    "macro_input_payload": {"subtask_label": "malicious"},
+                    "resume_interrupted_node_id": f"{task_id}:forged-skill",
+                    "resume_finalizer_node_id": f"{task_id}:forged-finalizer",
+                    "skill_bundle_revision": "skillrev-forged",
+                },
+            },
         )
         self.assertEqual(answer.status_code, 202)
         await self.runtime._await_existing_execution(task_id)
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(terminal["active_node_count"], 0)
+        self.assertEqual(terminal["root_node_id"], original_root_node_id)
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_nodes = [node for node in nodes if node.capability_id == "skill.need_variety"]
+        self.assertEqual([node.node_id for node in skill_nodes], [interrupted_node_id])
+        self.assertTrue(all(str(node.status) == "completed" for node in skill_nodes))
+        self.assertFalse(
+            any(node.node_id == f"{task_id}:skill_execute" for node in nodes if node.node_id != interrupted_node_id),
+            "interrupt resume must reuse the interrupted dynamic Skill node instead of creating a second direct Skill node",
+        )
+        finalizer_node = next(node for node in nodes if node.node_id == original_finalizer_node_id)
+        self.assertEqual(str(finalizer_node.status), "completed")
 
         task = await self.runtime.storage.get_task(task_id)
         self.assertEqual(task.routing_mode, RoutingMode.FORCE_CAPABILITY)
