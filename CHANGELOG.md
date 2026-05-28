@@ -8,7 +8,7 @@
 
 ## [Unreleased]
 
-- LLM Prompt Envelope 实施计划已落入 `docs/orchestration/LLM提示词信封与缓存友好上下文组装实施计划.md`：按 P0-P7 拆分测试基线、PromptEnvelope core、主代理 envelope-to-string、conversation memory candidate、工具信息分层、Soft Skill/Planner/Resolver profile、messages-native runtime 与 provider cache 观测，补齐运行模式、验收矩阵、验证命令和 Team lanes。
+- 大语言模型提示词信封实施计划已落入 `docs/orchestration/大语言模型提示词信封与缓存友好上下文组装实施计划.md`：按 P0-P7 拆分测试基线、PromptEnvelope core、主代理 envelope-to-string、conversation memory candidate、工具信息分层、Soft Skill/Planner/Resolver profile、messages-native runtime 与 provider cache 观测，补齐运行模式、验收矩阵、验证命令和 Team lanes。
 - LLM Prompt Envelope 长期设计已落文档并完成 document-perfectization 加固：新增缓存友好 prompt 组装设计，明确 messages-native Prompt Envelope 作为目标架构、第一阶段 envelope-to-string 兼容落地、动态历史预算按本次实际非历史 token 反算，并补齐 KV Cache、primacy/recency、工具信息分层、active continuity notes、provider role fallback、shadow rollout、失败模式与 segment-level 审计验收矩阵。
 - Interrupt answer resume 修复复用原 Skill 节点：回答缺参 interrupt 后，后端现在会把原 interrupted `skill.*` 节点 ID 和原 finalizer 节点 ID 作为内部 resume metadata 传入 Skill plan，复用 `ready_to_resume` 节点继续执行并保留原任务图 root，不再额外创建第二个 `task:skill_execute` 节点；同时过滤用户 metadata / answer_payload 中伪造的 resume 内部字段。
 - 主代理最终回答补齐文件下载硬约束：finalizer prompt 现在明确只有存在平台 `output_files.download_url`（`/api/v1/artifacts/.../download`）时才能声称文件已生成/可下载，Skill 失败或缺少 file artifact 时必须说明未生成/需补充信息，并禁止输出 `sandbox:/mnt/data`、本地路径或 `outputs/...` 伪下载链接；上游能力上下文只透传脱敏后的平台 file descriptor。
