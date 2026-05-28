@@ -58,13 +58,25 @@
 | conversation memory 预算固定扣 1/4 | `src/orchestration/conversation_memory.py:63-67` | memory 从最终预算决策者降级为候选上下文提供者。 |
 | LLMClient 只发送单条 user message | `src/integrations/llm_client.py:153-203` | 阶段一至阶段五不改 client；阶段六才扩展 messages。 |
 | SharedLLMRuntime 入参是 `prompt: str` | `src/integrations/llm_runtime.py:103-165` | 需要分阶段扩展，避免破坏 thinking / stream path。 |
+| interrupt resume 已合并同一任务已接受 answer payload 与上传 artifact metadata | `src/api/runtime.py:1424-1478`、`src/api/runtime.py:2018-2036`、`tests/api/test_pending_skill_context.py` | active continuity notes 必须只消费系统可信、已接受的补充事实，不能把任意用户历史当事实。 |
+
+### 3.1 依赖与集成点矩阵
+
+| 集成点 | 当前依赖 | PromptEnvelope 约束 |
+| --- | --- | --- |
+| 配置来源 | 启动期 `config.yaml` bootstrap 到环境变量 / runtime config；业务节点不得重复读 YAML。 | `PromptEnvelopeConfig` 只能消费进程环境、runtime config 或测试显式 config。 |
+| Token 计数 | `src/integrations/token_counter.py` 与 per-model `trim_max_tokens`。 | 精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`；fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`，且 audit 标记 fallback。 |
+| Skill 公开信息 | `build_public_skill_profile` 现有 sanitizer。 | 不新增第二套不一致 sanitizer；Skill match、Soft Skill、resolver profile 复用同一 public profile / schema 投影。 |
+| Artifact 下载 | 平台 artifact descriptor 与 `/api/v1/artifacts/{artifact_id}/download`。 | LLM 只能看到脱敏 descriptor 和平台 download_url；不得生成 sandbox、本地路径或 outputs 伪链接。 |
+| Audit/事件 | 现有 `EventVisibility.AUDIT_ONLY` / `main_agent.llm_call` 诊断出口。 | renderer 返回 audit，由 caller 写事件；renderer 不依赖 API repository，也不写前端可见 SSE。 |
+| LLM runtime | `SharedLLMRuntime` / `LLMClient` 当前以字符串为主。 | P1-P5 保持字符串兼容；P6 才扩展 messages-native，并保留 deterministic fallback。 |
 
 ## 4. 功能需求
 
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
 | FR-001 | 系统必须用 `PromptEnvelope` / `PromptSegment` 表达 LLM 输入。 | 核心模型有独立单元测试；业务调用点不再自由拼接不可审计的大字符串。 |
-| FR-002 | 系统必须按本次实际非历史 prompt token 反算 bulk history budget。 | `bulk_history_budget = trim_max_tokens - required_non_history_tokens - safety_margin`；不得继续把 `trim_max_tokens * 0.75` 作为最终历史预算。 |
+| FR-002 | 系统必须按本次实际非历史 prompt token 反算 bulk history budget。 | `bulk_history_budget = trim_max_tokens - required_non_history_tokens - safety_margin`；精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`；不得继续把 `trim_max_tokens * 0.75` 作为最终历史预算。 |
 | FR-003 | 系统必须把工具规则、工具公开档案、输入 schema、工具结果拆成独立 segment。 | 工具结果不进入普通 history；public profile 不暴露内部结构。 |
 | FR-004 | 系统必须保留 active continuity notes，并将其放在 current user request 之前的 recency 区。 | active notes 只来自系统可信状态和已接受 answer / artifact / tool result。 |
 | FR-005 | 系统必须支持至少八类 profile：main agent answer、soft skill decision、soft skill answer、planner、planner repair、runtime replanner、skill input resolver、conversation memory resolver / summary。 | 每类 profile 有 template_id / template_version 和 render audit。 |
@@ -155,6 +167,7 @@ I. final_recency_guard
 ### 6.6 配置、profile registry 与审计出口
 
 - 配置统一由 `PromptEnvelopeConfig` 或等价对象解析 `MAF_PROMPT_ENVELOPE_MODE`、`trim_max_tokens`、safety margin 与 provider role 能力；业务执行路径不得重新读取 `config.yaml`。
+- safety margin 默认规则必须可配置但不可隐式漂移：精确/可信 token 估算使用 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算使用 `max(2048, floor(trim_max_tokens * 0.02))`；任何调整必须同步测试和 PRD。
 - Profile 统一由 `PromptProfileRegistry` 或等价工厂按调用场景选择。
 - 审计由 caller 显式接收 `RenderedPrompt.audit` 并写入现有 `EventVisibility.AUDIT_ONLY` 事件；renderer 本身不直接依赖 FastAPI / repository / SSE。
 - Audit event payload 只能包含 `template_id`、`template_version`、mode、segment audit、token、hash、trim/fallback reason、provider role fallback；不得包含 raw prompt、raw artifact、secret、DSN、token 或内部路径。
@@ -171,7 +184,7 @@ MAF_PROMPT_ENVELOPE_MODE=off|shadow|string|messages
 | --- | --- | --- |
 | `off` | 完全走旧 prompt builder | 回滚 / 默认安全态 |
 | `shadow` | 实际发送旧 prompt，同时生成 envelope audit | 观测差异，零行为变更 |
-| `string` | 发送 envelope-to-string prompt | 第一阶段生产候选 |
+| `string` | 发送 envelope-to-string prompt | 第一阶段生产候选；涉及 Skill match / `/skill` 软绑定时必须等 P4 public profile 安全门禁通过后才能用于生产流量 |
 | `messages` | 发送 messages-native prompt | 第二阶段 provider 适配后启用 |
 
 默认值：阶段一合并时应为 `off` 或 `shadow`，不得直接默认 `string/messages`。
@@ -196,6 +209,7 @@ MAF_PROMPT_ENVELOPE_MODE=off|shadow|string|messages
 - **数据库 schema**：默认不需要新增表或迁移。Prompt audit 通过现有 event payload 扩展承载；如实施中发现必须持久化独立 prompt audit 表，必须先补充迁移 PRD / rollback plan。
 - **事件兼容**：新增 audit-only event 不得影响前端 SSE completion 语义；现有 `main_agent.output_delta`、`main_agent.output_final`、`main_agent.llm_call` 行为必须保持兼容。
 - **安全边界**：prompt renderer 与 audit schema 必须默认拒绝 raw prompt、raw artifact、内部路径、DSN、secret、token；public Skill profile 继续复用现有 allowlist sanitizer。
+- **权限与隐私**：PromptEnvelope 不新增权限模型，不绕过现有 artifact download authorization，不把 username / conversation_id / task_id 放入 stable prefix，不把 audit payload 作为用户可见数据返回。
 - **回滚策略**：`MAF_PROMPT_ENVELOPE_MODE=off` 是运行时回滚开关；`shadow` 只允许增加 audit，不得改变发送给 LLM 的 prompt。
 - **可观测性**：所有 mode 下若生成 audit，必须能回答“本次 non-history token 占用多少、history 可用预算多少、哪些 segment 被裁剪、prefix hash 是否变化、role fallback 是否发生”。
 
@@ -247,9 +261,9 @@ conda run -n multi_agent python -m unittest discover -s tests/integrations -p 't
 ## 12. Rollout 与 Stop Gates
 
 1. P1 完成后必须能独立通过 prompt envelope 单元测试。
-2. P2 完成后必须能在 `shadow` 模式不改变现有 API 行为。
-3. P3 完成后必须证明历史预算不再固定 75%。
-4. P4 完成后必须证明 `/skill` 和主代理 Skill match prompt 不暴露内部结构。
+2. P2 完成后必须能在 `shadow` 模式不改变现有 API 行为；`string` 模式若涉及 Skill match / `/skill` 软绑定，只能用于开发或小流量 shadow 对比，不能进入生产放量。
+3. P3 完成后必须证明历史预算不再固定 75%，且 current-task clarification、已接受 interrupt answer 与上传 artifact metadata 不会被旧 history 裁掉。
+4. P4 完成后必须证明 `/skill` 和主代理 Skill match prompt 不暴露内部结构；只有此门禁通过后，含 Skill profile 的 `string` 模式才可进入生产灰度。
 5. P5 完成后必须证明 planner repair、runtime replanner、memory resolver / summary 没有成为未审计 prompt 盲区。
 6. P6 完成前不得默认启用 `messages` 模式。
 7. P7 的 provider cache hint 必须先 shadow 观测，再按 provider 小流量启用；cache 命中不得成为 correctness 依赖。

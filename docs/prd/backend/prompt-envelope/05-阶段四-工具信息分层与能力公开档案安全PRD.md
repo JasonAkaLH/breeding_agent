@@ -16,9 +16,10 @@
 1. 建立工具信息四层 segment：stable tool rules、selected public tool profiles、tool input schema、required tool results and artifacts。
 2. 主代理 Skill match 禁止直接注入 `match.manifest.body`。
 3. 复用并扩展 `src/integrations/codex_skills/public_profile.py::build_public_skill_profile`。
-4. tool result segment 保留平台 `download_url`、missing、error、diagnostics 等关键事实。
-5. Skill input resolver 不把 `entrypoint` 等内部入口名作为默认公开字段。
-6. 增加安全扫描测试，防止脚本路径、handler、runtime、DSN、token 进入 prompt/audit。
+4. public profile 必须能支持用户询问“需要什么数据、数据格式、字段值如何构建、示例如何填写”，但回答不得暴露内部代码结构。
+5. tool result segment 保留平台 `download_url`、missing、error、diagnostics 等关键事实。
+6. Skill input resolver 不把 `entrypoint` 等内部入口名作为默认公开字段。
+7. 增加安全扫描测试，防止脚本路径、handler、runtime、DSN、token 进入 prompt/audit。
 
 ## 3. 非目标
 
@@ -31,7 +32,7 @@
 
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
-| P4-FR-1 | 主代理 Skill profile 必须使用 public profile。 | string 模式 prompt 中含 capability_id/display_name/description/public_usage，但不含 `manifest.body` 内部内容。 |
+| P4-FR-1 | 主代理 Skill profile 必须使用 public profile。 | string 模式 prompt 中含 capability_id/display_name/description/public_usage、用户可见输入字段、格式和值域示例，但不含 `manifest.body` 内部内容。 |
 | P4-FR-2 | 必须复用现有 sanitizer。 | 代码路径调用或共享 `build_public_skill_profile`；不重复实现不一致 allowlist。 |
 | P4-FR-3 | tool schema segment 必须只含用户可见参数契约。 | 参数名、类型、必填、aliases、accepted formats、missing input 标准可见；entrypoint/handler/path 不可见。 |
 | P4-FR-4 | tool result segment 必须保留下载事实。 | 只有存在平台 `/api/v1/artifacts/.../download` 的 `download_url` 时，finalizer 才能声称可下载。 |
@@ -40,7 +41,7 @@
 ## 5. 非功能需求
 
 - **Security**：内部实现字段默认拒绝，不依赖 LLM 自律。
-- **User value**：公开档案要足够回答“如何构建数据、字段值应该是什么、示例如何填写”。
+- **User value**：公开档案要足够回答“如何构建数据、字段值应该是什么、示例如何填写”，但只能使用 Skill 文档中面向用户的 public_usage / input schema / output 说明。
 - **Compatibility**：现有 `/skill` 软绑定答疑继续可用，且不暴露内部结构。
 
 ## 6. 实施计划
