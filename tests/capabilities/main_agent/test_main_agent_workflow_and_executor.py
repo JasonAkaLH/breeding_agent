@@ -286,6 +286,66 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         decision_event = next(event for event in result.events if event.event_type == "soft_skill_binding.decision")
         self.assertEqual(decision_event.payload["reason_code"], "low_confidence")
 
+    async def test_soft_skill_binding_answer_uses_conversation_memory_for_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    description: 解释公开用法。
+                    public_usage:
+                      overview: 公开字段说明
+                      examples:
+                        - /demo 怎么填？
+                    ---
+                    Raw body.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        seen_prompts: list[str] = []
+
+        async def streamer(prompt: str, *, stage: str | None = None):
+            seen_prompts.append(prompt)
+            if stage == "soft_skill_decision":
+                yield '{"decision":"answer","target_capability_id":"skill.demo","confidence":0.9,"reason_code":"followup"}'
+            else:
+                yield "继续解释。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "再说清楚一点"},
+                metadata={
+                    "soft_skill_binding": {"capability_id": "skill.demo"},
+                    "conversation_memory": {
+                        "recent_messages": [
+                            {"role": "user", "content": "/demo demo_data 怎么填？"},
+                            {"role": "assistant", "content": "demo_data 是需要上传的 CSV 表格。"},
+                        ]
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_text"], "继续解释。")
+        self.assertEqual(len(seen_prompts), 2)
+        for prompt in seen_prompts:
+            self.assertIn("对话记忆上下文", prompt)
+            self.assertIn("/demo demo_data 怎么填？", prompt)
+            self.assertIn("demo_data 是需要上传的 CSV 表格。", prompt)
+
     async def test_executor_injects_dependency_outputs_into_prompt(self) -> None:
         seen_prompts: list[str] = []
 
