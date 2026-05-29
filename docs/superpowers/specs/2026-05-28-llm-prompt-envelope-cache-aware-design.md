@@ -34,7 +34,7 @@
 ### 2.1 功能目标
 
 - 将 LLM 输入从散落的字符串拼接升级为结构化 `PromptEnvelope` / `PromptSegment`。
-- 支持按本次实际 prompt 组成动态计算历史可用 token，而不是固定保留 25%。
+- 支持把最终输入 token 预算默认限制为 `floor(trim_max_tokens * 0.75)`，并在该输入预算内按本次实际 prompt 组成动态计算历史可用 token；75% 不再是固定历史预算。
 - 同时优化 KV Cache 命中、prompt primacy、prompt recency。
 - 将工具信息拆分为规则、profile、schema、结果四层，并与普通历史分离。
 - 为主代理回答、soft skill decision、planner、skill input resolver 提供不同的 envelope profile。
@@ -52,16 +52,16 @@
 | ID | 类型 | 需求 |
 | --- | --- | --- |
 | FR-001 | 功能 | 系统必须用 `PromptEnvelope` / `PromptSegment` 表达 LLM 输入，而不是让各调用点自由拼接不可审计的大字符串。 |
-| FR-002 | 功能 | 系统必须按本次实际非历史 prompt token 反算 bulk history budget；不得继续把 `trim_max_tokens * 0.75` 作为最终历史预算。 |
+| FR-002 | 功能 | 系统必须把最终输入 token 预算默认限制为 `floor(trim_max_tokens * 0.75)`，并在该输入预算内按本次实际非历史 prompt token 反算 bulk history budget；不得继续把 `trim_max_tokens * 0.75` 作为最终历史预算。 |
 | FR-003 | 功能 | 系统必须把工具调用规则、工具 public profile、工具输入 schema、工具结果拆成独立 segment。 |
 | FR-004 | 功能 | 系统必须保留 active continuity notes，并将其放在 current user request 之前的 recency 区。 |
 | FR-005 | 功能 | 系统必须支持至少四类 envelope profile：main agent answer、soft skill decision、planner、skill input resolver。 |
 | FR-006 | 功能 | 系统必须提供 `off|shadow|string|messages` 渐进式运行模式，避免一次性切换风险。 |
 | NFR-001 | 性能 | 稳定系统契约和稳定工具规则必须形成可 hash 的 cacheable prefix，且动态字段不得污染该前缀。 |
 | NFR-002 | 安全 | prompt audit 不得记录 raw prompt、raw artifact content、secret、DSN、token 或 Skill 内部代码结构。 |
-| NFR-003 | 可靠性 | 必保 segments 超过 `trim_max_tokens` 时必须 fail closed，而不是截断系统规则、工具规则或当前用户请求。 |
+| NFR-003 | 可靠性 | 最终渲染输入必须通过 final token preflight，`final_input_tokens` 不得超过 `floor(trim_max_tokens * 0.75)`；必保 segments 超过该输入预算时必须 fail closed，而不是截断系统规则、工具规则或当前用户请求。 |
 | NFR-004 | 兼容性 | 阶段 1 不得改变 `LLMClient` 字符串入参；阶段 2 messages-native 必须保留字符串 fallback。 |
-| NFR-005 | 可观测性 | 每次渲染必须生成 segment-level token、裁剪、prefix hash、role fallback 和预算来源审计。 |
+| NFR-005 | 可观测性 | 每次渲染必须生成 final input budget、final input tokens、segment-level token、裁剪、prefix hash、role fallback 和预算来源审计。 |
 
 ## 3. 核心决策
 
@@ -129,6 +129,10 @@ class PromptRenderAudit:
     template_id: str
     template_version: str
     trim_max_tokens: int
+    final_input_token_budget: int
+    final_input_tokens: int
+    preflight_retry_count: int
+    history_compression_retry: bool
     cacheable_prefix_hash: str
     cacheable_prefix_tokens: int
     first_dynamic_segment: str | None
@@ -349,21 +353,23 @@ schema 可根据调用类型分级：
 
 ## 6. 动态预算算法
 
-不再固定 `trim_max_tokens * 75%`。
+不再把 `trim_max_tokens * 75%` 当作最终历史预算；75% 现在是最终输入预算上限。
 
-第一阶段采用两遍渲染算法，避免在还不知道非历史 token 时先裁历史：
+第一阶段采用两遍渲染算法，避免在还不知道非历史 token 时先裁历史。默认先把最终输入预算限定为 `final_input_token_budget=floor(trim_max_tokens * 0.75)`，剩余 25% 留给可见输出、thinking / reasoning、provider message overhead 与安全余量：
 
 1. 构造所有非历史必保 segments：system contract、tool rules、selected profiles 核心字段、tool schema 核心字段、required tool result 核心事实、active notes、current user、final guard。
 2. 对这些必保 segments 做 token 估算，得到 `required_non_history_tokens`。
-3. 计算 `flexible_budget = trim_max_tokens - required_non_history_tokens - safety_margin_tokens`。
+3. 计算 `flexible_budget = final_input_token_budget - required_non_history_tokens - safety_margin_tokens`。
 4. 在 `flexible_budget` 中按优先级装入可压缩工具结果明细、bulk history、可选 public profile 示例。
 5. 若必保 segments 自身超限，先压缩必保中的“可压缩明细”，仍超限则 fail closed，返回诊断，不生成可能违反安全约束的 prompt。
 
 核心公式：
 
 ```text
+final_input_token_budget = floor(trim_max_tokens * 0.75)
+
 bulk_history_budget =
-  trim_max_tokens
+  final_input_token_budget
   - required_non_history_tokens
   - safety_margin_tokens
 ```
@@ -388,9 +394,10 @@ required_non_history_tokens =
 max(1024, floor(trim_max_tokens * 0.01))
 ```
 
-对于 `1024000`：
+对于 `trim_max_tokens=1024000`：
 
 ```text
+final_input_token_budget = 768000
 safety_margin_tokens = 10240
 ```
 
@@ -401,9 +408,12 @@ safety_margin_tokens = 10240
 3. 再降低历史预算到 0。
 4. 如果仍超限，则 fail closed，返回可诊断错误，不盲目截断系统/当前用户请求。
 
-### 6.1 `trim_max_tokens` 缺失或 token counter 不可用
+### 6.1 Final token preflight 与 `trim_max_tokens` 缺失或 token counter 不可用
 
-- 如果当前 model config 缺少 `trim_max_tokens`，沿用现有安全默认值 `8000`，并在 audit 中记录 `trim_max_tokens_source=default_8000`。
+- 所有 string/messages renderer 在最终发送前必须对最终 payload 重新计 token，记录 `final_input_tokens`，并断言 `final_input_tokens <= final_input_token_budget`。
+- 如果首次 preflight 失败，只允许执行一次历史压缩重试：压缩或收缩 `bulk_conversation_history` candidates，重新 render 后再次 preflight。
+- 第二次 preflight 仍失败必须 fail closed；不得进入循环压缩，也不得截断 required segments。
+- 如果当前 model config 缺少 `trim_max_tokens`，沿用现有安全默认值 `8000`，对应默认 `final_input_token_budget=6000`，并在 audit 中记录 `trim_max_tokens_source=default_8000`。
 - 如果 provider tokenization / 本地 token counter 不可用，使用现有字符估算 fallback，但必须提高安全边界到 `max(2048, floor(trim_max_tokens * 0.02))`，并记录 `token_estimator=fallback_char_estimator`。
 - 不允许在 token 估算失败时无限制注入历史。
 
@@ -544,13 +554,17 @@ small recent clarification messages
 {
   "prompt_template_version": "main-agent-envelope-v1",
   "trim_max_tokens": 1024000,
+  "final_input_token_budget": 768000,
+  "final_input_tokens": 66000,
+  "preflight_retry_count": 0,
+  "history_compression_retry": false,
   "cacheable_prefix_hash": "sha256:...",
   "cacheable_prefix_tokens": 12345,
   "first_dynamic_segment": "selected_public_tool_profiles",
   "non_history_tokens": 18000,
   "required_tool_result_tokens": 3000,
   "active_notes_tokens": 800,
-  "bulk_history_budget": 990000,
+  "bulk_history_budget": 740000,
   "bulk_history_tokens_used": 42000,
   "history_truncated": false,
   "segments": [
@@ -576,7 +590,9 @@ small recent clarification messages
 
 | 场景 | 必须行为 |
 | --- | --- |
-| 必保 segments 超过 `trim_max_tokens` | fail closed，记录 `prompt_budget_exceeded`，不得截断系统规则或当前用户请求 |
+| 必保 segments 超过 `floor(trim_max_tokens * 0.75)` | fail closed，记录 `prompt_budget_exceeded`，不得截断系统规则或当前用户请求 |
+| final preflight 首次失败 | 仅允许一次 `bulk_conversation_history` 历史压缩重试，重渲染后再次 preflight |
+| final preflight 二次失败 | fail closed，记录 `prompt_budget_exceeded_after_history_retry`，不得继续循环压缩 |
 | token counter 不可用 | 使用字符估算 fallback + 更大 safety margin，并记录 fallback audit |
 | provider 不支持目标 messages role | 使用 role fallback mapping，并记录 fallback；不得改变指令优先级 |
 | tool result 过大 | 保留关键事实和 download/error/missing 字段，压缩明细 |
@@ -633,6 +649,7 @@ P1-P3 均应支持 feature flag / config gate，以便灰度切换：`MAF_PROMPT
 - 动态预算按实际 non-history token 反算。
 - 历史超限时只裁可裁段。
 - 必保段超限时 fail closed。
+- final preflight 首次失败时只允许一次历史压缩重试，二次失败必须 fail closed。
 - final guard 永远最后。
 - active continuity notes 靠近 current user。
 - tool results 不进入普通 history。
@@ -643,7 +660,7 @@ P1-P3 均应支持 feature flag / config gate，以便灰度切换：`MAF_PROMPT
 - `/skill` soft decision 只披露 public profile，不披露内部结构。
 - finalizer 只有看到平台 `download_url` 才可声称下载。
 - interrupt resume 场景 active notes 包含已补字段。
-- 长历史场景使用接近完整 `trim_max_tokens` 的动态预算，而不是固定 75%。
+- 长历史场景使用接近完整 `final_input_token_budget` 的动态预算；75% 是最终输入预算，不是固定历史预算。
 
 ### 13.3 回归测试
 
@@ -674,18 +691,18 @@ conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 
 | ID | 验收标准 | 验证方式 |
 | --- | --- | --- |
-| AC-001 | `conversation_memory` audit 不再把 `trim_max_tokens * 0.75` 作为最终历史预算 | 单元测试 + audit fixture |
+| AC-001 | `conversation_memory` audit 不再把 `trim_max_tokens * 0.75` 作为最终历史预算，而是记录 `final_input_token_budget=floor(trim_max_tokens*0.75)` 后再反算 history | 单元测试 + audit fixture |
 | AC-002 | main agent prompt audit 显示 segment-level token、裁剪和 hash 信息 | `PromptRenderAudit` 单测 |
 | AC-003 | 当前用户请求和 final guard 永远在 prompt 末尾 | golden order test |
 | AC-004 | 系统/工具规则在稳定前缀中，prefix hash 在无模板变更时稳定 | prefix hash determinism test |
 | AC-005 | 工具结果和 artifact 下载事实作为独立段进入 prompt，不混入 history | prompt segment classification test |
 | AC-006 | Skill public profile 不暴露脚本路径、handler、runtime 内部结构 | `/skill` prompt safety test |
-| AC-007 | 长历史测试证明历史预算按实际 non-history token 动态计算 | dynamic budget test |
+| AC-007 | 长历史测试证明历史预算在 75% 最终输入预算内按实际 non-history token 动态计算 | dynamic budget test |
 | AC-008 | provider 不支持 `developer` / `tool` role 时有 deterministic fallback audit | LLMClient fake provider test |
 | AC-009 | token counter 不可用时使用 fallback estimator 和更大 safety margin | token counter failure test |
 | AC-010 | active continuity notes 只来自可信系统状态，不直接信任用户文本 | interrupt resume prompt test |
 | AC-011 | envelope shadow 模式不改变实际 LLM 输入和业务输出 | API shadow-mode regression |
-| AC-012 | 必保 segments 超限时 fail closed，不截断系统规则/当前用户请求 | over-budget failure test |
+| AC-012 | 必保 segments 超过 75% 最终输入预算时 fail closed；final preflight 首次失败只允许一次 history compression retry，二次失败不截断系统规则/当前用户请求并 fail closed | over-budget failure test |
 
 ## 15. 风险与缓解
 
