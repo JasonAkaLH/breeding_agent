@@ -8,9 +8,14 @@
 
 ## [Unreleased]
 
+- Docker 远端启动文档与本次待发布镜像版本已提升到 `0.1.5`：`docker_cmd.md` 中 backend / frontend pull、inspect、run 与最小判别命令同步改为 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.5`。
+- API 文档代码段已完成语法校验并修正请求示例：会话重命名 / 删除、消息提交、上传删除、任务取消、interrupt answer 的 curl `-d` body 不再使用 `{ ... }` 占位，改为可解析 JSON 示例；“Skill 软绑定提交规则”的 JSON 片段也补齐为完整 `SubmitMessageRequest` body。
+- API 文档首页主按钮文案已从“查看行为变更”改为“更新日志”，与动态读取的 `docs/api/API更新日志.md` 维护入口保持一致。
+- 新增长期维护入口 `docs/api/API更新日志.md`，并在 `docs/api/api-doc.html` 规划“API 更新日志”动态读取区域：页面通过 `/api-doc/API更新日志.md` 加载 Markdown，不再手工复制日志正文；首个条目已按接口归并，只记录当前最新外部行为和客户端迁移提醒，字段级细节继续以正式 API 文档为准。
+- 表格上传编码兼容与表头规范化 PRD 已拆分为 `docs/prd/backend/table-upload-normalization/` 阶段目录：新增父总纲、阶段零测试基线、阶段一 CSV/JSON 规范化核心、阶段二 Excel 解析与 spreadsheet metadata、阶段三 sheet selection interrupt/resume、阶段四前端/API 文档与发布门禁；原 `19-表格上传编码兼容与表头规范化PRD.md` 保留为历史兼容入口。
+- 表格上传编码兼容与表头规范化 PRD 完成 document-perfectization 复审：补齐受影响系统与实施置信标准、prompt-safe 摘要硬上限、宽表 / 多 sheet 裁剪标记、sheet 选择按任务作用域生效、`application/vnd.ms-excel` 判定兼容口径、执行 artifact 与 prompt-safe 通道隔离、前端嵌套 sheet 选择 UI 与分阶段门禁。
 - 表格上传编码兼容与表头规范化 PRD 已落入 `docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`：明确 CSV / JSON / `.xlsx` / `.xls` 上传的多编码识别、表头技术噪声清洗、Excel 多 sheet interrupt 选择、原始 bytes 保留与 Skill 执行专用规范化 UTF-8 CSV / JSON 输入口径；本轮设计明确不做业务列名映射且不修改 `skill/**`。
 - REST API 静态文档再次对齐当前运行时行为：`/api/v1/capabilities` 的 response 示例中 `source_path` 改为当前实际返回的相对 Skill root 路径（如 `field-design/SKILL.md`），并补充回归锁定缺失 conversation 的 uploads / tasks 列表返回空集合、未知 upload 删除返回 `deleted=false` 的文档化 no-op 行为。
-- Docker 远端启动文档已同步当前镜像版本 `0.1.4`：`docker_cmd.md` 中 backend / frontend pull、inspect、run 与最小判别命令全部改为 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.4` 口径。
 - Agent 基础设施大块重复整改设计已落入 `docs/superpowers/specs/2026-05-29-agent-infrastructure-dedup-cleanup-design.md`，明确 sidecar wire helper、PostgreSQL SQL splitter、runtime revision store 与 final answer helper 的分阶段整改口径、非目标、验收命令与不修改 `skill/**` 约束。
 - 反屎山清理第一轮完成：后端 Skill 运行时兼容层统一迁移为 `src/integrations/agent_skills/` 与 `tests/integrations/agent_skills/`，项目代码 / 测试 / 文档中已清除旧品牌字面；同时抽出共享 `coerce_truthy` / `coerce_positive_int`、evidence gate 数值校验、LLM stream event 归一化与 provider role capability 清洗工具，减少主代理、LLM runtime、provider cache、PromptProfile、runtime gate 与 Skill manifest parser 的复制粘贴。
 - Prompt Envelope 阶段七供应商缓存与观测增强已落地：PromptEnvelope stable prefix 现在对 task/conversation/user/artifact/dependency 等动态污染 fail-closed，main-agent 与通用 PromptProfile audit 补齐 `prompt_render_metrics`、prefix hash/token、trim reason、history retry、role fallback 与 provider cache capability 观测；`LLMClient` / `SharedLLMRuntime` 新增配置驱动 provider prompt cache hint，默认关闭，不支持 provider no-op，audit/metadata 只记录安全状态与 hint keys，不记录 raw prompt、secret、DSN、token 或 provider endpoint。
