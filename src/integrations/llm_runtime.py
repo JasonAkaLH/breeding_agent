@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from .llm_client import LLMClient, ReasoningEffort, load_config
 from .model_editions import config_with_model_edition, default_model_edition
+from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, render_prompt_envelope
 
 RuntimeReasoningRecorder = Callable[[str], Awaitable[None]]
+PromptInput = str | PromptEnvelope | Sequence[LLMMessage | Mapping[str, Any]]
 
 
 class SharedLLMRuntime:
@@ -57,6 +59,9 @@ class SharedLLMRuntime:
             model = model_edition or default_model_edition(config) or config.get("model_edition") or config.get("model")
             if model:
                 metadata["model"] = model
+            role_capabilities = _role_capabilities_metadata(config)
+            if role_capabilities:
+                metadata["provider_role_capabilities"] = role_capabilities
         if reasoning_effort:
             metadata["reasoning_effort"] = reasoning_effort
         return metadata
@@ -102,7 +107,7 @@ class SharedLLMRuntime:
 
     async def generate_text(
         self,
-        prompt: str,
+        prompt: PromptInput,
         *,
         thinking: bool = False,
         reasoning_effort: ReasoningEffort = "minimal",
@@ -129,14 +134,18 @@ class SharedLLMRuntime:
         generate_text = getattr(client, "generate_text", None)
         if not callable(generate_text):
             raise TypeError("LLM runtime client must provide generate_text(prompt, ...).")
-        result = generate_text(prompt, thinking=thinking, reasoning_effort=reasoning_effort)
+        result = generate_text(
+            _runtime_prompt_for_client(prompt, client),
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+        )
         if inspect.isawaitable(result):
             result = await result
         return _coerce_text_result(result)
 
     async def stream_events(
         self,
-        prompt: str,
+        prompt: PromptInput,
         *,
         thinking: bool = False,
         reasoning_effort: ReasoningEffort = "minimal",
@@ -158,7 +167,7 @@ class SharedLLMRuntime:
             return
 
         options = _accepted_options(generator, {"thinking": thinking, "reasoning_effort": reasoning_effort})
-        produced = generator(prompt, **options) if options else generator(prompt)
+        produced = generator(_runtime_prompt_for_client(prompt, client), **options) if options else generator(_runtime_prompt_for_client(prompt, client))
         async for event in _iter_stream_like(produced):
             coerced = _coerce_stream_event(event)
             if coerced:
@@ -222,3 +231,29 @@ def _accepted_options(generator: Callable[..., Any], options: Mapping[str, Any])
         return {}
     accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
     return {key: value for key, value in options.items() if value is not None and (accepts_kwargs or key in signature.parameters)}
+
+
+def _runtime_prompt_for_client(prompt: PromptInput, client: Any) -> PromptInput | str:
+    if isinstance(prompt, PromptEnvelope) and not isinstance(client, LLMClient):
+        return render_prompt_envelope(prompt).prompt
+    return prompt
+
+
+def _role_capabilities_metadata(config: Mapping[str, Any]) -> dict[str, Any]:
+    raw = (
+        config.get("provider_role_capabilities")
+        or config.get("llm_role_capabilities")
+        or config.get("message_role_capabilities")
+        or config.get("messages")
+    )
+    if isinstance(raw, Mapping):
+        roles = raw.get("roles") or raw.get("supported_roles") or raw.get("message_roles") or raw.get("supported_message_roles")
+        return {
+            "supports_messages": raw.get("supports_messages", raw.get("messages_supported", True)),
+            **({"roles": list(roles)} if isinstance(roles, list | tuple) else {"roles": roles} if isinstance(roles, str) else {}),
+        }
+    for key in ("supported_message_roles", "message_roles"):
+        roles = config.get(key)
+        if isinstance(roles, list | tuple | str):
+            return {"supports_messages": True, "roles": roles}
+    return {}

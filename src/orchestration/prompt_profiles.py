@@ -6,15 +6,18 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .prompt_envelope import (
+    LLMMessage,
     PromptEnvelope,
     PromptEnvelopeRenderError,
     PromptSegment,
     RenderedPrompt,
+    RenderedMessages,
     TokenEstimator,
     render_prompt_envelope,
+    render_prompt_envelope_messages,
 )
 
-PromptProfileMode = Literal["off", "shadow", "string"]
+PromptProfileMode = Literal["off", "shadow", "string", "messages"]
 
 PROMPT_PROFILE_MODE_ENV = "MAF_PROMPT_ENVELOPE_MODE"
 PROMPT_PROFILE_TEMPLATE_VERSION = "p5-multi-call-v1"
@@ -22,10 +25,10 @@ PROMPT_PROFILE_TEMPLATE_VERSION = "p5-multi-call-v1"
 
 @dataclass(frozen=True, slots=True)
 class PromptProfileResolution:
-    prompt: str
+    prompt: str | tuple[LLMMessage, ...]
     mode: PromptProfileMode
     effective_mode: PromptProfileMode
-    rendered: RenderedPrompt | None
+    rendered: RenderedPrompt | RenderedMessages | None
     audit_payload: dict[str, Any] | None
     llm_call_payload: dict[str, Any] | None
 
@@ -33,7 +36,7 @@ class PromptProfileResolution:
 def resolve_prompt_profile_mode(value: str | None = None) -> PromptProfileMode:
     raw_value = value if value is not None else os.environ.get(PROMPT_PROFILE_MODE_ENV)
     mode = str(raw_value or "off").strip().lower()
-    if mode in {"off", "shadow", "string"}:
+    if mode in {"off", "shadow", "string", "messages"}:
         return mode  # type: ignore[return-value]
     return "off"
 
@@ -61,6 +64,31 @@ def render_profile_prompt(
     )
 
 
+def render_profile_messages(
+    *,
+    template_id: str,
+    template_version: str = PROMPT_PROFILE_TEMPLATE_VERSION,
+    segments: tuple[PromptSegment, ...],
+    model_edition: str | None = None,
+    trim_max_tokens: int | None = None,
+    role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
+    token_estimator: TokenEstimator | None = None,
+    token_estimator_is_fallback: bool = False,
+) -> RenderedMessages:
+    return render_prompt_envelope_messages(
+        PromptEnvelope(
+            template_id=template_id,
+            template_version=template_version,
+            model_edition=model_edition,
+            trim_max_tokens=trim_max_tokens,
+            segments=segments,
+        ),
+        role_capabilities=role_capabilities,
+        token_estimator=token_estimator,
+        token_estimator_is_fallback=token_estimator_is_fallback,
+    )
+
+
 def resolve_profile_prompt_for_mode(
     *,
     legacy_prompt: str,
@@ -73,6 +101,7 @@ def resolve_profile_prompt_for_mode(
     token_estimator: TokenEstimator | None = None,
     token_estimator_is_fallback: bool = False,
     audit_context: Mapping[str, Any] | None = None,
+    role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
 ) -> PromptProfileResolution:
     requested_mode = resolve_prompt_profile_mode(mode)
     if requested_mode == "off":
@@ -86,15 +115,27 @@ def resolve_profile_prompt_for_mode(
         )
 
     try:
-        rendered = render_profile_prompt(
-            template_id=template_id,
-            template_version=template_version,
-            segments=segments,
-            model_edition=model_edition,
-            trim_max_tokens=trim_max_tokens,
-            token_estimator=token_estimator,
-            token_estimator_is_fallback=token_estimator_is_fallback,
-        )
+        if requested_mode == "messages":
+            rendered = render_profile_messages(
+                template_id=template_id,
+                template_version=template_version,
+                segments=segments,
+                model_edition=model_edition,
+                trim_max_tokens=trim_max_tokens,
+                role_capabilities=role_capabilities,
+                token_estimator=token_estimator,
+                token_estimator_is_fallback=token_estimator_is_fallback,
+            )
+        else:
+            rendered = render_profile_prompt(
+                template_id=template_id,
+                template_version=template_version,
+                segments=segments,
+                model_edition=model_edition,
+                trim_max_tokens=trim_max_tokens,
+                token_estimator=token_estimator,
+                token_estimator_is_fallback=token_estimator_is_fallback,
+            )
     except PromptEnvelopeRenderError as exc:
         if requested_mode != "shadow":
             raise
@@ -116,15 +157,16 @@ def resolve_profile_prompt_for_mode(
             llm_call_payload=llm_call_payload_from_audit(audit_payload),
         )
 
-    effective_mode: PromptProfileMode = "shadow" if requested_mode == "shadow" else "string"
+    effective_mode: PromptProfileMode = "shadow" if requested_mode == "shadow" else requested_mode
     audit_payload = prompt_profile_audit_payload(
         rendered,
         mode=requested_mode,
         effective_mode=effective_mode,
         audit_context=audit_context,
+        provider_role_capabilities=role_capabilities if requested_mode == "messages" else None,
     )
     return PromptProfileResolution(
-        prompt=legacy_prompt if requested_mode == "shadow" else rendered.prompt,
+        prompt=legacy_prompt if requested_mode == "shadow" else (rendered.messages if isinstance(rendered, RenderedMessages) else rendered.prompt),
         mode=requested_mode,
         effective_mode=effective_mode,
         rendered=rendered,
@@ -134,11 +176,12 @@ def resolve_profile_prompt_for_mode(
 
 
 def prompt_profile_audit_payload(
-    rendered: RenderedPrompt,
+    rendered: RenderedPrompt | RenderedMessages,
     *,
     mode: PromptProfileMode,
     effective_mode: PromptProfileMode,
     audit_context: Mapping[str, Any] | None = None,
+    provider_role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     audit = rendered.audit
     payload: dict[str, Any] = {
@@ -164,6 +207,15 @@ def prompt_profile_audit_payload(
         "candidate_history_tokens": audit.candidate_history_tokens,
         "memory_candidate_count": audit.memory_candidate_count,
         "history_truncated": audit.history_truncated,
+        "role_fallbacks": [
+            {
+                "segment_name": fallback.segment_name,
+                "source_role": fallback.source_role,
+                "target_role": fallback.target_role,
+                "reason": fallback.reason,
+            }
+            for fallback in audit.role_fallbacks
+        ],
         "segments": [
             {
                 "name": segment.name,
@@ -179,6 +231,9 @@ def prompt_profile_audit_payload(
             for segment in audit.segments
         ],
     }
+    safe_role_capabilities = _safe_role_capabilities(provider_role_capabilities)
+    if safe_role_capabilities:
+        payload["provider_role_capabilities"] = safe_role_capabilities
     safe_context = _safe_audit_context(audit_context or {})
     if safe_context:
         payload["context"] = safe_context
@@ -238,6 +293,8 @@ def llm_call_payload_from_audit(payload: Mapping[str, Any] | None) -> dict[str, 
         "memory_candidate_count",
         "history_truncated",
         "error_reason",
+        "role_fallbacks",
+        "provider_role_capabilities",
     )
     return {key: payload[key] for key in keys if key in payload}
 
@@ -292,6 +349,40 @@ def _safe_audit_context(context: Mapping[str, Any]) -> dict[str, Any]:
             if projected:
                 safe[key_text] = projected[:32]
     return safe
+
+
+def _safe_role_capabilities(value: Mapping[str, Any] | tuple[str, ...] | None) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        safe: dict[str, Any] = {}
+        if "supports_messages" in value:
+            safe["supports_messages"] = _truthy(value.get("supports_messages"))
+        elif "messages_supported" in value:
+            safe["supports_messages"] = _truthy(value.get("messages_supported"))
+        roles = value.get("roles") or value.get("supported_roles") or value.get("message_roles") or value.get("supported_message_roles")
+        role_list = _safe_role_list(roles)
+        if role_list:
+            safe["roles"] = role_list
+        return safe
+    role_list = _safe_role_list(value)
+    return {"roles": role_list} if role_list else {}
+
+
+def _safe_role_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        candidates = value.replace("\n", ",").split(",")
+    elif isinstance(value, list | tuple | set | frozenset):
+        candidates = value
+    else:
+        return []
+    return sorted({str(role).strip().lower() for role in candidates if str(role).strip()})
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled", "supported"}
+    return bool(value)
 
 
 def _coerce_positive_int(value: Any) -> int | None:

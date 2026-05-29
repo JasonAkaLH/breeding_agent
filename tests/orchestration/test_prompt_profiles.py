@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from src.orchestration.prompt_envelope import PromptEnvelopeRenderError, PromptSegment
+from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelopeRenderError, PromptSegment
 from src.orchestration.prompt_profiles import resolve_profile_prompt_for_mode
 
 
@@ -147,6 +147,40 @@ class PromptProfilesTest(unittest.TestCase):
         self.assertEqual(resolved.prompt, "legacy")
         self.assertEqual(resolved.audit_payload["status"], "render_failed")
         self.assertEqual(resolved.audit_payload["template_id"], "oversized_profile")
+
+    def test_messages_mode_returns_native_messages_with_fallback_audit(self) -> None:
+        resolved = resolve_profile_prompt_for_mode(
+            legacy_prompt="legacy prompt",
+            template_id="unit_profile_messages",
+            segments=self._segments(history="消息模式历史 SECRET_HISTORY_SHOULD_NOT_LEAK"),
+            mode="messages",
+            trim_max_tokens=4000,
+            role_capabilities={"roles": ["system", "user"]},
+        )
+
+        self.assertEqual(resolved.mode, "messages")
+        self.assertEqual(resolved.effective_mode, "messages")
+        self.assertIsInstance(resolved.prompt, tuple)
+        self.assertTrue(all(isinstance(message, LLMMessage) for message in resolved.prompt))
+        self.assertEqual({message.role for message in resolved.prompt}, {"system", "user"})
+        self.assertEqual(resolved.audit_payload["mode"], "messages")
+        self.assertEqual(resolved.audit_payload["final_input_token_budget"], 3000)
+        self.assertEqual(resolved.audit_payload["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertEqual(
+            resolved.audit_payload["role_fallbacks"],
+            [
+                {
+                    "segment_name": "bulk_history",
+                    "source_role": "context",
+                    "target_role": "user",
+                    "reason": "context_to_user_context",
+                }
+            ],
+        )
+        self.assertEqual(resolved.llm_call_payload["mode"], "messages")
+        self.assertEqual(resolved.llm_call_payload["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertEqual(resolved.llm_call_payload["role_fallbacks"], resolved.audit_payload["role_fallbacks"])
+        self.assertNotIn("SECRET_HISTORY_SHOULD_NOT_LEAK", json.dumps(resolved.audit_payload, ensure_ascii=False))
 
 
 if __name__ == "__main__":
