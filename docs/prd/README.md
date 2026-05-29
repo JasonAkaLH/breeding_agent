@@ -9,6 +9,7 @@
 | `docs/prd/backend/` | 后端主代理框架、Skill runtime、LLM runtime、对话记忆、编排与 API 契约 | 当前正式基线 |
 | `docs/prd/backend/postgresql-state-platform/` | PostgreSQL State Platform 防死锁、写队列、runtime integration 与 SQLite migration/cutover Phase PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/prompt-envelope/` | 大语言模型提示词信封、动态上下文预算、KV Cache 友好组装与多大语言模型调用档案分步 PRD | Phase 拆分已落地；待实施 |
+| `docs/prd/backend/table-upload-normalization/` | 表格上传编码兼容、表头技术清洗、Excel sheet 选择与 prompt-safe 摘要上限分步 PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/MCP/` | MCP Runtime 长任务流式 SSE、Rust sidecar 联合改造 Phase PRD、MCP Client 四版本兼容 PRD，以及官方 SDK 引入轨道 | Phase 拆分已冻结；client 四版本兼容与官方 SDK PRD 已新增 |
 | `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | 已开始，v1 业务对话台 PRD 草案 |
 
@@ -26,7 +27,8 @@
 - MCP 长任务与流式 SSE PRD：`docs/prd/backend/17-MCP长任务流式SSEPRD.md`。
 - 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
-- 表格上传编码兼容与表头规范化 PRD：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
+- 表格上传编码兼容与表头规范化分步 PRD：`docs/prd/backend/table-upload-normalization/README.md`。
+- 表格上传编码兼容与表头规范化历史兼容入口：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
 - PostgreSQL State Platform 防死锁与写队列 Phase PRD：`docs/prd/backend/postgresql-state-platform/README.md`。
 - 大语言模型提示词信封分步 PRD：`docs/prd/backend/prompt-envelope/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`。
