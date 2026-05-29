@@ -1,6 +1,6 @@
 # Docker 启动命令
 
-按顺序逐行执行以下命令即可拉取并启动 `0.1.5` 版本镜像。
+按顺序逐行执行以下命令即可拉取并启动 backend `0.1.5` 与 frontend `0.1.6` 版本镜像。
 
 ```bash
 docker network create breeding-agent-net >/dev/null 2>&1 || true
@@ -128,7 +128,7 @@ docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.
 ```
 
 ```bash
-docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.5
+docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.6
 ```
 
 ```bash
@@ -153,7 +153,7 @@ docker run -d --name breeding-agent-backend --network breeding-agent-net --netwo
 ```
 
 ```bash
-docker run -d --name breeding-agent-frontend --network breeding-agent-net -p 51999:80 registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.5
+docker run -d --name breeding-agent-frontend --network breeding-agent-net -p 51999:80 registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.6
 ```
 
 
