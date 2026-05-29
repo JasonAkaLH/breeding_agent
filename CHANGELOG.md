@@ -8,6 +8,9 @@
 
 ## [Unreleased]
 
+- Prompt Envelope 阶段四 architect 复核指出 public profile 顶层 description/triggers/parameter 文本仍可能绕过 sanitizer；本轮修复将 sanitizer 扩展到 profile 顶层与参数字段，并补充对应泄漏回归。
+- Prompt Envelope 阶段四工具信息分层与能力公开档案安全已落地：主代理 legacy/string prompt 均改为注入 public Skill profile 与 tool input schema，不再注入 `manifest.body`；PromptEnvelope 新增 `selected_public_tool_profiles` / `tool_input_schema` segment 并解除 P2 string+Skill guard；tool result/artifact prompt 投影保留平台下载、missing/error/diagnostics，同时剔除 entrypoint、内部路径、handler/runtime/config/secret 与 raw content。
+- Prompt Envelope 阶段四工具信息分层与能力公开档案安全实施计划已落入 `.omx/plans/prd-20260529-prompt-envelope-p4-tool-profile-safety.md` 与 `.omx/plans/test-spec-20260529-prompt-envelope-p4-tool-profile-safety.md`：按 P4 PRD 拆分 public Skill profile、tool input schema、安全 tool result segment、string+Skill guard 下线、prompt/audit 敏感字段扫描与下载事实保留验证路径。
 - Prompt Envelope 阶段三对话记忆候选上下文化已落地：`ConversationMemoryContext` 现在输出带 priority / trim policy / token estimate 的 `memory_candidates`，主代理 PromptEnvelope string/shadow 路径按低优先级到高优先级装载 `bulk_conversation_history`，renderer/audit 补齐 `candidate_history_tokens` 与 `memory_candidate_count`，并验证 clarification、已接受 interrupt answer 与上传 artifact metadata 在长历史裁剪中优先保留；默认 off/旧 prompt 路径保持兼容。
 - Prompt Envelope 阶段三对话记忆候选上下文化实施计划已落入 `.omx/plans/prd-20260529-prompt-envelope-p3-conversation-memory-candidates.md`：按 P3 PRD 拆分 memory candidate payload、动态历史预算、clarification / accepted interrupt answer / 上传 artifact metadata 优先级、candidate audit 与回归验证路径。
 - Prompt Envelope 阶段二主代理信封字符串迁移已落地：新增主代理 `prompt_envelope_builder` rendered seam、`MAF_PROMPT_ENVELOPE_MODE=off|shadow|string` 解析、shadow/string audit-only event、string envelope-to-string 发送路径、75% final input preflight 接入与 P4 前 Skill match string 放量 guard；默认 off 保持旧 prompt / SSE 行为。

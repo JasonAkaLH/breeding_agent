@@ -9,7 +9,7 @@ from src.capabilities.main_agent import MainAgentExecutor
 from src.capabilities.main_agent.prompt_envelope_builder import build_main_agent_rendered_prompt
 from src.capabilities.main_agent.prompt_builder import build_main_agent_prompt
 from src.core.contracts import CapabilityExecutionRequest
-from src.integrations.codex_skills import SkillCatalog, SkillManifest, SkillMatch
+from src.integrations.codex_skills import SkillCatalog, SkillIOContract, SkillManifest, SkillMatch, SkillParameterSpec
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 
 
@@ -29,10 +29,68 @@ def _assert_markers_in_order(testcase: unittest.TestCase, text: str, markers: li
 def _synthetic_internal_skill_manifest() -> SkillManifest:
     return SkillManifest(
         name="synthetic",
-        description="Synthetic skill",
-        triggers=("synthetic",),
-        body="runtime: python_subprocess\nhandler: synthetic.internal.Handler\nscripts/internal_demo.py",
+        description="Synthetic skill scripts/leak.py handler_description_sentinel runtime_description_sentinel token-secret-description",
+        triggers=("synthetic", "scripts/trigger_leak.py"),
+        body=(
+            "runtime: python_subprocess\n"
+            "handler: synthetic.internal.Handler\n"
+            "scripts/internal_demo.py\n"
+            "INTERNAL_BODY_ONLY_DIRECTIVE"
+        ),
         source_path=Path("skill/synthetic/SKILL.md"),
+        inputs=SkillIOContract.from_mapping(
+            {
+                "required": ["material_data"],
+                "files": [{"extensions": [".csv"], "mime_types": ["text/csv"]}],
+                "handler_path": "scripts/internal_demo.py",
+            }
+        ),
+        outputs=SkillIOContract.from_mapping(
+            {
+                "required": ["answer"],
+                "files": [{"extensions": [".csv"], "mime_types": ["text/csv"]}],
+            }
+        ),
+        parameters={
+            "material_data": SkillParameterSpec(
+                name="material_data",
+                type="artifact",
+                required=True,
+                sources=("artifact",),
+                aliases=("材料清单", "materials", "scripts/alias_leak.py"),
+            ),
+            "design": SkillParameterSpec(
+                name="design",
+                type="string",
+                required=True,
+                aliases=("设计类型", "design", "handler_alias_sentinel"),
+                patterns=("(rcbd|RCBD|随机区组)", "runtime_pattern_sentinel"),
+                default="rcbd",
+                enum=("rcbd", "runtime_enum_sentinel"),
+            ),
+            "run_id": SkillParameterSpec(
+                name="run_id",
+                type="string",
+                required=False,
+                default="token-secret-from-default",
+            ),
+        },
+        metadata={
+            "capability_id": "skill.synthetic",
+            "display_name": "合成公开 Skill",
+            "public_usage": {
+                "overview": "公开档案说明：用于演示用户可见输入格式。",
+                "input_formats": [
+                    {
+                        "name": "material_data",
+                        "description": "CSV 材料清单，包含 material_id 和 variety_name。",
+                        "example_columns": ["material_id", "variety_name"],
+                    }
+                ],
+                "examples": ["示例：上传 CSV 后选择 RCBD 设计。"],
+                "outputs": ["公开结果摘要", "平台下载文件"],
+            },
+        },
     )
 
 
@@ -84,7 +142,7 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(required, prompt)
 
-    def test_phase_zero_documents_current_skill_manifest_body_exposure_risk(self) -> None:
+    def test_phase_four_legacy_prompt_uses_public_skill_profile_not_manifest_body(self) -> None:
         manifest = _synthetic_internal_skill_manifest()
 
         prompt = build_main_agent_prompt(
@@ -94,24 +152,28 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
             script_results=[],
         )
 
-        self.assertIn("runtime: python_subprocess", prompt)
-        self.assertIn("handler: synthetic.internal.Handler", prompt)
-        self.assertIn("scripts/internal_demo.py", prompt)
-
-    @unittest.skip("P4 public Skill profile migration will invert this phase-zero legacy-risk baseline.")
-    def test_future_public_skill_profile_must_not_expose_internal_manifest_body(self) -> None:
-        manifest = _synthetic_internal_skill_manifest()
-
-        prompt = build_main_agent_prompt(
-            user_message="synthetic task",
-            skill_matches=[SkillMatch(manifest=manifest, score=100, reason="trigger:synthetic")],
-            artifact_context=[],
-            script_results=[],
-        )
-
-        self.assertNotIn("runtime: python_subprocess", prompt)
-        self.assertNotIn("handler: synthetic.internal.Handler", prompt)
-        self.assertNotIn("scripts/internal_demo.py", prompt)
+        self.assertIn("skill.synthetic", prompt)
+        self.assertIn("合成公开 Skill", prompt)
+        self.assertIn("公开档案说明", prompt)
+        self.assertIn("material_data", prompt)
+        self.assertIn("示例：上传 CSV", prompt)
+        for forbidden in (
+            "runtime: python_subprocess",
+            "handler: synthetic.internal.Handler",
+            "scripts/internal_demo.py",
+            "INTERNAL_BODY_ONLY_DIRECTIVE",
+            "scripts/leak.py",
+            "handler_description_sentinel",
+            "runtime_description_sentinel",
+            "token-secret-description",
+            "scripts/trigger_leak.py",
+            "scripts/alias_leak.py",
+            "handler_alias_sentinel",
+            "runtime_pattern_sentinel",
+            "runtime_enum_sentinel",
+            "token-secret-from-default",
+        ):
+            self.assertNotIn(forbidden, prompt)
 
     def test_phase_two_rendered_seam_builds_named_segments_and_preserves_download_guard(self) -> None:
         rendered = build_main_agent_rendered_prompt(
@@ -160,6 +222,107 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(rendered.audit.final_input_tokens, rendered.audit.final_input_token_budget)
         for required in ("sandbox:/mnt/data", "file://", "本地绝对路径", "outputs/...", "/api/v1/artifacts/", "/download"):
             self.assertIn(required, rendered.prompt)
+
+    def test_phase_four_rendered_seam_layers_public_tool_profile_schema_and_safe_results(self) -> None:
+        manifest = _synthetic_internal_skill_manifest()
+        rendered = build_main_agent_rendered_prompt(
+            user_message="阶段四用户问题",
+            memory_context={
+                "history_summary": "阶段四历史摘要",
+                "recent_messages": [{"role": "user", "content": "上一轮问题"}],
+            },
+            artifact_context=[
+                {
+                    "upload_id": "upl-1",
+                    "filename": "input.csv",
+                    "content": "raw,csv,body",
+                    "storage_ref": "storage-secret",
+                    "local_path": "/tmp/private/input.csv",
+                }
+            ],
+            response_role=RESPONSE_ROLE_FINAL,
+            answer_scope="task",
+            dependency_context=[],
+            skill_matches=[SkillMatch(manifest=manifest, score=100, reason="trigger:synthetic")],
+            script_results=[
+                {
+                    "skill_name": "synthetic",
+                    "entrypoint": "internal_entrypoint",
+                    "output": {
+                        "answer": "脚本输出摘要",
+                        "missing": ["material_data"],
+                        "error": {"type": "missing_input", "message": "缺少 material_data"},
+                        "diagnostics": {"status": "needs_file", "handler": "hidden_handler"},
+                        "output_files": [
+                            {
+                                "artifact_id": "art-1",
+                                "filename": "result.csv",
+                                "download_url": "/api/v1/artifacts/art-1/download",
+                                "local_path": "/tmp/outputs/result.csv",
+                                "storage_ref": "secret-storage-ref",
+                                "content": "raw-result-content",
+                            }
+                        ],
+                        "file_path": "/tmp/outputs/result.csv",
+                    },
+                }
+            ],
+            trim_max_tokens=1_024_000,
+            token_estimator=_word_tokens,
+        )
+
+        segment_names = [segment.name for segment in rendered.audit.segments]
+        self.assertEqual(
+            segment_names,
+            [
+                "stable_system_contract",
+                "stable_tool_rules",
+                "selected_public_tool_profiles",
+                "tool_input_schema",
+                "bulk_conversation_history",
+                "required_tool_results_and_artifacts",
+                "active_continuity_notes",
+                "current_user_request",
+                "final_recency_guard",
+            ],
+        )
+        _assert_markers_in_order(
+            self,
+            rendered.prompt,
+            [
+                "# 主代理稳定系统契约",
+                "# 文件和下载链接硬约束",
+                "# 已选择工具公开档案",
+                "# 工具输入 schema",
+                "# 对话记忆上下文",
+                "# 必需工具结果与 artifact 上下文",
+                "# 当前回答角色与连续性约束",
+                "# 当前用户问题",
+                "# 最终回答前 recency guard",
+            ],
+        )
+        self.assertIn("skill.synthetic", rendered.prompt)
+        self.assertIn("公开档案说明", rendered.prompt)
+        self.assertIn("material_data", rendered.prompt)
+        self.assertIn("脚本输出摘要", rendered.prompt)
+        self.assertIn("missing_input", rendered.prompt)
+        self.assertIn("needs_file", rendered.prompt)
+        self.assertIn("/api/v1/artifacts/art-1/download", rendered.prompt)
+        for forbidden in (
+            "runtime: python_subprocess",
+            "handler: synthetic.internal.Handler",
+            "scripts/internal_demo.py",
+            "INTERNAL_BODY_ONLY_DIRECTIVE",
+            "internal_entrypoint",
+            "hidden_handler",
+            "raw,csv,body",
+            "storage-secret",
+            "/tmp/private/input.csv",
+            "/tmp/outputs/result.csv",
+            "secret-storage-ref",
+            "raw-result-content",
+        ):
+            self.assertNotIn(forbidden, rendered.prompt)
 
     def test_phase_two_rendered_seam_trims_history_inside_final_input_budget(self) -> None:
         rendered = build_main_agent_rendered_prompt(
