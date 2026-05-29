@@ -19,6 +19,7 @@
 4. Runtime Replanner 使用 replan profile，禁止内部 capability / handler / Skill 阶段输出。
 5. Skill input resolver 使用 resolver profile，只接收 schema、current request、active notes、artifact summaries、answer payload 和少量 clarification。
 6. Conversation memory resolver / summary 使用 memory profiles 或明确记录旧路径 fallback audit。
+7. 所有 profile 生成的最终 LLM 输入均继承 PromptEnvelope 的 75% final input budget 与 final token preflight 口径。
 
 ## 3. 非目标
 
@@ -37,10 +38,11 @@
 | P5-FR-4 | Runtime Replanner 不得成盲区。 | replan prompt 生成 audit；输出仍只允许 public DAG。 |
 | P5-FR-5 | Skill input resolver 必须限制上下文。 | 不接收完整 memory；artifact 只使用 summaries；无法确定的字段进入 missing。 |
 | P5-FR-6 | Memory resolver/summary 必须受控。 | resolver 仍只做高置信实体补全，不回答用户问题、不选择 capability；summary 只做忠实摘要。 |
+| P5-FR-7 | 多调用场景必须继承 75% 输入预算。 | Soft Skill、Planner、repair、Runtime Replanner、Skill input resolver、memory resolver/summary 的 profile 化路径最终输入均记录 `final_input_token_budget` / `final_input_tokens`；首次 preflight 失败时最多一次 history compression retry，第二次仍超过 75% 输入预算必须 fail closed。尚未 profile 化的旧路径只能在 `off` 兼容或显式 fallback audit 下保留，不得作为 `string/messages` 生产路径绕过 preflight。 |
 
 ## 5. 非功能需求
 
-- **Consistency**：所有 profile 使用统一 audit schema 和 mode 开关。
+- **Consistency**：所有 profile 使用统一 audit schema、75% final input budget 和 mode 开关。
 - **Safety**：JSON guard 不替代后端 validator；LLM 输出仍必须被解析/校验。
 - **Compatibility**：`off` 模式保留所有旧 prompt 路径。
 
@@ -52,14 +54,14 @@
 4. 迁移 `src/capabilities/main_agent/runtime_replanner.py` 的 replan prompt。
 5. 迁移 `src/integrations/codex_skills/input_resolution.py` 的 LLM slot prompt。
 6. 为 `src/orchestration/conversation_memory.py` 的 resolver / summary prompt 加 profile 或 fallback audit。
-7. 每条路径均新增 audit no-raw-content 测试。
+7. 每条路径均新增 audit no-raw-content 与 75% input budget preflight 测试。
 
 ## 7. 验收标准
 
 - `conda run -n multi_agent python -m unittest tests.api.test_soft_skill_binding tests.api.test_skill_input_resolution_runtime tests.api.test_runtime_replanner` 通过。
 - `conda run -n multi_agent python -m unittest tests.orchestration.test_planner_contract tests.orchestration.test_llm_workflow_provider` 通过。
 - `/skill` 追问、流式答疑、interrupt 缺参 API 回归通过。
-- Runtime Replanner、memory resolver / summary 不再是未审计 prompt 盲区。
+- Runtime Replanner、memory resolver / summary 不再是未审计 prompt 盲区，且能解释 final input budget / final input tokens。
 - License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 
 ## 8. 风险与缓解

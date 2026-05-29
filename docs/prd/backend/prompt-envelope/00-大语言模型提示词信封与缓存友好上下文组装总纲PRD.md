@@ -25,7 +25,7 @@
 ### 2.1 目标
 
 1. 将 LLM 输入从散落的字符串拼接升级为结构化 `PromptEnvelope` / `PromptSegment`。
-2. 历史上下文预算按本次实际非历史 token 动态反算，不再固定 `trim_max_tokens * 0.75`。
+2. 最终发送给模型的输入 token 预算默认固定为 `floor(trim_max_tokens * 0.75)`；其中 25% 预留给可见输出、thinking / reasoning、provider message overhead 与安全余量。历史上下文预算在该输入预算内按本次实际非历史 token 动态反算，不再把 `trim_max_tokens * 0.75` 当作历史预算。
 3. 稳定 system / tool rules 形成可 hash 的 cacheable prefix，提升 KV Cache 命中稳定性。
 4. 显式利用 primacy / recency：系统规则靠前，当前用户请求、active continuity notes、final guard 靠后。
 5. 工具规则、工具公开档案、工具输入 schema、工具结果与普通 history 分层。
@@ -65,7 +65,7 @@
 | 集成点 | 当前依赖 | PromptEnvelope 约束 |
 | --- | --- | --- |
 | 配置来源 | 启动期 `config.yaml` bootstrap 到环境变量 / runtime config；业务节点不得重复读 YAML。 | `PromptEnvelopeConfig` 只能消费进程环境、runtime config 或测试显式 config。 |
-| Token 计数 | `src/integrations/token_counter.py` 与 per-model `trim_max_tokens`。 | 精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`；fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`，且 audit 标记 fallback。 |
+| Token 计数 | `src/integrations/token_counter.py` 与 per-model `trim_max_tokens`。 | `trim_max_tokens` 是 provider/model 总上下文口径；PromptEnvelope 的默认最终输入预算为 `final_input_token_budget = floor(trim_max_tokens * 0.75)`，剩余 25% 预留给模型输出、thinking / reasoning、provider overhead 与安全余量。精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`；fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`，且 audit 标记 fallback。 |
 | Skill 公开信息 | `build_public_skill_profile` 现有 sanitizer。 | 不新增第二套不一致 sanitizer；Skill match、Soft Skill、resolver profile 复用同一 public profile / schema 投影。 |
 | Artifact 下载 | 平台 artifact descriptor 与 `/api/v1/artifacts/{artifact_id}/download`。 | LLM 只能看到脱敏 descriptor 和平台 download_url；不得生成 sandbox、本地路径或 outputs 伪链接。 |
 | Audit/事件 | 现有 `EventVisibility.AUDIT_ONLY` / `main_agent.llm_call` 诊断出口。 | renderer 返回 audit，由 caller 写事件；renderer 不依赖 API repository，也不写前端可见 SSE。 |
@@ -76,20 +76,20 @@
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
 | FR-001 | 系统必须用 `PromptEnvelope` / `PromptSegment` 表达 LLM 输入。 | 核心模型有独立单元测试；业务调用点不再自由拼接不可审计的大字符串。 |
-| FR-002 | 系统必须按本次实际非历史 prompt token 反算 bulk history budget。 | `bulk_history_budget = trim_max_tokens - required_non_history_tokens - safety_margin`；精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`；不得继续把 `trim_max_tokens * 0.75` 作为最终历史预算。 |
+| FR-002 | 系统必须把最终输入 token 预算限制在 `trim_max_tokens` 的 75%，并在该输入预算内按本次实际非历史 prompt token 反算 bulk history budget。 | `final_input_token_budget = floor(trim_max_tokens * 0.75)`；`bulk_history_budget = final_input_token_budget - required_non_history_tokens - safety_margin`；精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`；不得继续把 `trim_max_tokens * 0.75` 作为最终历史预算。 |
 | FR-003 | 系统必须把工具规则、工具公开档案、输入 schema、工具结果拆成独立 segment。 | 工具结果不进入普通 history；public profile 不暴露内部结构。 |
 | FR-004 | 系统必须保留 active continuity notes，并将其放在 current user request 之前的 recency 区。 | active notes 只来自系统可信状态和已接受 answer / artifact / tool result。 |
 | FR-005 | 系统必须支持至少八类 profile：main agent answer、soft skill decision、soft skill answer、planner、planner repair、runtime replanner、skill input resolver、conversation memory resolver / summary。 | 每类 profile 有 template_id / template_version 和 render audit。 |
 | FR-006 | 系统必须提供 `off|shadow|string|messages` 渐进运行模式。 | `off` 可回滚；`shadow` 只生成 audit；`string` 才发送 envelope string；`messages` 需显式启用。 |
 | FR-007 | 主代理 Skill match 必须使用 public Skill profile。 | prompt 不包含脚本路径、handler、runtime、sidecar、内部目录、配置、DSN、token、secret。 |
-| FR-008 | Prompt audit 必须能解释预算、裁剪和缓存前缀。 | audit 包含 segment token、trim reason、cacheable prefix hash、role fallback；不含 raw content。 |
+| FR-008 | Prompt audit 必须能解释输入预算、最终输入 token、裁剪、preflight 重试和缓存前缀。 | audit 包含 `final_input_token_budget`、`final_input_tokens`、`preflight_retry_count`、`history_compression_retry`、segment token、trim reason、cacheable prefix hash、role fallback；不含 raw content。 |
 | FR-009 | messages-native runtime 必须保留 string fallback。 | Provider 不支持 role 时 deterministic fallback，并写入 audit。 |
 | FR-010 | 新增 audit event 不得影响前端 SSE / completion 语义。 | `main_agent.output_delta`、`main_agent.output_final` 行为保持兼容。 |
 
 ## 5. 非功能需求
 
 - **安全**：prompt renderer 与 audit schema 必须默认拒绝 raw prompt、raw artifact、内部路径、DSN、secret、token；Skill public profile 继续复用现有 allowlist sanitizer。
-- **可靠性**：必保 segment 超过 `trim_max_tokens` 时必须 fail closed，不得截断系统规则、工具规则或当前用户请求。
+- **可靠性**：最终渲染输入必须通过 final token preflight，`final_input_tokens` 不得超过 `floor(trim_max_tokens * 0.75)`；首次 preflight 失败时只允许执行一次 bulk history 压缩重试，重渲染后再次 preflight；第二次仍失败必须 fail closed。必保 segment 超过该输入预算时必须 fail closed，不得截断系统规则、工具规则或当前用户请求。
 - **兼容性**：阶段一至阶段五不得要求 LLM provider 支持 messages-native；所有阶段必须保留 `off` 回滚。
 - **可观测性**：所有 profile 渲染均应产生 audit；audit-only event 不进入前端可见事件流。
 - **可测试性**：每个阶段均有可独立运行的 targeted tests；测试不依赖真实 LLM provider。
@@ -108,7 +108,7 @@ src/orchestration/prompt_envelope.py
 职责：
 
 - 定义 `PromptSegment`、`PromptEnvelope`、`PromptSegmentAudit`、`PromptRenderAudit`、`RenderedPrompt`、`RenderedMessages`。
-- 提供 segment 排序、token 估算、预算分配、裁剪、prefix hash、string/messages 渲染。
+- 提供 segment 排序、token 估算、输入预算分配、裁剪、final token preflight、prefix hash、string/messages 渲染。
 - 不依赖 FastAPI、具体 LLM provider 或 Skill executor，保持 orchestration 层可测。
 
 ### 6.2 主代理适配层
@@ -148,7 +148,7 @@ I. final_recency_guard
 - 继续保留 `ConversationMemoryContext.to_prompt_payload()`，避免破坏现有测试和旧路径。
 - 新增候选结构，例如 `ConversationMemoryCandidatePayload` 或 `ConversationMemorySegmentCandidate`。
 - 每个候选标记 kind、priority、trim_policy、token_estimate。
-- 最终预算由 PromptAssembler 按完整 prompt 反算。
+- 最终输入预算由 PromptAssembler 按 `floor(trim_max_tokens * 0.75)` 建模；bulk history 在该输入预算内按完整 prompt 反算。
 
 ### 6.5 Runtime 与 LLM Client 迁移
 
@@ -166,11 +166,11 @@ I. final_recency_guard
 
 ### 6.6 配置、profile registry 与审计出口
 
-- 配置统一由 `PromptEnvelopeConfig` 或等价对象解析 `MAF_PROMPT_ENVELOPE_MODE`、`trim_max_tokens`、safety margin 与 provider role 能力；业务执行路径不得重新读取 `config.yaml`。
-- safety margin 默认规则必须可配置但不可隐式漂移：精确/可信 token 估算使用 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算使用 `max(2048, floor(trim_max_tokens * 0.02))`；任何调整必须同步测试和 PRD。
+- 配置统一由 `PromptEnvelopeConfig` 或等价对象解析 `MAF_PROMPT_ENVELOPE_MODE`、`trim_max_tokens`、输入预算比例、safety margin 与 provider role 能力；业务执行路径不得重新读取 `config.yaml`。
+- 输入预算比例默认规则必须可配置但不可隐式漂移：默认 `input_budget_ratio=0.75`，即 `final_input_token_budget=floor(trim_max_tokens * 0.75)`；25% 保留给输出、thinking / reasoning、provider overhead 与安全余量。safety margin 默认规则同样不可隐式漂移：精确/可信 token 估算使用 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算使用 `max(2048, floor(trim_max_tokens * 0.02))`；任何调整必须同步测试和 PRD。
 - Profile 统一由 `PromptProfileRegistry` 或等价工厂按调用场景选择。
 - 审计由 caller 显式接收 `RenderedPrompt.audit` 并写入现有 `EventVisibility.AUDIT_ONLY` 事件；renderer 本身不直接依赖 FastAPI / repository / SSE。
-- Audit event payload 只能包含 `template_id`、`template_version`、mode、segment audit、token、hash、trim/fallback reason、provider role fallback；不得包含 raw prompt、raw artifact、secret、DSN、token 或内部路径。
+- Audit event payload 只能包含 `template_id`、`template_version`、mode、`final_input_token_budget`、`final_input_tokens`、`preflight_retry_count`、`history_compression_retry`、segment audit、token、hash、trim/fallback reason、provider role fallback；不得包含 raw prompt、raw artifact、secret、DSN、token 或内部路径。
 
 ## 7. 运行模式
 
@@ -211,13 +211,13 @@ MAF_PROMPT_ENVELOPE_MODE=off|shadow|string|messages
 - **安全边界**：prompt renderer 与 audit schema 必须默认拒绝 raw prompt、raw artifact、内部路径、DSN、secret、token；public Skill profile 继续复用现有 allowlist sanitizer。
 - **权限与隐私**：PromptEnvelope 不新增权限模型，不绕过现有 artifact download authorization，不把 username / conversation_id / task_id 放入 stable prefix，不把 audit payload 作为用户可见数据返回。
 - **回滚策略**：`MAF_PROMPT_ENVELOPE_MODE=off` 是运行时回滚开关；`shadow` 只允许增加 audit，不得改变发送给 LLM 的 prompt。
-- **可观测性**：所有 mode 下若生成 audit，必须能回答“本次 non-history token 占用多少、history 可用预算多少、哪些 segment 被裁剪、prefix hash 是否变化、role fallback 是否发生”。
+- **可观测性**：所有 mode 下若生成 audit，必须能回答“本次 final input budget 是多少、final input tokens 是多少、non-history token 占用多少、history 可用预算多少、哪些 segment 被裁剪、是否触发唯一一次 history compression retry、final preflight 是否通过、prefix hash 是否变化、role fallback 是否发生”。
 
 ## 10. 验收矩阵
 
 | AC | 对应阶段 | 验证 |
 | --- | --- | --- |
-| AC-001 动态历史预算 | P1/P3 | `tests/orchestration/test_prompt_envelope.py` dynamic budget case |
+| AC-001 75% 最终输入预算与动态历史预算 | P1/P3 | `tests/orchestration/test_prompt_envelope.py` 覆盖 `final_input_token_budget=floor(trim_max_tokens*0.75)`、dynamic budget、final preflight，以及首次 preflight 失败后仅一次 history compression retry case |
 | AC-002 segment audit | P1/P2 | audit 不含 raw content，只含 hash/token/trim |
 | AC-003 current user + final guard 末尾 | P2 | main agent golden order test |
 | AC-004 stable prefix hash | P1/P7 | prefix hash determinism test |
@@ -228,7 +228,7 @@ MAF_PROMPT_ENVELOPE_MODE=off|shadow|string|messages
 | AC-009 token counter fallback | P1/P3 | fallback estimator margin test |
 | AC-010 active notes 来源可信 | P3/P4 | interrupt resume active notes test |
 | AC-011 shadow 模式不改变输出 | P2/P5 | API shadow regression |
-| AC-012 必保超限 fail closed | P1 | over-budget failure test |
+| AC-012 必保超出最终输入预算 fail closed | P1 | over-budget failure test 证明 required segments 超过 `floor(trim_max_tokens*0.75)` 时不发送 LLM；history compression retry 后第二次 preflight 仍失败也不发送 LLM |
 | AC-013 audit 事件兼容 | P2/P5/P7 | 新增/扩展 audit-only event 不影响前端 SSE 与 completion |
 | AC-014 Runtime Replanner / memory resolver 不成盲区 | P5 | runtime replanner、conversation memory resolver / summary prompt 均有 profile 或显式旧路径 fallback audit |
 
@@ -262,7 +262,7 @@ conda run -n multi_agent python -m unittest discover -s tests/integrations -p 't
 
 1. P1 完成后必须能独立通过 prompt envelope 单元测试。
 2. P2 完成后必须能在 `shadow` 模式不改变现有 API 行为；`string` 模式若涉及 Skill match / `/skill` 软绑定，只能用于开发或小流量 shadow 对比，不能进入生产放量。
-3. P3 完成后必须证明历史预算不再固定 75%，且 current-task clarification、已接受 interrupt answer 与上传 artifact metadata 不会被旧 history 裁掉。
+3. P3 完成后必须证明 75% 是最终输入预算而不是历史预算；history 只能使用 `floor(trim_max_tokens*0.75) - required_non_history_tokens - safety_margin` 的剩余空间，且 current-task clarification、已接受 interrupt answer 与上传 artifact metadata 不会被旧 history 裁掉。
 4. P4 完成后必须证明 `/skill` 和主代理 Skill match prompt 不暴露内部结构；只有此门禁通过后，含 Skill profile 的 `string` 模式才可进入生产灰度。
 5. P5 完成后必须证明 planner repair、runtime replanner、memory resolver / summary 没有成为未审计 prompt 盲区。
 6. P6 完成前不得默认启用 `messages` 模式。
@@ -273,11 +273,11 @@ conda run -n multi_agent python -m unittest discover -s tests/integrations -p 't
 | 风险 | 缓解 |
 | --- | --- |
 | prompt 顺序变化影响模型输出 | `off/shadow/string/messages` 分阶段，先 shadow 观测，再 string 灰度。 |
-| token 估算误差导致 provider 拒绝 | provider tokenization 优先；fallback 使用更大 safety margin。 |
+| token 估算误差或输出空间不足导致 provider 拒绝 | 默认只允许最终输入使用 `trim_max_tokens` 的 75%；provider tokenization 优先；fallback 使用更大 safety margin；最终发送前执行 final token preflight。 |
 | audit 泄漏 prompt 或 secret | audit schema 禁 raw content，只保留 hash、token、segment name、trim reason。 |
 | Skill 内部结构继续暴露 | P4 明确替换 `manifest.body`，复用 `build_public_skill_profile`，测试扫描脚本路径/handler/runtime。 |
 | messages role provider 不兼容 | P6 role fallback mapping + audit，默认保留 string fallback。 |
-| 长工具结果挤占历史 | 工具结果关键事实必保，明细可压缩；bulk history 最后竞争 flexible budget。 |
+| 长工具结果挤占历史或撑爆输入预算 | 工具结果关键事实必保，明细可压缩；bulk history 最后竞争 flexible budget；若必保工具事实仍超过 75% 最终输入预算则 fail closed。 |
 | active notes 误把用户文本当事实 | active notes 只来自系统可信状态和已接受 answer / artifact / tool result。 |
 | 审计出口不清导致 shadow 无法验证 | P2 明确 rendered prompt 返回 audit，由 caller 写入 audit-only event；renderer 不直接写库。 |
 | 现有 prompt 路径遗漏 | P5 将 planner repair、runtime replanner、memory resolver / summary 列入 profile 或 fallback audit 验收。 |

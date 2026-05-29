@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import textwrap
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.capabilities.main_agent import MainAgentExecutor, MainAgentWorkflowProvider
+from src.capabilities.main_agent.prompt_builder import build_main_agent_prompt
 from src.core.contracts import CapabilityExecutionRequest
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 from src.orchestration.models import OrchestrationRequest
@@ -491,6 +493,145 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
         self.assertEqual(llm_event.payload["config_source"], "injected_config")
         self.assertNotIn("api_key", llm_event.payload)
+
+    async def test_prompt_envelope_shadow_keeps_legacy_prompt_and_records_audit_event(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "shadow answer"
+
+        request = CapabilityExecutionRequest(
+            capability_id="main_agent.respond",
+            conversation_id="conv-1",
+            task_id="task-shadow",
+            node_id="node-shadow",
+            input_payload={"user_message": "shadow 用户问题"},
+            metadata={"auto_skill_matching_enabled": False},
+        )
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={"provider": "injected_stream", "model": "test-model", "trim_max_tokens": 2_000},
+            skill_catalog=SkillCatalog(()),
+        )
+
+        with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "shadow"}):
+            result = await executor.execute(request)
+
+        legacy_prompt = build_main_agent_prompt(
+            user_message="shadow 用户问题",
+            skill_matches=[],
+            artifact_context=[],
+            script_results=[],
+            dependency_context=[],
+            memory_context={},
+        )
+        self.assertEqual(prompts, [legacy_prompt])
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.visibility, "audit_only")
+        self.assertEqual(prompt_event.payload["mode"], "shadow")
+        self.assertEqual(prompt_event.payload["effective_mode"], "shadow")
+        self.assertEqual(prompt_event.payload["final_input_token_budget"], 1_500)
+        self.assertIn("stable_system_contract", [segment["name"] for segment in prompt_event.payload["segments"]])
+        self.assertNotIn("shadow 用户问题", str(prompt_event.payload))
+        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "shadow")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["effective_mode"], "shadow")
+
+    async def test_prompt_envelope_string_sends_envelope_prompt_without_skill_matches(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "string answer"
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={"provider": "injected_stream", "model": "test-model", "trim_max_tokens": 20_000},
+            skill_catalog=SkillCatalog(()),
+        )
+        with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-string",
+                    node_id="node-string",
+                    input_payload={"user_message": "string 用户问题"},
+                    metadata={
+                        "auto_skill_matching_enabled": False,
+                        "conversation_memory": {"history_summary": "上一轮摘要"},
+                    },
+                    dependency_outputs={"node-a": {"response_text": "上游结果"}},
+                )
+            )
+
+        prompt = prompts[0]
+        self.assertIn("# 主代理稳定系统契约", prompt)
+        self.assertIn("# 必需工具结果与 artifact 上下文", prompt)
+        self.assertIn("# 当前用户问题", prompt)
+        self.assertIn("# 最终回答前 recency guard", prompt)
+        self.assertLess(prompt.index("# 对话记忆上下文"), prompt.index("# 必需工具结果与 artifact 上下文"))
+        self.assertLess(prompt.index("# 必需工具结果与 artifact 上下文"), prompt.index("# 当前用户问题"))
+        self.assertLess(prompt.index("# 当前用户问题"), prompt.index("# 最终回答前 recency guard"))
+        for required in ("sandbox:/mnt/data", "file://", "outputs/...", "/api/v1/artifacts/", "/download"):
+            self.assertIn(required, prompt)
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.payload["mode"], "string")
+        self.assertEqual(prompt_event.payload["effective_mode"], "string")
+        self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
+        self.assertNotIn("string 用户问题", str(prompt_event.payload))
+
+    async def test_prompt_envelope_string_with_skill_match_falls_back_to_legacy_prompt_and_records_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "report"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: report-writer
+description: 生成周报
+triggers:
+  - 周报
+---
+
+# Report Writer
+runtime: python_subprocess
+scripts/internal_report.py
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+            prompts: list[str] = []
+
+            async def streamer(prompt: str):
+                prompts.append(prompt)
+                yield "guarded"
+
+            executor = MainAgentExecutor(
+                stream_generator=streamer,
+                stream_metadata={"provider": "injected_stream", "model": "test-model", "trim_max_tokens": 2_000},
+                skill_catalog=catalog,
+            )
+
+            with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+                result = await executor.execute(
+                    CapabilityExecutionRequest(
+                        capability_id="main_agent.respond",
+                        conversation_id="conv-1",
+                        task_id="task-guard",
+                        node_id="node-guard",
+                        input_payload={"user_message": "写一个周报"},
+                    )
+                )
+
+        self.assertIn("runtime: python_subprocess", prompts[0])
+        self.assertNotIn("# 主代理稳定系统契约", prompts[0])
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.payload["mode"], "string")
+        self.assertEqual(prompt_event.payload["effective_mode"], "off")
+        self.assertEqual(prompt_event.payload["guard_reason"], "skill_match_requires_p4_public_profile")
+        self.assertNotIn("runtime: python_subprocess", str(prompt_event.payload))
+        self.assertNotIn("scripts/internal_report.py", str(prompt_event.payload))
 
     async def test_executor_applies_request_level_thinking_and_reasoning_effort_separately(self) -> None:
         seen_reasoning_efforts: list[str] = []

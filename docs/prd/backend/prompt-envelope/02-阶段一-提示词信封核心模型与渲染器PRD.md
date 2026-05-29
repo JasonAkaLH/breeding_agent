@@ -16,7 +16,7 @@
 1. 新增 `src/orchestration/prompt_envelope.py` 或等价模块。
 2. 定义提示词信封、段落、渲染结果和审计数据模型。
 3. 按父计划规定的稳定 prefix、半稳定 profile/schema、中段历史、工具结果、recency 区顺序渲染。
-4. 按本次实际非历史 token 反算 bulk history budget。
+4. 将最终输入 token 预算限制为 `floor(trim_max_tokens * 0.75)`，并按本次实际非历史 token 反算 bulk history budget。
 5. 支持 required / compressible / drop_oldest / drop_if_needed 裁剪策略。
 6. 生成不含 raw content 的审计信息。
 
@@ -33,11 +33,12 @@
 | --- | --- | --- |
 | P1-FR-1 | 必须定义不可变或低副作用的数据模型。 | `PromptSegment`、`PromptEnvelope`、`PromptSegmentAudit`、`PromptRenderAudit`、`RenderedPrompt` 可被单元测试 import。 |
 | P1-FR-2 | 必须实现 deterministic segment order。 | 同一组 segments 输入顺序不同，输出顺序一致。 |
-| P1-FR-3 | 必须实现动态历史预算。 | `bulk_history_budget = trim_max_tokens - required_non_history_tokens - safety_margin`；精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`；不再固定 75%。 |
-| P1-FR-4 | 必须实现 required 超限 fail closed。 | 必保 segment 超预算时抛出明确异常或返回 fail-closed 结果，不截断必保内容。 |
+| P1-FR-3 | 必须实现 75% 最终输入预算与动态历史预算。 | `final_input_token_budget = floor(trim_max_tokens * 0.75)`；`bulk_history_budget = final_input_token_budget - required_non_history_tokens - safety_margin`；精确/可信估算默认 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算默认 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`；不再把 75% 当成最终历史预算。 |
+| P1-FR-4 | 必须实现 required 超限 fail closed。 | 必保 segment 超过 `final_input_token_budget` 时抛出明确异常或返回 fail-closed 结果，不截断必保内容。 |
 | P1-FR-5 | 必须实现可压缩/可丢弃裁剪。 | flexible history segment 可按策略裁剪，并在 audit 中记录 tokens_before/after、trim_reason。 |
 | P1-FR-6 | 必须实现 cacheable prefix hash。 | 只覆盖 `cache_affinity=prefix` 且 `mutability=stable` 的 segment。 |
 | P1-FR-7 | audit 不得记录 raw prompt。 | 单元测试递归扫描 audit dict，不包含 segment content / raw prompt / artifact content。 |
+| P1-FR-8 | 必须实现 final token preflight 与一次历史压缩重试。 | 对最终即将发送的 string/messages payload 重新计 token，断言 `final_input_tokens <= final_input_token_budget`；首次失败时只允许执行一次 bulk history 压缩并重渲染，再执行第二次 preflight；第二次仍失败则 fail closed。 |
 
 ## 5. 非功能需求
 
@@ -50,9 +51,9 @@
 
 1. 新增 `src/orchestration/prompt_envelope.py`。
 2. 新增 `tests/orchestration/test_prompt_envelope.py`。
-3. 先写 segment order、dynamic budget、fail-closed、audit no-raw、prefix hash red/green 测试。
+3. 先写 segment order、75% final input budget、dynamic budget、final preflight、一次 history compression retry、二次失败 fail-closed、audit no-raw、prefix hash red/green 测试。
 4. 实现数据模型和 renderer。
-5. 为 token counter fallback 增加更大 safety margin 测试：fallback 时必须使用 `max(2048, floor(trim_max_tokens * 0.02))`，精确/可信估算使用 `max(1024, floor(trim_max_tokens * 0.01))`。
+5. 为 token counter fallback 增加更大 safety margin 测试：fallback 时必须使用 `max(2048, floor(trim_max_tokens * 0.02))`，精确/可信估算使用 `max(1024, floor(trim_max_tokens * 0.01))`；同时测试 `trim_max_tokens=1024000` 时默认 `final_input_token_budget=768000`。
 6. 保持所有业务调用点不接入，降低阶段风险。
 
 ## 7. 验收标准
@@ -60,6 +61,7 @@
 - `conda run -n multi_agent python -m unittest tests.orchestration.test_prompt_envelope` 通过。
 - 新模块无 FastAPI / storage / provider 依赖。
 - audit 对 raw content 的禁止有自动化测试。
+- 75% 最终输入预算、final preflight、preflight 失败后唯一一次 history compression retry 与二次失败 fail closed 有自动化测试。
 - `git diff --check` 通过。
 - License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 
@@ -67,6 +69,6 @@
 
 | 风险 | 缓解 |
 | --- | --- |
-| token 估算误差导致后续 provider 拒绝。 | 阶段一只定义 estimator seam 和 fallback margin；真实 provider 优化放后续阶段。 |
+| token 估算误差或输出空间不足导致后续 provider 拒绝。 | 阶段一默认只允许最终输入使用 `trim_max_tokens` 的 75%，并定义 estimator seam、fallback margin 与 final preflight；真实 provider 优化放后续阶段。 |
 | 裁剪策略过早复杂化。 | 先实现父计划列出的四种策略；新策略必须有测试和使用场景。 |
 | audit hash 无法排查问题。 | audit 保留 segment name、tokens、trim reason、content_hash；禁止 raw content 但允许 hash 对比。 |
