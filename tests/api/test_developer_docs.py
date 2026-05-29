@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 from tests.api.support import APITestCase
@@ -8,7 +9,9 @@ from tests.api.support import APITestCase
 class DeveloperDocsAPITest(APITestCase):
     async def test_api_doc_endpoint_serves_static_html_without_authentication(self) -> None:
         docs_file = Path("docs/api/api-doc.html")
+        changelog_file = Path("docs/api/API更新日志.md")
         self.assertTrue(docs_file.is_file())
+        self.assertTrue(changelog_file.is_file())
 
         await self.logout()
         response = await self.client.get("/api-doc")
@@ -27,6 +30,16 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("metadata.deep_thinking=false", response.text)
         self.assertIn("强制降为", response.text)
         self.assertIn("历史消息只持久化最终 answer content", response.text)
+        self.assertIn("API 更新日志", response.text)
+        self.assertIn("api-changelog-content", response.text)
+        self.assertIn("/api-doc/API更新日志.md", response.text)
+        self.assertIn("metadata.soft_skill_binding", response.text)
+        self.assertIn("direct_skill_execution_disabled", response.text)
+        self.assertIn("soft_skill_binding.decision", response.text)
+        self.assertIn("main_agent.output_delta", response.text)
+        self.assertIn("文件产物判定规则", response.text)
+        self.assertIn("sandbox:/mnt/data", response.text)
+        self.assertIn("/api/v1/artifacts/{artifact_id}/download", response.text)
         self.assertIn("/api/v1/tasks/{task_id}/events", response.text)
         self.assertIn("ConversationSummaryResponse", response.text)
         self.assertIn("username", response.text)
@@ -38,6 +51,9 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("deleting_failed", response.text)
         self.assertIn("没有前端/用户侧自动超时承诺", response.text)
         self.assertIn("docs/runbooks/postgresql-state-platform.md", response.text)
+        unescaped_html = html.unescape(response.text)
+        self.assertIn('"source_path": "field-design/SKILL.md"', unescaped_html)
+        self.assertNotIn('"source_path": "skill/field-design/SKILL.md"', unescaped_html)
         openapi_response = await self.client.get("/openapi.json")
         self.assertEqual(openapi_response.status_code, 200)
         for path in openapi_response.json()["paths"]:
@@ -50,3 +66,13 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertNotIn("account_id", response.text)
         self.assertNotIn("RegisterRequest", response.text)
         self.assertNotIn("CreateApiToken", response.text)
+
+        changelog_response = await self.client.get("/api-doc/API更新日志.md")
+        self.assertEqual(changelog_response.status_code, 200)
+        self.assertIn("text/markdown", changelog_response.headers["content-type"])
+        self.assertIn("# API 更新日志", changelog_response.text)
+        self.assertIn("2026-05-28 至 2026-05-29", changelog_response.text)
+        self.assertIn("direct_skill_execution_disabled", changelog_response.text)
+        alias_response = await self.client.get("/api-doc/api-changelog.md")
+        self.assertEqual(alias_response.status_code, 200)
+        self.assertEqual(alias_response.text, changelog_response.text)

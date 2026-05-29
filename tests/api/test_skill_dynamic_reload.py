@@ -102,9 +102,9 @@ triggers:
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
         events = await self.runtime.storage.list_events_for_task(response.json()["task_id"])
-        selected = next(event for event in events if event.event_type == "skill.forced_selected")
-        self.assertEqual(selected.payload["source"], "explicit_request")
-        self.assertTrue(selected.payload.get("skill_bundle_revision"))
+        decision = next(event for event in events if event.event_type == "soft_skill_binding.decision")
+        self.assertEqual(decision.payload["decision"], "execute")
+        self.assertEqual(decision.payload["target_capability_id"], "skill.demo_hot_reload")
 
     async def test_new_conversation_refresh_removes_deleted_skill_from_capabilities_and_prompt(self) -> None:
         project_skill_root = self.workspace / "skill"

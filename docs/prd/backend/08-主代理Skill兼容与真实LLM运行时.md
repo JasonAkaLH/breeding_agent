@@ -20,7 +20,7 @@
 
 ## 3. 非目标
 
-- 不复刻 Codex 本地 workspace runtime。
+- 不复刻 本地 workspace runtime。
 - 不支持任意 shell 执行。
 - 不实现 plugin / MCP runtime。
 - 不实现通用工具调用平台。
@@ -63,7 +63,7 @@ provider 失败时输出：
 - `scripts`
 - 正文说明
 
-解析目标是让后端主代理理解 skill 能力与输入输出边界，而不是复刻 Codex 完整运行时。
+解析目标是让后端主代理理解 skill 能力与输入输出边界，而不是复刻 完整本地运行时。
 
 ### 5.2 Skill 匹配
 
@@ -169,4 +169,4 @@ Smoke 验收重点：
 
 ## 11. Skill 构建指南
 
-面向 Oh-my-codex `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 Codex runtime 能力。
+面向 OMX `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 本地 runtime 能力。

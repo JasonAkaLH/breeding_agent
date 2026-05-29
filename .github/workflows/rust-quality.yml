@@ -422,7 +422,7 @@ jobs:
         run: python -m pip install --force-reinstall --no-deps native/target/wheels/maf_skill_runtime_pyo3-*.whl
 
       - name: test_installed_pyo3_module_matches_rust_contract_when_available
-        run: python -m unittest tests.integrations.codex_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
+        run: python -m unittest tests.integrations.agent_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
 
       - name: python -m maturin build --release --manifest-path native/crates/maf_core_lifecycle_pyo3/Cargo.toml --compatibility manylinux_2_35 --auditwheel check
         run: python -m maturin build --release --locked --manifest-path native/crates/maf_core_lifecycle_pyo3/Cargo.toml --interpreter python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels

@@ -23,18 +23,18 @@ from scripts.prd_evidence import (
     validate_schema_version,
 )
 
-_CODEX_SKILLS_DIR = REPO_ROOT / "src" / "integrations" / "codex_skills"
-_LIGHTWEIGHT_PACKAGE = "_maf_prd04_codex_skills"
+_AGENT_SKILLS_DIR = REPO_ROOT / "src" / "integrations" / "agent_skills"
+_LIGHTWEIGHT_PACKAGE = "_maf_prd04_agent_skills"
 
 _rust_contract = load_lightweight_module(
     package_name=_LIGHTWEIGHT_PACKAGE,
-    module_dir=_CODEX_SKILLS_DIR,
+    module_dir=_AGENT_SKILLS_DIR,
     name="rust_contract",
     error_label="Skill Runtime",
 )
 _skill_runtime_gates = load_lightweight_module(
     package_name=_LIGHTWEIGHT_PACKAGE,
-    module_dir=_CODEX_SKILLS_DIR,
+    module_dir=_AGENT_SKILLS_DIR,
     name="skill_runtime_gates",
     error_label="Skill Runtime",
 )

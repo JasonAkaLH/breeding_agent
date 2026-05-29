@@ -1,9 +1,9 @@
 # Skill 输出文件 Artifact 与下载 PRD
 
-- **范围**：后端 / Codex Skill 兼容层 / 文件型 Artifact / 下载鉴权 / 前后端契约
+- **范围**：后端 / Agent Skill 兼容层 / 文件型 Artifact / 下载鉴权 / 前后端契约
 - **文档状态**：草案（用于补充细节与后续实现规划）
 - **日期**：2026-05-08
-- **关联模块**：`src/integrations/codex_skills/`、`src/capabilities/main_agent/`、`src/api/`、`src/storage/`、`frontend/`
+- **关联模块**：`src/integrations/agent_skills/`、`src/capabilities/main_agent/`、`src/api/`、`src/storage/`、`frontend/`
 
 ## 1. 背景
 

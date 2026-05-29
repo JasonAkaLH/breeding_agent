@@ -22,6 +22,9 @@ _SYSTEM_NODE_METADATA_KEYS = frozenset(
         "forced_skill_capability_id",
         "forced_skill_name",
         "forced_skill_source",
+        "soft_skill_binding",
+        "soft_skill_binding_source",
+        "soft_skill_binding_requested_capability_id",
     }
 )
 
@@ -110,8 +113,17 @@ class OrchestrationService:
 
     async def _initialize_task(self, request: OrchestrationRequest, plan: WorkflowPlan) -> Task:
         now = self._utcnow_naive()
-        root_node_id = next((node.node_id for node in plan.nodes if not node.depends_on), None)
         existing_task = await self._storage.get_task(request.task_id)
+        planned_root_node_id = next((node.node_id for node in plan.nodes if not node.depends_on), None)
+        root_node_id = (
+            existing_task.root_node_id
+            if (
+                existing_task is not None
+                and request.metadata.get("resume_interrupted_node_id")
+                and existing_task.root_node_id
+            )
+            else planned_root_node_id
+        )
         existing_nodes = {
             node.node_id: node
             for node in await self._storage.list_task_nodes_for_task(plan.task_id)

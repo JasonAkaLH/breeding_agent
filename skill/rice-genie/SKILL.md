@@ -18,6 +18,29 @@ triggers:
   - rice vcf
   - rice qtn
   - gene check
+public_usage:
+  overview: >-
+    分析水稻 VCF 或既有基因检测结果，围绕参考 QTN 集合解释样本的有利变异、性状相关位点和报告摘要；也可以回答输入文件和样本参数的用法问题。
+  input_formats:
+    - name: rice_input
+      required: true
+      description: 水稻 VCF、VCF.GZ 或已生成的基因检测结果文件；单样本和多样本数据均可说明。
+      example_columns: [chrom, pos, ref, alt, sample]
+  parameters:
+    - name: sample
+      description: 单个样本名称；当文件中有多个样本且用户只关心一个样本时使用。
+    - name: samples
+      description: 多个样本名称或样本列表；用于限定报告对象。
+    - name: run_id
+      description: 可选运行编号，便于区分多次体检报告。
+  examples:
+    - /rice-genie 上传这个水稻 VCF 后能分析哪些性状？
+    - /rice-genie 分析样本 A 的有利 QTN
+    - /rice-genie 对这批样本生成基因体检报告
+  outputs:
+    - 水稻基因体检解读报告
+    - 有利 QTN 和相关性状摘要
+    - 单样本或多样本比较说明
 execution:
   mode: python_subprocess
   answer_mode: requires_finalizer
@@ -109,6 +132,8 @@ Use this flow for the customer-facing rice gene check agent:
 ## Run VCF Matching
 
 The project backend executes `scripts/run_rice_genie.py`. Do not ask the main agent to run Markdown code blocks. The wrapper receives JSON stdin, resolves uploaded VCF/VCF.GZ or existing gene_check JSON content, calls the bundled matching and interpretation scripts, and returns a structured report plus a Markdown artifact.
+
+When the wrapper detects a missing VCF / gene_check input, it must return the structured `missing_input` contract from `Skill构建指南.md`: `ok: false`, `is_error: true`, `error.type: missing_input`, `missing: ["rice_input"]`, and a user-readable `answer`.
 
 Manual local run from the project root:
 

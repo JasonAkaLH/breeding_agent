@@ -181,6 +181,24 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(resolved["uploaded_artifacts"], [])
         self.assertEqual(resolved["missing_upload_ids"], [first.json()["upload_id"]])
 
+    async def test_missing_conversation_upload_list_and_unknown_delete_are_documented_noops(self) -> None:
+        listed = await self.client.get("/api/v1/conversations/missing-conversation/uploads")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(
+            listed.json(),
+            {"conversation_id": "missing-conversation", "uploads": []},
+        )
+
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": "missing-conversation", "upload_id": "upl-missing"},
+        )
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json(), {"upload_id": "upl-missing", "deleted": False})
+
     async def test_upload_rejects_unsupported_file_type(self) -> None:
         response = await self.client.post(
             "/api/v1/conversations/uploads",
