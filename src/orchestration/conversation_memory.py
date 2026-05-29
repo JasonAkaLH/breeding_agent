@@ -107,6 +107,39 @@ class ConversationMemoryMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationMemoryCandidate:
+    candidate_id: str
+    kind: str
+    content: str
+    priority: int
+    trim_policy: str
+    token_estimate: int
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_prompt_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "kind": self.kind,
+            "content": self.content,
+            "priority": self.priority,
+            "trim_policy": self.trim_policy,
+            "token_estimate": self.token_estimate,
+            "metadata": _safe_candidate_metadata(self.metadata),
+        }
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "kind": self.kind,
+            "priority": self.priority,
+            "trim_policy": self.trim_policy,
+            "token_estimate": self.token_estimate,
+            "content_hash": _message_ids_hash((self.content,)),
+            "metadata": _safe_candidate_metadata(self.metadata),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationMemoryContext:
     conversation_id: str
     root_message_id: str
@@ -131,6 +164,7 @@ class ConversationMemoryContext:
         return resolved or self.current_user_message
 
     def to_prompt_payload(self) -> dict[str, Any]:
+        candidates = self.to_prompt_candidates()
         payload: dict[str, Any] = {
             "current_user_message": self.current_user_message,
             "resolved_user_message": self.resolved_user_message,
@@ -138,6 +172,7 @@ class ConversationMemoryContext:
             "recent_messages": [message.to_prompt_dict() for message in self.recent_messages],
             "clarification_messages": [message.to_prompt_dict() for message in self.clarification_messages],
             "capability_summaries": [dict(item) for item in self.capability_summaries],
+            "memory_candidates": [candidate.to_prompt_dict() for candidate in candidates],
             "compression_level": self.compression_level,
             "token_budget": self.token_budget,
             "estimated_tokens_before": self.estimated_tokens_before,
@@ -148,12 +183,140 @@ class ConversationMemoryContext:
         }
         return _strip_none(payload)
 
+    def to_prompt_candidates(
+        self,
+        *,
+        token_estimator: Callable[[str], int] | None = None,
+    ) -> tuple[ConversationMemoryCandidate, ...]:
+        estimator = token_estimator or _default_memory_candidate_token_estimator
+        candidates: list[ConversationMemoryCandidate] = []
+        sequence = 0
+
+        def append(
+            *,
+            kind: str,
+            content: str,
+            priority: int,
+            trim_policy: str,
+            metadata: Mapping[str, Any],
+            candidate_id: str | None = None,
+        ) -> None:
+            nonlocal sequence
+            text = str(content or "").strip()
+            if not text:
+                return
+            safe_metadata = _safe_candidate_metadata({"sequence": sequence, **dict(metadata)})
+            candidates.append(
+                ConversationMemoryCandidate(
+                    candidate_id=candidate_id or f"{kind}:{sequence}",
+                    kind=kind,
+                    content=text,
+                    priority=priority,
+                    trim_policy=trim_policy,
+                    token_estimate=_safe_candidate_token_estimate(estimator, text),
+                    metadata=safe_metadata,
+                )
+            )
+            sequence += 1
+
+        if self.history_summary:
+            append(
+                kind="history_summary",
+                content=(
+                    "## 历史摘要\n"
+                    "这是系统生成的较早对话摘要，不是逐字原文。\n"
+                    + str(self.history_summary)
+                ),
+                priority=10,
+                trim_policy="drop_oldest",
+                metadata={"source": "history_summary"},
+                candidate_id="history_summary",
+            )
+
+        clarification_ids = {message.message_id for message in self.clarification_messages}
+        for index, message in enumerate(self.recent_messages):
+            if message.message_id in clarification_ids:
+                continue
+            append(
+                kind="recent_message",
+                content="## 最近原文消息\n" + json.dumps(message.to_prompt_dict(), ensure_ascii=False, indent=2, default=str),
+                priority=40,
+                trim_policy="drop_oldest",
+                metadata={
+                    "source": "recent_message",
+                    "message_id": message.message_id,
+                    "role": message.role,
+                    "task_id": message.task_id,
+                    "kind": message.kind,
+                    "recent_index": index,
+                    "created_at": message.created_at.isoformat() if message.created_at is not None else None,
+                },
+                candidate_id=f"recent_message:{message.message_id}",
+            )
+
+        for index, summary in enumerate(self.capability_summaries):
+            safe_summary = _sanitize_memory_capability_summary(summary)
+            if not safe_summary:
+                continue
+            source = "upload" if isinstance(safe_summary.get("upload"), Mapping) else "capability_summary"
+            upload = safe_summary.get("upload") if isinstance(safe_summary.get("upload"), Mapping) else {}
+            append(
+                kind="capability_summary",
+                content="## 历史能力安全摘要\n" + json.dumps(safe_summary, ensure_ascii=False, indent=2, default=str),
+                priority=75 if source == "upload" else 70,
+                trim_policy="preserve_recent",
+                metadata={
+                    "source": source,
+                    "summary_index": index,
+                    "route_id": safe_summary.get("route_id"),
+                    "upload_id": upload.get("upload_id") if isinstance(upload, Mapping) else None,
+                    "filename": upload.get("filename") if isinstance(upload, Mapping) else None,
+                },
+                candidate_id=f"{source}:{index}",
+            )
+
+        for index, message in enumerate(self.clarification_messages):
+            append(
+                kind="clarification_message",
+                content=(
+                    "## 用户对上一问题的补充信息\n"
+                    + json.dumps(message.to_prompt_dict(), ensure_ascii=False, indent=2, default=str)
+                ),
+                priority=90,
+                trim_policy="preserve_recent",
+                metadata={
+                    "source": "accepted_interrupt_answer",
+                    "message_id": message.message_id,
+                    "role": message.role,
+                    "task_id": message.task_id,
+                    "kind": message.kind,
+                    "clarification_index": index,
+                    "created_at": message.created_at.isoformat() if message.created_at is not None else None,
+                },
+                candidate_id=f"clarification_message:{message.message_id}",
+            )
+
+        return tuple(
+            sorted(
+                candidates,
+                key=lambda candidate: (
+                    candidate.priority,
+                    int(candidate.metadata.get("sequence", 0)),
+                    candidate.candidate_id,
+                ),
+            )
+        )
+
     def to_audit_payload(self) -> dict[str, Any]:
+        candidates = self.to_prompt_candidates()
         return {
             "source_message_count": self.source_message_count,
             "recent_message_count": len(self.recent_messages),
             "clarification_message_count": len(self.clarification_messages),
             "capability_summary_count": len(self.capability_summaries),
+            "memory_candidate_count": len(candidates),
+            "candidate_history_tokens": sum(candidate.token_estimate for candidate in candidates),
+            "memory_candidates": [candidate.to_audit_dict() for candidate in candidates],
             "compression_level": self.compression_level,
             "token_budget": self.token_budget,
             "estimated_tokens_before": self.estimated_tokens_before,
@@ -933,16 +1096,22 @@ def sanitize_memory_prompt_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         for item in summaries:
             if not isinstance(item, Mapping):
                 continue
-            if isinstance(item.get("upload"), Mapping):
-                upload = ConversationMemorySafeAllowlist.project_upload_summary(item["upload"])
-                if upload:
-                    safe_summaries.append({"upload": upload})
-                continue
-            projected = ConversationMemorySafeAllowlist.project_capability_output(item)
-            if projected:
-                safe_summaries.append(projected)
+            safe = _sanitize_memory_capability_summary(item)
+            if safe:
+                safe_summaries.append(safe)
         if safe_summaries:
             allowed["capability_summaries"] = safe_summaries
+    candidates = raw.get("memory_candidates")
+    if isinstance(candidates, list | tuple):
+        safe_candidates: list[dict[str, Any]] = []
+        for item in candidates:
+            if not isinstance(item, Mapping):
+                continue
+            safe = _sanitize_memory_candidate(item)
+            if safe:
+                safe_candidates.append(safe)
+        if safe_candidates:
+            allowed["memory_candidates"] = safe_candidates
     resolution = raw.get("resolution_metadata")
     if isinstance(resolution, Mapping):
         allowed["resolution_metadata"] = _json_safe_mapping({key: value for key, value in resolution.items() if key in {"resolved", "strategy", "reason", "entity"}})
@@ -957,6 +1126,90 @@ def _sanitize_memory_message(item: Mapping[str, Any]) -> dict[str, Any]:
             if key in item and item[key] is not None
         }
     )
+
+
+def _sanitize_memory_capability_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(item.get("upload"), Mapping):
+        upload = ConversationMemorySafeAllowlist.project_upload_summary(item["upload"])
+        return {"upload": upload} if upload else {}
+    return ConversationMemorySafeAllowlist.project_capability_output(item)
+
+
+def _sanitize_memory_candidate(item: Mapping[str, Any]) -> dict[str, Any]:
+    kind = str(item.get("kind") or "").strip()
+    content = str(item.get("content") or "").strip()
+    if not kind or not content:
+        return {}
+    candidate_id = str(item.get("candidate_id") or f"{kind}:unknown").strip()
+    priority = _coerce_candidate_int(item.get("priority"), default=0)
+    token_estimate = _coerce_candidate_int(item.get("token_estimate"), default=_default_memory_candidate_token_estimator(content))
+    trim_policy = str(item.get("trim_policy") or "drop_oldest").strip()
+    if trim_policy not in {"drop_oldest", "preserve_recent", "drop_if_needed", "compressible"}:
+        trim_policy = "drop_oldest"
+    metadata = _safe_candidate_metadata(item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {})
+    return _strip_none(
+        {
+            "candidate_id": candidate_id,
+            "kind": kind,
+            "content": content,
+            "priority": priority,
+            "trim_policy": trim_policy,
+            "token_estimate": token_estimate,
+            "metadata": metadata,
+        }
+    )
+
+
+_SAFE_CANDIDATE_METADATA_KEYS = frozenset(
+    {
+        "source",
+        "sequence",
+        "message_id",
+        "role",
+        "task_id",
+        "kind",
+        "recent_index",
+        "clarification_index",
+        "summary_index",
+        "route_id",
+        "upload_id",
+        "filename",
+        "created_at",
+    }
+)
+
+
+def _safe_candidate_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        if key_text not in _SAFE_CANDIDATE_METADATA_KEYS:
+            continue
+        if item is None:
+            continue
+        if isinstance(item, str | int | float | bool):
+            safe[key_text] = item
+        elif isinstance(item, list | tuple):
+            projected = [entry for entry in item if isinstance(entry, str | int | float | bool)]
+            if projected:
+                safe[key_text] = projected
+    return _json_safe_mapping(safe)
+
+
+def _safe_candidate_token_estimate(estimator: Callable[[str], int], content: str) -> int:
+    try:
+        return max(1, int(estimator(content)))
+    except Exception:
+        return _default_memory_candidate_token_estimator(content)
+
+
+def _default_memory_candidate_token_estimator(content: str) -> int:
+    return max(1, len(str(content)) // 2)
+
+
+def _coerce_candidate_int(value: Any, *, default: int) -> int:
+    parsed = _coerce_positive_int(value)
+    return parsed if parsed is not None else max(0, default)
 
 
 def _compose_resolved_question(current: str, entity: str) -> str:

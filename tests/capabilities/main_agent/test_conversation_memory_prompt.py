@@ -183,6 +183,71 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(history_audit.trimmed)
         self.assertNotIn("history-0", rendered.prompt)
 
+    def test_phase_three_memory_candidates_keep_interrupt_and_upload_context_when_history_trims(self) -> None:
+        old_history = " ".join(f"old-history-{index}" for index in range(1_000))
+        rendered = build_main_agent_rendered_prompt(
+            user_message="继续生成田间设计",
+            memory_context={
+                "memory_candidates": [
+                    {
+                        "candidate_id": "history-summary",
+                        "kind": "history_summary",
+                        "content": old_history,
+                        "priority": 10,
+                        "trim_policy": "drop_oldest",
+                        "token_estimate": 1_000,
+                        "metadata": {"source": "history_summary", "sequence": 0},
+                    },
+                    {
+                        "candidate_id": "answer-upload",
+                        "kind": "clarification_message",
+                        "content": "KEEP_ACCEPTED_UPLOAD 已上传补充文件",
+                        "priority": 90,
+                        "trim_policy": "preserve_recent",
+                        "token_estimate": 4,
+                        "metadata": {"source": "accepted_interrupt_answer", "sequence": 1},
+                    },
+                    {
+                        "candidate_id": "upload-summary",
+                        "kind": "capability_summary",
+                        "content": "KEEP_UPLOAD_METADATA filename materials.csv upload_id upl-1",
+                        "priority": 80,
+                        "trim_policy": "preserve_recent",
+                        "token_estimate": 6,
+                        "metadata": {"source": "upload", "sequence": 2, "upload_id": "upl-1"},
+                    },
+                    {
+                        "candidate_id": "answer-scalar",
+                        "kind": "clarification_message",
+                        "content": "KEEP_SCALAR_ANSWER ncols=8",
+                        "priority": 95,
+                        "trim_policy": "preserve_recent",
+                        "token_estimate": 2,
+                        "metadata": {"source": "accepted_interrupt_answer", "sequence": 3},
+                    },
+                ]
+            },
+            artifact_context=[],
+            dependency_context=[],
+            skill_matches=[],
+            script_results=[],
+            trim_max_tokens=2_000,
+            token_estimator=_word_tokens,
+        )
+
+        self.assertEqual(rendered.audit.final_input_token_budget, 1_500)
+        self.assertEqual(
+            rendered.audit.bulk_history_budget,
+            rendered.audit.final_input_token_budget - rendered.audit.non_history_tokens - rendered.audit.safety_margin_tokens,
+        )
+        self.assertTrue(rendered.audit.history_truncated)
+        self.assertEqual(rendered.audit.candidate_history_tokens, 1_012)
+        self.assertEqual(rendered.audit.memory_candidate_count, 4)
+        self.assertNotIn("old-history-0", rendered.prompt)
+        self.assertIn("KEEP_ACCEPTED_UPLOAD", rendered.prompt)
+        self.assertIn("KEEP_UPLOAD_METADATA", rendered.prompt)
+        self.assertIn("KEEP_SCALAR_ANSWER", rendered.prompt)
+
     async def test_prompt_keeps_memory_boundaries_and_redacts_storage_metadata(self) -> None:
         prompts: list[str] = []
 
