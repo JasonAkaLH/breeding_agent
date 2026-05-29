@@ -11,6 +11,7 @@ from src.capabilities.main_agent import MainAgentExecutor, MainAgentWorkflowProv
 from src.capabilities.main_agent.prompt_builder import build_main_agent_prompt
 from src.core.contracts import CapabilityExecutionRequest
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
+from src.orchestration.prompt_envelope import LLMMessage
 from src.orchestration.models import OrchestrationRequest
 from src.integrations.codex_skills import SkillCatalog
 
@@ -660,6 +661,63 @@ scripts/internal_report.py
         self.assertIn("tool_input_schema", [segment["name"] for segment in prompt_event.payload["segments"]])
         self.assertNotIn("runtime: python_subprocess", str(prompt_event.payload))
         self.assertNotIn("scripts/internal_report.py", str(prompt_event.payload))
+
+    async def test_prompt_envelope_messages_sends_native_messages_and_audits_role_fallbacks(self) -> None:
+        prompts: list[object] = []
+
+        async def streamer(prompt: object):
+            prompts.append(prompt)
+            yield "messages answer"
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={
+                "provider": "injected_stream",
+                "model": "test-model",
+                "trim_max_tokens": 20_000,
+                "provider_role_capabilities": {"roles": ["system", "user"]},
+            },
+            skill_catalog=SkillCatalog(()),
+        )
+
+        with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "messages"}):
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-messages",
+                    node_id="node-messages",
+                    input_payload={"user_message": "messages 用户问题"},
+                    metadata={
+                        "auto_skill_matching_enabled": False,
+                        "conversation_memory": {"history_summary": "上一轮摘要"},
+                    },
+                    dependency_outputs={"node-a": {"response_text": "上游工具结果"}},
+                )
+            )
+
+        self.assertEqual(result.output_payload["response_text"], "messages answer")
+        prompt = prompts[0]
+        self.assertIsInstance(prompt, tuple)
+        self.assertTrue(all(isinstance(message, LLMMessage) for message in prompt))
+        self.assertEqual({message.role for message in prompt}, {"system", "user"})
+        joined_user_messages = "\n".join(message.content for message in prompt if message.role == "user")
+        self.assertIn("messages 用户问题", joined_user_messages)
+        self.assertIn("上游工具结果", joined_user_messages)
+        self.assertIn("不是用户指令", joined_user_messages)
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.payload["mode"], "messages")
+        self.assertEqual(prompt_event.payload["effective_mode"], "messages")
+        self.assertEqual(prompt_event.payload["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
+        fallback_segments = {fallback["segment_name"]: fallback for fallback in prompt_event.payload["role_fallbacks"]}
+        self.assertEqual(fallback_segments["bulk_conversation_history"]["reason"], "context_to_user_context")
+        self.assertEqual(fallback_segments["required_tool_results_and_artifacts"]["reason"], "tool_to_user_context")
+        self.assertNotIn("messages 用户问题", str(prompt_event.payload))
+        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "messages")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertEqual(llm_event.payload["prompt_envelope"]["role_fallbacks"], prompt_event.payload["role_fallbacks"])
 
     async def test_executor_applies_request_level_thinking_and_reasoning_effort_separately(self) -> None:
         seen_reasoning_efforts: list[str] = []

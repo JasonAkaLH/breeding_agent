@@ -11,12 +11,15 @@ from src.integrations.llm_client import load_config
 from src.integrations.model_editions import trim_max_tokens_for_model_edition
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 from src.orchestration.prompt_envelope import (
+    LLMMessage,
     PromptEnvelope,
     PromptEnvelopeRenderError,
     PromptSegment,
+    RenderedMessages,
     RenderedPrompt,
     TokenEstimator,
     render_prompt_envelope,
+    render_prompt_envelope_messages,
 )
 
 from .prompt_builder import (
@@ -31,7 +34,7 @@ from .prompt_builder import (
     sanitize_script_results_for_prompt,
 )
 
-PromptEnvelopeMode = Literal["off", "shadow", "string"]
+PromptEnvelopeMode = Literal["off", "shadow", "string", "messages"]
 
 _ENV_MODE_KEY = "MAF_PROMPT_ENVELOPE_MODE"
 _TEMPLATE_ID = "main_agent.respond.prompt_envelope"
@@ -40,10 +43,10 @@ _TEMPLATE_VERSION = "p4-tool-profile-v1"
 
 @dataclass(frozen=True, slots=True)
 class MainAgentPromptResolution:
-    prompt: str
+    prompt: str | tuple[LLMMessage, ...]
     mode: PromptEnvelopeMode
     effective_mode: PromptEnvelopeMode
-    rendered: RenderedPrompt | None
+    rendered: RenderedPrompt | RenderedMessages | None
     audit_payload: dict[str, Any] | None
     llm_call_payload: dict[str, Any] | None
 
@@ -51,7 +54,7 @@ class MainAgentPromptResolution:
 def resolve_main_agent_prompt_envelope_mode(value: str | None = None) -> PromptEnvelopeMode:
     raw_value = value if value is not None else os.environ.get(_ENV_MODE_KEY)
     mode = str(raw_value or "off").strip().lower()
-    if mode in {"off", "shadow", "string"}:
+    if mode in {"off", "shadow", "string", "messages"}:
         return mode  # type: ignore[return-value]
     return "off"
 
@@ -85,6 +88,42 @@ def build_main_agent_rendered_prompt(
     )
     return render_prompt_envelope(
         envelope,
+        token_estimator=token_estimator,
+        token_estimator_is_fallback=token_estimator_is_fallback,
+    )
+
+
+def build_main_agent_rendered_messages(
+    *,
+    user_message: str,
+    skill_matches: list[SkillMatch],
+    artifact_context: list[dict[str, Any]],
+    script_results: list[dict[str, Any]],
+    dependency_context: list[dict[str, Any]] | None = None,
+    memory_context: Mapping[str, Any] | None = None,
+    response_role: str | None = None,
+    answer_scope: str | None = None,
+    model_edition: str | None = None,
+    trim_max_tokens: int | None = None,
+    role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
+    token_estimator: TokenEstimator | None = None,
+    token_estimator_is_fallback: bool = False,
+) -> RenderedMessages:
+    envelope = build_main_agent_prompt_envelope(
+        user_message=user_message,
+        skill_matches=skill_matches,
+        artifact_context=artifact_context,
+        script_results=script_results,
+        dependency_context=dependency_context,
+        memory_context=memory_context,
+        response_role=response_role,
+        answer_scope=answer_scope,
+        model_edition=model_edition,
+        trim_max_tokens=trim_max_tokens,
+    )
+    return render_prompt_envelope_messages(
+        envelope,
+        role_capabilities=role_capabilities,
         token_estimator=token_estimator,
         token_estimator_is_fallback=token_estimator_is_fallback,
     )
@@ -296,21 +335,39 @@ def resolve_main_agent_prompt_for_mode(
         stream_metadata=stream_metadata,
         model_edition=model_edition,
     )
+    role_capabilities = _role_capabilities_from_metadata(stream_metadata or {})
     try:
-        rendered = build_main_agent_rendered_prompt(
-            user_message=user_message,
-            skill_matches=skill_matches,
-            artifact_context=artifact_context,
-            script_results=script_results,
-            dependency_context=dependency_context,
-            memory_context=memory_context,
-            response_role=response_role,
-            answer_scope=answer_scope,
-            model_edition=model_edition,
-            trim_max_tokens=trim_max_tokens,
-            token_estimator=token_estimator,
-            token_estimator_is_fallback=token_estimator is None,
-        )
+        if requested_mode == "messages":
+            rendered = build_main_agent_rendered_messages(
+                user_message=user_message,
+                skill_matches=skill_matches,
+                artifact_context=artifact_context,
+                script_results=script_results,
+                dependency_context=dependency_context,
+                memory_context=memory_context,
+                response_role=response_role,
+                answer_scope=answer_scope,
+                model_edition=model_edition,
+                trim_max_tokens=trim_max_tokens,
+                role_capabilities=role_capabilities,
+                token_estimator=token_estimator,
+                token_estimator_is_fallback=token_estimator is None,
+            )
+        else:
+            rendered = build_main_agent_rendered_prompt(
+                user_message=user_message,
+                skill_matches=skill_matches,
+                artifact_context=artifact_context,
+                script_results=script_results,
+                dependency_context=dependency_context,
+                memory_context=memory_context,
+                response_role=response_role,
+                answer_scope=answer_scope,
+                model_edition=model_edition,
+                trim_max_tokens=trim_max_tokens,
+                token_estimator=token_estimator,
+                token_estimator_is_fallback=token_estimator is None,
+            )
     except PromptEnvelopeRenderError as exc:
         if requested_mode == "shadow":
             audit_payload = _render_error_audit_payload(
@@ -329,15 +386,16 @@ def resolve_main_agent_prompt_for_mode(
             )
         raise
 
-    effective_mode: PromptEnvelopeMode = "shadow" if requested_mode == "shadow" else "string"
+    effective_mode: PromptEnvelopeMode = "shadow" if requested_mode == "shadow" else requested_mode
     audit_payload = prompt_envelope_audit_payload(
         rendered,
         mode=requested_mode,
         effective_mode=effective_mode,
         skill_match_count=len(skill_matches),
+        provider_role_capabilities=role_capabilities if requested_mode == "messages" else None,
     )
     return MainAgentPromptResolution(
-        prompt=legacy_prompt if requested_mode == "shadow" else rendered.prompt,
+        prompt=legacy_prompt if requested_mode == "shadow" else (rendered.messages if isinstance(rendered, RenderedMessages) else rendered.prompt),
         mode=requested_mode,
         effective_mode=effective_mode,
         rendered=rendered,
@@ -366,12 +424,13 @@ def resolve_main_agent_trim_max_tokens(
 
 
 def prompt_envelope_audit_payload(
-    rendered: RenderedPrompt,
+    rendered: RenderedPrompt | RenderedMessages,
     *,
     mode: PromptEnvelopeMode,
     effective_mode: PromptEnvelopeMode,
     guard_reason: str | None = None,
     skill_match_count: int = 0,
+    provider_role_capabilities: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     audit = rendered.audit
     payload: dict[str, Any] = {
@@ -399,6 +458,15 @@ def prompt_envelope_audit_payload(
         "memory_candidate_count": audit.memory_candidate_count,
         "history_truncated": audit.history_truncated,
         "skill_match_count": skill_match_count,
+        "role_fallbacks": [
+            {
+                "segment_name": fallback.segment_name,
+                "source_role": fallback.source_role,
+                "target_role": fallback.target_role,
+                "reason": fallback.reason,
+            }
+            for fallback in audit.role_fallbacks
+        ],
         "segments": [
             {
                 "name": segment.name,
@@ -414,6 +482,9 @@ def prompt_envelope_audit_payload(
             for segment in audit.segments
         ],
     }
+    safe_role_capabilities = _safe_role_capabilities(provider_role_capabilities)
+    if safe_role_capabilities:
+        payload["provider_role_capabilities"] = safe_role_capabilities
     return payload
 
 
@@ -537,8 +608,59 @@ def _llm_call_payload_from_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
         "memory_candidate_count",
         "history_truncated",
         "skill_match_count",
+        "role_fallbacks",
+        "provider_role_capabilities",
     )
     return {key: payload[key] for key in keys if key in payload}
+
+
+def _role_capabilities_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    for key in (
+        "provider_role_capabilities",
+        "llm_role_capabilities",
+        "message_role_capabilities",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, Mapping):
+            return dict(value)
+    for key in ("supported_message_roles", "message_roles", "supported_roles"):
+        value = metadata.get(key)
+        if isinstance(value, list | tuple | str):
+            return {"roles": value}
+    return {}
+
+
+def _safe_role_capabilities(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    safe: dict[str, Any] = {}
+    if "supports_messages" in value:
+        safe["supports_messages"] = _truthy(value.get("supports_messages"))
+    elif "messages_supported" in value:
+        safe["supports_messages"] = _truthy(value.get("messages_supported"))
+    roles = value.get("roles") or value.get("supported_roles") or value.get("message_roles") or value.get("supported_message_roles")
+    role_list = _safe_role_list(roles)
+    if role_list:
+        safe["roles"] = role_list
+    return safe
+
+
+def _safe_role_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        candidates = value.replace("\n", ",").split(",")
+    elif isinstance(value, list | tuple | set | frozenset):
+        candidates = value
+    else:
+        return []
+    return sorted({str(role).strip().lower() for role in candidates if str(role).strip()})
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled", "supported"}
+    return bool(value)
 
 
 def _safe_error_details(details: Mapping[str, Any]) -> dict[str, Any]:

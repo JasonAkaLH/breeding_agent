@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from unittest.mock import patch
 
 from tests.api.support import APITestCase
+from src.orchestration.prompt_envelope import LLMMessage
 
 
 class MainAgentLLMAPITest(APITestCase):
@@ -159,6 +160,44 @@ class MainAgentLLMAPITest(APITestCase):
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertTrue(any(event.event_type == "main_agent.prompt_envelope_rendered" for event in events))
         self.assertTrue(any(event.event_type == "main_agent.output_final" for event in events))
+        self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in events))
+
+    async def test_prompt_envelope_messages_mode_sends_native_messages_and_keeps_audit_only(self) -> None:
+        prompts: list[object] = []
+
+        async def streamer(prompt: object):
+            prompts.append(prompt)
+            yield "messages"
+            yield " ok"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=streamer, skill_roots=None)
+        with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "messages"}):
+            response = await self.client.post(
+                "/api/v1/conversations/chat-messages",
+                json={
+                    "conversation_id": "conv-main-messages-envelope",
+                    "content": "你好 messages",
+                    "routing_mode": "auto",
+                    "capability_id": None,
+                    "metadata": {},
+                },
+            )
+            self.assertEqual(response.status_code, 202)
+            task_id = response.json()["task_id"]
+            terminal = await self.wait_for_terminal_task(task_id)
+
+        self.assertEqual(terminal["status"], "completed")
+        self.assertIsInstance(prompts[0], tuple)
+        self.assertTrue(all(isinstance(message, LLMMessage) for message in prompts[0]))
+        self.assertIn("你好 messages", "\n".join(message.content for message in prompts[0] if message.role == "user"))
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        prompt_event = next(event for event in events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.visibility, "audit_only")
+        self.assertEqual(prompt_event.payload["mode"], "messages")
+        self.assertEqual(prompt_event.payload["effective_mode"], "messages")
+        self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
+        llm_event = next(event for event in events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "messages")
         self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in events))
 
     async def test_explicit_generic_data_lookup_capability_runs_internal_filtering_node(self) -> None:
