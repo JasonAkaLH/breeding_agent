@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from typing import Any
 
 from .llm_client import LLMClient, ReasoningEffort, load_config
+from .llm_stream_events import accepted_options, coerce_stream_event, coerce_text_result, iter_stream_like
 from .model_editions import config_with_model_edition, default_model_edition
 from .provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, render_prompt_envelope
@@ -145,7 +146,7 @@ class SharedLLMRuntime:
         )
         if inspect.isawaitable(result):
             result = await result
-        return _coerce_text_result(result)
+        return coerce_text_result(result)
 
     async def stream_events(
         self,
@@ -170,71 +171,12 @@ class SharedLLMRuntime:
                 yield {"answer": text, "reasoning": None}
             return
 
-        options = _accepted_options(generator, {"thinking": thinking, "reasoning_effort": reasoning_effort})
+        options = accepted_options(generator, {"thinking": thinking, "reasoning_effort": reasoning_effort})
         produced = generator(_runtime_prompt_for_client(prompt, client), **options) if options else generator(_runtime_prompt_for_client(prompt, client))
-        async for event in _iter_stream_like(produced):
-            coerced = _coerce_stream_event(event)
+        async for event in iter_stream_like(produced):
+            coerced = coerce_stream_event(event)
             if coerced:
                 yield coerced
-
-
-
-async def _iter_stream_like(value: Any) -> AsyncIterator[Any]:
-    if hasattr(value, "__aiter__"):
-        async for item in value:
-            yield item
-        return
-    if inspect.isawaitable(value):
-        yield await value
-        return
-    if isinstance(value, str | Mapping):
-        yield value
-        return
-    for item in value:
-        yield item
-
-
-def _coerce_text_result(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, Mapping):
-        for key in ("answer", "content", "delta", "text"):
-            candidate = value.get(key)
-            if candidate is not None:
-                return str(candidate or "")
-        return ""
-    return str(value or "")
-
-
-def _coerce_stream_event(value: Any) -> dict[str, str | None] | None:
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        answer = _optional_string(value.get("answer") if "answer" in value else value.get("delta"))
-        reasoning = _optional_string(value.get("reasoning") if "reasoning" in value else value.get("reasoning_content"))
-        if answer is None and reasoning is None:
-            return None
-        return {"answer": answer, "reasoning": reasoning}
-    text = str(value)
-    if not text:
-        return None
-    return {"answer": text, "reasoning": None}
-
-
-def _optional_string(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text if text else None
-
-
-def _accepted_options(generator: Callable[..., Any], options: Mapping[str, Any]) -> dict[str, Any]:
-    try:
-        signature = inspect.signature(generator)
-    except (TypeError, ValueError):
-        return {}
-    accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
-    return {key: value for key, value in options.items() if value is not None and (accepts_kwargs or key in signature.parameters)}
 
 
 def _runtime_prompt_for_client(prompt: PromptInput, client: Any) -> PromptInput | str:

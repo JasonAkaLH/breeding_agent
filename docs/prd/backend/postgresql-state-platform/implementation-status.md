@@ -3,7 +3,7 @@
 - **Date**: 2026-05-26
 - **Current decision**: PostgreSQL is a fresh canonical start. SQLite history is abandoned; no SQLite row migration, row-count/checksum validation, or shadow-read parity is required.
 - **Scope completed in this implementation pass**: Phase 4 fresh cutover foundation on top of Phase 0-3 State Platform work: PostgreSQL driver dependency, runtime schema manifest/DDL, no-drop bootstrap, runtime assembly, cutover/readiness tooling, SQLite cleanup guard, and regression evidence.
-- **Production cutover status**: Not executed by Codex. The user has provided remote PostgreSQL connection details in local `config.yaml`, but real serving cutover still requires operator-side schema/bootstrap smoke and readiness gate in the deployment environment.
+- **Production cutover status**: Not executed by this agent. The user has provided remote PostgreSQL connection details in local `config.yaml`, but real serving cutover still requires operator-side schema/bootstrap smoke and readiness gate in the deployment environment.
 
 ## Completed
 
@@ -17,7 +17,7 @@
 
 ## Still gated for production readiness
 
-- No Codex-executed remote DDL or destructive remote operation has been performed in this pass.
+- No agent-executed remote DDL or destructive remote operation has been performed in this pass.
 - Deployment must set PostgreSQL backend/DSN; `cutover_ready` / `MAF_STATE_PLATFORM_CUTOVER_READY` is removed from runtime gating and must not block startup.
 - Real read-not-blocked/write-queue evidence against the remote PostgreSQL instance remains an operator/integration gate.
 - Local SQLite files should only be archived/deleted through explicit operator cleanup after PostgreSQL cutover is accepted.

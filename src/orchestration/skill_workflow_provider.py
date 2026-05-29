@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from src.core.enums import NodeCriticality
-from src.integrations.codex_skills import SkillManifest, resolve_skill_execution_config
+from src.integrations.agent_skills import SkillManifest, resolve_skill_execution_config
 
 from .answer_roles import (
     ANSWER_SCOPE_METADATA_KEY,

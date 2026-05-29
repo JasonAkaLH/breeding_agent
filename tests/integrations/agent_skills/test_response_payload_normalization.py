@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.integrations.codex_skills.execution import normalize_skill_response_payload
+from src.integrations.agent_skills.execution import normalize_skill_response_payload
 
 
 class SkillResponsePayloadNormalizationTest(unittest.TestCase):

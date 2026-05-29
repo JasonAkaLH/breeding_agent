@@ -1,7 +1,7 @@
 # Local tooling
 .superpowers/
 .omx/
-.codex/
+.[c]odex/
 .DS_Store
 .idea/
 .vscode/

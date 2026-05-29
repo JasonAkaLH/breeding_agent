@@ -8,8 +8,8 @@ from pathlib import Path
 
 from src.capabilities.skill_tool import SkillExecutor
 from src.core.contracts import CapabilityExecutionRequest
-from src.integrations.codex_skills import SkillRuntimeState, SkillScriptRunner
-from src.integrations.codex_skills.execution import SkillPlatformHandlerRegistry, SkillServiceRegistry
+from src.integrations.agent_skills import SkillRuntimeState, SkillScriptRunner
+from src.integrations.agent_skills.execution import SkillPlatformHandlerRegistry, SkillServiceRegistry
 
 
 class SkillExecutorTest(unittest.IsolatedAsyncioTestCase):
@@ -1125,7 +1125,7 @@ execution:
 
             async def missing_handler(_ctx):
                 from src.core.contracts import CapabilityExecutionError
-                from src.integrations.codex_skills.execution import SkillPlatformHandlerResult
+                from src.integrations.agent_skills.execution import SkillPlatformHandlerResult
 
                 return SkillPlatformHandlerResult(
                     output_payload={'domain_kind': 'demo'},
@@ -1186,7 +1186,7 @@ execution:
 
             async def erroring_handler(_ctx):
                 from src.core.contracts import CapabilityExecutionError
-                from src.integrations.codex_skills.execution import SkillPlatformHandlerResult
+                from src.integrations.agent_skills.execution import SkillPlatformHandlerResult
 
                 return SkillPlatformHandlerResult(
                     output_payload={'response_text': 'handled'},

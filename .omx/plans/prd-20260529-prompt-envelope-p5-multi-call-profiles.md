@@ -25,7 +25,7 @@
 - Soft Skill decision / answer 当前在 executor 内手写字符串 prompt：`src/capabilities/main_agent/executor.py:420-538`、`src/capabilities/main_agent/executor.py:561-609`；answer 流式通过 `_generate_streaming_answer_text` 发布 `main_agent.output_delta`：`src/capabilities/main_agent/executor.py:644-685`。
 - Planner / repair prompt 当前在 `planner_contract` 中手写：`src/orchestration/planner_contract.py:47-94`；LLM provider 在 repair 时复用原 prompt 并限制 previous output 2000 chars：`src/orchestration/llm_workflow_provider.py:82-127`。当前 public capability line 会暴露 `source_path`：`src/orchestration/planner_contract.py:197-210`，P5 应收口为 public-only profile。
 - Runtime Replanner 仅在触发 replan 时调用 LLM：`src/capabilities/main_agent/runtime_replanner.py:90-134`；prompt 当前手写，包含 public capabilities、current nodes、sanitized outputs 与 schema：`src/capabilities/main_agent/runtime_replanner.py:277-321`。
-- Skill input resolver 只有 deterministic 缺参后才走 LLM fallback：`src/integrations/codex_skills/input_resolution.py:132-194`；LLM prompt 当前包含 `entrypoint`：`src/integrations/codex_skills/input_resolution.py:339-381`，与 P5 “只公开用户可见 schema/context”目标冲突。
+- Skill input resolver 只有 deterministic 缺参后才走 LLM fallback：`src/integrations/agent_skills/input_resolution.py:132-194`；LLM prompt 当前包含 `entrypoint`：`src/integrations/agent_skills/input_resolution.py:339-381`，与 P5 “只公开用户可见 schema/context”目标冲突。
 - Conversation memory summary prompt 与 entity resolution prompt 当前手写：`src/orchestration/conversation_memory.py:683-696`、`src/orchestration/conversation_memory.py:780-910`；resolver 输出之后仍有高置信与 evidence-in-context 校验：`src/orchestration/conversation_memory.py:805-860`。
 - 现有 P4 / P2 API 与 executor tests 已覆盖 main prompt envelope audit 与 public profile safety，可复用同一审计字段口径：`tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py:497-655`、`tests/api/test_main_agent_llm.py:118-160`。
 
@@ -89,7 +89,7 @@
 
 1. 保存本计划与 test spec 到 `.omx/plans/`。
 2. 更新 Ralph state：`planning_status=complete`，记录计划路径。
-3. 创建 Codex goal：完成 P5 PRD 的代码、测试、验证、architect 复核、deslop、提交。
+3. 创建 Agent goal：完成 P5 PRD 的代码、测试、验证、architect 复核、deslop、提交。
 
 ### CP-1 通用 Profile Helper（先写测试）
 
@@ -153,9 +153,9 @@ Steps:
 ### CP-5 Skill Input Resolver Profile
 
 Files:
-- `src/integrations/codex_skills/input_resolution.py`
+- `src/integrations/agent_skills/input_resolution.py`
 - `tests/api/test_skill_input_resolution_runtime.py`
-- 必要时新增 `tests/integrations/codex_skills/test_input_resolution.py`
+- 必要时新增 `tests/integrations/agent_skills/test_input_resolution.py`
 
 Steps:
 1. `_build_llm_slot_prompt` 保留 legacy；新增 resolver profile prompt。

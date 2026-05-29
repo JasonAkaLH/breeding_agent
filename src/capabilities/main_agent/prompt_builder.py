@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Mapping
 
-from src.integrations.codex_skills import SkillMatch, build_public_skill_profile
+from src.integrations.agent_skills import SkillMatch, build_public_skill_profile
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL, RESPONSE_ROLE_INTERMEDIATE
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 

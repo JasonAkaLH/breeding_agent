@@ -11,7 +11,7 @@ from src.orchestration.runtime_replanner import RuntimeReplanContext
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.soft_skill_replanner import SoftSkillBindingReplanner
 from src.orchestration.completion_policy import CompletionStatus
-from src.integrations.codex_skills import SkillManifest
+from src.integrations.agent_skills import SkillManifest
 
 
 class SoftSkillBindingReplannerTest(unittest.TestCase):

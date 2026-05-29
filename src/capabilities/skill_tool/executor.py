@@ -11,7 +11,7 @@ from typing import Any
 from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
 from src.core.enums import ArtifactType, EventVisibility
 from src.core.models import Artifact, EventRecord
-from src.integrations.codex_skills import (
+from src.integrations.agent_skills import (
     SkillExecutionConfig,
     SkillExecutionConfigError,
     SkillManifest,
@@ -30,7 +30,7 @@ from src.integrations.codex_skills import (
     resolve_skill_execution_config,
     select_skill_entrypoint,
 )
-from src.integrations.codex_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
+from src.integrations.agent_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
 
 
 @dataclass(slots=True, frozen=True)

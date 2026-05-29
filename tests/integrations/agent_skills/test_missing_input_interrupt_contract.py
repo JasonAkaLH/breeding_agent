@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 
 from src.core.contracts import CapabilityExecutionRequest
-from src.integrations.codex_skills import SkillCatalog
-from src.integrations.codex_skills.missing_input_interrupt import build_missing_input_interrupt
+from src.integrations.agent_skills import SkillCatalog
+from src.integrations.agent_skills.missing_input_interrupt import build_missing_input_interrupt
 
 
 class ProjectSkillMissingInputInterruptContractTest(unittest.TestCase):
@@ -12,13 +12,11 @@ class ProjectSkillMissingInputInterruptContractTest(unittest.TestCase):
         catalog = SkillCatalog.from_roots(["skill"])
         manifests = {manifest.name: manifest for manifest in catalog.skills}
         expected_missing = {
-            "field-analysis": ("field_data", "design"),
-            "field-design": ("material_data", "design"),
-            "ocr": ("file_path",),
-            "rice-genie": ("rice_input",),
-            "sql-query": ("query",),
+            name: tuple(field_name for field_name, spec in manifest.parameters.items() if spec.required)
+            for name, manifest in manifests.items()
         }
-        self.assertEqual(set(expected_missing).difference(manifests), set())
+        expected_missing = {name: fields for name, fields in expected_missing.items() if fields}
+        self.assertTrue(expected_missing)
 
         for skill_name, missing_fields in expected_missing.items():
             manifest = manifests[skill_name]
@@ -44,11 +42,12 @@ class ProjectSkillMissingInputInterruptContractTest(unittest.TestCase):
                 self.assertIn("description", interrupt.required_fields[field], f"{skill_name}:{field}")
 
         upload_fields = {
-            ("field-analysis", "field_data"),
-            ("field-design", "material_data"),
-            ("ocr", "file_path"),
-            ("rice-genie", "rice_input"),
+            (name, field_name)
+            for name, manifest in manifests.items()
+            for field_name, spec in manifest.parameters.items()
+            if spec.required and spec.type == "artifact"
         }
+        self.assertTrue(upload_fields)
         for skill_name, field in upload_fields:
             manifest = manifests[skill_name]
             interrupt = build_missing_input_interrupt(

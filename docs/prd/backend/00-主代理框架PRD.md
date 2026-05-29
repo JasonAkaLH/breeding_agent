@@ -128,7 +128,7 @@
 ### 5.5 主代理与 LLM Runtime 决策
 
 - `capability_id=None` 的普通消息默认进入 `main_agent.respond` 或由 LLM Planner 选择公开能力；显式 数据查询 Skill 入口使用 `skill.data_lookup`。
-- 主代理可读取 Codex Skill 兼容的 `SKILL.md` 元数据、上传 artifact 脱敏上下文与受控脚本输出，用于构造提示词。
+- 主代理可读取 Agent Skill 兼容的 `SKILL.md` 元数据、上传 artifact 脱敏上下文与受控脚本输出，用于构造提示词。
 - 主代理真实 LLM provider 必须通过可测试 seam 绑定；自动化测试默认使用 fake / injected stream，真实 provider 只在显式配置或手工 smoke 中验证。
 - 主代理与 数据查询 Skill 的 LLM 审计事件不得记录 API key、完整 prompt、完整 rows、base_url 等敏感信息。
 
@@ -154,7 +154,7 @@
 - Planner / Runtime Replanner / `/api/v1/capabilities` 必须从同一 public capability pool 发现公开 Skill，避免深度思考阶段看不到已注册 Skill。
 - v1 推荐采用 “Skill public macro → `main_agent.respond` forced skill” 模型：LLM 只选择 `skill.*` capability，系统注入可信 forced skill metadata，继续复用主代理受控 Skill runtime。
 - 后续结构化 / 脚本型 / 项目级可信 Skill 应按 `docs/prd/backend/15-SkillExecutor实现需求PRD.md` 演进为 generic Skill Executor 执行模型，forced `main_agent.respond` 仅作为兼容路径。
-- 默认只公开仓库项目级 `skill/` 下的 Skill；用户级 `~/.codex/skills` 不默认公开给业务 Planner 或 API。
+- 默认只公开仓库项目级 `skill/` 下的 Skill；用户级 `~/用户级本地 Skills 目录` 不默认公开给业务 Planner 或 API。
 
 ### 5.9 Skill 动态加载与热部署决策
 

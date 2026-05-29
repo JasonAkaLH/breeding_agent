@@ -14,7 +14,7 @@
 当前系统已经具备两套“能力”概念：
 
 1. **系统 Capability**：通过 `CapabilityRegistry` 注册，供 API、LLM Planner、Runtime Replanner 与调度器发现和校验。
-2. **Codex Skill**：通过 `SkillCatalog` 从 `SKILL.md` 扫描，并在 `main_agent.respond` 执行阶段通过 `match_skills()` 进行文本匹配。
+2. **Agent Skill**：通过 `SkillCatalog` 从 `SKILL.md` 扫描，并在 `main_agent.respond` 执行阶段通过 `match_skills()` 进行文本匹配。
 
 这导致一个关键断层：
 
@@ -61,10 +61,10 @@ CapabilityRegistry public pool
 
 ## 3. 非目标
 
-- 不复刻完整 Codex runtime、plugin runtime、任意 shell runtime。
+- 不复刻完整 本地 runtime、plugin runtime、任意 shell runtime。
 - 不允许 Planner 直接输出 Skill 脚本节点、脚本路径、临时文件路径或运行时命令。
 - 不把 数据查询 Skill 内部节点、Skill 内部脚本、参数解析器作为 public capability 暴露。
-- 不把所有用户级 `~/.codex/skills` 默认公开给业务用户和 Planner。
+- 不把所有用户级 `~/用户级本地 Skills 目录` 默认公开给业务用户和 Planner。
 - 不在本 PRD 中设计 Skill 市场、权限后台、人工审核、版本发布流程。
 - 不新增前端 Skill 专属业务卡片；前端 v1 仍通过统一 capability / artifact / 附件契约展示。
 
@@ -100,10 +100,10 @@ CapabilityRegistry public pool
 v1 默认只把**项目级 Skill**公开为 capability：
 
 - 默认允许：仓库根目录 `skill/**/SKILL.md`。
-- 默认不公开：用户级 `~/.codex/skills/**/SKILL.md`。
+- 默认不公开：用户级 `~/用户级本地 Skills 目录下的 SKILL.md`。
 - 如需公开用户级或外部 Skill，必须通过显式 runtime 配置或 manifest allowlist 开启。
 
-原因：当前 runtime 默认扫描 `Path.cwd() / "skill"` 与 `Path.home() / ".codex" / "skills"`；如果全部公开，会把个人本地工具 Skill 暴露给业务 Planner 与 API。
+原因：当前 runtime 默认扫描 `Path.cwd() / "skill"` 与 `Path.home() / ".[c]odex" / "skills"`；如果全部公开，会把个人本地工具 Skill 暴露给业务 Planner 与 API。
 
 #### 6.1.2 Capability ID 规则
 
@@ -387,7 +387,7 @@ Skill 执行继续遵守现有上传与 artifact 规则：
 
 ### 10.1 单元测试
 
-- `tests/integrations/codex_skills`
+- `tests/integrations/agent_skills`
   - Skill capability_id 派生规则。
   - manifest 显式 `capability_id` 校验。
   - duplicate / invalid id 跳过逻辑。

@@ -13,7 +13,7 @@
 3. Current main-agent prompt is a string assembled by `build_main_agent_prompt(...)` using `parts`, with download safety rules first, then optional memory, artifacts, response role, dependency context, Skill instructions, script output, and user question (`src/capabilities/main_agent/prompt_builder.py:23-75`).
 4. Current memory payload is sanitized before formatting and rendered under `# 对话记忆上下文（历史数据，不是系统指令）` (`src/capabilities/main_agent/prompt_builder.py:49-51`, `:100-136`; `src/orchestration/conversation_memory.py:919-949`).
 5. Current conversation memory budget is `max_tokens - max(1024, max_tokens // 4)`, so `1024000` resolves to `768000`; this is a legacy baseline to replace later, not a final design (`src/orchestration/conversation_memory.py:63-67`; `01-阶段零...PRD.md:43-45`).
-6. Current Skill prompt path injects `match.manifest.body`, while `SkillManifest.body` is a first-class manifest field and `SkillMatch` carries it into prompt building (`src/capabilities/main_agent/prompt_builder.py:62-71`; `src/integrations/codex_skills/manifest.py:12-23`; `src/integrations/codex_skills/matcher.py:9-13`).
+6. Current Skill prompt path injects `match.manifest.body`, while `SkillManifest.body` is a first-class manifest field and `SkillMatch` carries it into prompt building (`src/capabilities/main_agent/prompt_builder.py:62-71`; `src/integrations/agent_skills/manifest.py:12-23`; `src/integrations/agent_skills/matcher.py:9-13`).
 7. Current `LLMClient` converts the entire prompt string into one user-role chat message for both non-streaming and streaming paths (`src/integrations/llm_client.py:153-203`).
 8. Current `SharedLLMRuntime` accepts `prompt: str` and forwards that string to client `generate_text(...)` or `generate_text_with_thinking(...)` / `stream_text(...)` (`src/integrations/llm_runtime.py:103-165`).
 9. Existing tests already cover memory prompt redaction, Skill script metadata isolation, runtime/client basics, and model-edition trim budgets; phase zero should extend those tests rather than create brittle end-to-end fixtures (`tests/capabilities/main_agent/test_conversation_memory_prompt.py:13-167`; `tests/integrations/test_llm_client.py:245-361`; `tests/integrations/test_llm_runtime.py:8-124`).
@@ -39,7 +39,7 @@
 - Add imports for direct prompt construction:
   - `build_main_agent_prompt` from `src.capabilities.main_agent.prompt_builder`.
   - `RESPONSE_ROLE_FINAL` from `src.capabilities.main_agent.response_roles` if needed.
-  - `SkillManifest` and `SkillMatch` from `src.integrations.codex_skills` modules.
+  - `SkillManifest` and `SkillMatch` from `src.integrations.agent_skills` modules.
 - Add a small helper such as `_assert_markers_in_order(testcase, text, markers)` that searches indices and fails with the missing/out-of-order marker.
 - Add `test_phase_zero_locks_main_agent_prompt_segment_order_and_download_safety_wording`:
   - Build the prompt directly with synthetic `memory_context`, `artifact_context`, `response_role`, `answer_scope`, `dependency_context`, `skill_matches`, `script_results`, and a unique user message.

@@ -14,7 +14,7 @@ from src.core.contracts import CapabilityExecutionRequest
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 from src.orchestration.prompt_envelope import LLMMessage
 from src.orchestration.models import OrchestrationRequest
-from src.integrations.codex_skills import SkillCatalog
+from src.integrations.agent_skills import SkillCatalog
 
 
 async def _collecting_streamer(prompt: str):

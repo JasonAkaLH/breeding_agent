@@ -52,7 +52,7 @@
 2. 迁移 Soft Skill decision / answer prompt builder，并更新 API 回归。
 3. 迁移 `src/orchestration/planner_contract.py` 的 planner / repair prompt。
 4. 迁移 `src/capabilities/main_agent/runtime_replanner.py` 的 replan prompt。
-5. 迁移 `src/integrations/codex_skills/input_resolution.py` 的 LLM slot prompt。
+5. 迁移 `src/integrations/agent_skills/input_resolution.py` 的 LLM slot prompt。
 6. 为 `src/orchestration/conversation_memory.py` 的 resolver / summary prompt 加 profile 或 fallback audit。
 7. 每条路径均新增 audit no-raw-content 与 75% input budget preflight 测试。
 

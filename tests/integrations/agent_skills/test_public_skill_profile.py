@@ -6,8 +6,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from src.integrations.codex_skills import SkillCatalog, build_public_skill_profile, parse_skill_file
-from src.integrations.codex_skills.skill_capabilities import build_skill_capability_registry
+from src.integrations.agent_skills import SkillCatalog, build_public_skill_profile, parse_skill_file
+from src.integrations.agent_skills.skill_capabilities import build_skill_capability_registry
 
 
 class PublicSkillProfileTest(unittest.TestCase):

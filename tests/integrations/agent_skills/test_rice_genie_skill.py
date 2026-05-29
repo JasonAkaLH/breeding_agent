@@ -4,8 +4,8 @@ import asyncio
 import unittest
 from pathlib import Path
 
-from src.integrations.codex_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
-from src.integrations.codex_skills.output_files import collect_skill_output_files
+from src.integrations.agent_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
+from src.integrations.agent_skills.output_files import collect_skill_output_files
 
 
 SAMPLE_VCF = """##fileformat=VCFv4.2

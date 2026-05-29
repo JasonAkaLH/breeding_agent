@@ -17,7 +17,7 @@
 - `tests/`：后端按 `core`、`storage`、`lifecycle`、`orchestration`、`integrations`、`capabilities`、`api`、`e2e`、`observability` 分层组织回归测试。
 - `docs/prd/`：PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。
 - `scripts/`：显式手工 smoke / 维护脚本；真实 provider smoke 不属于默认自动化回归；`run_fullstack_dev.py` 可拉起前后端用于人工验证。
-- `skill/`：项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，不要再把项目共享 Skill 放在 `.codex/skills/`。
+- `skill/`：项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，不要再把项目共享 Skill 放在 `用户级本地 Skills 目录/`。
 
 仍需遵守：不要提交空目录、空测试或占位实现；新增 `native/`、`cpp/` 或其他大型目录前必须有明确设计/评审依据。
 
@@ -78,7 +78,7 @@ Skill Runtime PyO3 wheel 本地 smoke（非默认回归；产物仍需 CI / 部�
 ```bash
 CARGO_BUILD_JOBS=1 conda run -n multi_agent python -m maturin build --release --locked --manifest-path native/crates/maf_skill_runtime_pyo3/Cargo.toml --interpreter /opt/miniconda3/envs/multi_agent/bin/python --compatibility manylinux_2_35 --auditwheel check --out native/target/wheels
 conda run -n multi_agent python -m pip install --force-reinstall --no-deps native/target/wheels/maf_skill_runtime_pyo3-*.whl
-conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
+conda run -n multi_agent python -m unittest tests.integrations.agent_skills.test_pyo3_wheel_build_contract.SkillRuntimePyo3WheelBuildContractTest.test_installed_pyo3_module_matches_rust_contract_when_available
 conda run -n multi_agent python scripts/rust_artifact_provenance.py self-test
 ```
 

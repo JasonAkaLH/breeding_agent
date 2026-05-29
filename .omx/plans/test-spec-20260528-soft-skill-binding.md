@@ -22,7 +22,7 @@
 | 层级 | 文件建议 | 目标 |
 | --- | --- | --- |
 | API | `tests/api/test_soft_skill_binding.py` | submit-message 边界、metadata 校验、direct skill 禁止 |
-| Integration | `tests/integrations/codex_skills/test_public_skill_profile.py` | public profile allowlist / no-leak / public_usage |
+| Integration | `tests/integrations/agent_skills/test_public_skill_profile.py` | public profile allowlist / no-leak / public_usage |
 | Main agent | `tests/capabilities/main_agent/test_soft_skill_binding.py` | answer / execute decision、安全降级、不预执行脚本 |
 | Orchestration | `tests/orchestration/test_soft_skill_replanner.py` | deterministic replanner、budget、target validation |
 | Frontend domain | `frontend/src/domain/slashCommands.test.ts` | slash intent 改为 soft binding |
@@ -376,7 +376,7 @@ Targeted：
 
 ```bash
 conda run -n multi_agent python -m unittest tests.api.test_soft_skill_binding
-conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_public_skill_profile
+conda run -n multi_agent python -m unittest tests.integrations.agent_skills.test_public_skill_profile
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_soft_skill_binding
 conda run -n multi_agent python -m unittest tests.orchestration.test_soft_skill_replanner
 cd frontend && npm test -- --run slashCommands App SlashCommandMenu

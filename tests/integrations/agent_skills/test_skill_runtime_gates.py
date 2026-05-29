@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from src.integrations.codex_skills.rust_contract import error_policy, load_skill_runtime_contract
-from src.integrations.codex_skills.skill_runtime_gates import (
+from src.integrations.agent_skills.rust_contract import error_policy, load_skill_runtime_contract
+from src.integrations.agent_skills.skill_runtime_gates import (
     validate_skill_runtime_artifact_provenance,
     validate_skill_runtime_benchmark_report,
     validate_skill_runtime_decommission_readiness,

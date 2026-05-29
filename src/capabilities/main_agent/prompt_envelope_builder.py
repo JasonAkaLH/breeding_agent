@@ -6,11 +6,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from src.integrations.codex_skills import SkillMatch
+from src.core.coercion import coerce_positive_int
+from src.integrations.agent_skills import SkillMatch
 from src.integrations.llm_client import load_config
 from src.integrations.model_editions import trim_max_tokens_for_model_edition
 from src.integrations.provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
+from src.orchestration.prompt_provider_metadata import safe_role_capabilities
 from src.orchestration.prompt_envelope import (
     LLMMessage,
     PromptEnvelope,
@@ -421,7 +423,7 @@ def resolve_main_agent_trim_max_tokens(
         (metadata or {}).get("trim_max_tokens"),
         (stream_metadata or {}).get("trim_max_tokens"),
     ):
-        parsed = _coerce_positive_int(candidate)
+        parsed = coerce_positive_int(candidate)
         if parsed is not None:
             return parsed
     return trim_max_tokens_for_model_edition(model_edition, config=load_config())
@@ -493,9 +495,9 @@ def prompt_envelope_audit_payload(
             for segment in audit.segments
         ],
     }
-    safe_role_capabilities = _safe_role_capabilities(provider_role_capabilities)
-    if safe_role_capabilities:
-        payload["provider_role_capabilities"] = safe_role_capabilities
+    provider_role_capability_payload = safe_role_capabilities(provider_role_capabilities)
+    if provider_role_capability_payload:
+        payload["provider_role_capabilities"] = provider_role_capability_payload
     if safe_cache_capabilities:
         payload["provider_cache_capabilities"] = safe_cache_capabilities
     return payload
@@ -532,8 +534,8 @@ def _format_memory_history_segment(memory_payload: Mapping[str, Any]) -> tuple[s
     ordered_candidates = sorted(
         candidates,
         key=lambda item: (
-            _coerce_positive_int(item.get("priority")) or 0,
-            _coerce_positive_int((item.get("metadata") or {}).get("sequence") if isinstance(item.get("metadata"), Mapping) else None)
+            coerce_positive_int(item.get("priority")) or 0,
+            coerce_positive_int((item.get("metadata") or {}).get("sequence") if isinstance(item.get("metadata"), Mapping) else None)
             or 0,
             str(item.get("candidate_id") or ""),
         ),
@@ -553,9 +555,9 @@ def _format_memory_history_segment(memory_payload: Mapping[str, Any]) -> tuple[s
         if not content:
             continue
         kind = str(candidate.get("kind") or "memory_candidate").strip()
-        priority = _coerce_positive_int(candidate.get("priority")) or 0
+        priority = coerce_positive_int(candidate.get("priority")) or 0
         trim_policy = str(candidate.get("trim_policy") or "drop_oldest").strip()
-        token_estimate = _coerce_positive_int(candidate.get("token_estimate")) or 0
+        token_estimate = coerce_positive_int(candidate.get("token_estimate")) or 0
         sections.append(
             "## Memory Candidate\n"
             f"- kind: {kind}\n"
@@ -665,52 +667,9 @@ def _provider_cache_capabilities_from_metadata(metadata: Mapping[str, Any]) -> d
     return {}
 
 
-def _safe_role_capabilities(value: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        return {}
-    safe: dict[str, Any] = {}
-    if "supports_messages" in value:
-        safe["supports_messages"] = _truthy(value.get("supports_messages"))
-    elif "messages_supported" in value:
-        safe["supports_messages"] = _truthy(value.get("messages_supported"))
-    roles = value.get("roles") or value.get("supported_roles") or value.get("message_roles") or value.get("supported_message_roles")
-    role_list = _safe_role_list(roles)
-    if role_list:
-        safe["roles"] = role_list
-    return safe
-
-
-def _safe_role_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        candidates = value.replace("\n", ",").split(",")
-    elif isinstance(value, list | tuple | set | frozenset):
-        candidates = value
-    else:
-        return []
-    return sorted({str(role).strip().lower() for role in candidates if str(role).strip()})
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "enabled", "supported"}
-    return bool(value)
-
-
 def _safe_error_details(details: Mapping[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, value in details.items():
         if isinstance(value, str | int | float | bool) or value is None:
             safe[str(key)] = value
     return safe
-
-
-def _coerce_positive_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None

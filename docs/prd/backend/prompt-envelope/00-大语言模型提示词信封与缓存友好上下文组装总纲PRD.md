@@ -49,11 +49,11 @@
 | 主代理用 `parts` 拼接单字符串 | `src/capabilities/main_agent/prompt_builder.py:23-75` | 需要先迁移为 envelope-to-string，保持对外签名兼容。 |
 | memory 在 artifact / dependency / current user 前插入 | `src/capabilities/main_agent/prompt_builder.py:49-74` | 需要调整为 bulk history 中段，active notes 靠后。 |
 | Skill match 当前拼接 `match.manifest.body` | `src/capabilities/main_agent/prompt_builder.py:62-71` | 必须改成 public profile，避免暴露内部实现结构。 |
-| public Skill profile 已存在并有脱敏测试 | `src/integrations/codex_skills/public_profile.py:90-114`、`tests/integrations/codex_skills/test_public_skill_profile.py` | 必须复用并扩展现有 sanitizer，不重复造第二套。 |
+| public Skill profile 已存在并有脱敏测试 | `src/integrations/agent_skills/public_profile.py:90-114`、`tests/integrations/agent_skills/test_public_skill_profile.py` | 必须复用并扩展现有 sanitizer，不重复造第二套。 |
 | Soft Skill decision / answer 已手写专用 prompt | `src/capabilities/main_agent/executor.py:512-560` | 需要迁移到 decision / answer profile，并保持流式答疑与历史追问语义。 |
 | Planner prompt 是单字符串 | `src/orchestration/planner_contract.py:67-94` | 需要 planner profile，继续保证 JSON-only、public capability-only 与 repair prompt 行为。 |
 | Runtime Replanner 也是单字符串 | `src/capabilities/main_agent/runtime_replanner.py:277-321` | 需要纳入 replan profile，避免关键 LLM 调用散落拼接。 |
-| Skill input resolver prompt 包含 entrypoint | `src/integrations/codex_skills/input_resolution.py:339-381` | 需要 resolver profile，明确只披露用户可见 schema。 |
+| Skill input resolver prompt 包含 entrypoint | `src/integrations/agent_skills/input_resolution.py:339-381` | 需要 resolver profile，明确只披露用户可见 schema。 |
 | conversation memory resolver / summary 有独立 prompt | `src/orchestration/conversation_memory.py:699-747`、`src/orchestration/conversation_memory.py:520-533` | 需要 memory profile 或受控旧路径 fallback audit。 |
 | conversation memory 预算固定扣 1/4 | `src/orchestration/conversation_memory.py:63-67` | memory 从最终预算决策者降级为候选上下文提供者。 |
 | LLMClient 只发送单条 user message | `src/integrations/llm_client.py:153-203` | 阶段一至阶段五不改 client；阶段六才扩展 messages。 |
@@ -240,7 +240,7 @@ MAF_PROMPT_ENVELOPE_MODE=off|shadow|string|messages
 conda run -n multi_agent python -m unittest tests.orchestration.test_prompt_envelope
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_conversation_memory_prompt
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_main_agent_workflow_and_executor
-conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_public_skill_profile
+conda run -n multi_agent python -m unittest tests.integrations.agent_skills.test_public_skill_profile
 conda run -n multi_agent python -m unittest tests.api.test_soft_skill_binding tests.api.test_pending_skill_context tests.api.test_skill_input_resolution_runtime tests.api.test_runtime_replanner
 ```
 

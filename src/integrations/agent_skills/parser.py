@@ -10,6 +10,7 @@ from .manifest import SkillManifest
 from .parameters import parse_parameter_specs
 from .rust_contract import status_list as skill_runtime_status_list
 from .script_manifest import SkillScriptEntrypoint
+from .value_utils import string_tuple
 
 
 class SkillParseError(ValueError):
@@ -42,7 +43,7 @@ def parse_skill_file(path: str | Path) -> SkillManifest:
     return SkillManifest(
         name=name,
         description=description,
-        triggers=_string_tuple(data.get("triggers")),
+        triggers=string_tuple(data.get("triggers")),
         body=body,
         source_path=source_path,
         inputs=SkillIOContract.from_mapping(data.get("inputs")),
@@ -61,16 +62,6 @@ def _split_frontmatter(text: str, source_path: Path) -> tuple[str, str]:
         if line.strip() == _FRONTMATTER:
             return "\n".join(lines[1:index]), "\n".join(lines[index + 1 :])
     raise SkillParseError(f"Skill frontmatter is not closed: {source_path}")
-
-
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, list | tuple):
-        return tuple(str(item) for item in value if str(item).strip())
-    return ()
 
 
 def _parse_scripts(value: Any, source_path: Path) -> tuple[SkillScriptEntrypoint, ...]:
