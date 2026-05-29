@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.integrations.codex_skills import (
     SkillInputResolutionContext,
@@ -211,6 +212,47 @@ parameters:
         self.assertEqual(result.sources["blocks"].confidence, "medium")
         self.assertIn("blocks", prompts[0])
         self.assertNotIn("不应进入审计", str(result.audit_payload(skill_name="rcbd-like", entrypoint="run")))
+
+    async def test_llm_fallback_profile_omits_entrypoint_and_records_budget_audit(self) -> None:
+        manifest = self._manifest()
+        calls: list[dict] = []
+
+        async def slot_generator(prompt: str, **kwargs) -> str:
+            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            return '{"resolved": {"blocks": {"value": 2, "source": "recent_user_message"}}}'
+
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            result = await resolve_skill_inputs_with_llm(
+                manifest,
+                manifest.scripts[0],
+                {
+                    "query": "按照你的操作继续生成。",
+                    "uploaded_artifacts": [{"filename": "data.csv"}],
+                    "metadata": {"trim_max_tokens": 4000},
+                },
+                SkillInputResolutionContext(
+                    query="按照你的操作继续生成。",
+                    current_user_message="按照你的操作继续生成。",
+                    recent_user_messages=("用户刚才说明：重复数这个参数就是 blocks，取两次。",),
+                    artifact_summaries=(
+                        {
+                            "filename": "data.csv",
+                            "summary": "材料表",
+                            "content": "RAW_ARTIFACT_CONTENT_SHOULD_NOT_LEAK",
+                        },
+                    ),
+                ),
+                text_generator=slot_generator,
+            )
+
+        self.assertEqual(result.payload["blocks"], 2)
+        self.assertEqual(calls[0]["prompt_profile"]["template_id"], "skill_input_resolver")
+        self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
+        self.assertEqual(result.prompt_profile["template_id"], "skill_input_resolver")
+        self.assertNotIn("entrypoint", calls[0]["prompt"])
+        self.assertNotIn("scripts/run.py", calls[0]["prompt"])
+        self.assertNotIn("RAW_ARTIFACT_CONTENT_SHOULD_NOT_LEAK", calls[0]["prompt"])
+        self.assertNotIn("RAW_ARTIFACT_CONTENT_SHOULD_NOT_LEAK", str(result.audit_payload(skill_name="rcbd-like", entrypoint="run")))
 
     async def test_llm_fallback_rejects_unknown_and_artifact_parameters(self) -> None:
         manifest = self._manifest()

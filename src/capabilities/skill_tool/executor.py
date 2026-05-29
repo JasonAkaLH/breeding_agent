@@ -253,6 +253,24 @@ class SkillExecutor(ExecutorPort):
             },
         )
         events = list(prior_events)
+        resolution_prompt_profile = (
+            getattr(script_result.resolution, "prompt_profile", None)
+            if script_result.resolution is not None
+            else None
+        )
+        if isinstance(resolution_prompt_profile, Mapping):
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.input_resolution_prompt_profile",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "prompt_profile": dict(resolution_prompt_profile),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
         if script_result.resolution is not None and script_result.resolution.diagnostics:
             events.append(
                 self._make_event(
@@ -262,6 +280,11 @@ class SkillExecutor(ExecutorPort):
                         "skill_name": resolved.manifest.name,
                         "entrypoint": script.name,
                         "diagnostics": list(script_result.resolution.diagnostics),
+                        **(
+                            {"prompt_profile": dict(resolution_prompt_profile)}
+                            if isinstance(resolution_prompt_profile, Mapping)
+                            else {}
+                        ),
                     },
                     visibility=EventVisibility.AUDIT_ONLY,
                 )

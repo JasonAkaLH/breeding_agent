@@ -31,7 +31,12 @@ from src.orchestration.answer_roles import (
     response_role_from_metadata,
 )
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
-from src.orchestration.prompt_envelope import PromptEnvelopeRenderError
+from src.orchestration.prompt_envelope import PromptEnvelopeRenderError, PromptSegment
+from src.orchestration.prompt_profiles import (
+    PROMPT_PROFILE_TEMPLATE_VERSION,
+    coerce_profile_trim_max_tokens,
+    resolve_profile_prompt_for_mode,
+)
 
 from .helpers import StreamGenerator, TransientEventPublisher, iter_stream_events, make_event, make_text_artifact
 from .prompt_envelope_builder import resolve_main_agent_prompt_for_mode
@@ -443,17 +448,37 @@ class MainAgentRespondCapability(CapabilityContract):
             )
 
         profile = build_public_skill_profile(manifest, capability_id=capability_id).to_dict()
-        decision_prompt = self._build_soft_skill_decision_prompt(
+        decision_prompt_resolution = self._build_soft_skill_decision_prompt_resolution(
             user_message=user_message,
             artifact_context=artifact_context,
             memory_context=memory_context,
             profile=profile,
+            trim_max_tokens=coerce_profile_trim_max_tokens(
+                request.metadata.get("soft_skill_trim_max_tokens"),
+                request.metadata.get("trim_max_tokens"),
+                self._stream_metadata.get("trim_max_tokens"),
+            ),
         )
-        raw_decision = await self._generate_non_stream_text(
-            decision_prompt,
+        soft_profile_events = self._soft_skill_profile_events(
             request=request,
-            stage="soft_skill_decision",
+            profiles=(decision_prompt_resolution.llm_call_payload,),
+            stages=("soft_skill_decision",),
         )
+        try:
+            raw_decision = await self._generate_non_stream_text(
+                decision_prompt_resolution.prompt,
+                request=request,
+                stage="soft_skill_decision",
+                prompt_profile=decision_prompt_resolution.llm_call_payload,
+            )
+        except Exception as exc:
+            return self._soft_binding_llm_failed_result(
+                request=request,
+                response_role_payload=response_role_payload,
+                events=soft_profile_events,
+                stage="soft_skill_decision",
+                error=exc,
+            )
         decision = self._parse_soft_skill_decision(raw_decision)
         target_capability_id = str(decision.get("target_capability_id") or "").strip()
         execute_allowed = (
@@ -483,6 +508,7 @@ class MainAgentRespondCapability(CapabilityContract):
                     **response_role_payload,
                 },
                 events=(
+                    *soft_profile_events,
                     make_event(
                         request,
                         event_type="soft_skill_binding.decision",
@@ -491,6 +517,11 @@ class MainAgentRespondCapability(CapabilityContract):
                             "target_capability_id": capability_id,
                             "confidence": decision.get("confidence"),
                             "reason_code": decision.get("reason_code") or "soft_skill_execute",
+                            **(
+                                {"prompt_profile": decision_prompt_resolution.llm_call_payload}
+                                if decision_prompt_resolution.llm_call_payload
+                                else {}
+                            ),
                         },
                         visibility=EventVisibility.AUDIT_ONLY,
                     ),
@@ -502,19 +533,40 @@ class MainAgentRespondCapability(CapabilityContract):
             answer_reason_code = "target_mismatch"
         elif decision.get("decision") == "execute" and not self._is_high_confidence(decision.get("confidence")):
             answer_reason_code = "low_confidence"
-        answer_prompt = self._build_soft_skill_answer_prompt(
+        answer_prompt_resolution = self._build_soft_skill_answer_prompt_resolution(
             user_message=user_message,
             artifact_context=artifact_context,
             memory_context=memory_context,
             profile=profile,
             decision_reason_code=str(answer_reason_code),
+            trim_max_tokens=coerce_profile_trim_max_tokens(
+                request.metadata.get("soft_skill_trim_max_tokens"),
+                request.metadata.get("trim_max_tokens"),
+                self._stream_metadata.get("trim_max_tokens"),
+            ),
         )
-        answer, answer_chunk_count, answer_char_count, duration_ms = await self._generate_streaming_answer_text(
-            answer_prompt,
+        answer_profile_events = self._soft_skill_profile_events(
             request=request,
-            stage="soft_skill_answer",
-            response_role_payload=response_role_payload,
+            profiles=(answer_prompt_resolution.llm_call_payload,),
+            stages=("soft_skill_answer",),
         )
+        soft_profile_events = (*soft_profile_events, *answer_profile_events)
+        try:
+            answer, answer_chunk_count, answer_char_count, duration_ms = await self._generate_streaming_answer_text(
+                answer_prompt_resolution.prompt,
+                request=request,
+                stage="soft_skill_answer",
+                response_role_payload=response_role_payload,
+                prompt_profile=answer_prompt_resolution.llm_call_payload,
+            )
+        except Exception as exc:
+            return self._soft_binding_llm_failed_result(
+                request=request,
+                response_role_payload=response_role_payload,
+                events=soft_profile_events,
+                stage="soft_skill_answer",
+                error=exc,
+            )
         answer = answer.strip()
         if not answer:
             answer = str(decision.get("answer") or "").strip()
@@ -530,11 +582,20 @@ class MainAgentRespondCapability(CapabilityContract):
                 "target_capability_id": capability_id,
                 "confidence": decision.get("confidence"),
                 "reason_code": answer_reason_code,
+                **(
+                    {
+                        "decision_prompt_profile": decision_prompt_resolution.llm_call_payload,
+                        "answer_prompt_profile": answer_prompt_resolution.llm_call_payload,
+                    }
+                    if decision_prompt_resolution.llm_call_payload or answer_prompt_resolution.llm_call_payload
+                    else {}
+                ),
             },
             response_role_payload=response_role_payload,
             answer_chunk_count=answer_chunk_count,
             answer_char_count=answer_char_count,
             duration_ms=duration_ms,
+            additional_events=soft_profile_events,
         )
 
     def _resolve_skill_manifest_by_capability_id(self, capability_id: str, revision: str | None):
@@ -588,6 +649,109 @@ class MainAgentRespondCapability(CapabilityContract):
         )
 
     @staticmethod
+    def _build_soft_skill_decision_prompt_resolution(
+        *,
+        user_message: str,
+        artifact_context: list[dict[str, Any]],
+        memory_context: Mapping[str, Any],
+        profile: dict[str, Any],
+        trim_max_tokens: int | None,
+    ):
+        legacy_prompt = MainAgentRespondCapability._build_soft_skill_decision_prompt(
+            user_message=user_message,
+            artifact_context=artifact_context,
+            memory_context=memory_context,
+            profile=profile,
+        )
+        schema = {
+            "decision": "answer | execute",
+            "target_capability_id": "must equal the provided public profile capability_id when executing",
+            "confidence": "0.0-1.0",
+            "reason_code": "short snake_case reason",
+            "answer": "required when decision=answer; explain usage/data format without internal implementation details",
+        }
+        segments = [
+            PromptSegment(
+                name="stable_soft_skill_decision_rules",
+                role="system",
+                content=(
+                    "你是主代理的 Skill 软绑定判断器。用户用 slash command 点名公开 Skill，但这不等于必须执行。"
+                    "询问 Skill 用法、字段含义、数据格式、示例或边界时返回 decision=answer；"
+                    "只有用户明确要求执行且目标数据和必要参数已经由文本或上传摘要提供时返回 decision=execute。"
+                    "禁止暴露 Skill 内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。"
+                ),
+                priority=0,
+                mutability="stable",
+                cache_affinity="prefix",
+                trim_policy="required",
+                security_role="instruction",
+            ),
+            PromptSegment(
+                name="soft_skill_public_profile",
+                role="context",
+                content="# 公开 Skill profile\n" + json.dumps(profile, ensure_ascii=False, indent=2, default=str),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="tool_profile",
+            ),
+            PromptSegment(
+                name="soft_skill_artifact_context",
+                role="context",
+                content="# 上传摘要（已脱敏）\n" + json.dumps(artifact_context, ensure_ascii=False, indent=2, default=str),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="compressible",
+                security_role="tool_result",
+            ),
+            PromptSegment(
+                name="current_user_request",
+                role="user",
+                content="# 用户问题\n" + user_message,
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="user_input",
+            ),
+            PromptSegment(
+                name="soft_skill_decision_output_guard",
+                role="system",
+                content="只返回 JSON object，不要 Markdown。输出结构：\n" + json.dumps(schema, ensure_ascii=False, indent=2),
+                priority=0,
+                mutability="stable",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="guard",
+            ),
+        ]
+        memory_payload = MainAgentRespondCapability._format_soft_skill_memory_context(memory_context)
+        if memory_payload:
+            segments.insert(
+                2,
+                PromptSegment(
+                    name="soft_skill_conversation_memory",
+                    role="context",
+                    content=memory_payload,
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="drop_oldest",
+                    security_role="history",
+                ),
+            )
+        return resolve_profile_prompt_for_mode(
+            legacy_prompt=legacy_prompt,
+            template_id="soft_skill_decision",
+            template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+            trim_max_tokens=trim_max_tokens,
+            segments=tuple(segments),
+            audit_context={"stage": "soft_skill_decision"},
+        )
+
+    @staticmethod
     def _build_soft_skill_answer_prompt(
         *,
         user_message: str,
@@ -609,6 +773,114 @@ class MainAgentRespondCapability(CapabilityContract):
         )
 
     @staticmethod
+    def _build_soft_skill_answer_prompt_resolution(
+        *,
+        user_message: str,
+        artifact_context: list[dict[str, Any]],
+        memory_context: Mapping[str, Any],
+        profile: dict[str, Any],
+        decision_reason_code: str,
+        trim_max_tokens: int | None,
+    ):
+        legacy_prompt = MainAgentRespondCapability._build_soft_skill_answer_prompt(
+            user_message=user_message,
+            artifact_context=artifact_context,
+            memory_context=memory_context,
+            profile=profile,
+            decision_reason_code=decision_reason_code,
+        )
+        segments = [
+            PromptSegment(
+                name="stable_soft_skill_answer_rules",
+                role="system",
+                content=(
+                    "你是主代理的 Skill 软绑定公开回答器。当前应回答用法、字段、数据格式、示例或缺失信息，而不是执行 Skill。"
+                    "只能基于公开 Skill profile、上传摘要和对话记忆上下文作答；"
+                    "不要暴露内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。"
+                    "如果用户实际想执行但信息不足，请说明缺少哪些用户可补充的数据或参数。"
+                ),
+                priority=0,
+                mutability="stable",
+                cache_affinity="prefix",
+                trim_policy="required",
+                security_role="instruction",
+            ),
+            PromptSegment(
+                name="soft_skill_public_profile",
+                role="context",
+                content="# 公开 Skill profile\n" + json.dumps(profile, ensure_ascii=False, indent=2, default=str),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="tool_profile",
+            ),
+            PromptSegment(
+                name="soft_skill_decision_reason",
+                role="context",
+                content="# 判定原因\n" + decision_reason_code,
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="active_note",
+            ),
+            PromptSegment(
+                name="soft_skill_artifact_context",
+                role="context",
+                content="# 上传摘要（已脱敏）\n" + json.dumps(artifact_context, ensure_ascii=False, indent=2, default=str),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="compressible",
+                security_role="tool_result",
+            ),
+            PromptSegment(
+                name="current_user_request",
+                role="user",
+                content="# 用户问题\n" + user_message,
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="user_input",
+            ),
+            PromptSegment(
+                name="soft_skill_answer_guard",
+                role="system",
+                content="输出自然语言回答；如果缺少执行所需信息，只说明用户可补充的公开字段或数据。",
+                priority=0,
+                mutability="stable",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="guard",
+            ),
+        ]
+        memory_payload = MainAgentRespondCapability._format_soft_skill_memory_context(memory_context)
+        if memory_payload:
+            segments.insert(
+                2,
+                PromptSegment(
+                    name="soft_skill_conversation_memory",
+                    role="context",
+                    content=memory_payload,
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="drop_oldest",
+                    security_role="history",
+                ),
+            )
+        return resolve_profile_prompt_for_mode(
+            legacy_prompt=legacy_prompt,
+            template_id="soft_skill_answer",
+            template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+            trim_max_tokens=trim_max_tokens,
+            segments=tuple(segments),
+            audit_context={"stage": "soft_skill_answer"},
+        )
+
+    @staticmethod
     def _format_soft_skill_memory_context(memory_context: Mapping[str, Any]) -> str:
         memory_payload = sanitize_memory_prompt_payload(memory_context or {})
         if not memory_payload:
@@ -625,6 +897,7 @@ class MainAgentRespondCapability(CapabilityContract):
         *,
         request: CapabilityExecutionRequest,
         stage: str,
+        prompt_profile: Mapping[str, Any] | None = None,
     ) -> str:
         stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort="minimal")
         chunks: list[str] = []
@@ -635,6 +908,7 @@ class MainAgentRespondCapability(CapabilityContract):
             thinking=False,
             model_edition=self._resolve_model_edition(request.metadata),
             stage=stage,
+            prompt_profile=prompt_profile,
         ):
             answer = stream_event.get("answer")
             if answer:
@@ -648,6 +922,7 @@ class MainAgentRespondCapability(CapabilityContract):
         request: CapabilityExecutionRequest,
         stage: str,
         response_role_payload: dict[str, Any],
+        prompt_profile: Mapping[str, Any] | None = None,
     ) -> tuple[str, int, int, int]:
         stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort="minimal")
         started_at = time.monotonic()
@@ -661,6 +936,7 @@ class MainAgentRespondCapability(CapabilityContract):
             thinking=False,
             model_edition=self._resolve_model_edition(request.metadata),
             stage=stage,
+            prompt_profile=prompt_profile,
         ):
             answer_delta = stream_event.get("answer")
             if not answer_delta:
@@ -739,6 +1015,7 @@ class MainAgentRespondCapability(CapabilityContract):
         answer_chunk_count: int = 0,
         answer_char_count: int | None = None,
         duration_ms: int = 0,
+        additional_events: tuple[Any, ...] = (),
     ) -> CapabilityExecutionResult:
         final_event = make_event(
             request,
@@ -772,6 +1049,7 @@ class MainAgentRespondCapability(CapabilityContract):
             },
             artifacts=(artifact,),
             events=(
+                *additional_events,
                 make_event(
                     request,
                     event_type="soft_skill_binding.decision",
@@ -781,6 +1059,70 @@ class MainAgentRespondCapability(CapabilityContract):
                 final_event,
             ),
         )
+
+    def _soft_binding_llm_failed_result(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        response_role_payload: dict[str, Any],
+        events: tuple[Any, ...],
+        stage: str,
+        error: Exception,
+    ) -> CapabilityExecutionResult:
+        payload = {
+            "prompt_recorded": False,
+            "stage": stage,
+            "error_code": "soft_skill_llm_failed",
+            "error_type": error.__class__.__name__,
+            **response_role_payload,
+        }
+        failure_event = make_event(
+            request,
+            event_type="soft_skill_binding.llm_failed",
+            payload=payload,
+            visibility=EventVisibility.AUDIT_ONLY,
+        )
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload={
+                "response_source": "soft_skill_binding",
+                "fallback_used": False,
+                "failure_reason": "soft_skill_llm_failed",
+                "prompt_recorded": False,
+                **response_role_payload,
+            },
+            events=(*events, failure_event),
+            error=CapabilityExecutionError(
+                code="soft_skill_llm_failed",
+                message="Soft Skill binding LLM call failed.",
+                retriable=True,
+                metadata=payload,
+            ),
+        )
+
+    def _soft_skill_profile_events(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        profiles: tuple[Mapping[str, Any] | None, ...],
+        stages: tuple[str, ...],
+    ) -> tuple[Any, ...]:
+        events: list[Any] = []
+        for index, profile in enumerate(profiles):
+            if profile is None:
+                continue
+            stage = stages[index] if index < len(stages) else str(profile.get("template_id") or "unknown")
+            events.append(
+                make_event(
+                    request,
+                    event_type="main_agent.prompt_profile_rendered",
+                    payload={**dict(profile), "stage": stage},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        return tuple(events)
 
     def _resolve_skill_matches(self, request: CapabilityExecutionRequest, user_message: str) -> tuple[list[SkillMatch], list[Any]]:
         revision = self._skill_bundle_revision(request)
@@ -903,6 +1245,20 @@ class MainAgentRespondCapability(CapabilityContract):
                     },
                 )
                 resolution = execution.resolution
+                resolution_prompt_profile = getattr(resolution, "prompt_profile", None) if resolution is not None else None
+                if isinstance(resolution_prompt_profile, Mapping):
+                    events.append(
+                        make_event(
+                            request,
+                            event_type="skill.input_resolution_prompt_profile",
+                            payload={
+                                "skill_name": match.manifest.name,
+                                "entrypoint": script.name,
+                                "prompt_profile": dict(resolution_prompt_profile),
+                            },
+                            visibility=EventVisibility.AUDIT_ONLY,
+                        )
+                    )
                 if resolution is not None and resolution.diagnostics:
                     events.append(
                         make_event(
@@ -912,6 +1268,11 @@ class MainAgentRespondCapability(CapabilityContract):
                                 "skill_name": match.manifest.name,
                                 "entrypoint": script.name,
                                 "diagnostics": list(resolution.diagnostics),
+                                **(
+                                    {"prompt_profile": dict(resolution_prompt_profile)}
+                                    if isinstance(resolution_prompt_profile, Mapping)
+                                    else {}
+                                ),
                             },
                             visibility=EventVisibility.AUDIT_ONLY,
                         )

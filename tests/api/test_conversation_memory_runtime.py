@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 from src.core.enums import EventVisibility
 
@@ -78,11 +79,13 @@ class ConversationMemoryRuntimeAPITest(APITestCase):
 
     async def test_injected_llm_resolution_generator_builds_effective_question_before_planning(self) -> None:
         resolution_prompts: list[str] = []
+        resolution_profiles: list[dict | None] = []
         planner_prompts: list[str] = []
         answer_prompts: list[str] = []
 
-        async def resolver(prompt: str) -> str:
+        async def resolver(prompt: str, **kwargs) -> str:
             resolution_prompts.append(prompt)
+            resolution_profiles.append(kwargs.get("prompt_profile"))
             if "那它的基因型" not in prompt:
                 return json.dumps(
                     {
@@ -130,27 +133,29 @@ class ConversationMemoryRuntimeAPITest(APITestCase):
             skill_roots=[],
         )
 
-        for content in ("查一下龙粳33的品种信息", "再查一下龙粳18"):
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            for content in ("查一下龙粳33的品种信息", "再查一下龙粳18"):
+                response = await self.submit_message(
+                    conversation_id="conv-memory-llm-resolution",
+                    content=content,
+                    capability_id="main_agent.respond",
+                )
+                self.assertEqual(response.status_code, 202)
+                terminal = await self.wait_for_terminal_task(response.json()["task_id"])
+                self.assertEqual(terminal["status"], "completed")
+
             response = await self.submit_message(
                 conversation_id="conv-memory-llm-resolution",
-                content=content,
-                capability_id="main_agent.respond",
+                content="那它的基因型数据库里有什么？",
+                capability_id=None,
             )
             self.assertEqual(response.status_code, 202)
-            terminal = await self.wait_for_terminal_task(response.json()["task_id"])
+            task_id = response.json()["task_id"]
+            terminal = await self.wait_for_terminal_task(task_id)
             self.assertEqual(terminal["status"], "completed")
 
-        response = await self.submit_message(
-            conversation_id="conv-memory-llm-resolution",
-            content="那它的基因型数据库里有什么？",
-            capability_id=None,
-        )
-        self.assertEqual(response.status_code, 202)
-        task_id = response.json()["task_id"]
-        terminal = await self.wait_for_terminal_task(task_id)
-        self.assertEqual(terminal["status"], "completed")
-
         self.assertGreaterEqual(len(resolution_prompts), 3)
+        self.assertEqual(resolution_profiles[-1]["template_id"], "conversation_memory_resolution")
         self.assertIn("默认选择最近一次被明确提到的业务实体", resolution_prompts[-1])
         self.assertIn("龙粳33", resolution_prompts[-1])
         self.assertIn("龙粳18", resolution_prompts[-1])
@@ -165,6 +170,7 @@ class ConversationMemoryRuntimeAPITest(APITestCase):
             if event.event_type == "conversation.memory_built"
         )
         self.assertTrue(memory_event.payload["resolved"])
+        self.assertEqual(memory_event.payload["resolution_prompt_profile"]["template_id"], "conversation_memory_resolution")
 
     async def test_memory_builder_failure_falls_back_without_failing_task(self) -> None:
         class BrokenMemoryBuilder:

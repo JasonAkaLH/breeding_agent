@@ -17,12 +17,14 @@ from src.integrations.token_counter import get_num_of_tokens_from_messages_async
 
 from .answer_selection import select_final_text_artifact
 from .models import OrchestrationRequest
+from .prompt_envelope import PromptSegment
+from .prompt_profiles import PROMPT_PROFILE_TEMPLATE_VERSION, resolve_profile_prompt_for_mode
 
 SUMMARY_VERSION = "conversation-memory-summary-v1"
 COMPRESSION_POLICY_VERSION = "conversation-memory-policy-v1"
 
-SummaryGenerator = Callable[[str], str | Awaitable[str]]
-ResolutionGenerator = Callable[[str], str | Awaitable[str]]
+SummaryGenerator = Callable[..., str | Awaitable[str]]
+ResolutionGenerator = Callable[..., str | Awaitable[str]]
 MemoryConfigResolver = Callable[["OrchestrationRequest"], "ConversationMemoryConfig"]
 
 _BLOCKING_RESOLUTION_RISK_FLAGS = {
@@ -34,6 +36,17 @@ _BLOCKING_RESOLUTION_RISK_FLAGS = {
     "current_message_complete",
     "task_continuation_not_entity_resolution",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _InvalidResolutionAttempt:
+    prompt_profile: Mapping[str, Any] | None = None
+
+
+class _ResolutionGeneratorFailed(RuntimeError):
+    def __init__(self, prompt_profile: Mapping[str, Any] | None) -> None:
+        self.prompt_profile = prompt_profile
+        super().__init__("conversation_memory_resolution_generator_failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +170,7 @@ class ConversationMemoryContext:
     truncated: bool = False
     fallback_reason: str | None = None
     resolution_metadata: Mapping[str, Any] = field(default_factory=dict)
+    summary_prompt_profile: Mapping[str, Any] | None = None
 
     @property
     def effective_user_message(self) -> str:
@@ -309,7 +323,7 @@ class ConversationMemoryContext:
 
     def to_audit_payload(self) -> dict[str, Any]:
         candidates = self.to_prompt_candidates()
-        return {
+        payload = {
             "source_message_count": self.source_message_count,
             "recent_message_count": len(self.recent_messages),
             "clarification_message_count": len(self.clarification_messages),
@@ -325,6 +339,20 @@ class ConversationMemoryContext:
             "fallback_reason": self.fallback_reason,
             "resolved": bool(self.resolved_user_message),
         }
+        prompt_profile = self.resolution_metadata.get("prompt_profile") if isinstance(self.resolution_metadata, Mapping) else None
+        if isinstance(prompt_profile, Mapping):
+            payload["resolution_prompt_profile"] = {
+                str(key): value
+                for key, value in prompt_profile.items()
+                if isinstance(value, str | int | float | bool) or value is None
+            }
+        if isinstance(self.summary_prompt_profile, Mapping):
+            payload["summary_prompt_profile"] = {
+                str(key): value
+                for key, value in self.summary_prompt_profile.items()
+                if isinstance(value, str | int | float | bool) or value is None
+            }
+        return payload
 
 
 class ConversationMemorySafeAllowlist:
@@ -615,6 +643,7 @@ class ConversationMemoryBuilder:
         fallback_reason: str | None = None
         truncated = False
         recent_messages = all_recent_messages
+        summary_prompt_profile: Mapping[str, Any] | None = None
 
         if estimated_before > token_budget:
             compression_level = "level_1"
@@ -623,9 +652,18 @@ class ConversationMemoryBuilder:
             recent_messages = tuple(message for turn in kept_turns for message in turn.memory_messages())
             if older_turns:
                 if config.enable_summary_llm and self._summary_generator is not None:
-                    prompt = self._build_summary_prompt(older_turns, existing_summary_text=existing_summary_text)
+                    prompt_resolution = self._build_summary_prompt_resolution(
+                        older_turns,
+                        existing_summary_text=existing_summary_text,
+                        config=config,
+                    )
+                    summary_prompt_profile = prompt_resolution.llm_call_payload
                     try:
-                        generated = self._summary_generator(prompt)
+                        generated = _call_memory_generator(
+                            self._summary_generator,
+                            prompt_resolution.prompt,
+                            prompt_profile=prompt_resolution.llm_call_payload,
+                        )
                         if inspect.isawaitable(generated):
                             generated = await generated
                         history_summary = str(generated or "").strip()[: config.effective_summary_max_tokens * 4]
@@ -638,6 +676,7 @@ class ConversationMemoryBuilder:
                                 older_turns=older_turns,
                                 existing_summary=existing_summary,
                                 config=config,
+                                prompt_profile=prompt_resolution.llm_call_payload,
                             )
                         else:
                             history_summary = existing_summary_text
@@ -678,6 +717,7 @@ class ConversationMemoryBuilder:
             truncated=truncated or estimated_after > token_budget,
             fallback_reason=fallback_reason,
             resolution_metadata=resolution_metadata,
+            summary_prompt_profile=summary_prompt_profile,
         )
 
     def _build_summary_prompt(self, older_turns: list[_BusinessTurn], *, existing_summary_text: str | None) -> str:
@@ -695,6 +735,76 @@ class ConversationMemoryBuilder:
             + json.dumps(items, ensure_ascii=False, indent=2, default=str)
         )
 
+    def _build_summary_prompt_resolution(
+        self,
+        older_turns: list[_BusinessTurn],
+        *,
+        existing_summary_text: str | None,
+        config: ConversationMemoryConfig,
+    ):
+        legacy_prompt = self._build_summary_prompt(older_turns, existing_summary_text=existing_summary_text)
+        items = [message.to_prompt_dict() for turn in older_turns for message in turn.memory_messages()]
+        segments: list[PromptSegment] = [
+            PromptSegment(
+                name="stable_memory_summary_rules",
+                role="system",
+                content=(
+                    "请将较早对话压缩为忠实摘要。只保留用户目标、已确认实体、关键约束、"
+                    "已给出的结论、未完成事项和用户纠正信息；不得引入新事实，不要回答用户问题。"
+                ),
+                priority=0,
+                mutability="stable",
+                cache_affinity="prefix",
+                trim_policy="required",
+                security_role="instruction",
+            )
+        ]
+        if existing_summary_text:
+            segments.append(
+                PromptSegment(
+                    name="existing_history_summary",
+                    role="context",
+                    content="# 已有历史摘要\n" + existing_summary_text,
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="drop_oldest",
+                    security_role="history",
+                )
+            )
+        segments.extend(
+            [
+                PromptSegment(
+                    name="older_turns_to_summarize",
+                    role="context",
+                    content="# 待压缩较早对话\n" + json.dumps(items, ensure_ascii=False, indent=2, default=str),
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="drop_oldest",
+                    security_role="history",
+                ),
+                PromptSegment(
+                    name="memory_summary_output_guard",
+                    role="system",
+                    content="只输出忠实摘要正文；不得新增事实、不得选择 capability、不得回答当前用户问题。",
+                    priority=0,
+                    mutability="stable",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="guard",
+                ),
+            ]
+        )
+        return resolve_profile_prompt_for_mode(
+            legacy_prompt=legacy_prompt,
+            template_id="conversation_memory_summary",
+            template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+            trim_max_tokens=config.max_tokens,
+            segments=tuple(segments),
+            audit_context={"stage": "conversation_memory_summary", "source_turn_count": len(older_turns)},
+        )
+
     async def _save_summary(
         self,
         *,
@@ -704,6 +814,7 @@ class ConversationMemoryBuilder:
         older_turns: list[_BusinessTurn],
         existing_summary: ConversationMemorySummary | None,
         config: ConversationMemoryConfig,
+        prompt_profile: Mapping[str, Any] | None = None,
     ) -> None:
         if not hasattr(self._storage, "save_conversation_memory_summary"):
             return
@@ -735,7 +846,10 @@ class ConversationMemoryBuilder:
                 ),
                 summary_version=SUMMARY_VERSION,
                 compression_policy_version=COMPRESSION_POLICY_VERSION,
-                model_metadata_safe={"provider": "conversation_memory_summary_generator"},
+                model_metadata_safe={
+                    "provider": "conversation_memory_summary_generator",
+                    **({"prompt_profile": dict(prompt_profile)} if prompt_profile is not None else {}),
+                },
                 created_at=now,
                 updated_at=now,
             )
@@ -751,6 +865,7 @@ class ConversationMemoryBuilder:
         capability_summaries: tuple[dict[str, Any], ...] = (),
     ) -> tuple[str | None, dict[str, Any]]:
         llm_invalid_reason: str | None = None
+        llm_prompt_profile: Mapping[str, Any] | None = None
         if self._resolution_generator is not None:
             try:
                 llm_resolution = await self._resolve_user_message_with_llm(
@@ -760,9 +875,16 @@ class ConversationMemoryBuilder:
                     summary_text=summary_text,
                     capability_summaries=capability_summaries,
                 )
+            except _ResolutionGeneratorFailed as exc:
+                llm_resolution = None
+                llm_invalid_reason = "llm_resolution_failed"
+                llm_prompt_profile = exc.prompt_profile
             except Exception:
                 llm_resolution = None
                 llm_invalid_reason = "llm_resolution_failed"
+            if isinstance(llm_resolution, _InvalidResolutionAttempt):
+                llm_prompt_profile = llm_resolution.prompt_profile
+                llm_resolution = None
             if llm_resolution is not None:
                 return llm_resolution
             if llm_invalid_reason is None:
@@ -775,6 +897,8 @@ class ConversationMemoryBuilder:
         )
         if llm_invalid_reason is not None:
             metadata = {**metadata, "fallback_reason": llm_invalid_reason}
+        if llm_prompt_profile is not None:
+            metadata = {**metadata, "prompt_profile": dict(llm_prompt_profile)}
         return resolved, metadata
 
     async def _resolve_user_message_with_llm(
@@ -785,26 +909,33 @@ class ConversationMemoryBuilder:
         config: ConversationMemoryConfig,
         summary_text: str | None,
         capability_summaries: tuple[dict[str, Any], ...],
-    ) -> tuple[str | None, dict[str, Any]] | None:
+    ) -> tuple[str | None, dict[str, Any]] | _InvalidResolutionAttempt | None:
         if self._resolution_generator is None:
             return None
-        prompt = self._build_resolution_prompt(
+        prompt_resolution = self._build_resolution_prompt_resolution(
             current_user_message,
             turns,
             config=config,
             summary_text=summary_text,
             capability_summaries=capability_summaries,
         )
-        generated = self._resolution_generator(prompt)
-        if inspect.isawaitable(generated):
-            generated = await generated
+        try:
+            generated = _call_memory_generator(
+                self._resolution_generator,
+                prompt_resolution.prompt,
+                prompt_profile=prompt_resolution.llm_call_payload,
+            )
+            if inspect.isawaitable(generated):
+                generated = await generated
+        except Exception as exc:
+            raise _ResolutionGeneratorFailed(prompt_resolution.llm_call_payload) from exc
         decision = _parse_resolution_decision(str(generated or ""))
         if decision is None:
-            return None
+            return _InvalidResolutionAttempt(prompt_resolution.llm_call_payload)
 
         raw_should_resolve = decision.get("should_resolve")
         if not isinstance(raw_should_resolve, bool):
-            return None
+            return _InvalidResolutionAttempt(prompt_resolution.llm_call_payload)
         should_resolve = raw_should_resolve
         confidence = str(decision.get("confidence") or "").strip().lower()
         referenced_entity = str(decision.get("referenced_entity") or "").strip()
@@ -821,6 +952,8 @@ class ConversationMemoryBuilder:
             "reason": reason or "llm_returned_no_resolution",
             "risk_flags": risk_flags,
         }
+        if prompt_resolution.llm_call_payload is not None:
+            metadata["prompt_profile"] = prompt_resolution.llm_call_payload
         if referenced_entity:
             metadata["entity"] = referenced_entity
         entity_type = str(decision.get("entity_type") or "").strip()
@@ -909,6 +1042,118 @@ class ConversationMemoryBuilder:
             f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2, default=str)}"
         )
 
+    def _build_resolution_prompt_resolution(
+        self,
+        current_user_message: str,
+        turns: list[_BusinessTurn],
+        *,
+        config: ConversationMemoryConfig,
+        summary_text: str | None,
+        capability_summaries: tuple[dict[str, Any], ...],
+    ):
+        legacy_prompt = self._build_resolution_prompt(
+            current_user_message,
+            turns,
+            config=config,
+            summary_text=summary_text,
+            capability_summaries=capability_summaries,
+        )
+        resolver_turns = turns[-config.recent_turns :] if config.recent_turns > 0 else turns
+        recent_messages = [message.to_prompt_dict() for turn in resolver_turns for message in turn.memory_messages()]
+        schema = {
+            "should_resolve": "boolean",
+            "resolved_user_message": "string|null",
+            "referenced_entity": "string|null",
+            "entity_type": "crop_variety|file|task_object|previous_result|unknown|null",
+            "source": {
+                "type": "recent_message|history_summary|capability_summary|null",
+                "message_id": "string|null",
+                "evidence_text": "string|null",
+            },
+            "confidence": "high|medium|low",
+            "reason": "string",
+            "risk_flags": ["string"],
+        }
+        return resolve_profile_prompt_for_mode(
+            legacy_prompt=legacy_prompt,
+            template_id="conversation_memory_resolution",
+            template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+            trim_max_tokens=config.max_tokens,
+            segments=(
+                PromptSegment(
+                    name="stable_memory_resolution_rules",
+                    role="system",
+                    content=(
+                        "你是一个保守的对话上下文补全器，只负责判断当前用户问题是否需要根据同一 conversation 的历史补全实体。"
+                        "你不是问答模型，不要回答用户问题；你不是规划器，不要选择 capability。"
+                        "不能编造实体、字段、结论或业务事实，只能使用输入中明确出现过的历史消息、历史摘要和当前用户原文。"
+                        "如果历史中存在多个候选实体，默认选择最近一次被明确提到的业务实体；"
+                        "如果最近相关上下文是多个并列实体且当前问题使用单数指代无法区分，必须返回 should_resolve=false。"
+                        "如果只能低置信猜测、会改变用户意图、或当前问题本身已完整，必须返回 should_resolve=false。"
+                    ),
+                    priority=0,
+                    mutability="stable",
+                    cache_affinity="prefix",
+                    trim_policy="required",
+                    security_role="instruction",
+                ),
+                PromptSegment(
+                    name="memory_resolution_recent_messages",
+                    role="context",
+                    content="# recent_messages（时间升序）\n"
+                    + json.dumps(recent_messages, ensure_ascii=False, indent=2, default=str),
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="drop_oldest",
+                    security_role="history",
+                ),
+                PromptSegment(
+                    name="memory_resolution_history_summary",
+                    role="context",
+                    content="# history_summary\n" + (summary_text or ""),
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="drop_oldest",
+                    security_role="history",
+                ),
+                PromptSegment(
+                    name="memory_resolution_capability_summaries",
+                    role="context",
+                    content="# capability_summaries（脱敏）\n"
+                    + json.dumps(list(capability_summaries), ensure_ascii=False, indent=2, default=str),
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="compressible",
+                    security_role="tool_result",
+                ),
+                PromptSegment(
+                    name="current_user_request",
+                    role="user",
+                    content="# 当前用户原文\n" + current_user_message,
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="user_input",
+                ),
+                PromptSegment(
+                    name="memory_resolution_output_guard",
+                    role="system",
+                    content="输出必须是严格 JSON，不要 Markdown，不要解释性文本。JSON 字段形态：\n"
+                    + json.dumps(schema, ensure_ascii=False, indent=2),
+                    priority=0,
+                    mutability="stable",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="guard",
+                ),
+            ),
+            audit_context={"stage": "conversation_memory_resolution"},
+        )
+
     def _resolve_user_message_deterministic(
         self,
         current_user_message: str,
@@ -981,6 +1226,25 @@ def _parse_resolution_decision(raw_output: str) -> dict[str, Any] | None:
     if "should_resolve" not in parsed:
         return None
     return dict(parsed)
+
+
+def _call_memory_generator(
+    generator: Callable[..., str | Awaitable[str]],
+    prompt: str,
+    *,
+    prompt_profile: Mapping[str, Any] | None = None,
+):
+    kwargs: dict[str, Any] = {}
+    if prompt_profile is not None:
+        try:
+            signature = inspect.signature(generator)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+            if accepts_kwargs or "prompt_profile" in signature.parameters:
+                kwargs["prompt_profile"] = prompt_profile
+    return generator(prompt, **kwargs) if kwargs else generator(prompt)
 
 
 def _strip_json_code_fence(text: str) -> str:

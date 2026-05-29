@@ -3333,11 +3333,32 @@ def _resolve_planner_text_generator(
 
     call_ordinal = 0
 
-    async def generate(prompt: str, *, request: OrchestrationRequest | None = None, stage: str = "orchestration_plan") -> str:
+    async def generate(
+        prompt: str,
+        *,
+        request: OrchestrationRequest | None = None,
+        stage: str = "orchestration_plan",
+        prompt_profile: Mapping[str, Any] | None = None,
+    ) -> str:
         nonlocal call_ordinal
         call_ordinal += 1
         call_id = call_ordinal
         reasoning_ordinal = 0
+
+        if request is not None and prompt_profile is not None:
+            maybe_result = event_recorder(
+                EventRecord(
+                    event_id=f"{request.task_id}:main_agent.{stage}.prompt_profile:{call_id}",
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    node_id="main_agent.orchestrator",
+                    event_type="main_agent.prompt_profile_rendered",
+                    payload={**dict(prompt_profile), "stage": stage, "call_id": call_id},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
 
         async def record_reasoning(delta: str) -> None:
             nonlocal reasoning_ordinal
