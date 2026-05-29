@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 from tests.api.support import APITestCase
@@ -45,6 +46,9 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("deleting_failed", response.text)
         self.assertIn("没有前端/用户侧自动超时承诺", response.text)
         self.assertIn("docs/runbooks/postgresql-state-platform.md", response.text)
+        unescaped_html = html.unescape(response.text)
+        self.assertIn('"source_path": "field-design/SKILL.md"', unescaped_html)
+        self.assertNotIn('"source_path": "skill/field-design/SKILL.md"', unescaped_html)
         openapi_response = await self.client.get("/openapi.json")
         self.assertEqual(openapi_response.status_code, 200)
         for path in openapi_response.json()["paths"]:

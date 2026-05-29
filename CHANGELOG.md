@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- REST API 静态文档再次对齐当前运行时行为：`/api/v1/capabilities` 的 response 示例中 `source_path` 改为当前实际返回的相对 Skill root 路径（如 `field-design/SKILL.md`），并补充回归锁定缺失 conversation 的 uploads / tasks 列表返回空集合、未知 upload 删除返回 `deleted=false` 的文档化 no-op 行为。
 - Docker 远端启动文档已同步当前镜像版本 `0.1.4`：`docker_cmd.md` 中 backend / frontend pull、inspect、run 与最小判别命令全部改为 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.4` 口径。
 - Agent 基础设施大块重复整改设计已落入 `docs/superpowers/specs/2026-05-29-agent-infrastructure-dedup-cleanup-design.md`，明确 sidecar wire helper、PostgreSQL SQL splitter、runtime revision store 与 final answer helper 的分阶段整改口径、非目标、验收命令与不修改 `skill/**` 约束。
 - 反屎山清理第一轮完成：后端 Skill 运行时兼容层统一迁移为 `src/integrations/agent_skills/` 与 `tests/integrations/agent_skills/`，项目代码 / 测试 / 文档中已清除旧品牌字面；同时抽出共享 `coerce_truthy` / `coerce_positive_int`、evidence gate 数值校验、LLM stream event 归一化与 provider role capability 清洗工具，减少主代理、LLM runtime、provider cache、PromptProfile、runtime gate 与 Skill manifest parser 的复制粘贴。
