@@ -4,6 +4,15 @@ from tests.api.support import APITestCase, blocking_mysql_adapter
 
 
 class TaskListAPITest(APITestCase):
+    async def test_missing_conversation_task_list_returns_empty_for_documented_recovery_flow(self) -> None:
+        response = await self.client.get("/api/v1/conversations/missing-conversation/tasks?scope=all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"conversation_id": "missing-conversation", "tasks": []},
+        )
+
     async def test_conversation_unfinished_task_list_can_drive_stop_action(self) -> None:
         blocking_adapter, release = blocking_mysql_adapter()
         await self.reconfigure_runtime(mysql_adapter=blocking_adapter)
@@ -29,8 +38,12 @@ class TaskListAPITest(APITestCase):
         cancel_response = await self.client.post("/api/v1/tasks/cancel", json={"task_id": task_id})
         self.assertEqual(cancel_response.status_code, 202)
 
-        after_cancel = await self.client.get("/api/v1/conversations/conv-1/tasks?scope=unfinished")
-        self.assertEqual(after_cancel.status_code, 200)
-        self.assertEqual(after_cancel.json()["tasks"], [])
+        async def unfinished_list_empty() -> bool:
+            after_cancel = await self.client.get("/api/v1/conversations/conv-1/tasks?scope=unfinished")
+            self.assertEqual(after_cancel.status_code, 200)
+            return after_cancel.json()["tasks"] == []
 
-        release.set()
+        try:
+            await self.wait_for_condition(unfinished_list_empty)
+        finally:
+            release.set()
