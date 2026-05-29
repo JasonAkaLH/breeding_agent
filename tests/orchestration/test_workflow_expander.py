@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.integrations.codex_skills.skill_runtime_state import SkillRuntimeState
+from src.integrations.agent_skills.skill_runtime_state import SkillRuntimeState
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 from src.orchestration.models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider

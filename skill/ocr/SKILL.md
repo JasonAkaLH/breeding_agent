@@ -13,6 +13,28 @@ triggers:
   - 文档OCR
   - 图片转文字
   - 解析扫描件
+public_usage:
+  overview: >-
+    识别用户上传的图片、截图、扫描件或 PDF 中的文字，并按用户需要整理为 Markdown、JSON 或简短摘要；也可以回答可上传文件和输出格式的用法问题。
+  input_formats:
+    - name: file_path
+      required: false
+      description: 用户可提供图片或 PDF 文件路径，也可通过会话上传文件；上传优先用于正式识别。
+    - name: uploaded_file
+      required: false
+      description: 会话上传的图片、扫描件或 PDF。
+  parameters:
+    - name: output_format
+      description: 输出格式，默认 Markdown；可选择 JSON 或同时返回 Markdown 与 JSON。
+      examples: [markdown, json, both]
+  examples:
+    - /ocr 识别这张图片里的文字
+    - /ocr 把上传 PDF 转成 Markdown
+    - /ocr 可以输出 JSON 吗？
+  outputs:
+    - OCR 文本内容
+    - Markdown 版识别结果
+    - 按用户要求整理的 JSON 摘要
 execution:
   mode: python_subprocess
   answer_mode: requires_finalizer
@@ -81,5 +103,5 @@ scripts:
 - 不要在回答中暴露 `auth_token` 或完整鉴权头。
 - 更换远端服务时只改 `skill/ocr/config.yaml`，不要把真实地址、token 或鉴权头提交到仓库。
 - 不要把 OCR MCP 当长期文件存储；成功拿到结果后应由脚本调用 `ack_parse_job`。
-- 如果没有文件路径、没有上传 artifact、也没有可用文件内容，只问一个关键问题：请用户上传图片/PDF 或提供可访问的本地文件路径。
+- 如果没有文件路径、没有上传 artifact、也没有可用文件内容，只问一个关键问题：请用户上传图片/PDF 或提供可访问的本地文件路径；脚本必须按 `Skill构建指南.md` 返回 structured `missing_input`（`ok: false`、`is_error: true`、`error.type: missing_input`、`missing: ["file_path"]`），不要把缺文件伪装成 OCR 服务失败。
 - 大 PDF 或远端处理超时时，返回已有 `job_id` 和错误说明，不要假装已完成。

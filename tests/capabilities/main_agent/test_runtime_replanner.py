@@ -4,12 +4,13 @@ import asyncio
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.capabilities.main_agent.runtime_replanner import MainAgentRuntimeReplanner
 from src.capabilities.main_agent.workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS, MAIN_AGENT_PLANNER_PAYLOAD_POLICIES
 from src.core.enums import NodeStatus
 from src.core.models import TaskNode
-from src.integrations.codex_skills import SkillManifest
+from src.integrations.agent_skills import SkillManifest
 from src.orchestration.completion_policy import CompletionStatus
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
@@ -132,6 +133,68 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         self.assertEqual(decision.plan.nodes[-1].capability_id, "main_agent.respond")
         self.assertEqual(decision.plan.metadata["runtime_replan_source"], "main_agent_llm_runtime")
 
+    def test_runtime_replanner_profile_records_budget_metadata(self) -> None:
+        calls: list[dict] = []
+
+        async def text_generator(prompt: str, **kwargs) -> str:
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "stage": kwargs.get("stage"),
+                    "prompt_profile": kwargs.get("prompt_profile"),
+                }
+            )
+            return json.dumps({"action": "none"})
+
+        request = OrchestrationRequest(
+            task_id="task-profile-replan",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="查询龙粳33",
+            metadata={"trim_max_tokens": 4000},
+        )
+        context = RuntimeReplanContext(
+            request=request,
+            plan=WorkflowPlan(
+                task_id="task-profile-replan",
+                nodes=(WorkflowNodePlan(node_id="query_data", capability_id="skill.generic_data_lookup"),),
+                max_replans=1,
+                max_dynamic_nodes=4,
+            ),
+            nodes={
+                "query_data": TaskNode(
+                    node_id="query_data",
+                    task_id="task-profile-replan",
+                    capability_id="skill.generic_data_lookup",
+                    status=NodeStatus.COMPLETED,
+                )
+            },
+            node_outputs={
+                "query_data": {
+                    "row_count": 0,
+                    "satisfaction": {"satisfied": False, "reason_code": "empty_result", "replan_recommended": True},
+                }
+            },
+            completion_status=CompletionStatus.RUNNING,
+        )
+        replanner = MainAgentRuntimeReplanner(
+            capability_registry=self._registry(),
+            macro_providers=self._macro_providers(),
+            text_generator=text_generator,
+        )
+
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            decision = asyncio.run(replanner.build_replan(context))
+
+        self.assertIsNone(decision)
+        self.assertEqual(calls[0]["stage"], "orchestration_replan")
+        self.assertEqual(calls[0]["prompt_profile"]["template_id"], "runtime_replan")
+        self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
+        self.assertLessEqual(
+            calls[0]["prompt_profile"]["final_input_tokens"],
+            calls[0]["prompt_profile"]["final_input_token_budget"],
+        )
+
     def test_runtime_replanner_skill_capability_expands_with_replanner_source(self) -> None:
         async def text_generator(_prompt: str, **_: object) -> str:
             return json.dumps(
@@ -229,6 +292,45 @@ class MainAgentRuntimeReplannerTest(unittest.TestCase):
         decision = asyncio.run(replanner.build_replan(context))
 
         self.assertIsNone(decision)
+        self.assertEqual(calls, [])
+
+    def test_does_not_consume_soft_skill_execute_signal(self) -> None:
+        calls: list[str] = []
+
+        async def text_generator(prompt: str, **_: object) -> str:
+            calls.append(prompt)
+            return json.dumps({"action": "replan", "nodes": [{"node_id": "bad", "capability_id": "skill.generic_data_lookup"}]})
+
+        context = RuntimeReplanContext(
+            request=OrchestrationRequest(
+                task_id="task-soft",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="执行",
+                metadata={"soft_skill_binding": {"capability_id": "skill.generic_data_lookup"}},
+            ),
+            plan=WorkflowPlan(
+                task_id="task-soft",
+                nodes=(WorkflowNodePlan(node_id="answer", capability_id="main_agent.respond"),),
+                max_replans=1,
+                max_dynamic_nodes=4,
+            ),
+            nodes={"answer": TaskNode("answer", "task-soft", "main_agent.respond", status=NodeStatus.COMPLETED)},
+            node_outputs={
+                "answer": {
+                    "soft_skill_decision": {"decision": "execute", "target_capability_id": "skill.generic_data_lookup"},
+                    "satisfaction": {"satisfied": False, "replan_recommended": True, "reason_code": "soft_skill_execute"},
+                }
+            },
+            completion_status=CompletionStatus.RUNNING,
+        )
+        replanner = MainAgentRuntimeReplanner(
+            capability_registry=self._registry(),
+            macro_providers=self._macro_providers(),
+            text_generator=text_generator,
+        )
+
+        self.assertIsNone(asyncio.run(replanner.build_replan(context)))
         self.assertEqual(calls, [])
 
     def test_replan_prompt_uses_sanitized_observation_without_sensitive_outputs(self) -> None:

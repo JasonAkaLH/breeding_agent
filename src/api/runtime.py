@@ -34,7 +34,7 @@ from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executo
 from src.core.enums import ConversationStatus, EventVisibility, MessageRole, RoutingMode, TaskStatus
 from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, PendingSkillContext, Task
 from src.integrations.audit_logger import JsonlAuditSink
-from src.integrations.codex_skills import (
+from src.integrations.agent_skills import (
     SkillCapabilityRegistry,
     SkillCatalog,
     SkillPlatformHandlerRegistry,
@@ -44,13 +44,13 @@ from src.integrations.codex_skills import (
     SkillRuntimeState,
     SkillScriptRunner,
 )
-from src.integrations.codex_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
-from src.integrations.codex_skills.rust_contract import (
+from src.integrations.agent_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
+from src.integrations.agent_skills.rust_contract import (
     error_policy as skill_runtime_error_policy,
     load_skill_runtime_contract,
 )
-from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcClient
-from src.integrations.codex_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
+from src.integrations.agent_skills.skill_sandbox_client import SkillSandboxGrpcClient
+from src.integrations.agent_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.model_editions import config_for_model_edition, default_model_edition, model_edition_options, validate_model_edition
@@ -74,6 +74,7 @@ from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
 from src.orchestration.runtime_replanner import CompositeRuntimeReplanner, RuntimeReplanner
 from src.orchestration.scheduler import Scheduler
 from src.orchestration.service import OrchestrationService
+from src.orchestration.soft_skill_replanner import SoftSkillBindingReplanner
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_router import WorkflowRouter
 from src.storage import StoragePort
@@ -119,6 +120,46 @@ PENDING_SKILL_METADATA_KEYS = frozenset(
         "pending_skill_original_user_message",
         "pending_skill_assistant_message",
         "defer_task_completed_until_pending_skill_context_processed",
+    }
+)
+SOFT_SKILL_BINDING_METADATA_KEY = "soft_skill_binding"
+SOFT_SKILL_INTERNAL_METADATA_KEYS = frozenset(
+    {
+        "forced_skill_name",
+        "forced_skill_capability_id",
+        "forced_skill_source",
+        "macro_source",
+        "macro_expansion",
+        "macro_input_payload",
+        "requires_public_skill_dependency",
+        "requires_skill_dependency",
+        "skill_execution_mode",
+        "soft_skill_decision",
+    }
+)
+RESUME_SKILL_INTERNAL_METADATA_KEYS = frozenset(
+    {
+        "resume_interrupted_node_id",
+        "resume_finalizer_node_id",
+    }
+)
+SYSTEM_MANAGED_METADATA_KEYS = frozenset(
+    {
+        "skill_bundle_revision",
+        "mcp_bundle_revision",
+        "uploaded_artifacts",
+        "skill_artifacts",
+        "artifacts",
+        "conversation_memory",
+        "memory_context",
+    }
+)
+USER_SUPPLIED_METADATA_DENYLIST = frozenset(
+    {
+        *PENDING_SKILL_METADATA_KEYS,
+        *SOFT_SKILL_INTERNAL_METADATA_KEYS,
+        *RESUME_SKILL_INTERNAL_METADATA_KEYS,
+        *SYSTEM_MANAGED_METADATA_KEYS,
     }
 )
 
@@ -320,11 +361,26 @@ class ApiRuntime:
         if routing_mode == RoutingMode.FORCE_CAPABILITY and not request.capability_id:
             raise ValueError("capability_id is required when routing_mode is force_capability")
         requested_capability_id = self._canonical_capability_id(request.capability_id)
+        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
+            self._record_direct_skill_execution_rejected(
+                capability_id=requested_capability_id,
+                routing_mode=str(routing_mode),
+                conversation_id=conversation_id,
+            )
+            raise ValueError(
+                "direct_skill_execution_disabled: Direct skill execution is disabled; "
+                "submit main_agent.respond with metadata.soft_skill_binding instead."
+            )
+        soft_skill_binding = self._normalize_soft_skill_binding(request.metadata)
+        if soft_skill_binding is not None:
+            requested_capability_id = "main_agent.respond"
         self._ensure_supported_capability(requested_capability_id)
         explicit_force_capability = routing_mode == RoutingMode.FORCE_CAPABILITY and requested_capability_id is not None
         continued_pending_context: PendingSkillContext | None = None
         superseded_pending_count = 0
-        if explicit_force_capability:
+        if soft_skill_binding is not None:
+            superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
+        elif explicit_force_capability:
             superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
         elif requested_capability_id is None:
             continued_pending_context = await self.storage.get_active_pending_skill_context(conversation_id)
@@ -412,7 +468,11 @@ class ApiRuntime:
                 )
             )
 
-        metadata = self._drop_user_supplied_pending_skill_metadata(request.metadata)
+        metadata = self._drop_user_supplied_system_metadata(request.metadata)
+        if soft_skill_binding is not None:
+            metadata[SOFT_SKILL_BINDING_METADATA_KEY] = soft_skill_binding
+            metadata["soft_skill_binding_source"] = "slash_command"
+            metadata["soft_skill_binding_requested_capability_id"] = requested_capability_id
         if selected_model_edition:
             metadata["model_edition"] = selected_model_edition
         if request.capability_id != requested_capability_id and request.capability_id is not None:
@@ -426,7 +486,11 @@ class ApiRuntime:
             execution_user_message = self._format_pending_skill_continuation_message(continued_pending_context, request.content)
             current_user_message = request.content
             resolved_user_message = execution_user_message
-        if requested_capability_id is not None and requested_capability_id.startswith("skill."):
+        if (
+            soft_skill_binding is None
+            and requested_capability_id is not None
+            and requested_capability_id.startswith("skill.")
+        ):
             metadata["defer_task_completed_until_pending_skill_context_processed"] = True
         if self._skill_runtime_state is not None:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
@@ -456,11 +520,59 @@ class ApiRuntime:
         return message, task
 
     @staticmethod
-    def _drop_user_supplied_pending_skill_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    def _drop_user_supplied_system_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         values = dict(metadata)
-        for key in PENDING_SKILL_METADATA_KEYS:
+        for key in USER_SUPPLIED_METADATA_DENYLIST:
             values.pop(key, None)
         return values
+
+    def _normalize_soft_skill_binding(self, metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+        raw = metadata.get(SOFT_SKILL_BINDING_METADATA_KEY)
+        if raw in (None, ""):
+            return None
+        if not isinstance(raw, Mapping):
+            raise ValueError("metadata.soft_skill_binding must be an object")
+        capability_id = self._canonical_capability_id(self._metadata_text(raw.get("capability_id")))
+        if not capability_id or not capability_id.startswith("skill."):
+            raise ValueError("metadata.soft_skill_binding.capability_id must be a public skill capability")
+        descriptor = self.capability_registry.get(capability_id)
+        if descriptor is None or not descriptor.public or not _is_skill_descriptor(descriptor):
+            raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
+        if self._skill_runtime_state is not None:
+            bundle = self._skill_runtime_state.active_bundle
+            if capability_id not in bundle.skill_capabilities.skill_name_by_capability_id:
+                raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
+            revision = bundle.revision
+        else:
+            revision = ""
+        command = self._metadata_text(raw.get("command")) or self._metadata_text(metadata.get("slash_command")) or ""
+        normalized = {
+            "capability_id": capability_id,
+        }
+        if command:
+            normalized["command"] = command
+        if revision:
+            normalized["skill_bundle_revision"] = revision
+        return normalized
+
+    def _record_direct_skill_execution_rejected(
+        self,
+        *,
+        capability_id: str,
+        routing_mode: str,
+        conversation_id: str,
+    ) -> None:
+        if self._audit_sink is None:
+            return
+        self._audit_sink.record_sync(
+            "skill.direct_execution_rejected",
+            {
+                "capability_id": capability_id,
+                "routing_mode": routing_mode,
+                "conversation_id": conversation_id,
+                "reason": "direct_skill_execution_disabled",
+            },
+        )
 
     @staticmethod
     def _pending_skill_continuation_metadata(context: PendingSkillContext) -> dict[str, Any]:
@@ -875,7 +987,7 @@ class ApiRuntime:
         if not capability_id.startswith("skill."):
             return None
         interrupts = await self.storage.list_interrupts_for_task(request.task_id)
-        if any(str(interrupt.status) == "open" for interrupt in interrupts):
+        if interrupts:
             return None
 
         events = await self.storage.list_events_for_task(request.task_id)
@@ -1346,16 +1458,53 @@ class ApiRuntime:
         )
 
         root_message = await self.storage.get_message(task.root_message_id)
-        combined_message = self._combine_resume_message(root_message.content if root_message is not None else task.summary or "", answer_payload)
+        answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
+        merged_answer_payload = self._merge_answer_payloads(answer_payloads)
+        combined_message = self._combine_resume_message(
+            root_message.content if root_message is not None else task.summary or "",
+            merged_answer_payload,
+        )
+        resume_metadata = self._resume_skill_revision_metadata(task.task_id)
+        for payload in answer_payloads:
+            resume_metadata.update(self._answer_payload_metadata(payload))
+        upload_ids = self._merged_answer_upload_ids(answer_payloads)
+        if upload_ids:
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is None:
+                raise ValueError(f"Unknown conversation: {task.conversation_id}")
+            upload_context = await self.resolve_uploads_for_message(
+                task.conversation_id,
+                conversation.username,
+                upload_ids,
+            )
+            if upload_context["uploaded_artifacts"]:
+                resume_metadata["uploaded_artifacts"] = [
+                    *self._metadata_list(resume_metadata.get("uploaded_artifacts")),
+                    *upload_context["uploaded_artifacts"],
+                ]
+                resume_metadata["skill_artifacts"] = [
+                    *self._metadata_list(resume_metadata.get("skill_artifacts")),
+                    *upload_context["skill_artifacts"],
+                ]
         await self._await_existing_execution(task.task_id)
+        resume_capability_id = task.requested_capability_id
+        interrupted_node = await self.storage.get_task_node(interrupt.node_id)
+        if interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
+            resume_capability_id = interrupted_node.capability_id
+            resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
+            resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupted_node.node_id)
+            if resume_finalizer_node_id:
+                resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
+        elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
+            resume_capability_id = interrupt.source_agent
         await self._schedule_execution(
             OrchestrationRequest(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 root_message_id=task.root_message_id,
                 user_message=combined_message,
-                requested_capability_id=task.requested_capability_id,
-                metadata=self._resume_skill_revision_metadata(task.task_id),
+                requested_capability_id=resume_capability_id,
+                metadata=resume_metadata,
             )
         )
         return {
@@ -1818,8 +1967,100 @@ class ApiRuntime:
         return {}
 
     @staticmethod
-    def _format_answer_message(answer_payload: dict[str, object]) -> str:
-        return "；".join(f"{key}={value}" for key, value in answer_payload.items())
+    def _answer_payload_metadata(answer_payload: Mapping[str, object]) -> dict[str, object]:
+        metadata: dict[str, object] = {}
+        for key, value in answer_payload.items():
+            key_text = str(key).strip()
+            if not key_text or key_text == "upload_ids":
+                continue
+            if key_text in USER_SUPPLIED_METADATA_DENYLIST:
+                continue
+            if isinstance(value, Mapping) and "text" in value:
+                value = value.get("text")
+            metadata[key_text] = value
+        return metadata
+
+    async def _resume_finalizer_node_id(self, task_id: str, interrupted_node_id: str) -> str | None:
+        nodes = {node.node_id: node for node in await self.storage.list_task_nodes_for_task(task_id)}
+        edges = await self.storage.list_task_edges(task_id)
+        for edge in edges:
+            if edge.from_node_id != interrupted_node_id:
+                continue
+            node = nodes.get(edge.to_node_id)
+            if node is not None and node.capability_id == "main_agent.respond":
+                return node.node_id
+        return None
+
+    @staticmethod
+    def _answer_upload_ids(answer_payload: Mapping[str, object]) -> tuple[str, ...]:
+        raw_upload_ids = answer_payload.get("upload_ids")
+        if raw_upload_ids is None:
+            return ()
+        if isinstance(raw_upload_ids, str):
+            values = [raw_upload_ids]
+        elif isinstance(raw_upload_ids, list | tuple):
+            values = raw_upload_ids
+        else:
+            raise UploadValidationError("answer_payload.upload_ids must be a list")
+        return tuple(str(value).strip() for value in values if str(value).strip())
+
+    async def _task_interrupt_answer_payloads(self, task_id: str) -> tuple[dict[str, object], ...]:
+        rows: list[tuple[datetime, str, dict[str, object]]] = []
+        for task_interrupt in await self.storage.list_interrupts_for_task(task_id):
+            for saved_answer in await self.storage.list_interrupt_answers(task_interrupt.interrupt_id):
+                payload = saved_answer.answer_payload
+                if isinstance(payload, Mapping):
+                    rows.append((saved_answer.created_at, saved_answer.interrupt_answer_id, dict(payload)))
+        rows.sort(key=lambda item: (item[0], item[1]))
+        return tuple(payload for _created_at, _answer_id, payload in rows)
+
+    @classmethod
+    def _merge_answer_payloads(cls, answer_payloads: Iterable[Mapping[str, object]]) -> dict[str, object]:
+        merged: dict[str, object] = {}
+        upload_ids: list[str] = []
+        for payload in answer_payloads:
+            for key, value in payload.items():
+                key_text = str(key).strip()
+                if not key_text:
+                    continue
+                if key_text == "upload_ids":
+                    upload_ids.extend(cls._answer_upload_ids(payload))
+                    continue
+                merged[key_text] = value
+        if upload_ids:
+            merged["upload_ids"] = list(dict.fromkeys(upload_ids))
+        return merged
+
+    @classmethod
+    def _merged_answer_upload_ids(cls, answer_payloads: Iterable[Mapping[str, object]]) -> tuple[str, ...]:
+        upload_ids: list[str] = []
+        for payload in answer_payloads:
+            upload_ids.extend(cls._answer_upload_ids(payload))
+        return tuple(dict.fromkeys(upload_ids))
+
+    @classmethod
+    def _format_answer_message(cls, answer_payload: dict[str, object]) -> str:
+        parts: list[str] = []
+        for key, value in answer_payload.items():
+            if key == "upload_ids":
+                continue
+            parts.append(f"{key}={cls._format_answer_value(value)}")
+        if parts:
+            return "；".join(parts)
+        if cls._answer_upload_ids(answer_payload):
+            return "已上传补充文件"
+        return ""
+
+    @staticmethod
+    def _format_answer_value(value: object) -> object:
+        if isinstance(value, Mapping):
+            filenames = value.get("filenames")
+            if isinstance(filenames, list | tuple) and filenames:
+                return "、".join(str(item) for item in filenames if str(item).strip())
+            upload_ids = value.get("upload_ids")
+            if isinstance(upload_ids, list | tuple) and upload_ids:
+                return "已上传文件"
+        return value
 
     @classmethod
     def _combine_resume_message(cls, root_content: str, answer_payload: dict[str, object]) -> str:
@@ -2148,6 +2389,13 @@ def build_api_runtime(
             return skill_workflow_provider
         return None
 
+    def resolve_active_skill_revision(capability_id: str) -> str | None:
+        return (
+            skill_runtime_state.active_revision
+            if capability_id in skill_runtime_state.active_bundle.skill_capabilities.skill_name_by_capability_id
+            else None
+        )
+
     macro_providers = {}
 
     auto_workflow_provider = AutoWorkflowProvider(
@@ -2172,6 +2420,12 @@ def build_api_runtime(
         payload_policies=planner_payload_policies,
     )
     default_replanners: list[RuntimeReplanner] = [
+        SoftSkillBindingReplanner(
+            capability_registry=capability_registry,
+            macro_providers=macro_providers,
+            macro_provider_resolver=resolve_macro_provider,
+            active_skill_revision_resolver=resolve_active_skill_revision,
+        ),
         MainAgentRuntimeReplanner(
             capability_registry=capability_registry,
             macro_providers=macro_providers,
@@ -3079,11 +3333,32 @@ def _resolve_planner_text_generator(
 
     call_ordinal = 0
 
-    async def generate(prompt: str, *, request: OrchestrationRequest | None = None, stage: str = "orchestration_plan") -> str:
+    async def generate(
+        prompt: str,
+        *,
+        request: OrchestrationRequest | None = None,
+        stage: str = "orchestration_plan",
+        prompt_profile: Mapping[str, Any] | None = None,
+    ) -> str:
         nonlocal call_ordinal
         call_ordinal += 1
         call_id = call_ordinal
         reasoning_ordinal = 0
+
+        if request is not None and prompt_profile is not None:
+            maybe_result = event_recorder(
+                EventRecord(
+                    event_id=f"{request.task_id}:main_agent.{stage}.prompt_profile:{call_id}",
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    node_id="main_agent.orchestrator",
+                    event_type="main_agent.prompt_profile_rendered",
+                    payload={**dict(prompt_profile), "stage": stage, "call_id": call_id},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
 
         async def record_reasoning(delta: str) -> None:
             nonlocal reasoning_ordinal
@@ -3182,7 +3457,4 @@ def _resolve_main_agent_stream_binding(
 
 
 def _default_skill_roots() -> tuple[Path, ...]:
-    return (
-        Path.cwd() / "skill",
-        Path.home() / ".codex" / "skills",
-    )
+    return (Path.cwd() / "skill",)

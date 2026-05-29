@@ -21,6 +21,38 @@ triggers:
   - randomized complete block design
   - diagonal augmented design
   - interval contrast design
+public_usage:
+  overview: >-
+    使用上传的材料清单生成田间试验设计，支持随机区组、对角线增广和间比法；也可以只回答材料字段、设计参数和输出格式等用法问题。
+  input_formats:
+    - name: material_data
+      required: true
+      description: >-
+        CSV 或 JSON 材料清单；每行代表一个试验材料或对照材料。常见列包括材料编号、品种名称、hyb_check、set、plot_hint、备注等。
+      example_columns: [material_id, variety_name, hyb_check, set]
+      notes:
+        - hyb_check 可用于标记普通材料、对照材料或杂交检查分类；具体取值应与用户数据字典保持一致。
+    - name: design
+      required: true
+      description: 设计类型，可选随机区组、对角线增广或间比法。
+      examples: [rcbd, diagonal, interval]
+  parameters:
+    - name: blocks
+      description: 随机区组设计的重复数或区组数；用户说“3 个重复”时通常对应 blocks=3。
+    - name: ncols
+      description: 田间布局列数；未提供时可由系统按默认布局策略处理。
+    - name: ck_spec
+      description: 间比法或对照布置规则，例如对照起始位置、间隔或对照材料组合。
+    - name: planter
+      description: 种植路径，默认蛇形排布，也可按用户要求使用直线或笛卡尔布局。
+  examples:
+    - /field-design hyb_check 怎么填？
+    - /field-design 用这个 CSV 做 RCBD，3 个重复
+    - /field-design 生成对角线增广设计，并给出 HTML 布局预览
+  outputs:
+    - 田间 fieldbook CSV
+    - 种植顺序和小区布局说明
+    - HTML 田间布局预览
 execution:
   mode: python_subprocess
   answer_mode: requires_finalizer
@@ -137,6 +169,8 @@ If the user has not provided enough information, ask only for the missing items:
 - design parameters, such as `blocks` for RCBD, `ncols`, `ck_ratio`, `planter`, `randomize`, and `seed` for Diagonal, or `ncols` and CK interval parameters for Interval. Do not ask for Interval `reps` in the first interaction.
 
 For a bare `$field-design` invocation, show only the exact welcome message above. Do not run scripts until the required inputs are available.
+
+When the declared Python wrapper detects missing required user input, it must return the structured `missing_input` contract from `Skill构建指南.md`: `ok: false`, `is_error: true`, `error.type: missing_input`, `missing` with manifest parameter names, and a user-readable `answer`. For Interval designs, the CK lookup prompt (`status: needs_ck_parameters`) is still missing input, not a successful design result.
 
 ## Choose The Workflow
 

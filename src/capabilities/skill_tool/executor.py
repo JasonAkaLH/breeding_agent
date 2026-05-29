@@ -11,7 +11,7 @@ from typing import Any
 from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
 from src.core.enums import ArtifactType, EventVisibility
 from src.core.models import Artifact, EventRecord
-from src.integrations.codex_skills import (
+from src.integrations.agent_skills import (
     SkillExecutionConfig,
     SkillExecutionConfigError,
     SkillManifest,
@@ -30,6 +30,7 @@ from src.integrations.codex_skills import (
     resolve_skill_execution_config,
     select_skill_entrypoint,
 )
+from src.integrations.agent_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
 
 
 @dataclass(slots=True, frozen=True)
@@ -252,6 +253,24 @@ class SkillExecutor(ExecutorPort):
             },
         )
         events = list(prior_events)
+        resolution_prompt_profile = (
+            getattr(script_result.resolution, "prompt_profile", None)
+            if script_result.resolution is not None
+            else None
+        )
+        if isinstance(resolution_prompt_profile, Mapping):
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.input_resolution_prompt_profile",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "prompt_profile": dict(resolution_prompt_profile),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
         if script_result.resolution is not None and script_result.resolution.diagnostics:
             events.append(
                 self._make_event(
@@ -261,6 +280,11 @@ class SkillExecutor(ExecutorPort):
                         "skill_name": resolved.manifest.name,
                         "entrypoint": script.name,
                         "diagnostics": list(script_result.resolution.diagnostics),
+                        **(
+                            {"prompt_profile": dict(resolution_prompt_profile)}
+                            if isinstance(resolution_prompt_profile, Mapping)
+                            else {}
+                        ),
                     },
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
@@ -300,12 +324,20 @@ class SkillExecutor(ExecutorPort):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
+            interrupt = build_missing_input_interrupt(
+                request=request,
+                manifest=resolved.manifest,
+                skill_name=resolved.manifest.name,
+                entrypoint=script.name,
+                missing=script_result.missing,
+            )
             return CapabilityExecutionResult(
                 capability_id=request.capability_id,
                 task_id=request.task_id,
                 node_id=request.node_id,
                 output_payload={"skill_name": resolved.manifest.name, "missing": list(script_result.missing)},
                 events=tuple(events),
+                interrupt=interrupt,
                 error=CapabilityExecutionError(
                     code="skill_input_missing",
                     message="Missing required skill input.",
@@ -393,6 +425,36 @@ class SkillExecutor(ExecutorPort):
                 )
             )
         output_payload = normalize_skill_response_payload(script_result.output)
+        script_missing = missing_input_fields_from_payload(output_payload)
+        if script_missing:
+            events.append(
+                self._make_event(
+                    request,
+                    event_type="skill.input_missing",
+                    payload={
+                        "skill_name": resolved.manifest.name,
+                        "entrypoint": script.name,
+                        "missing": list(script_missing),
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            interrupt = build_missing_input_interrupt(
+                request=request,
+                manifest=resolved.manifest,
+                skill_name=resolved.manifest.name,
+                entrypoint=script.name,
+                missing=script_missing,
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload=output_payload,
+                artifacts=tuple(artifacts),
+                events=tuple(events),
+                interrupt=interrupt,
+            )
         response_text = coerce_skill_response_text(output_payload)
         display_artifact_specs = output_payload.pop("display_artifacts", None)
         artifacts.extend(self._make_display_artifacts(request, display_artifact_specs))
@@ -668,11 +730,36 @@ class SkillExecutor(ExecutorPort):
 
         artifacts = list(handler_result.artifacts)
         output_payload = normalize_skill_response_payload(handler_result.output_payload)
+        handler_interrupt = handler_result.interrupt
+        if handler_result.error is not None and handler_result.error.code == "skill_input_missing" and handler_interrupt is None:
+            missing = handler_result.error.metadata.get("missing") if isinstance(handler_result.error.metadata, Mapping) else None
+            if not missing:
+                missing = tuple(name for name, spec in resolved.manifest.parameters.items() if spec.required)
+            handler_interrupt = build_missing_input_interrupt(
+                request=request,
+                manifest=resolved.manifest,
+                skill_name=resolved.manifest.name,
+                entrypoint=execution.handler or execution.handler_module or "platform_service",
+                missing=missing,
+            )
+            if handler_interrupt is not None:
+                events.append(
+                    self._make_event(
+                        request,
+                        event_type="skill.input_missing",
+                        payload={
+                            "skill_name": resolved.manifest.name,
+                            "entrypoint": execution.handler or execution.handler_module or "platform_service",
+                            "missing": list(handler_interrupt.required_fields.keys()),
+                        },
+                        visibility=EventVisibility.AUDIT_ONLY,
+                    )
+                )
         response_text = coerce_skill_response_text(output_payload)
         if execution.answer_mode == "direct" and response_text:
             artifacts.append(self._make_text_artifact(request, response_text))
         events.extend(handler_result.events)
-        if handler_result.error is None and handler_result.interrupt is None:
+        if handler_result.error is None and handler_interrupt is None:
             events.append(
                 self._make_event(
                     request,
@@ -687,7 +774,7 @@ class SkillExecutor(ExecutorPort):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
-        elif handler_result.interrupt is not None:
+        elif handler_interrupt is not None:
             events.append(
                 self._make_event(
                     request,
@@ -696,7 +783,7 @@ class SkillExecutor(ExecutorPort):
                         "capability_id": request.capability_id,
                         "skill_name": resolved.manifest.name,
                         "mode": execution.mode,
-                        "interrupt_id": handler_result.interrupt.interrupt_id,
+                        "interrupt_id": handler_interrupt.interrupt_id,
                     },
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
@@ -722,7 +809,7 @@ class SkillExecutor(ExecutorPort):
             output_payload=output_payload,
             artifacts=tuple(artifacts),
             events=tuple(events),
-            interrupt=handler_result.interrupt,
+            interrupt=handler_interrupt,
             error=handler_result.error,
         )
 

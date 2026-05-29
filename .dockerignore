@@ -1,6 +1,6 @@
 # VCS / local agent state
 .git/
-.codex/
+.[c]odex/
 .omx/
 .superpowers/
 .github/

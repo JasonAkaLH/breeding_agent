@@ -7,7 +7,7 @@
 
 ## 1. 背景
 
-当前系统已经具备主代理、数据查询 Skill、Skill 一等 capability、动态 Skill bundle、LLM Planner、runtime replanner、API/SSE 与状态存储基线。现阶段外部系统接入仍以单点 adapter 为主，例如 MySQL 只读适配器、LLM provider、Codex Skill 兼容层。
+当前系统已经具备主代理、数据查询 Skill、Skill 一等 capability、动态 Skill bundle、LLM Planner、runtime replanner、API/SSE 与状态存储基线。现阶段外部系统接入仍以单点 adapter 为主，例如 MySQL 只读适配器、LLM provider、Agent Skill 兼容层。
 
 后续如果需要接入来自外部 MCP server 的工具，不能把 MCP tool 直接作为 orchestration 内核概念暴露给 Planner。MCP tool 本质上是外部 server 暴露的可调用原语；本项目的稳定编排单位仍应是 **capability**。因此需要新增 MCP Runtime，把 MCP 的连接、发现、调用、鉴权、输出治理和审计收口到外部适配层，再通过受控 capability 包装进入现有编排系统。
 

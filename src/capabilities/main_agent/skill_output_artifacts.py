@@ -11,18 +11,18 @@ from uuid import uuid4
 from src.core.contracts import StoragePort
 from src.core.enums import ArtifactType
 from src.core.models import Artifact
-from src.integrations.codex_skills.internal_keys import (
+from src.integrations.agent_skills.internal_keys import (
     SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY,
     SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY,
 )
-from src.integrations.codex_skills.manifest import SkillManifest
-from src.integrations.codex_skills.output_files import (
+from src.integrations.agent_skills.manifest import SkillManifest
+from src.integrations.agent_skills.output_files import (
     CollectedSkillOutputFile,
     SkillOutputFileRejection,
     collect_skill_output_files,
     create_zip_from_collected_files,
 )
-from src.integrations.codex_skills.script_manifest import SkillScriptEntrypoint
+from src.integrations.agent_skills.script_manifest import SkillScriptEntrypoint
 from src.storage.artifact_files import (
     LocalArtifactFileStore,
     build_file_storage_ref,

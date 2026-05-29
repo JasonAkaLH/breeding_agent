@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from src.core.enums import NodeCriticality
-from src.integrations.codex_skills import SkillManifest, resolve_skill_execution_config
+from src.integrations.agent_skills import SkillManifest, resolve_skill_execution_config
 
 from .answer_roles import (
     ANSWER_SCOPE_METADATA_KEY,
@@ -88,7 +88,7 @@ class SkillWorkflowProvider:
         revision: str | None,
     ) -> WorkflowPlan:
         task_id = request.task_id
-        skill_node_id = f"{task_id}:skill_execute"
+        skill_node_id = self._resume_interrupted_node_id(request) or f"{task_id}:skill_execute"
         skill_node = WorkflowNodePlan(
             node_id=skill_node_id,
             capability_id=capability_id,
@@ -110,7 +110,7 @@ class SkillWorkflowProvider:
             finalizer_added = True
             nodes.append(
                 WorkflowNodePlan(
-                    node_id=f"{task_id}:main_agent.respond",
+                    node_id=self._resume_finalizer_node_id(request) or f"{task_id}:main_agent.respond",
                     capability_id="main_agent.respond",
                     input_payload={"user_message": request.effective_user_message},
                     metadata={
@@ -179,3 +179,20 @@ class SkillWorkflowProvider:
                 if isinstance(value, str) and value.strip():
                     payload[key] = value.strip()
         return payload
+
+    @staticmethod
+    def _resume_interrupted_node_id(request: OrchestrationRequest) -> str | None:
+        return SkillWorkflowProvider._task_scoped_resume_node_id(request, "resume_interrupted_node_id")
+
+    @staticmethod
+    def _resume_finalizer_node_id(request: OrchestrationRequest) -> str | None:
+        return SkillWorkflowProvider._task_scoped_resume_node_id(request, "resume_finalizer_node_id")
+
+    @staticmethod
+    def _task_scoped_resume_node_id(request: OrchestrationRequest, metadata_key: str) -> str | None:
+        if request.metadata.get("macro_expansion") is True:
+            return None
+        value = str(request.metadata.get(metadata_key) or "").strip()
+        if not value:
+            return None
+        return value if value.startswith(f"{request.task_id}:") else None
