@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from src.integrations.llm_runtime import SharedLLMRuntime
+from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, PromptSegment
 
 
 class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
@@ -125,6 +126,112 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await runtime.generate_text("p", model_edition="deepseek-v4-flash-260425")
 
         self.assertNotIn("trim_max_tokens", FakeClient.instances[0].kwargs["config"])
+
+    async def test_static_metadata_uses_same_messages_role_alias_as_llm_client(self) -> None:
+        runtime = SharedLLMRuntime(
+            config={
+                "model": "fake",
+                "messages": {
+                    "supports_messages": True,
+                    "roles": ["system", "developer", "user"],
+                },
+            }
+        )
+
+        metadata = runtime.static_metadata()
+
+        self.assertEqual(
+            metadata["provider_role_capabilities"],
+            {"supports_messages": True, "roles": ["system", "developer", "user"]},
+        )
+
+    async def test_generate_text_passes_native_messages_to_message_aware_clients(self) -> None:
+        messages = (
+            LLMMessage(role="system", content="rules"),
+            LLMMessage(role="user", content="question"),
+        )
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.seen_prompt = None
+
+            async def generate_text(self, prompt, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
+                self.seen_prompt = prompt
+                return "ok"
+
+        client = FakeClient()
+        runtime = SharedLLMRuntime(client=client)
+
+        text = await runtime.generate_text(messages)
+
+        self.assertEqual(text, "ok")
+        self.assertIs(client.seen_prompt, messages)
+
+    async def test_stream_events_passes_messages_and_keeps_reasoning_event_shape(self) -> None:
+        messages = (LLMMessage(role="user", content="question"),)
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.seen_prompt = None
+
+            async def generate_text_with_thinking(self, prompt, *, thinking: bool = False, reasoning_effort: str = "minimal"):
+                self.seen_prompt = prompt
+                yield {"reasoning": "think", "answer": None}
+                yield {"reasoning": None, "answer": "answer"}
+
+        client = FakeClient()
+        runtime = SharedLLMRuntime(client=client)
+
+        events = [event async for event in runtime.stream_events(messages, thinking=True, reasoning_effort="max")]
+
+        self.assertIs(client.seen_prompt, messages)
+        self.assertEqual(events, [{"answer": None, "reasoning": "think"}, {"answer": "answer", "reasoning": None}])
+
+    async def test_prompt_envelope_renders_to_string_for_legacy_fake_clients(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.seen_prompt = None
+
+            async def generate_text(self, prompt, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
+                self.seen_prompt = prompt
+                return "ok"
+
+        client = FakeClient()
+        runtime = SharedLLMRuntime(client=client)
+        envelope = PromptEnvelope(
+            template_id="runtime.legacy",
+            template_version="v1",
+            model_edition="fake",
+            trim_max_tokens=4_000,
+            segments=(
+                PromptSegment(
+                    name="stable",
+                    role="system",
+                    content="系统规则",
+                    priority=0,
+                    mutability="stable",
+                    cache_affinity="prefix",
+                    trim_policy="required",
+                    security_role="instruction",
+                ),
+                PromptSegment(
+                    name="user",
+                    role="user",
+                    content="用户问题",
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="user_input",
+                ),
+            ),
+        )
+
+        await runtime.generate_text(envelope)
+
+        self.assertIsInstance(client.seen_prompt, str)
+        self.assertIn("系统规则", client.seen_prompt)
+        self.assertIn("用户问题", client.seen_prompt)
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ def make_text_artifact(*, task_id: str, node_id: str, text: str, response_role: 
 
 async def iter_stream(
     generator: StreamGenerator,
-    prompt: str,
+    prompt: Any,
     *,
     reasoning_effort: str | None = None,
     thinking: bool | None = None,
@@ -73,7 +73,7 @@ async def iter_stream(
 
 async def iter_stream_events(
     generator: StreamGenerator,
-    prompt: str,
+    prompt: Any,
     *,
     reasoning_effort: str | None = None,
     thinking: bool | None = None,

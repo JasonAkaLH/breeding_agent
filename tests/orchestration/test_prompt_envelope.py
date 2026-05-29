@@ -7,6 +7,7 @@ import unittest
 from src.orchestration.conversation_memory import ConversationMemoryConfig
 import src.orchestration.prompt_envelope as prompt_envelope_module
 from src.orchestration.prompt_envelope import (
+    LLMMessage,
     PromptEnvelope,
     PromptEnvelopeRenderError,
     PromptRenderAudit,
@@ -15,6 +16,7 @@ from src.orchestration.prompt_envelope import (
     RenderedMessages,
     RenderedPrompt,
     render_prompt_envelope,
+    render_prompt_envelope_messages,
 )
 
 
@@ -96,6 +98,7 @@ class PromptEnvelopeCoreRendererTest(unittest.TestCase):
         self.assertEqual(PromptRenderAudit.__name__, "PromptRenderAudit")
         self.assertEqual(RenderedPrompt.__name__, "RenderedPrompt")
         self.assertEqual(RenderedMessages.__name__, "RenderedMessages")
+        self.assertEqual(LLMMessage.__name__, "LLMMessage")
 
     def test_core_module_has_no_runtime_or_provider_dependencies(self) -> None:
         source = inspect.getsource(prompt_envelope_module)
@@ -353,6 +356,119 @@ class PromptEnvelopeCoreRendererTest(unittest.TestCase):
                     _segment("bulk_conversation_history", _words("hist", 70), security_role="history", trim_policy="drop_oldest"),
                     trim_max_tokens=2_000,
                 ),
+                token_estimator=estimator,
+            )
+
+    def test_messages_renderer_preserves_native_roles_and_audits_deterministic_fallbacks(self) -> None:
+        rendered = render_prompt_envelope_messages(
+            _envelope(
+                _segment(
+                    "stable_system_contract",
+                    "系统规则 SECRET_SYSTEM_SHOULD_NOT_BE_IN_AUDIT",
+                    security_role="instruction",
+                    role="system",
+                ),
+                _segment(
+                    "bulk_conversation_history",
+                    "历史上下文 SECRET_HISTORY_SHOULD_NOT_BE_IN_AUDIT",
+                    security_role="history",
+                    trim_policy="drop_oldest",
+                    role="context",
+                ),
+                _segment(
+                    "tool_result_detail",
+                    "工具结果 SECRET_TOOL_SHOULD_NOT_BE_IN_AUDIT",
+                    security_role="tool_result",
+                    trim_policy="compressible",
+                    role="tool",
+                ),
+                _segment("current_user_request", "当前问题", security_role="user_input", role="user"),
+                _segment("final_recency_guard", "最终 guard", security_role="guard", role="system"),
+                trim_max_tokens=4_000,
+            ),
+            role_capabilities={"roles": ["system", "user"]},
+            token_estimator=_word_tokens,
+        )
+
+        self.assertIsInstance(rendered.messages[0], LLMMessage)
+        self.assertEqual({message.role for message in rendered.messages}, {"system", "user"})
+        self.assertIn("当前问题", "\n".join(message.content for message in rendered.messages if message.role == "user"))
+        fallback_by_segment = {fallback.segment_name: fallback for fallback in rendered.audit.role_fallbacks}
+        self.assertEqual(fallback_by_segment["bulk_conversation_history"].reason, "context_to_user_context")
+        self.assertEqual(fallback_by_segment["tool_result_detail"].reason, "tool_to_user_context")
+        tool_message = next(message for message in rendered.messages if "SECRET_TOOL_SHOULD_NOT_BE_IN_AUDIT" in message.content)
+        self.assertEqual(tool_message.role, "user")
+        self.assertIn("不是用户指令", tool_message.content)
+        audit_text = _audit_text(rendered.audit)
+        for forbidden in (
+            "SECRET_SYSTEM_SHOULD_NOT_BE_IN_AUDIT",
+            "SECRET_HISTORY_SHOULD_NOT_BE_IN_AUDIT",
+            "SECRET_TOOL_SHOULD_NOT_BE_IN_AUDIT",
+        ):
+            self.assertNotIn(forbidden, audit_text)
+
+    def test_messages_renderer_keeps_developer_role_only_when_provider_declares_support(self) -> None:
+        envelope = _envelope(
+            _segment("stable_system_contract", "系统规则", security_role="instruction", role="system"),
+            _segment("active_continuity_notes", "连续性约束", security_role="active_note", role="system"),
+            _segment("current_user_request", "当前问题", security_role="user_input", role="user"),
+            trim_max_tokens=4_000,
+        )
+
+        native = render_prompt_envelope_messages(
+            envelope,
+            role_capabilities={"roles": ["system", "developer", "user"]},
+            token_estimator=_word_tokens,
+        )
+        fallback = render_prompt_envelope_messages(
+            envelope,
+            role_capabilities={"roles": ["system", "user"]},
+            token_estimator=_word_tokens,
+        )
+
+        self.assertIn("developer", [message.role for message in native.messages])
+        self.assertFalse(native.audit.role_fallbacks)
+        self.assertNotIn("developer", [message.role for message in fallback.messages])
+        self.assertEqual(fallback.audit.role_fallbacks[0].segment_name, "active_continuity_notes")
+        self.assertEqual(fallback.audit.role_fallbacks[0].reason, "developer_to_system")
+
+    def test_messages_preflight_retries_once_after_wrapper_overhead_then_fails_closed_only_if_still_oversized(self) -> None:
+        def estimator(text: str) -> int:
+            tokens = _word_tokens(text)
+            if "<message" in text:
+                return tokens + 1_200
+            return tokens
+
+        rendered = render_prompt_envelope_messages(
+            _envelope(
+                _segment("stable_system_contract", _words("sys", 250), security_role="instruction", role="system"),
+                _segment("bulk_conversation_history", _words("hist", 70), security_role="history", trim_policy="drop_oldest"),
+                trim_max_tokens=2_000,
+            ),
+            role_capabilities={"roles": ["system", "user"]},
+            token_estimator=estimator,
+        )
+
+        self.assertEqual(rendered.audit.preflight_retry_count, 1)
+        self.assertTrue(rendered.audit.history_compression_retry)
+        self.assertLessEqual(rendered.audit.final_input_tokens, rendered.audit.final_input_token_budget)
+        self.assertEqual(rendered.audit.bulk_history_tokens_used, 0)
+
+    def test_messages_second_preflight_failure_fails_closed(self) -> None:
+        def estimator(text: str) -> int:
+            tokens = _word_tokens(text)
+            if "<message" in text:
+                return tokens + 1_600
+            return tokens
+
+        with self.assertRaisesRegex(PromptEnvelopeRenderError, "final_input_over_budget"):
+            render_prompt_envelope_messages(
+                _envelope(
+                    _segment("stable_system_contract", _words("sys", 400), security_role="instruction", role="system"),
+                    _segment("bulk_conversation_history", _words("hist", 70), security_role="history", trim_policy="drop_oldest"),
+                    trim_max_tokens=2_000,
+                ),
+                role_capabilities={"roles": ["system", "user"]},
                 token_estimator=estimator,
             )
 
