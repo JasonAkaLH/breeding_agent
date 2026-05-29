@@ -10,6 +10,12 @@ from src.orchestration.completion_policy import CompletionStatus
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.planner_contract import PlannerOutputError, TextGenerator, parse_planner_output
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy, PlannerPayloadPolicy
+from src.orchestration.prompt_envelope import PromptSegment
+from src.orchestration.prompt_profiles import (
+    PROMPT_PROFILE_TEMPLATE_VERSION,
+    coerce_profile_trim_max_tokens,
+    resolve_profile_prompt_for_mode,
+)
 from src.orchestration.registry import CapabilityRegistry
 from src.orchestration.runtime_replanner import RuntimeReplanContext, RuntimeReplanDecision
 from src.orchestration.workflow_expander import WorkflowExpander, WorkflowExpansionError
@@ -56,6 +62,7 @@ _MAX_OBSERVATION_TOKENS = 2000
 _MAX_SAMPLE_ROWS = 2
 _MAX_SAMPLE_COLUMNS = 8
 _MAX_STRING_LENGTH = 240
+_RUNTIME_REPLAN_TEMPLATE_ID = "runtime_replan"
 
 
 class MainAgentRuntimeReplanner:
@@ -97,8 +104,13 @@ class MainAgentRuntimeReplanner:
         if not self._should_observe_for_replan(context):
             return None
 
-        prompt = self._build_prompt(context)
-        raw_output = self._call_text_generator(prompt, request=context.request, stage="orchestration_replan")
+        prompt_resolution = self._build_prompt_resolution(context)
+        raw_output = self._call_text_generator(
+            prompt_resolution.prompt,
+            request=context.request,
+            stage="orchestration_replan",
+            prompt_profile=prompt_resolution.llm_call_payload,
+        )
         if inspect.isawaitable(raw_output):
             raw_output = await raw_output
         try:
@@ -133,7 +145,14 @@ class MainAgentRuntimeReplanner:
             metadata={"replan_source": "main_agent_llm_runtime"},
         )
 
-    def _call_text_generator(self, prompt: str, *, request: OrchestrationRequest, stage: str):
+    def _call_text_generator(
+        self,
+        prompt: str,
+        *,
+        request: OrchestrationRequest,
+        stage: str,
+        prompt_profile: Mapping[str, Any] | None = None,
+    ):
         assert self._text_generator is not None
         try:
             signature = inspect.signature(self._text_generator)
@@ -145,6 +164,8 @@ class MainAgentRuntimeReplanner:
             kwargs["request"] = request
         if accepts_kwargs or "stage" in signature.parameters:
             kwargs["stage"] = stage
+        if prompt_profile is not None and (accepts_kwargs or "prompt_profile" in signature.parameters):
+            kwargs["prompt_profile"] = prompt_profile
         return self._text_generator(prompt, **kwargs) if kwargs else self._text_generator(prompt)
 
     @staticmethod
@@ -318,6 +339,134 @@ class MainAgentRuntimeReplanner:
             f"当前节点：\n{json.dumps(current_nodes, ensure_ascii=False, indent=2, default=str)}\n\n"
             f"已完成节点输出 / 满足度：\n{json.dumps(node_outputs, ensure_ascii=False, indent=2, default=str)}\n\n"
             f"输出结构：\n{json.dumps(schema, ensure_ascii=False, indent=2)}"
+        )
+
+    def _build_prompt_resolution(self, context: RuntimeReplanContext):
+        legacy_prompt = self._build_prompt(context)
+        capabilities = self._format_public_capabilities(self._capability_registry.list(public_only=True))
+        node_outputs = self._sanitize_node_outputs(context.node_outputs)
+        current_nodes = []
+        for node in context.nodes.values():
+            if node.status == NodeStatus.ORPHANED:
+                continue
+            try:
+                depends_on = list(context.plan.node_by_id(node.node_id).depends_on)
+            except KeyError:
+                depends_on = []
+            current_nodes.append(
+                {
+                    "node_id": node.node_id,
+                    "capability_id": node.capability_id,
+                    "depends_on": depends_on,
+                    "status": str(node.status),
+                }
+            )
+        schema = {
+            "action": "none | replan",
+            "reason": "short reason when replanning",
+            "nodes": [
+                {
+                    "node_id": "public node id",
+                    "capability_id": "public capability id only",
+                    "depends_on": ["other public node ids"],
+                    "input_payload": {},
+                }
+            ],
+        }
+        metadata = context.request.metadata if isinstance(context.request.metadata, Mapping) else {}
+        return resolve_profile_prompt_for_mode(
+            legacy_prompt=legacy_prompt,
+            template_id=_RUNTIME_REPLAN_TEMPLATE_ID,
+            template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+            trim_max_tokens=coerce_profile_trim_max_tokens(
+                metadata.get("runtime_replan_trim_max_tokens"),
+                metadata.get("trim_max_tokens"),
+            ),
+            segments=(
+                PromptSegment(
+                    name="stable_runtime_replan_rules",
+                    role="system",
+                    content=(
+                        "你是小奥 Agent 的运行时重编排决策器。"
+                        "必须在 capability public contract 内工作，只能输出 public capability 高层 DAG；"
+                        "禁止输出任何 Skill 内部阶段、handler、runtime 或实现细节。"
+                        "如果当前结果已经足以回答用户，返回 {\"action\":\"none\"}；"
+                        "如果系统内可补足，返回完整修订后的 public DAG。只返回 JSON。"
+                    ),
+                    priority=0,
+                    mutability="stable",
+                    cache_affinity="prefix",
+                    trim_policy="required",
+                    security_role="instruction",
+                ),
+                PromptSegment(
+                    name="runtime_replan_public_capabilities",
+                    role="context",
+                    content="# 可用 public capability\n" + capabilities,
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="tool_profile",
+                ),
+                PromptSegment(
+                    name="runtime_replan_budget_state",
+                    role="context",
+                    content=(
+                        "# 重排预算\n"
+                        f"replan_count={context.replan_count}, max_replans={context.plan.max_replans}, "
+                        f"dynamic_node_count={context.dynamic_node_count}, max_dynamic_nodes={context.plan.max_dynamic_nodes}"
+                    ),
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="active_note",
+                ),
+                PromptSegment(
+                    name="current_user_request",
+                    role="user",
+                    content="# 用户问题\n" + context.request.user_message,
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="user_input",
+                ),
+                PromptSegment(
+                    name="runtime_replan_current_nodes",
+                    role="context",
+                    content="# 当前 public 节点\n" + json.dumps(current_nodes, ensure_ascii=False, indent=2, default=str),
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="compressible",
+                    security_role="tool_result",
+                ),
+                PromptSegment(
+                    name="runtime_replan_sanitized_outputs",
+                    role="context",
+                    content="# 已完成节点输出 / 满足度（已脱敏）\n"
+                    + json.dumps(node_outputs, ensure_ascii=False, indent=2, default=str),
+                    priority=0,
+                    mutability="dynamic",
+                    cache_affinity="no_cache",
+                    trim_policy="compressible",
+                    security_role="tool_result",
+                ),
+                PromptSegment(
+                    name="runtime_replan_output_guard",
+                    role="system",
+                    content="输出结构如下，必须严格 JSON，不要 Markdown 或解释：\n"
+                    + json.dumps(schema, ensure_ascii=False, indent=2),
+                    priority=0,
+                    mutability="stable",
+                    cache_affinity="no_cache",
+                    trim_policy="required",
+                    security_role="guard",
+                ),
+            ),
+            audit_context={"stage": "orchestration_replan"},
         )
 
     @classmethod

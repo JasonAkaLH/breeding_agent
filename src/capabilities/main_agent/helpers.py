@@ -79,6 +79,7 @@ async def iter_stream_events(
     thinking: bool | None = None,
     model_edition: str | None = None,
     stage: str | None = None,
+    prompt_profile: Mapping[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, str | None]]:
     stream_options = _accepted_stream_options(
         generator,
@@ -87,6 +88,7 @@ async def iter_stream_events(
             "thinking": thinking,
             "model_edition": model_edition,
             "stage": stage,
+            "prompt_profile": prompt_profile,
         },
     )
     produced = generator(prompt, **stream_options) if stream_options else generator(prompt)

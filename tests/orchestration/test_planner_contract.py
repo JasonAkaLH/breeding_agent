@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest
 from src.orchestration.planner_contract import (
@@ -100,6 +101,50 @@ class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("skill.demo", prompt)
         self.assertIn("路径：demo/SKILL.md", prompt)
         self.assertNotIn("完整 Skill 指令", prompt)
+
+    async def test_planner_profile_records_budget_and_omits_internal_source_path(self) -> None:
+        calls: list[dict] = []
+
+        async def fake_generator(prompt: str, **kwargs) -> str:
+            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            return """
+            {
+              "nodes": [
+                {"node_id": "query_data", "capability_id": "skill.demo"}
+              ]
+            }
+            """
+
+        request = OrchestrationRequest(
+            task_id="task-profile",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="处理材料表",
+            metadata={"trim_max_tokens": 4000},
+        )
+
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            plan = await build_plan_from_llm_output(
+                request,
+                text_generator=fake_generator,
+                public_capabilities=(
+                    CapabilityDescriptor(
+                        capability_id="skill.demo",
+                        name="demo",
+                        description="处理演示任务。",
+                        kind="skill",
+                        source="skill",
+                        source_path="demo/SKILL.md",
+                    ),
+                ),
+            )
+
+        self.assertEqual(plan.nodes[0].capability_id, "skill.demo")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("skill.demo", calls[0]["prompt"])
+        self.assertNotIn("路径：demo/SKILL.md", calls[0]["prompt"])
+        self.assertEqual(calls[0]["prompt_profile"]["template_id"], "planner")
+        self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
 
     def test_public_capability_block_is_budgeted_by_shortening_and_omitting_entries(self) -> None:
         long_description = "能力描述" + ("x" * 500)

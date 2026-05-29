@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+from unittest.mock import patch
 
 from src.core.enums import EventVisibility
 
@@ -187,22 +188,23 @@ parameters:
             skill_roots=[self.workspace / "skills"],
         )
 
-        first = await self.submit_message(
-            conversation_id="conv-skill-input-llm",
-            content="补充设置：重复数这个参数就是 blocks，取两次。",
-            capability_id="main_agent.respond",
-        )
-        self.assertEqual(first.status_code, 202)
-        await self.wait_for_terminal_task(first.json()["task_id"])
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            first = await self.submit_message(
+                conversation_id="conv-skill-input-llm",
+                content="补充设置：重复数这个参数就是 blocks，取两次。",
+                capability_id="main_agent.respond",
+            )
+            self.assertEqual(first.status_code, 202)
+            await self.wait_for_terminal_task(first.json()["task_id"])
 
-        second = await self.submit_message(
-            conversation_id="conv-skill-input-llm",
-            content="按照你的操作继续生成随机区组。",
-            capability_id="main_agent.respond",
-        )
-        self.assertEqual(second.status_code, 202)
-        second_task_id = second.json()["task_id"]
-        await self.wait_for_terminal_task(second_task_id)
+            second = await self.submit_message(
+                conversation_id="conv-skill-input-llm",
+                content="按照你的操作继续生成随机区组。",
+                capability_id="main_agent.respond",
+            )
+            self.assertEqual(second.status_code, 202)
+            second_task_id = second.json()["task_id"]
+            await self.wait_for_terminal_task(second_task_id)
 
         self.assertEqual(len(slot_prompts), 1)
         self.assertGreaterEqual(len(answer_prompts), 2)
@@ -211,7 +213,11 @@ parameters:
 
         events = await self.runtime.storage.list_events_for_task(second_task_id)
         resolved_event = next(event for event in events if event.event_type == "skill.input_resolved")
+        profile_event = next(event for event in events if event.event_type == "skill.input_resolution_prompt_profile")
         self.assertEqual(resolved_event.visibility, EventVisibility.AUDIT_ONLY)
         self.assertEqual(resolved_event.payload["sources"]["blocks"]["source"], "llm_slot_resolver:recent_user_message")
+        self.assertEqual(resolved_event.payload["prompt_profile"]["template_id"], "skill_input_resolver")
+        self.assertEqual(profile_event.payload["prompt_profile"]["template_id"], "skill_input_resolver")
+        self.assertIn("final_input_token_budget", resolved_event.payload["prompt_profile"])
         self.assertNotIn("不应出现在审计", str(resolved_event.payload))
         self.assertNotIn("重复数这个参数", str(resolved_event.payload))
