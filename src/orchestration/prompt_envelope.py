@@ -70,6 +70,7 @@ class PromptSegmentAudit:
     trimmed: bool
     trim_reason: str | None = None
     content_hash: str | None = None
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,8 @@ class PromptRenderAudit:
     non_history_tokens: int
     bulk_history_budget: int
     bulk_history_tokens_used: int
+    candidate_history_tokens: int
+    memory_candidate_count: int
     history_truncated: bool
     segments: tuple[PromptSegmentAudit, ...]
 
@@ -207,6 +210,8 @@ def _render_once(
     segment_audits: list[PromptSegmentAudit] = []
     included_by_name: dict[str, str] = {}
     bulk_history_tokens_used = 0
+    candidate_history_tokens = 0
+    memory_candidate_count = 0
     history_truncated = False
     non_history_tokens = 0
 
@@ -248,9 +253,12 @@ def _render_once(
 
         if _is_history_segment(segment):
             bulk_history_tokens_used += tokens_after
+            candidate_history_tokens += _safe_int(segment.metadata.get("candidate_history_tokens"))
+            memory_candidate_count += _safe_int(segment.metadata.get("memory_candidate_count"))
         else:
             non_history_tokens += tokens_after
 
+        audit_metadata = _safe_segment_audit_metadata(segment.metadata)
         segment_audits.append(
             PromptSegmentAudit(
                 name=segment.name,
@@ -261,6 +269,7 @@ def _render_once(
                 trimmed=tokens_after < tokens_before,
                 trim_reason=trim_reason,
                 content_hash=_content_hash(segment.content),
+                metadata=audit_metadata,
             )
         )
 
@@ -288,6 +297,8 @@ def _render_once(
         non_history_tokens=non_history_tokens,
         bulk_history_budget=bulk_history_budget,
         bulk_history_tokens_used=bulk_history_tokens_used,
+        candidate_history_tokens=candidate_history_tokens,
+        memory_candidate_count=memory_candidate_count,
         history_truncated=history_truncated,
         segments=tuple(segment_audits),
     )
@@ -387,6 +398,42 @@ def _first_dynamic_segment_name(segments: tuple[PromptSegment, ...]) -> str | No
         if segment.mutability != "stable":
             return segment.name
     return None
+
+
+_SAFE_SEGMENT_AUDIT_METADATA_KEYS = frozenset(
+    {
+        "candidate_history_tokens",
+        "memory_candidate_count",
+        "candidate_kinds",
+        "candidate_priority_min",
+        "candidate_priority_max",
+        "candidate_trim_policies",
+    }
+)
+
+
+def _safe_segment_audit_metadata(metadata: Mapping[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for key, value in metadata.items():
+        key_text = str(key)
+        if key_text not in _SAFE_SEGMENT_AUDIT_METADATA_KEYS:
+            continue
+        if isinstance(value, str | int | float | bool) or value is None:
+            safe[key_text] = value
+            continue
+        if isinstance(value, list | tuple):
+            projected = tuple(item for item in value if isinstance(item, str | int | float | bool))
+            if projected:
+                safe[key_text] = projected
+    return safe
+
+
+def _safe_int(value: object) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
 
 
 def _normalize_trim_max_tokens(trim_max_tokens: int | None) -> tuple[int, str]:
