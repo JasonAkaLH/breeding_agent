@@ -6,6 +6,7 @@ from typing import Any
 
 from .llm_client import LLMClient, ReasoningEffort, load_config
 from .model_editions import config_with_model_edition, default_model_edition
+from .provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, render_prompt_envelope
 
 RuntimeReasoningRecorder = Callable[[str], Awaitable[None]]
@@ -62,6 +63,9 @@ class SharedLLMRuntime:
             role_capabilities = _role_capabilities_metadata(config)
             if role_capabilities:
                 metadata["provider_role_capabilities"] = role_capabilities
+            cache_capabilities = provider_cache_capabilities_metadata(config)
+            if cache_capabilities:
+                metadata["provider_cache_capabilities"] = cache_capabilities
         if reasoning_effort:
             metadata["reasoning_effort"] = reasoning_effort
         return metadata

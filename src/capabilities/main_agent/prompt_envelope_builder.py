@@ -9,6 +9,7 @@ from typing import Any, Literal
 from src.integrations.codex_skills import SkillMatch
 from src.integrations.llm_client import load_config
 from src.integrations.model_editions import trim_max_tokens_for_model_edition
+from src.integrations.provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 from src.orchestration.prompt_envelope import (
     LLMMessage,
@@ -18,6 +19,7 @@ from src.orchestration.prompt_envelope import (
     RenderedMessages,
     RenderedPrompt,
     TokenEstimator,
+    prompt_render_metrics_from_audit,
     render_prompt_envelope,
     render_prompt_envelope_messages,
 )
@@ -336,6 +338,7 @@ def resolve_main_agent_prompt_for_mode(
         model_edition=model_edition,
     )
     role_capabilities = _role_capabilities_from_metadata(stream_metadata or {})
+    provider_cache_capabilities = _provider_cache_capabilities_from_metadata(stream_metadata or {})
     try:
         if requested_mode == "messages":
             rendered = build_main_agent_rendered_messages(
@@ -393,6 +396,7 @@ def resolve_main_agent_prompt_for_mode(
         effective_mode=effective_mode,
         skill_match_count=len(skill_matches),
         provider_role_capabilities=role_capabilities if requested_mode == "messages" else None,
+        provider_cache_capabilities=provider_cache_capabilities,
     )
     return MainAgentPromptResolution(
         prompt=legacy_prompt if requested_mode == "shadow" else (rendered.messages if isinstance(rendered, RenderedMessages) else rendered.prompt),
@@ -431,8 +435,13 @@ def prompt_envelope_audit_payload(
     guard_reason: str | None = None,
     skill_match_count: int = 0,
     provider_role_capabilities: Mapping[str, Any] | None = None,
+    provider_cache_capabilities: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     audit = rendered.audit
+    safe_cache_capabilities = provider_cache_capabilities_metadata(provider_cache_capabilities or {})
+    metrics = prompt_render_metrics_from_audit(audit, mode=mode, effective_mode=effective_mode)
+    if safe_cache_capabilities:
+        metrics["provider_cache_capabilities"] = safe_cache_capabilities
     payload: dict[str, Any] = {
         "status": "rendered",
         "mode": mode,
@@ -457,7 +466,9 @@ def prompt_envelope_audit_payload(
         "candidate_history_tokens": audit.candidate_history_tokens,
         "memory_candidate_count": audit.memory_candidate_count,
         "history_truncated": audit.history_truncated,
+        "prefix_dynamic_pollution_detected": audit.prefix_dynamic_pollution_detected,
         "skill_match_count": skill_match_count,
+        "prompt_render_metrics": metrics,
         "role_fallbacks": [
             {
                 "segment_name": fallback.segment_name,
@@ -485,6 +496,8 @@ def prompt_envelope_audit_payload(
     safe_role_capabilities = _safe_role_capabilities(provider_role_capabilities)
     if safe_role_capabilities:
         payload["provider_role_capabilities"] = safe_role_capabilities
+    if safe_cache_capabilities:
+        payload["provider_cache_capabilities"] = safe_cache_capabilities
     return payload
 
 
@@ -604,12 +617,21 @@ def _llm_call_payload_from_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
         "final_input_tokens",
         "preflight_retry_count",
         "history_compression_retry",
+        "cacheable_prefix_hash",
+        "cacheable_prefix_tokens",
+        "first_dynamic_segment",
+        "non_history_tokens",
+        "bulk_history_budget",
+        "bulk_history_tokens_used",
         "candidate_history_tokens",
         "memory_candidate_count",
         "history_truncated",
+        "prefix_dynamic_pollution_detected",
         "skill_match_count",
         "role_fallbacks",
         "provider_role_capabilities",
+        "provider_cache_capabilities",
+        "prompt_render_metrics",
     )
     return {key: payload[key] for key in keys if key in payload}
 
@@ -627,6 +649,19 @@ def _role_capabilities_from_metadata(metadata: Mapping[str, Any]) -> dict[str, A
         value = metadata.get(key)
         if isinstance(value, list | tuple | str):
             return {"roles": value}
+    return {}
+
+
+def _provider_cache_capabilities_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    for key in (
+        "provider_cache_capabilities",
+        "llm_cache_capabilities",
+        "prompt_cache",
+        "cache",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, Mapping):
+            return dict(value)
     return {}
 
 
