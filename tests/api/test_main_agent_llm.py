@@ -158,7 +158,9 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(deltas, ["shadow", " ok"])
         self.assertNotIn("main_agent.prompt_envelope_rendered", seen_types)
         events = await self.runtime.storage.list_events_for_task(task_id)
-        self.assertTrue(any(event.event_type == "main_agent.prompt_envelope_rendered" for event in events))
+        prompt_event = next(event for event in events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "shadow")
+        self.assertIn("cacheable_prefix_hash", prompt_event.payload["prompt_render_metrics"])
         self.assertTrue(any(event.event_type == "main_agent.output_final" for event in events))
         self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in events))
 
@@ -196,8 +198,13 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(prompt_event.payload["mode"], "messages")
         self.assertEqual(prompt_event.payload["effective_mode"], "messages")
         self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "messages")
         llm_event = next(event for event in events if event.event_type == "main_agent.llm_call")
         self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "messages")
+        self.assertEqual(
+            llm_event.payload["prompt_envelope"]["prompt_render_metrics"],
+            prompt_event.payload["prompt_render_metrics"],
+        )
         self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in events))
 
     async def test_explicit_generic_data_lookup_capability_runs_internal_filtering_node(self) -> None:

@@ -77,6 +77,9 @@ class PromptProfilesTest(unittest.TestCase):
         audit_text = json.dumps(resolved.audit_payload, ensure_ascii=False)
         self.assertNotIn("SECRET_STABLE_SHOULD_NOT_BE_IN_AUDIT", audit_text)
         self.assertEqual(resolved.llm_call_payload["template_id"], "unit_profile")
+        self.assertEqual(resolved.audit_payload["prompt_render_metrics"]["mode"], "shadow")
+        self.assertEqual(resolved.llm_call_payload["prompt_render_metrics"]["template_id"], "unit_profile")
+        self.assertNotIn("SECRET_STABLE_SHOULD_NOT_BE_IN_AUDIT", json.dumps(resolved.llm_call_payload, ensure_ascii=False))
 
     def test_string_mode_uses_rendered_prompt_inside_final_input_budget(self) -> None:
         resolved = resolve_profile_prompt_for_mode(
@@ -119,6 +122,34 @@ class PromptProfilesTest(unittest.TestCase):
                 trim_max_tokens=100,
                 token_estimator=len,
             )
+
+    def test_string_mode_fail_closes_on_stable_prefix_dynamic_pollution(self) -> None:
+        segments = (
+            PromptSegment(
+                name="stable_rules",
+                role="system",
+                content="稳定规则",
+                priority=0,
+                mutability="stable",
+                cache_affinity="prefix",
+                trim_policy="required",
+                security_role="instruction",
+                metadata={"conversation_id": "conv-secret-raw-value"},
+            ),
+        )
+
+        with self.assertRaises(PromptEnvelopeRenderError) as captured:
+            resolve_profile_prompt_for_mode(
+                legacy_prompt="legacy",
+                template_id="polluted_profile",
+                template_version="v1",
+                segments=segments,
+                mode="string",
+                trim_max_tokens=4000,
+            )
+
+        self.assertEqual(captured.exception.reason, "stable_prefix_dynamic_pollution")
+        self.assertNotIn("conv-secret-raw-value", str(captured.exception.details))
 
     def test_shadow_mode_records_render_failure_audit(self) -> None:
         segments = (
@@ -180,6 +211,9 @@ class PromptProfilesTest(unittest.TestCase):
         self.assertEqual(resolved.llm_call_payload["mode"], "messages")
         self.assertEqual(resolved.llm_call_payload["provider_role_capabilities"], {"roles": ["system", "user"]})
         self.assertEqual(resolved.llm_call_payload["role_fallbacks"], resolved.audit_payload["role_fallbacks"])
+        self.assertEqual(resolved.audit_payload["prompt_render_metrics"]["mode"], "messages")
+        self.assertEqual(resolved.audit_payload["prompt_render_metrics"]["role_fallback_count"], 1)
+        self.assertEqual(resolved.llm_call_payload["prompt_render_metrics"], resolved.audit_payload["prompt_render_metrics"])
         self.assertNotIn("SECRET_HISTORY_SHOULD_NOT_LEAK", json.dumps(resolved.audit_payload, ensure_ascii=False))
 
 

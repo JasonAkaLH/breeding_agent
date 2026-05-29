@@ -15,6 +15,7 @@ from src.orchestration.prompt_envelope import (
     PromptSegmentAudit,
     RenderedMessages,
     RenderedPrompt,
+    prompt_render_metrics_from_audit,
     render_prompt_envelope,
     render_prompt_envelope_messages,
 )
@@ -277,6 +278,135 @@ class PromptEnvelopeCoreRendererTest(unittest.TestCase):
 
         self.assertEqual(hash_a, hash_b)
         self.assertNotEqual(hash_a, hash_c)
+
+    def test_cacheable_prefix_hash_is_stable_when_dynamic_user_history_or_tool_result_changes(self) -> None:
+        stable_prefix = _segment(
+            "stable_system_contract",
+            "stable prefix",
+            security_role="instruction",
+            role="system",
+            mutability="stable",
+            cache_affinity="prefix",
+        )
+        stable_tool_rules = _segment(
+            "stable_tool_rules",
+            "stable tool rules",
+            security_role="tool_rule",
+            role="system",
+            mutability="stable",
+            cache_affinity="prefix",
+        )
+
+        rendered_a = render_prompt_envelope(
+            _envelope(
+                stable_prefix,
+                stable_tool_rules,
+                _segment("bulk_conversation_history", "history a", security_role="history", trim_policy="drop_oldest"),
+                _segment("required_tool_results_and_artifacts", "tool result a", security_role="tool_result"),
+                _segment("current_user_request", "user asks a", security_role="user_input", role="user"),
+            ),
+            token_estimator=_word_tokens,
+        )
+        rendered_b = render_prompt_envelope(
+            _envelope(
+                stable_prefix,
+                stable_tool_rules,
+                _segment("bulk_conversation_history", "history b changed", security_role="history", trim_policy="drop_oldest"),
+                _segment("required_tool_results_and_artifacts", "tool result b changed", security_role="tool_result"),
+                _segment("current_user_request", "user asks b changed", security_role="user_input", role="user"),
+            ),
+            token_estimator=_word_tokens,
+        )
+
+        self.assertEqual(rendered_a.audit.cacheable_prefix_hash, rendered_b.audit.cacheable_prefix_hash)
+        self.assertEqual(rendered_a.audit.cacheable_prefix_tokens, rendered_b.audit.cacheable_prefix_tokens)
+        self.assertFalse(rendered_a.audit.prefix_dynamic_pollution_detected)
+
+    def test_stable_prefix_dynamic_metadata_pollution_fails_closed_without_raw_value(self) -> None:
+        with self.assertRaises(PromptEnvelopeRenderError) as captured:
+            render_prompt_envelope(
+                _envelope(
+                    _segment(
+                        "stable_system_contract",
+                        "stable prefix",
+                        security_role="instruction",
+                        role="system",
+                        mutability="stable",
+                        cache_affinity="prefix",
+                        metadata={"task_id": "task-secret-raw-value"},
+                    ),
+                ),
+                token_estimator=_word_tokens,
+            )
+
+        self.assertEqual(captured.exception.reason, "stable_prefix_dynamic_pollution")
+        self.assertEqual(captured.exception.details["segment_name"], "stable_system_contract")
+        self.assertEqual(captured.exception.details["source"], "metadata_key")
+        self.assertEqual(captured.exception.details["marker"], "task_id")
+        self.assertNotIn("task-secret-raw-value", str(captured.exception.details))
+
+    def test_stable_prefix_dynamic_content_marker_pollution_fails_closed_without_raw_prompt(self) -> None:
+        raw_prompt_marker = "task_id: task-secret-raw-value"
+        with self.assertRaises(PromptEnvelopeRenderError) as captured:
+            render_prompt_envelope(
+                _envelope(
+                    _segment(
+                        "stable_system_contract",
+                        f"stable prefix\n{raw_prompt_marker}",
+                        security_role="instruction",
+                        role="system",
+                        mutability="stable",
+                        cache_affinity="prefix",
+                    ),
+                ),
+                token_estimator=_word_tokens,
+            )
+
+        self.assertEqual(captured.exception.reason, "stable_prefix_dynamic_pollution")
+        self.assertEqual(captured.exception.details["source"], "content_marker")
+        self.assertEqual(captured.exception.details["marker"], "task_id")
+        self.assertNotIn(raw_prompt_marker, str(captured.exception.details))
+
+    def test_prompt_render_metrics_are_safe_and_complete(self) -> None:
+        rendered = render_prompt_envelope(
+            _envelope(
+                _segment(
+                    "stable_system_contract",
+                    "stable prefix SECRET_STABLE_SHOULD_NOT_LEAK",
+                    security_role="instruction",
+                    role="system",
+                    mutability="stable",
+                    cache_affinity="prefix",
+                ),
+                _segment(
+                    "bulk_conversation_history",
+                    _words("hist", 500),
+                    security_role="history",
+                    trim_policy="drop_oldest",
+                    metadata={"candidate_history_tokens": 500, "memory_candidate_count": 2},
+                ),
+                trim_max_tokens=600,
+            ),
+            token_estimator=_word_tokens,
+        )
+
+        metrics = prompt_render_metrics_from_audit(rendered.audit, mode="string", effective_mode="string")
+
+        self.assertEqual(metrics["mode"], "string")
+        self.assertEqual(metrics["template_version"], "v1")
+        self.assertEqual(metrics["cacheable_prefix_hash"], rendered.audit.cacheable_prefix_hash)
+        self.assertEqual(metrics["cacheable_prefix_tokens"], rendered.audit.cacheable_prefix_tokens)
+        self.assertEqual(metrics["final_input_token_budget"], 450)
+        self.assertEqual(metrics["final_input_tokens"], rendered.audit.final_input_tokens)
+        self.assertEqual(metrics["bulk_history_budget"], rendered.audit.bulk_history_budget)
+        self.assertEqual(metrics["bulk_history_tokens_used"], rendered.audit.bulk_history_tokens_used)
+        self.assertEqual(metrics["preflight_retry_count"], rendered.audit.preflight_retry_count)
+        self.assertEqual(metrics["history_compression_retry"], rendered.audit.history_compression_retry)
+        self.assertGreaterEqual(metrics["trimmed_segment_count"], 1)
+        self.assertIn("drop_oldest_to_bulk_history_budget", metrics["trim_reasons"])
+        self.assertEqual(metrics["role_fallback_count"], 0)
+        self.assertFalse(metrics["prefix_dynamic_pollution_detected"])
+        self.assertNotIn("SECRET_STABLE_SHOULD_NOT_LEAK", str(metrics))
 
     def test_audit_does_not_contain_raw_segment_content_or_internal_values(self) -> None:
         secret_content = "SECRET_TOKEN_ABC postgresql://user:pass@example/db scripts/internal_demo.py artifact_raw_body"

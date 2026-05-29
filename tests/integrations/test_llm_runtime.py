@@ -145,6 +145,34 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
             {"supports_messages": True, "roles": ["system", "developer", "user"]},
         )
 
+    async def test_static_metadata_includes_safe_provider_cache_capabilities(self) -> None:
+        runtime = SharedLLMRuntime(
+            config={
+                "model": "fake",
+                "api_key": "SHOULD_NOT_LEAK",
+                "base_url": "https://secret-provider.example/v1",
+                "provider_cache_capabilities": {
+                    "supports_prompt_cache": True,
+                    "prompt_cache_hint_enabled": True,
+                    "prompt_cache_hint": {"type": "ephemeral", "scope": "cacheable_prefix"},
+                },
+            }
+        )
+
+        metadata = runtime.static_metadata()
+
+        self.assertEqual(
+            metadata["provider_cache_capabilities"],
+            {
+                "supports_prompt_cache": True,
+                "prompt_cache_hint_enabled": True,
+                "status": "enabled",
+                "hint_keys": ["scope", "type"],
+            },
+        )
+        self.assertNotIn("SHOULD_NOT_LEAK", str(metadata))
+        self.assertNotIn("secret-provider", str(metadata))
+
     async def test_generate_text_passes_native_messages_to_message_aware_clients(self) -> None:
         messages = (
             LLMMessage(role="system", content="rules"),

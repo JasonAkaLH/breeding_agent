@@ -9,6 +9,11 @@ import yaml
 from openai import AsyncOpenAI
 
 from .model_editions import default_model_edition
+from .provider_cache import (
+    provider_cache_capabilities_metadata,
+    provider_cache_hint_status,
+    resolve_provider_cache_capabilities,
+)
 from src.orchestration.prompt_envelope import (
     LLMMessage,
     PromptEnvelope,
@@ -121,7 +126,9 @@ class LLMClient:
         self._base_url_configured = bool(base_url)
         self._role_capabilities = _resolve_provider_role_capabilities(loaded_config)
         self._feature_capabilities = _resolve_provider_feature_capabilities(loaded_config)
+        self._cache_capabilities = resolve_provider_cache_capabilities(loaded_config)
         self._last_message_role_fallbacks: tuple[dict[str, str], ...] = ()
+        self._last_provider_cache_hint_status = provider_cache_capabilities_metadata(self._cache_capabilities)
 
         missing = [
             name
@@ -158,6 +165,10 @@ class LLMClient:
                 "roles": sorted(self._role_capabilities["roles"]),
             },
             "provider_feature_capabilities": dict(self._feature_capabilities),
+            "provider_cache_capabilities": provider_cache_capabilities_metadata(
+                self._cache_capabilities,
+                status=self._last_provider_cache_hint_status.get("status"),
+            ),
         }
         if config_source:
             metadata["config_source"] = config_source
@@ -172,11 +183,13 @@ class LLMClient:
         thinking: bool = False,
         reasoning_effort: ReasoningEffort = "minimal",
     ) -> str:
-        request_options = _provider_request_options(
+        request_options, cache_hint_status = _provider_request_options(
             thinking=thinking,
             reasoning_effort=reasoning_effort,
             feature_capabilities=self._feature_capabilities,
+            cache_capabilities=self._cache_capabilities,
         )
+        self._last_provider_cache_hint_status = cache_hint_status
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=self._messages_payload(prompt),
@@ -211,11 +224,13 @@ class LLMClient:
         thinking: bool = False,
         reasoning_effort: ReasoningEffort = "minimal",
     ) -> AsyncIterator[dict[str, str | None]]:
-        request_options = _provider_request_options(
+        request_options, cache_hint_status = _provider_request_options(
             thinking=thinking,
             reasoning_effort=reasoning_effort,
             feature_capabilities=self._feature_capabilities,
+            cache_capabilities=self._cache_capabilities,
         )
+        self._last_provider_cache_hint_status = cache_hint_status
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=self._messages_payload(prompt),
@@ -272,6 +287,10 @@ class LLMClient:
     @property
     def last_message_role_fallbacks(self) -> tuple[dict[str, str], ...]:
         return self._last_message_role_fallbacks
+
+    @property
+    def last_provider_cache_hint_status(self) -> dict[str, Any]:
+        return dict(self._last_provider_cache_hint_status)
 
 
 def _resolve_model_from_config(config: Mapping[str, Any]) -> Any:
@@ -359,13 +378,34 @@ def _provider_request_options(
     thinking: bool,
     reasoning_effort: ReasoningEffort,
     feature_capabilities: Mapping[str, bool],
-) -> dict[str, Any]:
+    cache_capabilities: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     options: dict[str, Any] = {}
     if feature_capabilities.get("supports_thinking", True):
         options["extra_body"] = {"thinking": {"type": "enabled" if thinking else "disabled"}}
     if feature_capabilities.get("supports_reasoning_effort", True):
         options["reasoning_effort"] = reasoning_effort
-    return options
+    cache_status = _apply_provider_cache_hint(options, cache_capabilities=cache_capabilities)
+    return options, cache_status
+
+
+def _apply_provider_cache_hint(options: dict[str, Any], *, cache_capabilities: Mapping[str, Any]) -> dict[str, Any]:
+    status = provider_cache_hint_status(cache_capabilities)
+    metadata = provider_cache_capabilities_metadata(cache_capabilities, status=status)
+    if status != "enabled":
+        return metadata
+
+    hint = cache_capabilities.get("prompt_cache_hint")
+    if hint in (None, ""):
+        hint = {"type": "ephemeral"}
+    extra_body = dict(options.get("extra_body") or {})
+    if isinstance(hint, Mapping) and isinstance(hint.get("extra_body"), Mapping):
+        extra_body.update(dict(hint["extra_body"]))
+    else:
+        extra_body["prompt_cache"] = hint
+    options["extra_body"] = extra_body
+    metadata["status"] = "applied"
+    return metadata
 
 
 def _coerce_message_roles(value: Any) -> frozenset[str]:
