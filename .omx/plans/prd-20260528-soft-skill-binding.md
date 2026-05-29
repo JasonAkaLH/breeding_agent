@@ -28,8 +28,8 @@
 - `MainAgentWorkflowProvider` 当前对普通主代理计划设置 `max_replans=0`、`max_dynamic_nodes=0`；软绑定初始主代理计划需要只在 soft binding 请求上开放有限 replan budget（`src/capabilities/main_agent/workflow.py:23-40`）。
 - `MainAgentRespondCapability.execute()` 当前一开始就解析 Skill match 并调用 `_run_auto_scripts`，因此软绑定不能复用 existing forced Skill match，否则会在判断前运行脚本（`src/capabilities/main_agent/executor.py:87-100`）。
 - 当前 main-agent prompt builder 会把 `match.manifest.body` 原样注入 LLM；软绑定必须绕开这条 raw body 注入路径，改用 public profile（`src/capabilities/main_agent/prompt_builder.py:44-53`）。
-- `SkillManifest` 已包含 `name`、`description`、`triggers`、`inputs`、`outputs`、`scripts`、`parameters`、`metadata`，足够从 manifest 构造 allowlisted public profile（`src/integrations/codex_skills/manifest.py:12-23`）。
-- `build_skill_capability_registry()` 已能根据 public roots 生成 active public `skill.*` descriptor，并提供 `display_name` / `description` / `source_path` 等字段；soft profile 需要复用 public 判断但不能把 `source_path` 暴露给 LLM（`src/integrations/codex_skills/skill_capabilities.py:39-83`, `src/integrations/codex_skills/skill_capabilities.py:101-118`）。
+- `SkillManifest` 已包含 `name`、`description`、`triggers`、`inputs`、`outputs`、`scripts`、`parameters`、`metadata`，足够从 manifest 构造 allowlisted public profile（`src/integrations/agent_skills/manifest.py:12-23`）。
+- `build_skill_capability_registry()` 已能根据 public roots 生成 active public `skill.*` descriptor，并提供 `display_name` / `description` / `source_path` 等字段；soft profile 需要复用 public 判断但不能把 `source_path` 暴露给 LLM（`src/integrations/agent_skills/skill_capabilities.py:39-83`, `src/integrations/agent_skills/skill_capabilities.py:101-118`）。
 - runtime replanner 已有 `RuntimeReplanner` interface 与 `CompositeRuntimeReplanner`，可插入 deterministic soft-binding replanner，并在 runtime assembly 中排在 `MainAgentRuntimeReplanner` 之前（`src/orchestration/runtime_replanner.py:14-35`, `src/orchestration/runtime_replanner.py:43-56`, `src/api/runtime.py:2240-2249`）。
 - 现有 API / 前端 / orchestration 回归中有多处直接通过 submit-message 或测试 helper 传 `capability_id=skill.*`；实施时必须区分“外部 API direct skill 请求下线”和“内部 orchestration / macro provider 仍允许 skill.* 节点”，并迁移 API 层旧测试，避免旧测试继续把 hard execution 当作合法客户端行为（例如 `tests/api/test_slash_force_capability.py`、`tests/api/test_task_list.py`、`tests/api/test_pending_skill_context.py`、`frontend/src/api/client.test.ts`）。
 
@@ -89,7 +89,7 @@ API 边界拒绝任何外部 submit-message 直接指定 `capability_id=skill.*`
 
 ### D4. Public profile allowlist
 
-新增 `src/integrations/codex_skills/public_profile.py`（建议命名）负责从 `SkillManifest` 生成 public profile。字段只允许业务层信息，禁止包含 `source_path`、`scripts[].path`、raw body、内部 runtime 等。测试采用 allowlist + forbidden token 双保险。
+新增 `src/integrations/agent_skills/public_profile.py`（建议命名）负责从 `SkillManifest` 生成 public profile。字段只允许业务层信息，禁止包含 `source_path`、`scripts[].path`、raw body、内部 runtime 等。测试采用 allowlist + forbidden token 双保险。
 
 ### D5. `public_usage` 作为长期 Skill 写作入口
 
@@ -132,7 +132,7 @@ profile builder 对项目级 Skill 必须优先使用 `public_usage`，并可合
 
 - `tests/api/test_soft_skill_binding.py`
 - 迁移旧 hard-skill submit 测试：`tests/api/test_slash_force_capability.py` 应改为 direct skill reject；`tests/api/test_task_list.py`、`tests/api/test_message_submission.py`、`tests/api/test_pending_skill_context.py` 等若需要 Skill 结果，必须改用 soft binding execute fixture、planner fixture 或内部 orchestration 层测试，不再把外部 direct `skill.*` submit 当合法客户端路径。
-- `tests/integrations/codex_skills/test_public_skill_profile.py`
+- `tests/integrations/agent_skills/test_public_skill_profile.py`
 - `tests/capabilities/main_agent/test_soft_skill_binding.py`
 - `tests/orchestration/test_soft_skill_replanner.py`
 - `frontend/src/domain/slashCommands.test.ts`
@@ -174,7 +174,7 @@ profile builder 对项目级 Skill 必须优先使用 `public_usage`，并可合
 
 ### CP-3：Public Skill Profile Builder
 
-文件：`src/integrations/codex_skills/public_profile.py`、`src/integrations/codex_skills/__init__.py`、`tests/integrations/codex_skills/test_public_skill_profile.py`。
+文件：`src/integrations/agent_skills/public_profile.py`、`src/integrations/agent_skills/__init__.py`、`tests/integrations/agent_skills/test_public_skill_profile.py`。
 
 步骤：
 
@@ -324,7 +324,7 @@ Canonical metadata 应由后端规范化，不信任用户附带的 `skill_name`
 
 ```bash
 conda run -n multi_agent python -m unittest tests.api.test_soft_skill_binding
-conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_public_skill_profile
+conda run -n multi_agent python -m unittest tests.integrations.agent_skills.test_public_skill_profile
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_soft_skill_binding
 conda run -n multi_agent python -m unittest tests.orchestration.test_soft_skill_replanner
 ```

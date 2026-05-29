@@ -1805,7 +1805,7 @@ mod tests {
     fn checked_in_contract_artifact_matches_rust_canonical_export() {
         let artifact = fs::read_to_string(
             repo_root()
-                .join("src/integrations/codex_skills/rust_contracts/skill_runtime_contract.json"),
+                .join("src/integrations/agent_skills/rust_contracts/skill_runtime_contract.json"),
         )
         .expect("checked-in skill runtime contract artifact must exist");
         assert_eq!(

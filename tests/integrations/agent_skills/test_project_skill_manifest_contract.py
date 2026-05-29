@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from src.integrations.codex_skills import parse_skill_file
+from src.integrations.agent_skills import parse_skill_file
 
 
 class ProjectSkillManifestContractTest(unittest.TestCase):

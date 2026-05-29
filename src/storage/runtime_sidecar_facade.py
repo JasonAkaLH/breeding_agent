@@ -5,6 +5,12 @@ from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlparse
 
+from src.core.evidence import (
+    is_number as _is_number,
+    number_at_least as _number_at_least,
+    number_at_most as _number_at_most,
+    require_boolean_evidence as _require_boolean_evidence,
+)
 from src.storage.rust_contract import (
     artifact_policy,
     benchmark_policy,
@@ -458,11 +464,6 @@ def validate_runtime_sidecar_decommission_readiness(report: Mapping[str, Any]) -
     }
 
 
-def _require_boolean_evidence(evidence: Any, required_items: list[str], error_factory: Any) -> None:
-    if not isinstance(evidence, Mapping) or any(evidence.get(item) is not True for item in required_items):
-        error_factory()
-
-
 def _raise_decommission_blocked() -> None:
     error_code = error_policy("runtime_store_decommission_blocked")["code"]
     raise RuntimeError(f"{error_code}: Rust runtime sidecar legacy decommission evidence is incomplete")
@@ -476,18 +477,6 @@ def _raise_ops_readiness_blocked() -> None:
 def _raise_migration_blocked() -> None:
     error_code = error_policy("runtime_store_migration_blocked")["code"]
     raise RuntimeError(f"{error_code}: Rust runtime sidecar migration plan is incomplete")
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _number_at_least(value: Any, lower_bound: int | float) -> bool:
-    return _is_number(value) and value >= lower_bound
-
-
-def _number_at_most(value: Any, upper_bound: Any) -> bool:
-    return _is_number(value) and _is_number(upper_bound) and value <= upper_bound
 
 
 def _raise_promotion_blocked() -> None:

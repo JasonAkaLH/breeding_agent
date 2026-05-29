@@ -15,7 +15,7 @@
 
 | ID | 文件 | 场景 | 断言 |
 | --- | --- | --- | --- |
-| T1 | `tests.integrations.codex_skills.test_public_skill_profile` | public profile 读取 public_usage / parameters / inputs / outputs | 有用户可见字段；无 scripts/Rscript/wrapper/handler/runtime/path/token/secret |
+| T1 | `tests.integrations.agent_skills.test_public_skill_profile` | public profile 读取 public_usage / parameters / inputs / outputs | 有用户可见字段；无 scripts/Rscript/wrapper/handler/runtime/path/token/secret |
 | T2 | `tests.capabilities.main_agent.test_conversation_memory_prompt` | legacy/off main_agent prompt + SkillMatch | prompt 包含 public profile，不含 `manifest.body` 内部文本 |
 | T3 | `tests.capabilities.main_agent.test_conversation_memory_prompt` | string rendered prompt + SkillMatch | segment names 包含 `selected_public_tool_profiles`、`tool_input_schema`；顺序符合 security role；无内部泄漏 |
 | T4 | `tests.capabilities.main_agent.test_conversation_memory_prompt` | tool result/artifact sanitization | 保留 `/api/v1/artifacts/.../download`、missing/error/diagnostics；删除 entrypoint/local path/storage_ref/raw content |
@@ -27,7 +27,7 @@
 ## 3. 目标命令
 
 ```bash
-conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_public_skill_profile
+conda run -n multi_agent python -m unittest tests.integrations.agent_skills.test_public_skill_profile
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_conversation_memory_prompt
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_main_agent_workflow_and_executor
 ```
@@ -36,8 +36,8 @@ conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_m
 
 ```bash
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
-conda run -n multi_agent python -m unittest discover -s tests/integrations/codex_skills -p 'test_*.py'
-python -m compileall src/capabilities/main_agent src/integrations/codex_skills
+conda run -n multi_agent python -m unittest discover -s tests/integrations/agent_skills -p 'test_*.py'
+python -m compileall src/capabilities/main_agent src/integrations/agent_skills
 ```
 
 ## 5. 安全扫描清单

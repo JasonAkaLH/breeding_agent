@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.integrations.codex_skills import parse_skill_file
-from src.integrations.codex_skills.execution import SkillExecutionConfigError, resolve_skill_execution_config
-from src.integrations.codex_skills.skill_runtime_state import SkillRuntimeState
+from src.integrations.agent_skills import parse_skill_file
+from src.integrations.agent_skills.execution import SkillExecutionConfigError, resolve_skill_execution_config
+from src.integrations.agent_skills.skill_runtime_state import SkillRuntimeState
 
 
 class SkillExecutionConfigTest(unittest.TestCase):

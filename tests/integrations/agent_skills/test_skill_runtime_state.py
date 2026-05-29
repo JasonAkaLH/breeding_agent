@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.integrations.codex_skills.skill_runtime_state import SkillRuntimeState
+from src.integrations.agent_skills.skill_runtime_state import SkillRuntimeState
 
 
 class SkillRuntimeStateTest(unittest.TestCase):
@@ -80,7 +80,7 @@ Body.
             first_revision = state.active_revision
 
             with patch(
-                "src.integrations.codex_skills.skill_runtime_state.SkillCatalog.from_roots",
+                "src.integrations.agent_skills.skill_runtime_state.SkillCatalog.from_roots",
                 side_effect=RuntimeError("boom"),
             ):
                 result = state.refresh_if_changed(reason="conversation_start", force=True)

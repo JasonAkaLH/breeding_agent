@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from src.core.coercion import coerce_positive_int
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Artifact, ConversationMemorySummary, Message, Task
 from src.integrations.llm_client import load_config
@@ -61,9 +62,9 @@ class ConversationMemoryConfig:
     @classmethod
     def from_runtime_config(cls, config: Mapping[str, Any] | None = None) -> "ConversationMemoryConfig":
         loaded = dict(config) if config is not None else load_config()
-        max_tokens = _coerce_positive_int(loaded.get("trim_max_tokens"))
-        recent_turns = _coerce_positive_int(loaded.get("conversation_memory_recent_turns")) or 6
-        summary_max_tokens = _coerce_positive_int(loaded.get("conversation_memory_summary_max_tokens"))
+        max_tokens = coerce_positive_int(loaded.get("trim_max_tokens"))
+        recent_turns = coerce_positive_int(loaded.get("conversation_memory_recent_turns")) or 6
+        summary_max_tokens = coerce_positive_int(loaded.get("conversation_memory_summary_max_tokens"))
         enable_summary_llm = _coerce_bool(loaded.get("conversation_memory_enable_summary_llm"), default=True)
         return cls(
             max_tokens=max_tokens,
@@ -1472,7 +1473,7 @@ def _default_memory_candidate_token_estimator(content: str) -> int:
 
 
 def _coerce_candidate_int(value: Any, *, default: int) -> int:
-    parsed = _coerce_positive_int(value)
+    parsed = coerce_positive_int(value)
     return parsed if parsed is not None else max(0, default)
 
 
@@ -1592,16 +1593,6 @@ def _json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _strip_none(value: Mapping[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if item is not None}
-
-
-def _coerce_positive_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
 
 
 def _coerce_bool(value: Any, *, default: bool) -> bool:

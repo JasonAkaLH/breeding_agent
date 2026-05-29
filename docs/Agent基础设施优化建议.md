@@ -19,7 +19,7 @@
 | 状态存储 | 已有状态存储抽象与 SQLite 实现，为后续 PostgreSQL 迁移留出接口。 | `src/storage/` |
 | 主代理能力 | `main_agent.respond`、prompt 构造、streaming 输出与 Skill 兼容层已落地。 | `src/capabilities/main_agent/` |
 | 可移除数据查询 Skill | 数据查询 Skill 作为 `skill.data_lookup` platform-service bundle 示例；manifest、领域 runtime 与配置均归属 `skill/<domain-query>/`，系统 runtime 只提供 generic Skill loader / allowlisted handler。 | `skill/<domain-query>/` |
-| Skill 能力池 | 项目级 Skill 已可进入 public capability pool，并有 forced skill、安全 metadata 剥离与审计。 | `skill/`, `src/integrations/codex_skills/`, `src/orchestration/skill_workflow_provider.py` |
+| Skill 能力池 | 项目级 Skill 已可进入 public capability pool，并有 forced skill、安全 metadata 剥离与审计。 | `skill/`, `src/integrations/agent_skills/`, `src/orchestration/skill_workflow_provider.py` |
 | 前端联调 | React + TypeScript + Vite + Ant Design 对话台、SSE client、状态 reducer 与结果卡片测试已存在。 | `frontend/` |
 | 验证资产 | 后端按模块分层 `unittest`，前端有 Vitest / build 命令；当前文档基线已收口到 PRD 目录与少量专题说明。 | `tests/`, `docs/prd/`, `docs/` |
 
@@ -79,3 +79,18 @@
 3. **同步补可观测性**：metrics、trace、health、审计字段标准化。
    没有观测就无法判断第 1、2 步是否有效。
 4. **最后推进插件化与 sandbox**：在现有 Skill 一等 Capability 能力池基础上继续降低中心装配成本，并根据 Skill 信任边界决定 sandbox 深度。
+
+## 5. 大块重复整改补充（2026-05-29）
+
+反屎山清理第一轮后，仓库仍有几类不适合继续复制维护的大块重复：sidecar gRPC/h2 wire helper、PostgreSQL SQL script splitter、runtime revision retain / release / evict 生命周期，以及 final answer 节点补齐逻辑。
+
+详细整改设计已落入：
+
+- `docs/superpowers/specs/2026-05-29-agent-infrastructure-dedup-cleanup-design.md`
+
+执行口径：
+
+1. 先抽低业务语义、重复度最高的 wire / SQL 基元。
+2. 对 MCP Runtime 与 Skill Runtime 只抽组合式 revision store，不引入共享父类。
+3. 对 final answer 节点只做小 helper 收敛，避免改变现有图节点 ID 与 metadata 契约。
+4. 全程不修改 `skill/**`，也不新增第三方依赖。

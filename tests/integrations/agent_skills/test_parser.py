@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.integrations.codex_skills import SkillParseError, parse_skill_file
+from src.integrations.agent_skills import SkillParseError, parse_skill_file
 
 
-class CodexSkillParserTest(unittest.TestCase):
-    def test_parse_codex_skill_manifest_with_project_extensions(self) -> None:
+class AgentSkillParserTest(unittest.TestCase):
+    def test_parse_agent_skill_manifest_with_project_extensions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_file = Path(tmpdir) / "SKILL.md"
             skill_file.write_text(

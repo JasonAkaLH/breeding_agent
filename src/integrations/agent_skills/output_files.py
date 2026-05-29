@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from src.storage.artifact_files import sanitize_download_filename
 
 from .manifest import SkillManifest
+from .value_utils import string_tuple
 
 _ALLOWED_SOURCE_EXTENSIONS = {
     ".txt",
@@ -228,19 +229,9 @@ def _manifest_file_constraints(manifest: SkillManifest | None) -> tuple[set[str]
     for item in files:
         if not isinstance(item, Mapping):
             continue
-        for ext in _list_strings(item.get("extensions") or item.get("extension")):
+        for ext in string_tuple(item.get("extensions") or item.get("extension")):
             normalized = ext.lower()
             extensions.add(normalized if normalized.startswith(".") else f".{normalized}")
-        for mime in _list_strings(item.get("mime_types") or item.get("mime_type")):
+        for mime in string_tuple(item.get("mime_types") or item.get("mime_type")):
             mime_types.add(mime.lower())
     return (extensions or None), (mime_types or None)
-
-
-def _list_strings(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, list | tuple):
-        return tuple(str(item) for item in value if str(item).strip())
-    return ()

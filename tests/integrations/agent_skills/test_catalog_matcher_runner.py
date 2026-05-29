@@ -6,7 +6,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from src.integrations.codex_skills import SkillCatalog, SkillScriptError, SkillScriptRunner, match_skills, parse_skill_file
+from src.integrations.agent_skills import SkillCatalog, SkillScriptError, SkillScriptRunner, match_skills, parse_skill_file
 
 
 class SkillCatalogMatcherRunnerTest(unittest.TestCase):

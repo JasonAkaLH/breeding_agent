@@ -10,7 +10,7 @@ from src.capabilities.main_agent.runtime_replanner import MainAgentRuntimeReplan
 from src.capabilities.main_agent.workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS, MAIN_AGENT_PLANNER_PAYLOAD_POLICIES
 from src.core.enums import NodeStatus
 from src.core.models import TaskNode
-from src.integrations.codex_skills import SkillManifest
+from src.integrations.agent_skills import SkillManifest
 from src.orchestration.completion_policy import CompletionStatus
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy

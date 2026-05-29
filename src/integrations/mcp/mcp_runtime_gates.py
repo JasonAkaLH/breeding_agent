@@ -5,6 +5,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from src.core.evidence import (
+    is_number as _is_number,
+    non_negative_number as _non_negative_number,
+    number_at_least as _number_at_least,
+    number_at_most as _number_at_most,
+    require_boolean_evidence as _require_boolean_evidence,
+)
+
 from .protocol import (
     SUPPORTED_MCP_PROTOCOL_VERSION_ORDER,
     SUPPORTED_MCP_PROTOCOL_VERSIONS,
@@ -637,27 +645,6 @@ def _require_existing_evidence_refs(evidence: Mapping[str, Any]) -> None:
             _raise_conformance_blocked()
         if not Path(path_text).is_file():
             _raise_conformance_blocked()
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _non_negative_number(value: Any) -> bool:
-    return _is_number(value) and value >= 0
-
-
-def _number_at_least(value: Any, lower_bound: int | float) -> bool:
-    return _is_number(value) and value >= lower_bound
-
-
-def _number_at_most(value: Any, upper_bound: Any) -> bool:
-    return _is_number(value) and _is_number(upper_bound) and value <= upper_bound
-
-
-def _require_boolean_evidence(evidence: Any, required_items: tuple[str, ...], error_factory: Any) -> None:
-    if not isinstance(evidence, Mapping) or any(evidence.get(item) is not True for item in required_items):
-        error_factory()
 
 
 def _raise_artifact_untrusted() -> None:

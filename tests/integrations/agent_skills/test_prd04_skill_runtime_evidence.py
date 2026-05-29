@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.validate_prd04_skill_runtime_evidence import validate_evidence
-from src.integrations.codex_skills.rust_contract import load_skill_runtime_contract
+from src.integrations.agent_skills.rust_contract import load_skill_runtime_contract
 
 
 class PRD04SkillRuntimeEvidenceTest(unittest.TestCase):

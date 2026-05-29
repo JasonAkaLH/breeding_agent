@@ -15,7 +15,7 @@
 
 1. 建立工具信息四层 segment：stable tool rules、selected public tool profiles、tool input schema、required tool results and artifacts。
 2. 主代理 Skill match 禁止直接注入 `match.manifest.body`。
-3. 复用并扩展 `src/integrations/codex_skills/public_profile.py::build_public_skill_profile`。
+3. 复用并扩展 `src/integrations/agent_skills/public_profile.py::build_public_skill_profile`。
 4. public profile 必须能支持用户询问“需要什么数据、数据格式、字段值如何构建、示例如何填写”，但回答不得暴露内部代码结构。
 5. tool result segment 保留平台 `download_url`、missing、error、diagnostics 等关键事实。
 6. Skill input resolver 不把 `entrypoint` 等内部入口名作为默认公开字段。
@@ -54,7 +54,7 @@
 
 ## 7. 验收标准
 
-- `conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_public_skill_profile` 通过。
+- `conda run -n multi_agent python -m unittest tests.integrations.agent_skills.test_public_skill_profile` 通过。
 - `/skill` prompt safety test 通过。
 - 主代理 Skill match prompt 不含脚本路径、handler、runtime、sidecar、config、DSN、token、secret。
 - finalizer 文件下载硬约束仍有测试覆盖。

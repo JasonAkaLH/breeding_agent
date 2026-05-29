@@ -3,6 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from src.core.evidence import (
+    is_number as _is_number,
+    non_negative_number as _non_negative_number,
+    number_at_least as _number_at_least,
+    number_at_most as _number_at_most,
+    require_boolean_evidence as _require_boolean_evidence,
+)
+
 from .rust_contract import (
     artifact_policy,
     benchmark_policy,
@@ -185,27 +193,6 @@ def validate_skill_runtime_decommission_readiness(report: Mapping[str, Any]) -> 
 
 def _non_empty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _non_negative_number(value: Any) -> bool:
-    return _is_number(value) and value >= 0
-
-
-def _number_at_least(value: Any, lower_bound: int | float) -> bool:
-    return _is_number(value) and value >= lower_bound
-
-
-def _number_at_most(value: Any, upper_bound: Any) -> bool:
-    return _is_number(value) and _is_number(upper_bound) and value <= upper_bound
-
-
-def _require_boolean_evidence(evidence: Any, required_items: list[str], error_factory: Any) -> None:
-    if not isinstance(evidence, Mapping) or any(evidence.get(item) is not True for item in required_items):
-        error_factory()
 
 
 def _raise_artifact_untrusted() -> None:

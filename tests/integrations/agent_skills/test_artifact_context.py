@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.integrations.codex_skills.execution import (
+from src.integrations.agent_skills.execution import (
     build_skill_artifact_context,
     build_skill_safe_metadata,
     build_skill_script_artifact_context,

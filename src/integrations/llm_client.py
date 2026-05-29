@@ -8,6 +8,7 @@ from typing import Any, Literal
 import yaml
 from openai import AsyncOpenAI
 
+from src.core.coercion import coerce_truthy
 from .model_editions import default_model_edition
 from .provider_cache import (
     provider_cache_capabilities_metadata,
@@ -326,7 +327,7 @@ def _resolve_provider_role_capabilities(config: Mapping[str, Any]) -> dict[str, 
         roles = frozenset({"system", "user"})
     if "user" not in roles:
         roles = frozenset((*roles, "user"))
-    return {"supports_messages": _truthy(supports_messages), "roles": roles}
+    return {"supports_messages": coerce_truthy(supports_messages), "roles": roles}
 
 
 def _resolve_provider_feature_capabilities(config: Mapping[str, Any]) -> dict[str, bool]:
@@ -367,9 +368,9 @@ def _capability_flag(
 ) -> bool:
     for key in keys:
         if key in raw_mapping:
-            return _truthy(raw_mapping[key])
+            return coerce_truthy(raw_mapping[key])
         if key in config:
-            return _truthy(config[key])
+            return coerce_truthy(config[key])
     return default
 
 
@@ -512,14 +513,6 @@ def _message_to_openai_dict(message: LLMMessage) -> dict[str, str]:
 
 def _messages_to_context_block(messages: tuple[LLMMessage, ...]) -> str:
     return "\n\n".join(f"# role:{message.role}\n{message.content}" for message in messages)
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "enabled", "supported"}
-    return bool(value)
 
 
 def _iter_config_env_items(config: Mapping[str, Any], prefix: str = ""):

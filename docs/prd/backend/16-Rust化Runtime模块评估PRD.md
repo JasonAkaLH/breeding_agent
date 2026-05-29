@@ -52,7 +52,7 @@
 | `src/core/` | 跨模块 contracts、models、enums、基础错误 | canonical schema 与类型约束 |
 | `src/lifecycle/` | task / node / mailbox / interrupt / cancel 状态规则 | 状态机不可非法转移、并发一致性 |
 | `src/storage/` | SQLite storage facade、状态持久化、event append/list | durable store、event log、replay、lease、PostgreSQL 同构 |
-| `src/integrations/codex_skills/` | Skill catalog、manifest、runtime bundle、script runner、service binding | sandbox、trust gate、fingerprint、handler allowlist |
+| `src/integrations/agent_skills/` | Skill catalog、manifest、runtime bundle、script runner、service binding | sandbox、trust gate、fingerprint、handler allowlist |
 | `src/capabilities/skill_tool/` | generic Skill Executor | mode / answer_mode / service binding / result normalization |
 | `src/integrations/mcp/` + `src/capabilities/mcp_tool/` | MCP client runtime、tool binding、schema 校验、executor | JSON-RPC、transport、schema validation、untrusted output sanitization |
 | `src/storage/artifact_files.py` + `src/api/upload_store.py` | artifact 文件、上传、hash、路径安全、quota | 文件安全与大对象管理 |
@@ -143,7 +143,7 @@ MCP Runtime 已不再只是本总评估 PRD 中的抽象 Rust 化候选项，而
 | RUST-P0-002 | `src/lifecycle/` | task/node/mailbox/interrupt/cancel 状态机、非法转移错误、property-testable transition table | service wrapper、storage 调用 | 状态不可非法、取消/恢复语义可验证 |
 | RUST-P0-003 | `src/storage/` | durable store、event append/replay、idempotency、lease、SQLite/PostgreSQL repository kernel | 配置注入、迁移 orchestration | 多实例、重放、可靠任务恢复 |
 | RUST-P0-004 | `src/api/runtime.py` 内 dispatcher | task dispatcher、running task registry、cancellation token、bundle revision pin/release、active task lease | `ApiRuntime` composition root、FastAPI dependency | 消除 in-memory fragile runtime，支持生产化 |
-| RUST-P0-005 | `src/integrations/codex_skills/` | Skill manifest parser、bundle fingerprint、public root guard、trust gate、handler allowlist、script sandbox policy | Python handler 兼容、Skill 作者接口 | Skill 安全边界可审计 |
+| RUST-P0-005 | `src/integrations/agent_skills/` | Skill manifest parser、bundle fingerprint、public root guard、trust gate、handler allowlist、script sandbox policy | Python handler 兼容、Skill 作者接口 | Skill 安全边界可审计 |
 | RUST-P0-006 | `src/capabilities/skill_tool/` | execution mode、answer_mode、service binding、result normalization、error mapping | final answer glue、Python handler call bridge | `skill.*` 一等执行器稳定化 |
 | RUST-P0-007 | `src/integrations/mcp/` + `src/capabilities/mcp_tool/` | JSON-RPC、transport state、schema validation、tool binding、output truncation/sanitization | runtime config 注入、业务 capability 包装 | 已进入 `docs/prd/MCP/` 联合 Phase 实施；最终以 Rust sidecar 稳定外部 tool 不可信边界 |
 | RUST-P0-008 | artifact/upload/file store | storage key、path normalization、hash、quota、retention、zip/archive safety | API download response、auth dependency | 防路径穿透、防大文件资源泄漏 |
@@ -522,7 +522,7 @@ Rust dependency 技术栈冻结为 `tokio`、`tonic`、`prost`、`serde`、`serd
 | AC-001 | 具体业务 Skill 仍只通过 `skill.*` 暴露，不出现主体 native business capability | API capability list / ownership guard / grep 检查 |
 | AC-002 | Rust lifecycle kernel 与 Python 旧行为完全一致 | Python golden tests + Rust unit/property tests |
 | AC-003 | Rust storage/event kernel 不改变 API/SSE 行为 | `tests/api`、`tests/e2e`、event replay tests |
-| AC-004 | 通用 Skill Runtime Rust kernel 保持 service binding 双重授权 | `tests/integrations/codex_skills`、`tests/capabilities/skill_tool` |
+| AC-004 | 通用 Skill Runtime Rust kernel 保持 service binding 双重授权 | `tests/integrations/agent_skills`、`tests/capabilities/skill_tool` |
 | AC-005 | MCP Runtime Rust kernel 对输入输出 fail-closed | MCP unit tests、schema tests、redaction tests、fuzz tests |
 | AC-006 | Artifact/upload Rust kernel 防路径穿透和 symlink 泄漏 | path sanitizer property tests、artifact API tests |
 | AC-007 | Skill-owned Rust adapter 不改变该 Skill 的 output / artifact / event contract | `skill/<skill-name>/tests` 与 adapter contract tests 全量通过 |
@@ -667,7 +667,7 @@ Rust dependency 技术栈冻结为 `tokio`、`tonic`、`prost`、`serde`、`serd
 - `src/api/runtime.py` 当前只装配 `MainAgentExecutor`、`SkillExecutor`、`MCPToolExecutor`，并通过通用 service registry 向 Skill handler 注入受控平台服务。
 - `src/lifecycle/task_state_machine.py` 当前承载可 Rust 化的状态转移规则。
 - `src/storage/sqlite/repositories.py` 当前通过 `asyncio.to_thread` 包装同步 SQLAlchemy session，是后续 durable store / async Rust store 的候选边界。
-- `src/integrations/codex_skills/execution.py` 当前承载 Skill trust gate、public root、handler allowlist 与 service binding。
+- `src/integrations/agent_skills/execution.py` 当前承载 Skill trust gate、public root、handler allowlist 与 service binding。
 - `src/integrations/mcp/` 与 `src/capabilities/mcp_tool/` 当前承载 MCP Python facade / generic MCP executor；MCP Rust sidecar 的 Phase 0 / Phase 1 骨架已进入 `native/crates/maf_mcp_runtime/`，完整 canonical MCP runtime 仍以 `docs/prd/MCP/` Phase 2-5 为后续实施范围。
 - `docs/prd/MCP/README.md` 与 `docs/prd/MCP/00-MCPRuntime联合改造总览PRD.md` 当前承载 MCP 长任务流式 SSE 与 Rust sidecar 的联合实施门禁。
 

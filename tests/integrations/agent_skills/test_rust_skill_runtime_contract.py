@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.integrations.codex_skills import execution
-from src.integrations.codex_skills.execution import (
+from src.integrations.agent_skills import execution
+from src.integrations.agent_skills.execution import (
     SkillPlatformHandlerRegistry,
     SkillServiceRegistry,
     resolve_skill_execution_config,
 )
-from src.integrations.codex_skills.parser import SkillParseError, parse_skill_file
-from src.integrations.codex_skills.rust_contract import load_skill_runtime_contract
+from src.integrations.agent_skills.parser import SkillParseError, parse_skill_file
+from src.integrations.agent_skills.rust_contract import load_skill_runtime_contract
 
 
 class SkillRuntimeRustContractTest(unittest.TestCase):

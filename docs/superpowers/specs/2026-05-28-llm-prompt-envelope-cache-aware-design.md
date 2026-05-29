@@ -611,7 +611,7 @@ small recent clarification messages
 - `src/integrations/llm_client.py`
 - `src/orchestration/planner_contract.py`
 - `src/capabilities/main_agent/runtime_replanner.py`
-- `src/integrations/codex_skills/input_resolution.py`
+- `src/integrations/agent_skills/input_resolution.py`
 
 阶段 1 集成建议：
 

@@ -7,7 +7,7 @@ import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
-from src.integrations.codex_skills.rust_contract import load_skill_runtime_contract
+from src.integrations.agent_skills.rust_contract import load_skill_runtime_contract
 
 from tests.api.support import APITestCase
 

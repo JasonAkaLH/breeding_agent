@@ -9,7 +9,7 @@ from src.capabilities.main_agent import MainAgentExecutor
 from src.capabilities.main_agent.prompt_envelope_builder import build_main_agent_rendered_prompt
 from src.capabilities.main_agent.prompt_builder import build_main_agent_prompt
 from src.core.contracts import CapabilityExecutionRequest
-from src.integrations.codex_skills import SkillCatalog, SkillIOContract, SkillManifest, SkillMatch, SkillParameterSpec
+from src.integrations.agent_skills import SkillCatalog, SkillIOContract, SkillManifest, SkillMatch, SkillParameterSpec
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 
 

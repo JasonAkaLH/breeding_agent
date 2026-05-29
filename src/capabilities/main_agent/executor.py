@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult, ExecutorPort
 from src.core.enums import EventVisibility
-from src.integrations.codex_skills import (
+from src.integrations.agent_skills import (
     SkillCatalog,
     SkillExecutionConfigError,
     SkillInputTextGenerator,
@@ -21,7 +21,7 @@ from src.integrations.codex_skills import (
     build_public_skill_profile,
     resolve_skill_execution_config,
 )
-from src.integrations.codex_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
+from src.integrations.agent_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
 from src.integrations.llm_client import LLMClient, ReasoningEffort
 from src.integrations.provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.answer_roles import (
@@ -65,7 +65,7 @@ _SENSITIVE_STREAM_METADATA_KEYS = {
 class MainAgentRespondCapability(CapabilityContract):
     capability_id = "main_agent.respond"
     version = "1"
-    description = "生成主代理回答，并可兼容 Codex Skill 的提示词 / 脚本支持。"
+    description = "生成主代理回答，并可兼容 Agent Skill 的提示词 / 脚本支持。"
 
     def __init__(
         self,

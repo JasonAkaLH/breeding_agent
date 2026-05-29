@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from src.integrations.codex_skills import SkillScriptError, SkillScriptRunner, parse_skill_file
-from src.integrations.codex_skills import skill_sandbox_client as sandbox_module
-from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcClient
+from src.integrations.agent_skills import SkillScriptError, SkillScriptRunner, parse_skill_file
+from src.integrations.agent_skills import skill_sandbox_client as sandbox_module
+from src.integrations.agent_skills.skill_sandbox_client import SkillSandboxGrpcClient
 
 
 class _FakeRustSandboxClient:
