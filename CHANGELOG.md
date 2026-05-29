@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- Prompt Envelope 阶段三对话记忆候选上下文化已落地：`ConversationMemoryContext` 现在输出带 priority / trim policy / token estimate 的 `memory_candidates`，主代理 PromptEnvelope string/shadow 路径按低优先级到高优先级装载 `bulk_conversation_history`，renderer/audit 补齐 `candidate_history_tokens` 与 `memory_candidate_count`，并验证 clarification、已接受 interrupt answer 与上传 artifact metadata 在长历史裁剪中优先保留；默认 off/旧 prompt 路径保持兼容。
+- Prompt Envelope 阶段三对话记忆候选上下文化实施计划已落入 `.omx/plans/prd-20260529-prompt-envelope-p3-conversation-memory-candidates.md`：按 P3 PRD 拆分 memory candidate payload、动态历史预算、clarification / accepted interrupt answer / 上传 artifact metadata 优先级、candidate audit 与回归验证路径。
 - Prompt Envelope 阶段二主代理信封字符串迁移已落地：新增主代理 `prompt_envelope_builder` rendered seam、`MAF_PROMPT_ENVELOPE_MODE=off|shadow|string` 解析、shadow/string audit-only event、string envelope-to-string 发送路径、75% final input preflight 接入与 P4 前 Skill match string 放量 guard；默认 off 保持旧 prompt / SSE 行为。
 - Prompt Envelope 阶段二主代理信封字符串迁移实施计划已落入 `.omx/plans/prd-20260529-prompt-envelope-p2-main-agent-string.md`：按 P2 PRD 拆分 rendered seam、`off|shadow|string` 模式、主代理 audit-only event、75% final input preflight、文件下载硬约束保留与 Skill string 放量 guard 的实现和验证步骤。
 - Prompt Envelope 阶段一核心模型与渲染器已落地：新增 standalone `src/orchestration/prompt_envelope.py`，覆盖 PromptEnvelope / PromptSegment / RenderAudit 数据模型、确定性 segment 排序、75% final input budget、trusted/fallback safety margin、动态 bulk history budget、required fail-closed、flexible/history 裁剪、cacheable prefix hash、no-raw audit 与 final token preflight 一次历史压缩重试；暂未接入主代理生产路径或 LLMClient messages-native。

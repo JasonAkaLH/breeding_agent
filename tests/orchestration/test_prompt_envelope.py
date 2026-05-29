@@ -36,6 +36,7 @@ def _segment(
     mutability: str = "dynamic",
     cache_affinity: str = "no_cache",
     role: str = "context",
+    metadata: dict[str, object] | None = None,
 ) -> PromptSegment:
     return PromptSegment(
         name=name,
@@ -46,6 +47,7 @@ def _segment(
         cache_affinity=cache_affinity,
         trim_policy=trim_policy,
         security_role=security_role,
+        metadata=metadata or {},
     )
 
 
@@ -284,6 +286,36 @@ class PromptEnvelopeCoreRendererTest(unittest.TestCase):
         for forbidden in ("SECRET_TOKEN_ABC", "postgresql://user:pass@example/db", "scripts/internal_demo.py", "artifact_raw_body"):
             self.assertIn(forbidden, rendered.prompt)
             self.assertNotIn(forbidden, audit_text)
+
+    def test_history_candidate_audit_uses_safe_metadata_without_raw_candidate_content(self) -> None:
+        rendered = render_prompt_envelope(
+            _envelope(
+                _segment("stable_system_contract", _words("sys", 10), security_role="instruction", role="system"),
+                _segment(
+                    "bulk_conversation_history",
+                    "RAW_CANDIDATE_CONTENT_SHOULD_NOT_BE_IN_AUDIT",
+                    security_role="history",
+                    trim_policy="drop_oldest",
+                    metadata={
+                        "candidate_history_tokens": 42,
+                        "memory_candidate_count": 3,
+                        "candidate_kinds": ["history_summary", "clarification_message"],
+                        "raw_candidate_content": "RAW_CANDIDATE_CONTENT_SHOULD_NOT_BE_IN_AUDIT",
+                    },
+                ),
+                trim_max_tokens=4_000,
+            ),
+            token_estimator=_word_tokens,
+        )
+
+        self.assertEqual(rendered.audit.candidate_history_tokens, 42)
+        self.assertEqual(rendered.audit.memory_candidate_count, 3)
+        history_audit = next(segment for segment in rendered.audit.segments if segment.name == "bulk_conversation_history")
+        self.assertEqual(history_audit.metadata["candidate_history_tokens"], 42)
+        self.assertEqual(history_audit.metadata["memory_candidate_count"], 3)
+        self.assertEqual(history_audit.metadata["candidate_kinds"], ("history_summary", "clarification_message"))
+        audit_text = _audit_text(rendered.audit)
+        self.assertNotIn("RAW_CANDIDATE_CONTENT_SHOULD_NOT_BE_IN_AUDIT", audit_text)
 
     def test_final_preflight_retries_once_by_compressing_history(self) -> None:
         def estimator(text: str) -> int:

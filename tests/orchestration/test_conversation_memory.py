@@ -9,8 +9,12 @@ from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatu
 from src.core.models import Artifact, Conversation, ConversationMemorySummary, EventRecord, Message, Task
 from src.orchestration.conversation_memory import (
     ConversationMemoryBuilder,
+    ConversationMemoryCandidate,
     ConversationMemoryConfig,
+    ConversationMemoryContext,
+    ConversationMemoryMessage,
     ConversationMemorySafeAllowlist,
+    sanitize_memory_prompt_payload,
 )
 from src.orchestration.models import OrchestrationRequest
 
@@ -134,6 +138,84 @@ class ConversationMemorySafeAllowlistTest(unittest.TestCase):
         self.assertNotIn("content", projected)
 
 
+class ConversationMemoryCandidateTest(unittest.TestCase):
+    def test_context_emits_priority_annotated_candidates_without_breaking_legacy_payload(self) -> None:
+        context = ConversationMemoryContext(
+            conversation_id="conv-1",
+            root_message_id="msg-current",
+            source_message_count=4,
+            current_user_message="继续",
+            resolved_user_message="围绕龙粳33继续回答：继续",
+            recent_messages=(
+                ConversationMemoryMessage(
+                    message_id="msg-old",
+                    role="user",
+                    content="old recent message",
+                    task_id="task-old",
+                    kind="root",
+                ),
+            ),
+            clarification_messages=(
+                ConversationMemoryMessage(
+                    message_id="msg-answer",
+                    role="user",
+                    content="KEEP_ACCEPTED_ANSWER ncols=8",
+                    task_id="task-current",
+                    kind="clarification",
+                ),
+            ),
+            history_summary="older summary about 龙粳33",
+            capability_summaries=(
+                {"summary": "KEEP_CAPABILITY_SUMMARY safe result", "route_id": "dataset_b"},
+                {"upload": {"upload_id": "upl-1", "filename": "materials.csv", "content": "RAW_UPLOAD_SHOULD_NOT_PASS"}},
+            ),
+        )
+
+        candidates = context.to_prompt_candidates(token_estimator=lambda text: len(str(text).split()))
+        by_kind = {candidate.kind: candidate for candidate in candidates}
+
+        self.assertIsInstance(candidates[0], ConversationMemoryCandidate)
+        self.assertIn("history_summary", by_kind)
+        self.assertIn("recent_message", by_kind)
+        self.assertIn("clarification_message", by_kind)
+        self.assertIn("capability_summary", by_kind)
+        self.assertGreater(by_kind["clarification_message"].priority, by_kind["history_summary"].priority)
+        self.assertGreater(by_kind["capability_summary"].priority, by_kind["history_summary"].priority)
+        self.assertEqual(by_kind["history_summary"].trim_policy, "drop_oldest")
+        self.assertEqual(by_kind["clarification_message"].trim_policy, "preserve_recent")
+        self.assertGreater(by_kind["clarification_message"].token_estimate, 0)
+
+        payload = context.to_prompt_payload()
+        self.assertEqual(payload["history_summary"], "older summary about 龙粳33")
+        self.assertEqual(payload["recent_messages"][0]["content"], "old recent message")
+        self.assertEqual(payload["clarification_messages"][0]["content"], "KEEP_ACCEPTED_ANSWER ncols=8")
+        self.assertIn("memory_candidates", payload)
+        self.assertGreaterEqual(len(payload["memory_candidates"]), 4)
+
+        sanitized = sanitize_memory_prompt_payload(
+            {
+                **payload,
+                "memory_candidates": [
+                    *payload["memory_candidates"],
+                    {
+                        "candidate_id": "unsafe",
+                        "kind": "capability_summary",
+                        "content": "SAFE_VISIBLE",
+                        "priority": 1,
+                        "trim_policy": "drop_oldest",
+                        "token_estimate": 1,
+                        "metadata": {"raw_content": "RAW_METADATA_SHOULD_NOT_PASS", "sequence": 1},
+                    },
+                ],
+            }
+        )
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertIn("memory_candidates", sanitized)
+        self.assertIn("SAFE_VISIBLE", serialized)
+        self.assertNotIn("RAW_UPLOAD_SHOULD_NOT_PASS", serialized)
+        self.assertNotIn("RAW_METADATA_SHOULD_NOT_PASS", serialized)
+
+
 class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
     async def test_builder_uses_llm_resolution_when_high_confidence(self) -> None:
         prompts: list[str] = []
@@ -193,6 +275,58 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("那它的基因型呢", prompts[0])
         self.assertIn("龙粳33", prompts[0])
         self.assertIn("龙粳18", prompts[0])
+
+    async def test_builder_candidates_include_accepted_interrupt_answers_and_uploaded_artifact_metadata(self) -> None:
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        later = datetime(2026, 5, 8, 9, 5, 0)
+        messages = [
+            Message("msg-root", "conv-1", MessageRole.USER, "生成田间设计", task_id="task-1", created_at=now),
+            Message("msg-answer-upload", "conv-1", MessageRole.USER, "已上传补充文件", task_id="task-1", created_at=later),
+            Message("msg-answer-scalar", "conv-1", MessageRole.USER, "ncols=8", task_id="task-1", created_at=later),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-root", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
+        builder = ConversationMemoryBuilder(storage=storage, config=ConversationMemoryConfig(max_tokens=4000))
+
+        context = await builder.build(
+            OrchestrationRequest(
+                "task-1",
+                "conv-1",
+                "msg-root",
+                "生成田间设计\n补充信息：已上传补充文件；ncols=8",
+                metadata={
+                    "uploaded_artifacts": [
+                        {
+                            "upload_id": "upl-1",
+                            "filename": "materials.csv",
+                            "content_type": "text/csv",
+                            "preview": {"row_count": 2},
+                            "content": "RAW_UPLOAD_BODY_SHOULD_NOT_PASS",
+                        }
+                    ]
+                },
+            ),
+            username="alice",
+        )
+
+        payload = context.to_prompt_payload()
+        serialized = json.dumps(payload, ensure_ascii=False)
+        candidates = payload["memory_candidates"]
+        clarification_candidates = [item for item in candidates if item["kind"] == "clarification_message"]
+        upload_candidates = [
+            item
+            for item in candidates
+            if item["kind"] == "capability_summary" and item.get("metadata", {}).get("source") == "upload"
+        ]
+        self.assertGreaterEqual(len(clarification_candidates), 2)
+        self.assertEqual(len(upload_candidates), 1)
+        self.assertIn("已上传补充文件", serialized)
+        self.assertIn("ncols=8", serialized)
+        self.assertIn("materials.csv", serialized)
+        self.assertNotIn("RAW_UPLOAD_BODY_SHOULD_NOT_PASS", serialized)
+        self.assertGreater(clarification_candidates[-1]["priority"], upload_candidates[0]["priority"] - 20)
 
     async def test_builder_honors_llm_no_resolution_for_parallel_ambiguous_entities(self) -> None:
         async def resolver(_prompt: str) -> str:
