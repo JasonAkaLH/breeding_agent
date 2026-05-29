@@ -26,6 +26,7 @@
 - MCP 长任务与流式 SSE PRD：`docs/prd/backend/17-MCP长任务流式SSEPRD.md`。
 - 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
+- 表格上传编码兼容与表头规范化 PRD：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
 - PostgreSQL State Platform 防死锁与写队列 Phase PRD：`docs/prd/backend/postgresql-state-platform/README.md`。
 - 大语言模型提示词信封分步 PRD：`docs/prd/backend/prompt-envelope/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`。
