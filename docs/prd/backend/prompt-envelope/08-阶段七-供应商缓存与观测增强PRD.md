@@ -1,7 +1,7 @@
 # 阶段七 PRD —— 供应商缓存与观测增强
 
 - **日期**：2026-05-29
-- **状态**：待实施
+- **状态**：已实施（2026-05-29）
 - **父总纲 PRD**：`docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`
 - **所属专题**：大语言模型提示词信封
 - **范围**：cacheable prefix hash、prefix 动态污染检测、provider cache hint 配置、prompt render metrics、audit-only 观测
@@ -67,3 +67,12 @@ PromptEnvelope 的结构化 segment 能稳定 system/tool prefix，但只有持�
 | provider cache hint 行为不透明。 | 不把 cache 命中作为 correctness 依赖，只做观测优化。 |
 | hash 粒度过粗无法排查。 | 保留 segment-level content_hash 和 prefix hash，但不记录 raw content。 |
 | 为追求 prefix 稳定把动态信息提前。 | pollution detector 和 segment order tests 防止动态信息进入 stable prefix。 |
+
+## 9. 灰度与回滚建议
+
+1. **Shadow 观察**：先保持 `MAF_PROMPT_ENVELOPE_MODE=shadow`，只读取 audit-only 的 `prompt_render_metrics`、`cacheable_prefix_hash`、`final_input_token_budget`、`final_input_tokens`、`history_compression_retry` 与 `trim_reasons`；前端 SSE 不展示这些事件。
+2. **String 小流量**：在 prefix hash 稳定且 `final_input_tokens <= final_input_token_budget` 持续成立后，将少量主代理流量切到 `string`；若出现 `stable_prefix_dynamic_pollution` 或 `final_input_over_budget`，立即回滚到 `shadow/off`。
+3. **Messages 小流量**：provider role fallback 观测稳定后再切 `messages`，重点观察 `role_fallbacks` / `role_fallback_count` 是否符合 provider capabilities。
+4. **Provider cache hint 小流量**：仅当配置声明 `supports_prompt_cache=true` 且显式开启 `prompt_cache_hint_enabled=true` 时启用；unsupported/default disabled provider 必须 no-op，仅保留 hash/metrics 观测。
+5. **观测聚合口径**：按 `mode`、`effective_mode`、`template_version`、provider/model、`cacheable_prefix_hash`、`first_dynamic_segment` 聚合，对比 prefix hash 波动、history retry 比例、trim reason 分布与 role fallback 发生率。
+6. **安全回滚口径**：任何 audit payload 扫描发现 raw prompt、secret、DSN、token、provider `base_url` / `api_key`，或 stable prefix 污染检测失败未 fail-closed，均停止 provider cache hint 放量并回滚到上一阶段。

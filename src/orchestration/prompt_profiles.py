@@ -5,6 +5,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from src.integrations.provider_cache import provider_cache_capabilities_metadata
+
 from .prompt_envelope import (
     LLMMessage,
     PromptEnvelope,
@@ -13,6 +15,7 @@ from .prompt_envelope import (
     RenderedPrompt,
     RenderedMessages,
     TokenEstimator,
+    prompt_render_metrics_from_audit,
     render_prompt_envelope,
     render_prompt_envelope_messages,
 )
@@ -102,6 +105,7 @@ def resolve_profile_prompt_for_mode(
     token_estimator_is_fallback: bool = False,
     audit_context: Mapping[str, Any] | None = None,
     role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
+    provider_cache_capabilities: Mapping[str, Any] | None = None,
 ) -> PromptProfileResolution:
     requested_mode = resolve_prompt_profile_mode(mode)
     if requested_mode == "off":
@@ -164,6 +168,7 @@ def resolve_profile_prompt_for_mode(
         effective_mode=effective_mode,
         audit_context=audit_context,
         provider_role_capabilities=role_capabilities if requested_mode == "messages" else None,
+        provider_cache_capabilities=provider_cache_capabilities,
     )
     return PromptProfileResolution(
         prompt=legacy_prompt if requested_mode == "shadow" else (rendered.messages if isinstance(rendered, RenderedMessages) else rendered.prompt),
@@ -182,8 +187,13 @@ def prompt_profile_audit_payload(
     effective_mode: PromptProfileMode,
     audit_context: Mapping[str, Any] | None = None,
     provider_role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
+    provider_cache_capabilities: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     audit = rendered.audit
+    safe_cache_capabilities = provider_cache_capabilities_metadata(provider_cache_capabilities or {})
+    metrics = prompt_render_metrics_from_audit(audit, mode=mode, effective_mode=effective_mode)
+    if safe_cache_capabilities:
+        metrics["provider_cache_capabilities"] = safe_cache_capabilities
     payload: dict[str, Any] = {
         "status": "rendered",
         "mode": mode,
@@ -207,6 +217,8 @@ def prompt_profile_audit_payload(
         "candidate_history_tokens": audit.candidate_history_tokens,
         "memory_candidate_count": audit.memory_candidate_count,
         "history_truncated": audit.history_truncated,
+        "prefix_dynamic_pollution_detected": audit.prefix_dynamic_pollution_detected,
+        "prompt_render_metrics": metrics,
         "role_fallbacks": [
             {
                 "segment_name": fallback.segment_name,
@@ -234,6 +246,8 @@ def prompt_profile_audit_payload(
     safe_role_capabilities = _safe_role_capabilities(provider_role_capabilities)
     if safe_role_capabilities:
         payload["provider_role_capabilities"] = safe_role_capabilities
+    if safe_cache_capabilities:
+        payload["provider_cache_capabilities"] = safe_cache_capabilities
     safe_context = _safe_audit_context(audit_context or {})
     if safe_context:
         payload["context"] = safe_context
@@ -295,6 +309,9 @@ def llm_call_payload_from_audit(payload: Mapping[str, Any] | None) -> dict[str, 
         "error_reason",
         "role_fallbacks",
         "provider_role_capabilities",
+        "provider_cache_capabilities",
+        "prefix_dynamic_pollution_detected",
+        "prompt_render_metrics",
     )
     return {key: payload[key] for key in keys if key in payload}
 

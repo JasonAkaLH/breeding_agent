@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -82,6 +83,14 @@ class PromptRoleFallbackAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class PromptPrefixPollutionAudit:
+    segment_name: str
+    source: str
+    marker: str
+    pollution_kind: str
+
+
+@dataclass(frozen=True, slots=True)
 class PromptRenderAudit:
     template_id: str
     template_version: str
@@ -102,6 +111,8 @@ class PromptRenderAudit:
     candidate_history_tokens: int
     memory_candidate_count: int
     history_truncated: bool
+    prefix_dynamic_pollution_detected: bool
+    prefix_dynamic_pollution: tuple[PromptPrefixPollutionAudit, ...]
     segments: tuple[PromptSegmentAudit, ...]
     role_fallbacks: tuple[PromptRoleFallbackAudit, ...] = field(default_factory=tuple)
 
@@ -160,6 +171,56 @@ def render_prompt_envelope_messages(
     return rendered
 
 
+def prompt_render_metrics_from_audit(
+    audit: PromptRenderAudit,
+    *,
+    mode: str | None = None,
+    effective_mode: str | None = None,
+) -> dict[str, Any]:
+    """Return a compact no-raw metrics projection for render audit events."""
+
+    trim_reasons: dict[str, int] = {}
+    trimmed_segment_count = 0
+    for segment in audit.segments:
+        if not segment.trimmed:
+            continue
+        trimmed_segment_count += 1
+        reason = segment.trim_reason or "trimmed"
+        trim_reasons[reason] = trim_reasons.get(reason, 0) + 1
+
+    metrics: dict[str, Any] = {
+        "template_id": audit.template_id,
+        "template_version": audit.template_version,
+        "trim_max_tokens": audit.trim_max_tokens,
+        "trim_max_tokens_source": audit.trim_max_tokens_source,
+        "token_estimator": audit.token_estimator,
+        "safety_margin_tokens": audit.safety_margin_tokens,
+        "final_input_token_budget": audit.final_input_token_budget,
+        "final_input_tokens": audit.final_input_tokens,
+        "input_budget_ratio": _INPUT_BUDGET_RATIO,
+        "preflight_retry_count": audit.preflight_retry_count,
+        "history_compression_retry": audit.history_compression_retry,
+        "cacheable_prefix_hash": audit.cacheable_prefix_hash,
+        "cacheable_prefix_tokens": audit.cacheable_prefix_tokens,
+        "first_dynamic_segment": audit.first_dynamic_segment,
+        "non_history_tokens": audit.non_history_tokens,
+        "bulk_history_budget": audit.bulk_history_budget,
+        "bulk_history_tokens_used": audit.bulk_history_tokens_used,
+        "candidate_history_tokens": audit.candidate_history_tokens,
+        "memory_candidate_count": audit.memory_candidate_count,
+        "history_truncated": audit.history_truncated,
+        "trimmed_segment_count": trimmed_segment_count,
+        "trim_reasons": trim_reasons,
+        "role_fallback_count": len(audit.role_fallbacks),
+        "prefix_dynamic_pollution_detected": audit.prefix_dynamic_pollution_detected,
+    }
+    if mode is not None:
+        metrics["mode"] = mode
+    if effective_mode is not None:
+        metrics["effective_mode"] = effective_mode
+    return metrics
+
+
 def _render_with_preflight(
     envelope: PromptEnvelope,
     *,
@@ -173,6 +234,7 @@ def _render_with_preflight(
     trim_max_tokens, trim_max_tokens_source = _normalize_trim_max_tokens(envelope.trim_max_tokens)
     final_input_token_budget = math.floor(trim_max_tokens * _INPUT_BUDGET_RATIO)
     safety_margin_tokens = _safety_margin(trim_max_tokens, fallback=(estimator_name == "fallback"))
+    _assert_stable_prefix_is_not_polluted(_ordered_segments(envelope.segments))
 
     rendered = _render_once(
         envelope,
@@ -369,6 +431,8 @@ def _render_once(
         candidate_history_tokens=candidate_history_tokens,
         memory_candidate_count=memory_candidate_count,
         history_truncated=history_truncated,
+        prefix_dynamic_pollution_detected=False,
+        prefix_dynamic_pollution=(),
         segments=tuple(segment_audits),
         role_fallbacks=role_fallbacks,
     )
@@ -581,6 +645,136 @@ def _cacheable_prefix(
             token_count += _count_tokens(estimator, content)
     joined = "\n".join(chunks)
     return _content_hash(joined), token_count
+
+
+_DYNAMIC_PREFIX_SEGMENT_NAMES = frozenset(
+    {
+        "active_continuity_notes",
+        "bulk_conversation_history",
+        "current_user_request",
+        "required_tool_results_and_artifacts",
+        "selected_public_tool_profiles",
+        "tool_input_schema",
+    }
+)
+_DYNAMIC_PREFIX_SECURITY_ROLES = frozenset(
+    {
+        "active_note",
+        "history",
+        "tool_profile",
+        "tool_result",
+        "tool_schema",
+        "user_input",
+    }
+)
+_DYNAMIC_METADATA_KEYS = frozenset(
+    {
+        "artifact",
+        "artifactid",
+        "artifacts",
+        "conversationid",
+        "currentuser",
+        "currentuserrequest",
+        "dependencycontext",
+        "dependencyoutput",
+        "dependencyoutputs",
+        "dependencyresult",
+        "dependencyresults",
+        "taskid",
+        "toolresult",
+        "user",
+        "userid",
+        "username",
+    }
+)
+_DYNAMIC_CONTENT_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("task_id", re.compile(r"[\"']?\btask[_-]?id\b[\"']?\s*[:=]", re.IGNORECASE)),
+    ("conversation_id", re.compile(r"[\"']?\bconversation[_-]?id\b[\"']?\s*[:=]", re.IGNORECASE)),
+    ("username", re.compile(r"[\"']?\buser[_-]?name\b[\"']?\s*[:=]", re.IGNORECASE)),
+    ("current_user", re.compile(r"[\"']?\bcurrent[_-]?user(?:[_-]?request)?\b[\"']?\s*[:=]", re.IGNORECASE)),
+    ("artifact", re.compile(r"[\"']?\bartifact(?:s|[_-]?id)?\b[\"']?\s*[:=]", re.IGNORECASE)),
+    (
+        "dependency_result",
+        re.compile(r"[\"']?\bdependency[_-]?(?:context|output|outputs|result|results)\b[\"']?\s*[:=]", re.IGNORECASE),
+    ),
+    ("tool_result", re.compile(r"[\"']?\btool[_-]?result\b[\"']?\s*[:=]", re.IGNORECASE)),
+)
+
+
+def _assert_stable_prefix_is_not_polluted(segments: tuple[PromptSegment, ...]) -> None:
+    for segment in segments:
+        if segment.cache_affinity != "prefix" or segment.mutability != "stable":
+            continue
+        pollution = _detect_stable_prefix_pollution(segment)
+        if pollution is None:
+            continue
+        raise PromptEnvelopeRenderError(
+            "stable_prefix_dynamic_pollution",
+            details={
+                "segment_name": pollution.segment_name,
+                "source": pollution.source,
+                "marker": pollution.marker,
+                "pollution_kind": pollution.pollution_kind,
+            },
+        )
+
+
+def _detect_stable_prefix_pollution(segment: PromptSegment) -> PromptPrefixPollutionAudit | None:
+    if segment.name in _DYNAMIC_PREFIX_SEGMENT_NAMES:
+        return PromptPrefixPollutionAudit(
+            segment_name=segment.name,
+            source="segment_name",
+            marker=segment.name,
+            pollution_kind="dynamic_segment_in_stable_prefix",
+        )
+    if segment.security_role in _DYNAMIC_PREFIX_SECURITY_ROLES:
+        return PromptPrefixPollutionAudit(
+            segment_name=segment.name,
+            source="security_role",
+            marker=segment.security_role,
+            pollution_kind="dynamic_security_role_in_stable_prefix",
+        )
+    metadata_key = _first_dynamic_metadata_key(segment.metadata)
+    if metadata_key is not None:
+        return PromptPrefixPollutionAudit(
+            segment_name=segment.name,
+            source="metadata_key",
+            marker=metadata_key,
+            pollution_kind="dynamic_metadata_in_stable_prefix",
+        )
+    content_marker = _first_dynamic_content_marker(segment.content)
+    if content_marker is not None:
+        return PromptPrefixPollutionAudit(
+            segment_name=segment.name,
+            source="content_marker",
+            marker=content_marker,
+            pollution_kind="dynamic_content_marker_in_stable_prefix",
+        )
+    return None
+
+
+def _first_dynamic_metadata_key(metadata: Mapping[str, object]) -> str | None:
+    for key, value in metadata.items():
+        key_text = str(key)
+        if _normalize_dynamic_key(key_text) in _DYNAMIC_METADATA_KEYS:
+            return key_text
+        if isinstance(value, Mapping):
+            nested = _first_dynamic_metadata_key(value)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _normalize_dynamic_key(key: str) -> str:
+    return "".join(char.lower() for char in key if char.isalnum())
+
+
+def _first_dynamic_content_marker(content: str) -> str | None:
+    text = str(content)
+    for marker, pattern in _DYNAMIC_CONTENT_MARKERS:
+        if pattern.search(text):
+            return marker
+    return None
 
 
 def _first_dynamic_segment_name(segments: tuple[PromptSegment, ...]) -> str | None:

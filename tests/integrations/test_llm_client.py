@@ -516,6 +516,105 @@ class LLMClientTest(unittest.TestCase):
         self.assertNotIn("reasoning_effort", call)
         self.assertEqual(client.safe_metadata()["provider_feature_capabilities"]["supports_thinking"], False)
 
+    def test_provider_cache_hint_defaults_disabled(self) -> None:
+        client = self.make_client()
+        fake_completions = _FakeCompletions(response=_completion("OK"))
+        client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+        asyncio.run(client.generate_text("prompt", thinking=False))
+
+        call = fake_completions.calls[0]
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertNotIn("prompt_cache", call["extra_body"])
+        metadata = client.safe_metadata()
+        self.assertEqual(metadata["provider_cache_capabilities"]["status"], "disabled")
+        self.assertFalse(metadata["provider_cache_capabilities"]["prompt_cache_hint_enabled"])
+
+    def test_provider_cache_hint_unsupported_provider_noops_when_enabled(self) -> None:
+        client = LLMClient(
+            config={
+                "api_key": "test-key",
+                "base_url": "https://example.test/v1",
+                "model": "test-model",
+                "temperature": 0,
+                "max_retries": 0,
+                "timeout": 1,
+                "provider_cache_capabilities": {
+                    "supports_prompt_cache": False,
+                    "prompt_cache_hint_enabled": True,
+                    "prompt_cache_hint": {"type": "ephemeral"},
+                },
+            }
+        )
+        fake_completions = _FakeCompletions(response=_completion("OK"))
+        client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+        asyncio.run(client.generate_text("prompt", thinking=False))
+
+        call = fake_completions.calls[0]
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(client.last_provider_cache_hint_status["status"], "unsupported")
+        metadata = client.safe_metadata()
+        self.assertEqual(metadata["provider_cache_capabilities"]["status"], "unsupported")
+        self.assertEqual(metadata["provider_cache_capabilities"]["hint_keys"], ["type"])
+        self.assertNotIn("base_url", metadata)
+        self.assertNotIn("api_key", metadata)
+
+    def test_provider_cache_hint_supported_provider_adds_configured_hint(self) -> None:
+        client = LLMClient(
+            config={
+                "api_key": "test-key",
+                "base_url": "https://example.test/v1",
+                "model": "test-model",
+                "temperature": 0,
+                "max_retries": 0,
+                "timeout": 1,
+                "provider_cache_capabilities": {
+                    "supports_prompt_cache": True,
+                    "prompt_cache_hint_enabled": True,
+                    "prompt_cache_hint": {"type": "ephemeral", "scope": "cacheable_prefix"},
+                },
+            }
+        )
+        fake_completions = _FakeCompletions(response=_completion("OK"))
+        client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+        asyncio.run(client.generate_text("prompt", thinking=True, reasoning_effort="high"))
+
+        call = fake_completions.calls[0]
+        self.assertEqual(call["extra_body"]["thinking"], {"type": "enabled"})
+        self.assertEqual(call["extra_body"]["prompt_cache"], {"type": "ephemeral", "scope": "cacheable_prefix"})
+        self.assertEqual(client.last_provider_cache_hint_status["status"], "applied")
+        metadata = client.safe_metadata()
+        self.assertEqual(metadata["provider_cache_capabilities"]["status"], "applied")
+        self.assertEqual(metadata["provider_cache_capabilities"]["hint_keys"], ["scope", "type"])
+
+    def test_provider_cache_hint_supported_provider_also_applies_to_streaming(self) -> None:
+        client = LLMClient(
+            config={
+                "api_key": "test-key",
+                "base_url": "https://example.test/v1",
+                "model": "test-model",
+                "temperature": 0,
+                "max_retries": 0,
+                "timeout": 1,
+                "provider_cache_capabilities": {
+                    "supports_prompt_cache": True,
+                    "prompt_cache_hint_enabled": True,
+                    "prompt_cache_hint": {"type": "ephemeral"},
+                },
+            }
+        )
+        fake_completions = _FakeCompletions([_chunk(answer="OK")])
+        client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+        async def collect() -> list[dict[str, str | None]]:
+            return [event async for event in client.generate_text_with_thinking("prompt", thinking=False)]
+
+        self.assertEqual(asyncio.run(collect()), [{"answer": "OK", "reasoning": None}])
+        self.assertEqual(fake_completions.calls[0]["extra_body"]["prompt_cache"], {"type": "ephemeral"})
+        self.assertEqual(client.last_provider_cache_hint_status["status"], "applied")
+
     def test_prompt_envelope_input_renders_to_messages_with_final_preflight(self) -> None:
         client = self.make_client()
         fake_completions = _FakeCompletions(response=_completion("OK"))

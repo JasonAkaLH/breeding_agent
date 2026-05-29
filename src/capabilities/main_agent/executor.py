@@ -23,6 +23,7 @@ from src.integrations.codex_skills import (
 )
 from src.integrations.codex_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
 from src.integrations.llm_client import LLMClient, ReasoningEffort
+from src.integrations.provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.answer_roles import (
     ANSWER_SCOPE_METADATA_KEY,
     RESPONSE_ROLE_METADATA_KEY,
@@ -1530,11 +1531,20 @@ class MainAgentRespondCapability(CapabilityContract):
 
     @staticmethod
     def _sanitize_stream_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            str(key): value
-            for key, value in metadata.items()
-            if str(key).lower() not in _SENSITIVE_STREAM_METADATA_KEYS
-        }
+        safe: dict[str, Any] = {}
+        for key, value in metadata.items():
+            key_text = str(key)
+            key_lower = key_text.lower()
+            if key_lower in _SENSITIVE_STREAM_METADATA_KEYS:
+                continue
+            if key_lower in {"provider_cache_capabilities", "llm_cache_capabilities", "prompt_cache", "cache"} and isinstance(
+                value,
+                Mapping,
+            ):
+                safe[key_text] = provider_cache_capabilities_metadata(value)
+                continue
+            safe[key_text] = value
+        return safe
 
     async def _publish_transient(self, event) -> None:
         if self._transient_event_publisher is None:

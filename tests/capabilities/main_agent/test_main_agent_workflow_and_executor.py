@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import textwrap
 import unittest
@@ -533,11 +534,14 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prompt_event.payload["mode"], "shadow")
         self.assertEqual(prompt_event.payload["effective_mode"], "shadow")
         self.assertEqual(prompt_event.payload["final_input_token_budget"], 1_500)
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "shadow")
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["final_input_token_budget"], 1_500)
         self.assertIn("stable_system_contract", [segment["name"] for segment in prompt_event.payload["segments"]])
         self.assertNotIn("shadow 用户问题", str(prompt_event.payload))
         llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
         self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "shadow")
         self.assertEqual(llm_event.payload["prompt_envelope"]["effective_mode"], "shadow")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["prompt_render_metrics"], prompt_event.payload["prompt_render_metrics"])
 
     async def test_prompt_envelope_string_sends_envelope_prompt_without_skill_matches(self) -> None:
         prompts: list[str] = []
@@ -581,6 +585,9 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prompt_event.payload["mode"], "string")
         self.assertEqual(prompt_event.payload["effective_mode"], "string")
         self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "string")
+        self.assertIn("cacheable_prefix_hash", prompt_event.payload["prompt_render_metrics"])
+        self.assertIn("trim_reasons", prompt_event.payload["prompt_render_metrics"])
         self.assertNotIn("string 用户问题", str(prompt_event.payload))
 
     async def test_prompt_envelope_string_with_skill_match_sends_public_profile_segments(self) -> None:
@@ -676,6 +683,11 @@ scripts/internal_report.py
                 "model": "test-model",
                 "trim_max_tokens": 20_000,
                 "provider_role_capabilities": {"roles": ["system", "user"]},
+                "provider_cache_capabilities": {
+                    "supports_prompt_cache": True,
+                    "prompt_cache_hint_enabled": True,
+                    "prompt_cache_hint": {"type": "ephemeral", "scope": "cacheable_prefix"},
+                },
             },
             skill_catalog=SkillCatalog(()),
         )
@@ -709,6 +721,17 @@ scripts/internal_report.py
         self.assertEqual(prompt_event.payload["mode"], "messages")
         self.assertEqual(prompt_event.payload["effective_mode"], "messages")
         self.assertEqual(prompt_event.payload["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertEqual(
+            prompt_event.payload["provider_cache_capabilities"],
+            {
+                "supports_prompt_cache": True,
+                "prompt_cache_hint_enabled": True,
+                "status": "enabled",
+                "hint_keys": ["scope", "type"],
+            },
+        )
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "messages")
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["role_fallback_count"], len(prompt_event.payload["role_fallbacks"]))
         self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
         fallback_segments = {fallback["segment_name"]: fallback for fallback in prompt_event.payload["role_fallbacks"]}
         self.assertEqual(fallback_segments["bulk_conversation_history"]["reason"], "context_to_user_context")
@@ -717,7 +740,9 @@ scripts/internal_report.py
         llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
         self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "messages")
         self.assertEqual(llm_event.payload["prompt_envelope"]["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertEqual(llm_event.payload["prompt_envelope"]["provider_cache_capabilities"], prompt_event.payload["provider_cache_capabilities"])
         self.assertEqual(llm_event.payload["prompt_envelope"]["role_fallbacks"], prompt_event.payload["role_fallbacks"])
+        self.assertNotIn('"prompt_cache_hint":', json.dumps(llm_event.payload, ensure_ascii=False))
 
     async def test_executor_applies_request_level_thinking_and_reasoning_effort_separately(self) -> None:
         seen_reasoning_efforts: list[str] = []
