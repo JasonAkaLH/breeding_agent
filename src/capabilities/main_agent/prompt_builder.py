@@ -1,13 +1,51 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping
 
-from src.integrations.codex_skills import SkillMatch
+from src.integrations.codex_skills import SkillMatch, build_public_skill_profile
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL, RESPONSE_ROLE_INTERMEDIATE
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 
 _SENSITIVE_ARTIFACT_KEYS = {"content", "raw", "text", "storage_ref", "path", "file_path", "local_path"}
+_SENSITIVE_PROMPT_KEY_PARTS = (
+    "entrypoint",
+    "handler",
+    "runtime",
+    "script",
+    "source_path",
+    "storage_ref",
+    "local_path",
+    "file_path",
+    "config",
+    "dsn",
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "authorization",
+    "base_url",
+    "endpoint",
+)
+_SENSITIVE_PROMPT_TEXT_PARTS = (
+    "scripts/",
+    "python_subprocess",
+    "rscript",
+    "wrapper",
+    "handler",
+    "runtime:",
+    "runtime",
+    "sidecar",
+    "config.yaml",
+    "mysql://",
+    "postgresql://",
+    "api_key",
+    "token",
+    "secret",
+    "/tmp/",
+    "/mnt/data",
+)
 _SAFE_OUTPUT_FILE_KEYS = (
     "artifact_id",
     "filename",
@@ -50,8 +88,9 @@ def build_main_agent_prompt(
     memory_payload = sanitize_memory_prompt_payload(memory_context or {})
     if memory_payload:
         parts.append(_format_memory_context(memory_payload))
-    if artifact_context:
-        parts.append("\n# 上传文件上下文（已脱敏）\n" + json.dumps(artifact_context, ensure_ascii=False, indent=2, default=str))
+    safe_artifact_context = sanitize_artifact_context_for_prompt(artifact_context)
+    if safe_artifact_context:
+        parts.append("\n# 上传文件上下文（已脱敏）\n" + json.dumps(safe_artifact_context, ensure_ascii=False, indent=2, default=str))
     if response_role:
         parts.append(_format_response_role(response_role, answer_scope=answer_scope))
     if dependency_context:
@@ -61,17 +100,23 @@ def build_main_agent_prompt(
             + json.dumps(dependency_context, ensure_ascii=False, indent=2, default=str)
         )
     if skill_matches:
-        skill_blocks = []
-        for match in skill_matches:
-            skill_blocks.append(
-                f"## Skill：{match.manifest.name}\n"
-                f"描述：{match.manifest.description}\n"
-                f"匹配原因：{match.reason}\n\n"
-                f"{match.manifest.body}"
+        public_profiles = build_selected_public_skill_profiles(skill_matches)
+        tool_input_schemas = build_tool_input_schemas_from_profiles(public_profiles)
+        parts.append(
+            "\n# 已匹配 Skill 指令\n"
+            "以下内容是已匹配 Skill 的公开能力档案；不得推断或暴露内部脚本、handler、runtime、路径或配置。\n"
+            + json.dumps(public_profiles, ensure_ascii=False, indent=2, default=str)
+        )
+        if tool_input_schemas:
+            parts.append(
+                "\n# 工具输入 schema\n"
+                "以下 schema 只描述用户可见输入参数、格式、别名、值域和缺参处理标准；不包含内部入口或执行结构。\n"
+                + json.dumps(tool_input_schemas, ensure_ascii=False, indent=2, default=str)
             )
-        parts.append("\n# 已匹配 Skill 指令\n" + "\n\n".join(skill_blocks))
     if script_results:
-        parts.append("\n# Skill 脚本输出\n" + json.dumps(script_results, ensure_ascii=False, indent=2, default=str))
+        safe_script_results = sanitize_script_results_for_prompt(script_results)
+        if safe_script_results:
+            parts.append("\n# Skill 脚本输出\n" + json.dumps(safe_script_results, ensure_ascii=False, indent=2, default=str))
     parts.append("\n# 用户问题\n" + user_message)
     return "\n".join(parts)
 
@@ -164,6 +209,158 @@ def build_artifact_context(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
         if safe:
             sanitized.append(safe)
     return sanitized
+
+
+def sanitize_artifact_context_for_prompt(artifact_context: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for item in artifact_context:
+        if not isinstance(item, Mapping):
+            continue
+        safe = {
+            str(key): _sanitize_prompt_value(value)
+            for key, value in item.items()
+            if str(key).lower() not in _SENSITIVE_ARTIFACT_KEYS and not _is_sensitive_prompt_key(str(key))
+        }
+        safe = {key: value for key, value in safe.items() if value not in (None, "", [], {})}
+        if safe:
+            sanitized.append(safe)
+    return sanitized
+
+
+def build_selected_public_skill_profiles(skill_matches: list[SkillMatch]) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    for match in skill_matches:
+        capability_id = _manifest_capability_id(match.manifest)
+        profile = build_public_skill_profile(match.manifest, capability_id=capability_id).to_dict()
+        match_payload: dict[str, Any] = {}
+        score = getattr(match, "score", None)
+        if isinstance(score, int | float):
+            match_payload["score"] = score
+        reason = _safe_prompt_text(getattr(match, "reason", ""))
+        if reason:
+            match_payload["reason"] = reason
+        if match_payload:
+            profile["match"] = match_payload
+        profiles.append(profile)
+    return profiles
+
+
+def build_tool_input_schemas_from_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    schemas: list[dict[str, Any]] = []
+    for profile in profiles:
+        public_usage = profile.get("public_usage") if isinstance(profile.get("public_usage"), Mapping) else {}
+        schema = {
+            "capability_id": profile.get("capability_id"),
+            "display_name": profile.get("display_name") or profile.get("name"),
+            "parameters": profile.get("parameters") or [],
+            "inputs": profile.get("inputs") or {},
+            "outputs": profile.get("outputs") or {},
+            "accepted_formats": public_usage.get("input_formats") if isinstance(public_usage, Mapping) else [],
+            "missing_input_standard": (
+                "缺少 required=true 的参数或 inputs.required 字段时，只询问一个最关键的缺失输入；"
+                "不得编造用户未提供的文件、字段或下载链接。"
+            ),
+        }
+        sanitized = _sanitize_prompt_value(schema)
+        if isinstance(sanitized, Mapping) and sanitized:
+            schemas.append(dict(sanitized))
+    return schemas
+
+
+def sanitize_script_results_for_prompt(script_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for result in script_results:
+        if not isinstance(result, Mapping):
+            continue
+        entry: dict[str, Any] = {}
+        skill_name = _safe_prompt_text(result.get("skill_name"))
+        if skill_name:
+            entry["skill_name"] = skill_name
+        for key in (
+            "ok",
+            "is_error",
+            "status",
+            "error",
+            "error_code",
+            "error_type",
+            "stage",
+            "retriable",
+            "missing",
+            "diagnostics",
+            "output_file_diagnostics",
+        ):
+            if key not in result:
+                continue
+            value = _sanitize_prompt_value(result[key])
+            if value not in (None, "", [], {}):
+                entry[key] = value
+        if "output" in result:
+            output = _sanitize_prompt_value(result["output"])
+            if output not in (None, "", [], {}):
+                entry["output"] = output
+        if entry:
+            sanitized.append(entry)
+    return sanitized
+
+
+def _manifest_capability_id(manifest: Any) -> str:
+    metadata = getattr(manifest, "metadata", {})
+    if isinstance(metadata, Mapping):
+        direct = str(metadata.get("capability_id") or "").strip()
+        if direct:
+            return direct
+        nested_metadata = metadata.get("metadata")
+        if isinstance(nested_metadata, Mapping):
+            nested = str(nested_metadata.get("capability_id") or "").strip()
+            if nested:
+                return nested
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(getattr(manifest, "name", "skill")).lower()).strip("_")
+    return f"skill.{normalized or 'unknown'}"
+
+
+def _sanitize_prompt_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        payload: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key).strip()
+            if not key_text or _is_sensitive_prompt_key(key_text):
+                continue
+            if key_text == "output_files":
+                safe_files = _sanitize_output_files(child)
+                if safe_files:
+                    payload[key_text] = safe_files
+                continue
+            safe_child = _sanitize_prompt_value(child)
+            if safe_child not in (None, "", [], {}):
+                payload[key_text] = safe_child
+        return payload
+    if isinstance(value, list | tuple):
+        sanitized_items = [_sanitize_prompt_value(item) for item in value]
+        return [item for item in sanitized_items if item not in (None, "", [], {})]
+    if isinstance(value, str):
+        return _safe_prompt_text(value)
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return _safe_prompt_text(str(value))
+
+
+def _safe_prompt_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or _contains_sensitive_prompt_text(text):
+        return None
+    return text
+
+
+def _is_sensitive_prompt_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(part in normalized for part in _SENSITIVE_PROMPT_KEY_PARTS)
+
+
+def _contains_sensitive_prompt_text(text: str) -> bool:
+    normalized = text.lower()
+    return any(part in normalized for part in _SENSITIVE_PROMPT_TEXT_PARTS)
 
 
 def _sanitize_dependency_output(output: Mapping[str, Any]) -> dict[str, Any]:

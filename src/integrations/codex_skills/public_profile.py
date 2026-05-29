@@ -22,6 +22,25 @@ _PUBLIC_USAGE_KEYS = frozenset(
         "notes",
     }
 )
+_PUBLIC_IO_SCHEMA_KEYS = frozenset(
+    {
+        "description",
+        "type",
+        "required",
+        "files",
+        "fields",
+        "columns",
+        "example_columns",
+        "formats",
+        "examples",
+        "schema",
+        "properties",
+        "items",
+        "enum",
+        "mime_types",
+        "extensions",
+    }
+)
 _FORBIDDEN_KEY_PARTS = (
     "source_path",
     "script",
@@ -47,6 +66,8 @@ _FORBIDDEN_KEY_PARTS = (
 _FORBIDDEN_TEXT_PARTS = (
     "scripts/",
     "runtime/",
+    "runtime",
+    "python_subprocess",
     "rscript",
     "wrapper",
     "platform_service",
@@ -100,42 +121,67 @@ def build_public_skill_profile(
     runtime/script fields.
     """
 
-    display_name = (descriptor.display_name if descriptor else "") or str(manifest.metadata.get("display_name") or "").strip()
+    name = _public_text(manifest.name, fallback=capability_id)
+    raw_display_name = (descriptor.display_name if descriptor else "") or str(manifest.metadata.get("display_name") or "").strip()
+    display_name = _public_text(raw_display_name, fallback=name)
+    raw_description = (descriptor.description if descriptor else "") or manifest.description
     return PublicSkillProfile(
         capability_id=capability_id,
-        name=manifest.name,
-        display_name=display_name or manifest.name,
-        description=(descriptor.description if descriptor else "") or manifest.description,
-        triggers=tuple(str(trigger) for trigger in manifest.triggers if str(trigger).strip()),
-        parameters=tuple(_parameter_payload(name, spec) for name, spec in manifest.parameters.items()),
+        name=name,
+        display_name=display_name,
+        description=_public_text(raw_description),
+        triggers=_public_text_tuple(manifest.triggers),
+        parameters=tuple(
+            payload
+            for parameter_name, spec in manifest.parameters.items()
+            if (payload := _parameter_payload(parameter_name, spec))
+        ),
         inputs=_io_contract_payload(manifest.inputs),
         outputs=_io_contract_payload(manifest.outputs),
         public_usage=_public_usage_payload(manifest.metadata.get("public_usage")),
     )
 
 
-def _parameter_payload(name: str, spec: Any) -> dict[str, Any]:
+def _parameter_payload(name: str, spec: Any) -> dict[str, Any] | None:
+    safe_name = _public_text(name)
+    if not safe_name:
+        return None
     payload: dict[str, Any] = {
-        "name": str(name),
-        "type": str(getattr(spec, "type", "string") or "string"),
+        "name": safe_name,
+        "type": _public_text(getattr(spec, "type", "string") or "string", fallback="string"),
         "required": bool(getattr(spec, "required", False)),
     }
-    sources = tuple(str(item) for item in getattr(spec, "sources", ()) if str(item).strip())
+    sources = _public_text_tuple(getattr(spec, "sources", ()))
     if sources:
         payload["sources"] = list(sources)
-    aliases = tuple(str(item) for item in getattr(spec, "aliases", ()) if str(item).strip())
+    aliases = _public_text_tuple(getattr(spec, "aliases", ()))
     if aliases:
         payload["aliases"] = list(aliases)
-    patterns = tuple(str(item) for item in getattr(spec, "patterns", ()) if str(item).strip())
+    patterns = _public_text_tuple(getattr(spec, "patterns", ()))
     if patterns:
         payload["patterns"] = list(patterns)
-    enum = tuple(str(item) for item in getattr(spec, "enum", ()) if str(item).strip())
+    enum = _public_text_tuple(getattr(spec, "enum", ()))
     if enum:
         payload["enum"] = list(enum)
     default = getattr(spec, "default", None)
-    if default is not None:
-        payload["default"] = default
+    safe_default = _sanitize_public_value(default)
+    if safe_default not in (None, "", [], {}):
+        payload["default"] = safe_default
     return payload
+
+
+def _public_text(value: Any, *, fallback: str = "") -> str:
+    sanitized = _sanitize_public_value(value)
+    if isinstance(sanitized, str) and sanitized:
+        return sanitized
+    return fallback
+
+
+def _public_text_tuple(value: Any) -> tuple[str, ...]:
+    sanitized = _sanitize_public_value(list(value) if isinstance(value, tuple) else value)
+    if not isinstance(sanitized, list | tuple):
+        return ()
+    return tuple(str(item).strip() for item in sanitized if isinstance(item, str) and str(item).strip())
 
 
 def _io_contract_payload(value: Any) -> dict[str, Any]:
@@ -143,21 +189,14 @@ def _io_contract_payload(value: Any) -> dict[str, Any]:
     required = tuple(str(item) for item in getattr(value, "required", ()) if str(item).strip())
     if required:
         payload["required"] = list(required)
-    files = tuple(getattr(value, "files", ()) or ())
-    if files:
-        safe_files: list[dict[str, Any]] = []
-        for file_spec in files:
-            entry: dict[str, Any] = {}
-            extensions = tuple(str(item) for item in getattr(file_spec, "extensions", ()) if str(item).strip())
-            mime_types = tuple(str(item) for item in getattr(file_spec, "mime_types", ()) if str(item).strip())
-            if extensions:
-                entry["extensions"] = list(extensions)
-            if mime_types:
-                entry["mime_types"] = list(mime_types)
-            if entry:
-                safe_files.append(entry)
-        if safe_files:
-            payload["files"] = safe_files
+    schema = getattr(value, "schema", None)
+    if isinstance(schema, Mapping):
+        for key in _PUBLIC_IO_SCHEMA_KEYS:
+            if key == "required" or key not in schema:
+                continue
+            sanitized = _sanitize_public_value(schema[key])
+            if sanitized not in (None, "", [], {}):
+                payload[key] = sanitized
     return payload
 
 
@@ -194,7 +233,10 @@ def _sanitize_public_value(value: Any) -> Any:
         return value.strip()
     if value is None or isinstance(value, bool | int | float):
         return value
-    return str(value)
+    text = str(value).strip()
+    if _contains_forbidden_text(text):
+        return None
+    return text
 
 
 def _is_forbidden_key(key: str) -> bool:
