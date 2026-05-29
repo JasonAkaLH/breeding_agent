@@ -86,7 +86,7 @@
 | Rust 化 Runtime 模块评估 | `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` | 评估主体 runtime substrate、Skill/MCP、storage/event、artifact 与 deterministic kernel 的 Rust native 下沉边界；不针对单个业务 Skill 做专项优化 |
 | MCP 长任务与流式 SSE | `docs/prd/backend/17-MCP长任务流式SSEPRD.md` | 将 MCP Runtime 从单条 SSE 兼容升级为完整长任务流式 SSE、断线恢复、progress、task status、取消与 API/SSE 事件桥接 |
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
-| 表格上传编码兼容与表头规范化 | `docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt 与 Skill artifact 规范化输入 |
+| 表格上传编码兼容与表头规范化分步实施 | `docs/prd/backend/table-upload-normalization/README.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt、prompt-safe 摘要上限与 Skill artifact 规范化输入 |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
 | 大语言模型提示词信封分步实施 | `docs/prd/backend/prompt-envelope/README.md` | 将 prompt 组装拆成测试基线、核心模型、主代理迁移、记忆候选、工具信息分层、多调用场景档案、消息原生运行时、供应商缓存八个可独立验收阶段 |
@@ -191,7 +191,8 @@
 - 表头只做技术噪声清洗，例如 BOM、外层成对引号、不可见字符、首尾空白和全角空格；不做 `材料编号 -> ped_id` 等业务语义映射。
 - CSV / JSON 应支持常见文本编码候选；`.xlsx` / `.xls` 应通过受控依赖读取并转为规范化 CSV。
 - 多 sheet Excel 不自动猜测或合并，必须通过 interrupt / resume 或显式 metadata 选择 sheet 后再执行。
-- 该能力不得修改 `skill/**`，不得把完整文件内容写入 prompt、SSE 或普通 audit。
+- 该能力不得修改 `skill/**`，不得把完整文件内容写入 prompt、SSE、对话记忆或普通 audit；prompt-safe 上传摘要必须有列数、sheet 数和清洗映射上限。
+- 该专题已拆为 `docs/prd/backend/table-upload-normalization/` 下的父总纲与阶段 PRD，实施时必须按阶段门禁推进。
 
 ### 5.13 Rust 化 Runtime 决策
 
