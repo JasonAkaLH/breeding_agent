@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Docker 前端 nginx 反代补齐 `/api-doc/` 前缀路由：修复 `/api-doc/API更新日志.md` 在前端容器内落入 SPA `index.html` fallback，导致更新日志区域显示 Vite HTML 的部署问题；新增配置回归锁定 Markdown 更新日志必须代理到后端 `/api-doc/API更新日志.md`。
 - Docker 远端启动文档与本次待发布镜像版本已提升到 `0.1.5`：`docker_cmd.md` 中 backend / frontend pull、inspect、run 与最小判别命令同步改为 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.5`。
 - API 文档代码段已完成语法校验并修正请求示例：会话重命名 / 删除、消息提交、上传删除、任务取消、interrupt answer 的 curl `-d` body 不再使用 `{ ... }` 占位，改为可解析 JSON 示例；“Skill 软绑定提交规则”的 JSON 片段也补齐为完整 `SubmitMessageRequest` body。
 - API 文档首页主按钮文案已从“查看行为变更”改为“更新日志”，与动态读取的 `docs/api/API更新日志.md` 维护入口保持一致。
