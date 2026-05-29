@@ -4,6 +4,7 @@ import unittest
 import json
 from datetime import datetime
 from typing import Iterable
+from unittest.mock import patch
 
 from src.core.enums import ArtifactType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import Artifact, Conversation, ConversationMemorySummary, EventRecord, Message, Task
@@ -276,6 +277,157 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("龙粳33", prompts[0])
         self.assertIn("龙粳18", prompts[0])
 
+    async def test_builder_resolution_profile_records_budget_metadata(self) -> None:
+        calls: list[dict] = []
+
+        async def resolver(prompt: str, **kwargs) -> str:
+            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            return json.dumps(
+                {
+                    "should_resolve": True,
+                    "resolved_user_message": "查询龙粳18的基因型信息",
+                    "referenced_entity": "龙粳18",
+                    "entity_type": "crop_variety",
+                    "source": {"type": "recent_message", "message_id": "msg-1", "evidence_text": "再查一下龙粳18"},
+                    "confidence": "high",
+                    "reason": "当前问题使用它指代最近实体。",
+                    "risk_flags": [],
+                },
+                ensure_ascii=False,
+            )
+
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages = [
+            Message("msg-1", "conv-1", MessageRole.USER, "再查一下龙粳18", task_id="task-1", created_at=now),
+            Message("task-1:assistant", "conv-1", MessageRole.ASSISTANT, "龙粳18是水稻品种。", task_id="task-1", created_at=now),
+            Message("msg-current", "conv-1", MessageRole.USER, "那它的基因型呢？", task_id="task-2", created_at=now),
+        ]
+        tasks = [
+            Task("task-1", "conv-1", root_message_id="msg-1", status=TaskStatus.COMPLETED, created_at=now),
+            Task("task-2", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now),
+        ]
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
+        builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000),
+            resolution_generator=resolver,
+        )
+
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            context = await builder.build(
+                OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+                username="alice",
+            )
+
+        self.assertEqual(context.resolved_user_message, "查询龙粳18的基因型信息")
+        self.assertEqual(calls[0]["prompt_profile"]["template_id"], "conversation_memory_resolution")
+        self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
+        self.assertEqual(context.resolution_metadata["prompt_profile"]["template_id"], "conversation_memory_resolution")
+        self.assertIn("不要回答用户问题", calls[0]["prompt"])
+
+    async def test_builder_summary_profile_records_budget_metadata(self) -> None:
+        calls: list[dict] = []
+
+        async def summarizer(prompt: str, **kwargs) -> str:
+            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            return "忠实摘要：用户反复查询龙粳33。"
+
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages: list[Message] = []
+        tasks: list[Task] = []
+        for index in range(8):
+            task_id = f"task-{index}"
+            messages.append(
+                Message(
+                    f"msg-{index}",
+                    "conv-1",
+                    MessageRole.USER,
+                    f"第 {index} 轮：查询龙粳33。" + ("补充长上下文" * 400),
+                    task_id=task_id,
+                    created_at=now,
+                )
+            )
+            messages.append(
+                Message(
+                    f"{task_id}:assistant",
+                    "conv-1",
+                    MessageRole.ASSISTANT,
+                    f"第 {index} 轮答复。",
+                    task_id=task_id,
+                    created_at=now,
+                )
+            )
+            tasks.append(Task(task_id, "conv-1", root_message_id=f"msg-{index}", status=TaskStatus.COMPLETED, created_at=now))
+        messages.append(Message("msg-current", "conv-1", MessageRole.USER, "继续", task_id="task-current", created_at=now))
+        tasks.append(Task("task-current", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now))
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
+        builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000, recent_turns=1),
+            summary_generator=summarizer,
+        )
+
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            context = await builder.build(
+                OrchestrationRequest("task-current", "conv-1", "msg-current", "继续"),
+                username="alice",
+            )
+
+        self.assertEqual(context.history_summary, "忠实摘要：用户反复查询龙粳33。")
+        self.assertEqual(calls[0]["prompt_profile"]["template_id"], "conversation_memory_summary")
+        self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
+        self.assertEqual(storage.saved_summaries[0].model_metadata_safe["prompt_profile"]["template_id"], "conversation_memory_summary")
+        self.assertEqual(context.to_audit_payload()["summary_prompt_profile"]["template_id"], "conversation_memory_summary")
+        self.assertIn("不得引入新事实", calls[0]["prompt"])
+
+    async def test_builder_summary_failure_keeps_prompt_profile_in_audit_payload(self) -> None:
+        async def summarizer(_prompt: str, **_kwargs) -> str:
+            raise RuntimeError("summary provider failed")
+
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        messages: list[Message] = []
+        tasks: list[Task] = []
+        for index in range(5):
+            task_id = f"task-failed-summary-{index}"
+            messages.append(
+                Message(
+                    f"msg-failed-summary-{index}",
+                    "conv-1",
+                    MessageRole.USER,
+                    "查询龙粳33。" + ("长上下文" * 500),
+                    task_id=task_id,
+                    created_at=now,
+                )
+            )
+            messages.append(
+                Message(
+                    f"{task_id}:assistant",
+                    "conv-1",
+                    MessageRole.ASSISTANT,
+                    "答复。",
+                    task_id=task_id,
+                    created_at=now,
+                )
+            )
+            tasks.append(Task(task_id, "conv-1", root_message_id=f"msg-failed-summary-{index}", status=TaskStatus.COMPLETED, created_at=now))
+        messages.append(Message("msg-current", "conv-1", MessageRole.USER, "继续", task_id="task-current", created_at=now))
+        tasks.append(Task("task-current", "conv-1", root_message_id="msg-current", status=TaskStatus.ACCEPTED, created_at=now))
+        storage = FakeStorage(conversation=Conversation("conv-1", "alice"), messages=messages, tasks=tasks)
+        builder = ConversationMemoryBuilder(
+            storage=storage,
+            config=ConversationMemoryConfig(max_tokens=4000, recent_turns=1),
+            summary_generator=summarizer,
+        )
+
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            context = await builder.build(
+                OrchestrationRequest("task-current", "conv-1", "msg-current", "继续"),
+                username="alice",
+            )
+
+        self.assertEqual(context.fallback_reason, "summary_llm_failed")
+        self.assertEqual(context.to_audit_payload()["summary_prompt_profile"]["template_id"], "conversation_memory_summary")
+
     async def test_builder_candidates_include_accepted_interrupt_answers_and_uploaded_artifact_metadata(self) -> None:
         now = datetime(2026, 5, 8, 9, 0, 0)
         later = datetime(2026, 5, 8, 9, 5, 0)
@@ -482,14 +634,17 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
             resolution_generator=resolver,
         )
 
-        context = await builder.build(
-            OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
-            username="alice",
-        )
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            context = await builder.build(
+                OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+                username="alice",
+            )
 
         self.assertEqual(context.resolved_user_message, "查询龙粳33的基因型信息")
         self.assertEqual(context.resolution_metadata["strategy"], "deterministic_entity_reference")
         self.assertEqual(context.resolution_metadata["fallback_reason"], "llm_resolution_invalid_json")
+        self.assertEqual(context.resolution_metadata["prompt_profile"]["template_id"], "conversation_memory_resolution")
+        self.assertEqual(context.to_audit_payload()["resolution_prompt_profile"]["template_id"], "conversation_memory_resolution")
 
     async def test_builder_excludes_current_root_and_resolves_followup(self) -> None:
         now = datetime(2026, 5, 8, 9, 0, 0)

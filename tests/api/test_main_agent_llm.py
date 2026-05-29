@@ -496,7 +496,9 @@ triggers:
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
-        self.assertIn("请使用汇报格式", prompts[0])
+        self.assertIn("report-writer", prompts[0])
+        self.assertIn("生成周报", prompts[0])
+        self.assertNotIn("请使用汇报格式", prompts[0])
 
     async def test_runtime_can_bind_main_agent_real_llm_factory_without_network(self) -> None:
         factory_kwargs: list[dict] = []

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .manifest import SkillManifest
     from .script_manifest import SkillScriptEntrypoint
 
-SkillInputTextGenerator = Callable[[str], Any]
+SkillInputTextGenerator = Callable[..., Any]
 
 _SCALAR_LLM_TYPES = {"string", "str", "int", "integer", "number", "float"}
 _TEXT_SOURCES = {"query", "current_user_message", "resolved_user_message", "recent_user_message"}
@@ -72,6 +72,7 @@ class SkillInputResolutionResult:
     missing: tuple[str, ...] = ()
     sources: Mapping[str, SkillInputSource] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = ()
+    prompt_profile: Mapping[str, Any] | None = None
 
     @property
     def resolved_fields(self) -> tuple[str, ...]:
@@ -86,6 +87,7 @@ class SkillInputResolutionResult:
                 field: {"source": source.source, "confidence": source.confidence}
                 for field, source in self.sources.items()
             },
+            **({"prompt_profile": dict(self.prompt_profile)} if self.prompt_profile is not None else {}),
         }
 
 
@@ -152,22 +154,29 @@ async def resolve_skill_inputs_with_llm(
     if not eligible_specs:
         return deterministic
 
-    prompt = _build_llm_slot_prompt(
+    prompt_resolution = _build_llm_slot_prompt_resolution(
         manifest=manifest,
         script=script,
         context=context,
         resolved_payload=deterministic.payload,
         missing_specs=eligible_specs,
+        trim_max_tokens=_metadata_trim_max_tokens(base_payload),
     )
+    from src.orchestration.prompt_profiles import optional_profile_kwargs
+
     try:
-        raw_response = text_generator(prompt)
+        kwargs = optional_profile_kwargs(
+            text_generator,
+            prompt_profile=prompt_resolution.llm_call_payload,
+        )
+        raw_response = text_generator(prompt_resolution.prompt, **kwargs) if kwargs else text_generator(prompt_resolution.prompt)
         if inspect.isawaitable(raw_response):
             raw_response = await raw_response
         candidates = _parse_llm_slot_candidates(str(raw_response or ""))
     except json.JSONDecodeError:
-        return _copy_result(deterministic, diagnostics=("llm_invalid_json",))
+        return _copy_result(deterministic, diagnostics=("llm_invalid_json",), prompt_profile=prompt_resolution.llm_call_payload)
     except Exception:
-        return _copy_result(deterministic, diagnostics=("llm_failed",))
+        return _copy_result(deterministic, diagnostics=("llm_failed",), prompt_profile=prompt_resolution.llm_call_payload)
 
     payload = dict(deterministic.payload)
     sources = dict(deterministic.sources)
@@ -191,6 +200,7 @@ async def resolve_skill_inputs_with_llm(
         missing=missing,
         sources=sources,
         diagnostics=_dedupe((*deterministic.diagnostics, *diagnostics)),
+        prompt_profile=prompt_resolution.llm_call_payload,
     )
 
 
@@ -202,12 +212,14 @@ def _copy_result(
     result: SkillInputResolutionResult,
     *,
     diagnostics: tuple[str, ...] = (),
+    prompt_profile: Mapping[str, Any] | None = None,
 ) -> SkillInputResolutionResult:
     return SkillInputResolutionResult(
         payload=dict(result.payload),
         missing=result.missing,
         sources=dict(result.sources),
         diagnostics=_dedupe((*result.diagnostics, *diagnostics)),
+        prompt_profile=prompt_profile if prompt_profile is not None else result.prompt_profile,
     )
 
 
@@ -378,6 +390,129 @@ def _build_llm_slot_prompt(
         '"missing":["参数名"]}\n'
         "输入如下：\n"
         f"{json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True)}"
+    )
+
+
+def _build_llm_slot_prompt_resolution(
+    *,
+    manifest: "SkillManifest",
+    script: "SkillScriptEntrypoint",
+    context: SkillInputResolutionContext,
+    resolved_payload: Mapping[str, Any],
+    missing_specs: Mapping[str, SkillParameterSpec],
+    trim_max_tokens: int | None = None,
+):
+    from src.orchestration.prompt_envelope import PromptSegment
+    from src.orchestration.prompt_profiles import PROMPT_PROFILE_TEMPLATE_VERSION, resolve_profile_prompt_for_mode
+
+    legacy_prompt = _build_llm_slot_prompt(
+        manifest=manifest,
+        script=script,
+        context=context,
+        resolved_payload=resolved_payload,
+        missing_specs=missing_specs,
+    )
+    public_skill_schema = {
+        "name": manifest.name,
+        "description": manifest.description,
+        "parameters_to_resolve": [
+            {
+                "name": spec.name,
+                "type": spec.type,
+                "required": spec.required,
+                "aliases": list(spec.aliases),
+                "allowed_sources": list(spec.sources) if spec.sources else sorted(_TEXT_SOURCES),
+            }
+            for spec in missing_specs.values()
+        ],
+    }
+    safe_context = {
+        "query": context.query,
+        "current_user_message": context.current_user_message,
+        "resolved_user_message": context.resolved_user_message,
+        "recent_user_messages": list(context.recent_user_messages),
+        "artifact_summaries": [_safe_artifact_summary(item) for item in context.artifact_summaries],
+    }
+    return resolve_profile_prompt_for_mode(
+        legacy_prompt=legacy_prompt,
+        template_id="skill_input_resolver",
+        template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+        trim_max_tokens=trim_max_tokens,
+        segments=(
+            PromptSegment(
+                name="stable_skill_input_resolver_rules",
+                role="system",
+                content=(
+                    "你是一个受限的 Skill 参数补槽器。只根据给定上下文抽取缺失参数；"
+                    "禁止编造文件、数据、未声明字段、内部入口或执行细节。不能确定就放入 missing。"
+                ),
+                priority=0,
+                mutability="stable",
+                cache_affinity="prefix",
+                trim_policy="required",
+                security_role="instruction",
+            ),
+            PromptSegment(
+                name="skill_public_parameter_schema",
+                role="context",
+                content="# Skill 公开参数 schema\n" + json.dumps(public_skill_schema, ensure_ascii=False, indent=2, default=str),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="tool_schema",
+            ),
+            PromptSegment(
+                name="already_resolved_payload",
+                role="context",
+                content="# 已确定参数（脱敏）\n"
+                + json.dumps(_safe_resolved_payload(resolved_payload), ensure_ascii=False, indent=2, default=str),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="active_note",
+            ),
+            PromptSegment(
+                name="resolver_context",
+                role="context",
+                content="# 可用于补槽的上下文（已限制）\n"
+                + json.dumps(safe_context, ensure_ascii=False, indent=2, default=str),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="drop_oldest",
+                security_role="history",
+            ),
+            PromptSegment(
+                name="slot_resolver_output_guard",
+                role="system",
+                content=(
+                    "只返回 JSON 对象，不要 Markdown。格式："
+                    '{"resolved":{"参数名":{"value":值,"source":"query|current_user_message|resolved_user_message|recent_user_message"}},'
+                    '"missing":["参数名"]}'
+                ),
+                priority=0,
+                mutability="stable",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="guard",
+            ),
+        ),
+        audit_context={"stage": "skill_input_resolver", "skill_name": manifest.name},
+    )
+
+
+def _metadata_trim_max_tokens(base_payload: Mapping[str, Any]) -> int | None:
+    from src.orchestration.prompt_profiles import coerce_profile_trim_max_tokens
+
+    metadata = base_payload.get("metadata")
+    safe_metadata = metadata if isinstance(metadata, Mapping) else {}
+    return coerce_profile_trim_max_tokens(
+        base_payload.get("skill_input_trim_max_tokens"),
+        base_payload.get("trim_max_tokens"),
+        safe_metadata.get("skill_input_trim_max_tokens"),
+        safe_metadata.get("trim_max_tokens"),
     )
 
 
