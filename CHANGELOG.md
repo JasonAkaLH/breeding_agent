@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Docker 远端启动文档已同步当前镜像版本 `0.1.4`：`docker_cmd.md` 中 backend / frontend pull、inspect、run 与最小判别命令全部改为 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.4` 口径。
 - Agent 基础设施大块重复整改设计已落入 `docs/superpowers/specs/2026-05-29-agent-infrastructure-dedup-cleanup-design.md`，明确 sidecar wire helper、PostgreSQL SQL splitter、runtime revision store 与 final answer helper 的分阶段整改口径、非目标、验收命令与不修改 `skill/**` 约束。
 - 反屎山清理第一轮完成：后端 Skill 运行时兼容层统一迁移为 `src/integrations/agent_skills/` 与 `tests/integrations/agent_skills/`，项目代码 / 测试 / 文档中已清除旧品牌字面；同时抽出共享 `coerce_truthy` / `coerce_positive_int`、evidence gate 数值校验、LLM stream event 归一化与 provider role capability 清洗工具，减少主代理、LLM runtime、provider cache、PromptProfile、runtime gate 与 Skill manifest parser 的复制粘贴。
 - Prompt Envelope 阶段七供应商缓存与观测增强已落地：PromptEnvelope stable prefix 现在对 task/conversation/user/artifact/dependency 等动态污染 fail-closed，main-agent 与通用 PromptProfile audit 补齐 `prompt_render_metrics`、prefix hash/token、trim reason、history retry、role fallback 与 provider cache capability 观测；`LLMClient` / `SharedLLMRuntime` 新增配置驱动 provider prompt cache hint，默认关闭，不支持 provider no-op，audit/metadata 只记录安全状态与 hint keys，不记录 raw prompt、secret、DSN、token 或 provider endpoint。
