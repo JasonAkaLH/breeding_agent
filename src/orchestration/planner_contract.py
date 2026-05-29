@@ -7,10 +7,19 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Iterable
 
 from .models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from .prompt_envelope import PromptSegment
+from .prompt_profiles import (
+    PROMPT_PROFILE_TEMPLATE_VERSION,
+    PromptProfileResolution,
+    coerce_profile_trim_max_tokens,
+    resolve_profile_prompt_for_mode,
+)
 
 
 PUBLIC_CAPABILITY_LIST_BUDGET_CHARS = 8_000
 _SHORTENED_CAPABILITY_DESCRIPTION_CHARS = 160
+_PLANNER_TEMPLATE_ID = "planner"
+_PLANNER_REPAIR_TEMPLATE_ID = "planner_repair"
 
 
 PLANNER_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
@@ -64,6 +73,94 @@ def build_planner_repair_prompt(
     )
 
 
+def build_planner_repair_profile_resolution(
+    original_prompt: str,
+    *,
+    previous_output: str,
+    error_reason: str,
+    diagnostic: str,
+    mode: str | None = None,
+    trim_max_tokens: int | None = None,
+) -> PromptProfileResolution:
+    previous_output_limited = previous_output[:2000]
+    diagnostic_limited = diagnostic[:500]
+    legacy_prompt = build_planner_repair_prompt(
+        original_prompt,
+        previous_output=previous_output,
+        error_reason=error_reason,
+        diagnostic=diagnostic,
+    )
+    segments = (
+        PromptSegment(
+            name="stable_repair_rules",
+            role="system",
+            content=(
+                "你是受边界约束的高层工作流 Planner repair 器。"
+                "上一轮 Planner 输出未通过校验，不能交给系统执行，也不能改由确定性规则兜底。"
+                "请只基于 public capability 目录重新编排，修正为可执行 JSON。"
+            ),
+            priority=0,
+            mutability="stable",
+            cache_affinity="prefix",
+            trim_policy="required",
+            security_role="instruction",
+        ),
+        PromptSegment(
+            name="original_planner_prompt",
+            role="context",
+            content="# 原始 planner prompt（可裁剪）\n" + original_prompt,
+            priority=0,
+            mutability="dynamic",
+            cache_affinity="no_cache",
+            trim_policy="drop_oldest",
+            security_role="history",
+        ),
+        PromptSegment(
+            name="planner_validation_diagnostic",
+            role="context",
+            content=(
+                "# Planner 校验诊断\n"
+                f"- 校验错误类型：{error_reason}\n"
+                f"- 校验诊断：{diagnostic_limited}"
+            ),
+            priority=0,
+            mutability="dynamic",
+            cache_affinity="no_cache",
+            trim_policy="required",
+            security_role="tool_result",
+        ),
+        PromptSegment(
+            name="previous_planner_output",
+            role="context",
+            content="# 上一轮原始输出（已截断）\n" + previous_output_limited,
+            priority=0,
+            mutability="dynamic",
+            cache_affinity="no_cache",
+            trim_policy="compressible",
+            security_role="tool_result",
+        ),
+        PromptSegment(
+            name="planner_repair_output_guard",
+            role="system",
+            content="现在只返回修正后的 JSON 对象，不要输出 Markdown、解释、代码块或额外文本。",
+            priority=0,
+            mutability="stable",
+            cache_affinity="no_cache",
+            trim_policy="required",
+            security_role="guard",
+        ),
+    )
+    return resolve_profile_prompt_for_mode(
+        legacy_prompt=legacy_prompt,
+        template_id=_PLANNER_REPAIR_TEMPLATE_ID,
+        template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+        segments=segments,
+        mode=mode,
+        trim_max_tokens=trim_max_tokens,
+        audit_context={"stage": "orchestration_plan_repair"},
+    )
+
+
 def build_planner_prompt(
     request: OrchestrationRequest,
     *,
@@ -91,6 +188,112 @@ def build_planner_prompt(
         f"{memory_block}"
         f"{question_block}\n\n"
         f"输出 JSON Schema：\n{schema}"
+    )
+
+
+def build_planner_profile_resolution(
+    request: OrchestrationRequest,
+    *,
+    public_capabilities: Iterable[CapabilityDescriptor] | None = None,
+    planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
+    mode: str | None = None,
+    trim_max_tokens: int | None = None,
+) -> PromptProfileResolution:
+    legacy_prompt = build_planner_prompt(
+        request,
+        public_capabilities=public_capabilities,
+        planner_payload_allowlist=planner_payload_allowlist,
+    )
+    schema = json.dumps(PLANNER_OUTPUT_JSON_SCHEMA, ensure_ascii=False, indent=2)
+    capability_block = _format_public_capabilities(
+        public_capabilities,
+        planner_payload_allowlist=planner_payload_allowlist,
+        include_source_path=False,
+    )
+    memory_block = _format_memory_block(request.memory_context)
+    segments = [
+        PromptSegment(
+            name="stable_planner_rules",
+            role="system",
+            content=(
+                "你是一个受边界约束的高层工作流规划器。"
+                "除非用户请求已经显式指定某个 capability，否则所有路由和 DAG 编排都由你基于上下文决定。"
+                "只返回 JSON。请选择最小且有用的无环 DAG。只能使用列出的 public capability。"
+                "禁止输出任何内部 capability 或低层实现节点。"
+                "数据库 / 数据查询或明确匹配公开 Skill 的任务优先规划对应 skill.* capability；"
+                "追问、参数调整、继续上次任务必须结合对话记忆判断；兜底对话、解释、汇总使用 main_agent.respond。"
+            ),
+            priority=0,
+            mutability="stable",
+            cache_affinity="prefix",
+            trim_policy="required",
+            security_role="instruction",
+        ),
+        PromptSegment(
+            name="public_capability_profiles",
+            role="context",
+            content=(
+                "# 可用 public capability\n"
+                "以下列表只包含 public contract；不得推断或输出内部路径、handler、runtime、Skill 阶段或实现细节。\n"
+                + capability_block
+            ),
+            priority=0,
+            mutability="dynamic",
+            cache_affinity="no_cache",
+            trim_policy="required",
+            security_role="tool_profile",
+        ),
+    ]
+    if memory_block:
+        segments.append(
+            PromptSegment(
+                name="planner_conversation_memory",
+                role="context",
+                content=memory_block,
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="drop_oldest",
+                security_role="history",
+            )
+        )
+    segments.extend(
+        [
+            PromptSegment(
+                name="current_user_request",
+                role="user",
+                content=_format_question_block(request),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="user_input",
+            ),
+            PromptSegment(
+                name="planner_output_guard",
+                role="system",
+                content="输出必须是严格 JSON，不要 Markdown、解释或代码块。JSON Schema：\n" + schema,
+                priority=0,
+                mutability="stable",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="guard",
+            ),
+        ]
+    )
+    metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+    return resolve_profile_prompt_for_mode(
+        legacy_prompt=legacy_prompt,
+        template_id=_PLANNER_TEMPLATE_ID,
+        template_version=PROMPT_PROFILE_TEMPLATE_VERSION,
+        segments=tuple(segments),
+        mode=mode,
+        trim_max_tokens=coerce_profile_trim_max_tokens(
+            trim_max_tokens,
+            metadata.get("planner_trim_max_tokens"),
+            metadata.get("trim_max_tokens"),
+        ),
+        audit_context={"stage": "orchestration_plan"},
     )
 
 
@@ -129,12 +332,17 @@ async def build_plan_from_llm_output(
     public_capabilities: Iterable[CapabilityDescriptor] | None = None,
     planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
 ) -> WorkflowPlan:
-    prompt = build_planner_prompt(
+    prompt_resolution = build_planner_profile_resolution(
         request,
         public_capabilities=public_capabilities,
         planner_payload_allowlist=planner_payload_allowlist,
     )
-    raw_output = call_text_generator(text_generator, prompt, request=request)
+    raw_output = call_text_generator(
+        text_generator,
+        prompt_resolution.prompt,
+        request=request,
+        prompt_profile=prompt_resolution.llm_call_payload,
+    )
     if inspect.isawaitable(raw_output):
         raw_output = await raw_output
     if not isinstance(raw_output, str):
@@ -142,7 +350,13 @@ async def build_plan_from_llm_output(
     return parse_planner_output(raw_output, task_id=request.task_id)
 
 
-def call_text_generator(text_generator: TextGenerator, prompt: str, *, request: OrchestrationRequest):
+def call_text_generator(
+    text_generator: TextGenerator,
+    prompt: str,
+    *,
+    request: OrchestrationRequest,
+    prompt_profile: Mapping[str, Any] | None = None,
+):
     try:
         signature = inspect.signature(text_generator)
     except (TypeError, ValueError):
@@ -151,9 +365,12 @@ def call_text_generator(text_generator: TextGenerator, prompt: str, *, request: 
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
+    kwargs: dict[str, Any] = {}
     if accepts_kwargs or "request" in signature.parameters:
-        return text_generator(prompt, request=request)
-    return text_generator(prompt)
+        kwargs["request"] = request
+    if prompt_profile is not None and (accepts_kwargs or "prompt_profile" in signature.parameters):
+        kwargs["prompt_profile"] = prompt_profile
+    return text_generator(prompt, **kwargs) if kwargs else text_generator(prompt)
 
 
 def _call_text_generator(text_generator: TextGenerator, prompt: str, *, request: OrchestrationRequest):
@@ -165,6 +382,7 @@ def _format_public_capabilities(
     *,
     planner_payload_allowlist: Mapping[str, Iterable[str]] | None = None,
     budget_chars: int = PUBLIC_CAPABILITY_LIST_BUDGET_CHARS,
+    include_source_path: bool = True,
 ) -> str:
     capabilities = tuple(public_capabilities or ())
     allowlist = {
@@ -177,7 +395,11 @@ def _format_public_capabilities(
             "规划器 input_payload 允许字段：无；系统会填充可信字段。\n"
         )
     full_block = "\n".join(
-        _format_capability_line(descriptor, allowlist.get(descriptor.capability_id, ()))
+        _format_capability_line(
+            descriptor,
+            allowlist.get(descriptor.capability_id, ()),
+            include_source_path=include_source_path,
+        )
         for descriptor in capabilities
     )
     if len(full_block) <= budget_chars:
@@ -188,6 +410,7 @@ def _format_public_capabilities(
             descriptor,
             allowlist.get(descriptor.capability_id, ()),
             shorten_description=True,
+            include_source_path=include_source_path,
         )
         for descriptor in capabilities
     ]
@@ -199,11 +422,12 @@ def _format_capability_line(
     planner_payload_fields: Iterable[str],
     *,
     shorten_description: bool = False,
+    include_source_path: bool = True,
 ) -> str:
     description = descriptor.description
     if shorten_description:
         description = _shorten_text(description, _SHORTENED_CAPABILITY_DESCRIPTION_CHARS)
-    source_path_part = f" 路径：{descriptor.source_path}。" if descriptor.source_path else ""
+    source_path_part = f" 路径：{descriptor.source_path}。" if include_source_path and descriptor.source_path else ""
     return (
         f"- {descriptor.capability_id}：{descriptor.name} — {description}"
         f"{source_path_part} 规划器 input_payload 允许字段：{_format_payload_fields(planner_payload_fields)}。"

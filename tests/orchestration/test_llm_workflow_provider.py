@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.capabilities.main_agent import (
     MAIN_AGENT_CAPABILITY_DESCRIPTORS,
@@ -12,7 +13,7 @@ from src.capabilities.main_agent import (
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
-from src.integrations.codex_skills import SkillManifest
+from src.integrations.agent_skills import SkillManifest
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.registry import CapabilityRegistry
@@ -454,6 +455,38 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.metadata["planner_repair_attempts"], 1)
         self.assertIn("上一轮 Planner 输出未通过校验", prompts[1])
         self.assertIn("skill.generic_data_lookup", [node.capability_id for node in plan.nodes])
+
+    async def test_planner_repair_profile_records_profile_metadata_and_limits_previous_output(self) -> None:
+        calls: list[dict] = []
+        noisy_output = "not json " + ("RAW_OUTPUT_SHOULD_BE_TRUNCATED" * 200)
+
+        def planner(prompt: str, **kwargs) -> str:
+            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            if len(calls) == 1:
+                return noisy_output
+            return json.dumps({"nodes": [{"node_id": "query_data", "capability_id": "skill.generic_data_lookup"}]})
+
+        with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            plan = await self.make_provider(planner).build_plan(
+                OrchestrationRequest(
+                    task_id="task-repair-profile",
+                    conversation_id="conv-1",
+                    root_message_id="msg-1",
+                    user_message="查询龙粳33",
+                    metadata={"trim_max_tokens": 12_000},
+                )
+            )
+
+        self.assertEqual(plan.metadata["planner_repair_attempts"], 1)
+        self.assertEqual(calls[0]["prompt_profile"]["template_id"], "planner")
+        self.assertEqual(calls[1]["prompt_profile"]["template_id"], "planner_repair")
+        self.assertIn("上一轮原始输出", calls[1]["prompt"])
+        self.assertIn(noisy_output[:2000], calls[1]["prompt"])
+        self.assertNotIn(noisy_output[2100:], calls[1]["prompt"])
+        self.assertLessEqual(
+            calls[1]["prompt_profile"]["final_input_tokens"],
+            calls[1]["prompt_profile"]["final_input_token_budget"],
+        )
 
     async def test_invalid_planner_json_is_repaired_by_llm(self) -> None:
         prompts: list[str] = []

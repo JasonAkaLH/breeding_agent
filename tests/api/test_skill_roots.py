@@ -19,8 +19,7 @@ class DefaultSkillRootsTest(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
-        self.assertEqual(roots[0], project_root / "skill")
-        self.assertEqual(roots[1], Path.home() / ".codex" / "skills")
+        self.assertEqual(roots, (project_root / "skill",))
 
 
 if __name__ == "__main__":

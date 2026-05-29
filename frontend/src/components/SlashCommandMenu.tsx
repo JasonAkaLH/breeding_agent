@@ -49,9 +49,9 @@ export default function SlashCommandMenu({ candidates, activeIndex, emptyMessage
               <span className="slash-command-title">{candidate.displayName}</span>
             </div>
             <div className="slash-command-description">{candidate.description}</div>
-            {candidate.sourcePath || candidate.hasCommandConflict ? (
+            {candidate.hasCommandConflict ? (
               <div className="slash-command-meta">
-                {candidate.hasCommandConflict ? '命令冲突，请点选具体 capability · ' : ''}{candidate.capabilityId}{candidate.sourcePath ? ` · ${candidate.sourcePath}` : ''}
+                命令冲突，请点选具体 capability · {candidate.capabilityId}
               </div>
             ) : null}
           </div>

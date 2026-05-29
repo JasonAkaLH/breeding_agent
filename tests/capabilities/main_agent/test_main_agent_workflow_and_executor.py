@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import json
 import tempfile
 import textwrap
 import unittest
@@ -7,10 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.capabilities.main_agent import MainAgentExecutor, MainAgentWorkflowProvider
+from src.capabilities.main_agent.prompt_builder import build_main_agent_prompt
 from src.core.contracts import CapabilityExecutionRequest
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
+from src.orchestration.prompt_envelope import LLMMessage
 from src.orchestration.models import OrchestrationRequest
-from src.integrations.codex_skills import SkillCatalog
+from src.integrations.agent_skills import SkillCatalog
 
 
 async def _collecting_streamer(prompt: str):
@@ -34,6 +38,24 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plan.nodes), 1)
         self.assertEqual(plan.nodes[0].capability_id, "main_agent.respond")
         self.assertEqual(plan.nodes[0].input_payload["user_message"], "你好")
+
+    async def test_workflow_provider_allows_replan_budget_only_for_soft_skill_binding(self) -> None:
+        provider = MainAgentWorkflowProvider()
+        plan = provider.build_plan(
+            OrchestrationRequest(
+                task_id="task-soft",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="请执行",
+                requested_capability_id="main_agent.respond",
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo", "skill_bundle_revision": "skillrev-1"}},
+            )
+        )
+
+        self.assertEqual(plan.nodes[0].capability_id, "main_agent.respond")
+        self.assertEqual(plan.nodes[0].metadata["soft_skill_binding"]["capability_id"], "skill.demo")
+        self.assertEqual(plan.max_replans, 1)
+        self.assertEqual(plan.max_dynamic_nodes, 4)
 
     async def test_executor_streams_answer_chunks_and_returns_text_artifact(self) -> None:
         seen_prompts: list[str] = []
@@ -72,6 +94,261 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", seen_prompts[0])
         self.assertEqual([event.event_type for event in transient_events], ["main_agent.output_delta", "main_agent.output_delta"])
         self.assertFalse(any(event.event_type == "main_agent.output_delta" for event in result.events))
+
+    async def test_soft_skill_binding_answer_uses_public_profile_without_running_scripts_or_raw_body(self) -> None:
+        seen_prompts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    display_name: 演示 Skill
+                    description: 解释公开用法。
+                    public_usage:
+                      overview: 公开字段说明
+                      input_formats:
+                        - name: demo_data
+                          description: CSV 表格。
+                      examples:
+                        - /demo 怎么填 demo_data？
+                      outputs:
+                        - 公开结果
+                    scripts:
+                      - name: run_demo
+                        path: scripts/run_demo.py
+                        runtime: python
+                    ---
+                    # Internal body
+                    scripts/run_demo.py Rscript wrapper handler secret details.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        async def streamer(prompt: str):
+            seen_prompts.append(prompt)
+            if "Skill 软绑定判断器" in prompt:
+                yield '{"decision":"answer","target_capability_id":"skill.demo","reason_code":"usage_question"}'
+            else:
+                yield "demo_data 需要"
+                yield "上传 CSV 表格。"
+
+        transient_events = []
+
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=catalog,
+            transient_event_publisher=publish_transient,
+        )
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "demo_data 怎么填？"},
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo"}},
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_source"], "llm")
+        self.assertEqual(result.output_payload["response_text"], "demo_data 需要上传 CSV 表格。")
+        self.assertNotIn("soft_skill_decision", result.output_payload)
+        self.assertEqual([event.event_type for event in result.events], ["soft_skill_binding.decision", "main_agent.output_final"])
+        self.assertEqual(
+            [event.payload["delta"] for event in transient_events if event.event_type == "main_agent.output_delta"],
+            ["demo_data 需要", "上传 CSV 表格。"],
+        )
+        final_event = next(event for event in result.events if event.event_type == "main_agent.output_final")
+        self.assertEqual(final_event.payload["answer_chunk_count"], 2)
+        self.assertIn("公开字段说明", seen_prompts[0])
+        self.assertIn("公开字段说明", seen_prompts[1])
+        combined_prompts = "\n".join(seen_prompts)
+        self.assertNotIn("scripts/run_demo.py", combined_prompts)
+        self.assertNotIn("Rscript", combined_prompts)
+        self.assertNotIn("handler", combined_prompts)
+
+    async def test_soft_skill_binding_execute_returns_deterministic_replan_signal_without_user_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    description: 执行演示。
+                    public_usage:
+                      overview: 执行演示。
+                      input_formats:
+                        - name: demo_data
+                          description: CSV 表格。
+                      examples:
+                        - /demo 执行
+                      outputs:
+                        - 结果
+                    ---
+                    Body.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        async def streamer(_prompt: str):
+            yield '{"decision":"execute","target_capability_id":"skill.demo","confidence":0.94,"reason_code":"ready_to_execute"}'
+
+        transient_events = []
+
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=catalog,
+            transient_event_publisher=publish_transient,
+        )
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "执行"},
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo"}},
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_source"], "soft_skill_decision")
+        self.assertEqual(result.output_payload["soft_skill_decision"]["decision"], "execute")
+        self.assertTrue(result.output_payload["satisfaction"]["replan_recommended"])
+        self.assertEqual(result.artifacts, ())
+        self.assertFalse(transient_events)
+        self.assertEqual([event.event_type for event in result.events], ["soft_skill_binding.decision"])
+
+    async def test_soft_skill_binding_low_confidence_execute_downgrades_to_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    description: 执行演示。
+                    public_usage:
+                      overview: 公开字段说明
+                      input_formats:
+                        - name: demo_data
+                          description: CSV 表格。
+                      examples:
+                        - /demo 执行
+                      outputs:
+                        - 结果
+                    ---
+                    Raw body.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        async def streamer(prompt: str):
+            if "Skill 软绑定判断器" in prompt:
+                yield '{"decision":"execute","target_capability_id":"skill.demo","confidence":"low","reason_code":"unclear"}'
+            else:
+                yield "请先补充 demo_data。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "帮我做一下"},
+                metadata={"soft_skill_binding": {"capability_id": "skill.demo"}},
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_source"], "llm")
+        self.assertEqual(result.output_payload["response_text"], "请先补充 demo_data。")
+        self.assertNotIn("soft_skill_decision", result.output_payload)
+        decision_event = next(event for event in result.events if event.event_type == "soft_skill_binding.decision")
+        self.assertEqual(decision_event.payload["reason_code"], "low_confidence")
+
+    async def test_soft_skill_binding_answer_uses_conversation_memory_for_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    description: 解释公开用法。
+                    public_usage:
+                      overview: 公开字段说明
+                      examples:
+                        - /demo 怎么填？
+                    ---
+                    Raw body.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        seen_prompts: list[str] = []
+
+        async def streamer(prompt: str, *, stage: str | None = None):
+            seen_prompts.append(prompt)
+            if stage == "soft_skill_decision":
+                yield '{"decision":"answer","target_capability_id":"skill.demo","confidence":0.9,"reason_code":"followup"}'
+            else:
+                yield "继续解释。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog)
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "再说清楚一点"},
+                metadata={
+                    "soft_skill_binding": {"capability_id": "skill.demo"},
+                    "conversation_memory": {
+                        "recent_messages": [
+                            {"role": "user", "content": "/demo demo_data 怎么填？"},
+                            {"role": "assistant", "content": "demo_data 是需要上传的 CSV 表格。"},
+                        ]
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_text"], "继续解释。")
+        self.assertEqual(len(seen_prompts), 2)
+        for prompt in seen_prompts:
+            self.assertIn("对话记忆上下文", prompt)
+            self.assertIn("/demo demo_data 怎么填？", prompt)
+            self.assertIn("demo_data 是需要上传的 CSV 表格。", prompt)
 
     async def test_executor_injects_dependency_outputs_into_prompt(self) -> None:
         seen_prompts: list[str] = []
@@ -219,6 +496,254 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm_event.payload["config_source"], "injected_config")
         self.assertNotIn("api_key", llm_event.payload)
 
+    async def test_prompt_envelope_shadow_keeps_legacy_prompt_and_records_audit_event(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "shadow answer"
+
+        request = CapabilityExecutionRequest(
+            capability_id="main_agent.respond",
+            conversation_id="conv-1",
+            task_id="task-shadow",
+            node_id="node-shadow",
+            input_payload={"user_message": "shadow 用户问题"},
+            metadata={"auto_skill_matching_enabled": False},
+        )
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={"provider": "injected_stream", "model": "test-model", "trim_max_tokens": 2_000},
+            skill_catalog=SkillCatalog(()),
+        )
+
+        with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "shadow"}):
+            result = await executor.execute(request)
+
+        legacy_prompt = build_main_agent_prompt(
+            user_message="shadow 用户问题",
+            skill_matches=[],
+            artifact_context=[],
+            script_results=[],
+            dependency_context=[],
+            memory_context={},
+        )
+        self.assertEqual(prompts, [legacy_prompt])
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.visibility, "audit_only")
+        self.assertEqual(prompt_event.payload["mode"], "shadow")
+        self.assertEqual(prompt_event.payload["effective_mode"], "shadow")
+        self.assertEqual(prompt_event.payload["final_input_token_budget"], 1_500)
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "shadow")
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["final_input_token_budget"], 1_500)
+        self.assertIn("stable_system_contract", [segment["name"] for segment in prompt_event.payload["segments"]])
+        self.assertNotIn("shadow 用户问题", str(prompt_event.payload))
+        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "shadow")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["effective_mode"], "shadow")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["prompt_render_metrics"], prompt_event.payload["prompt_render_metrics"])
+
+    async def test_prompt_envelope_string_sends_envelope_prompt_without_skill_matches(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "string answer"
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={"provider": "injected_stream", "model": "test-model", "trim_max_tokens": 20_000},
+            skill_catalog=SkillCatalog(()),
+        )
+        with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-string",
+                    node_id="node-string",
+                    input_payload={"user_message": "string 用户问题"},
+                    metadata={
+                        "auto_skill_matching_enabled": False,
+                        "conversation_memory": {"history_summary": "上一轮摘要"},
+                    },
+                    dependency_outputs={"node-a": {"response_text": "上游结果"}},
+                )
+            )
+
+        prompt = prompts[0]
+        self.assertIn("# 主代理稳定系统契约", prompt)
+        self.assertIn("# 必需工具结果与 artifact 上下文", prompt)
+        self.assertIn("# 当前用户问题", prompt)
+        self.assertIn("# 最终回答前 recency guard", prompt)
+        self.assertLess(prompt.index("# 对话记忆上下文"), prompt.index("# 必需工具结果与 artifact 上下文"))
+        self.assertLess(prompt.index("# 必需工具结果与 artifact 上下文"), prompt.index("# 当前用户问题"))
+        self.assertLess(prompt.index("# 当前用户问题"), prompt.index("# 最终回答前 recency guard"))
+        for required in ("sandbox:/mnt/data", "file://", "outputs/...", "/api/v1/artifacts/", "/download"):
+            self.assertIn(required, prompt)
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.payload["mode"], "string")
+        self.assertEqual(prompt_event.payload["effective_mode"], "string")
+        self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "string")
+        self.assertIn("cacheable_prefix_hash", prompt_event.payload["prompt_render_metrics"])
+        self.assertIn("trim_reasons", prompt_event.payload["prompt_render_metrics"])
+        self.assertNotIn("string 用户问题", str(prompt_event.payload))
+
+    async def test_prompt_envelope_string_with_skill_match_sends_public_profile_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "report"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                """---
+name: report-writer
+capability_id: skill.report_writer
+display_name: 周报生成公开档案
+description: 生成周报
+triggers:
+  - 周报
+public_usage:
+  overview: 公开周报用法说明。
+  input_formats:
+    - name: report_notes
+      description: 用户提供的周报要点、日期范围和已完成工作。
+  examples:
+    - /report-writer 根据这些要点生成周报
+parameters:
+  report_notes:
+    type: string
+    required: true
+    aliases: [周报要点, report_notes]
+scripts:
+  - name: internal_report
+    path: scripts/internal_report.py
+    runtime: python
+---
+
+# Report Writer
+runtime: python_subprocess
+handler: internal.ReportHandler
+scripts/internal_report.py
+""",
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots([tmpdir])
+            prompts: list[str] = []
+
+            async def streamer(prompt: str):
+                prompts.append(prompt)
+                yield "guarded"
+
+            executor = MainAgentExecutor(
+                stream_generator=streamer,
+                stream_metadata={"provider": "injected_stream", "model": "test-model", "trim_max_tokens": 2_000},
+                skill_catalog=catalog,
+            )
+
+            with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
+                result = await executor.execute(
+                    CapabilityExecutionRequest(
+                        capability_id="main_agent.respond",
+                        conversation_id="conv-1",
+                        task_id="task-guard",
+                        node_id="node-guard",
+                        input_payload={"user_message": "写一个周报"},
+                    )
+                )
+
+        self.assertIn("# 主代理稳定系统契约", prompts[0])
+        self.assertIn("# 已选择工具公开档案", prompts[0])
+        self.assertIn("# 工具输入 schema", prompts[0])
+        self.assertIn("skill.report_writer", prompts[0])
+        self.assertIn("公开周报用法说明", prompts[0])
+        self.assertIn("report_notes", prompts[0])
+        self.assertNotIn("runtime: python_subprocess", prompts[0])
+        self.assertNotIn("scripts/internal_report.py", prompts[0])
+        self.assertNotIn("internal.ReportHandler", prompts[0])
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.payload["mode"], "string")
+        self.assertEqual(prompt_event.payload["effective_mode"], "string")
+        self.assertIsNone(prompt_event.payload["guard_reason"])
+        self.assertIn("selected_public_tool_profiles", [segment["name"] for segment in prompt_event.payload["segments"]])
+        self.assertIn("tool_input_schema", [segment["name"] for segment in prompt_event.payload["segments"]])
+        self.assertNotIn("runtime: python_subprocess", str(prompt_event.payload))
+        self.assertNotIn("scripts/internal_report.py", str(prompt_event.payload))
+
+    async def test_prompt_envelope_messages_sends_native_messages_and_audits_role_fallbacks(self) -> None:
+        prompts: list[object] = []
+
+        async def streamer(prompt: object):
+            prompts.append(prompt)
+            yield "messages answer"
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            stream_metadata={
+                "provider": "injected_stream",
+                "model": "test-model",
+                "trim_max_tokens": 20_000,
+                "provider_role_capabilities": {"roles": ["system", "user"]},
+                "provider_cache_capabilities": {
+                    "supports_prompt_cache": True,
+                    "prompt_cache_hint_enabled": True,
+                    "prompt_cache_hint": {"type": "ephemeral", "scope": "cacheable_prefix"},
+                },
+            },
+            skill_catalog=SkillCatalog(()),
+        )
+
+        with patch.dict(os.environ, {"MAF_PROMPT_ENVELOPE_MODE": "messages"}):
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-messages",
+                    node_id="node-messages",
+                    input_payload={"user_message": "messages 用户问题"},
+                    metadata={
+                        "auto_skill_matching_enabled": False,
+                        "conversation_memory": {"history_summary": "上一轮摘要"},
+                    },
+                    dependency_outputs={"node-a": {"response_text": "上游工具结果"}},
+                )
+            )
+
+        self.assertEqual(result.output_payload["response_text"], "messages answer")
+        prompt = prompts[0]
+        self.assertIsInstance(prompt, tuple)
+        self.assertTrue(all(isinstance(message, LLMMessage) for message in prompt))
+        self.assertEqual({message.role for message in prompt}, {"system", "user"})
+        joined_user_messages = "\n".join(message.content for message in prompt if message.role == "user")
+        self.assertIn("messages 用户问题", joined_user_messages)
+        self.assertIn("上游工具结果", joined_user_messages)
+        self.assertIn("不是用户指令", joined_user_messages)
+        prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
+        self.assertEqual(prompt_event.payload["mode"], "messages")
+        self.assertEqual(prompt_event.payload["effective_mode"], "messages")
+        self.assertEqual(prompt_event.payload["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertEqual(
+            prompt_event.payload["provider_cache_capabilities"],
+            {
+                "supports_prompt_cache": True,
+                "prompt_cache_hint_enabled": True,
+                "status": "enabled",
+                "hint_keys": ["scope", "type"],
+            },
+        )
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["mode"], "messages")
+        self.assertEqual(prompt_event.payload["prompt_render_metrics"]["role_fallback_count"], len(prompt_event.payload["role_fallbacks"]))
+        self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
+        fallback_segments = {fallback["segment_name"]: fallback for fallback in prompt_event.payload["role_fallbacks"]}
+        self.assertEqual(fallback_segments["bulk_conversation_history"]["reason"], "context_to_user_context")
+        self.assertEqual(fallback_segments["required_tool_results_and_artifacts"]["reason"], "tool_to_user_context")
+        self.assertNotIn("messages 用户问题", str(prompt_event.payload))
+        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["mode"], "messages")
+        self.assertEqual(llm_event.payload["prompt_envelope"]["provider_role_capabilities"], {"roles": ["system", "user"]})
+        self.assertEqual(llm_event.payload["prompt_envelope"]["provider_cache_capabilities"], prompt_event.payload["provider_cache_capabilities"])
+        self.assertEqual(llm_event.payload["prompt_envelope"]["role_fallbacks"], prompt_event.payload["role_fallbacks"])
+        self.assertNotIn('"prompt_cache_hint":', json.dumps(llm_event.payload, ensure_ascii=False))
+
     async def test_executor_applies_request_level_thinking_and_reasoning_effort_separately(self) -> None:
         seen_reasoning_efforts: list[str] = []
         seen_thinking_flags: list[bool] = []
@@ -330,16 +855,22 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("https://example.test/v1", str(fallback_event.payload))
         self.assertNotIn("不要把 prompt 泄露到 audit", str(fallback_event.payload))
 
-    async def test_prompt_includes_matched_skill_body(self) -> None:
+    async def test_prompt_includes_matched_skill_public_profile_without_raw_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_dir = Path(tmpdir) / "report"
             skill_dir.mkdir()
             (skill_dir / "SKILL.md").write_text(
                 """---
 name: report-writer
+capability_id: skill.report_writer
+display_name: 周报生成公开档案
 description: 生成周报
 triggers:
   - 周报
+public_usage:
+  overview: 公开周报格式说明。
+  examples:
+    - /report-writer 生成本周进展周报
 ---
 
 # Report Writer
@@ -366,7 +897,10 @@ triggers:
             )
 
         self.assertEqual(result.output_payload["matched_skills"], ["report-writer"])
-        self.assertIn("请使用项目汇报格式", prompts[0])
+        self.assertIn("skill.report_writer", prompts[0])
+        self.assertIn("周报生成公开档案", prompts[0])
+        self.assertIn("公开周报格式说明", prompts[0])
+        self.assertNotIn("请使用项目汇报格式", prompts[0])
 
     async def test_executor_suppresses_auto_skill_matching_when_metadata_disables_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -777,7 +1311,9 @@ parameters:
         self.assertFalse(output["ok"])
         self.assertEqual(output["error"]["type"], "missing_input")
         self.assertEqual(output["missing"], ["blocks"])
-        self.assertIn("blocks", prompts[0])
+        self.assertEqual(prompts, [])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("blocks", result.interrupt.required_fields)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)
@@ -953,6 +1489,8 @@ parameters:
         self.assertFalse(sentinel.exists())
         output = result.output_payload["script_results"][0]["output"]
         self.assertEqual(output["missing"], ["blocks"])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("blocks", result.interrupt.required_fields)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertIn("skill.input_resolution_diagnostic", event_types)
@@ -1026,6 +1564,9 @@ parameters:
         self.assertFalse(sentinel.exists())
         output = result.output_payload["script_results"][0]["output"]
         self.assertEqual(output["missing"], ["material_data"])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("material_data", result.interrupt.required_fields)
+        self.assertIs(result.interrupt.required_fields["material_data"].get("accepts_upload"), True)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)
@@ -1172,6 +1713,8 @@ outputs:
         self.assertFalse(sentinel.exists())
         output = result.output_payload["script_results"][0]["output"]
         self.assertEqual(output["missing"], ["user_id"])
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn("user_id", result.interrupt.required_fields)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)
@@ -1183,9 +1726,15 @@ outputs:
             (skill_dir / "SKILL.md").write_text(
                 """---
 name: mini-breedstat-rcbd
+capability_id: skill.mini_breedstat_rcbd
+display_name: RCBD 公开 Skill
 description: 生成 RCBD 随机区组设计
 triggers:
   - 完全不会出现在问题里的触发词
+public_usage:
+  overview: 公开说明：用于生成随机区组设计。
+  examples:
+    - /mini-breedstat-rcbd 上传材料表并生成 RCBD
 ---
 
 # RCBD
@@ -1215,7 +1764,10 @@ triggers:
             )
 
         self.assertEqual(result.output_payload["matched_skills"], ["mini-breedstat-rcbd"])
-        self.assertIn("请使用随机区组设计 Skill", prompts[0])
+        self.assertIn("skill.mini_breedstat_rcbd", prompts[0])
+        self.assertIn("RCBD 公开 Skill", prompts[0])
+        self.assertIn("公开说明：用于生成随机区组设计", prompts[0])
+        self.assertNotIn("请使用随机区组设计 Skill", prompts[0])
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.forced_selected", event_types)
         self.assertNotIn("skill.match_fallback", event_types)
@@ -1276,9 +1828,15 @@ triggers:
                 textwrap.dedent(
                     """---
 name: delegated-skill
+capability_id: skill.delegated_skill
+display_name: Delegated Skill
 description: 委托技能
 triggers:
   - 委托技能
+public_usage:
+  overview: 公开说明：委托主代理回答，不直接运行脚本。
+  examples:
+    - /delegated-skill 说明委托技能如何使用
 scripts:
   - name: should-not-run
     path: scripts/should_not_run.py
@@ -1317,6 +1875,8 @@ execution:
         self.assertNotIn("skill.script_started", event_types)
         self.assertNotIn("skill.script_completed", event_types)
         self.assertIn("Delegated Skill", seen_prompts[0])
+        self.assertIn("公开说明：委托主代理回答", seen_prompts[0])
+        self.assertNotIn("scripts/should_not_run.py", seen_prompts[0])
         self.assertNotIn("Skill 脚本输出", seen_prompts[0])
 
 

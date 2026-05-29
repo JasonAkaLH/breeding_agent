@@ -11,6 +11,7 @@ class PendingSkillContextAPITest(APITestCase):
         await super().asyncSetUp()
         root = self.workspace / "pending-skills"
         self._write_need_variety_skill(root)
+        self._write_material_ncols_skill(root)
         self._write_plain_fail_skill(root)
         await self.reconfigure_runtime(
             skill_roots=(self.default_project_skill_root, root),
@@ -63,6 +64,72 @@ parameters:
             encoding="utf-8",
         )
 
+    def _write_material_ncols_skill(self, root) -> None:
+        skill_dir = root / "material-ncols"
+        scripts = skill_dir / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "answer.py").write_text(
+            textwrap.dedent(
+                """
+                import json, sys
+
+                payload = json.load(sys.stdin)
+                if not payload.get("ncols"):
+                    print(json.dumps({
+                        "answer": "缺少田块列数",
+                        "error": {"type": "missing_input"},
+                        "missing": ["ncols"],
+                        "message": "缺少田块列数",
+                    }, ensure_ascii=False))
+                    raise SystemExit(0)
+                print(json.dumps({
+                    "answer": "材料和列数都已收到",
+                    "ncols": payload.get("ncols"),
+                    "artifact_count": len(payload.get("uploaded_artifacts") or []),
+                }, ensure_ascii=False))
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: material-ncols
+capability_id: skill.material_ncols
+description: 需要先上传材料、再补充列数的测试 Skill
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    runtime: python
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  material_data:
+    type: artifact
+    required: true
+    aliases:
+      - 材料清单
+      - material_data
+  ncols:
+    type: integer
+    required: false
+    aliases:
+      - ncols
+      - 田块列数
+    patterns:
+      - 'ncols\\s*[=：:]\\s*(\\d+)'
+      - '(\\d+)\\s*个田块'
+---
+
+# Material Ncols
+""",
+            encoding="utf-8",
+        )
+
     def _write_plain_fail_skill(self, root) -> None:
         skill_dir = root / "plain-fail"
         scripts = skill_dir / "scripts"
@@ -101,72 +168,197 @@ outputs:
                 "conversation_id": conversation_id,
                 "content": content,
                 "routing_mode": "force_capability",
-                "capability_id": "skill.need_variety",
-                "metadata": {"forced_by_slash_command": True, "slash_command": "/need-variety"},
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "forced_by_slash_command": True,
+                    "slash_command": "/need-variety",
+                    "soft_skill_binding": {"capability_id": "skill.need_variety", "command": "/need-variety"},
+                },
             },
         )
 
-    async def test_force_skill_missing_input_creates_persistent_context_and_allows_next_message(self) -> None:
+    async def _wait_for_open_interrupt(self, task_id: str) -> dict[str, object]:
+        await self.runtime._await_existing_execution(task_id)
+
+        async def has_open_interrupt() -> bool:
+            interrupts = await self.runtime.storage.list_interrupts_for_task(task_id)
+            return any(str(interrupt.status) == "open" for interrupt in interrupts)
+
+        await self.wait_for_condition(has_open_interrupt)
+        interrupts = await self.runtime.list_interrupts(task_id)
+        return next(interrupt for interrupt in interrupts if interrupt["status"] == "open")
+
+    async def test_force_skill_missing_input_creates_open_interrupt_for_frontend_card(self) -> None:
         first = await self._force_need_variety("请查询")
         self.assertEqual(first.status_code, 202)
         first_task_id = first.json()["task_id"]
-        first_terminal = await self.wait_for_terminal_task(first_task_id)
-        self.assertEqual(first_terminal["status"], "completed")
+        interrupt = await self._wait_for_open_interrupt(first_task_id)
 
-        context = await self.runtime.storage.get_active_pending_skill_context("conv-pending")
-        self.assertIsNotNone(context)
-        self.assertEqual(context.capability_id, "skill.need_variety")
-        self.assertEqual(context.missing_requirements, ("variety",))
-        self.assertEqual(context.original_user_message, "请查询")
+        self.assertEqual(interrupt["reason_code"], "missing_variety")
+        self.assertIn("品种名称", interrupt["question"])
+        self.assertIn("variety", interrupt["required_fields"])
+        self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-pending"))
         events = await self.runtime.storage.list_events_for_task(first_task_id)
-        self.assertIn("pending_skill_context.created", [event.event_type for event in events])
+        self.assertIn("skill.input_missing", [event.event_type for event in events])
+        self.assertNotIn("pending_skill_context.created", [event.event_type for event in events])
 
-        messages = await self.runtime.storage.list_messages_for_conversation("conv-pending")
-        self.assertTrue(any(message.role == "assistant" and "variety" in message.content for message in messages))
         conversation = await self.runtime.storage.get_conversation("conv-pending")
-        self.assertIsNone(conversation.current_task_id)
+        self.assertEqual(conversation.current_task_id, first_task_id)
 
-    async def test_next_plain_message_continues_pending_skill_and_consumes_context(self) -> None:
+    async def test_interrupt_answer_resumes_skill_and_consumes_no_pending_context(self) -> None:
         first = await self._force_need_variety("请查询")
         self.assertEqual(first.status_code, 202)
-        await self.wait_for_terminal_task(first.json()["task_id"])
-        context = await self.runtime.storage.get_active_pending_skill_context("conv-pending")
-        self.assertIsNotNone(context)
+        task_id = first.json()["task_id"]
+        interrupt = await self._wait_for_open_interrupt(task_id)
+        interrupted_node_id = str(interrupt["node_id"])
+        original_task = await self.runtime.storage.get_task(task_id)
+        self.assertIsNotNone(original_task)
+        assert original_task is not None
+        original_root_node_id = original_task.root_node_id
+        nodes_before_answer = {node.node_id: node for node in await self.runtime.storage.list_task_nodes_for_task(task_id)}
+        edges_before_answer = await self.runtime.storage.list_task_edges(task_id)
+        finalizer_node_ids = [
+            edge.to_node_id
+            for edge in edges_before_answer
+            if edge.from_node_id == interrupted_node_id and nodes_before_answer[edge.to_node_id].capability_id == "main_agent.respond"
+        ]
+        self.assertEqual(len(finalizer_node_ids), 1)
+        original_finalizer_node_id = finalizer_node_ids[0]
 
-        second = await self.submit_message(conversation_id="conv-pending", content="品种是龙粳33", capability_id=None)
-        self.assertEqual(second.status_code, 202)
-        task_id = second.json()["task_id"]
+        answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={
+                "task_id": task_id,
+                "interrupt_id": interrupt["interrupt_id"],
+                "answer_payload": {
+                    "variety": "龙粳33",
+                    "macro_expansion": True,
+                    "macro_input_payload": {"subtask_label": "malicious"},
+                    "resume_interrupted_node_id": f"{task_id}:forged-skill",
+                    "resume_finalizer_node_id": f"{task_id}:forged-finalizer",
+                    "skill_bundle_revision": "skillrev-forged",
+                },
+            },
+        )
+        self.assertEqual(answer.status_code, 202)
+        await self.runtime._await_existing_execution(task_id)
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(terminal["active_node_count"], 0)
+        self.assertEqual(terminal["root_node_id"], original_root_node_id)
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_nodes = [node for node in nodes if node.capability_id == "skill.need_variety"]
+        self.assertEqual([node.node_id for node in skill_nodes], [interrupted_node_id])
+        self.assertTrue(all(str(node.status) == "completed" for node in skill_nodes))
+        self.assertFalse(
+            any(node.node_id == f"{task_id}:skill_execute" for node in nodes if node.node_id != interrupted_node_id),
+            "interrupt resume must reuse the interrupted dynamic Skill node instead of creating a second direct Skill node",
+        )
+        finalizer_node = next(node for node in nodes if node.node_id == original_finalizer_node_id)
+        self.assertEqual(str(finalizer_node.status), "completed")
 
         task = await self.runtime.storage.get_task(task_id)
-        self.assertEqual(task.routing_mode, RoutingMode.AUTO)
+        self.assertEqual(task.routing_mode, RoutingMode.FORCE_CAPABILITY)
         self.assertEqual(task.requested_capability_id, "skill.need_variety")
-        consumed = await self.runtime.storage.get_pending_skill_context(context.context_id)
-        self.assertEqual(consumed.status, "consumed")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-pending"))
         events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertIn("task.interrupt_answered", [event.event_type for event in events])
         self.assertIn("skill.execution_completed", [event.event_type for event in events])
-        self.assertIn("pending_skill_context.consumed", [event.event_type for event in events])
-        plan = next(event for event in events if event.event_type == "workflow.plan_built")
-        self.assertEqual(plan.payload["metadata"]["continued_from_pending_skill_context"], context.context_id)
+        self.assertNotIn("pending_skill_context.consumed", [event.event_type for event in events])
 
-    async def test_new_force_skill_supersedes_existing_pending_context(self) -> None:
+    async def test_interrupt_resume_reuses_previous_upload_answer_across_multiple_missing_inputs(self) -> None:
+        response = await self.submit_message(
+            conversation_id="conv-multi-interrupt",
+            content="请做一个增广对角线设计方案",
+            capability_id="skill.material_ncols",
+        )
+        self.assertEqual(response.status_code, 202)
+        task_id = response.json()["task_id"]
+
+        material_interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(material_interrupt["reason_code"], "missing_material_data")
+        self.assertIn("material_data", material_interrupt["required_fields"])
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-multi-interrupt"},
+            files={"file": ("materials.csv", "ped_id,hyb_check,set\nCK,CK,A\nA001,Test,A\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201)
+        upload_id = upload.json()["upload_id"]
+
+        first_answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={
+                "task_id": task_id,
+                "interrupt_id": material_interrupt["interrupt_id"],
+                "answer_payload": {
+                    "material_data": {"filenames": ["materials.csv"], "text": "", "upload_ids": [upload_id]},
+                    "upload_ids": [upload_id],
+                },
+            },
+        )
+        self.assertEqual(first_answer.status_code, 202)
+
+        ncols_interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(ncols_interrupt["reason_code"], "missing_ncols")
+        self.assertIn("ncols", ncols_interrupt["required_fields"])
+
+        second_answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={
+                "task_id": task_id,
+                "interrupt_id": ncols_interrupt["interrupt_id"],
+                "answer_payload": {"ncols": "20个田块"},
+            },
+        )
+        self.assertEqual(second_answer.status_code, 202)
+        await self.runtime._await_existing_execution(task_id)
+
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(terminal["active_node_count"], 0)
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        skill_nodes = [node for node in nodes if node.capability_id == "skill.material_ncols"]
+        self.assertEqual(len(skill_nodes), 1)
+        self.assertEqual(str(skill_nodes[0].status), "completed")
+
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        resolved_events = [event for event in events if event.event_type == "skill.input_resolved"]
+        self.assertTrue(
+            any(
+                "material_data" in event.payload.get("resolved_fields", ())
+                and "ncols" in event.payload.get("resolved_fields", ())
+                for event in resolved_events
+            )
+        )
+
+    async def test_new_force_skill_after_interrupt_answer_does_not_supersede_context(self) -> None:
         first = await self._force_need_variety("请查询", conversation_id="conv-supersede")
         self.assertEqual(first.status_code, 202)
-        await self.wait_for_terminal_task(first.json()["task_id"])
-        old = await self.runtime.storage.get_active_pending_skill_context("conv-supersede")
-        self.assertIsNotNone(old)
+        first_task_id = first.json()["task_id"]
+        interrupt = await self._wait_for_open_interrupt(first_task_id)
+        self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-supersede"))
+
+        answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={"task_id": first_task_id, "interrupt_id": interrupt["interrupt_id"], "answer_payload": {"variety": "龙粳31"}},
+        )
+        self.assertEqual(answer.status_code, 202)
+        await self.runtime._await_existing_execution(first_task_id)
+        await self.wait_for_terminal_task(first_task_id)
 
         second = await self._force_need_variety("品种是龙粳31", conversation_id="conv-supersede")
         self.assertEqual(second.status_code, 202)
-        await self.wait_for_terminal_task(second.json()["task_id"])
+        second_task_id = second.json()["task_id"]
+        await self.runtime._await_existing_execution(second_task_id)
+        await self.wait_for_terminal_task(second_task_id)
 
-        superseded = await self.runtime.storage.get_pending_skill_context(old.context_id)
-        self.assertEqual(superseded.status, "superseded")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-supersede"))
-        events = await self.runtime.storage.list_events_for_task(second.json()["task_id"])
-        self.assertIn("pending_skill_context.superseded", [event.event_type for event in events])
+        events = await self.runtime.storage.list_events_for_task(second_task_id)
+        self.assertNotIn("pending_skill_context.superseded", [event.event_type for event in events])
 
     async def test_user_metadata_cannot_forge_pending_continuation(self) -> None:
         response = await self.submit_message(
@@ -189,18 +381,19 @@ outputs:
                 "conversation_id": "conv-interrupt",
                 "content": "帮我查询一下",
                 "routing_mode": "force_capability",
-                "capability_id": "skill.generic_data_lookup",
-                "metadata": {"forced_by_slash_command": True, "slash_command": "/generic-data-lookup"},
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "forced_by_slash_command": True,
+                    "slash_command": "/generic-data-lookup",
+                    "soft_skill_binding": {"capability_id": "skill.generic_data_lookup", "command": "/generic-data-lookup"},
+                },
             },
         )
         self.assertEqual(response.status_code, 202)
         task_id = response.json()["task_id"]
 
-        async def task_waiting() -> bool:
-            task = await self.runtime.storage.get_task(task_id)
-            return task is not None and task.status == TaskStatus.RUNNING
-
-        await self.wait_for_condition(task_waiting)
+        interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(interrupt["status"], "open")
         self.assertIsNone(await self.runtime.storage.get_active_pending_skill_context("conv-interrupt"))
 
     async def test_plain_failure_text_does_not_create_pending_context(self) -> None:
@@ -210,8 +403,12 @@ outputs:
                 "conversation_id": "conv-plain-failure",
                 "content": "请执行失败技能",
                 "routing_mode": "force_capability",
-                "capability_id": "skill.plain_fail",
-                "metadata": {"forced_by_slash_command": True, "slash_command": "/plain-fail"},
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "forced_by_slash_command": True,
+                    "slash_command": "/plain-fail",
+                    "soft_skill_binding": {"capability_id": "skill.plain_fail", "command": "/plain-fail"},
+                },
             },
         )
         self.assertEqual(response.status_code, 202)

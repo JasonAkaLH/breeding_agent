@@ -8,8 +8,8 @@ from pathlib import Path
 
 from src.capabilities.skill_tool import SkillExecutor
 from src.core.contracts import CapabilityExecutionRequest
-from src.integrations.codex_skills import SkillRuntimeState, SkillScriptRunner
-from src.integrations.codex_skills.execution import SkillPlatformHandlerRegistry, SkillServiceRegistry
+from src.integrations.agent_skills import SkillRuntimeState, SkillScriptRunner
+from src.integrations.agent_skills.execution import SkillPlatformHandlerRegistry, SkillServiceRegistry
 
 
 class SkillExecutorTest(unittest.IsolatedAsyncioTestCase):
@@ -462,6 +462,77 @@ outputs:
 
         self.assertIsNotNone(result.error)
         self.assertEqual(result.error.code, 'skill_input_missing')
+        self.assertIsNotNone(result.interrupt)
+        self.assertEqual(result.interrupt.reason_code, 'missing_variety')
+        self.assertIn('variety', result.interrupt.required_fields)
+
+    async def test_structured_stdout_missing_input_returns_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'conditional'
+            scripts = skill_dir / 'scripts'
+            scripts.mkdir(parents=True)
+            (scripts / 'needs_file.py').write_text(
+                textwrap.dedent(
+                    '''
+                    import json, sys
+                    json.load(sys.stdin)
+                    print(json.dumps({
+                        "ok": False,
+                        "is_error": True,
+                        "error": {"type": "missing_input", "message": "缺少田间数据文件。"},
+                        "missing": ["field_data"],
+                        "answer": "还缺少田间观测数据文件，请上传后继续。",
+                    }, ensure_ascii=False))
+                    '''
+                ).strip(),
+                encoding='utf-8',
+            )
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: conditional
+description: 条件缺参
+parameters:
+  field_data:
+    type: artifact
+    required: false
+scripts:
+  - name: needs_file
+    path: scripts/needs_file.py
+    runtime: python
+outputs:
+  required:
+    - answer
+---
+
+# Conditional
+执行脚本。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+            executor = SkillExecutor(runtime_state=state, script_runner=SkillScriptRunner())
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.conditional',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': '分析田间数据'},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertIsNotNone(result.interrupt)
+        self.assertEqual(result.interrupt.reason_code, 'missing_field_data')
+        self.assertIn('field_data', result.interrupt.required_fields)
+        self.assertEqual(result.interrupt.required_fields['field_data']['type'], 'artifact')
+        self.assertIs(result.interrupt.required_fields['field_data']['accepts_upload'], True)
+        self.assertEqual(result.output_payload['missing'], ['field_data'])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn('skill.input_missing', event_types)
+        self.assertNotIn('skill.execution_completed', event_types)
 
     async def test_platform_service_rejects_unregistered_handler(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1025,6 +1096,71 @@ execution:
         self.assertIsNotNone(result.error)
         self.assertEqual(result.error.code, 'skill_service_denied')
 
+    async def test_platform_service_missing_input_error_is_converted_to_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'skill'
+            skill_dir = root / 'platform'
+            skill_dir.mkdir(parents=True)
+            (skill_dir / 'SKILL.md').write_text(
+                """---
+name: platform
+description: 平台服务
+parameters:
+  query:
+    type: string
+    required: true
+execution:
+  mode: platform_service
+  answer_mode: direct
+  trust_scope: project
+  handler: demo.handler
+---
+
+# Platform
+平台服务。
+""",
+                encoding='utf-8',
+            )
+            state = self._build_state(root)
+
+            async def missing_handler(_ctx):
+                from src.core.contracts import CapabilityExecutionError
+                from src.integrations.agent_skills.execution import SkillPlatformHandlerResult
+
+                return SkillPlatformHandlerResult(
+                    output_payload={'domain_kind': 'demo'},
+                    error=CapabilityExecutionError(code='skill_input_missing', message='missing query', retriable=False),
+                )
+
+            handlers = SkillPlatformHandlerRegistry(
+                handlers={'demo.handler': missing_handler},
+                trusted_skill_handlers={'skill.platform': 'demo.handler'},
+            )
+            executor = SkillExecutor(
+                runtime_state=state,
+                platform_handler_registry=handlers,
+                service_registry=SkillServiceRegistry(),
+            )
+            result = await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id='skill.platform',
+                    conversation_id='conv-1',
+                    task_id='task-1',
+                    node_id='node-1',
+                    input_payload={'user_message': ''},
+                    metadata={'skill_bundle_revision': state.active_revision},
+                )
+            )
+
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error.code, 'skill_input_missing')
+        self.assertIsNotNone(result.interrupt)
+        self.assertIn('query', result.interrupt.required_fields)
+        event_types = [event.event_type for event in result.events]
+        self.assertIn('skill.input_missing', event_types)
+        self.assertIn('skill.execution_interrupted', event_types)
+        self.assertNotIn('skill.execution_completed', event_types)
+
     async def test_platform_service_error_is_not_audited_as_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / 'skill'
@@ -1050,7 +1186,7 @@ execution:
 
             async def erroring_handler(_ctx):
                 from src.core.contracts import CapabilityExecutionError
-                from src.integrations.codex_skills.execution import SkillPlatformHandlerResult
+                from src.integrations.agent_skills.execution import SkillPlatformHandlerResult
 
                 return SkillPlatformHandlerResult(
                     output_payload={'response_text': 'handled'},

@@ -6,7 +6,6 @@ export interface SlashCommand {
   name: string;
   displayName: string;
   description: string;
-  sourcePath: string;
   hasCommandConflict: boolean;
 }
 
@@ -17,7 +16,20 @@ export type DirectSlashParseResult =
   | { kind: 'not_slash' };
 
 export type SlashSubmitIntent =
-  | { kind: 'ready'; command: SlashCommand; content: string; metadata: { forced_by_slash_command: true; slash_command: string } }
+  | {
+      kind: 'ready';
+      command: SlashCommand;
+      content: string;
+      capabilityId: 'main_agent.respond';
+      metadata: {
+        forced_by_slash_command: true;
+        slash_command: string;
+        soft_skill_binding: {
+          capability_id: string;
+          command: string;
+        };
+      };
+    }
   | { kind: 'blocked'; reason: 'not_found' | 'conflict'; command: string }
   | { kind: 'auto'; content: string };
 
@@ -32,7 +44,6 @@ export function deriveSlashCommands(capabilities: CapabilityResponse[]): SlashCo
       name: capability.name,
       displayName: displayName(capability),
       description: capability.description,
-      sourcePath: capability.source_path,
       hasCommandConflict: false,
     }))
     .sort((left, right) => left.command.localeCompare(right.command));
@@ -54,7 +65,7 @@ export function slashMenuCandidates(input: string, commands: SlashCommand[]): Sl
   if (!query) return commands;
   const normalized = normalizeSearchText(query);
   return commands.filter((command) => {
-    const haystack = [command.command, command.displayName, command.name, command.description, command.capabilityId, command.sourcePath]
+    const haystack = [command.command, command.displayName, command.name, command.description, command.capabilityId]
       .map(normalizeSearchText)
       .join(' ');
     return haystack.includes(normalized);
@@ -95,9 +106,14 @@ function readyIntent(command: SlashCommand, content: string): SlashSubmitIntent 
     kind: 'ready',
     content,
     command,
+    capabilityId: 'main_agent.respond',
     metadata: {
       forced_by_slash_command: true,
       slash_command: command.command,
+      soft_skill_binding: {
+        capability_id: command.capabilityId,
+        command: command.command,
+      },
     },
   };
 }

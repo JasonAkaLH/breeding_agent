@@ -20,7 +20,12 @@ def emit(payload: Mapping[str, Any]) -> None:
 
 
 def fail(answer: str, *, missing: list[str] | None = None, error_type: str = "rice_genie_error") -> dict[str, Any]:
-    result: dict[str, Any] = {"ok": False, "answer": answer, "error": {"type": error_type, "message": answer}}
+    result: dict[str, Any] = {
+        "ok": False,
+        "is_error": True,
+        "answer": answer,
+        "error": {"type": error_type, "message": answer},
+    }
     if missing:
         result["missing"] = missing
     return result

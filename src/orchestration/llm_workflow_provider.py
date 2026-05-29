@@ -9,8 +9,8 @@ from .models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from .planner_contract import (
     PlannerOutputError,
     TextGenerator,
-    build_planner_prompt,
-    build_planner_repair_prompt,
+    build_planner_profile_resolution,
+    build_planner_repair_profile_resolution,
     call_text_generator,
     parse_planner_output,
 )
@@ -79,18 +79,25 @@ class LLMWorkflowProvider:
             capability_id: policy.planner_allowed_fields
             for capability_id, policy in payload_policies.items()
         }
-        original_prompt = build_planner_prompt(
+        original_prompt_resolution = build_planner_profile_resolution(
             request,
             public_capabilities=self._capability_registry.list(public_only=True),
             planner_payload_allowlist=planner_payload_allowlist,
         )
+        original_prompt = original_prompt_resolution.prompt
         prompt = original_prompt
+        prompt_profile = original_prompt_resolution.llm_call_payload
         previous_output = ""
         attempts = 0
         while attempts <= self._max_repair_attempts:
             attempts += 1
             try:
-                raw_output = call_text_generator(self._text_generator, prompt, request=request)
+                raw_output = call_text_generator(
+                    self._text_generator,
+                    prompt,
+                    request=request,
+                    prompt_profile=prompt_profile,
+                )
                 if inspect.isawaitable(raw_output):
                     raw_output = await raw_output
                 if not isinstance(raw_output, str):
@@ -118,12 +125,16 @@ class LLMWorkflowProvider:
                 )
             except (PlannerOutputError, WorkflowPlanValidationError, WorkflowExpansionError) as exc:
                 if attempts <= self._max_repair_attempts:
-                    prompt = build_planner_repair_prompt(
+                    repair_resolution = build_planner_repair_profile_resolution(
                         original_prompt,
                         previous_output=previous_output,
                         error_reason=type(exc).__name__,
                         diagnostic=str(exc),
+                        trim_max_tokens=(request.metadata or {}).get("planner_trim_max_tokens")
+                        or (request.metadata or {}).get("trim_max_tokens"),
                     )
+                    prompt = repair_resolution.prompt
+                    prompt_profile = repair_resolution.llm_call_payload
                     continue
                 raise WorkflowPlanningError(
                     reason=type(exc).__name__,

@@ -22,6 +22,29 @@ triggers:
   - field analysis
   - field trial analysis
   - phenotype analysis
+public_usage:
+  overview: >-
+    分析田间试验表型数据，生成面向业务解释的统计报告；也可以只回答数据列、设计类型、对照比较或分析输出的用法问题。
+  input_formats:
+    - name: field_data
+      required: true
+      description: >-
+        CSV、JSON 或表格型上传数据；每行通常代表一个小区、材料或观测记录。常见列包括材料编号、区组、重复、地点、性状值、对照标记和试验设计标记。
+      example_columns: [entry_id, block, trait_value, check_flag]
+  parameters:
+    - name: design
+      description: 分析所对应的试验设计；当前重点支持随机区组和对角线增广。
+      examples: [rcbd, diagonal]
+    - name: run_id
+      description: 可选运行编号，便于用户区分多次分析结果。
+  examples:
+    - /field-analysis 这个 RCBD 表型数据怎么整理？
+    - /field-analysis 分析上传表格，做随机区组方差分析和 LSD 分组
+    - /field-analysis 对角线增广试验需要哪些列？
+  outputs:
+    - 章节化田间数据分析报告
+    - 描述统计、方差分析和分组结果摘要
+    - 数据质量和空间校正诊断建议
 execution:
   mode: python_subprocess
   answer_mode: requires_finalizer
@@ -102,6 +125,8 @@ If the user has not provided enough information, ask only for the missing items:
 - optional `run_id`. Output files are written through the platform-managed Skill output directory.
 
 For a bare `$field-analysis` invocation, show only the exact welcome message above. Do not run scripts until the required inputs are available.
+
+When the declared Python wrapper detects missing required user input, it must return the structured `missing_input` contract from `Skill构建指南.md`: `ok: false`, `is_error: true`, `error.type: missing_input`, `missing` with manifest parameter names, and a user-readable `answer`.
 
 ## Inputs
 
