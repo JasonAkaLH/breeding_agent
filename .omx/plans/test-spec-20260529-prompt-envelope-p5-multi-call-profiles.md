@@ -44,7 +44,7 @@ Cases:
 
 ### UT-4 Skill input resolver
 
-Files: `tests/api/test_skill_input_resolution_runtime.py`, optional `tests/integrations/codex_skills/test_input_resolution.py`
+Files: `tests/api/test_skill_input_resolution_runtime.py`, optional `tests/integrations/agent_skills/test_input_resolution.py`
 
 Cases:
 1. `string` mode LLM slot prompt 使用 `skill_input_resolver` profile。

@@ -411,7 +411,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
 
                 from src.core.enums import ArtifactType
                 from src.core.models import Artifact, Interrupt
-                from src.integrations.codex_skills import SkillPlatformExecutionContext, SkillPlatformHandlerResult
+                from src.integrations.agent_skills import SkillPlatformExecutionContext, SkillPlatformHandlerResult
 
 
                 async def _handle(context: SkillPlatformExecutionContext) -> SkillPlatformHandlerResult:

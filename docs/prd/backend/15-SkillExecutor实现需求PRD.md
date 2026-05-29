@@ -12,8 +12,8 @@
   - `docs/prd/backend/13-Skill动态加载与热部署PRD.md`
   - `docs/prd/backend/14-MCPRuntime实现需求PRD.md`
 - **外部参考**：
-  - OpenAI Codex Agent Skills：<https://developers.openai.com/codex/skills>
-  - OpenAI Codex Customization - Skills：<https://developers.openai.com/codex/concepts/customization#skills>
+  - OpenAI Agent Skills：<https://developers.openai.com/agent/skills>
+  - OpenAI Agent Skills Customization：<https://developers.openai.com/agent/concepts/customization#skills>
 
 ## 1. 一句话结论
 
@@ -45,13 +45,13 @@ Skill Executor 是框架层的**通用执行适配器**，负责把已被 Planne
 
 因此需要新增 Skill Executor 实现需求，作为后续 数据查询 Skill 化和 capability 统一治理的前置基线。
 
-## 3. Codex Skill 机制对本项目的启发
+## 3. Agent Skill 机制对本项目的启发
 
-OpenAI Codex Skills 的核心机制是：
+OpenAI Agent Skills 的核心机制是：
 
 1. Skill 是可复用 workflow 的作者格式。
 2. Skill 目录包含 `SKILL.md`，可选 `scripts/`、`references/`、`assets/`。
-3. Codex 使用渐进式披露：先用 name / description / path 做发现，只有选中 Skill 后才加载完整 `SKILL.md`。
+3. Agent Skills 机制使用渐进式披露：先用 name / description / path 做发现，只有选中 Skill 后才加载完整 `SKILL.md`。
 4. references 和 scripts 也应在需要时才读取或执行。
 5. 如果 workflow 需要外部系统，官方建议与 MCP 配合使用。
 
@@ -62,7 +62,7 @@ OpenAI Codex Skills 的核心机制是：
 - Skill executor 只负责执行与治理，不应把所有业务能力塞进框架内核；
 - 外部系统接入优先通过 MCP 或受控 service binding，而不是让 Skill 脚本继承完整环境和任意访问权限。
 
-本项目不需要完全复刻 Codex 本地 runtime。当前后端仍应保持服务化、安全受控、可测试和可审计。
+本项目不需要完全复刻 本地 runtime。当前后端仍应保持服务化、安全受控、可测试和可审计。
 
 ## 4. 目标
 
@@ -96,7 +96,7 @@ OpenAI Codex Skills 的核心机制是：
 
 ## 5. 非目标
 
-1. 不复刻完整 Codex 本地 runtime。
+1. 不复刻完整 本地 runtime。
 2. 不支持任意 shell、任意本地命令、任意依赖安装。
 3. 不允许 Skill 脚本继承完整环境变量或读取 secret。
 4. 不把 数据查询 Skill 业务逻辑写进 Skill Executor。

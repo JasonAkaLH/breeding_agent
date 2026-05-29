@@ -34,7 +34,7 @@ from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executo
 from src.core.enums import ConversationStatus, EventVisibility, MessageRole, RoutingMode, TaskStatus
 from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, PendingSkillContext, Task
 from src.integrations.audit_logger import JsonlAuditSink
-from src.integrations.codex_skills import (
+from src.integrations.agent_skills import (
     SkillCapabilityRegistry,
     SkillCatalog,
     SkillPlatformHandlerRegistry,
@@ -44,13 +44,13 @@ from src.integrations.codex_skills import (
     SkillRuntimeState,
     SkillScriptRunner,
 )
-from src.integrations.codex_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
-from src.integrations.codex_skills.rust_contract import (
+from src.integrations.agent_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
+from src.integrations.agent_skills.rust_contract import (
     error_policy as skill_runtime_error_policy,
     load_skill_runtime_contract,
 )
-from src.integrations.codex_skills.skill_sandbox_client import SkillSandboxGrpcClient
-from src.integrations.codex_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
+from src.integrations.agent_skills.skill_sandbox_client import SkillSandboxGrpcClient
+from src.integrations.agent_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.model_editions import config_for_model_edition, default_model_edition, model_edition_options, validate_model_edition
@@ -3457,7 +3457,4 @@ def _resolve_main_agent_stream_binding(
 
 
 def _default_skill_roots() -> tuple[Path, ...]:
-    return (
-        Path.cwd() / "skill",
-        Path.home() / ".codex" / "skills",
-    )
+    return (Path.cwd() / "skill",)

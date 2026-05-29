@@ -13,7 +13,7 @@ from src.capabilities.main_agent import (
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
-from src.integrations.codex_skills import SkillManifest
+from src.integrations.agent_skills import SkillManifest
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.registry import CapabilityRegistry

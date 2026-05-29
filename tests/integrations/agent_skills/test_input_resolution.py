@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.integrations.codex_skills import (
+from src.integrations.agent_skills import (
     SkillInputResolutionContext,
     parse_skill_file,
     resolve_skill_inputs,

@@ -5,7 +5,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from src.core.coercion import coerce_positive_int
 from src.integrations.provider_cache import provider_cache_capabilities_metadata
+from src.orchestration.prompt_provider_metadata import safe_role_capabilities
 
 from .prompt_envelope import (
     LLMMessage,
@@ -243,9 +245,9 @@ def prompt_profile_audit_payload(
             for segment in audit.segments
         ],
     }
-    safe_role_capabilities = _safe_role_capabilities(provider_role_capabilities)
-    if safe_role_capabilities:
-        payload["provider_role_capabilities"] = safe_role_capabilities
+    provider_role_capability_payload = safe_role_capabilities(provider_role_capabilities)
+    if provider_role_capability_payload:
+        payload["provider_role_capabilities"] = provider_role_capability_payload
     if safe_cache_capabilities:
         payload["provider_cache_capabilities"] = safe_cache_capabilities
     safe_context = _safe_audit_context(audit_context or {})
@@ -318,7 +320,7 @@ def llm_call_payload_from_audit(payload: Mapping[str, Any] | None) -> dict[str, 
 
 def coerce_profile_trim_max_tokens(*values: Any) -> int | None:
     for value in values:
-        parsed = _coerce_positive_int(value)
+        parsed = coerce_positive_int(value)
         if parsed is not None:
             return parsed
     return None
@@ -366,45 +368,3 @@ def _safe_audit_context(context: Mapping[str, Any]) -> dict[str, Any]:
             if projected:
                 safe[key_text] = projected[:32]
     return safe
-
-
-def _safe_role_capabilities(value: Mapping[str, Any] | tuple[str, ...] | None) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        safe: dict[str, Any] = {}
-        if "supports_messages" in value:
-            safe["supports_messages"] = _truthy(value.get("supports_messages"))
-        elif "messages_supported" in value:
-            safe["supports_messages"] = _truthy(value.get("messages_supported"))
-        roles = value.get("roles") or value.get("supported_roles") or value.get("message_roles") or value.get("supported_message_roles")
-        role_list = _safe_role_list(roles)
-        if role_list:
-            safe["roles"] = role_list
-        return safe
-    role_list = _safe_role_list(value)
-    return {"roles": role_list} if role_list else {}
-
-
-def _safe_role_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        candidates = value.replace("\n", ",").split(",")
-    elif isinstance(value, list | tuple | set | frozenset):
-        candidates = value
-    else:
-        return []
-    return sorted({str(role).strip().lower() for role in candidates if str(role).strip()})
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "enabled", "supported"}
-    return bool(value)
-
-
-def _coerce_positive_int(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None

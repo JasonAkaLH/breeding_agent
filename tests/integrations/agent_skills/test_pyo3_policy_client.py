@@ -8,8 +8,8 @@ from unittest.mock import patch
 from typing import Any
 
 from src.api.runtime import _resolve_skill_policy_client
-from src.integrations.codex_skills.pyo3_policy import SkillRuntimePyo3PolicyClient
-from src.integrations.codex_skills.rust_contract import load_skill_runtime_contract
+from src.integrations.agent_skills.pyo3_policy import SkillRuntimePyo3PolicyClient
+from src.integrations.agent_skills.rust_contract import load_skill_runtime_contract
 
 
 class SkillRuntimePyo3PolicyClientTest(unittest.TestCase):

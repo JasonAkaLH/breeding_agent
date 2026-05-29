@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from src.core.coercion import coerce_truthy as truthy
+
 
 def resolve_provider_cache_capabilities(config: Mapping[str, Any]) -> dict[str, Any]:
     raw: Any = None
@@ -129,11 +131,3 @@ def _capability_flag(
         if key in config:
             return truthy(config[key])
     return default
-
-
-def truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "enabled", "supported"}
-    return bool(value)

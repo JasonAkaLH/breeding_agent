@@ -6,7 +6,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from src.integrations.codex_skills.rust_contract import load_skill_runtime_contract
+from src.integrations.agent_skills.rust_contract import load_skill_runtime_contract
 
 
 class SkillRuntimePyo3WheelBuildContractTest(unittest.TestCase):

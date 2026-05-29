@@ -52,7 +52,7 @@ LLM Planner / Replanner / capabilities API 看到最新 skill.* 能力
 ## 3. 非目标
 
 - 不设计 Skill 市场、权限审批后台、多人发布流程或版本回滚 UI。
-- 不把用户级 `~/.codex/skills` 默认公开给业务 Planner。
+- 不把用户级 `~/用户级本地 Skills 目录` 默认公开给业务 Planner。
 - 不让 Planner 直接输出脚本路径、shell 命令、本地文件路径或 arbitrary tool call。
 - 不在每一轮普通消息、每一个 token 或每一次 SSE 事件里重复扫描 Skill。
 - 不要求前端“点击新建对话”立即调用后端创建 conversation；后端应以首次任务提交作为可靠边界。
@@ -228,7 +228,7 @@ Skill 刷新必须以“构建新 bundle → 校验 → 原子激活”的顺序
 Skill 热部署不得改变既有安全边界：
 
 - 默认只公开仓库项目级 `skill/` 下的 Skill。
-- 用户级 `~/.codex/skills` 默认只可被主代理内部 matcher 使用，不进入业务 public capability pool。
+- 用户级 `~/用户级本地 Skills 目录` 默认只可被主代理内部 matcher 使用，不进入业务 public capability pool。
 - Planner 只能选择已注册 `skill.*` capability，不能指定脚本路径、运行命令、root 路径或 forced skill metadata。
 - 用户请求 metadata 中伪造的 `forced_skill_*` 字段仍必须被执行层剥离。
 - 公开 Skill 脚本 runtime 仍只允许当前受支持 runtime；不因热部署扩大为任意 shell。

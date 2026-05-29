@@ -9,8 +9,8 @@ from pathlib import Path
 
 from src.capabilities.skill_tool import SkillExecutor
 from src.core.contracts import CapabilityExecutionRequest
-from src.integrations.codex_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
-from src.integrations.codex_skills import SkillRuntimeState
+from src.integrations.agent_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
+from src.integrations.agent_skills import SkillRuntimeState
 
 
 class MiniBreedstatRcbdSkillCompatibilityTest(unittest.TestCase):

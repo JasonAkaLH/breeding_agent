@@ -9,8 +9,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from src.integrations.codex_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
-from src.integrations.codex_skills.output_files import collect_skill_output_files
+from src.integrations.agent_skills import SkillCatalog, SkillScriptRunner, match_skills, parse_skill_file
+from src.integrations.agent_skills.output_files import collect_skill_output_files
 
 
 SAMPLE_CSV = """loc_id,rep_num,entry_id,ped_id,trait,value,check_type,ranges,pass,value_trend

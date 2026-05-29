@@ -7,8 +7,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from src.integrations.codex_skills import SkillScriptRunner, parse_skill_file
-from src.integrations.codex_skills.output_files import collect_skill_output_files, create_zip_from_collected_files
+from src.integrations.agent_skills import SkillScriptRunner, parse_skill_file
+from src.integrations.agent_skills.output_files import collect_skill_output_files, create_zip_from_collected_files
 
 
 class SkillOutputFileCollectionTest(unittest.TestCase):

@@ -9,8 +9,8 @@
 
 1. 主代理匹配到 Skill 时，prompt 必须使用 public Skill profile，禁止注入 `match.manifest.body`。当前 legacy prompt 仍在 Skill match block 拼接 `match.manifest.body`（`src/capabilities/main_agent/prompt_builder.py:63-73`），string envelope 的 tool result segment 也仍拼入 `match.manifest.body`（`src/capabilities/main_agent/prompt_envelope_builder.py:411-418`）。
 2. PromptEnvelope 要形成四层工具信息：`stable_tool_rules`、`selected_public_tool_profiles`、`tool_input_schema`、`required_tool_results_and_artifacts`。核心 renderer 已支持 `tool_profile` / `tool_schema` security role（`src/orchestration/prompt_envelope.py:18-28`），P4 只需在主代理 envelope 装配层接入。
-3. 必须复用 `build_public_skill_profile` 的 sanitizer，不复制不一致 allowlist。该函数已明确只从 frontmatter / `public_usage` allowlist 生成 profile，不读取 `manifest.body` 或 runtime/script 字段（`src/integrations/codex_skills/public_profile.py:90-114`）。
-4. 公开档案需足够回答用户“需要什么数据、格式、字段、示例如何填写”，因此需要补强 inputs/outputs schema 投影，并保留参数名、类型、必填、aliases、patterns/enum/default、public_usage examples 等用户可见信息（现有参数投影见 `src/integrations/codex_skills/public_profile.py:117-138`）。
+3. 必须复用 `build_public_skill_profile` 的 sanitizer，不复制不一致 allowlist。该函数已明确只从 frontmatter / `public_usage` allowlist 生成 profile，不读取 `manifest.body` 或 runtime/script 字段（`src/integrations/agent_skills/public_profile.py:90-114`）。
+4. 公开档案需足够回答用户“需要什么数据、格式、字段、示例如何填写”，因此需要补强 inputs/outputs schema 投影，并保留参数名、类型、必填、aliases、patterns/enum/default、public_usage examples 等用户可见信息（现有参数投影见 `src/integrations/agent_skills/public_profile.py:117-138`）。
 5. string 模式 P2 guard 要解除：当前 `MAF_PROMPT_ENVELOPE_MODE=string` 且存在 `skill_matches` 时会 fallback 到 legacy 并记录 `skill_match_requires_p4_public_profile`（`src/capabilities/main_agent/prompt_envelope_builder.py:253-263`）；P4 完成后应发送 string envelope 且仍不泄漏内部信息。
 6. tool result segment 必须保留 download_url、missing/error/diagnostics 等事实，同时去除 script path、entrypoint、handler、runtime、local path、raw artifact content 等面向内部的字段。现有 dependency/artifact sanitizer 已保留平台 `/api/v1/artifacts/.../download` 并丢弃 raw path/content（`src/capabilities/main_agent/prompt_builder.py:169-204`），但 script results 仍直接 JSON dump（`src/capabilities/main_agent/prompt_builder.py:73-74`）。
 7. 现有测试有意锁定旧风险，需要在 P4 反转：`test_phase_zero_documents_current_skill_manifest_body_exposure_risk` 断言 manifest body 暴露（`tests/capabilities/main_agent/test_conversation_memory_prompt.py:87-99`），string+skill guard 测试断言 fallback（`tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py:585-634`），matched skill body 测试断言 body 注入（`tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py:747-783`）。
@@ -36,11 +36,11 @@
 - 修改 `tests/capabilities/main_agent/test_main_agent_workflow_and_executor.py`：
   - 将 string+skill guard 测试改为 string prompt 正常发送。
   - 将 `test_prompt_includes_matched_skill_body` 改为 “matched skill prompt uses public profile”。
-- 扩展 `tests/integrations/codex_skills/test_public_skill_profile.py`：覆盖 inputs/outputs schema 的公开投影和敏感字段拒绝。
+- 扩展 `tests/integrations/agent_skills/test_public_skill_profile.py`：覆盖 inputs/outputs schema 的公开投影和敏感字段拒绝。
 
 ### CP-1 — 扩展 public profile 一处 sanitizer
 
-- 在 `src/integrations/codex_skills/public_profile.py` 内补强 `_io_contract_payload`：读取 `SkillIOContract.schema` 的公开字段（例如 required/files/schema/properties/columns/fields/formats/examples），继续复用 `_sanitize_public_value` 与 forbidden key/text denylist。
+- 在 `src/integrations/agent_skills/public_profile.py` 内补强 `_io_contract_payload`：读取 `SkillIOContract.schema` 的公开字段（例如 required/files/schema/properties/columns/fields/formats/examples），继续复用 `_sanitize_public_value` 与 forbidden key/text denylist。
 - 如需补充 tool schema 投影 helper，应放在 public_profile 同模块，保证主代理与软绑定共用同一安全口径。
 
 ### CP-2 — legacy prompt 使用 public profile 与安全 tool result 投影
@@ -66,7 +66,7 @@
 - 运行目标测试与相关分层回归。
 - 由 architect 复核 prompt/audit 安全、segment ordering、下载事实保留。
 - 对本轮变更文件执行 ai-slop-cleaner 范围内的简化/一致性检查，随后重新运行回归。
-- 写入 Ralph completion audit、更新 Codex goal complete、按 Lore protocol 提交 git。
+- 写入 Ralph completion audit、更新 Agent goal complete、按 Lore protocol 提交 git。
 
 ## 4. RALPLAN-DR Summary
 
@@ -118,12 +118,12 @@
 ## 6. Verification Steps
 
 ```bash
-conda run -n multi_agent python -m unittest tests.integrations.codex_skills.test_public_skill_profile
+conda run -n multi_agent python -m unittest tests.integrations.agent_skills.test_public_skill_profile
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_conversation_memory_prompt
 conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_main_agent_workflow_and_executor
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
-conda run -n multi_agent python -m unittest discover -s tests/integrations/codex_skills -p 'test_*.py'
-python -m compileall src/capabilities/main_agent src/integrations/codex_skills
+conda run -n multi_agent python -m unittest discover -s tests/integrations/agent_skills -p 'test_*.py'
+python -m compileall src/capabilities/main_agent src/integrations/agent_skills
 ```
 
 License Requirement：本计划不新增/升级依赖，不触发 `native/`、`Cargo.lock`、`native/deny.toml` 或供应链策略变更；最终报告记录“无依赖/许可变更，未触发 cargo-deny 风险”。

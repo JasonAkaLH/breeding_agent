@@ -11,12 +11,12 @@
 外部参考：
 
 - Claude Code 支持用户通过 `/skill-name` 直接调用 skill；skills 可由 `SKILL.md` 定义，并按需加载完整内容。
-- OpenAI Codex Agent Skills 支持显式调用和隐式匹配；CLI / IDE 中可用 `/skills` 或 `$` mention 选择 skill，Codex 也可在任务匹配 description 时隐式使用 skill。
+- OpenAI Agent Skills 支持显式调用和隐式匹配；CLI / IDE 中可用 `/skills` 或 `$` mention 选择 skill，Agent 也可在任务匹配 description 时隐式使用 skill。
 
 参考链接：
 
 - https://code.claude.com/docs/en/slash-commands
-- https://developers.openai.com/codex/skills
+- https://developers.openai.com/agent/skills
 
 ## 目标
 
