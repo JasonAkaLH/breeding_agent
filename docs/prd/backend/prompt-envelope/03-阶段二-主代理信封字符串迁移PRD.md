@@ -35,7 +35,7 @@
 | P2-FR-1 | 必须提供可测试 rendered seam。 | 有 `build_main_agent_rendered_prompt(...) -> RenderedPrompt` 或等价函数，可直接断言 segments/audit。 |
 | P2-FR-2 | `off` 模式必须保持旧行为。 | 旧主代理 prompt 顺序/关键内容测试不变。 |
 | P2-FR-3 | `shadow` 模式不得改变发送给 LLM 的 prompt。 | fake stream generator 收到旧 prompt；audit-only event 包含 envelope audit。 |
-| P2-FR-4 | `string` 模式必须发送 envelope-to-string prompt。 | fake stream generator 收到新顺序 prompt；current user 与 final guard 接近末尾。 |
+| P2-FR-4 | `string` 模式必须发送 envelope-to-string prompt。 | fake stream generator 收到新顺序 prompt；current user 与 final guard 接近末尾；最终发送前通过 75% input budget preflight。 |
 | P2-FR-5 | 文件下载硬约束必须保留。 | string 模式 prompt 仍禁止 `sandbox:/mnt/data`、`file://`、`outputs/...`，并只允许平台 download_url。 |
 | P2-FR-6 | audit event 不影响 SSE。 | 前端可见 `main_agent.output_delta` / `main_agent.output_final` 语义不变。 |
 | P2-FR-7 | `string` 生产放量必须有 Skill 安全门禁。 | 无 Skill match 的主代理回答可独立灰度；含 Skill match / `/skill` 软绑定的 `string` 流量必须等阶段四证明 public profile 不泄漏内部结构后才能放量。 |
@@ -52,7 +52,7 @@
 1. 在阶段一核心模型基础上新增主代理 builder。
 2. 改造 `build_main_agent_prompt` 为兼容包装：`off` 走旧逻辑，`shadow/string` 走 envelope seam。
 3. 在 `MainAgentRespondCapability.execute` 收集 rendered audit 并写入 audit-only event 或扩展 `main_agent.llm_call` payload。
-4. 更新主代理 prompt 测试，覆盖 `off`、`shadow`、`string`。
+4. 更新主代理 prompt 测试，覆盖 `off`、`shadow`、`string` 与 `string` 模式 final input preflight。
 5. 跑 API/main_agent targeted tests，确认 streaming completion-only 行为不变。
 6. 增加含 Skill match 的 mode guard 测试，证明 P4 之前不会把未脱敏 Skill body 经 `string` 送入生产 LLM 调用。
 
@@ -62,6 +62,7 @@
 - `conda run -n multi_agent python -m unittest tests.capabilities.main_agent.test_main_agent_workflow_and_executor` 通过。
 - `conda run -n multi_agent python -m unittest tests.api.test_main_agent_llm` 通过或等价 API 回归通过。
 - shadow 模式不改变实际 prompt，有测试证据。
+- string 模式最终输入不超过 `floor(trim_max_tokens * 0.75)`，有测试证据。
 - 含 Skill match / `/skill` 软绑定的 `string` 生产放量被 guard 阻止或显式依赖 P4 安全完成证据。
 - License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 

@@ -43,8 +43,8 @@
 - `MAF_PROMPT_ENVELOPE_MODE=off` 必须始终可回滚到旧 prompt 路径。
 - `shadow` 模式只允许增加 audit，不得改变实际发送给 LLM 的 prompt。
 - 稳定 system / tool rules 是 cacheable prefix；task_id、conversation_id、username、当前用户问题、history、artifact、dependency result 不得进入 stable prefix。
-- 历史预算必须按 `trim_max_tokens - required_non_history_tokens - safety_margin` 反算，不得继续把 `trim_max_tokens * 0.75` 当最终历史预算；默认精确/可信 token 估算 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`。
-- 必保 segment 超限必须 fail closed，不得截断系统规则、工具规则、当前用户请求或最终安全 guard。
+- 最终发送给 LLM 的输入 token 预算默认固定为 `final_input_token_budget=floor(trim_max_tokens * 0.75)`；剩余 25% 预留给可见输出、thinking / reasoning、provider message overhead 与安全余量。历史预算必须按 `final_input_token_budget - required_non_history_tokens - safety_margin` 反算，不得继续把 `trim_max_tokens * 0.75` 当最终历史预算；默认精确/可信 token 估算 margin 为 `max(1024, floor(trim_max_tokens * 0.01))`，fallback 估算 margin 为 `max(2048, floor(trim_max_tokens * 0.02))`。
+- 最终 render 后必须执行 final token preflight；首次 `final_input_tokens` 超过 `final_input_token_budget` 时，只允许执行一次 `bulk_conversation_history` 历史压缩重试并重渲染，再做第二次 final token preflight；第二次仍超过预算必须 fail closed。必保 segment 超出 75% 最终输入预算也必须 fail closed，不得截断系统规则、工具规则、当前用户请求或最终安全 guard。
 - Skill public profile 只允许使用用户可见信息；不得暴露脚本路径、handler、runtime、sidecar、内部目录、配置、DSN、token 或 secret。
 - Prompt audit 只记录 hash、token、segment name、trim reason、fallback reason 和 role fallback；不得记录 raw prompt 或 raw artifact content。
 - 前端 SSE / completion 语义保持兼容：`main_agent.output_delta`、`main_agent.output_final` 不因 audit 扩展而改变。

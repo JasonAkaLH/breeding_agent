@@ -31,9 +31,11 @@ from src.orchestration.answer_roles import (
     response_role_from_metadata,
 )
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
+from src.orchestration.prompt_envelope import PromptEnvelopeRenderError
 
 from .helpers import StreamGenerator, TransientEventPublisher, iter_stream_events, make_event, make_text_artifact
-from .prompt_builder import build_artifact_context, build_dependency_context, build_main_agent_prompt
+from .prompt_envelope_builder import resolve_main_agent_prompt_for_mode
+from .prompt_builder import build_artifact_context, build_dependency_context
 from .skill_output_artifacts import (
     SkillOutputArtifactManager,
 )
@@ -150,23 +152,69 @@ class MainAgentRespondCapability(CapabilityContract):
                 interrupt=missing_interrupt,
             )
 
-        prompt = build_main_agent_prompt(
-            user_message=user_message,
-            skill_matches=skill_matches,
-            artifact_context=artifact_context,
-            script_results=script_results,
-            dependency_context=dependency_context,
-            memory_context=memory_context,
-            response_role=response_role,
-            answer_scope=answer_scope,
-        )
+        model_edition = self._resolve_model_edition(request.metadata)
+        try:
+            prompt_resolution = resolve_main_agent_prompt_for_mode(
+                user_message=user_message,
+                skill_matches=skill_matches,
+                artifact_context=artifact_context,
+                script_results=script_results,
+                dependency_context=dependency_context,
+                memory_context=memory_context,
+                response_role=response_role,
+                answer_scope=answer_scope,
+                model_edition=model_edition,
+                metadata=request.metadata,
+                stream_metadata=self._stream_metadata,
+            )
+        except PromptEnvelopeRenderError as exc:
+            prompt_error_payload = self._prompt_envelope_error_payload(exc)
+            events.append(
+                make_event(
+                    request,
+                    event_type="main_agent.prompt_envelope_failed",
+                    payload=prompt_error_payload,
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload={
+                    "response_source": "prompt_envelope",
+                    "fallback_used": False,
+                    "failure_reason": "prompt_envelope_failed",
+                    "matched_skills": [match.manifest.name for match in skill_matches],
+                    "script_results": script_results,
+                    "prompt_recorded": False,
+                    **response_role_payload,
+                },
+                artifacts=tuple(script_artifacts),
+                events=tuple(events),
+                error=CapabilityExecutionError(
+                    code="main_agent_prompt_envelope_failed",
+                    message="Main agent prompt envelope rendering failed.",
+                    retriable=False,
+                    metadata=prompt_error_payload,
+                ),
+            )
+        prompt = prompt_resolution.prompt
+        if prompt_resolution.audit_payload is not None:
+            events.append(
+                make_event(
+                    request,
+                    event_type="main_agent.prompt_envelope_rendered",
+                    payload=prompt_resolution.audit_payload,
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
         thinking_enabled = self._resolve_thinking_enabled(request.metadata)
         reasoning_effort = self._resolve_reasoning_effort(request.metadata, thinking_enabled=thinking_enabled)
 
         started_at = time.monotonic()
         chunks: list[str] = []
         stream_metadata: dict[str, Any] = dict(self._stream_metadata)
-        model_edition = self._resolve_model_edition(request.metadata)
         answer_ordinal = 0
         reasoning_ordinal = 0
         answer_char_count = 0
@@ -341,6 +389,7 @@ class MainAgentRespondCapability(CapabilityContract):
                     "matched_skill_count": len(skill_matches),
                     "uploaded_artifact_count": len(artifact_context),
                     "dependency_context_count": len(dependency_context),
+                    **({"prompt_envelope": prompt_resolution.llm_call_payload} if prompt_resolution.llm_call_payload else {}),
                     **response_role_payload,
                 },
                 visibility=EventVisibility.AUDIT_ONLY,
@@ -1172,6 +1221,23 @@ class MainAgentRespondCapability(CapabilityContract):
         if cancel_source is not None:
             payload["cancel_source"] = cancel_source
         return payload
+
+    @staticmethod
+    def _prompt_envelope_error_payload(exc: PromptEnvelopeRenderError) -> dict[str, Any]:
+        safe_details = {
+            str(key): value
+            for key, value in exc.details.items()
+            if isinstance(value, str | int | float | bool) or value is None
+        }
+        return {
+            "status": "failed",
+            "stage": "prompt_envelope_render",
+            "error_code": "main_agent_prompt_envelope_failed",
+            "error_type": exc.__class__.__name__,
+            "error_reason": exc.reason,
+            "prompt_recorded": False,
+            "details": safe_details,
+        }
 
     def _cancelled_result(
         self,

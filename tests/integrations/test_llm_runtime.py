@@ -12,15 +12,15 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
-                self.calls: list[str] = []
+                self.calls: list[tuple[str, type, str, bool, str]] = []
                 FakeClient.instances.append(self)
 
             async def generate_text(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal") -> str:
-                self.calls.append(f"text:{prompt}:{thinking}:{reasoning_effort}")
+                self.calls.append(("text", type(prompt), prompt, thinking, reasoning_effort))
                 return "text-output"
 
             async def generate_text_with_thinking(self, prompt: str, *, thinking: bool = False, reasoning_effort: str = "minimal"):
-                self.calls.append(f"stream:{prompt}:{thinking}:{reasoning_effort}")
+                self.calls.append(("stream", type(prompt), prompt, thinking, reasoning_effort))
                 yield {"reasoning": "r", "answer": None}
                 yield {"reasoning": None, "answer": "a"}
 
@@ -34,7 +34,10 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, "text-output")
         self.assertEqual(events, [{"answer": None, "reasoning": "r"}, {"answer": "a", "reasoning": None}])
         self.assertEqual(len(FakeClient.instances), 1)
-        self.assertEqual(FakeClient.instances[0].calls, ["text:p1:False:max", "stream:p2:True:high"])
+        self.assertEqual(
+            FakeClient.instances[0].calls,
+            [("text", str, "p1", False, "max"), ("stream", str, "p2", True, "high")],
+        )
 
     async def test_generate_text_can_collect_stream_reasoning_when_requested(self) -> None:
         class FakeClient:

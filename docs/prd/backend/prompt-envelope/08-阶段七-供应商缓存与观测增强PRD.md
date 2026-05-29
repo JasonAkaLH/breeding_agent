@@ -17,7 +17,7 @@ PromptEnvelope 的结构化 segment 能稳定 system/tool prefix，但只有持�
 2. 增加 prefix 动态污染检测，禁止 task_id、conversation_id、username、current user、artifact、dependency result 进入 stable prefix。
 3. provider 支持 prompt cache hint 时，通过配置启用；不支持时只保留 hash 观测。
 4. 增加 prompt render metrics / audit-only event，不记录 raw prompt。
-5. 为生产灰度提供对比字段：mode、template_version、prefix hash、history budget、trim reason、role fallback。
+5. 为生产灰度提供对比字段：mode、template_version、prefix hash、final input budget、final input tokens、history budget、history compression retry、trim reason、role fallback。
 
 ## 3. 非目标
 
@@ -34,7 +34,7 @@ PromptEnvelope 的结构化 segment 能稳定 system/tool prefix，但只有持�
 | P7-FR-2 | 动态污染必须被检测。 | stable prefix segment 中出现 task_id/conversation_id/current user/artifact 等字段时测试 fail closed。 |
 | P7-FR-3 | provider cache hint 必须配置控制。 | 默认关闭；启用时只对支持 provider 生效，不支持 provider 记录 no-op。 |
 | P7-FR-4 | metrics/audit 不得含 raw prompt。 | audit-only payload 扫描不含 raw content、secret、DSN、token。 |
-| P7-FR-5 | 灰度观测字段完整。 | audit 可回答 prefix hash 是否变化、history 裁剪多少、role fallback 是否发生。 |
+| P7-FR-5 | 灰度观测字段完整。 | audit 可回答 prefix hash 是否变化、最终输入是否在 75% 预算内、是否触发唯一一次 history compression retry、history 裁剪多少、role fallback 是否发生。 |
 
 ## 5. 非功能需求
 
@@ -54,6 +54,7 @@ PromptEnvelope 的结构化 segment 能稳定 system/tool prefix，但只有持�
 ## 7. 验收标准
 
 - prefix hash determinism tests 通过。
+- prompt render metrics 包含 `final_input_token_budget`、`final_input_tokens`、`preflight_retry_count` 和 `history_compression_retry`。
 - 当前用户、history、tool result 变化不影响 stable prefix hash。
 - 动态字段污染 stable prefix 时 fail closed。
 - audit payload 不含 raw prompt / secret / DSN / token。

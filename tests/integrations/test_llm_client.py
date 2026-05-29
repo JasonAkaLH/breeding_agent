@@ -50,6 +50,11 @@ def _completion(answer: str | None) -> object:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=answer))])
 
 
+def _assert_single_user_prompt_message(testcase: unittest.TestCase, call: dict, prompt: str = "prompt") -> None:
+    testcase.assertEqual(call["messages"], [{"role": "user", "content": prompt}])
+    testcase.assertEqual([message["role"] for message in call["messages"]], ["user"])
+
+
 @contextmanager
 def _isolated_config_env():
     saved = {key: value for key, value in os.environ.items() if key.startswith(CONFIG_ENV_PREFIX)}
@@ -277,6 +282,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(call["reasoning_effort"], "max")
         self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
         self.assertTrue(call["stream"])
+        _assert_single_user_prompt_message(self, call)
 
     def test_stream_text_uses_streaming_without_thinking_for_main_agent_output(self) -> None:
         client = self.make_client()
@@ -305,6 +311,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(call["reasoning_effort"], "minimal")
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
         self.assertTrue(call["stream"])
+        _assert_single_user_prompt_message(self, call)
 
     def test_stream_text_can_enable_thinking_for_main_agent_output(self) -> None:
         client = self.make_client()
@@ -333,6 +340,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(call["reasoning_effort"], "high")
         self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
         self.assertTrue(call["stream"])
+        _assert_single_user_prompt_message(self, call)
 
     def test_generate_text_uses_non_streaming_completion_for_structured_tasks(self) -> None:
         client = self.make_client()
@@ -346,6 +354,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertFalse(call["stream"])
         self.assertEqual(call["reasoning_effort"], "minimal")
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
+        _assert_single_user_prompt_message(self, call)
 
     def test_generate_text_defaults_to_minimal_reasoning_without_thinking(self) -> None:
         client = self.make_client()
@@ -359,6 +368,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertFalse(call["stream"])
         self.assertEqual(call["reasoning_effort"], "minimal")
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
+        _assert_single_user_prompt_message(self, call)
 
     def test_safe_metadata_excludes_secrets_and_raw_endpoint(self) -> None:
         client = self.make_client()

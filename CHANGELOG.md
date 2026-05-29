@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- Prompt Envelope 阶段二主代理信封字符串迁移已落地：新增主代理 `prompt_envelope_builder` rendered seam、`MAF_PROMPT_ENVELOPE_MODE=off|shadow|string` 解析、shadow/string audit-only event、string envelope-to-string 发送路径、75% final input preflight 接入与 P4 前 Skill match string 放量 guard；默认 off 保持旧 prompt / SSE 行为。
+- Prompt Envelope 阶段二主代理信封字符串迁移实施计划已落入 `.omx/plans/prd-20260529-prompt-envelope-p2-main-agent-string.md`：按 P2 PRD 拆分 rendered seam、`off|shadow|string` 模式、主代理 audit-only event、75% final input preflight、文件下载硬约束保留与 Skill string 放量 guard 的实现和验证步骤。
+- Prompt Envelope 阶段一核心模型与渲染器已落地：新增 standalone `src/orchestration/prompt_envelope.py`，覆盖 PromptEnvelope / PromptSegment / RenderAudit 数据模型、确定性 segment 排序、75% final input budget、trusted/fallback safety margin、动态 bulk history budget、required fail-closed、flexible/history 裁剪、cacheable prefix hash、no-raw audit 与 final token preflight 一次历史压缩重试；暂未接入主代理生产路径或 LLMClient messages-native。
+- Prompt Envelope 阶段一核心模型与渲染器实施计划已落入 `.omx/plans/prd-20260529-prompt-envelope-p1-core-renderer.md`：按阶段一 PRD 拆分 PromptEnvelope 数据模型、确定性排序、75% final input budget、动态 history budget、裁剪策略、prefix hash、no-raw audit 与 final token preflight / 一次历史压缩重试的实现与验证步骤。
+- Prompt Envelope 阶段零测试基线已按计划实施：新增/扩展 tests-only 回归锁定主代理 prompt 相对顺序与下载安全文案、conversation memory 当前静态 75% 预算、Skill `manifest.body` 暴露风险、LLMClient 单 user message provider 形态与 SharedLLMRuntime 字符串转发；未修改生产 runtime。
+- Prompt Envelope 阶段零测试基线实施计划已落入 `.omx/plans/prd-20260529-prompt-envelope-p0-baseline.md`：按阶段零 PRD 拆分主代理 prompt 相对顺序、下载安全文案、conversation memory 静态 75% 预算、Skill `manifest.body` 暴露风险、LLMClient 单 user message 与 SharedLLMRuntime 字符串转发的测试-only 实施步骤，并明确不修改生产 runtime。
+- Prompt Envelope PRD 预算口径补齐：最终发送给 LLM 的输入 token 默认限制为 `floor(trim_max_tokens * 0.75)`，剩余 25% 预留给输出、thinking / reasoning、provider overhead 与安全余量；历史预算改为在 75% 输入预算内扣除 non-history 与 safety margin 后反算，并要求 final token preflight / audit 记录 `final_input_token_budget`、`final_input_tokens`、preflight retry 与唯一一次 history compression retry，二次 preflight 仍失败必须 fail closed。
 - Prompt Envelope 分步 PRD 完成目录级 document-perfectization 复审：补齐目录级置信标准、依赖与集成点矩阵、token safety margin 默认规则、P2 `string` + Skill 脱敏后置门禁、阶段零禁止默认红测试、P3 已接受 interrupt answer / 上传 artifact metadata 的可信上下文优先级，以及 messages-native provider role capability 默认 fallback 口径。
 - Interrupt 多轮补充答案 resume 现在会合并同一任务已接受的历史 interrupt answer payload 与上传 artifact metadata：第二次补充标量参数时仍能复用第一次上传的文件上下文，避免 Skill 因缺少早前上传而失败；新增 API 回归覆盖“先上传材料、再补列数”的多缺参链路。
 - 大语言模型提示词信封父总纲 PRD 已迁入 `docs/prd/backend/prompt-envelope/00-大语言模型提示词信封与缓存友好上下文组装总纲PRD.md`，并同步更新分步 PRD、索引和历史记录中的引用路径。
