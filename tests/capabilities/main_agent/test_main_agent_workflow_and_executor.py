@@ -582,20 +582,39 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(prompt_event.payload["final_input_tokens"], prompt_event.payload["final_input_token_budget"])
         self.assertNotIn("string 用户问题", str(prompt_event.payload))
 
-    async def test_prompt_envelope_string_with_skill_match_falls_back_to_legacy_prompt_and_records_guard(self) -> None:
+    async def test_prompt_envelope_string_with_skill_match_sends_public_profile_segments(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_dir = Path(tmpdir) / "report"
             skill_dir.mkdir()
             (skill_dir / "SKILL.md").write_text(
                 """---
 name: report-writer
+capability_id: skill.report_writer
+display_name: 周报生成公开档案
 description: 生成周报
 triggers:
   - 周报
+public_usage:
+  overview: 公开周报用法说明。
+  input_formats:
+    - name: report_notes
+      description: 用户提供的周报要点、日期范围和已完成工作。
+  examples:
+    - /report-writer 根据这些要点生成周报
+parameters:
+  report_notes:
+    type: string
+    required: true
+    aliases: [周报要点, report_notes]
+scripts:
+  - name: internal_report
+    path: scripts/internal_report.py
+    runtime: python
 ---
 
 # Report Writer
 runtime: python_subprocess
+handler: internal.ReportHandler
 scripts/internal_report.py
 """,
                 encoding="utf-8",
@@ -624,12 +643,21 @@ scripts/internal_report.py
                     )
                 )
 
-        self.assertIn("runtime: python_subprocess", prompts[0])
-        self.assertNotIn("# 主代理稳定系统契约", prompts[0])
+        self.assertIn("# 主代理稳定系统契约", prompts[0])
+        self.assertIn("# 已选择工具公开档案", prompts[0])
+        self.assertIn("# 工具输入 schema", prompts[0])
+        self.assertIn("skill.report_writer", prompts[0])
+        self.assertIn("公开周报用法说明", prompts[0])
+        self.assertIn("report_notes", prompts[0])
+        self.assertNotIn("runtime: python_subprocess", prompts[0])
+        self.assertNotIn("scripts/internal_report.py", prompts[0])
+        self.assertNotIn("internal.ReportHandler", prompts[0])
         prompt_event = next(event for event in result.events if event.event_type == "main_agent.prompt_envelope_rendered")
         self.assertEqual(prompt_event.payload["mode"], "string")
-        self.assertEqual(prompt_event.payload["effective_mode"], "off")
-        self.assertEqual(prompt_event.payload["guard_reason"], "skill_match_requires_p4_public_profile")
+        self.assertEqual(prompt_event.payload["effective_mode"], "string")
+        self.assertIsNone(prompt_event.payload["guard_reason"])
+        self.assertIn("selected_public_tool_profiles", [segment["name"] for segment in prompt_event.payload["segments"]])
+        self.assertIn("tool_input_schema", [segment["name"] for segment in prompt_event.payload["segments"]])
         self.assertNotIn("runtime: python_subprocess", str(prompt_event.payload))
         self.assertNotIn("scripts/internal_report.py", str(prompt_event.payload))
 
@@ -744,16 +772,22 @@ scripts/internal_report.py
         self.assertNotIn("https://example.test/v1", str(fallback_event.payload))
         self.assertNotIn("不要把 prompt 泄露到 audit", str(fallback_event.payload))
 
-    async def test_prompt_includes_matched_skill_body(self) -> None:
+    async def test_prompt_includes_matched_skill_public_profile_without_raw_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_dir = Path(tmpdir) / "report"
             skill_dir.mkdir()
             (skill_dir / "SKILL.md").write_text(
                 """---
 name: report-writer
+capability_id: skill.report_writer
+display_name: 周报生成公开档案
 description: 生成周报
 triggers:
   - 周报
+public_usage:
+  overview: 公开周报格式说明。
+  examples:
+    - /report-writer 生成本周进展周报
 ---
 
 # Report Writer
@@ -780,7 +814,10 @@ triggers:
             )
 
         self.assertEqual(result.output_payload["matched_skills"], ["report-writer"])
-        self.assertIn("请使用项目汇报格式", prompts[0])
+        self.assertIn("skill.report_writer", prompts[0])
+        self.assertIn("周报生成公开档案", prompts[0])
+        self.assertIn("公开周报格式说明", prompts[0])
+        self.assertNotIn("请使用项目汇报格式", prompts[0])
 
     async def test_executor_suppresses_auto_skill_matching_when_metadata_disables_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1606,9 +1643,15 @@ outputs:
             (skill_dir / "SKILL.md").write_text(
                 """---
 name: mini-breedstat-rcbd
+capability_id: skill.mini_breedstat_rcbd
+display_name: RCBD 公开 Skill
 description: 生成 RCBD 随机区组设计
 triggers:
   - 完全不会出现在问题里的触发词
+public_usage:
+  overview: 公开说明：用于生成随机区组设计。
+  examples:
+    - /mini-breedstat-rcbd 上传材料表并生成 RCBD
 ---
 
 # RCBD
@@ -1638,7 +1681,10 @@ triggers:
             )
 
         self.assertEqual(result.output_payload["matched_skills"], ["mini-breedstat-rcbd"])
-        self.assertIn("请使用随机区组设计 Skill", prompts[0])
+        self.assertIn("skill.mini_breedstat_rcbd", prompts[0])
+        self.assertIn("RCBD 公开 Skill", prompts[0])
+        self.assertIn("公开说明：用于生成随机区组设计", prompts[0])
+        self.assertNotIn("请使用随机区组设计 Skill", prompts[0])
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.forced_selected", event_types)
         self.assertNotIn("skill.match_fallback", event_types)
@@ -1699,9 +1745,15 @@ triggers:
                 textwrap.dedent(
                     """---
 name: delegated-skill
+capability_id: skill.delegated_skill
+display_name: Delegated Skill
 description: 委托技能
 triggers:
   - 委托技能
+public_usage:
+  overview: 公开说明：委托主代理回答，不直接运行脚本。
+  examples:
+    - /delegated-skill 说明委托技能如何使用
 scripts:
   - name: should-not-run
     path: scripts/should_not_run.py
@@ -1740,6 +1792,8 @@ execution:
         self.assertNotIn("skill.script_started", event_types)
         self.assertNotIn("skill.script_completed", event_types)
         self.assertIn("Delegated Skill", seen_prompts[0])
+        self.assertIn("公开说明：委托主代理回答", seen_prompts[0])
+        self.assertNotIn("scripts/should_not_run.py", seen_prompts[0])
         self.assertNotIn("Skill 脚本输出", seen_prompts[0])
 
 

@@ -24,15 +24,18 @@ from .prompt_builder import (
     MAIN_AGENT_SYSTEM_CONTRACT_LINES,
     _format_memory_context,
     _format_response_role,
+    build_selected_public_skill_profiles,
+    build_tool_input_schemas_from_profiles,
     build_main_agent_prompt,
+    sanitize_artifact_context_for_prompt,
+    sanitize_script_results_for_prompt,
 )
 
 PromptEnvelopeMode = Literal["off", "shadow", "string"]
 
 _ENV_MODE_KEY = "MAF_PROMPT_ENVELOPE_MODE"
 _TEMPLATE_ID = "main_agent.respond.prompt_envelope"
-_TEMPLATE_VERSION = "p2-string-v1"
-_SKILL_STRING_GUARD_REASON = "skill_match_requires_p4_public_profile"
+_TEMPLATE_VERSION = "p4-tool-profile-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +126,44 @@ def build_main_agent_prompt_envelope(
         ),
     ]
 
+    public_skill_profiles = build_selected_public_skill_profiles(skill_matches)
+    if public_skill_profiles:
+        segments.append(
+            PromptSegment(
+                name="selected_public_tool_profiles",
+                role="context",
+                content=(
+                    "# 已选择工具公开档案\n"
+                    "以下内容只来自 Skill frontmatter 的公开档案；不得推断或暴露内部脚本、handler、runtime、路径、配置或密钥。\n"
+                    + json.dumps(public_skill_profiles, ensure_ascii=False, indent=2, default=str)
+                ),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="tool_profile",
+            )
+        )
+
+    tool_input_schemas = build_tool_input_schemas_from_profiles(public_skill_profiles)
+    if tool_input_schemas:
+        segments.append(
+            PromptSegment(
+                name="tool_input_schema",
+                role="context",
+                content=(
+                    "# 工具输入 schema\n"
+                    "以下 schema 只描述用户可见输入参数、格式、别名、值域和缺参处理标准；不包含内部入口或执行结构。\n"
+                    + json.dumps(tool_input_schemas, ensure_ascii=False, indent=2, default=str)
+                ),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="tool_schema",
+            )
+        )
+
     memory_payload = sanitize_memory_prompt_payload(memory_context or {})
     if memory_payload:
         memory_content, memory_metadata = _format_memory_history_segment(memory_payload)
@@ -141,10 +182,9 @@ def build_main_agent_prompt_envelope(
         )
 
     required_context = _format_required_tool_results_and_artifacts(
-        skill_matches=skill_matches,
-        artifact_context=artifact_context,
+        artifact_context=sanitize_artifact_context_for_prompt(artifact_context),
         dependency_context=dependency_context or [],
-        script_results=script_results,
+        script_results=sanitize_script_results_for_prompt(script_results),
     )
     if required_context:
         segments.append(
@@ -248,21 +288,6 @@ def resolve_main_agent_prompt_for_mode(
             rendered=None,
             audit_payload=None,
             llm_call_payload=None,
-        )
-
-    if requested_mode == "string" and skill_matches:
-        audit_payload = _guard_audit_payload(
-            mode=requested_mode,
-            guard_reason=_SKILL_STRING_GUARD_REASON,
-            skill_match_count=len(skill_matches),
-        )
-        return MainAgentPromptResolution(
-            prompt=legacy_prompt,
-            mode=requested_mode,
-            effective_mode="off",
-            rendered=None,
-            audit_payload=audit_payload,
-            llm_call_payload=_llm_call_payload_from_audit(audit_payload),
         )
 
     trim_max_tokens = resolve_main_agent_trim_max_tokens(
@@ -394,7 +419,6 @@ def prompt_envelope_audit_payload(
 
 def _format_required_tool_results_and_artifacts(
     *,
-    skill_matches: list[SkillMatch],
     artifact_context: list[dict[str, Any]],
     dependency_context: list[dict[str, Any]],
     script_results: list[dict[str, Any]],
@@ -408,16 +432,6 @@ def _format_required_tool_results_and_artifacts(
             "这些内容来自自动 DAG 中已经完成的能力节点。请优先基于这些事实回答用户，并把技术性字段整理成自然语言。\n"
             + json.dumps(dependency_context, ensure_ascii=False, indent=2, default=str)
         )
-    if skill_matches:
-        skill_blocks = []
-        for match in skill_matches:
-            skill_blocks.append(
-                f"### Skill：{match.manifest.name}\n"
-                f"描述：{match.manifest.description}\n"
-                f"匹配原因：{match.reason}\n\n"
-                f"{match.manifest.body}"
-            )
-        sections.append("## 已匹配 Skill 指令\n" + "\n\n".join(skill_blocks))
     if script_results:
         sections.append("## Skill 脚本输出\n" + json.dumps(script_results, ensure_ascii=False, indent=2, default=str))
     if not sections:
@@ -481,24 +495,6 @@ def _format_memory_history_segment(memory_payload: Mapping[str, Any]) -> tuple[s
         metadata["candidate_priority_min"] = min(priorities)
         metadata["candidate_priority_max"] = max(priorities)
     return "\n\n".join(sections), metadata
-
-
-def _guard_audit_payload(
-    *,
-    mode: PromptEnvelopeMode,
-    guard_reason: str,
-    skill_match_count: int,
-) -> dict[str, Any]:
-    return {
-        "status": "guarded",
-        "mode": mode,
-        "effective_mode": "off",
-        "guard_reason": guard_reason,
-        "template_id": _TEMPLATE_ID,
-        "template_version": _TEMPLATE_VERSION,
-        "skill_match_count": skill_match_count,
-        "segments": [],
-    }
 
 
 def _render_error_audit_payload(

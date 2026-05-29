@@ -106,6 +106,99 @@ class PublicSkillProfileTest(unittest.TestCase):
                 for token in forbidden:
                     self.assertNotIn(token, payload)
 
+    def test_profile_projects_user_visible_io_schema_without_internal_runtime_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "schema-demo"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: schema-demo
+                    capability_id: skill.schema_demo
+                    display_name: Schema Demo
+                    description: Explains public input schema.
+                    triggers:
+                      - schema demo
+                      - scripts/trigger_leak.py
+                    public_usage:
+                      overview: Public schema overview.
+                      input_formats:
+                        - name: material_data
+                          description: CSV or JSON material table.
+                          example_columns: [material_id, variety_name]
+                      examples:
+                        - /schema-demo upload CSV
+                    parameters:
+                      material_data:
+                        type: artifact
+                        required: true
+                        source: artifact
+                        aliases: [materials, 材料清单, scripts/alias_leak.py]
+                      design:
+                        type: string
+                        required: true
+                        aliases: [design, 设计类型, handler_alias_sentinel]
+                        patterns:
+                          - '(rcbd|RCBD|随机区组)'
+                          - 'runtime_pattern_sentinel'
+                        default: rcbd
+                        enum: [rcbd, runtime_enum_sentinel]
+                      run_id:
+                        type: string
+                        required: false
+                        default: token-secret-from-default
+                    inputs:
+                      required: [material_data]
+                      files:
+                        - extensions: [.csv, .json]
+                          mime_types: [text/csv, application/json]
+                      runtime_path: scripts/hidden.py
+                    outputs:
+                      required: [answer]
+                      files:
+                        - extensions: [.csv]
+                          mime_types: [text/csv]
+                    scripts:
+                      - name: run_internal
+                        path: scripts/run_internal.py
+                        runtime: python
+                    ---
+                    # Internal body
+                    scripts/run_internal.py handler runtime token secret
+                    """
+                ),
+                encoding="utf-8",
+            )
+            manifest = parse_skill_file(skill_dir / "SKILL.md")
+
+        profile = build_public_skill_profile(manifest, capability_id="skill.schema_demo").to_dict()
+        serialized = json.dumps(profile, ensure_ascii=False, sort_keys=True)
+
+        self.assertIn("skill.schema_demo", serialized)
+        self.assertIn("Schema Demo", serialized)
+        self.assertIn("material_data", serialized)
+        self.assertIn("materials", serialized)
+        self.assertIn("随机区组", serialized)
+        self.assertIn(".csv", serialized)
+        self.assertIn("application/json", serialized)
+        self.assertIn("Public schema overview", serialized)
+        for forbidden in (
+            "scripts/run_internal.py",
+            "scripts/trigger_leak.py",
+            "scripts/alias_leak.py",
+            "handler_alias_sentinel",
+            "runtime_pattern_sentinel",
+            "runtime_enum_sentinel",
+            "token-secret-from-default",
+            "handler",
+            "runtime_path",
+            "runtime",
+            "token",
+            "secret",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
 
 if __name__ == "__main__":
     unittest.main()
