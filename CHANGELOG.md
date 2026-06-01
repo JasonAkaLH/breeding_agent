@@ -8,6 +8,9 @@
 
 ## [Unreleased]
 
+- Docker 镜像发布版本提升到 `0.1.7`：发布表格上传编码兼容、表头规范化、Excel sheet selection interrupt/resume、前端 sheet 选择 UI、API 文档行为对齐与取消晚返回竞态修复；backend / frontend 本轮均需使用 `0.1.7` 镜像。License Requirement：新增 Python 依赖 license 已检查为 openpyxl MIT、xlrd BSD、et-xmlfile MIT；未触及 native/Rust 依赖、Cargo.lock 或 native/deny.toml，未触发 cargo-deny 风险。
+- 任务取消晚返回竞态已收紧：orchestration 节点执行结果晚于 `task.cancelled` 返回时，不再让 completion policy 把已取消任务覆盖成 `failed`；取消 API 回归已锁定 terminal status 继续保持 `cancelled`。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+- 表格上传编码兼容与表头规范化已按分阶段 PRD 落地：上传层新增 CSV / JSON 多编码严格解码、技术性表头 / 顶层 key 清洗、prompt-safe 摘要硬上限、`.xlsx` / `.xls` spreadsheet 解析、单 sheet 规范化 CSV 执行 artifact、多 sheet `sheet_selection_required` interrupt / resume，以及前端 sheet 选择 UI 与 API 文档 / 更新日志同步；新增 `openpyxl==3.1.5`（MIT）、`xlrd==2.0.2`（BSD）、`et-xmlfile==2.0.0`（MIT）Python 依赖。License Requirement：未触及 native/Rust 依赖、Cargo.lock 或 native/deny.toml，未触发 cargo-deny 风险。
 - backend Docker 镜像发布版本提升到 `0.1.6`：发布 field-design 材料表头修复，部署口径更新为 backend `0.1.6` / frontend `0.1.6`；frontend 本轮无代码变化，继续复用已发布的 `0.1.6` 镜像。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - field-design Skill 材料表头口径已修正：`public_usage` 不再把材料清单示例列写成 `variety_name`，重新明确上传 CSV / JSON 应使用 `ped_id,hyb_check,set`，并补充回归测试防止 LLM / slash Skill 公开用法再次偏离运行脚本实际读取的 `ped_id`。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - 前端 Docker 镜像发布版本提升到 `0.1.6`：仅重打 frontend 镜像以发布 nginx `/api-doc/` 前缀反代修复，backend 继续使用 `0.1.5`；`docker_cmd.md` 同步改为 backend `0.1.5` / frontend `0.1.6` 的部署口径。

@@ -23,7 +23,26 @@ from .rust_contract import status_list as skill_runtime_status_list
 from .script_manifest import SkillScriptEntrypoint
 from .script_runner import SkillScriptError, SkillScriptRunner
 
-_SAFE_ARTIFACT_KEYS = frozenset({"artifact_id", "upload_id", "filename", "mime_type", "content_type", "size", "row_count", "columns", "preview", "summary"})
+_SAFE_ARTIFACT_KEYS = frozenset({
+    "artifact_id",
+    "upload_id",
+    "filename",
+    "original_filename",
+    "normalized_filename",
+    "mime_type",
+    "content_type",
+    "normalized_content_type",
+    "file_type",
+    "size",
+    "size_bytes",
+    "sha256",
+    "row_count",
+    "columns",
+    "preview",
+    "summary",
+    "selected_sheet",
+    "requires_sheet_selection",
+})
 _SCRIPT_ARTIFACT_KEYS = frozenset((*_SAFE_ARTIFACT_KEYS, "content", "content_base64", "encoding"))
 _BLOCKED_METADATA_KEYS = frozenset({"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"})
 

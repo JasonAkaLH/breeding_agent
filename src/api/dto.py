@@ -153,6 +153,19 @@ class UploadPreviewResponse(BaseModel):
     row_count: int | None = None
     columns: list[str] = Field(default_factory=list)
     shape: str | None = None
+    source_encoding: str | None = None
+    original_columns: list[str] = Field(default_factory=list)
+    column_normalizations: list[dict[str, Any]] = Field(default_factory=list)
+    column_count: int | None = None
+    columns_truncated: bool | None = None
+    column_normalization_count: int | None = None
+    column_normalizations_truncated: bool | None = None
+    normalized_content_type: str | None = None
+    requires_sheet_selection: bool | None = None
+    selected_sheet: str | None = None
+    excel_sheets: list[dict[str, Any]] = Field(default_factory=list)
+    excel_sheet_count: int | None = None
+    excel_sheets_truncated: bool | None = None
 
 
 class UploadFileResponse(BaseModel):

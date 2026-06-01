@@ -465,7 +465,10 @@ class OrchestrationService:
 
         latest_task = await self._storage.get_task(request.task_id)
         latest_node = await self._storage.get_task_node(task_node.node_id) or running
-        if latest_task is not None and latest_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+        if latest_task is not None and (
+            latest_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}
+            or latest_task.cancel_requested_at is not None
+        ):
             diagnostic = result.output_payload.get("stream_diagnostic") if isinstance(result.output_payload, dict) else None
             payload = {
                 "capability_id": node_plan.capability_id,
@@ -620,6 +623,13 @@ class OrchestrationService:
                         node,
                         dependency_outputs=node_outputs,
                     )
+                    refreshed_task = await self._storage.get_task(task.task_id)
+                    if refreshed_task is not None and refreshed_task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+                        return OrchestrationRunResult(
+                            task=refreshed_task,
+                            nodes=tuple(await self._storage.list_task_nodes_for_task(plan.task_id)),
+                            completion_status=refreshed_task.status.value,
+                        )
                     nodes[node.node_id] = updated
                     node_outputs[node.node_id] = output_payload
                     progress_made = True
@@ -687,6 +697,10 @@ class OrchestrationService:
 
             if runtime_replanned:
                 continue
+
+            cancellation_result = await self._cancellation_result_if_requested(task.task_id, plan)
+            if cancellation_result is not None:
+                return cancellation_result
 
             unresolved_interrupt = any(interrupt.status == "open" for interrupt in await self._storage.list_interrupts_for_task(plan.task_id))
             completion = self._completion_policy.evaluate(
@@ -813,3 +827,19 @@ class OrchestrationService:
             if completion == CompletionStatus.WAITING_FOR_INPUT or not progress_made:
                 task = await self._storage.save_task(replace(task, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive()))
                 return OrchestrationRunResult(task=task, nodes=tuple(nodes.values()), completion_status=completion.value)
+
+    async def _cancellation_result_if_requested(
+        self,
+        task_id: str,
+        plan: WorkflowPlan,
+    ) -> OrchestrationRunResult | None:
+        current_task = await self._storage.get_task(task_id)
+        if current_task is None:
+            return None
+        if current_task.status not in {TaskStatus.CANCELLING, TaskStatus.CANCELLED} and current_task.cancel_requested_at is None:
+            return None
+        return OrchestrationRunResult(
+            task=current_task,
+            nodes=tuple(await self._storage.list_task_nodes_for_task(plan.task_id)),
+            completion_status=current_task.status.value,
+        )
