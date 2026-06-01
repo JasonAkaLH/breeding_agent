@@ -57,6 +57,17 @@ class DeveloperDocsAPITest(APITestCase):
         for summary in endpoint_summaries:
             self.assertIn("典型时机：", summary)
         self.assertIn("SSE event_type 枚举", response.text)
+        event_enum_section = response.text[
+            response.text.index("SSE event_type 枚举"):response.text.index("流式持久化规则")
+        ]
+        for expected_label in (
+            "task.accepted</code>（任务接受）",
+            "task.graph_created</code>（任务图创建完成）",
+            "auth.invalidated</code>（认证失效）",
+            "mcp.tool_call_completed</code>（MCP 工具调用完成）",
+            "artifact.download_gone</code>（Artifact 下载已失效）",
+        ):
+            self.assertIn(expected_label, event_enum_section)
         for event_type in (
             "auth.invalidated",
             "task.accepted",
@@ -138,6 +149,10 @@ class DeveloperDocsAPITest(APITestCase):
             "workflow.plan_built",
         ):
             self.assertIn(event_type, response.text)
+            self.assertRegex(
+                event_enum_section,
+                rf'<code class="inline-code">{re.escape(event_type)}</code>（[^）]+）',
+            )
         self.assertNotIn("task.updated", response.text)
         self.assertIn("ConversationSummaryResponse", response.text)
         self.assertIn("username", response.text)
