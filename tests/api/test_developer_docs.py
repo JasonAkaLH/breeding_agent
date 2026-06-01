@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 
 from tests.api.support import APITestCase
@@ -51,6 +52,10 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("sandbox:/mnt/data", response.text)
         self.assertIn("/api/v1/artifacts/{artifact_id}/download", response.text)
         self.assertIn("/api/v1/tasks/{task_id}/events", response.text)
+        endpoint_summaries = re.findall(r'<div class="endpoint-summary"><div><h3>.*?</h3><p>(.*?)</p></div></div>', response.text, re.S)
+        self.assertGreaterEqual(len(endpoint_summaries), 20)
+        for summary in endpoint_summaries:
+            self.assertIn("典型时机：", summary)
         self.assertIn("SSE event_type 枚举", response.text)
         for event_type in (
             "auth.invalidated",
