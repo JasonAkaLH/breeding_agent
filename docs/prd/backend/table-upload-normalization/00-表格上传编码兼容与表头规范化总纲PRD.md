@@ -11,7 +11,7 @@
   - `docs/prd/backend/08-主代理Skill兼容与真实LLM运行时.md`
   - `docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
   - `docs/prd/backend/15-SkillExecutor实现需求PRD.md`
-  - `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`
+  - `docs/prd/backend/18-ThreadRuntime可靠性与时间旅行平台PRD.md`
   - `docs/api/api-doc.html`
 
 ## 1. 一句话结论
