@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- backend Docker 镜像发布版本提升到 `0.1.6`：发布 field-design 材料表头修复，部署口径更新为 backend `0.1.6` / frontend `0.1.6`；frontend 本轮无代码变化，继续复用已发布的 `0.1.6` 镜像。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+- field-design Skill 材料表头口径已修正：`public_usage` 不再把材料清单示例列写成 `variety_name`，重新明确上传 CSV / JSON 应使用 `ped_id,hyb_check,set`，并补充回归测试防止 LLM / slash Skill 公开用法再次偏离运行脚本实际读取的 `ped_id`。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - 前端 Docker 镜像发布版本提升到 `0.1.6`：仅重打 frontend 镜像以发布 nginx `/api-doc/` 前缀反代修复，backend 继续使用 `0.1.5`；`docker_cmd.md` 同步改为 backend `0.1.5` / frontend `0.1.6` 的部署口径。
 - Docker 前端 nginx 反代补齐 `/api-doc/` 前缀路由：修复 `/api-doc/API更新日志.md` 在前端容器内落入 SPA `index.html` fallback，导致更新日志区域显示 Vite HTML 的部署问题；新增配置回归锁定 Markdown 更新日志必须代理到后端 `/api-doc/API更新日志.md`。
 - Docker 远端启动文档与本次待发布镜像版本已提升到 `0.1.5`：`docker_cmd.md` 中 backend / frontend pull、inspect、run 与最小判别命令同步改为 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.5`。
