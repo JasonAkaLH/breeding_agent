@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Docker 远端启动命令同步到 `0.1.9`：`docker_cmd.md` 的 pull、inspect、run 与最小判别命令统一改为 backend / frontend `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.9` 部署口径，用于发布 main 分支 API 文档 event_type 与典型请求时机更新。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - API 文档各接口简介补齐“典型请求时机”：`docs/api/api-doc.html` 在 23 个 endpoint summary 中直接说明登录、会话、消息、上传、任务、SSE、interrupt、artifact 等接口通常何时调用，并新增开发者文档回归锁定每个 endpoint 简介都包含该提示。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - main 分支 API 文档补齐任务 SSE `event_type` 枚举：`docs/api/api-doc.html` 在 `/api/v1/tasks/{task_id}/events` 章节列出当前后端 / 前端任务事件客户端认可的 FRONTEND、transient、AUDIT_ONLY 与 internal 事件类型，并把示例中的伪事件 `task.updated` 改为真实 `task.accepted`；新增开发者文档回归锁定完整清单。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Docker 镜像发布版本提升到 `0.1.7`：发布表格上传编码兼容、表头规范化、Excel sheet selection interrupt/resume、前端 sheet 选择 UI、API 文档行为对齐与取消晚返回竞态修复；backend / frontend 本轮均需使用 `0.1.7` 镜像。License Requirement：新增 Python 依赖 license 已检查为 openpyxl MIT、xlrd BSD、et-xmlfile MIT；未触及 native/Rust 依赖、Cargo.lock 或 native/deny.toml，未触发 cargo-deny 风险。
