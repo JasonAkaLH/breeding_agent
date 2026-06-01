@@ -68,6 +68,16 @@ class FieldDesignSkillCompatibilityTest(unittest.TestCase):
         self.assertEqual(manifest.scripts[0].runtime, "python")
         self.assertTrue(manifest.scripts[0].auto_run)
 
+    def test_public_usage_keeps_material_header_as_ped_id(self) -> None:
+        manifest = parse_skill_file(self.skill_file)
+        public_usage = manifest.metadata.get("public_usage", {})
+        input_formats = public_usage.get("input_formats", [])
+        material_data = next(item for item in input_formats if item.get("name") == "material_data")
+
+        self.assertIn("ped_id", material_data.get("description", ""))
+        self.assertIn("ped_id", material_data.get("example_columns", []))
+        self.assertNotIn("variety_name", material_data.get("example_columns", []))
+
     def test_project_catalog_matches_field_design_queries(self) -> None:
         catalog = SkillCatalog.from_roots(["skill"])
 

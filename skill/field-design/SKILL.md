@@ -28,8 +28,8 @@ public_usage:
     - name: material_data
       required: true
       description: >-
-        CSV 或 JSON 材料清单；每行代表一个试验材料或对照材料。常见列包括材料编号、品种名称、hyb_check、set、plot_hint、备注等。
-      example_columns: [material_id, variety_name, hyb_check, set]
+        CSV 或 JSON 材料清单；每行代表一个试验材料或对照材料。常见列包括 ped_id、hyb_check、set、plot_hint、备注等。
+      example_columns: [ped_id, hyb_check, set]
       notes:
         - hyb_check 可用于标记普通材料、对照材料或杂交检查分类；具体取值应与用户数据字典保持一致。
     - name: design
