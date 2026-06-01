@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 import base64
-import csv
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from src.integrations.rust_safety_contract import normalize_storage_key, resource_limit, sha256_hex
 
+from .table_upload_normalizer import (
+    detect_table_file_type,
+    normalize_selected_spreadsheet_sheet,
+    normalize_table_upload,
+)
+from .upload_errors import UploadValidationError
 
-UploadFileType = Literal["json", "csv", "image", "pdf"]
+
+UploadFileType = Literal["json", "csv", "spreadsheet", "image", "pdf"]
 
 SUPPORTED_UPLOAD_EXTENSIONS: dict[str, UploadFileType] = {
     ".json": "json",
     ".csv": "csv",
+    ".xlsx": "spreadsheet",
+    ".xls": "spreadsheet",
     ".png": "image",
     ".jpg": "image",
     ".jpeg": "image",
@@ -29,15 +35,12 @@ SUPPORTED_UPLOAD_CONTENT_TYPES: dict[str, UploadFileType] = {
     "text/csv": "csv",
     "application/csv": "csv",
     "application/vnd.ms-excel": "csv",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "spreadsheet",
     "image/png": "image",
     "image/jpeg": "image",
     "application/pdf": "pdf",
 }
 DEFAULT_MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024
-
-
-class UploadValidationError(ValueError):
-    pass
 
 
 @dataclass(slots=True, frozen=True)
@@ -51,13 +54,20 @@ class UploadedFileRecord:
     size_bytes: int
     sha256: str
     content_bytes: bytes
+    # Execution-oriented normalized text for table uploads.  This is not the
+    # original file text; original bytes remain in ``content_bytes`` and own the
+    # sha256.
     content_text: str | None
     preview: dict[str, Any]
     created_at: datetime
     expires_at: datetime
+    normalized_content_type: str | None = None
+    normalized_filename: str | None = None
+    requires_sheet_selection: bool = False
+    selected_sheet: str | None = None
 
     def to_summary(self) -> dict[str, Any]:
-        return {
+        summary = {
             "upload_id": self.upload_id,
             "filename": self.filename,
             "content_type": self.content_type,
@@ -67,15 +77,67 @@ class UploadedFileRecord:
             "preview": dict(self.preview),
             "expires_at": self.expires_at.isoformat(),
         }
+        if self.normalized_filename:
+            summary["normalized_filename"] = self.normalized_filename
+        if self.normalized_content_type:
+            summary["normalized_content_type"] = self.normalized_content_type
+        if self.requires_sheet_selection:
+            summary["requires_sheet_selection"] = True
+        if self.selected_sheet:
+            summary["selected_sheet"] = self.selected_sheet
+        return summary
 
-    def to_skill_artifact(self) -> dict[str, Any]:
+    def to_skill_artifact(self, *, selected_sheet: str | None = None) -> dict[str, Any]:
         artifact = self.to_summary()
-        if self.content_text is not None:
-            artifact["content"] = self.content_text
+        content_text = self.content_text
+        normalized_filename = self.normalized_filename
+        normalized_content_type = self.normalized_content_type
+        selected_sheet_text = selected_sheet or self.selected_sheet
+        if self.file_type == "spreadsheet" and selected_sheet:
+            normalized = normalize_selected_spreadsheet_sheet(
+                filename=self.filename,
+                content_type=self.content_type,
+                content=self.content_bytes,
+                selected_sheet=selected_sheet,
+            )
+            content_text = normalized.normalized_content_text
+            normalized_filename = normalized.normalized_filename
+            normalized_content_type = normalized.normalized_content_type
+            selected_sheet_text = normalized.selected_sheet
+            artifact["preview"] = dict(normalized.preview)
+        if self.file_type == "spreadsheet" and self.requires_sheet_selection and selected_sheet_text is None:
+            return artifact
+        if content_text is not None:
+            artifact["content"] = content_text
+            artifact["original_filename"] = self.filename
+            artifact["normalized_filename"] = normalized_filename or self.filename
+            artifact["filename"] = normalized_filename or self.filename
+            artifact["normalized_content_type"] = normalized_content_type
+            artifact["content_type"] = normalized_content_type or self.content_type
+            if selected_sheet_text:
+                artifact["selected_sheet"] = selected_sheet_text
+            artifact.pop("requires_sheet_selection", None)
         else:
             artifact["encoding"] = "base64"
             artifact["content_base64"] = base64.b64encode(self.content_bytes).decode("ascii")
         return artifact
+
+    def sheet_selection_payload(self) -> dict[str, Any]:
+        preview = self.preview
+        return {
+            "upload_id": self.upload_id,
+            "filename": self.filename,
+            "required_upload_ids": [self.upload_id],
+            "options_by_upload_id": {
+                self.upload_id: [
+                    str(sheet.get("sheet_name"))
+                    for sheet in preview.get("excel_sheets", [])
+                    if isinstance(sheet, dict) and str(sheet.get("sheet_name") or "").strip()
+                ]
+            },
+            "labels_by_upload_id": {self.upload_id: self.filename},
+            "details_by_upload_id": {self.upload_id: list(preview.get("excel_sheets", []))},
+        }
 
 
 class InMemoryUploadStore:
@@ -109,17 +171,28 @@ class InMemoryUploadStore:
         _validate_managed_upload_key(normalized_filename)
         if len(content) > self.max_file_bytes:
             raise UploadValidationError(f"Uploaded file exceeds {self.max_file_bytes} bytes")
-        file_type = _detect_file_type(normalized_filename, content_type)
+        file_type = _detect_file_type(normalized_filename, content_type, content)
         if file_type is None:
-            raise UploadValidationError("Only JSON, CSV, PNG, JPG/JPEG, and PDF files are supported")
-        if file_type in {"json", "csv"}:
+            raise UploadValidationError("Only JSON, CSV, Excel, PNG, JPG/JPEG, and PDF files are supported")
+        normalized_content_type = None
+        normalized_content_filename = None
+        requires_sheet_selection = False
+        selected_sheet = None
+        if file_type in {"json", "csv", "spreadsheet"}:
             if len(content) > self.max_preview_bytes:
                 raise UploadValidationError(f"Uploaded file exceeds preview limit of {self.max_preview_bytes} bytes")
-            try:
-                content_text = content.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise UploadValidationError("Uploaded file must be UTF-8 encoded") from exc
-            preview = _build_text_preview(file_type, content_text)
+            normalized = normalize_table_upload(
+                filename=normalized_filename,
+                content_type=content_type,
+                content=content,
+            )
+            file_type = normalized.file_type
+            content_text = normalized.normalized_content_text
+            preview = normalized.preview
+            normalized_content_type = normalized.normalized_content_type
+            normalized_content_filename = normalized.normalized_filename
+            requires_sheet_selection = normalized.requires_sheet_selection
+            selected_sheet = normalized.selected_sheet
         else:
             content_text = None
             preview = _build_binary_preview(file_type, len(content))
@@ -139,6 +212,10 @@ class InMemoryUploadStore:
             preview=preview,
             created_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
+            normalized_content_type=normalized_content_type,
+            normalized_filename=normalized_content_filename,
+            requires_sheet_selection=requires_sheet_selection,
+            selected_sheet=selected_sheet,
         )
         self._records[record.upload_id] = record
         return record
@@ -205,56 +282,18 @@ def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _detect_file_type(filename: str, content_type: str | None) -> UploadFileType | None:
+def _detect_file_type(filename: str, content_type: str | None, content: bytes) -> UploadFileType | None:
     suffix_type = SUPPORTED_UPLOAD_EXTENSIONS.get(Path(filename).suffix.lower())
     if suffix_type:
+        if suffix_type in {"json", "csv", "spreadsheet"}:
+            return detect_table_file_type(filename, content_type, content)
         return suffix_type
+    table_type = detect_table_file_type(filename, content_type, content)
+    if table_type:
+        return table_type
     base_content_type = (content_type or "").split(";", 1)[0].strip().lower()
     return SUPPORTED_UPLOAD_CONTENT_TYPES.get(base_content_type)
 
 
-def _build_text_preview(file_type: Literal["json", "csv"], content_text: str) -> dict[str, Any]:
-    if file_type == "json":
-        return _build_json_preview(content_text)
-    return _build_csv_preview(content_text)
-
-
 def _build_binary_preview(file_type: Literal["image", "pdf"], size_bytes: int) -> dict[str, Any]:
     return {"row_count": None, "columns": [], "shape": "binary", "size_bytes": size_bytes, "file_type": file_type}
-
-
-def _build_json_preview(content_text: str) -> dict[str, Any]:
-    try:
-        value = json.loads(content_text)
-    except json.JSONDecodeError as exc:
-        raise UploadValidationError(f"Invalid JSON file: {exc}") from exc
-    if isinstance(value, list):
-        columns = _columns_from_rows(value)
-        return {"row_count": len(value), "columns": columns, "shape": "array"}
-    if isinstance(value, dict):
-        return {"row_count": 1, "columns": [str(key) for key in value.keys()], "shape": "object"}
-    raise UploadValidationError("JSON upload must be an object or an array")
-
-
-def _build_csv_preview(content_text: str) -> dict[str, Any]:
-    try:
-        reader = csv.DictReader(StringIO(content_text))
-        columns = [str(field) for field in (reader.fieldnames or [])]
-        if not columns:
-            raise UploadValidationError("CSV upload must include a header row")
-        row_count = sum(1 for _ in reader)
-    except csv.Error as exc:
-        raise UploadValidationError(f"Invalid CSV file: {exc}") from exc
-    return {"row_count": row_count, "columns": columns, "shape": "table"}
-
-
-def _columns_from_rows(value: list[Any]) -> list[str]:
-    columns: list[str] = []
-    for row in value:
-        if not isinstance(row, dict):
-            continue
-        for key in row.keys():
-            key_text = str(key)
-            if key_text not in columns:
-                columns.append(key_text)
-    return columns

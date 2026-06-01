@@ -1322,7 +1322,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '/mini-breedstat-rcbd 用这个文件做3个区组RCBD' } });
@@ -1389,7 +1389,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     await screen.findByText(/1 行/);
@@ -1839,7 +1839,7 @@ describe('App', () => {
     expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
     expect(screen.getByText('试验材料文件')).toBeInTheDocument();
     expect(screen.getByText('可直接上传文件，或回复文字后继续当前任务。')).toBeInTheDocument();
-    const uploadInput = screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件') as HTMLInputElement;
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件') as HTMLInputElement;
     expect(uploadInput).not.toBeDisabled();
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(uploadInput, { target: { files: [file] } });
@@ -1850,6 +1850,66 @@ describe('App', () => {
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', {
       material_data: { text: '', upload_ids: ['upl-1'], filenames: ['materials.csv'] },
       upload_ids: ['upl-1'],
+    }));
+  });
+
+  it('renders sheet selection interrupt and submits upload_sheet_selections only', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:sheet_selection', capability_id: 'main_agent.respond', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => waitingGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:sheet_selection',
+          question: '检测到多 sheet Excel，请选择。',
+          reason_code: 'sheet_selection_required',
+          required_fields: {
+            upload_sheet_selections: {
+              type: 'sheet_selection',
+              required_upload_ids: ['upl-book'],
+              options_by_upload_id: { 'upl-book': ['Alpha', 'Beta'] },
+              labels_by_upload_id: { 'upl-book': 'materials.xlsx' },
+            },
+          },
+          status: 'open',
+        }],
+      })),
+      answerInterrupt: vi.fn(async () => ({
+        interrupt_id: 'interrupt-1',
+        status: 'answered',
+        node_id: 'task-1:sheet_selection',
+        answer_payload: { upload_sheet_selections: { 'upl-book': 'Beta' } },
+      })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [event('task.accepted', {}, 'accepted-before-sheet-interrupt')],
+        [event('task.accepted', {}, 'accepted-after-sheet-interrupt')],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用多 sheet Excel 做设计' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
+    expect(screen.getByText('Excel sheet 选择')).toBeInTheDocument();
+    expect(screen.getByText('选择 Excel sheet')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('选择 materials.xlsx 的 sheet'), { target: { value: 'Beta' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', {
+      upload_sheet_selections: { 'upl-book': 'Beta' },
     }));
   });
 
@@ -1893,7 +1953,7 @@ describe('App', () => {
     expect(screen.getByText('回复后将继续当前任务。')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     expect(screen.getByRole('button', { name: '选择 JSON、CSV、图片或 PDF 文件' })).toBeDisabled();
-    expect(screen.getByLabelText('上传 JSON、CSV、图片或 PDF 文件')).toBeDisabled();
+    expect(screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件')).toBeDisabled();
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: '发送' }));

@@ -31,8 +31,8 @@ from src.capabilities.main_agent import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import ConversationStatus, EventVisibility, MessageRole, RoutingMode, TaskStatus
-from src.core.models import Conversation, EventRecord, InterruptAnswer, Message, PendingSkillContext, Task
+from src.core.enums import ConversationStatus, EventVisibility, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
+from src.core.models import Conversation, EventRecord, Interrupt, InterruptAnswer, Message, PendingSkillContext, Task, TaskNode
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.agent_skills import (
     SkillCapabilityRegistry,
@@ -246,6 +246,7 @@ class ApiRuntime:
         self._running_title_tasks: set[asyncio.Task[None]] = set()
         self._task_skill_bundle_revisions: dict[str, str] = {}
         self._task_mcp_bundle_revisions: dict[str, str] = {}
+        self._task_sheet_selection_resume_metadata: dict[str, dict[str, Any]] = {}
         self._assistant_history_sync_failure_task_ids: set[str] = set()
         self._assistant_history_sync_failure_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
@@ -392,7 +393,9 @@ class ApiRuntime:
             conversation_id,
             authenticated_username,
             request.metadata.get("upload_ids") or (),
+            upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
         )
+        self._raise_missing_uploads(upload_context.get("missing_upload_ids"), context="message submission")
         now = self._utcnow_naive()
         message_id = request.client_message_id or self._make_id("msg")
         task_id = self._make_id("task")
@@ -505,6 +508,13 @@ class ApiRuntime:
                 *self._metadata_list(metadata.get("skill_artifacts")),
                 *upload_context["skill_artifacts"],
             ]
+        if upload_context.get("pending_sheet_selections"):
+            await self._open_sheet_selection_interrupt(
+                task=task,
+                metadata=metadata,
+                pending_sheet_selections=upload_context["pending_sheet_selections"],
+            )
+            return message, task
 
         orchestration_request = OrchestrationRequest(
             task_id=task_id,
@@ -668,6 +678,8 @@ class ApiRuntime:
         conversation_id: str,
         username: str,
         upload_ids,
+        *,
+        upload_sheet_selections: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if upload_ids is None:
             upload_ids = ()
@@ -675,8 +687,10 @@ class ApiRuntime:
             upload_ids = [upload_ids]
         if not isinstance(upload_ids, list | tuple):
             raise UploadValidationError("metadata.upload_ids must be a list")
+        sheet_selections = self._normalize_upload_sheet_selections(upload_sheet_selections)
         uploaded_artifacts: list[dict[str, Any]] = []
         skill_artifacts: list[dict[str, Any]] = []
+        pending_sheet_selections: list[dict[str, Any]] = []
         missing_upload_ids: list[str] = []
         for upload_id in upload_ids:
             upload_id_text = str(upload_id).strip()
@@ -691,13 +705,127 @@ class ApiRuntime:
             except UploadValidationError:
                 missing_upload_ids.append(upload_id_text)
                 continue
+            selected_sheet = sheet_selections.get(upload_id_text)
             uploaded_artifacts.append(record.to_summary())
-            skill_artifacts.append(record.to_skill_artifact())
+            if record.requires_sheet_selection and not selected_sheet:
+                pending_sheet_selections.append(record.sheet_selection_payload())
+                skill_artifacts.append(record.to_summary())
+                continue
+            skill_artifacts.append(record.to_skill_artifact(selected_sheet=selected_sheet))
         return {
             "uploaded_artifacts": uploaded_artifacts,
             "skill_artifacts": skill_artifacts,
             "missing_upload_ids": missing_upload_ids,
+            "pending_sheet_selections": pending_sheet_selections,
         }
+
+    @staticmethod
+    def _raise_missing_uploads(missing_upload_ids: object, *, context: str) -> None:
+        if not isinstance(missing_upload_ids, list | tuple) or not missing_upload_ids:
+            return
+        missing = [str(upload_id).strip() for upload_id in missing_upload_ids if str(upload_id).strip()]
+        if not missing:
+            return
+        raise UploadValidationError(f"Missing or expired uploads required for {context}: {', '.join(missing)}")
+
+    @staticmethod
+    def _normalize_upload_sheet_selections(raw: Any) -> dict[str, str]:
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, Mapping):
+            raise UploadValidationError("upload_sheet_selections must be an object")
+        selections: dict[str, str] = {}
+        for key, value in raw.items():
+            upload_id = str(key).strip()
+            sheet_name = str(value).strip()
+            if upload_id and sheet_name:
+                selections[upload_id] = sheet_name
+        return selections
+
+    async def _open_sheet_selection_interrupt(
+        self,
+        *,
+        task: Task,
+        metadata: Mapping[str, Any],
+        pending_sheet_selections: list[dict[str, Any]],
+    ) -> None:
+        now = self._utcnow_naive()
+        node_id = f"{task.task_id}:sheet_selection"
+        node = TaskNode(
+            node_id=node_id,
+            task_id=task.task_id,
+            capability_id=task.requested_capability_id or "main_agent.respond",
+            status=NodeStatus.RUNNING,
+            criticality=NodeCriticality.REQUIRED,
+            started_at=now,
+        )
+        await self.storage.save_task_node(node)
+        await self.storage.save_task(
+            replace(
+                task,
+                status=TaskStatus.RUNNING,
+                root_node_id=task.root_node_id or node_id,
+                updated_at=now,
+            )
+        )
+        required_upload_ids: list[str] = []
+        options_by_upload_id: dict[str, list[str]] = {}
+        labels_by_upload_id: dict[str, str] = {}
+        details_by_upload_id: dict[str, Any] = {}
+        for pending in pending_sheet_selections:
+            required_upload_ids.extend(str(item) for item in pending.get("required_upload_ids", []) if str(item).strip())
+            options_by_upload_id.update(
+                {
+                    str(upload_id): [str(option) for option in options]
+                    for upload_id, options in dict(pending.get("options_by_upload_id", {})).items()
+                    if isinstance(options, list | tuple)
+                }
+            )
+            labels_by_upload_id.update({str(key): str(value) for key, value in dict(pending.get("labels_by_upload_id", {})).items()})
+            details_by_upload_id.update(dict(pending.get("details_by_upload_id", {})))
+        required_upload_ids = list(dict.fromkeys(required_upload_ids))
+        required_fields = {
+            "upload_sheet_selections": {
+                "type": "sheet_selection",
+                "description": "请选择每个 Excel 文件要用于执行的 sheet。",
+                "required_upload_ids": required_upload_ids,
+                "options_by_upload_id": options_by_upload_id,
+                "labels_by_upload_id": labels_by_upload_id,
+                "details_by_upload_id": details_by_upload_id,
+            }
+        }
+        interrupt = Interrupt(
+            interrupt_id=f"{node_id}:interrupt:sheet_selection_required",
+            conversation_id=task.conversation_id,
+            task_id=task.task_id,
+            node_id=node_id,
+            source_agent=task.requested_capability_id or "main_agent.respond",
+            source_message_id=task.root_message_id,
+            question=self._sheet_selection_question(labels_by_upload_id, options_by_upload_id),
+            reason_code="sheet_selection_required",
+            required_fields=required_fields,
+        )
+        self._task_sheet_selection_resume_metadata[task.task_id] = dict(metadata)
+        await self.interrupt_service.open_interrupt(interrupt, now=now)
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=node_id,
+                event_type="node.waiting_for_input",
+                payload={"reason": "sheet_selection_required", "required_upload_ids": required_upload_ids},
+                created_at=now,
+            )
+        )
+
+    @staticmethod
+    def _sheet_selection_question(labels_by_upload_id: Mapping[str, str], options_by_upload_id: Mapping[str, list[str]]) -> str:
+        parts = []
+        for upload_id, label in labels_by_upload_id.items():
+            options = "、".join(options_by_upload_id.get(upload_id, ()))
+            parts.append(f"{label}（可选 sheet：{options}）")
+        detail = "；".join(parts) if parts else "上传的 Excel 文件"
+        return f"检测到多 sheet Excel：{detail}。请为每个文件选择一个 sheet 后继续。"
 
     async def _maybe_schedule_conversation_title_generation(self, conversation_id: str) -> None:
         if self._conversation_title_generator is None:
@@ -772,6 +900,12 @@ class ApiRuntime:
             plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
             await self._record_plan_built(request, plan)
             result = await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
+            restored_cancelled_task = await self._restore_cancelled_task_if_requested(
+                request.task_id,
+                request.conversation_id,
+            )
+            if restored_cancelled_task is not None:
+                return
             await self._handle_pending_skill_context_after_execution(request, result)
             if result.completion_status == str(TaskStatus.COMPLETED):
                 try:
@@ -779,6 +913,12 @@ class ApiRuntime:
                 except Exception as exc:
                     await self._record_assistant_history_sync_failure(request.task_id, request.conversation_id, exc)
         except Exception as exc:
+            restored_cancelled_task = await self._restore_cancelled_task_if_requested(
+                request.task_id,
+                request.conversation_id,
+            )
+            if restored_cancelled_task is not None:
+                return
             await self._mark_task_failed(request, exc)
         finally:
             try:
@@ -789,6 +929,38 @@ class ApiRuntime:
                 self._locally_cancelled_task_ids.discard(request.task_id)
                 async with self._lock:
                     self._running_tasks.pop(request.task_id, None)
+
+    async def _restore_cancelled_task_if_requested(self, task_id: str, conversation_id: str) -> Task | None:
+        task = await self.storage.get_task(task_id)
+        if task is None:
+            return None
+        if task.status == TaskStatus.CANCELLED:
+            return task
+        if (
+            task.status != TaskStatus.CANCELLING
+            and task.cancel_requested_at is None
+            and task_id not in self._locally_cancelled_task_ids
+        ):
+            return None
+        now = self._utcnow_naive()
+        restored = replace(
+            task,
+            status=TaskStatus.CANCELLED,
+            cancel_requested_at=task.cancel_requested_at or now,
+            updated_at=now,
+        )
+        await self.storage.save_task(restored)
+        await self._record_event(
+            self._make_event(
+                task_id=task_id,
+                conversation_id=conversation_id,
+                event_type="task.late_result_discarded",
+                payload={"reason": "cancelled_task_status_restored"},
+                visibility=EventVisibility.AUDIT_ONLY,
+                created_at=now,
+            )
+        )
+        return restored
 
     async def _attach_conversation_memory(self, request: OrchestrationRequest) -> OrchestrationRequest:
         if self._conversation_memory_builder is None:
@@ -832,7 +1004,7 @@ class ApiRuntime:
 
     async def _mark_task_failed(self, request: OrchestrationRequest, exc: Exception) -> None:
         task = await self.storage.get_task(request.task_id)
-        if task is None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+        if task is None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED} or task.cancel_requested_at is not None:
             return
         failed = replace(task, status=TaskStatus.FAILED, updated_at=self._utcnow_naive())
         await self.storage.save_task(failed)
@@ -1428,6 +1600,47 @@ class ApiRuntime:
         interrupt = await self.storage.get_interrupt(interrupt_id)
         if interrupt is None or interrupt.task_id != task_id:
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
+        if interrupt.reason_code == "sheet_selection_required":
+            self._validate_sheet_selection_answer(interrupt, answer_payload)
+
+        existing_answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
+        answer_payloads = (*existing_answer_payloads, dict(answer_payload))
+        root_message = await self.storage.get_message(task.root_message_id)
+        merged_answer_payload = self._merge_answer_payloads(answer_payloads)
+        combined_message = self._combine_resume_message(
+            root_message.content if root_message is not None else task.summary or "",
+            merged_answer_payload,
+        )
+        sheet_selection_resume_metadata = self._task_sheet_selection_resume_metadata.get(task.task_id, {})
+        resume_metadata = {
+            **sheet_selection_resume_metadata,
+            **self._resume_skill_revision_metadata(task.task_id),
+        }
+        for payload in answer_payloads:
+            resume_metadata.update(self._answer_payload_metadata(payload))
+        upload_ids = self._merged_answer_upload_ids(answer_payloads)
+        if upload_ids:
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is None:
+                raise ValueError(f"Unknown conversation: {task.conversation_id}")
+            upload_context = await self.resolve_uploads_for_message(
+                task.conversation_id,
+                conversation.username,
+                upload_ids,
+                upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
+            )
+            self._raise_missing_uploads(upload_context.get("missing_upload_ids"), context="interrupt resume")
+            if upload_context.get("pending_sheet_selections"):
+                raise UploadValidationError("Spreadsheet sheet selection is required before resuming the task")
+            if upload_context["uploaded_artifacts"]:
+                resume_metadata["uploaded_artifacts"] = [
+                    *self._metadata_list(resume_metadata.get("uploaded_artifacts")),
+                    *upload_context["uploaded_artifacts"],
+                ]
+                resume_metadata["skill_artifacts"] = [
+                    *self._metadata_list(resume_metadata.get("skill_artifacts")),
+                    *upload_context["skill_artifacts"],
+                ]
 
         answer = InterruptAnswer(
             interrupt_answer_id=self._make_id("interrupt-answer"),
@@ -1457,35 +1670,6 @@ class ApiRuntime:
             )
         )
 
-        root_message = await self.storage.get_message(task.root_message_id)
-        answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
-        merged_answer_payload = self._merge_answer_payloads(answer_payloads)
-        combined_message = self._combine_resume_message(
-            root_message.content if root_message is not None else task.summary or "",
-            merged_answer_payload,
-        )
-        resume_metadata = self._resume_skill_revision_metadata(task.task_id)
-        for payload in answer_payloads:
-            resume_metadata.update(self._answer_payload_metadata(payload))
-        upload_ids = self._merged_answer_upload_ids(answer_payloads)
-        if upload_ids:
-            conversation = await self.storage.get_conversation(task.conversation_id)
-            if conversation is None:
-                raise ValueError(f"Unknown conversation: {task.conversation_id}")
-            upload_context = await self.resolve_uploads_for_message(
-                task.conversation_id,
-                conversation.username,
-                upload_ids,
-            )
-            if upload_context["uploaded_artifacts"]:
-                resume_metadata["uploaded_artifacts"] = [
-                    *self._metadata_list(resume_metadata.get("uploaded_artifacts")),
-                    *upload_context["uploaded_artifacts"],
-                ]
-                resume_metadata["skill_artifacts"] = [
-                    *self._metadata_list(resume_metadata.get("skill_artifacts")),
-                    *upload_context["skill_artifacts"],
-                ]
         await self._await_existing_execution(task.task_id)
         resume_capability_id = task.requested_capability_id
         interrupted_node = await self.storage.get_task_node(interrupt.node_id)
@@ -1507,12 +1691,36 @@ class ApiRuntime:
                 metadata=resume_metadata,
             )
         )
+        if sheet_selection_resume_metadata:
+            self._task_sheet_selection_resume_metadata.pop(task.task_id, None)
         return {
             "interrupt_id": saved_interrupt.interrupt_id,
             "status": str(saved_interrupt.status),
             "node_id": saved_interrupt.node_id,
             "answer_payload": dict(answer_payload),
         }
+
+    def _validate_sheet_selection_answer(self, interrupt: Interrupt, answer_payload: Mapping[str, object]) -> None:
+        fields = interrupt.required_fields.get("upload_sheet_selections")
+        if not isinstance(fields, Mapping):
+            raise UploadValidationError("sheet selection interrupt is malformed")
+        raw_selections = answer_payload.get("upload_sheet_selections")
+        selections = self._normalize_upload_sheet_selections(raw_selections)
+        required_upload_ids = [str(item) for item in fields.get("required_upload_ids", []) if str(item).strip()]
+        options_by_upload_id = {
+            str(upload_id): [str(option) for option in options]
+            for upload_id, options in dict(fields.get("options_by_upload_id", {})).items()
+            if isinstance(options, list | tuple)
+        }
+        missing = [upload_id for upload_id in required_upload_ids if upload_id not in selections]
+        if missing:
+            raise UploadValidationError(f"Missing spreadsheet sheet selection for uploads: {', '.join(missing)}")
+        invalid: list[str] = []
+        for upload_id, sheet_name in selections.items():
+            if upload_id not in required_upload_ids or sheet_name not in options_by_upload_id.get(upload_id, ()):
+                invalid.append(upload_id)
+        if invalid:
+            raise UploadValidationError(f"Invalid spreadsheet sheet selection for uploads: {', '.join(invalid)}")
 
     async def iter_frontend_events(self, task_id: str):
         task = await self.storage.get_task(task_id)
@@ -2036,6 +2244,9 @@ class ApiRuntime:
         upload_ids: list[str] = []
         for payload in answer_payloads:
             upload_ids.extend(cls._answer_upload_ids(payload))
+            raw_sheet_selections = payload.get("upload_sheet_selections")
+            if isinstance(raw_sheet_selections, Mapping):
+                upload_ids.extend(str(key).strip() for key in raw_sheet_selections.keys() if str(key).strip())
         return tuple(dict.fromkeys(upload_ids))
 
     @classmethod

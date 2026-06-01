@@ -19,13 +19,21 @@ _TEXT_SOURCES = {"query", "current_user_message", "resolved_user_message", "rece
 _SAFE_ARTIFACT_KEYS = {
     "upload_id",
     "filename",
+    "original_filename",
+    "normalized_filename",
     "mime_type",
     "content_type",
+    "normalized_content_type",
+    "file_type",
     "size",
+    "size_bytes",
+    "sha256",
     "row_count",
     "columns",
     "preview",
     "summary",
+    "selected_sheet",
+    "requires_sheet_selection",
 }
 
 
