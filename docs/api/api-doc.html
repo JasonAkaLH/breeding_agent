@@ -375,7 +375,7 @@
             </div>
             <span class="endpoint-tag">公开 · 登录</span>
           </div>
-          <div class="endpoint-summary"><div><h3>登录并返回当前 token</h3><p>只接收 username，返回当前 access_token；同一 username 新登录会让旧 token 立即失效。</p></div></div>
+          <div class="endpoint-summary"><div><h3>登录并返回当前 token</h3><p>只接收 username，返回当前 access_token；同一 username 新登录会让旧 token 立即失效。<br><b>典型时机：</b>首次进入应用、token 缺失或失效后重新建立登录态时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>LoginRequest；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>400：用户名不合法；422：请求体不符合 LoginRequest schema。该接口无需 Authorization。</p></div><div><b>下一步</b><p>调用受保护接口时把 access_token 放入 Authorization header。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">username</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>登录用户名；这是唯一允许客户端提交 username 的接口。</td><td>—</td></tr></tbody></table></section>
@@ -399,7 +399,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>读取当前用户</h3><p>通过 Authorization token 定位当前用户，不接收 body、query 或 metadata 中的 username。</p></div></div>
+          <div class="endpoint-summary"><div><h3>读取当前用户</h3><p>通过 Authorization token 定位当前用户，不接收 body、query 或 metadata 中的 username。<br><b>典型时机：</b>页面启动、刷新 token 后或恢复本地 token 时请求，用于确认登录态。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthUserResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>可用于前端启动时恢复登录态。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>格式为 Authorization: Bearer &lt;access_token&gt;。</td><td>Bearer token</td></tr></tbody></table></section>
@@ -421,7 +421,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>刷新 token</h3><p>通过当前 token 定位用户，原子替换为新的当前 token；旧 token 立即失效。</p></div></div>
+          <div class="endpoint-summary"><div><h3>刷新 token</h3><p>通过当前 token 定位用户，原子替换为新的当前 token；旧 token 立即失效。<br><b>典型时机：</b>页面仍在使用但需要续期、主动刷新会话或收到 token 当前性变化前请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AuthTokenResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>客户端必须立即保存新 access_token 并停止使用旧 token。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前有效 token；刷新成功后旧 token 立即失效。</td><td>Bearer token</td></tr></tbody></table></section>
@@ -444,7 +444,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>登出</h3><p>通过当前 token 定位用户并清空 token，保留 username 映射记录。</p></div></div>
+          <div class="endpoint-summary"><div><h3>登出</h3><p>通过当前 token 定位用户并清空 token，保留 username 映射记录。<br><b>典型时机：</b>用户点击退出、切换账号前或需要让当前 token 立即失效时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">LogoutResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>登出后该 token 再访问受保护接口会返回 401。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前有效 token；登出会清空该 token。</td><td>Bearer token</td></tr></tbody></table></section>
@@ -467,7 +467,7 @@
             </div>
             <span class="endpoint-tag">公开</span>
           </div>
-          <div class="endpoint-summary"><div><h3>列出公开能力</h3><p>列出 public capability / Skill，用于前端能力选择或 slash command 初始化。</p></div></div>
+          <div class="endpoint-summary"><div><h3>列出公开能力</h3><p>列出 public capability / Skill，用于前端能力选择或 slash command 初始化。<br><b>典型时机：</b>应用启动、Skill / slash command 菜单初始化、能力列表刷新或强制 Skill 提交失败后请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；公开接口，无需 Authorization。</p></div><div><b>响应</b><p><code class="inline-code">CapabilityListResponse</code></p></div><div><b>错误</b><p>公开接口，无需 Authorization；正常情况下不依赖请求参数。服务端异常按通用错误处理。</p></div><div><b>下一步</b><p><code class="inline-code">skill.*</code> capability 仅用于能力发现和系统内部编排；提交消息点名 Skill 时使用 <code class="inline-code">main_agent.respond</code> + <code class="inline-code">metadata.soft_skill_binding</code>，不要直接请求 <code class="inline-code">skill.*</code>。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">无</code></td><td>—</td><td>—</td><td>否</td><td>公开接口，无请求参数。</td><td>—</td></tr></tbody></table></section>
@@ -500,7 +500,7 @@
             </div>
             <span class="endpoint-tag">受保护</span>
           </div>
-          <div class="endpoint-summary"><div><h3>读取模型版本配置</h3><p>返回运行时 <code class="inline-code">config.yaml</code> 中声明的可选模型版本与新对话默认模型，供前端每次提交消息时选择。</p></div></div>
+          <div class="endpoint-summary"><div><h3>读取模型版本配置</h3><p>返回运行时 <code class="inline-code">config.yaml</code> 中声明的可选模型版本与新对话默认模型，供前端每次提交消息时选择。<br><b>典型时机：</b>应用启动、新建会话或初始化模型选择器时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ModelEditionsResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>提交消息时可把用户选择的模型放入 <code class="inline-code">model_edition</code> 顶层字段；每个模型的 <code class="inline-code">trim_max_tokens</code> 只由服务端 <code class="inline-code">config.yaml</code> 的 <code class="inline-code">model_editions.options[]</code> 维护；不再使用顶层 <code class="inline-code">trim_max_tokens</code>，前端不传该字段。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">无</code></td><td>—</td><td>—</td><td>否</td><td>使用 Authorization 定位当前登录态。</td><td>—</td></tr></tbody></table></section>
@@ -526,7 +526,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>列出会话</h3><p>列出当前 token 所属 username 的会话。</p></div></div>
+          <div class="endpoint-summary"><div><h3>列出会话</h3><p>列出当前 token 所属 username 的会话。<br><b>典型时机：</b>登录后初始化会话侧边栏、会话创建 / 重命名 / 删除 / 任务完成后刷新列表时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationListResponse</code></p></div><div><b>错误</b><p>401：Authorization 缺失、格式不是 Bearer、token 不存在、已被刷新替换或已登出。</p></div><div><b>下一步</b><p>进入会话后读取 messages、tasks、uploads。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr></tbody></table></section>
@@ -558,7 +558,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>重命名会话</h3><p>按 body.conversation_id 重命名当前用户会话；非 GET 业务 ID 放 body。</p></div></div>
+          <div class="endpoint-summary"><div><h3>重命名会话</h3><p>按 body.conversation_id 重命名当前用户会话；非 GET 业务 ID 放 body。<br><b>典型时机：</b>用户在会话列表或标题栏提交新标题时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>RenameConversationRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationSummaryResponse</code></p></div><div><b>错误</b><p>400：标题等请求语义不合法；401：token 缺失、过期或已失效；404：会话不存在、不属于当前用户或不可用；422：请求体不符合 schema。</p></div><div><b>下一步</b><p>成功后刷新会话列表或当前会话标题。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要重命名的会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">title</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>新标题。</td><td>—</td></tr></tbody></table></section>
@@ -588,7 +588,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>删除会话</h3><p>强物理删除当前用户会话：确认后会话先进入 <code class="inline-code">deleting</code>，普通用户列表、消息、上传、任务、SSE 和 artifact 路由立即不可见；后端 deletion runner 会继续清理消息、任务、事件与关联文件记录。</p></div></div>
+          <div class="endpoint-summary"><div><h3>删除会话</h3><p>强物理删除当前用户会话：确认后会话先进入 <code class="inline-code">deleting</code>，普通用户列表、消息、上传、任务、SSE 和 artifact 路由立即不可见；后端 deletion runner 会继续清理消息、任务、事件与关联文件记录。<br><b>典型时机：</b>用户确认删除会话时请求；成功后刷新会话列表并关闭相关 SSE。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteConversationRequest；必须携带 Authorization: Bearer access_token。删除没有前端/用户侧自动超时承诺，客户端断开后后端仍继续执行物理删除。</p></div><div><b>响应</b><p><code class="inline-code">DeleteConversationResponse</code>；成功响应不早于物理删除完成。</p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：资源不存在、不属于当前用户、或处于 <code class="inline-code">deleting_failed</code> 运维状态；422：参数或 payload 不符合 schema。失败会话不向普通用户复活，按 runbook 运维诊断/重试。</p></div><div><b>下一步</b><p>前端应在目标历史条目显示 spinner；成功后从会话列表移除本会话。运维参考 <code class="inline-code">docs/runbooks/postgresql-state-platform.md</code> 的 failed deletion recovery。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要删除的会话 ID。</td><td>—</td></tr></tbody></table></section>
@@ -626,7 +626,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>读取消息历史</h3><p>读取 path 中 conversation_id 对应的当前用户消息历史。</p></div></div>
+          <div class="endpoint-summary"><div><h3>读取消息历史</h3><p>读取 path 中 conversation_id 对应的当前用户消息历史。<br><b>典型时机：</b>打开或切换会话、刷新恢复、SSE 完成后补齐最终消息时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">ConversationMessagesResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于刷新恢复或 SSE 完成后补齐最终消息。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取消息的会话 ID。</td><td>—</td></tr></tbody></table></section>
@@ -668,7 +668,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>提交消息</h3><p>提交用户消息并创建任务。资源归属只能由 Authorization token 解析出的 username 决定，body 和 metadata 不允许伪造用户或 token。</p></div></div>
+          <div class="endpoint-summary"><div><h3>提交消息</h3><p>提交用户消息并创建任务。资源归属只能由 Authorization token 解析出的 username 决定，body 和 metadata 不允许伪造用户或 token。<br><b>典型时机：</b>用户发送新消息、触发 slash Skill 命令或携带上传内容提交问题时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>SubmitMessageRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">MessageAcceptedResponse</code></p></div><div><b>错误</b><p>400：routing_mode、capability_id、model_edition、metadata.upload_ids 或 metadata.soft_skill_binding 等请求语义不合法；metadata.upload_ids 中任一 upload_id 缺失、过期或不属于当前会话时 fail closed，返回 400，且不会创建 message / task；外部 direct <code class="inline-code">skill.*</code> 请求返回 <code class="inline-code">direct_skill_execution_disabled</code>；401：token 缺失、过期或已失效；404：会话不属于当前用户或不可用；409：会话已有运行中任务；422：请求体不符合 schema 或 metadata 携带保留身份字段。</p></div><div><b>下一步</b><p>使用返回的 task_id 订阅 SSE 或查询任务摘要。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>目标会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">content</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>用户消息正文。</td><td>—</td></tr><tr><td><code class="inline-code">routing_mode</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>否</td><td>路由模式。</td><td>默认 auto</td></tr><tr><td><code class="inline-code">capability_id</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>指定非 Skill capability；外部请求不得直接指定 <code class="inline-code">skill.*</code>。点名 Skill 时固定使用 <code class="inline-code">main_agent.respond</code> 并在 metadata 中放 soft binding。</td><td>—</td></tr><tr><td><code class="inline-code">client_message_id</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>客户端幂等或追踪 ID。</td><td>—</td></tr><tr><td><code class="inline-code">model_edition</code></td><td>Body</td><td><code class="inline-code">string|null</code></td><td>否</td><td>本次消息使用的模型版本；取值来自 <code class="inline-code">/api/v1/config/model-editions</code>。后端会按该模型在 <code class="inline-code">config.yaml</code> 的 <code class="inline-code">model_editions.options[]</code> 中声明的 <code class="inline-code">trim_max_tokens</code> 裁剪上下文；不读取顶层 trim 配置。</td><td>默认由服务端配置决定；客户端不得提交 trim_max_tokens</td></tr><tr><td><code class="inline-code">metadata.deep_thinking</code></td><td>Body.metadata</td><td><code class="inline-code">boolean</code></td><td>否</td><td>是否开启深度思考 / thinking；关闭时服务端按 minimal 执行，并不会持久化 reasoning 内容。</td><td>默认 false</td></tr><tr><td><code class="inline-code">metadata.main_agent_reasoning_effort</code></td><td>Body.metadata</td><td><code class="inline-code">string</code></td><td>否</td><td>本次主代理 / planner 思考强度；未开启 deep thinking 时服务端固定按 minimal 执行。</td><td><code class="inline-code">minimal</code> / <code class="inline-code">high</code> / <code class="inline-code">max</code>；前端默认 minimal，high/max 仅在 thinking 开启后可选</td></tr><tr><td><code class="inline-code">metadata.soft_skill_binding.capability_id</code></td><td>Body.metadata</td><td><code class="inline-code">string</code></td><td>否</td><td>slash / API 点名 Skill 的软绑定目标，必须是当前 active public <code class="inline-code">skill.*</code>。存在该字段时执行入口规范为 <code class="inline-code">main_agent.respond</code>，由主代理判断 answer 或 execute。</td><td>例如 skill.field_design</td></tr><tr><td><code class="inline-code">metadata.soft_skill_binding.command</code></td><td>Body.metadata</td><td><code class="inline-code">string</code></td><td>否</td><td>触发该绑定的 slash command，仅用于审计和 UI 语境。</td><td>例如 /field-design</td></tr><tr><td><code class="inline-code">metadata</code></td><td>Body</td><td><code class="inline-code">object</code></td><td>否</td><td>业务 metadata；不得携带用户或 token 字段。</td><td>默认 {}</td></tr></tbody></table></section>
@@ -709,7 +709,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>上传会话文件</h3><p>multipart/form-data 上传；conversation_id 与 file 放 form field，Authorization 放 header。支持 JSON、CSV、Excel、图片与 PDF；CSV / JSON 多编码会在上传层规范化，Excel .xlsx / .xls 会转为 spreadsheet metadata。</p></div></div>
+          <div class="endpoint-summary"><div><h3>上传会话文件</h3><p>multipart/form-data 上传；conversation_id 与 file 放 form field，Authorization 放 header。支持 JSON、CSV、Excel、图片与 PDF；CSV / JSON 多编码会在上传层规范化，Excel .xlsx / .xls 会转为 spreadsheet metadata。<br><b>典型时机：</b>用户发送前添加文件，或 OCR / 表格 / Skill 需要附件上下文时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>multipart/form-data；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadFileResponse</code></p></div><div><b>错误</b><p>400：文件类型、大小、编码、文件名或内容预览校验失败；401：token 缺失、过期或已失效；404：已存在的会话不属于当前用户或不可用；422：multipart 字段不符合 schema，或 form 中含多余 / 保留身份字段。若 conversation_id 尚不存在，上传会创建该会话。</p></div><div><b>下一步</b><p>提交消息时可在 metadata.upload_ids 中引用上传文件。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Form</td><td><code class="inline-code">string</code></td><td>是</td><td>上传所属会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">file</code></td><td>Form</td><td><code class="inline-code">file</code></td><td>是</td><td>上传文件。</td><td>—</td></tr></tbody></table></section>
@@ -758,7 +758,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>列出上传</h3><p>列出当前用户会话的未过期上传。</p></div></div>
+          <div class="endpoint-summary"><div><h3>列出上传</h3><p>列出当前用户会话的未过期上传。<br><b>典型时机：</b>打开会话、刷新上传区或提交前校准可用附件时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">UploadListResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话已存在但不属于当前用户或不可用。若 conversation_id 不存在，返回空 uploads 列表。</p></div><div><b>下一步</b><p>用于展示可引用文件或刷新上传状态。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要列出上传的会话 ID。</td><td>—</td></tr></tbody></table></section>
@@ -800,7 +800,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>删除上传</h3><p>按 body.conversation_id 与 body.upload_id 删除上传记录。</p></div></div>
+          <div class="endpoint-summary"><div><h3>删除上传</h3><p>按 body.conversation_id 与 body.upload_id 删除上传记录。<br><b>典型时机：</b>用户移除待使用附件、清理误传文件或取消本次附件上下文时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>DeleteUploadRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">DeleteUploadResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：会话或上传记录属于其他用户 / 会话，或已存在会话不可用；422：请求体不符合 schema。upload_id 不存在时返回 200 且 deleted=false。</p></div><div><b>下一步</b><p>删除后该 upload_id 不应继续用于提交消息。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>上传所属会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">upload_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要删除的上传 ID。</td><td>—</td></tr></tbody></table></section>
@@ -826,7 +826,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>列出会话任务</h3><p>列出当前用户指定会话任务；scope 为 query，支持 unfinished 或 all。</p></div></div>
+          <div class="endpoint-summary"><div><h3>列出会话任务</h3><p>列出当前用户指定会话任务；scope 为 query，支持 unfinished 或 all。<br><b>典型时机：</b>恢复会话运行态、页面刷新查找未完成任务或批量取消当前会话任务时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskListResponse</code></p></div><div><b>错误</b><p>400：scope 不是 unfinished 或 all；401：token 缺失、过期或已失效；404：会话已存在但不属于当前用户或不可用。若 conversation_id 不存在，返回空 tasks 列表。</p></div><div><b>下一步</b><p>用于刷新恢复当前任务或查看历史任务。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">conversation_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要查询任务的会话 ID。</td><td>—</td></tr><tr><td><code class="inline-code">scope</code></td><td>Query</td><td><code class="inline-code">string</code></td><td>否</td><td>任务列表范围。</td><td>unfinished / all；默认 unfinished</td></tr></tbody></table></section>
@@ -864,7 +864,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>读取任务摘要</h3><p>读取当前用户任务摘要。</p></div></div>
+          <div class="endpoint-summary"><div><h3>读取任务摘要</h3><p>读取当前用户任务摘要。<br><b>典型时机：</b>恢复任务、SSE 断线校准、取消 / 失败 / 完成后确认终态时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskSummaryResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于断线后回查任务状态。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取摘要的任务 ID。</td><td>—</td></tr></tbody></table></section>
@@ -897,7 +897,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>订阅任务事件</h3><p>返回 text/event-stream。token 必须放 Authorization header，不能放 URL；服务端在建连时校验 token 和 task owner，连接中使用本地 auth_generation 失效检查，不对每条事件查询 token 数据库。</p></div></div>
+          <div class="endpoint-summary"><div><h3>订阅任务事件</h3><p>返回 text/event-stream。token 必须放 Authorization header，不能放 URL；服务端在建连时校验 token 和 task owner，连接中使用本地 auth_generation 失效检查，不对每条事件查询 token 数据库。<br><b>典型时机：</b>提交消息返回 task_id 后、恢复未完成任务后、回答 interrupt 后或取消后等待终态时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">text/event-stream</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。连接建立后如 auth_generation 失效，会发送 auth.invalidated 并结束。</p></div><div><b>下一步</b><p>事件结束后读取 messages 和 artifacts。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token；禁止放入 URL。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要订阅事件的任务 ID。</td><td>—</td></tr><tr><td><code class="inline-code">Accept</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>建议</td><td>建议设置为 text/event-stream。</td><td>text/event-stream</td></tr></tbody></table></section>
@@ -921,7 +921,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>取消任务</h3><p>按 body.task_id 请求取消当前用户任务；非 GET 业务 ID 放 body。</p></div></div>
+          <div class="endpoint-summary"><div><h3>取消任务</h3><p>按 body.task_id 请求取消当前用户任务；非 GET 业务 ID 放 body。<br><b>典型时机：</b>用户点击停止、切换会话前需终止当前任务或关闭会话前清理运行中任务时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>CancelTaskRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">CancelTaskResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用；422：请求体不符合 CancelTaskRequest schema。</p></div><div><b>下一步</b><p>前端可继续监听 SSE 或回查任务摘要确认终态。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要请求取消的任务 ID。</td><td>—</td></tr></tbody></table></section>
@@ -947,7 +947,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>列出中断</h3><p>列出当前用户任务待回答的 interrupt。</p></div></div>
+          <div class="endpoint-summary"><div><h3>列出中断</h3><p>列出当前用户任务待回答的 interrupt。<br><b>典型时机：</b>任务等待输入、SSE 断线后恢复补充问题或刷新页面恢复待答 interrupt 时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskInterruptsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>收到 interrupt 事件后可调用本接口补齐状态。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要查询中断的任务 ID。</td><td>—</td></tr></tbody></table></section>
@@ -983,7 +983,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>回答中断</h3><p>按 body.task_id 与 body.interrupt_id 提交回答；answer_payload 不允许伪造用户或 token。</p></div></div>
+          <div class="endpoint-summary"><div><h3>回答中断</h3><p>按 body.task_id 与 body.interrupt_id 提交回答；answer_payload 不允许伪造用户或 token。<br><b>典型时机：</b>用户提交补充参数、sheet 选择或其他 interrupt answer 后请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>AnswerInterruptRequest；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">AnswerInterruptResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务 / interrupt 不存在、所属会话不存在、不属于当前用户或不可用；422：请求体不符合 schema 或 answer_payload 携带保留身份字段。</p></div><div><b>下一步</b><p>回答后继续监听同一 task 的 SSE。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>中断所属任务 ID。</td><td>—</td></tr><tr><td><code class="inline-code">interrupt_id</code></td><td>Body</td><td><code class="inline-code">string</code></td><td>是</td><td>要回答的中断 ID。</td><td>—</td></tr><tr><td><code class="inline-code">answer_payload</code></td><td>Body</td><td><code class="inline-code">object</code></td><td>否</td><td>回答内容；不得携带用户或 token 字段。</td><td>默认 {}</td></tr></tbody></table></section>
@@ -1012,7 +1012,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>读取任务图</h3><p>读取当前用户任务 DAG 节点与边。</p></div></div>
+          <div class="endpoint-summary"><div><h3>读取任务图</h3><p>读取当前用户任务 DAG 节点与边。<br><b>典型时机：</b>打开任务详情 / 调试面板、SSE 断线后恢复节点状态或展示 DAG 进度时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskGraphResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>用于调试或前端节点状态展示。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要读取 DAG 的任务 ID。</td><td>—</td></tr></tbody></table></section>
@@ -1054,7 +1054,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>列出产物</h3><p>列出当前用户任务产物。</p></div></div>
+          <div class="endpoint-summary"><div><h3>列出产物</h3><p>列出当前用户任务产物。<br><b>典型时机：</b>任务完成后加载结果卡片、刷新历史任务结果或下载前获取 artifact 列表时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">TaskArtifactsResponse</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：任务不存在、所属会话不存在、不属于当前用户或不可用。</p></div><div><b>下一步</b><p>文件产物可使用 download_url 或下载接口获取。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">task_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要列出产物的任务 ID。</td><td>—</td></tr></tbody></table></section>
@@ -1097,7 +1097,7 @@
             </div>
             <span class="endpoint-tag">需 Authorization</span>
           </div>
-          <div class="endpoint-summary"><div><h3>下载文件产物</h3><p>下载当前用户任务所属文件产物；不存在、非文件或不属于当前用户均返回 404。</p></div></div>
+          <div class="endpoint-summary"><div><h3>下载文件产物</h3><p>下载当前用户任务所属文件产物；不存在、非文件或不属于当前用户均返回 404。<br><b>典型时机：</b>用户点击文件产物下载、预览或导出已生成文件时请求。</p></div></div>
           <details class="endpoint-detail" open>
             <summary>参数 / 请求 / 响应 / 下一步</summary><div class="detail-grid"><div><b>请求说明</b><p>无 body；必须携带 Authorization: Bearer access_token。</p></div><div><b>响应</b><p><code class="inline-code">文件流</code></p></div><div><b>错误</b><p>401：token 缺失、过期或已失效；404：artifact 不存在、不是文件产物、文件已过期 / 缺失、所属任务不可访问或不属于当前用户。</p></div><div><b>下一步</b><p>成功时按附件形式返回文件内容。</p></div></div></details>
           <section class="param-section"><h4>参数明细</h4><table class="param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>简介</th><th>枚举 / 默认</th></tr></thead><tbody><tr><td><code class="inline-code">Authorization</code></td><td>Header</td><td><code class="inline-code">string</code></td><td>是</td><td>当前用户 token。</td><td>Bearer token</td></tr><tr><td><code class="inline-code">artifact_id</code></td><td>Path</td><td><code class="inline-code">string</code></td><td>是</td><td>要下载的文件产物 ID。</td><td>—</td></tr></tbody></table></section>
