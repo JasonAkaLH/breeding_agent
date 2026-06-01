@@ -65,6 +65,19 @@ export interface UploadPreviewResponse {
   row_count?: number | null;
   columns: string[];
   shape?: string | null;
+  source_encoding?: string | null;
+  original_columns?: string[];
+  column_normalizations?: Array<Record<string, unknown>>;
+  column_count?: number | null;
+  columns_truncated?: boolean | null;
+  column_normalization_count?: number | null;
+  column_normalizations_truncated?: boolean | null;
+  normalized_content_type?: string | null;
+  requires_sheet_selection?: boolean | null;
+  selected_sheet?: string | null;
+  excel_sheets?: Array<Record<string, unknown>>;
+  excel_sheet_count?: number | null;
+  excel_sheets_truncated?: boolean | null;
 }
 
 export interface UploadFileResponse {
@@ -72,7 +85,7 @@ export interface UploadFileResponse {
   conversation_id: string;
   filename: string;
   content_type: string;
-  file_type: 'json' | 'csv' | string;
+  file_type: 'json' | 'csv' | 'spreadsheet' | string;
   size_bytes: number;
   sha256: string;
   expires_at: string;

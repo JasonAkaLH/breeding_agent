@@ -66,6 +66,12 @@ interface PendingInterrupt {
   mode: ChatMode;
 }
 
+interface SheetSelectionField {
+  required_upload_ids: string[];
+  options_by_upload_id: Record<string, string[]>;
+  labels_by_upload_id?: Record<string, string>;
+}
+
 interface TransientNotice {
   id: number;
   message: string;
@@ -94,6 +100,7 @@ const INTERRUPT_FIELD_LABELS: Record<string, string> = {
   rice_input: '水稻 VCF/gene_check 文件',
   sample: '样本名',
   samples: '样本列表',
+  upload_sheet_selections: 'Excel sheet 选择',
   variety: '品种名称',
   route_id: '查询范围',
   year_range: '年份范围',
@@ -175,6 +182,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null);
   const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
+  const [sheetSelections, setSheetSelections] = useState<Record<string, string>>({});
   const [conversationHistory, setConversationHistory] = useState<ConversationSummaryResponse[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [deletingConversationIds, setDeletingConversationIds] = useState<Set<string>>(() => new Set());
@@ -343,6 +351,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   useEffect(() => {
     void refreshConversationUploads();
   }, [refreshConversationUploads]);
+
+  useEffect(() => {
+    setSheetSelections({});
+  }, [pendingInterrupt?.interruptId]);
 
   const handleConversationScroll = useCallback(() => {
     const conversationList = conversationListRef.current;
@@ -711,6 +723,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const directSlashParse = useMemo(() => parseDirectSlashCommand(input, skillCommands), [input, skillCommands]);
   const slashInputBlocked = !selectedSkillCommand && (directSlashParse.kind === 'not_found' || directSlashParse.kind === 'conflict');
   const pendingInterruptAcceptsUpload = pendingInterrupt !== null && interruptAcceptsUpload(pendingInterrupt);
+  const pendingSheetSelectionField = pendingInterrupt ? interruptSheetSelectionField(pendingInterrupt) : null;
+  const canSubmitSheetSelectionAnswer = pendingSheetSelectionField !== null && sheetSelectionComplete(pendingSheetSelectionField, sheetSelections);
   const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && pendingUploads.length > 0;
   const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
   const canSubmitComposer = !slashInputBlocked && (
@@ -718,6 +732,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     || selectedSkillCommand !== null
     || directSlashParse.kind === 'matched'
     || canSubmitUploadOnlyInterruptAnswer
+    || canSubmitSheetSelectionAnswer
   );
   const slashMenuEmptyMessage = skillCommands.length === 0 ? '暂无可用 Skill' : '未找到 Skill';
 
@@ -799,7 +814,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (!conversationId) {
       setActiveConversationId(targetConversationId);
     }
-    if (!content && intent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
+    if (!content && intent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer && !canSubmitSheetSelectionAnswer) return;
     clearTransientNotice();
     if (pendingInterrupt && intent.kind === 'ready') {
       setSlashMenuOpen(true);
@@ -950,11 +965,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   async function handleInterruptAnswer(content: string, interrupt: PendingInterrupt) {
     const uploads = interruptAcceptsUpload(interrupt) ? pendingUploads.slice() : [];
+    const sheetField = interruptSheetSelectionField(interrupt);
+    const selectedSheets = sheetField ? selectedSheetPayload(sheetField, sheetSelections) : {};
     const targetConversationId = conversationIdRef.current;
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     const resumeProgressText = '补充信息已提交，正在继续任务';
-    const displayContent = content || uploadAnswerDisplayText(uploads);
+    const displayContent = content || uploadAnswerDisplayText(uploads) || sheetSelectionDisplayText(sheetField, selectedSheets);
     const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode: interrupt.mode };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
@@ -977,7 +994,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }));
 
     try {
-      await api.answerInterrupt(interrupt.taskId, interrupt.interruptId, buildInterruptAnswerPayload(interrupt, content, uploads));
+      await api.answerInterrupt(interrupt.taskId, interrupt.interruptId, buildInterruptAnswerPayload(interrupt, content, uploads, selectedSheets));
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(interrupt.taskId, interrupt.mode);
       setPendingUploads([]);
@@ -1379,6 +1396,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             >
               <div className="chat-upload-drop-hint" aria-hidden={!draggingUpload}>释放文件以上传到当前对话</div>
               {pendingInterrupt ? <InterruptInputBanner interrupt={pendingInterrupt} onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
+              {pendingSheetSelectionField ? (
+                <SheetSelectionControls
+                  field={pendingSheetSelectionField}
+                  value={sheetSelections}
+                  onChange={setSheetSelections}
+                />
+              ) : null}
               <Card
                 className={`composer-card floating-composer${draggingUpload ? ' floating-composer-dragging' : ''}`}
                 role="region"
@@ -1390,8 +1414,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       {pendingUploads.map((upload) => (
                         <Tag key={upload.upload_id} className="upload-file-tag">
                           {upload.filename}
+                          {upload.file_type === 'spreadsheet' ? ' · Excel' : ''}
+                          {upload.preview.source_encoding ? ` · ${upload.preview.source_encoding}` : ''}
                           {typeof upload.preview.row_count === 'number' ? ` · ${upload.preview.row_count} 行` : ''}
                           {upload.preview.columns.length > 0 ? ` · ${upload.preview.columns.slice(0, 3).join('/')}` : ''}
+                          {upload.preview.requires_sheet_selection ? ' · 需选择 sheet' : ''}
+                          {upload.preview.columns_truncated || upload.preview.excel_sheets_truncated ? ' · 已裁剪摘要' : ''}
                           <Button
                             type="link"
                             danger
@@ -1515,9 +1543,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   <input
                     ref={uploadInputRef}
                     className="file-input-hidden"
-                    aria-label="上传 JSON、CSV、图片或 PDF 文件"
+                    aria-label="上传 JSON、CSV、Excel、图片或 PDF 文件"
                     type="file"
-                    accept=".json,.csv,.png,.jpg,.jpeg,.pdf,application/json,text/csv,image/png,image/jpeg,application/pdf"
+                    accept=".json,.csv,.xlsx,.xls,.png,.jpg,.jpeg,.pdf,application/json,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg,application/pdf"
                     disabled={!canUploadInCurrentComposer || uploadingFile}
                     onChange={(event) => void handleUploadFile(event.target.files?.[0])}
                   />
@@ -1744,7 +1772,11 @@ function buildInterruptAnswerPayload(
   interrupt: PendingInterrupt,
   content: string,
   uploads: UploadFileResponse[] = [],
+  selectedSheets: Record<string, string> = {},
 ): Record<string, unknown> {
+  if (interruptSheetSelectionField(interrupt)) {
+    return { upload_sheet_selections: selectedSheets };
+  }
   const fieldNames = Object.keys(interrupt.requiredFields ?? {});
   const uploadIds = uploads.map((upload) => upload.upload_id);
   const filenames = uploads.map((upload) => upload.filename);
@@ -1765,6 +1797,18 @@ function buildInterruptAnswerPayload(
 function uploadAnswerDisplayText(uploads: UploadFileResponse[]): string {
   if (uploads.length === 0) return '';
   return `已上传文件：${uploads.map((upload) => upload.filename).join('、')}`;
+}
+
+function sheetSelectionDisplayText(field: SheetSelectionField | null, selections: Record<string, string>): string {
+  if (!field) return '';
+  const parts = field.required_upload_ids
+    .map((uploadId) => {
+      const label = field.labels_by_upload_id?.[uploadId] ?? uploadId;
+      const sheet = selections[uploadId];
+      return sheet ? `${label}=${sheet}` : '';
+    })
+    .filter(Boolean);
+  return parts.length > 0 ? `已选择 sheet：${parts.join('；')}` : '';
 }
 
 function InterruptPromptCard({ interrupt }: { interrupt: PendingInterrupt }) {
@@ -1791,6 +1835,41 @@ function InterruptPromptCard({ interrupt }: { interrupt: PendingInterrupt }) {
   );
 }
 
+function SheetSelectionControls({
+  field,
+  value,
+  onChange,
+}: {
+  field: SheetSelectionField;
+  value: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  return (
+    <Card size="small" className="sheet-selection-card" title="选择 Excel sheet">
+      <Space direction="vertical" size="small" className="sheet-selection-space">
+        {field.required_upload_ids.map((uploadId) => {
+          const options = field.options_by_upload_id[uploadId] ?? [];
+          const label = field.labels_by_upload_id?.[uploadId] ?? uploadId;
+          return (
+            <div key={uploadId} className="sheet-selection-row">
+              <Typography.Text>{label}</Typography.Text>
+              <select
+                aria-label={`选择 ${label} 的 sheet`}
+                value={value[uploadId] || ''}
+                onChange={(event) => onChange({ ...value, [uploadId]: event.target.value })}
+                style={{ minWidth: 180 }}
+              >
+                <option value="">选择 sheet</option>
+                {options.map((option) => <option key={option} value={option}>{option}</option>)}
+              </select>
+            </div>
+          );
+        })}
+      </Space>
+    </Card>
+  );
+}
+
 function InterruptInputBanner({ interrupt, onCancel, cancelling }: { interrupt: PendingInterrupt; onCancel: () => void; cancelling: boolean }) {
   return (
     <div className="interrupt-input-banner" role="status">
@@ -1810,6 +1889,55 @@ function interruptAcceptsUpload(interrupt: PendingInterrupt): boolean {
     const metadata = field as { accepts_upload?: unknown; type?: unknown };
     return metadata.accepts_upload === true || ['artifact', 'file', 'data'].includes(String(metadata.type ?? ''));
   });
+}
+
+function interruptSheetSelectionField(interrupt: PendingInterrupt): SheetSelectionField | null {
+  const raw = interrupt.requiredFields?.upload_sheet_selections;
+  if (!raw || typeof raw !== 'object') return null;
+  const field = raw as {
+    required_upload_ids?: unknown;
+    options_by_upload_id?: unknown;
+    labels_by_upload_id?: unknown;
+  };
+  if (!Array.isArray(field.required_upload_ids) || !field.options_by_upload_id || typeof field.options_by_upload_id !== 'object') {
+    return null;
+  }
+  const requiredUploadIds = field.required_upload_ids.filter((item): item is string => typeof item === 'string' && item.length > 0);
+  const optionsByUploadId: Record<string, string[]> = {};
+  for (const [uploadId, options] of Object.entries(field.options_by_upload_id as Record<string, unknown>)) {
+    if (Array.isArray(options)) {
+      optionsByUploadId[uploadId] = options.filter((item): item is string => typeof item === 'string' && item.length > 0);
+    }
+  }
+  const labelsByUploadId: Record<string, string> = {};
+  if (field.labels_by_upload_id && typeof field.labels_by_upload_id === 'object') {
+    for (const [uploadId, label] of Object.entries(field.labels_by_upload_id as Record<string, unknown>)) {
+      if (typeof label === 'string' && label.length > 0) labelsByUploadId[uploadId] = label;
+    }
+  }
+  return {
+    required_upload_ids: requiredUploadIds,
+    options_by_upload_id: optionsByUploadId,
+    labels_by_upload_id: labelsByUploadId,
+  };
+}
+
+function sheetSelectionComplete(field: SheetSelectionField, selections: Record<string, string>): boolean {
+  return field.required_upload_ids.every((uploadId) => {
+    const selected = selections[uploadId];
+    return Boolean(selected && (field.options_by_upload_id[uploadId] ?? []).includes(selected));
+  });
+}
+
+function selectedSheetPayload(field: SheetSelectionField, selections: Record<string, string>): Record<string, string> {
+  const payload: Record<string, string> = {};
+  for (const uploadId of field.required_upload_ids) {
+    const selected = selections[uploadId];
+    if (selected && (field.options_by_upload_id[uploadId] ?? []).includes(selected)) {
+      payload[uploadId] = selected;
+    }
+  }
+  return payload;
 }
 
 function interruptFieldSummary(interrupt: PendingInterrupt): string {
@@ -1837,6 +1965,9 @@ function extractInterruptOptions(field: unknown): string[] {
 }
 
 function interruptAnswerPlaceholder(interrupt: PendingInterrupt): string {
+  if (interruptSheetSelectionField(interrupt)) {
+    return '请选择 Excel sheet 后发送';
+  }
   const labels = interruptFieldLabels(interrupt);
   const options = interruptOptionLabels(interrupt);
   if (labels.length === 1 && options.length > 0) {

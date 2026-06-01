@@ -32,6 +32,7 @@ from ..dto import (
 )
 from ..runtime import ApiRuntime
 from ..sse import encode_sse_event
+from ..upload_errors import UploadValidationError
 
 router = APIRouter()
 SSE_AUTH_REVALIDATION_INTERVAL_SECONDS = 15.0
@@ -284,6 +285,8 @@ async def answer_task_interrupt(
     await require_task_owner(runtime, task_id, user)
     try:
         result = await runtime.answer_interrupt(task_id, interrupt_id, body.answer_payload)
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return AnswerInterruptResponse(**result)
