@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- API 文档任务 SSE `event_type` 枚举补齐中文含义：`docs/api/api-doc.html` 在每个事件枚举值后追加中文释义，例如 `task.accepted（任务接受）`、`task.graph_created（任务图创建完成）`，并扩展开发者文档回归保证所有枚举都有释义。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Docker 远端启动命令同步到 `0.1.9`：`docker_cmd.md` 的 pull、inspect、run 与最小判别命令统一改为 backend / frontend `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.9` 部署口径，用于发布 main 分支 API 文档 event_type 与典型请求时机更新。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - API 文档各接口简介补齐“典型请求时机”：`docs/api/api-doc.html` 在 23 个 endpoint summary 中直接说明登录、会话、消息、上传、任务、SSE、interrupt、artifact 等接口通常何时调用，并新增开发者文档回归锁定每个 endpoint 简介都包含该提示。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - main 分支 API 文档补齐任务 SSE `event_type` 枚举：`docs/api/api-doc.html` 在 `/api/v1/tasks/{task_id}/events` 章节列出当前后端 / 前端任务事件客户端认可的 FRONTEND、transient、AUDIT_ONLY 与 internal 事件类型，并把示例中的伪事件 `task.updated` 改为真实 `task.accepted`；新增开发者文档回归锁定完整清单。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
