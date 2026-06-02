@@ -99,3 +99,7 @@ native/target/
 
 # Local generated analysis exports
 /已实现的Fallback失败自检恢复机制.pdf
+
+# Local private working documents
+/需求.md
+/本周工作周报.md
