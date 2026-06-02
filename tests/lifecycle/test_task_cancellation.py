@@ -102,6 +102,12 @@ class TaskCancellationTest(LifecycleSQLiteTestCase):
             if event.event_type == "node.cancelled"
         }
         self.assertEqual(cancelled_node_ids, {"node-running", "node-waiting"})
+        blocked_node_ids = {
+            event.node_id
+            for event in events
+            if event.event_type == "node.blocked_by_cancellation"
+        }
+        self.assertEqual(blocked_node_ids, {"node-pending"})
 
     def test_cancel_task_context_preserves_terminal_task_statuses(self) -> None:
         service = CancellationService(self.storage)

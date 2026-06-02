@@ -56,6 +56,15 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertGreaterEqual(len(endpoint_summaries), 20)
         for summary in endpoint_summaries:
             self.assertIn("典型时机：", summary)
+        external_explanations = re.findall(r'<section class="external-explanation"><h4>外部调用方说明</h4><ul>(.*?)</ul></section>', response.text, re.S)
+        self.assertEqual(len(external_explanations), len(endpoint_summaries))
+        self.assertIn("给外部系统的完整任务链路", response.text)
+        self.assertIn("以 SSE 为主账本", response.text)
+        self.assertIn("只有当 SSE 中收到", response.text)
+        self.assertIn("不能替代 SSE 触发 interrupt", response.text)
+        self.assertIn("graph 只能说明“现在看起来是什么状态”", response.text)
+        self.assertIn("它不是创建新任务，而是恢复同一个", response.text)
+        self.assertIn("不要传用户身份、伪造节点 ID 或内部 resume 字段", response.text)
         self.assertIn("SSE event_type 枚举", response.text)
         event_enum_section = response.text[
             response.text.index("SSE event_type 枚举"):response.text.index("流式持久化规则")
@@ -87,6 +96,9 @@ class DeveloperDocsAPITest(APITestCase):
             "node.waiting_for_input",
             "node.cancelled",
             "node.blocked_by_cancellation",
+            "node.orphaned",
+            "node.ready_to_resume",
+            "node.resuming",
             "main_agent.output_delta",
             "main_agent.reasoning_delta",
             "main_agent.output_final",

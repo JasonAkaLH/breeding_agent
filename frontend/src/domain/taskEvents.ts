@@ -19,7 +19,7 @@ export interface SkillStatusLine {
   capabilityId: string;
   label: string;
   statusText: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'blocked';
 }
 
 export interface TaskEventState {
@@ -154,6 +154,10 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     }
     case 'node.waiting_for_input':
       return markWaitingInputRequired(withEvent);
+    case 'node.ready_to_resume':
+      return markNodeResumeProgress(withEvent, event, '补充信息已提交', '准备恢复执行', '已收到补充信息，准备恢复执行');
+    case 'node.resuming':
+      return markNodeResumeProgress(withEvent, event, '正在恢复执行', '正在恢复执行', '正在恢复执行');
     case 'main_agent.output_delta': {
       if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
       const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
@@ -179,6 +183,12 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
       return { ...withEvent, phase: 'cancelling', statusText: '取消请求已发送', currentActivityText: '正在取消当前任务', errorMessage: null };
     case 'task.cancelled':
       return { ...withEvent, phase: 'cancelled', statusText: '任务已取消', currentCapabilityId: null, currentCapabilityLabel: null, currentActivityText: null, errorMessage: null };
+    case 'node.cancelled':
+      return markNodeInterruptedLine(withEvent, event, 'cancelled', '已取消');
+    case 'node.blocked_by_cancellation':
+      return markNodeInterruptedLine(withEvent, event, 'blocked', '已被取消阻断');
+    case 'node.orphaned':
+      return markNodeInterruptedLine(withEvent, event, 'blocked', '已被重规划跳过');
     case 'node.failed':
       return {
         ...withEvent,
@@ -223,6 +233,62 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     default:
       return state;
   }
+}
+
+function markNodeResumeProgress(
+  state: TaskEventState,
+  event: TaskEventEnvelope,
+  statusText: string,
+  rowStatusText: string,
+  activitySuffix: string,
+): TaskEventState {
+  const activity = nodeActivity(event.payload);
+  const skillStatuses = isSkillCapability(activity.capabilityId)
+    ? upsertSkillStatusLine(state.skillStatuses, {
+      key: skillStatusKey(event, event.payload),
+      nodeId: event.node_id,
+      capabilityId: activity.capabilityId,
+      label: activity.capabilityLabel,
+      statusText: rowStatusText,
+      status: 'running',
+    })
+    : state.skillStatuses;
+  return {
+    ...state,
+    phase: 'running',
+    statusText,
+    currentCapabilityId: activity.capabilityId,
+    currentCapabilityLabel: activity.capabilityLabel,
+    currentActivityText: `${activity.capabilityLabel} ${activitySuffix}`,
+    skillStatuses,
+    errorMessage: null,
+  };
+}
+
+function markNodeInterruptedLine(
+  state: TaskEventState,
+  event: TaskEventEnvelope,
+  status: Extract<SkillStatusLine['status'], 'cancelled' | 'blocked'>,
+  statusText: string,
+): TaskEventState {
+  const activity = nodeActivity(event.payload);
+  const key = skillStatusKey(event, event.payload);
+  const updated = updateExistingSkillStatusLine(state.skillStatuses, key, { status, statusText });
+  if (updated !== state.skillStatuses) {
+    return { ...state, currentActivityText: null, skillStatuses: updated };
+  }
+  if (!isSkillCapability(activity.capabilityId)) {
+    return { ...state, currentActivityText: null };
+  }
+  const skillStatuses = upsertSkillStatusLine(state.skillStatuses, {
+    key,
+    nodeId: event.node_id,
+    capabilityId: activity.capabilityId,
+    label: activity.capabilityLabel,
+    statusText,
+    status,
+  });
+  return { ...state, currentActivityText: null, skillStatuses };
 }
 
 function isSkillCapability(capabilityId: unknown): capabilityId is string {

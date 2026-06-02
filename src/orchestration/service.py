@@ -151,6 +151,7 @@ class OrchestrationService:
             )
         )
         saved = await self._storage.save_task(planning_task)
+        resuming_nodes: list[tuple[TaskNode, WorkflowNodePlan]] = []
         for node in plan.nodes:
             if node.node_id not in existing_nodes:
                 await self._storage.save_task_node(
@@ -166,16 +167,24 @@ class OrchestrationService:
                     )
                 )
             else:
-                await self._storage.save_task_node(
+                existing_node = existing_nodes[node.node_id]
+                is_resume_node = (
+                    request.metadata.get("resume_interrupted_node_id") == node.node_id
+                    and existing_node.status in {NodeStatus.READY_TO_RESUME, NodeStatus.RESUMING}
+                )
+                resumed_status = NodeStatus.RESUMING if is_resume_node else NodeStatus.PENDING
+                saved_node = await self._storage.save_task_node(
                     replace(
-                        existing_nodes[node.node_id],
-                        status=NodeStatus.PENDING,
+                        existing_node,
+                        status=resumed_status,
                         assigned_instance_id=None,
                         output_refs=(),
                         started_at=None,
                         finished_at=None,
                     )
                 )
+                if is_resume_node and existing_node.status == NodeStatus.READY_TO_RESUME:
+                    resuming_nodes.append((saved_node, node))
             for dependency in node.depends_on:
                 await self._storage.save_task_edge(
                     plan.task_id,
@@ -195,6 +204,19 @@ class OrchestrationService:
                 },
             )
         )
+        for resumed_node, node_plan in resuming_nodes:
+            await self._record_event(
+                self._make_event(
+                    task_id=plan.task_id,
+                    conversation_id=request.conversation_id,
+                    node_id=resumed_node.node_id,
+                    event_type="node.resuming",
+                    payload={
+                        **self._node_activity_payload(node_plan),
+                        "status": str(resumed_node.status),
+                    },
+                )
+            )
         return running
 
     async def _apply_runtime_replan(
@@ -321,11 +343,32 @@ class OrchestrationService:
                 )
 
         orphaned_node_ids: list[str] = []
-        for node_id in previous_plan_node_ids - revised_node_ids:
+        for node_id in sorted(previous_plan_node_ids - revised_node_ids):
             node = latest_nodes.get(node_id)
             if node is not None and node.status not in self._TERMINAL_NODE_STATUSES:
-                await self._storage.save_task_node(replace(node, status=NodeStatus.ORPHANED))
+                orphaned_node = await self._storage.save_task_node(replace(node, status=NodeStatus.ORPHANED))
                 orphaned_node_ids.append(node_id)
+                node_plan = current_plan_by_id.get(node_id)
+                activity_payload = (
+                    self._node_activity_payload(node_plan)
+                    if node_plan is not None
+                    else {"capability_id": orphaned_node.capability_id}
+                )
+                await self._record_event(
+                    self._make_event(
+                        task_id=request.task_id,
+                        conversation_id=request.conversation_id,
+                        node_id=node_id,
+                        event_type="node.orphaned",
+                        payload={
+                            **activity_payload,
+                            "status": str(orphaned_node.status),
+                            "reason": decision.reason,
+                            "replan_index": replan_count + 1,
+                        },
+                        visibility=EventVisibility.FRONTEND,
+                    )
+                )
 
         await self._record_event(
             self._make_event(
