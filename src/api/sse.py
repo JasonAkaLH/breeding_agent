@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -9,6 +10,9 @@ from typing import Any
 from src.core.contracts import AuditSink, EventSink
 from src.core.enums import EventVisibility
 from src.core.models import EventRecord
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -44,18 +48,33 @@ class InMemoryEventBroker(EventSink):
 
     async def publish(self, event: EventRecord) -> None:
         if self._audit_sink is not None:
-            await self._audit_sink.record(
-                event.event_type,
-                {
-                    "event_id": event.event_id,
-                    "visibility": str(event.visibility),
-                    "created_at": _to_isoformat(event.created_at),
-                    **dict(event.payload),
-                },
-                conversation_id=event.conversation_id,
-                task_id=event.task_id,
-                node_id=event.node_id,
-            )
+            try:
+                await self._audit_sink.record(
+                    event.event_type,
+                    {
+                        "event_id": event.event_id,
+                        "visibility": str(event.visibility),
+                        "created_at": _to_isoformat(event.created_at),
+                        **dict(event.payload),
+                    },
+                    conversation_id=event.conversation_id,
+                    task_id=event.task_id,
+                    node_id=event.node_id,
+                )
+            except Exception:
+                # SSE fanout is part of the user-visible task ledger. A transient
+                # audit sink failure must not prevent already-persisted events
+                # from reaching live subscribers.
+                _LOGGER.warning(
+                    "event_broker_audit_sink_failed",
+                    extra={
+                        "event_id": event.event_id,
+                        "event_type": event.event_type,
+                        "task_id": event.task_id,
+                        "node_id": event.node_id,
+                    },
+                    exc_info=True,
+                )
 
         for queue in tuple(self._subscribers.get(event.task_id, ())):
             await queue.put(event)

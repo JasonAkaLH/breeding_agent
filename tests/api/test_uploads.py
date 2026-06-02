@@ -304,6 +304,12 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(sheet_field["required_upload_ids"], [upload_id])
         self.assertEqual(sheet_field["options_by_upload_id"][upload_id], ["Alpha", "Beta"])
         self.assertNotIn("A001", json.dumps(sheet_field, ensure_ascii=False))
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        waiting_events = [event for event in events if event.event_type == "node.waiting_for_input"]
+        self.assertEqual(len(waiting_events), 1)
+        self.assertEqual(waiting_events[0].node_id, open_interrupt["node_id"])
+        self.assertEqual(waiting_events[0].payload["interrupt_id"], open_interrupt["interrupt_id"])
+        self.assertEqual(waiting_events[0].payload["reason_code"], open_interrupt["reason_code"])
 
         invalid = await self.client.post(
             "/api/v1/tasks/interrupts/answer",

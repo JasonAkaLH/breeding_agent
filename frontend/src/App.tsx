@@ -81,9 +81,13 @@ interface TransientNotice {
 const AUTH_TOKEN_STORAGE_KEY = 'maf.frontend.access_token';
 const CONVERSATION_STORAGE_KEY_PREFIX = 'maf.frontend.conversation_id';
 const WAITING_INPUT_CHECK_DELAY_MS = 8_000;
+const WAITING_INTERRUPT_RETRY_DELAY_MS = 250;
+const WAITING_INTERRUPT_MAX_RETRIES = 6;
+const EVENT_STREAM_RECONNECT_DELAY_MS = 1_000;
 const TRANSIENT_NOTICE_DURATION_MS = 5_000;
 const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
+const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const INTERRUPT_FIELD_LABELS: Record<string, string> = {
   blocks: '区组数/重复数',
@@ -181,6 +185,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [taskState, setTaskState] = useState<TaskEventState>(createInitialTaskEventState());
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null);
+  const currentTaskIdRef = useRef<string | null>(null);
+  const currentAssistantIdRef = useRef<string | null>(null);
   const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
   const [sheetSelections, setSheetSelections] = useState<Record<string, string>>({});
   const [conversationHistory, setConversationHistory] = useState<ConversationSummaryResponse[]>([]);
@@ -201,6 +207,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const restoredTaskIdsRef = useRef<Set<string>>(new Set());
   const localTaskRuntimeActiveRef = useRef(false);
   const pendingAssistantPatchesRef = useRef<Map<string, AssistantMessagePatch>>(new Map());
+  const handledWaitingInputEventIdsRef = useRef<Set<string>>(new Set());
+  const waitingInputRetryTimersRef = useRef<Map<string, number>>(new Map());
+  const eventStreamReconnectTimerRef = useRef<number | null>(null);
   const transientNoticeIdRef = useRef(0);
 
   function showTransientNotice(message: string, type: TransientNotice['type'] = 'warning') {
@@ -210,6 +219,36 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   function clearTransientNotice() {
     setTransientNotice(null);
+  }
+
+  function clearEventStreamReconnectTimer() {
+    if (eventStreamReconnectTimerRef.current === null) return;
+    window.clearTimeout(eventStreamReconnectTimerRef.current);
+    eventStreamReconnectTimerRef.current = null;
+  }
+
+  function clearWaitingInputRetryTimer(eventId: string) {
+    const timerId = waitingInputRetryTimersRef.current.get(eventId);
+    if (timerId === undefined) return;
+    window.clearTimeout(timerId);
+    waitingInputRetryTimersRef.current.delete(eventId);
+  }
+
+  function clearWaitingInputRetryTimers() {
+    for (const timerId of waitingInputRetryTimersRef.current.values()) {
+      window.clearTimeout(timerId);
+    }
+    waitingInputRetryTimersRef.current.clear();
+  }
+
+  function updateCurrentTaskId(nextTaskId: string | null) {
+    currentTaskIdRef.current = nextTaskId;
+    setCurrentTaskId(nextTaskId);
+  }
+
+  function updateCurrentAssistantId(nextAssistantId: string | null) {
+    currentAssistantIdRef.current = nextAssistantId;
+    setCurrentAssistantId(nextAssistantId);
   }
 
   function setActiveConversationId(nextConversationId: string) {
@@ -328,6 +367,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (!authUser) return;
     return () => {
       subscriptionRef.current?.close();
+      clearEventStreamReconnectTimer();
+      clearWaitingInputRetryTimers();
     };
   }, [authUser]);
 
@@ -392,7 +433,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       inFlight = true;
       attempts += 1;
       try {
-        const shouldStop = await detectPendingInterrupt(currentTaskId);
+        const shouldStop = await pollTaskGraphFallback(currentTaskId);
         stopped = shouldStop || attempts >= maxAttempts;
       } finally {
         inFlight = false;
@@ -409,46 +450,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     };
   }, [active, api, currentTaskId, taskState.phase, waitingInputCheckDelayMs]);
 
-  async function detectPendingInterrupt(taskId: string): Promise<boolean> {
+  async function pollTaskGraphFallback(taskId: string): Promise<boolean> {
     try {
-      const graph = await api.getTaskGraph(taskId);
-      if (graph.nodes.some((node) => node.status === 'waiting_for_input')) {
-        const interrupts = await api.listInterrupts(taskId).catch(() => ({ task_id: taskId, interrupts: [] }));
-        const openInterrupt = interrupts.interrupts.find((interrupt) => interrupt.status === 'open');
-        if (!openInterrupt) {
-          const waitingProgressText = '正在等待任务给出补充信息';
-          if (currentAssistantId) {
-            updateAssistantMessage(currentAssistantId, { activityText: waitingProgressText });
-          }
-          setTaskState((state) => ({
-            ...state,
-            statusText: waitingProgressText,
-            errorMessage: null,
-          }));
-          return false;
-        }
-        const interruptionMode = taskPresentationModesRef.current.get(taskId) ?? mode;
-        const pending: PendingInterrupt = {
-          taskId,
-          interruptId: openInterrupt.interrupt_id,
-          question: openInterrupt.question,
-          requiredFields: openInterrupt.required_fields,
-          mode: interruptionMode,
-        };
-        setPendingInterrupt(pending);
-        if (currentAssistantId) {
-          updateAssistantMessage(currentAssistantId, {
-            content: '',
-            interruptPrompt: pending,
-            mode: interruptionMode,
-            artifactDisplays: undefined,
-            finalContentLoaded: undefined,
-          });
-        }
-        setTaskState((state) => markWaitingInputRequired(state));
-        subscriptionRef.current?.close();
-        return true;
-      }
+      await api.getTaskGraph(taskId);
       const task = await api.getTask(taskId);
       if (['completed', 'failed', 'cancelled'].includes(task.status)) {
         return true;
@@ -494,12 +498,15 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       subscriptionRef.current = null;
     }
     setTaskState(createInitialTaskEventState());
-    setCurrentTaskId(null);
-    setCurrentAssistantId(null);
+    updateCurrentTaskId(null);
+    updateCurrentAssistantId(null);
     setPendingInterrupt(null);
     localTaskRuntimeActiveRef.current = false;
     restoredTaskIdsRef.current.clear();
     pendingAssistantPatchesRef.current.clear();
+    handledWaitingInputEventIdsRef.current.clear();
+    clearEventStreamReconnectTimer();
+    clearWaitingInputRetryTimers();
   }
 
   function isActiveTaskStatus(status: string): boolean {
@@ -567,8 +574,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         ? current
         : [...current, applyPendingAssistantPatch(restoredAssistantMessage)]
     ));
-    setCurrentTaskId(taskId);
-    setCurrentAssistantId(restoredAssistantId);
+    updateCurrentTaskId(taskId);
+    updateCurrentAssistantId(restoredAssistantId);
     setPendingInterrupt(null);
     setTaskState(restoringState);
     subscribeToTask(taskId, restoredAssistantId, generation, targetConversationId);
@@ -599,8 +606,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setMessages([]);
     setConversationHistory([]);
     setPendingUploads([]);
-    setCurrentTaskId(null);
-    setCurrentAssistantId(null);
+    updateCurrentTaskId(null);
+    updateCurrentAssistantId(null);
     setPendingInterrupt(null);
     setTaskState(createInitialTaskEventState());
     setDeletingConversationIds(new Set());
@@ -621,8 +628,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setInput('');
     setModelEdition(defaultModelEdition);
     setPendingUploads([]);
-    setCurrentTaskId(null);
-    setCurrentAssistantId(null);
+    updateCurrentTaskId(null);
+    updateCurrentAssistantId(null);
     setPendingInterrupt(null);
     setTaskState(createInitialTaskEventState());
     taskPresentationModesRef.current.clear();
@@ -839,7 +846,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       activityText: taskProgressDisplayText(createSubmittingTaskState()),
     };
     setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
-    setCurrentAssistantId(assistantMessage.id);
+    updateCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState(createSubmittingTaskState());
 
@@ -859,7 +866,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       });
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(accepted.task_id, mode);
-      setCurrentTaskId(accepted.task_id);
+      updateCurrentTaskId(accepted.task_id);
       setSelectedSkillCommand(null);
       setSlashMenuOpen(false);
       subscribeToTask(accepted.task_id, assistantMessage.id, generation, targetConversationId);
@@ -982,7 +989,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       activityText: resumeProgressText,
     };
     setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
-    setCurrentAssistantId(assistantMessage.id);
+    updateCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState((state) => ({
       ...state,
@@ -999,7 +1006,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       taskPresentationModesRef.current.set(interrupt.taskId, interrupt.mode);
       setPendingUploads([]);
       setPendingInterrupt(null);
-      setCurrentTaskId(interrupt.taskId);
+      updateCurrentTaskId(interrupt.taskId);
       subscribeToTask(interrupt.taskId, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
       localTaskRuntimeActiveRef.current = false;
@@ -1014,21 +1021,31 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     generation = restoreGenerationRef.current,
     targetConversationId = conversationIdRef.current,
   ) {
+    clearEventStreamReconnectTimer();
     subscriptionRef.current?.close();
     subscriptionRef.current = createEventSource(taskEventsUrl(taskId), {
       onMessage: (event) => {
         if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
         if (event.task_id !== taskId) return;
-        handleTaskEvent(event, taskId, assistantId);
+        handleTaskEvent(event, taskId, assistantId, generation, targetConversationId);
       },
       onError: () => {
         if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-        handleEventStreamError(taskId, assistantId);
+        handleEventStreamError(taskId, assistantId, generation, targetConversationId);
       },
     });
   }
 
-  function handleTaskEvent(event: TaskEventEnvelope, taskId: string, assistantId: string) {
+  function handleTaskEvent(
+    event: TaskEventEnvelope,
+    taskId: string,
+    assistantId: string,
+    generation: number,
+    targetConversationId: string,
+  ) {
+    if (TERMINAL_TASK_EVENT_TYPES.has(event.event_type)) {
+      clearWaitingInputRetryTimers();
+    }
     setTaskState((previous) => {
       const next = applyTaskEvent(previous, event);
       const previousProgressText = taskProgressDisplayText(previous);
@@ -1056,11 +1073,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           activityStatus: 'pending',
         });
       }
-      if (['task.failed', 'node.failed'].includes(event.event_type)) {
+      if (event.event_type === 'task.failed') {
         localTaskRuntimeActiveRef.current = false;
         subscriptionRef.current?.close();
         subscriptionRef.current = null;
-        setCurrentTaskId(null);
+        updateCurrentTaskId(null);
         restoredTaskIdsRef.current.delete(taskId);
         taskPresentationModesRef.current.delete(taskId);
       }
@@ -1068,7 +1085,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         localTaskRuntimeActiveRef.current = false;
         subscriptionRef.current?.close();
         subscriptionRef.current = null;
-        setCurrentTaskId(null);
+        updateCurrentTaskId(null);
         restoredTaskIdsRef.current.delete(taskId);
         taskPresentationModesRef.current.delete(taskId);
       }
@@ -1078,29 +1095,160 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
       void loadArtifacts(taskId, assistantId);
     }
+    if (event.event_type === 'node.waiting_for_input') {
+      void loadPendingInterruptFromWaitingEvent(event, taskId, assistantId, generation, targetConversationId);
+    }
   }
 
-  async function handleEventStreamError(taskId: string, assistantId: string) {
+  function isCurrentTaskEventStream(
+    taskId: string,
+    assistantId: string,
+    generation: number,
+    targetConversationId: string,
+  ): boolean {
+    return isCurrentRestoreGeneration(generation, targetConversationId)
+      && currentTaskIdRef.current === taskId
+      && currentAssistantIdRef.current === assistantId;
+  }
+
+  async function loadPendingInterruptFromWaitingEvent(
+    event: TaskEventEnvelope,
+    taskId: string,
+    assistantId: string,
+    generation: number,
+    targetConversationId: string,
+    attempt = 0,
+  ) {
+    if (!isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) return;
+    if (attempt === 0) {
+      if (handledWaitingInputEventIdsRef.current.has(event.event_id)) return;
+      handledWaitingInputEventIdsRef.current.add(event.event_id);
+    }
+    const payloadInterruptId = typeof event.payload.interrupt_id === 'string' ? event.payload.interrupt_id : null;
+    try {
+      const interrupts = await api.listInterrupts(taskId);
+      if (!isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) return;
+      const openInterrupts = interrupts.interrupts.filter((interrupt) => interrupt.status === 'open');
+      const openInterrupt =
+        (payloadInterruptId ? openInterrupts.find((interrupt) => interrupt.interrupt_id === payloadInterruptId) : undefined)
+        ?? (event.node_id ? openInterrupts.find((interrupt) => interrupt.node_id === event.node_id) : undefined)
+        ?? openInterrupts[0];
+      if (!openInterrupt) {
+        scheduleWaitingInputInterruptRetry(event, taskId, assistantId, generation, targetConversationId, attempt);
+        return;
+      }
+      clearWaitingInputRetryTimer(event.event_id);
+      const interruptionMode = taskPresentationModesRef.current.get(taskId) ?? mode;
+      const pending: PendingInterrupt = {
+        taskId,
+        interruptId: openInterrupt.interrupt_id,
+        question: openInterrupt.question,
+        requiredFields: openInterrupt.required_fields,
+        mode: interruptionMode,
+      };
+      setPendingInterrupt(pending);
+      updateAssistantMessage(assistantId, {
+        content: '',
+        interruptPrompt: pending,
+        mode: interruptionMode,
+        artifactDisplays: undefined,
+        finalContentLoaded: undefined,
+      });
+      setTaskState((state) => markWaitingInputRequired(state));
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+    } catch {
+      if (!scheduleWaitingInputInterruptRetry(event, taskId, assistantId, generation, targetConversationId, attempt)) {
+        showTransientNotice('补充信息请求已到达，但暂时无法加载表单，请稍后重试。');
+      }
+    }
+  }
+
+  function scheduleWaitingInputInterruptRetry(
+    event: TaskEventEnvelope,
+    taskId: string,
+    assistantId: string,
+    generation: number,
+    targetConversationId: string,
+    attempt: number,
+  ): boolean {
+    if (!isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) {
+      clearWaitingInputRetryTimer(event.event_id);
+      return true;
+    }
+    if (attempt >= WAITING_INTERRUPT_MAX_RETRIES) {
+      handledWaitingInputEventIdsRef.current.delete(event.event_id);
+      clearWaitingInputRetryTimer(event.event_id);
+      const waitingProgressText = '正在等待任务给出补充信息';
+      setTaskState((state) => ({
+        ...state,
+        phase: 'running',
+        statusText: waitingProgressText,
+        currentActivityText: waitingProgressText,
+        errorMessage: null,
+      }));
+      updateAssistantMessage(assistantId, { activityText: waitingProgressText });
+      return false;
+    }
+    clearWaitingInputRetryTimer(event.event_id);
+    const retryTimer = window.setTimeout(() => {
+      waitingInputRetryTimersRef.current.delete(event.event_id);
+      if (!isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) return;
+      void loadPendingInterruptFromWaitingEvent(event, taskId, assistantId, generation, targetConversationId, attempt + 1);
+    }, WAITING_INTERRUPT_RETRY_DELAY_MS);
+    waitingInputRetryTimersRef.current.set(event.event_id, retryTimer);
+    return true;
+  }
+
+  async function handleEventStreamError(
+    taskId: string,
+    assistantId: string,
+    generation = restoreGenerationRef.current,
+    targetConversationId = conversationIdRef.current,
+  ) {
     showTransientNotice('事件流暂时中断，正在尝试查询任务状态。');
     try {
       const task = await api.getTask(taskId);
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       if (task.status === 'completed') {
+        clearWaitingInputRetryTimers();
         await loadArtifacts(taskId, assistantId);
       } else if (task.status === 'failed') {
+        clearWaitingInputRetryTimers();
         localTaskRuntimeActiveRef.current = false;
         setTaskState((state) => markTaskFailed(state, '本次任务未完成，请调整问题后重试。'));
         updateAssistantMessage(assistantId, { activityText: '本次任务未完成', activityStatus: 'failed' });
-        setCurrentTaskId(null);
+        updateCurrentTaskId(null);
         restoredTaskIdsRef.current.delete(taskId);
       } else if (task.status === 'cancelled') {
+        clearWaitingInputRetryTimers();
         localTaskRuntimeActiveRef.current = false;
         setTaskState((state) => ({ ...state, phase: 'cancelled', statusText: '任务已取消' }));
-        setCurrentTaskId(null);
+        updateCurrentTaskId(null);
         restoredTaskIdsRef.current.delete(taskId);
+      } else if (isActiveTaskStatus(task.status)) {
+        scheduleTaskEventReconnect(taskId, assistantId, generation, targetConversationId);
       }
     } catch {
       showTransientNotice('事件流中断，任务状态暂时无法确认。');
+      if (isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) {
+        scheduleTaskEventReconnect(taskId, assistantId, generation, targetConversationId);
+      }
     }
+  }
+
+  function scheduleTaskEventReconnect(
+    taskId: string,
+    assistantId: string,
+    generation: number,
+    targetConversationId: string,
+  ) {
+    clearEventStreamReconnectTimer();
+    eventStreamReconnectTimerRef.current = window.setTimeout(() => {
+      eventStreamReconnectTimerRef.current = null;
+      if (!isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) return;
+      subscribeToTask(taskId, assistantId, generation, targetConversationId);
+    }, EVENT_STREAM_RECONNECT_DELAY_MS);
   }
 
   async function loadArtifacts(taskId: string, assistantId: string) {
@@ -1119,7 +1267,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       updateAssistantMessage(assistantId, { activityText: undefined });
       setTaskState((state) => markTaskCompleted(state));
-      setCurrentTaskId(null);
+      updateCurrentTaskId(null);
       localTaskRuntimeActiveRef.current = false;
       taskPresentationModesRef.current.delete(taskId);
       subscriptionRef.current?.close();
@@ -1153,6 +1301,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       statusText: '取消请求已发送',
       currentActivityText: '正在停止当前对话任务',
     }));
+    if (currentAssistantId) {
+      updateAssistantMessage(currentAssistantId, {
+        interruptPrompt: undefined,
+        activityText: '正在停止当前对话任务',
+        activityStatus: 'pending',
+      });
+    }
     try {
       const taskIds = await collectConversationTaskIdsToCancel();
       const cancelErrors: unknown[] = [];
@@ -1167,17 +1322,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         throw cancelErrors[0];
       }
       setPendingInterrupt(null);
-      setCurrentTaskId(null);
-      subscriptionRef.current?.close();
-      subscriptionRef.current = null;
-      restoredTaskIdsRef.current.clear();
       setTaskState((state) => ({
         ...state,
-        phase: 'cancelled',
-        statusText: taskIds.length > 1 ? '当前对话任务已停止' : '任务已取消',
-        currentActivityText: null,
+        phase: 'cancelling',
+        statusText: '取消请求已发送',
+        currentActivityText: '正在停止当前对话任务',
         errorMessage: null,
       }));
+      if (currentAssistantId) {
+        updateAssistantMessage(currentAssistantId, {
+          interruptPrompt: undefined,
+          activityText: '正在停止当前对话任务',
+          activityStatus: 'pending',
+        });
+      }
+      const taskIdToResubscribe = currentTaskIdRef.current;
+      const assistantIdToResubscribe = currentAssistantIdRef.current;
+      if (subscriptionRef.current === null && taskIdToResubscribe && assistantIdToResubscribe) {
+        subscribeToTask(taskIdToResubscribe, assistantIdToResubscribe);
+      }
     } catch (error) {
       const message = friendlyError(error);
       showTransientNotice(message);
@@ -1204,7 +1367,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         pushTaskId(task.task_id);
       }
     }
-    pushTaskId(currentTaskId);
+    pushTaskId(currentTaskIdRef.current ?? currentTaskId);
     return orderedIds;
   }
 

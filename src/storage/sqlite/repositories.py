@@ -1400,6 +1400,14 @@ class SQLiteStorage(StoragePort):
 
         return await asyncio.to_thread(_sync)
 
+    def _ensure_event_replay_available(self) -> None:
+        if runtime_mode_for_component("event_log") != "enforce":
+            return
+        raise RuntimeError(
+            "event_log_replay_unavailable: Rust runtime sidecar enforce mode is active, "
+            "but event replay/list operations are not implemented by the configured sidecar facade."
+        )
+
     async def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken:
         return await self._run(lambda state, collab: state.save_auth_user_token(token, auth_generation_reason=auth_generation_reason))
 
@@ -1896,6 +1904,7 @@ class SQLiteStorage(StoragePort):
         return saved
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]:
+        self._ensure_event_replay_available()
         return await self._run(lambda state, collab: collab.list_events_for_task(task_id))
 
     async def list_events_for_task_filtered(
@@ -1907,6 +1916,7 @@ class SQLiteStorage(StoragePort):
         visibility: EventVisibility | str | None = None,
         limit: int | None = None,
     ) -> list[EventRecord]:
+        self._ensure_event_replay_available()
         return await self._run(
             lambda state, collab: collab.list_events_for_task_filtered(
                 task_id,
@@ -1924,6 +1934,7 @@ class SQLiteStorage(StoragePort):
         after_event_id: str | None = None,
         limit: int | None = None,
     ) -> list[EventRecord]:
+        self._ensure_event_replay_available()
         return await self._run(
             lambda state, collab: collab.list_event_page_for_task(
                 task_id,

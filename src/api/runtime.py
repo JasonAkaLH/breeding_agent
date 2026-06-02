@@ -806,14 +806,19 @@ class ApiRuntime:
             required_fields=required_fields,
         )
         self._task_sheet_selection_resume_metadata[task.task_id] = dict(metadata)
-        await self.interrupt_service.open_interrupt(interrupt, now=now)
+        saved_interrupt = await self.interrupt_service.open_interrupt(interrupt, now=now)
         await self._record_event(
             self._make_event(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 node_id=node_id,
                 event_type="node.waiting_for_input",
-                payload={"reason": "sheet_selection_required", "required_upload_ids": required_upload_ids},
+                payload={
+                    "reason": saved_interrupt.reason_code,
+                    "reason_code": saved_interrupt.reason_code,
+                    "interrupt_id": saved_interrupt.interrupt_id,
+                    "required_upload_ids": required_upload_ids,
+                },
                 created_at=now,
             )
         )
@@ -1730,37 +1735,52 @@ class ApiRuntime:
         yielded_event_ids: set[str] = set()
         terminal_event_types = {"task.completed", "task.failed", "task.cancelled"}
         terminal_event_seen = False
-        async for event in self._iter_event_replay_pages(task_id):
-            if is_frontend_event(event):
-                yielded_event_ids.add(event.event_id)
-                terminal_event_seen = terminal_event_seen or event.event_type in terminal_event_types
-                yield event
-
-        latest_task = await self.storage.get_task(task_id)
-        if latest_task is not None and latest_task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
-            if not terminal_event_seen:
-                deadline = asyncio.get_running_loop().time() + 0.25
-                while asyncio.get_running_loop().time() < deadline:
-                    await asyncio.sleep(0.01)
-                    async for event in self._iter_event_replay_pages(task_id):
-                        if event.event_id in yielded_event_ids:
-                            continue
-                        if not is_frontend_event(event):
-                            continue
-                        yielded_event_ids.add(event.event_id)
-                        terminal_event_seen = terminal_event_seen or event.event_type in terminal_event_types
-                        yield event
-                    if terminal_event_seen:
-                        return
-            return
-
         subscription = self.event_broker.subscribe(task_id)
         try:
+            async for event in self._iter_event_replay_pages(task_id):
+                if is_frontend_event(event):
+                    yielded_event_ids.add(event.event_id)
+                    terminal_event_seen = terminal_event_seen or event.event_type in terminal_event_types
+                    yield event
+
+            if terminal_event_seen:
+                return
+
+            latest_task = await self.storage.get_task(task_id)
+            if latest_task is not None and latest_task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                deadline = asyncio.get_running_loop().time() + 0.25
+                while asyncio.get_running_loop().time() < deadline:
+                    try:
+                        event = await asyncio.wait_for(subscription.get(), timeout=0.01)
+                    except asyncio.TimeoutError:
+                        async for event in self._iter_event_replay_pages(task_id):
+                            if event.event_id in yielded_event_ids:
+                                continue
+                            if not is_frontend_event(event):
+                                continue
+                            yielded_event_ids.add(event.event_id)
+                            terminal_event_seen = terminal_event_seen or event.event_type in terminal_event_types
+                            yield event
+                        if terminal_event_seen:
+                            return
+                        continue
+                    if event.event_id in yielded_event_ids:
+                        continue
+                    if is_frontend_event(event):
+                        yielded_event_ids.add(event.event_id)
+                        yield event
+                    if event.event_type in terminal_event_types:
+                        return
+                return
+
             while True:
                 event = await subscription.get()
+                if event.event_id in yielded_event_ids:
+                    continue
                 if is_frontend_event(event):
+                    yielded_event_ids.add(event.event_id)
                     yield event
-                if event.event_type in {"task.completed", "task.failed", "task.cancelled"}:
+                if event.event_type in terminal_event_types:
                     return
         finally:
             subscription.close()

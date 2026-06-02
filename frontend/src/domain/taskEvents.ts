@@ -152,6 +152,8 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
         errorMessage: null,
       };
     }
+    case 'node.waiting_for_input':
+      return markWaitingInputRequired(withEvent);
     case 'main_agent.output_delta': {
       if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
       const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
@@ -180,8 +182,8 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     case 'node.failed':
       return {
         ...withEvent,
-        phase: 'failed',
-        statusText: '本次任务未完成',
+        phase: state.phase,
+        statusText: state.statusText,
         currentActivityText: null,
         skillStatuses: markSkillStatusFailed(withEvent.skillStatuses, event),
         errorMessage: failureMessage(event.payload, event.node_id),

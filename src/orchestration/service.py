@@ -497,7 +497,22 @@ class OrchestrationService:
         if result.interrupt is not None:
             updated = replace(latest_node, status=NodeStatus.WAITING_FOR_INPUT)
             saved_node = await self._storage.save_task_node(updated)
-            await self._storage.save_interrupt(result.interrupt)
+            interrupt = replace(result.interrupt, created_at=result.interrupt.created_at or now)
+            saved_interrupt = await self._storage.save_interrupt(interrupt)
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    node_id=task_node.node_id,
+                    event_type="node.waiting_for_input",
+                    payload={
+                        **self._node_activity_payload(node_plan),
+                        "reason": saved_interrupt.reason_code,
+                        "interrupt_id": saved_interrupt.interrupt_id,
+                        "reason_code": saved_interrupt.reason_code,
+                    },
+                )
+            )
             return saved_node, dict(result.output_payload)
 
         if result.error is not None:
@@ -822,7 +837,20 @@ class OrchestrationService:
                         },
                     )
                 )
-                return OrchestrationRunResult(task=task, nodes=tuple(nodes.values()), completion_status=completion.value)
+                await self._record_event(
+                    self._make_event(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        event_type="task.failed",
+                        payload={
+                            "code": "replan_unavailable",
+                            "replan_count": replan_count,
+                            "max_replans": max_replans,
+                            "max_dynamic_nodes": max_dynamic_nodes,
+                        },
+                    )
+                )
+                return OrchestrationRunResult(task=task, nodes=tuple(nodes.values()), completion_status=CompletionStatus.FAILED.value)
 
             if completion == CompletionStatus.WAITING_FOR_INPUT or not progress_made:
                 task = await self._storage.save_task(replace(task, status=TaskStatus.RUNNING, updated_at=self._utcnow_naive()))
