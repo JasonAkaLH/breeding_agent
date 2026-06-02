@@ -252,7 +252,7 @@ describe('App', () => {
       getTask: vi.fn(async () => ({
         task_id: 'task-1',
         conversation_id: 'conv-test',
-        status: 'running',
+        status: 'failed',
         root_node_id: 'task-1:main',
         summary: null,
         requested_capability_id: null,
@@ -679,7 +679,16 @@ describe('App', () => {
       answerInterrupt: vi.fn(async () => ({ interrupt_id: 'interrupt-1', status: 'answered', node_id: 'node-wait', answer_payload: { crop: '水稻' } })),
     });
 
-    await renderAuthed(<App apiClient={api} eventSourceFactory={makeInspectableEventSourceFactory([]).factory} waitingInputCheckDelayMs={1} />);
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeInspectableEventSourceFactory([
+        {
+          ...event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'restored-waiting-event', 'node-wait'),
+          task_id: 'task-running',
+        },
+      ]).factory}
+      waitingInputCheckDelayMs={1}
+    />);
 
     expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
     expect(await screen.findByText(/当前任务等待补充信息/)).toBeInTheDocument();
@@ -1131,6 +1140,38 @@ describe('App', () => {
     expect(within(notice).getByLabelText('任务失败')).toBeInTheDocument();
     expect(notice.querySelector('.ant-spin')).toBeNull();
     expect(screen.queryByText('正在等待回答...')).not.toBeInTheDocument();
+  });
+
+  it('keeps the task stream open after a node failure until a task failure event arrives', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const close = vi.fn();
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '触发节点失败后重排' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'skill.data_lookup', skill_name: 'data-lookup' }, 'node-started', 'node-data'));
+      streamHandlers?.onMessage(event('node.failed', { code: 'data_access_deadline_exceeded' }, 'node-failed', 'node-data'));
+    });
+
+    expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('任务失败')).not.toBeInTheDocument();
+    expect(close).not.toHaveBeenCalled();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.failed', {}, 'task-failed'));
+    });
+
+    expect(await screen.findByLabelText('任务失败')).toBeInTheDocument();
+    expect(close).toHaveBeenCalled();
   });
 
   it('submits long composer input without a character cap', async () => {
@@ -1721,7 +1762,7 @@ describe('App', () => {
     }
   });
 
-  it('keeps polling until graph has waiting_for_input and submits the next input as interrupt answer', async () => {
+  it('loads the interrupt prompt from node.waiting_for_input SSE and submits the next input as interrupt answer', async () => {
     const runningGraph = {
       task_id: 'task-1',
       nodes: [
@@ -1766,7 +1807,10 @@ describe('App', () => {
     await renderAuthed(<App
       apiClient={api}
       eventSourceFactory={makeSequencedEventSourceFactory([
-        [event('task.accepted', {}, 'accepted-before-interrupt')],
+        [
+          event('task.accepted', {}, 'accepted-before-interrupt'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-before-interrupt', 'task-1:skill_data_query'),
+        ],
         [
           event('task.accepted', {}, 'accepted-after-interrupt'),
           event('skill.progress', { capability_id: 'skill.data_query', skill_name: 'data-query', domain_kind: 'data_query', stage: 'execute_query' }, 'execute-after-interrupt', 'node-resumed-query'),
@@ -1778,7 +1822,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询基因型' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    await waitFor(() => expect(api.getTaskGraph).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
     expect(screen.getByText('回复后将继续当前任务。')).toBeInTheDocument();
     expect(screen.getByText('作物类型')).toBeInTheDocument();
@@ -1827,7 +1871,10 @@ describe('App', () => {
     await renderAuthed(<App
       apiClient={api}
       eventSourceFactory={makeSequencedEventSourceFactory([
-        [event('task.accepted', {}, 'accepted-before-artifact-interrupt')],
+        [
+          event('task.accepted', {}, 'accepted-before-artifact-interrupt'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-artifact-interrupt', 'task-1:skill_field_design'),
+        ],
         [event('task.accepted', {}, 'accepted-after-artifact-interrupt')],
       ])}
       waitingInputCheckDelayMs={1}
@@ -1893,7 +1940,10 @@ describe('App', () => {
     await renderAuthed(<App
       apiClient={api}
       eventSourceFactory={makeSequencedEventSourceFactory([
-        [event('task.accepted', {}, 'accepted-before-sheet-interrupt')],
+        [
+          event('task.accepted', {}, 'accepted-before-sheet-interrupt'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-sheet-interrupt', 'task-1:sheet_selection'),
+        ],
         [event('task.accepted', {}, 'accepted-after-sheet-interrupt')],
       ])}
       waitingInputCheckDelayMs={1}
@@ -1940,7 +1990,10 @@ describe('App', () => {
     await renderAuthed(<App
       apiClient={api}
       eventSourceFactory={makeSequencedEventSourceFactory([
-        [event('task.accepted', {}, 'accepted-before-scalar-interrupt')],
+        [
+          event('task.accepted', {}, 'accepted-before-scalar-interrupt'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-scalar-interrupt', 'task-1:skill_rice_genie'),
+        ],
       ])}
       waitingInputCheckDelayMs={1}
     />);
@@ -2002,7 +2055,10 @@ describe('App', () => {
     await renderAuthed(<App
       apiClient={api}
       eventSourceFactory={makeSequencedEventSourceFactory([
-        [event('task.accepted')],
+        [
+          event('task.accepted'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-final-answer-interrupt', 'task-1:skill_data_query'),
+        ],
         [
           event('main_agent.output_delta', { delta: '流式主代理回答', ordinal: 1 }, 'delta-resumed-1'),
           event('task.completed', {}, 'task-completed-resumed'),
@@ -2025,7 +2081,7 @@ describe('App', () => {
     expect(screen.getByText('数据查询已完成，共返回 0 行结果。')).toBeInTheDocument();
   });
 
-  it('keeps the task locked while waiting_for_input has no open interrupt yet', async () => {
+  it('keeps graph-only waiting_for_input locked without calling interrupts before SSE', async () => {
     const waitingGraph = {
       task_id: 'task-1',
       nodes: [
@@ -2054,14 +2110,142 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询基因型' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    await waitFor(() => expect(api.listInterrupts).toHaveBeenCalled());
+    await waitFor(() => expect(api.getTaskGraph).toHaveBeenCalled());
+    expect(api.listInterrupts).not.toHaveBeenCalled();
     expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
+    expect(screen.queryByText('正在等待任务给出补充信息')).not.toBeInTheDocument();
     expect(screen.getByLabelText('请输入问题')).toBeDisabled();
     expect(screen.queryByRole('button', { name: '发送' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     expect(api.answerInterrupt).not.toHaveBeenCalled();
     expect(api.submitMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnects the task event stream after a transient SSE error while the task is still active', async () => {
+    const subscriptions: TaskEventHandlers[] = [];
+    const api = makeApi({
+      getTask: vi.fn(async () => taskSummary('task-1', 'running')),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '需要重连' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+
+    await act(async () => {
+      subscriptions[0].onError(new Error('stream dropped'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(api.getTask).toHaveBeenCalledWith('task-1'));
+
+    await waitFor(() => expect(subscriptions).toHaveLength(2), { timeout: 2_000 });
+    await act(async () => {
+      subscriptions[1].onMessage(event('main_agent.output_delta', { delta: '重连后的内容', response_role: 'final' }, 'delta-after-reconnect'));
+    });
+    expect(await screen.findByText('重连后的内容')).toBeInTheDocument();
+  });
+
+  it('keeps reconnecting the task event stream when status recovery is temporarily unavailable', async () => {
+    const subscriptions: TaskEventHandlers[] = [];
+    const api = makeApi({
+      getTask: vi.fn(async () => {
+        throw new Error('status endpoint unavailable');
+      }),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '状态接口短暂失败也要重连' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+
+    await act(async () => {
+      subscriptions[0].onError(new Error('stream dropped'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(api.getTask).toHaveBeenCalledWith('task-1'));
+    await waitFor(() => expect(subscriptions).toHaveLength(2), { timeout: 2_000 });
+    await act(async () => {
+      subscriptions[1].onMessage(event('main_agent.output_delta', { delta: '状态接口恢复前的 SSE 内容', response_role: 'final' }, 'delta-after-status-failure'));
+    });
+    expect(await screen.findByText('状态接口恢复前的 SSE 内容')).toBeInTheDocument();
+  });
+
+  it('retries loading open interrupts after a waiting-input event when the interrupt list lags', async () => {
+    const api = makeApi({
+      listInterrupts: vi.fn()
+        .mockResolvedValueOnce({ task_id: 'task-1', interrupts: [] })
+        .mockResolvedValueOnce({
+          task_id: 'task-1',
+          interrupts: [{
+            interrupt_id: 'interrupt-1',
+            task_id: 'task-1',
+            node_id: 'task-1:skill_data_query',
+            question: '请补充作物类型',
+            required_fields: { crop: { options: ['rice'] } },
+            status: 'open',
+            created_at: null,
+            answered_at: null,
+          }],
+        }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
+      event('task.accepted'),
+      event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-retry', 'task-1:skill_data_query'),
+    ])} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询基因型' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
+  });
+
+  it('does not let a stale waiting-input retry overwrite a terminal task event', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      listInterrupts: vi.fn(async () => ({ task_id: 'task-1', interrupts: [] })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等待事件后马上失败' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+      streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-before-terminal', 'task-1:skill_data_query'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.failed', {}, 'task-failed-before-waiting-retry'));
+    });
+    expect(await screen.findByLabelText('任务失败')).toBeInTheDocument();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_800));
+    });
+    expect(api.listInterrupts).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('任务失败')).toBeInTheDocument();
+    expect(screen.queryByText('正在等待任务给出补充信息')).not.toBeInTheDocument();
   });
 
   it('does not render the unfinished task list and still lets the user cancel the current task', async () => {
@@ -2080,6 +2264,82 @@ describe('App', () => {
 
     await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
     expect(screen.queryByText('暂无未完成任务')).not.toBeInTheDocument();
+  });
+
+  it('waits for the task.cancelled event before marking a cancel request terminal', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消前保持事件驱动' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(screen.getByText('正在停止当前对话任务')).toBeInTheDocument();
+    expect(screen.queryByText('任务已取消')).not.toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.cancelled', {}, 'task-cancelled'));
+    });
+
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+  });
+
+  it('resubscribes after cancelling a waiting-input interrupt and waits for task.cancelled', async () => {
+    const subscriptions: TaskEventHandlers[] = [];
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_data_query',
+          question: '请补充作物类型',
+          required_fields: { crop: { options: ['rice'] } },
+          status: 'open',
+          created_at: null,
+          answered_at: null,
+        }],
+      })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等待时取消任务' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    await act(async () => {
+      subscriptions[0].onMessage(event('task.accepted'));
+      subscriptions[0].onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-before-cancel', 'task-1:skill_data_query'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '取消当前任务' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    expect(screen.getByText('正在停止当前对话任务')).toBeInTheDocument();
+    expect(screen.queryByText('任务已取消')).not.toBeInTheDocument();
+
+    await act(async () => {
+      subscriptions[1].onMessage(event('task.cancelled', {}, 'task-cancelled-after-waiting-cancel'));
+    });
+
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
   });
 
   it('replaces the send button with a stop button while a conversation task is active and cancels all unfinished tasks', async () => {

@@ -7,10 +7,16 @@ from datetime import datetime, timedelta
 
 
 from src.api.routes.tasks import _iter_authorized_frontend_events
+from src.api.sse import InMemoryEventBroker
 from src.core.enums import EventVisibility, MessageRole, TaskStatus
 from src.core.models import Conversation, EventRecord, Message, Task
 from src.storage.rust_contract import resource_limit
 from tests.api.support import APITestCase, blocking_mysql_adapter
+
+
+class _FailingAuditSink:
+    async def record(self, *_args, **_kwargs) -> None:
+        raise RuntimeError("audit sink unavailable")
 
 
 class TaskEventsSSEAPITest(APITestCase):
@@ -96,6 +102,75 @@ class TaskEventsSSEAPITest(APITestCase):
         self.assertIn("text/event-stream", response.headers.get("content-type", ""))
         self.assertIn("evt-bearer-sse", response.text)
         self.assertIn("task.completed", response.text)
+
+    async def test_task_events_live_subscription_covers_replay_to_live_gap(self) -> None:
+        created_at = datetime(2026, 5, 15, 12, 0, 0)
+        await self.runtime.storage.save_conversation(
+            Conversation(conversation_id="conv-gap", username="account-gap", created_at=created_at, updated_at=created_at)
+        )
+        await self.runtime.storage.save_task(
+            Task(
+                task_id="task-gap",
+                conversation_id="conv-gap",
+                root_message_id="msg-gap",
+                status=TaskStatus.RUNNING,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        replay_event = EventRecord(
+            event_id="evt-gap-replay",
+            conversation_id="conv-gap",
+            task_id="task-gap",
+            event_type="task.accepted",
+            payload={},
+            visibility=EventVisibility.FRONTEND,
+            created_at=created_at,
+        )
+        live_gap_event = EventRecord(
+            event_id="evt-gap-live",
+            conversation_id="conv-gap",
+            task_id="task-gap",
+            event_type="node.started",
+            payload={"capability_id": "main_agent.respond"},
+            visibility=EventVisibility.FRONTEND,
+            created_at=created_at + timedelta(microseconds=1),
+        )
+
+        async def replay_then_publish_gap(task_id: str):
+            self.assertEqual(task_id, "task-gap")
+            yield replay_event
+            await self.runtime._record_event(live_gap_event)
+
+        self.runtime._iter_event_replay_pages = replay_then_publish_gap  # type: ignore[method-assign]
+
+        iterator = self.runtime.iter_frontend_events("task-gap").__aiter__()
+        self.assertEqual((await asyncio.wait_for(iterator.__anext__(), timeout=2)).event_id, "evt-gap-replay")
+        self.assertEqual((await asyncio.wait_for(iterator.__anext__(), timeout=2)).event_id, "evt-gap-live")
+        aclose = getattr(iterator, "aclose", None)
+        if callable(aclose):
+            await aclose()
+
+    async def test_event_broker_fanout_survives_audit_sink_failure(self) -> None:
+        broker = InMemoryEventBroker(audit_sink=_FailingAuditSink())
+        subscription = broker.subscribe("task-audit-fanout")
+        event = EventRecord(
+            event_id="evt-audit-fanout",
+            conversation_id="conv-audit-fanout",
+            task_id="task-audit-fanout",
+            event_type="node.waiting_for_input",
+            payload={"interrupt_id": "interrupt-1"},
+            visibility=EventVisibility.FRONTEND,
+            created_at=datetime(2026, 5, 15, 12, 0, 0),
+        )
+
+        with self.assertLogs("src.api.sse", level="WARNING") as logs:
+            await broker.publish(event)
+
+        received = await asyncio.wait_for(subscription.get(), timeout=1)
+        self.assertEqual(received.event_id, "evt-audit-fanout")
+        self.assertTrue(any("event_broker_audit_sink_failed" in item for item in logs.output))
+        subscription.close()
 
 
     async def test_open_task_event_stream_stops_after_token_refresh(self) -> None:

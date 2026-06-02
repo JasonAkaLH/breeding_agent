@@ -56,6 +56,12 @@ class MessageSubmissionAPITest(APITestCase):
         open_interrupt = interrupts.json()["interrupts"][0]
         self.assertEqual(open_interrupt["status"], "open")
         self.assertEqual(open_interrupt["reason_code"], "lookup_target_missing")
+        events = await self.runtime.storage.list_events_for_task(first_payload["task_id"])
+        waiting_events = [event for event in events if event.event_type == "node.waiting_for_input"]
+        self.assertEqual(len(waiting_events), 1)
+        self.assertEqual(waiting_events[0].node_id, open_interrupt["node_id"])
+        self.assertEqual(waiting_events[0].payload["interrupt_id"], open_interrupt["interrupt_id"])
+        self.assertEqual(waiting_events[0].payload["reason_code"], open_interrupt["reason_code"])
 
         answer = await self.client.post(
             "/api/v1/tasks/interrupts/answer",

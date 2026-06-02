@@ -219,6 +219,29 @@ class RuntimeReplanningTest(OrchestrationSQLiteTestCase):
         self.assertEqual(result.task.status, TaskStatus.FAILED)
         self.assertTrue(any(event.event_type == "task.replan_rejected" for event in events))
 
+    def test_required_failure_without_replan_decision_records_terminal_task_failure(self) -> None:
+        service = self._service(
+            executor=FakeExecutor({"cap.fail": error_result(code="boom", message="failed")}),
+            runtime_replanner=_AsyncNoneReplanner(),
+        )
+        request = OrchestrationRequest(task_id="task-no-replan", conversation_id="conv-1", root_message_id="msg-1", user_message="repair it")
+        plan = WorkflowPlan(
+            task_id="task-no-replan",
+            nodes=(WorkflowNodePlan(node_id="fail", capability_id="cap.fail"),),
+            max_replans=1,
+            max_dynamic_nodes=1,
+        )
+
+        result = asyncio.run(service.execute_request(request, plan, active_task_count=0))
+        events = asyncio.run(self.storage.list_events_for_task("task-no-replan"))
+        event_types = [event.event_type for event in events]
+
+        self.assertEqual(result.task.status, TaskStatus.FAILED)
+        self.assertEqual(result.completion_status, CompletionStatus.FAILED.value)
+        self.assertIn("task.replan_available", event_types)
+        self.assertIn("task.failed", event_types)
+        self.assertGreater(event_types.index("task.failed"), event_types.index("task.replan_available"))
+
     def test_replan_rejects_dependency_mutation_for_existing_pending_node(self) -> None:
         service = self._service(
             executor=FakeExecutor({

@@ -485,6 +485,27 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         )
         self.assertEqual(asyncio.run(SQLiteStorage(self.session_factory).list_event_page_for_task("task-sidecar")), [])
 
+    def test_event_log_enforce_rejects_python_sqlite_replay_even_when_append_sidecar_is_configured(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+
+        with patch.dict(os.environ, {"MAF_RUST_EVENT_LOG_MODE": "enforce"}):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "event_log_replay_unavailable: Rust runtime sidecar enforce mode is active",
+            ):
+                asyncio.run(storage.list_event_page_for_task("task-sidecar"))
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "event_log_replay_unavailable: Rust runtime sidecar enforce mode is active",
+            ):
+                asyncio.run(storage.list_events_for_task("task-sidecar"))
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "event_log_replay_unavailable: Rust runtime sidecar enforce mode is active",
+            ):
+                asyncio.run(storage.list_events_for_task_filtered("task-sidecar"))
+
     def test_event_log_shadow_keeps_python_visible_write_and_records_sidecar_audit(self) -> None:
         audit_events: list[dict[str, str]] = []
         sidecar = _RecordingRuntimeSidecarClient()

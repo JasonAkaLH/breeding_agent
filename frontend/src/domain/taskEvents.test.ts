@@ -131,16 +131,18 @@ describe('applyTaskEvent', () => {
     ]);
   });
 
-  it('marks existing skill rows failed without inventing rows for unknown failed nodes', () => {
+  it('marks existing skill rows failed without making node failure a task terminal state', () => {
     let state = createInitialTaskEventState();
     state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'sql-start', 'node-sql'));
     state = applyTaskEvent(state, event('node.failed', { code: 'db_transient_error' }, 'sql-failed', 'node-sql'));
 
+    expect(state.phase).toBe('running');
     expect(state.skillStatuses).toHaveLength(1);
     expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ label: 'data-query', status: 'failed', statusText: '失败' }));
     expect(state.errorMessage).toContain('数据库暂时不可用');
 
     const unknownFailure = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'db_transient_error' }, 'unknown-failed', 'node-unknown'));
+    expect(unknownFailure.phase).toBe('idle');
     expect(unknownFailure.skillStatuses).toEqual([]);
     expect(unknownFailure.errorMessage).toContain('数据库暂时不可用');
   });
@@ -205,6 +207,19 @@ describe('applyTaskEvent', () => {
     expect(state.errorMessage).toContain('下一条回复会继续当前任务');
   });
 
+  it('maps node waiting-for-input events to a resumable clarification state', () => {
+    const state = applyTaskEvent(createInitialTaskEventState(), event(
+      'node.waiting_for_input',
+      { capability_id: 'main_agent.respond', interrupt_id: 'interrupt-1', reason_code: 'lookup_target_missing' },
+      'waiting-event',
+      'node-main',
+    ));
+
+    expect(state.phase).toBe('waiting_for_input');
+    expect(state.statusText).toContain('等待补充信息');
+    expect(state.seenEventIds).toEqual(['waiting-event']);
+  });
+
   it('maps cancellation and guard failures to friendly states', () => {
     let state = createInitialTaskEventState();
     state = applyTaskEvent(state, event('task.cancellation_requested'));
@@ -214,17 +229,18 @@ describe('applyTaskEvent', () => {
     expect(state.phase).toBe('cancelled');
 
     state = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'write_pattern_detected' }, 'guard-node-failed', 'task-1:query_guard'));
-    expect(state.phase).toBe('failed');
+    expect(state.phase).toBe('idle');
     expect(state.errorMessage).toContain('只读查询安全边界');
 
   });
 
-  it('maps data access failures to friendly terminal messages', () => {
+  it('keeps node data access failures non-terminal until a task failure event arrives', () => {
     let state = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'data_access_deadline_exceeded' }, 'timeout-failed'));
-    expect(state.phase).toBe('failed');
+    expect(state.phase).toBe('idle');
     expect(state.errorMessage).toContain('数据库查询超时');
 
     state = applyTaskEvent(createInitialTaskEventState(), event('node.failed', { code: 'data_access_result_too_large' }, 'too-large-failed'));
+    expect(state.phase).toBe('idle');
     expect(state.errorMessage).toContain('查询结果内容过大');
   });
 
