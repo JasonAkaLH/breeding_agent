@@ -147,6 +147,39 @@ describe('applyTaskEvent', () => {
     expect(unknownFailure.errorMessage).toContain('数据库暂时不可用');
   });
 
+  it('marks node cancellation, blocked, and orphaned events on matching skill rows', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'sql-start', 'node-sql'));
+    state = applyTaskEvent(state, event('node.started', { capability_id: 'skill.rcbd', skill_name: 'RCBD' }, 'rcbd-start', 'node-rcbd'));
+    state = applyTaskEvent(state, event('node.cancelled', { capability_id: 'skill.data_query' }, 'sql-cancelled', 'node-sql'));
+    state = applyTaskEvent(state, event('node.blocked_by_cancellation', { capability_id: 'skill.rcbd' }, 'rcbd-blocked', 'node-rcbd'));
+    state = applyTaskEvent(state, event('node.orphaned', { capability_id: 'skill.report', skill_name: 'ReportSkill' }, 'report-orphaned', 'node-report'));
+
+    expect(state.phase).toBe('running');
+    expect(state.skillStatuses).toEqual([
+      expect.objectContaining({ key: 'node-sql', label: 'data-query', status: 'cancelled', statusText: '已取消' }),
+      expect.objectContaining({ key: 'node-rcbd', label: 'RCBD', status: 'blocked', statusText: '已被取消阻断' }),
+      expect.objectContaining({ key: 'node-report', label: 'ReportSkill', status: 'blocked', statusText: '已被重规划跳过' }),
+    ]);
+  });
+
+  it('maps interrupt resume node events to non-terminal running progress', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('node.ready_to_resume', { capability_id: 'skill.data_query', skill_name: 'data-query', interrupt_id: 'interrupt-1' }, 'ready-to-resume', 'node-sql'));
+
+    expect(state.phase).toBe('running');
+    expect(state.statusText).toBe('补充信息已提交');
+    expect(state.currentActivityText).toBe('data-query 已收到补充信息，准备恢复执行');
+    expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ key: 'node-sql', label: 'data-query', status: 'running', statusText: '准备恢复执行' }));
+
+    state = applyTaskEvent(state, event('node.resuming', { capability_id: 'skill.data_query', skill_name: 'data-query' }, 'resuming', 'node-sql'));
+
+    expect(state.phase).toBe('running');
+    expect(state.statusText).toBe('正在恢复执行');
+    expect(state.currentActivityText).toBe('data-query 正在恢复执行');
+    expect(state.skillStatuses[0]).toEqual(expect.objectContaining({ key: 'node-sql', label: 'data-query', status: 'running', statusText: '正在恢复执行' }));
+  });
+
   it('does not create skill rows for main-agent nodes and uses fallback keys when node ids are missing', () => {
     let state = createInitialTaskEventState();
     state = applyTaskEvent(state, event('node.started', { capability_id: 'main_agent.respond' }, 'main-start', 'node-main'));

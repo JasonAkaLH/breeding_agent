@@ -139,6 +139,11 @@ describe('taskEvents', () => {
         'mcp.long_task_progress',
         'mcp.long_task_cancelled',
         'node.waiting_for_input',
+        'node.cancelled',
+        'node.blocked_by_cancellation',
+        'node.orphaned',
+        'node.ready_to_resume',
+        'node.resuming',
       ]) {
         expect(listeners.get(eventName), eventName).toBeDefined();
       }
@@ -152,11 +157,20 @@ describe('taskEvents', () => {
           payload: { interrupt_id: 'interrupt-1' },
         }),
       }));
+      listeners.get('node.ready_to_resume')?.(new MessageEvent('node.ready_to_resume', {
+        data: JSON.stringify({
+          event_id: 'evt-ready',
+          event_type: 'node.ready_to_resume',
+          task_id: 'task-1',
+          payload: { interrupt_id: 'interrupt-1' },
+        }),
+      }));
     } finally {
       vi.unstubAllGlobals();
     }
 
     expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'node.waiting_for_input' }));
+    expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'node.ready_to_resume' }));
     expect(onError).not.toHaveBeenCalled();
   });
 });
