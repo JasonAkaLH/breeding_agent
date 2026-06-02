@@ -19,6 +19,8 @@ export interface FetchTaskEventSourceOptions {
   credentials?: RequestCredentials;
 }
 
+const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
+
 export function parseTaskEventData(data: string): TaskEventEnvelope | null {
   try {
     const parsed = JSON.parse(data) as TaskEventEnvelope;
@@ -44,11 +46,17 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
 
     // sse-starlette sets named events. Handle both named and default delivery.
     const knownEvents = [
+      'auth.invalidated',
       'task.accepted',
       'task.graph_created',
+      'task.graph_updated',
+      'task.replan_started',
+      'task.replan_rejected',
+      'task.replan_available',
       'node.started',
       'node.completed',
       'node.failed',
+      'node.waiting_for_input',
       'node.cancelled',
       'node.blocked_by_cancellation',
       'task.completed',
@@ -60,6 +68,17 @@ export function createBrowserEventSourceFactory(): EventSourceFactory {
       'main_agent.reasoning_delta',
       'skill.progress',
       'task.interrupt_answered',
+      'mcp.long_task_started',
+      'mcp.long_task_progress',
+      'mcp.long_task_status',
+      'mcp.long_task_reconnected',
+      'mcp.long_task_completed',
+      'mcp.long_task_failed',
+      'mcp.long_task_cancel_requested',
+      'mcp.long_task_cancelled',
+      'artifact.download_denied',
+      'artifact.download_gone',
+      'artifact.downloaded',
     ];
     for (const eventName of knownEvents) {
       source.addEventListener(eventName, (event) => {
@@ -91,7 +110,10 @@ export function createFetchTaskEventSourceFactory(options: FetchTaskEventSourceO
       if (!response.ok || !response.body) {
         throw new Error(`Task event stream failed with status ${response.status}`);
       }
-      await readTaskEventStream(response.body, handlers, () => closed, expectedTaskId);
+      const sawTerminalEvent = await readTaskEventStream(response.body, handlers, () => closed, expectedTaskId);
+      if (!closed && !sawTerminalEvent) {
+        handlers.onError(new Error('Task event stream closed before a terminal task event.'));
+      }
     }).catch((error) => {
       if (!closed) {
         handlers.onError(error);
@@ -112,10 +134,11 @@ async function readTaskEventStream(
   handlers: TaskEventHandlers,
   isClosed: () => boolean,
   expectedTaskId: string | null = null,
-): Promise<void> {
+): Promise<boolean> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let sawTerminalEvent = false;
   try {
     while (!isClosed()) {
       const { value, done } = await reader.read();
@@ -128,15 +151,16 @@ async function readTaskEventStream(
       while (separatorIndex >= 0) {
         const block = buffer.slice(0, separatorIndex);
         buffer = buffer.slice(separatorIndex + 2);
-        dispatchTaskEventBlock(block, handlers, expectedTaskId);
+        sawTerminalEvent = dispatchTaskEventBlock(block, handlers, expectedTaskId) || sawTerminalEvent;
         separatorIndex = buffer.indexOf('\n\n');
       }
     }
     buffer += decoder.decode();
     buffer = normalizeSseNewlines(buffer);
     if (buffer.trim()) {
-      dispatchTaskEventBlock(buffer, handlers, expectedTaskId);
+      sawTerminalEvent = dispatchTaskEventBlock(buffer, handlers, expectedTaskId) || sawTerminalEvent;
     }
+    return sawTerminalEvent;
   } finally {
     reader.releaseLock();
   }
@@ -146,23 +170,26 @@ function normalizeSseNewlines(value: string): string {
   return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
-function dispatchTaskEventBlock(block: string, handlers: TaskEventHandlers, expectedTaskId: string | null = null): void {
+function dispatchTaskEventBlock(block: string, handlers: TaskEventHandlers, expectedTaskId: string | null = null): boolean {
   const data = block
     .split('\n')
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice(5).replace(/^ /, ''))
     .join('\n');
   if (!data) {
-    return;
+    return false;
   }
-  dispatchParsedTaskEvent(data, handlers, expectedTaskId);
+  const event = dispatchParsedTaskEvent(data, handlers, expectedTaskId);
+  return event ? TERMINAL_TASK_EVENT_TYPES.has(event.event_type) : false;
 }
 
-function dispatchParsedTaskEvent(data: string, handlers: TaskEventHandlers, expectedTaskId: string | null): void {
+function dispatchParsedTaskEvent(data: string, handlers: TaskEventHandlers, expectedTaskId: string | null): TaskEventEnvelope | null {
   const parsed = parseTaskEventData(data);
   if (parsed && (!expectedTaskId || parsed.task_id === expectedTaskId)) {
     handlers.onMessage(parsed);
+    return parsed;
   }
+  return null;
 }
 
 function taskIdFromEventsUrl(url: string): string | null {

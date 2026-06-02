@@ -49,8 +49,9 @@ class CancellationService:
         now: datetime | None = None,
     ) -> EventRecord:
         suffix = int((now or self._utcnow_naive()).timestamp() * 1_000_000)
+        node_part = node_id or "task"
         return EventRecord(
-            event_id=f"evt-{task_id}-{event_type}-{suffix}",
+            event_id=f"evt-{task_id}-{event_type}-{node_part}-{suffix}",
             conversation_id=conversation_id,
             task_id=task_id,
             node_id=node_id,

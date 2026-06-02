@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- v1 任务事件链路已加固为 SSE 驱动：`result.interrupt` 与多 sheet 选择分支现在在保存 `waiting_for_input` 节点 / open interrupt 后同步写入 `node.waiting_for_input` FRONTEND 事件且携带 `interrupt_id` / `reason_code`；SSE 订阅先建立 live broker 再 replay，避免 replay-to-live 窗口漏事件；无可用重排决策时 `task.replan_available` 后补齐 `task.failed` 终止事件；取消节点事件 ID 纳入 `node_id` 防止同时间多节点覆盖；前端 v1 浏览器 EventSource / reducer 补齐事件枚举、`node.failed` 不再提前终止任务、graph-only 轮询不再在 SSE 等待事件到达前调用 interrupts，等待 interrupt 加载支持短重试，SSE 断线会按任务仍活跃状态重连，取消请求等待 `task.cancelled` SSE 后才进入终态；SSE audit sink 失败改为脱敏 warning 且不阻断 fanout，event_log enforce 模式下 replay/list 继续 fail-closed。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - API 文档任务 SSE `event_type` 枚举补齐中文含义：`docs/api/api-doc.html` 在每个事件枚举值后追加中文释义，例如 `task.accepted（任务接受）`、`task.graph_created（任务图创建完成）`，并扩展开发者文档回归保证所有枚举都有释义。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Docker 远端启动命令同步到 `0.1.9`：`docker_cmd.md` 的 pull、inspect、run 与最小判别命令统一改为 backend / frontend `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.9` 部署口径，用于发布 main 分支 API 文档 event_type 与典型请求时机更新。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - API 文档各接口简介补齐“典型请求时机”：`docs/api/api-doc.html` 在 23 个 endpoint summary 中直接说明登录、会话、消息、上传、任务、SSE、interrupt、artifact 等接口通常何时调用，并新增开发者文档回归锁定每个 endpoint 简介都包含该提示。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
