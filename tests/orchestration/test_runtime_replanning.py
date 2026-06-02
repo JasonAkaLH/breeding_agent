@@ -5,7 +5,8 @@ import unittest
 from dataclasses import replace
 
 from src.core.contracts import CapabilityExecutionRequest, CapabilityExecutionResult
-from src.core.enums import NodeStatus, TaskStatus
+from src.core.enums import NodeCriticality, NodeStatus, TaskStatus
+from src.core.models import Task, TaskNode
 from src.orchestration.backpressure import BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy, CompletionStatus
 from src.orchestration.models import CapabilityDescriptor, ExecutionInstance, InstanceState, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
@@ -266,6 +267,151 @@ class RuntimeReplanningTest(OrchestrationSQLiteTestCase):
 
         self.assertEqual(result.task.status, TaskStatus.FAILED)
         self.assertTrue(any(event.event_type == "task.replan_rejected" and event.payload.get("reason") == "invalid_runtime_plan" for event in events))
+
+    def test_replan_records_node_orphaned_events_for_removed_nonterminal_nodes(self) -> None:
+        service = self._service(
+            executor=FakeExecutor({"cap.probe": success_result(output_payload={"ok": True}), "cap.repair": success_result(output_payload={"ok": True})}),
+            runtime_replanner=_AsyncNoneReplanner(),
+        )
+        task = Task(
+            task_id="task-orphan",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.RUNNING,
+        )
+        kept_node = TaskNode(node_id="kept", task_id="task-orphan", capability_id="cap.probe", status=NodeStatus.COMPLETED)
+        stale_a = TaskNode(node_id="stale-a", task_id="task-orphan", capability_id="cap.repair", status=NodeStatus.WAITING_FOR_DEPENDENCY)
+        stale_b = TaskNode(node_id="stale-b", task_id="task-orphan", capability_id="cap.repair", status=NodeStatus.PENDING)
+        asyncio.run(self.storage.save_task(task))
+        asyncio.run(self.storage.save_task_node(kept_node))
+        asyncio.run(self.storage.save_task_node(stale_a))
+        asyncio.run(self.storage.save_task_node(stale_b))
+
+        request = OrchestrationRequest(task_id="task-orphan", conversation_id="conv-1", root_message_id="msg-1", user_message="replan")
+        current_plan = WorkflowPlan(
+            task_id="task-orphan",
+            nodes=(
+                WorkflowNodePlan(node_id="kept", capability_id="cap.probe"),
+                WorkflowNodePlan(node_id="stale-b", capability_id="cap.repair", criticality=NodeCriticality.OPTIONAL, metadata={"skill_name": "RepairSkillB"}),
+                WorkflowNodePlan(node_id="stale-a", capability_id="cap.repair", criticality=NodeCriticality.OPTIONAL, metadata={"skill_name": "RepairSkillA"}),
+            ),
+            max_replans=1,
+            max_dynamic_nodes=1,
+        )
+        revised_plan = WorkflowPlan(
+            task_id="task-orphan",
+            nodes=(WorkflowNodePlan(node_id="kept", capability_id="cap.probe"),),
+            max_replans=1,
+            max_dynamic_nodes=1,
+        )
+        applied = asyncio.run(
+            service._apply_runtime_replan(
+                request=request,
+                current_plan=current_plan,
+                decision=RuntimeReplanDecision(plan=revised_plan, reason="remove_stale_optional_branch"),
+                current_nodes={"kept": kept_node, "stale-a": stale_a, "stale-b": stale_b},
+                replan_count=0,
+                dynamic_node_count=0,
+            )
+        )
+
+        self.assertIsNotNone(applied)
+        reloaded_stale_a = asyncio.run(self.storage.get_task_node("stale-a"))
+        reloaded_stale_b = asyncio.run(self.storage.get_task_node("stale-b"))
+        self.assertEqual(reloaded_stale_a.status, NodeStatus.ORPHANED)
+        self.assertEqual(reloaded_stale_b.status, NodeStatus.ORPHANED)
+        events = asyncio.run(self.storage.list_events_for_task("task-orphan"))
+        orphan_events = [event for event in events if event.event_type == "node.orphaned"]
+        self.assertEqual([event.node_id for event in orphan_events], ["stale-a", "stale-b"])
+        self.assertEqual(orphan_events[0].payload["status"], "orphaned")
+        self.assertEqual(orphan_events[0].payload["capability_id"], "cap.repair")
+        self.assertEqual(orphan_events[0].payload["skill_name"], "RepairSkillA")
+        self.assertEqual(orphan_events[0].payload["reason"], "remove_stale_optional_branch")
+        self.assertEqual(orphan_events[1].payload["skill_name"], "RepairSkillB")
+        graph_updated = next(event for event in events if event.event_type == "task.graph_updated")
+        self.assertEqual(graph_updated.payload["orphaned_node_ids"], ["stale-a", "stale-b"])
+
+    def test_resume_execution_records_node_resuming_before_restart(self) -> None:
+        service = self._service(
+            executor=FakeExecutor({"cap.repair": success_result(output_payload={"ok": True})}),
+            runtime_replanner=_AsyncNoneReplanner(),
+        )
+        task = Task(
+            task_id="task-resume",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.RUNNING,
+            root_node_id="skill-node",
+        )
+        interrupted_node = TaskNode(
+            node_id="skill-node",
+            task_id="task-resume",
+            capability_id="cap.repair",
+            status=NodeStatus.READY_TO_RESUME,
+        )
+        asyncio.run(self.storage.save_task(task))
+        asyncio.run(self.storage.save_task_node(interrupted_node))
+
+        request = OrchestrationRequest(
+            task_id="task-resume",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="resume",
+            requested_capability_id="cap.repair",
+            metadata={"resume_interrupted_node_id": "skill-node"},
+        )
+        plan = WorkflowPlan(task_id="task-resume", nodes=(WorkflowNodePlan(node_id="skill-node", capability_id="cap.repair"),))
+
+        result = asyncio.run(service.execute_request(request, plan, active_task_count=0))
+        events = asyncio.run(self.storage.list_events_for_task("task-resume"))
+        event_types = [event.event_type for event in events]
+
+        self.assertEqual(result.task.status, TaskStatus.COMPLETED)
+        self.assertIn("node.resuming", event_types)
+        self.assertIn("node.started", event_types)
+        self.assertLess(event_types.index("node.resuming"), event_types.index("node.started"))
+        resuming_event = next(event for event in events if event.event_type == "node.resuming")
+        self.assertEqual(resuming_event.node_id, "skill-node")
+        self.assertEqual(resuming_event.payload["status"], "resuming")
+        self.assertEqual(resuming_event.payload["capability_id"], "cap.repair")
+
+    def test_resume_execution_preserves_existing_resuming_node_without_duplicate_resuming_event(self) -> None:
+        service = self._service(
+            executor=FakeExecutor({"cap.repair": success_result(output_payload={"ok": True})}),
+            runtime_replanner=_AsyncNoneReplanner(),
+        )
+        task = Task(
+            task_id="task-already-resuming",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.RUNNING,
+            root_node_id="skill-node",
+        )
+        interrupted_node = TaskNode(
+            node_id="skill-node",
+            task_id="task-already-resuming",
+            capability_id="cap.repair",
+            status=NodeStatus.RESUMING,
+        )
+        asyncio.run(self.storage.save_task(task))
+        asyncio.run(self.storage.save_task_node(interrupted_node))
+
+        request = OrchestrationRequest(
+            task_id="task-already-resuming",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            user_message="resume",
+            requested_capability_id="cap.repair",
+            metadata={"resume_interrupted_node_id": "skill-node"},
+        )
+        plan = WorkflowPlan(task_id="task-already-resuming", nodes=(WorkflowNodePlan(node_id="skill-node", capability_id="cap.repair"),))
+
+        result = asyncio.run(service.execute_request(request, plan, active_task_count=0))
+        events = asyncio.run(self.storage.list_events_for_task("task-already-resuming"))
+
+        self.assertEqual(result.task.status, TaskStatus.COMPLETED)
+        self.assertEqual([event.event_type for event in events].count("node.resuming"), 0)
+        self.assertEqual((asyncio.run(self.storage.get_task_node("skill-node"))).status, NodeStatus.COMPLETED)
 
     def test_replan_rejects_capability_mutation_for_existing_completed_node(self) -> None:
         service = self._service(
