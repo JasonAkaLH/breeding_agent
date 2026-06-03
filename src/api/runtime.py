@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 import os
@@ -32,7 +33,17 @@ from src.capabilities.main_agent import (
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
-from src.core.models import Conversation, EventRecord, Interrupt, InterruptAnswer, Message, PendingSkillContext, Task, TaskNode
+from src.core.models import (
+    Conversation,
+    EventRecord,
+    Interrupt,
+    InterruptAnswer,
+    Message,
+    PendingSkillContext,
+    Task,
+    TaskInputAttachment,
+    TaskNode,
+)
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.agent_skills import (
     SkillCapabilityRegistry,
@@ -102,6 +113,7 @@ from .conversation_titles import (
 )
 from .dto import SubmitMessageRequest
 from .sse import InMemoryEventBroker, is_frontend_event
+from .table_upload_normalizer import normalize_selected_spreadsheet_sheet
 from .upload_store import InMemoryUploadStore, UploadedFileRecord, UploadValidationError
 
 
@@ -499,15 +511,17 @@ class ApiRuntime:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
         if self._mcp_runtime_state is not None:
             metadata["mcp_bundle_revision"] = self._mcp_runtime_state.active_revision
+        upload_ids = request.metadata.get("upload_ids") or ()
         if upload_context["uploaded_artifacts"]:
-            metadata["uploaded_artifacts"] = [
-                *self._metadata_list(metadata.get("uploaded_artifacts")),
-                *upload_context["uploaded_artifacts"],
-            ]
-            metadata["skill_artifacts"] = [
-                *self._metadata_list(metadata.get("skill_artifacts")),
-                *upload_context["skill_artifacts"],
-            ]
+            await self._bind_task_input_uploads(
+                task=task,
+                username=authenticated_username,
+                upload_ids=upload_ids,
+                source_kind="message_upload",
+                source_message_id=message_id,
+                upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
+            )
+            metadata.update(await self._task_input_attachment_metadata(task.task_id))
         if upload_context.get("pending_sheet_selections"):
             await self._open_sheet_selection_interrupt(
                 task=task,
@@ -1033,7 +1047,17 @@ class ApiRuntime:
 
     async def sync_assistant_history_messages(self, conversation_id: str) -> None:
         tasks = await self.storage.list_tasks_for_conversation(conversation_id, statuses={TaskStatus.COMPLETED})
+        messages = await self.storage.list_messages_for_conversation(conversation_id)
+        completed_assistant_task_ids = {
+            message.task_id
+            for message in messages
+            if message.role == MessageRole.ASSISTANT
+            and message.task_id is not None
+            and message.stream_status == "complete"
+        }
         for task in tasks:
+            if task.task_id in completed_assistant_task_ids:
+                continue
             await self.try_sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
 
     async def sync_assistant_history_message_for_task(self, task_id: str, conversation_id: str) -> None:
@@ -1364,6 +1388,8 @@ class ApiRuntime:
                     )
                 )
         task = await self.cancellation_service.cancel_task_context(task_id)
+        if task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
+            await self._cancel_existing_execution(task_id)
         if task.status not in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
             self._locally_cancelled_task_ids.discard(task_id)
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
@@ -1623,30 +1649,6 @@ class ApiRuntime:
         }
         for payload in answer_payloads:
             resume_metadata.update(self._answer_payload_metadata(payload))
-        upload_ids = self._merged_answer_upload_ids(answer_payloads)
-        if upload_ids:
-            conversation = await self.storage.get_conversation(task.conversation_id)
-            if conversation is None:
-                raise ValueError(f"Unknown conversation: {task.conversation_id}")
-            upload_context = await self.resolve_uploads_for_message(
-                task.conversation_id,
-                conversation.username,
-                upload_ids,
-                upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
-            )
-            self._raise_missing_uploads(upload_context.get("missing_upload_ids"), context="interrupt resume")
-            if upload_context.get("pending_sheet_selections"):
-                raise UploadValidationError("Spreadsheet sheet selection is required before resuming the task")
-            if upload_context["uploaded_artifacts"]:
-                resume_metadata["uploaded_artifacts"] = [
-                    *self._metadata_list(resume_metadata.get("uploaded_artifacts")),
-                    *upload_context["uploaded_artifacts"],
-                ]
-                resume_metadata["skill_artifacts"] = [
-                    *self._metadata_list(resume_metadata.get("skill_artifacts")),
-                    *upload_context["skill_artifacts"],
-                ]
-
         answer = InterruptAnswer(
             interrupt_answer_id=self._make_id("interrupt-answer"),
             interrupt_id=interrupt_id,
@@ -1654,6 +1656,21 @@ class ApiRuntime:
             source_message_id=self._make_id("msg"),
             created_at=self._utcnow_naive(),
         )
+        upload_ids = self._merged_answer_upload_ids(answer_payloads)
+        if upload_ids:
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is None:
+                raise ValueError(f"Unknown conversation: {task.conversation_id}")
+            await self._bind_or_update_resume_input_attachments(
+                task=task,
+                username=conversation.username,
+                upload_ids=upload_ids,
+                source_kind="interrupt_answer_upload",
+                source_message_id=answer.source_message_id,
+                interrupt_answer_id=answer.interrupt_answer_id,
+                upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
+            )
+        resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
         saved_interrupt = await self.interrupt_service.record_answer(answer)
 
         answer_message = Message(
@@ -1704,6 +1721,232 @@ class ApiRuntime:
             "node_id": saved_interrupt.node_id,
             "answer_payload": dict(answer_payload),
         }
+
+    async def _bind_task_input_uploads(
+        self,
+        *,
+        task: Task,
+        username: str,
+        upload_ids: Any,
+        source_kind: str,
+        source_message_id: str | None = None,
+        interrupt_answer_id: str | None = None,
+        upload_sheet_selections: Mapping[str, Any] | None = None,
+    ) -> tuple[TaskInputAttachment, ...]:
+        sheet_selections = self._normalize_upload_sheet_selections(upload_sheet_selections)
+        saved: list[TaskInputAttachment] = []
+        for upload_id in self._normalize_upload_ids(upload_ids):
+            record = self.upload_store.get_for_message(
+                upload_id=upload_id,
+                username=username,
+                conversation_id=task.conversation_id,
+            )
+            attachment = self._attachment_from_upload_record(
+                task=task,
+                record=record,
+                source_kind=source_kind,
+                source_message_id=source_message_id,
+                interrupt_answer_id=interrupt_answer_id,
+                selected_sheet=sheet_selections.get(upload_id),
+            )
+            saved.append(await self.storage.save_task_input_attachment(attachment))
+        return tuple(saved)
+
+    async def _bind_or_update_resume_input_attachments(
+        self,
+        *,
+        task: Task,
+        username: str,
+        upload_ids: Any,
+        source_kind: str,
+        source_message_id: str | None,
+        interrupt_answer_id: str | None,
+        upload_sheet_selections: Mapping[str, Any] | None = None,
+    ) -> None:
+        sheet_selections = self._normalize_upload_sheet_selections(upload_sheet_selections)
+        existing = {
+            str(attachment.source_upload_id): attachment
+            for attachment in await self.storage.list_task_input_attachments_for_task(task.task_id)
+            if attachment.source_upload_id
+        }
+        missing_upload_ids: list[str] = []
+        for upload_id in self._normalize_upload_ids(upload_ids):
+            selected_sheet = sheet_selections.get(upload_id)
+            existing_attachment = existing.get(upload_id)
+            if existing_attachment is not None:
+                if selected_sheet:
+                    await self._update_task_input_attachment_sheet_selection(
+                        existing_attachment,
+                        selected_sheet=selected_sheet,
+                        interrupt_answer_id=interrupt_answer_id,
+                    )
+                continue
+            try:
+                record = self.upload_store.get_for_message(
+                    upload_id=upload_id,
+                    username=username,
+                    conversation_id=task.conversation_id,
+                )
+            except UploadValidationError:
+                missing_upload_ids.append(upload_id)
+                continue
+            if record.requires_sheet_selection and not selected_sheet:
+                raise UploadValidationError("Spreadsheet sheet selection is required before resuming the task")
+            attachment = self._attachment_from_upload_record(
+                task=task,
+                record=record,
+                source_kind=source_kind,
+                source_message_id=source_message_id,
+                interrupt_answer_id=interrupt_answer_id,
+                selected_sheet=selected_sheet,
+            )
+            await self.storage.save_task_input_attachment(attachment)
+        self._raise_missing_uploads(missing_upload_ids, context="interrupt resume")
+
+    def _attachment_from_upload_record(
+        self,
+        *,
+        task: Task,
+        record: UploadedFileRecord,
+        source_kind: str,
+        source_message_id: str | None,
+        interrupt_answer_id: str | None,
+        selected_sheet: str | None,
+    ) -> TaskInputAttachment:
+        now = self._utcnow_naive()
+        skill_artifact = record.to_skill_artifact(selected_sheet=selected_sheet)
+        prompt_artifact = self._prompt_artifact_from_skill_artifact(skill_artifact)
+        return TaskInputAttachment(
+            attachment_id=self._task_input_attachment_id(task.task_id, record.upload_id),
+            task_id=task.task_id,
+            conversation_id=task.conversation_id,
+            source_kind=source_kind,
+            source_upload_id=record.upload_id,
+            source_message_id=source_message_id,
+            interrupt_answer_id=interrupt_answer_id,
+            filename=record.filename,
+            content_type=record.content_type,
+            file_type=record.file_type,
+            size_bytes=record.size_bytes,
+            sha256=record.sha256,
+            prompt_artifact=prompt_artifact,
+            skill_artifact=skill_artifact,
+            source_payload=self._source_payload_from_upload_record(record),
+            selected_sheet=selected_sheet or record.selected_sheet,
+            created_at=record.created_at,
+            updated_at=now,
+        )
+
+    async def _update_task_input_attachment_sheet_selection(
+        self,
+        attachment: TaskInputAttachment,
+        *,
+        selected_sheet: str,
+        interrupt_answer_id: str | None = None,
+    ) -> TaskInputAttachment:
+        if attachment.file_type != "spreadsheet":
+            return attachment
+        source_payload = dict(attachment.source_payload)
+        raw_base64 = source_payload.get("content_base64")
+        if not isinstance(raw_base64, str) or not raw_base64:
+            raise UploadValidationError(
+                f"Task-bound spreadsheet upload is missing stored content for interrupt resume: {attachment.source_upload_id}"
+            )
+        try:
+            content = base64.b64decode(raw_base64.encode("ascii"), validate=True)
+        except Exception as exc:
+            raise UploadValidationError(
+                f"Task-bound spreadsheet upload content is invalid for interrupt resume: {attachment.source_upload_id}"
+            ) from exc
+        normalized = normalize_selected_spreadsheet_sheet(
+            filename=attachment.filename,
+            content_type=attachment.content_type,
+            content=content,
+            selected_sheet=selected_sheet,
+        )
+        if normalized.normalized_content_text is None:
+            raise UploadValidationError(
+                f"Selected spreadsheet sheet could not be normalized for interrupt resume: {attachment.source_upload_id}"
+            )
+        prompt_artifact = dict(attachment.prompt_artifact)
+        prompt_artifact["preview"] = dict(normalized.preview)
+        prompt_artifact["selected_sheet"] = normalized.selected_sheet or selected_sheet
+        prompt_artifact["normalized_filename"] = normalized.normalized_filename or attachment.filename
+        prompt_artifact["normalized_content_type"] = normalized.normalized_content_type
+        prompt_artifact.pop("requires_sheet_selection", None)
+        skill_artifact = dict(prompt_artifact)
+        skill_artifact.update(
+            {
+                "content": normalized.normalized_content_text,
+                "original_filename": attachment.filename,
+                "filename": normalized.normalized_filename or attachment.filename,
+                "normalized_filename": normalized.normalized_filename or attachment.filename,
+                "content_type": normalized.normalized_content_type or attachment.content_type,
+                "normalized_content_type": normalized.normalized_content_type,
+                "selected_sheet": normalized.selected_sheet or selected_sheet,
+            }
+        )
+        updated = replace(
+            attachment,
+            prompt_artifact=self._prompt_artifact_from_skill_artifact(skill_artifact),
+            skill_artifact=skill_artifact,
+            selected_sheet=normalized.selected_sheet or selected_sheet,
+            interrupt_answer_id=interrupt_answer_id or attachment.interrupt_answer_id,
+            updated_at=self._utcnow_naive(),
+        )
+        return await self.storage.save_task_input_attachment(updated)
+
+    async def _task_input_attachment_metadata(self, task_id: str) -> dict[str, Any]:
+        attachments = await self.storage.list_task_input_attachments_for_task(task_id)
+        if not attachments:
+            return {}
+        return {
+            "uploaded_artifacts": [
+                dict(attachment.prompt_artifact)
+                for attachment in attachments
+                if isinstance(attachment.prompt_artifact, Mapping) and attachment.prompt_artifact
+            ],
+            "skill_artifacts": [
+                dict(attachment.skill_artifact)
+                for attachment in attachments
+                if isinstance(attachment.skill_artifact, Mapping) and attachment.skill_artifact
+            ],
+        }
+
+    @staticmethod
+    def _task_input_attachment_id(task_id: str, upload_id: str) -> str:
+        return f"{task_id}:input:{upload_id}"
+
+    @staticmethod
+    def _prompt_artifact_from_skill_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
+        prompt_artifact = dict(artifact)
+        for raw_key in ("content", "content_base64", "encoding"):
+            prompt_artifact.pop(raw_key, None)
+        return prompt_artifact
+
+    @staticmethod
+    def _source_payload_from_upload_record(record: UploadedFileRecord) -> dict[str, Any]:
+        return {
+            "encoding": "base64",
+            "content_base64": base64.b64encode(record.content_bytes).decode("ascii"),
+            "filename": record.filename,
+            "content_type": record.content_type,
+            "file_type": record.file_type,
+            "normalized_filename": record.normalized_filename,
+            "normalized_content_type": record.normalized_content_type,
+        }
+
+    @staticmethod
+    def _normalize_upload_ids(upload_ids: Any) -> tuple[str, ...]:
+        if upload_ids is None:
+            return ()
+        if isinstance(upload_ids, str):
+            values = [upload_ids]
+        elif isinstance(upload_ids, list | tuple):
+            values = upload_ids
+        else:
+            raise UploadValidationError("upload_ids must be a list")
+        return tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
 
     def _validate_sheet_selection_answer(self, interrupt: Interrupt, answer_payload: Mapping[str, object]) -> None:
         fields = interrupt.required_fields.get("upload_sheet_selections")
@@ -2314,6 +2557,8 @@ class ApiRuntime:
         async with self._lock:
             handle = self._running_tasks.get(task_id)
         if handle is None:
+            return
+        if handle is asyncio.current_task():
             return
         if not handle.done():
             handle.cancel()

@@ -145,6 +145,7 @@ class PostgreSQLStorage(SQLiteStorage):
             "mailbox_message": 0,
             "event_record": 0,
             "artifact": 0,
+            "task_input_attachment": 0,
             "task_edge": 0,
             "task_node": 0,
             "message": 0,
@@ -216,6 +217,15 @@ class PostgreSQLStorage(SQLiteStorage):
                 "artifact",
                 """
                 DELETE FROM artifact a
+                USING task t
+                WHERE a.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "task_input_attachment",
+                """
+                DELETE FROM task_input_attachment a
                 USING task t
                 WHERE a.task_id = t.task_id
                   AND t.conversation_id = :conversation_id

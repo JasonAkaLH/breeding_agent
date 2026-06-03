@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import shutil
 import unittest
 from pathlib import Path
@@ -110,6 +111,32 @@ class FieldDesignSkillCompatibilityTest(unittest.TestCase):
         self.assertIn("material_data", result["missing"])
         self.assertIn("design", result["missing"])
 
+    def test_wrapper_positive_integer_parser_accepts_chinese_phrases(self) -> None:
+        script_path = Path("skill/field-design/scripts/run_field_design.py")
+        spec = importlib.util.spec_from_file_location("field_design_run_field_design_test", script_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertEqual(module.get_positive_int({"blocks": "十个重复"}, "blocks"), 10)
+        self.assertEqual(module.get_positive_int({"blocks": "两次"}, "blocks"), 2)
+        self.assertEqual(module.get_positive_int({"blocks": "壹佰零贰"}, "blocks"), 102)
+        self.assertEqual(
+            module.get_positive_int(
+                {"query": "请做随机区组，重复十次"},
+                "blocks",
+                (
+                    r"(?:blocks?|区组数|区组|重复数|重复|reps?|replications?)\s*[:：=]?\s*(\d+)",
+                    r"(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)",
+                ),
+            ),
+            10,
+        )
+        for invalid in (False, True, "0", "零", "-1", "1.5", "", "没有重复"):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(module.get_positive_int({"blocks": invalid}, "blocks"))
+
     def test_wrapper_calls_bundled_rcbd_pipeline_and_declares_csv_html_outputs(self) -> None:
         self._skip_without_rscript()
         manifest = parse_skill_file(self.skill_file)
@@ -139,7 +166,7 @@ class FieldDesignSkillCompatibilityTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn("RCBD 试验设计已完成", result["answer"])
         self.assertEqual(result["design"], "rcbd")
-        self.assertEqual(result["columns"], ["plots", "r", "ped_id", "ranges", "pass", "set", "hyb_check", "hyb_type"])
+        self.assertEqual(result["columns"], ["小区编号", "区组", "材料编号", "行号", "列号", "组别", "对照标记", "材料类型"])
         self.assertEqual(len(result["rows"]), 10)
         self.assertEqual([item["mime_type"] for item in result["output_files"]], ["text/csv", "text/html"])
         self.assertEqual(len(captured["files"]), 2)
@@ -168,5 +195,5 @@ class FieldDesignSkillCompatibilityTest(unittest.TestCase):
         self.assertEqual(result["status"], "needs_ck_parameters")
         self.assertEqual(result["design"], "interval")
         self.assertIn("ck_spec", result["missing"])
-        self.assertEqual(result["columns"], ["ck_no", "ped_id", "set"])
+        self.assertEqual(result["columns"], ["CK编号", "材料编号", "组别"])
         self.assertGreaterEqual(len(result["rows"]), 2)

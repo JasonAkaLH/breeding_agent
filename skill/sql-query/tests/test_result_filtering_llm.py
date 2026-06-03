@@ -117,6 +117,86 @@ class SQLQueryResultFilteringLLMTest(unittest.TestCase):
         self.assertEqual(result.output_payload["kept_row_indexes"], [0, 2])
         self.assertTrue(result.output_payload["domain_filter_applied"])
 
+    def test_enterprise_like_matches_are_protected_when_llm_drops_alias_rows(self) -> None:
+        async def llm_text_generator(_: str) -> str:
+            return json.dumps({"keep_row_indexes": [], "filter_reason": "模型误判子公司不是简称主体。"})
+
+        capability = SQLQueryResultFilteringCapability(llm_text_generator=llm_text_generator)
+
+        result = asyncio.run(
+            capability.execute(
+                make_request(
+                    "skill.sql_query",
+                    dependency_outputs={
+                        "execute": {
+                            "sql": "SELECT `variety_name`, `applicant`, `breeder` FROM `corn_varieties` WHERE (`applicant` LIKE '%隆平高科%' OR `breeder` LIKE '%隆平高科%')",
+                            "columns": ["variety_name", "applicant", "breeder"],
+                            "rows": [
+                                {
+                                    "variety_name": "圣甜1365",
+                                    "applicant": "广州隆平高科特种玉米有限公司",
+                                    "breeder": "圣尼斯蔬菜种子有限公司",
+                                },
+                                {
+                                    "variety_name": "农本313",
+                                    "applicant": "河北巡天农业科技有限公司",
+                                    "breeder": "安徽隆平高科种业有限公司、新疆巡天农业科技有限公司、宋国宏",
+                                },
+                            ],
+                            "row_count": 2,
+                        },
+                        "generate": {
+                            "route_id": "approval_variety_db",
+                            "schema_profile_id": "approval_variety_profile",
+                            "user_question": "隆平高科2021年审定了什么玉米品种？",
+                            "sql": "SELECT `variety_name`, `applicant`, `breeder` FROM `corn_varieties` WHERE (`applicant` LIKE '%隆平高科%' OR `breeder` LIKE '%隆平高科%')",
+                        },
+                    },
+                )
+            )
+        )
+
+        self.assertEqual(result.output_payload["row_count"], 2)
+        self.assertEqual(result.output_payload["kept_row_indexes"], [0, 1])
+        self.assertEqual(result.output_payload["filter_source"], "llm")
+        self.assertFalse(result.output_payload["fallback_used"])
+        self.assertTrue(result.output_payload["domain_filter_applied"])
+        self.assertIn("企业简称", result.output_payload["domain_filter_reason"])
+
+    def test_enterprise_like_protection_supports_chinese_column_aliases(self) -> None:
+        async def llm_text_generator(_: str) -> str:
+            return json.dumps({"keep_row_indexes": []})
+
+        capability = SQLQueryResultFilteringCapability(llm_text_generator=llm_text_generator)
+
+        result = asyncio.run(
+            capability.execute(
+                make_request(
+                    "skill.sql_query",
+                    dependency_outputs={
+                        "execute": {
+                            "sql": "SELECT `applicant` AS '申请者', `breeder` AS '育种者' FROM `corn_varieties` WHERE (`applicant` LIKE '%大北农%' OR `breeder` LIKE '%大北农%')",
+                            "columns": ["申请者", "育种者"],
+                            "rows": [
+                                {"申请者": "北京大北农科技集团股份有限公司", "育种者": "其他单位"},
+                                {"申请者": "其他单位", "育种者": "北京大北农生物技术有限公司"},
+                            ],
+                            "row_count": 2,
+                        },
+                        "generate": {
+                            "route_id": "approval_variety_db",
+                            "schema_profile_id": "approval_variety_profile",
+                            "user_question": "大北农在2021年审定了哪些玉米品种？",
+                            "sql": "SELECT `applicant` AS '申请者', `breeder` AS '育种者' FROM `corn_varieties` WHERE (`applicant` LIKE '%大北农%' OR `breeder` LIKE '%大北农%')",
+                        },
+                    },
+                )
+            )
+        )
+
+        self.assertEqual(result.output_payload["row_count"], 2)
+        self.assertEqual(result.output_payload["kept_row_indexes"], [0, 1])
+
     def test_prompt_sends_all_trimmed_rows_without_hard_candidate_cap(self) -> None:
         captured_prompts: list[str] = []
 

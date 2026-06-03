@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401
 import asyncio
+import json
 import time
 import unittest
 
@@ -46,6 +47,9 @@ class SQLQuerySQLExecuteReadonlyTest(unittest.TestCase):
         self.assertEqual(result.output_payload["preview_row_count"], 1)
         self.assertFalse(result.output_payload["truncated"])
         self.assertEqual(result.output_payload["rows"], [{"variety_name": "龙粳33"}])
+        self.assertNotIn("guard_pass_token", result.output_payload)
+        artifact_payload = json.loads(result.artifacts[0].storage_ref)
+        self.assertNotIn("guard_pass_token", artifact_payload)
 
     def test_transient_error_retries_once(self) -> None:
         calls = {"count": 0}
@@ -120,3 +124,56 @@ class SQLQuerySQLExecuteReadonlyTest(unittest.TestCase):
         self.assertTrue(result.output_payload["truncated"])
         self.assertEqual(result.output_payload["row_limit_removed_row_count"], 1)
         self.assertNotIn("db_row_limit", result.artifacts[0].summary)
+
+    def test_mysql_syntax_error_is_classified_repairable(self) -> None:
+        def runner(sql: str):
+            raise RuntimeError("(pymysql.err.ProgrammingError) (1064, \"You have an error in your SQL syntax near 'FROM'\")")
+
+        capability = SQLQuerySQLExecuteReadonlyCapability(adapter=MySQLReadonlyAdapter(runner=runner))
+        request = make_request(
+            "skill.sql_query",
+            dependency_outputs={"guard": {"sql": "SELECT FROM variety", "guard_pass_token": "guard:ok"}},
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertEqual(result.error.code, "db_sql_syntax_error")
+        self.assertTrue(result.error.metadata["repairable_sql_error"])
+        self.assertEqual(result.error.metadata["failed_stage"], "sql_execute_readonly")
+        self.assertIn("sql_fingerprint", result.error.metadata)
+
+    def test_unknown_column_is_classified_repairable(self) -> None:
+        def runner(sql: str):
+            raise RuntimeError("(1054, \"Unknown column 'bad_column' in 'field list'\")")
+
+        capability = SQLQuerySQLExecuteReadonlyCapability(adapter=MySQLReadonlyAdapter(runner=runner))
+        request = make_request(
+            "skill.sql_query",
+            dependency_outputs={"guard": {"sql": "SELECT bad_column FROM variety", "guard_pass_token": "guard:ok"}},
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertEqual(result.error.code, "db_unknown_column")
+        self.assertTrue(result.error.metadata["repairable_sql_error"])
+
+    def test_uncertain_db_error_defaults_not_repairable(self) -> None:
+        def runner(sql: str):
+            raise RuntimeError("database returned an unexpected domain-specific failure")
+
+        capability = SQLQuerySQLExecuteReadonlyCapability(adapter=MySQLReadonlyAdapter(runner=runner))
+        request = make_request(
+            "skill.sql_query",
+            dependency_outputs={"guard": {"sql": "SELECT variety_name FROM variety", "guard_pass_token": "guard:ok"}},
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertEqual(result.error.code, "db_execution_failed")
+        self.assertFalse(result.error.metadata.get("repairable_sql_error", False))

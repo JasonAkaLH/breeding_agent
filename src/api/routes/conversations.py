@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from src.core.enums import ConversationStatus
-from src.core.models import Conversation
+from src.core.enums import ConversationStatus, MessageRole
+from src.core.models import Artifact, Conversation, Message
 from src.lifecycle.errors import ConversationBusyError
 
+from ..artifact_responses import artifact_response, should_return_history_display_artifact
 from ..auth import require_authenticated_user, require_conversation_owner
 from ..dto import (
     ConversationListResponse,
@@ -13,6 +14,7 @@ from ..dto import (
     ConversationSummaryResponse,
     DeleteConversationRequest,
     DeleteConversationResponse,
+    ArtifactResponse,
     MessageAcceptedResponse,
     MessageResponse,
     RenameConversationRequest,
@@ -98,6 +100,7 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
     await require_conversation_owner(runtime, conversation_id, user)
     await runtime.sync_assistant_history_messages(conversation_id)
     messages = await runtime.storage.list_messages_for_conversation(conversation_id)
+    artifacts_by_task_id = await _history_display_artifacts_by_task_id(runtime, conversation_id, messages)
     return ConversationMessagesResponse(
         conversation_id=conversation_id,
         messages=[
@@ -109,10 +112,40 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
                 task_id=message.task_id,
                 stream_status=message.stream_status,
                 created_at=message.created_at,
+                artifacts=(
+                    artifacts_by_task_id.get(message.task_id, [])
+                    if message.role == MessageRole.ASSISTANT and message.task_id is not None
+                    else []
+                ),
             )
             for message in messages
         ],
     )
+
+
+async def _history_display_artifacts_by_task_id(
+    runtime: ApiRuntime,
+    conversation_id: str,
+    messages: list[Message],
+) -> dict[str, list[ArtifactResponse]]:
+    assistant_task_ids = {
+        message.task_id
+        for message in messages
+        if message.role == MessageRole.ASSISTANT and message.task_id is not None
+    }
+    if not assistant_task_ids:
+        return {}
+
+    grouped: dict[str, list] = {task_id: [] for task_id in assistant_task_ids}
+    artifacts = await runtime.storage.list_artifacts_for_conversation(conversation_id)
+    for artifact in artifacts:
+        if _is_history_artifact_for_assistant_message(artifact, assistant_task_ids):
+            grouped[artifact.task_id].append(artifact_response(artifact))
+    return grouped
+
+
+def _is_history_artifact_for_assistant_message(artifact: Artifact, assistant_task_ids: set[str]) -> bool:
+    return artifact.task_id in assistant_task_ids and should_return_history_display_artifact(artifact)
 
 
 @router.delete("/api/v1/conversations", response_model=DeleteConversationResponse)

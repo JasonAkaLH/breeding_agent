@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401
 import asyncio
+import json
 import unittest
 
 from sql_query_skill.sql_guard import SQLQuerySQLGuardCapability
@@ -28,6 +29,8 @@ class SQLQuerySQLGuardTest(unittest.TestCase):
 
         self.assertIsNone(result.error)
         self.assertIn("guard_pass_token", result.output_payload)
+        artifact_payload = json.loads(result.artifacts[0].storage_ref)
+        self.assertNotIn("guard_pass_token", artifact_payload)
 
     def test_insert_is_blocked(self) -> None:
         capability = SQLQuerySQLGuardCapability()
@@ -105,3 +108,53 @@ class SQLQuerySQLGuardTest(unittest.TestCase):
 
         self.assertIsNotNone(result.error)
         self.assertEqual(result.error.code, "table_not_in_route_whitelist")
+
+    def test_multiline_select_root_passes_guard(self) -> None:
+        capability = SQLQuerySQLGuardCapability()
+        request = make_request(
+            "skill.sql_query",
+            dependency_outputs={
+                "sql_generate": {
+                    "route_id": "approval_variety_db",
+                    "schema_profile_id": "approval_variety_profile",
+                    "allowed_tables": ["corn_varieties"],
+                    "selected_tables": ["corn_varieties"],
+                    "sql": """
+                    SELECT
+                        year,
+                        variety_name
+                    FROM corn_varieties
+                    WHERE year = 2021
+                    """,
+                }
+            },
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.error)
+        self.assertEqual(
+            result.output_payload["sql"],
+            "SELECT year, variety_name FROM corn_varieties WHERE year = 2021",
+        )
+        self.assertIn("guard_pass_token", result.output_payload)
+
+    def test_guard_remains_safety_boundary_not_full_parser(self) -> None:
+        capability = SQLQuerySQLGuardCapability()
+        request = make_request(
+            "skill.sql_query",
+            dependency_outputs={
+                "sql_generate": {
+                    "route_id": "approval_variety_db",
+                    "schema_profile_id": "approval_variety_profile",
+                    "allowed_tables": ["corn_varieties"],
+                    "selected_tables": ["corn_varieties"],
+                    "sql": "SELECT COALESCE(applicant, breeder) AS owner_name FROM corn_varieties WHERE year + 1 > 2021",
+                }
+            },
+        )
+
+        result = asyncio.run(capability.execute(request))
+
+        self.assertIsNone(result.error)
+        self.assertIn("guard_pass_token", result.output_payload)

@@ -117,6 +117,26 @@ parameters:
         self.assertEqual(result.sources["blocks"].source, "recent_user_message")
         self.assertEqual(result.sources["blocks"].confidence, "medium")
 
+    def test_resolves_from_resolved_user_message_text_source(self) -> None:
+        manifest = self._manifest()
+
+        result = resolve_skill_inputs(
+            manifest,
+            manifest.scripts[0],
+            {"query": "按照你的操作继续生成。", "uploaded_artifacts": [{"filename": "data.csv"}]},
+            SkillInputResolutionContext(
+                query="按照你的操作继续生成。",
+                current_user_message="按照你的操作继续生成。",
+                resolved_user_message="用户已补充 blocks=十个重复。",
+                artifact_summaries=({"filename": "data.csv"},),
+            ),
+        )
+
+        self.assertEqual(result.payload["blocks"], 10)
+        self.assertEqual(result.missing, ())
+        self.assertEqual(result.sources["blocks"].source, "resolved_user_message")
+        self.assertEqual(result.sources["blocks"].confidence, "high")
+
     def test_does_not_resolve_from_assistant_only_claims(self) -> None:
         manifest = self._manifest()
 
@@ -161,14 +181,67 @@ parameters:
         self.assertNotIn("material_data", result.payload)
         self.assertEqual(result.missing, ("material_data",))
 
-    async def test_llm_fallback_is_not_called_when_deterministic_resolution_is_complete(self) -> None:
+    async def test_structured_payload_resolution_is_not_overridden_by_llm(self) -> None:
         manifest = self._manifest()
         called = False
 
         async def slot_generator(_prompt: str) -> str:
             nonlocal called
             called = True
-            return '{"resolved": {"blocks": {"value": 999}}}'
+            return '{"resolved": {"blocks": {"value": 999, "source": "query"}}}'
+
+        result = await resolve_skill_inputs_with_llm(
+            manifest,
+            manifest.scripts[0],
+            {"query": "请生成随机区组，重复数=2", "blocks": 3, "uploaded_artifacts": [{"filename": "data.csv"}]},
+            SkillInputResolutionContext(
+                query="请生成随机区组，重复数=2",
+                artifact_summaries=({"filename": "data.csv"},),
+            ),
+            text_generator=slot_generator,
+        )
+
+        self.assertFalse(called)
+        self.assertEqual(result.payload["blocks"], 3)
+        self.assertEqual(result.sources["blocks"].source, "payload")
+        self.assertEqual(result.missing, ())
+
+    async def test_metadata_resolution_is_not_overridden_by_llm(self) -> None:
+        manifest = self._manifest()
+        called = False
+
+        async def slot_generator(_prompt: str) -> str:
+            nonlocal called
+            called = True
+            return '{"resolved": {"blocks": {"value": 999, "source": "query"}}}'
+
+        result = await resolve_skill_inputs_with_llm(
+            manifest,
+            manifest.scripts[0],
+            {
+                "query": "请生成随机区组，重复数=2",
+                "uploaded_artifacts": [{"filename": "data.csv"}],
+                "metadata": {"blocks": "三"},
+            },
+            SkillInputResolutionContext(
+                query="请生成随机区组，重复数=2",
+                artifact_summaries=({"filename": "data.csv"},),
+            ),
+            text_generator=slot_generator,
+        )
+
+        self.assertFalse(called)
+        self.assertEqual(result.payload["blocks"], 3)
+        self.assertEqual(result.sources["blocks"].source, "metadata")
+        self.assertEqual(result.missing, ())
+
+    async def test_llm_resolves_natural_language_scalar_before_regex_fallback(self) -> None:
+        manifest = self._manifest()
+        prompts: list[str] = []
+
+        async def slot_generator(prompt: str) -> str:
+            prompts.append(prompt)
+            return '{"resolved": {"blocks": {"value": 10, "source": "query"}}}'
 
         result = await resolve_skill_inputs_with_llm(
             manifest,
@@ -181,9 +254,44 @@ parameters:
             text_generator=slot_generator,
         )
 
-        self.assertFalse(called)
-        self.assertEqual(result.payload["blocks"], 2)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(result.payload["blocks"], 10)
+        self.assertEqual(result.sources["blocks"].source, "llm_slot_resolver:query")
         self.assertEqual(result.missing, ())
+
+    def test_explicit_chinese_integer_phrase_payload_is_coerced(self) -> None:
+        manifest = self._manifest()
+
+        result = resolve_skill_inputs(
+            manifest,
+            manifest.scripts[0],
+            {"query": "继续生成", "blocks": "十个重复", "uploaded_artifacts": [{"filename": "data.csv"}]},
+            SkillInputResolutionContext(
+                query="继续生成",
+                artifact_summaries=({"filename": "data.csv"},),
+            ),
+        )
+
+        self.assertEqual(result.payload["blocks"], 10)
+        self.assertEqual(result.sources["blocks"].source, "payload")
+        self.assertEqual(result.missing, ())
+
+    def test_invalid_integer_payload_values_remain_missing(self) -> None:
+        manifest = self._manifest()
+
+        for value in (False, True, "0", "零", "-1", "1.5", "", "没有重复"):
+            with self.subTest(value=value):
+                result = resolve_skill_inputs(
+                    manifest,
+                    manifest.scripts[0],
+                    {"query": "继续生成", "blocks": value, "uploaded_artifacts": [{"filename": "data.csv"}]},
+                    SkillInputResolutionContext(
+                        query="继续生成",
+                        artifact_summaries=({"filename": "data.csv"},),
+                    ),
+                )
+                self.assertNotIn("blocks", result.payload)
+                self.assertEqual(result.missing, ("blocks",))
 
     async def test_llm_fallback_resolves_missing_scalar_from_safe_recent_user_message(self) -> None:
         manifest = self._manifest()
@@ -282,7 +390,7 @@ parameters:
         self.assertNotIn("unknown", result.payload)
         self.assertEqual(result.missing, ("material_data",))
 
-    async def test_llm_fallback_invalid_json_keeps_missing_without_raising(self) -> None:
+    async def test_llm_invalid_json_falls_back_to_chinese_integer_text(self) -> None:
         manifest = self._manifest()
 
         async def slot_generator(_prompt: str) -> str:
@@ -294,17 +402,17 @@ parameters:
             {"query": "按照你的操作继续生成。", "uploaded_artifacts": [{"filename": "data.csv"}]},
             SkillInputResolutionContext(
                 query="按照你的操作继续生成。",
-                recent_user_messages=("重复数这个参数就是 blocks，取两次。",),
+                recent_user_messages=("blocks 就是十个重复。",),
                 artifact_summaries=({"filename": "data.csv"},),
             ),
             text_generator=slot_generator,
         )
 
-        self.assertNotIn("blocks", result.payload)
-        self.assertEqual(result.missing, ("blocks",))
+        self.assertEqual(result.payload["blocks"], 10)
+        self.assertEqual(result.missing, ())
         self.assertIn("llm_invalid_json", result.diagnostics)
 
-    async def test_llm_fallback_exception_keeps_missing_without_raising(self) -> None:
+    async def test_llm_exception_falls_back_to_chinese_integer_text(self) -> None:
         manifest = self._manifest()
 
         async def slot_generator(_prompt: str) -> str:
@@ -316,7 +424,51 @@ parameters:
             {"query": "按照你的操作继续生成。", "uploaded_artifacts": [{"filename": "data.csv"}]},
             SkillInputResolutionContext(
                 query="按照你的操作继续生成。",
-                recent_user_messages=("重复数这个参数就是 blocks，取两次。",),
+                recent_user_messages=("重复十次。",),
+                artifact_summaries=({"filename": "data.csv"},),
+            ),
+            text_generator=slot_generator,
+        )
+
+        self.assertEqual(result.payload["blocks"], 10)
+        self.assertEqual(result.missing, ())
+        self.assertEqual(result.diagnostics, ("llm_failed",))
+
+    async def test_llm_invalid_candidate_falls_back_to_chinese_integer_text(self) -> None:
+        manifest = self._manifest()
+
+        async def slot_generator(_prompt: str) -> str:
+            return '{"resolved": {"blocks": {"value": "many", "source": "recent_user_message"}}}'
+
+        result = await resolve_skill_inputs_with_llm(
+            manifest,
+            manifest.scripts[0],
+            {"query": "按照你的操作继续生成。", "uploaded_artifacts": [{"filename": "data.csv"}]},
+            SkillInputResolutionContext(
+                query="按照你的操作继续生成。",
+                recent_user_messages=("十个重复。",),
+                artifact_summaries=({"filename": "data.csv"},),
+            ),
+            text_generator=slot_generator,
+        )
+
+        self.assertEqual(result.payload["blocks"], 10)
+        self.assertEqual(result.missing, ())
+        self.assertIn("llm_rejected_invalid_value", result.diagnostics)
+
+    async def test_llm_failure_keeps_missing_when_no_text_fallback_evidence_exists(self) -> None:
+        manifest = self._manifest()
+
+        async def slot_generator(_prompt: str) -> str:
+            return "不是 JSON"
+
+        result = await resolve_skill_inputs_with_llm(
+            manifest,
+            manifest.scripts[0],
+            {"query": "按照你的操作继续生成。", "uploaded_artifacts": [{"filename": "data.csv"}]},
+            SkillInputResolutionContext(
+                query="按照你的操作继续生成。",
+                recent_user_messages=("好，继续。",),
                 artifact_summaries=({"filename": "data.csv"},),
             ),
             text_generator=slot_generator,
@@ -324,9 +476,9 @@ parameters:
 
         self.assertNotIn("blocks", result.payload)
         self.assertEqual(result.missing, ("blocks",))
-        self.assertEqual(result.diagnostics, ("llm_failed",))
+        self.assertIn("llm_invalid_json", result.diagnostics)
 
-    async def test_llm_fallback_only_accepts_still_missing_fields_when_other_scalar_is_resolved(self) -> None:
+    async def test_llm_text_stage_only_accepts_still_missing_structured_fields(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         skill_file = Path(tmpdir.name) / "SKILL.md"
@@ -379,9 +531,9 @@ parameters:
             text_generator=slot_generator,
         )
 
-        self.assertEqual(result.payload["blocks"], 2)
+        self.assertEqual(result.payload["blocks"], 999)
         self.assertEqual(result.payload["plots"], 12)
-        self.assertEqual(result.sources["blocks"].source, "query")
+        self.assertEqual(result.sources["blocks"].source, "llm_slot_resolver:recent_user_message")
         self.assertEqual(result.sources["plots"].source, "llm_slot_resolver:recent_user_message")
         self.assertEqual(result.missing, ())
 

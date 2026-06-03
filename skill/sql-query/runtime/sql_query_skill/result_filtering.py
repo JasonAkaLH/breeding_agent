@@ -22,6 +22,19 @@ _VARIETY_LIKE_PATTERN = re.compile(
     r"(?:`?[A-Za-z_][\w]*`?\.)?`?variety_name`?\s+LIKE\s+['\"]%([^%'\";]+)%['\"]",
     flags=re.IGNORECASE,
 )
+_ORGANIZATION_LIKE_PATTERN = re.compile(
+    r"(?:`?[A-Za-z_][\w]*`?\.)?`?(?:applicant|breeder|transgenic_owner)`?\s+LIKE\s+['\"]%([^%'\";]+)%['\"]",
+    flags=re.IGNORECASE,
+)
+_ORGANIZATION_ROW_KEYS = frozenset({
+    "applicant",
+    "breeder",
+    "transgenic_owner",
+    "申请者",
+    "育种者",
+    "转基因所有者",
+    "转基因权属",
+})
 
 _TOKEN_BUDGET_TOO_SMALL_MESSAGE = "查询结果内容过长，当前无法整理成可靠总结。请缩小查询范围后重试。"
 
@@ -85,7 +98,15 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             upstream=filter_upstream,
             question_context=question_context,
         )
-        domain_filter_applied = domain_keep_indexes is not None
+        protected_keep_indexes, protected_filter_reason = (None, None)
+        if domain_keep_indexes is None:
+            protected_keep_indexes, protected_filter_reason = self._organization_like_protected_indexes(
+                rows=source_rows,
+                upstream=filter_upstream,
+                question_context=question_context,
+            )
+        domain_filter_applied = domain_keep_indexes is not None or protected_keep_indexes is not None
+        combined_domain_filter_reason = self._join_filter_reasons(domain_filter_reason, protected_filter_reason)
 
         if raw_source_row_count > 0 and token_trim.applied and not source_rows:
             return self._success_result(
@@ -128,7 +149,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
                 filter_reason=domain_filter_reason or ("未配置 LLM 筛选器，保留 SQL 查询返回的候选表格。" if source_row_count else "查询未返回候选行。"),
                 domain_filter_applied=domain_filter_applied,
-                domain_filter_reason=domain_filter_reason,
+                domain_filter_reason=combined_domain_filter_reason,
                 token_trim=token_trim,
                 events=(),
             )
@@ -142,6 +163,10 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             llm_payload = parse_json_object(raw_output)
             kept_row_indexes = self._parse_keep_row_indexes(llm_payload, candidate_row_count=candidate_row_count)
             kept_row_indexes = self._apply_domain_keep_indexes(kept_row_indexes, domain_keep_indexes=domain_keep_indexes)
+            kept_row_indexes = self._apply_protected_keep_indexes(
+                kept_row_indexes,
+                protected_keep_indexes=protected_keep_indexes,
+            )
             filtered_rows = [source_rows[index] for index in kept_row_indexes]
         except LLMOutputError as exc:
             kept_row_indexes = domain_keep_indexes if domain_keep_indexes is not None else list(range(len(source_rows)))
@@ -160,7 +185,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 route_id=question_context.get("route_id") or upstream.get("route_id"),
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
                 domain_filter_applied=domain_filter_applied,
-                domain_filter_reason=domain_filter_reason,
+                domain_filter_reason=combined_domain_filter_reason,
                 token_trim=token_trim,
             )
         except Exception as exc:
@@ -180,7 +205,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 route_id=question_context.get("route_id") or upstream.get("route_id"),
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
                 domain_filter_applied=domain_filter_applied,
-                domain_filter_reason=domain_filter_reason,
+                domain_filter_reason=combined_domain_filter_reason,
                 token_trim=token_trim,
             )
 
@@ -217,9 +242,9 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             truncated=truncated,
             route_id=question_context.get("route_id") or upstream.get("route_id"),
             schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
-            filter_reason=domain_filter_reason or self._string_or_none(llm_payload.get("filter_reason")),
+            filter_reason=combined_domain_filter_reason or self._string_or_none(llm_payload.get("filter_reason")),
             domain_filter_applied=domain_filter_applied,
-            domain_filter_reason=domain_filter_reason,
+            domain_filter_reason=combined_domain_filter_reason,
             token_trim=token_trim,
             events=(event,),
         )
@@ -497,6 +522,54 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                     targets.add(normalized)
         return targets
 
+    def _organization_like_protected_indexes(
+        self,
+        *,
+        rows: list[dict[str, Any]],
+        upstream: Mapping[str, Any],
+        question_context: Mapping[str, Any],
+    ) -> tuple[list[int] | None, str | None]:
+        targets = self._organization_like_targets(upstream, question_context)
+        if not targets:
+            return None, None
+
+        protected = [
+            index
+            for index, row in enumerate(rows)
+            if self._row_matches_organization_like(row, targets=targets)
+        ]
+        if not protected:
+            return None, None
+
+        target_label = " / ".join(sorted(targets))
+        return protected, f"用户查询企业简称或主体关键词 {target_label}；保留申请者/育种者等企业字段中包含该简称、完整名称、子公司或关联主体名称的候选行。"
+
+    def _organization_like_targets(
+        self,
+        upstream: Mapping[str, Any],
+        question_context: Mapping[str, Any],
+    ) -> set[str]:
+        sql_candidates = [upstream.get("sql"), question_context.get("sql")]
+        targets: set[str] = set()
+        for sql in sql_candidates:
+            if not isinstance(sql, str):
+                continue
+            for match in _ORGANIZATION_LIKE_PATTERN.finditer(sql):
+                normalized = self._normalize_entity_token(match.group(1))
+                if normalized:
+                    targets.add(normalized)
+        return targets
+
+    @classmethod
+    def _row_matches_organization_like(cls, row: Mapping[str, Any], *, targets: set[str]) -> bool:
+        for key, value in row.items():
+            if not cls._is_organization_key(key):
+                continue
+            normalized = cls._normalize_entity_token(value)
+            if any(target in normalized for target in targets):
+                return True
+        return False
+
     @classmethod
     def _row_matches_specific_variety(cls, row: Mapping[str, Any], *, targets: set[str]) -> bool:
         for key, value in row.items():
@@ -513,11 +586,24 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
         return normalized == "variety_name" or normalized.endswith(".variety_name")
 
     @staticmethod
+    def _is_organization_key(key: Any) -> bool:
+        normalized = str(key or "").strip().strip("`").lower()
+        if normalized in _ORGANIZATION_ROW_KEYS:
+            return True
+        suffix = normalized.rsplit(".", 1)[-1]
+        return suffix in _ORGANIZATION_ROW_KEYS
+
+    @staticmethod
     def _normalize_variety_token(value: Any) -> str:
         text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
         text = re.sub(r"\s+", "", text)
         text = text.rstrip("号")
         return text
+
+    @staticmethod
+    def _normalize_entity_token(value: Any) -> str:
+        text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
+        return re.sub(r"\s+", "", text)
 
     @staticmethod
     def _apply_domain_keep_indexes(
@@ -530,6 +616,28 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
         domain_set = set(domain_keep_indexes)
         intersected = [index for index in llm_indexes if index in domain_set]
         return intersected or list(domain_keep_indexes)
+
+    @staticmethod
+    def _apply_protected_keep_indexes(
+        llm_indexes: list[int],
+        *,
+        protected_keep_indexes: list[int] | None,
+    ) -> list[int]:
+        if protected_keep_indexes is None:
+            return llm_indexes
+        merged: list[int] = []
+        seen: set[int] = set()
+        for index in [*llm_indexes, *protected_keep_indexes]:
+            if index in seen:
+                continue
+            merged.append(index)
+            seen.add(index)
+        return merged
+
+    @staticmethod
+    def _join_filter_reasons(*reasons: str | None) -> str | None:
+        joined = "；".join(reason for reason in reasons if reason)
+        return joined or None
 
     def _find_optional_dependency_output(
         self,

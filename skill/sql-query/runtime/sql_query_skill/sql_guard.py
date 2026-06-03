@@ -4,11 +4,25 @@ import hashlib
 import re
 from typing import Any
 
-from src.core.contracts import CapabilityContract, CapabilityExecutionError, CapabilityExecutionRequest, CapabilityExecutionResult
+from src.core.contracts import (
+    CapabilityContract,
+    CapabilityExecutionError,
+    CapabilityExecutionRequest,
+    CapabilityExecutionResult,
+)
 from src.core.enums import EventVisibility
 from src.core.models import EventRecord
 
-from .helpers import SQL_QUERY_AUDIT_GUARD_BLOCKED_EVENT, SQL_QUERY_AUDIT_GUARD_PASSED_EVENT, SQL_QUERY_PUBLIC_CAPABILITY_ID, find_dependency_output, load_yaml, make_artifact, normalize_text, skill_root
+from .helpers import (
+    SQL_QUERY_AUDIT_GUARD_BLOCKED_EVENT,
+    SQL_QUERY_AUDIT_GUARD_PASSED_EVENT,
+    SQL_QUERY_PUBLIC_CAPABILITY_ID,
+    find_dependency_output,
+    load_yaml,
+    make_artifact,
+    normalize_text,
+    skill_root,
+)
 
 
 class SQLQuerySQLGuardCapability(CapabilityContract):
@@ -69,7 +83,7 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
             name="guard_report",
             task_id=request.task_id,
             node_id=request.node_id,
-            payload=output,
+            payload={key: value for key, value in output.items() if key != "guard_pass_token"},
             summary="guard passed",
         )
         event = self._make_event(
@@ -92,7 +106,7 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
         normalized = re.sub(r"--.*?$", " ", normalized, flags=re.M)
         normalized = re.sub(r"#.*?$", " ", normalized, flags=re.M)
         normalized = normalized.rstrip(";").strip()
-        normalized = re.sub(r"\\s+", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized)
         return normalized
 
     def _validate_sql(self, normalized_sql: str, *, allowed_tables: set[str]) -> CapabilityExecutionError | None:

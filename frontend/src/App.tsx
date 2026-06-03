@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
 import { CopyOutlined, ExclamationCircleFilled, ReloadOutlined } from '@ant-design/icons';
 import { Alert, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
+import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
 import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
@@ -37,6 +38,7 @@ interface AppProps {
 }
 
 type MessageRole = 'user' | 'assistant';
+type ActivityNoticeStatus = 'pending' | 'failed' | 'cancelled';
 
 interface ConversationMessage {
   id: string;
@@ -47,7 +49,7 @@ interface ConversationMessage {
   reasoningComplete?: boolean;
   reasoningContent?: string;
   activityText?: string;
-  activityStatus?: 'pending' | 'failed';
+  activityStatus?: ActivityNoticeStatus;
   skillStatuses?: SkillStatusLine[];
   artifactDisplays?: CapabilityArtifactDisplay[];
   finalContentLoaded?: boolean;
@@ -78,12 +80,70 @@ interface TransientNotice {
   type: 'success' | 'warning';
 }
 
+const COMPOSER_READY_PHASES = new Set(['idle', 'completed', 'failed', 'cancelled']);
+const CANCELLATION_OR_TERMINAL_PHASES = new Set(['cancelling', 'completed', 'failed', 'cancelled']);
+const INTERACTIVE_FOCUS_SELECTOR = [
+  'button',
+  'input',
+  'select',
+  'a[href]',
+  '[contenteditable="true"]',
+  '[role="button"]',
+  '[role="menuitem"]',
+  '[role="option"]',
+  '[role="combobox"]',
+  '[role="dialog"]',
+  '[role="listbox"]',
+  '[role="textbox"]',
+  '.ant-popover',
+  '.ant-select-dropdown',
+  '.ant-dropdown',
+  '.ant-modal',
+  '.composer-menu-popover',
+  '.history-row',
+  '.history-actions',
+].join(',');
+
+function resolveComposerTextArea(
+  textAreaRef: RefObject<TextAreaRef | null>,
+  composerRoot: HTMLElement | null,
+): HTMLTextAreaElement | null {
+  return textAreaRef.current?.resizableTextArea?.textArea
+    ?? composerRoot?.querySelector<HTMLTextAreaElement>('textarea[aria-label="请输入问题"]')
+    ?? null;
+}
+
+function isHiddenMeasurementTextArea(element: Element): boolean {
+  return element.getAttribute('aria-hidden') === 'true' || element.getAttribute('name') === 'hiddenTextarea';
+}
+
+function canAutoFocusComposer(textArea: HTMLTextAreaElement, composerRoot: HTMLElement | null): boolean {
+  const activeElement = document.activeElement;
+  if (!activeElement || activeElement === document.body || activeElement === textArea || isHiddenMeasurementTextArea(activeElement)) {
+    return true;
+  }
+  if (composerRoot?.contains(activeElement)) {
+    return Boolean(activeElement.closest('.composer-send-button')) && !activeElement.closest('.composer-stop-button');
+  }
+  return activeElement.closest(INTERACTIVE_FOCUS_SELECTOR) === null;
+}
+
+function focusTextAreaWithoutScroll(textArea: HTMLTextAreaElement) {
+  try {
+    textArea.focus({ preventScroll: true });
+  } catch {
+    textArea.focus();
+  }
+}
+
 const AUTH_TOKEN_STORAGE_KEY = 'maf.frontend.access_token';
 const CONVERSATION_STORAGE_KEY_PREFIX = 'maf.frontend.conversation_id';
 const WAITING_INPUT_CHECK_DELAY_MS = 8_000;
 const WAITING_INTERRUPT_RETRY_DELAY_MS = 250;
 const WAITING_INTERRUPT_MAX_RETRIES = 6;
 const EVENT_STREAM_RECONNECT_DELAY_MS = 1_000;
+const CANCEL_RECONCILE_DELAY_MS = 250;
+const CANCEL_RECONCILE_MAX_ATTEMPTS = 10;
 const TRANSIENT_NOTICE_DURATION_MS = 5_000;
 const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
@@ -187,9 +247,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null);
   const currentTaskIdRef = useRef<string | null>(null);
   const currentAssistantIdRef = useRef<string | null>(null);
+  const taskPhaseRef = useRef(taskState.phase);
   const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
   const [sheetSelections, setSheetSelections] = useState<Record<string, string>>({});
   const [conversationHistory, setConversationHistory] = useState<ConversationSummaryResponse[]>([]);
+  const [restoredWorkspaceConversationId, setRestoredWorkspaceConversationId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [deletingConversationIds, setDeletingConversationIds] = useState<Set<string>>(() => new Set());
   const [renamingConversationIds, setRenamingConversationIds] = useState<Set<string>>(() => new Set());
@@ -197,6 +259,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const subscriptionRef = useRef<TaskEventSubscription | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const conversationListRef = useRef<HTMLDivElement | null>(null);
+  const composerRootRef = useRef<HTMLDivElement | null>(null);
+  const composerTextAreaRef = useRef<TextAreaRef | null>(null);
+  const lastComposerAutofocusKeyRef = useRef<string | null>(null);
   const shouldFollowConversationRef = useRef(true);
   const lastAutoFollowConversationIdRef = useRef(conversationId);
   const conversationIdRef = useRef(conversationId);
@@ -252,6 +317,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   function setActiveConversationId(nextConversationId: string) {
+    if (conversationIdRef.current !== nextConversationId) {
+      setRestoredWorkspaceConversationId(null);
+    }
     conversationIdRef.current = nextConversationId;
     setConversationId(nextConversationId);
   }
@@ -264,6 +332,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   function isCurrentRestoreGeneration(generation: number, targetConversationId: string): boolean {
     return restoreGenerationRef.current === generation && conversationIdRef.current === targetConversationId;
   }
+
+  useEffect(() => {
+    taskPhaseRef.current = taskState.phase;
+  }, [taskState.phase]);
 
   useEffect(() => {
     let mounted = true;
@@ -362,6 +434,19 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }, [api, authUser]);
 
   const active = isTaskActive(taskState.phase);
+  const composerDisabled = active && taskState.phase !== 'cancelling';
+  const composerWorkspaceReady = Boolean(conversationId) && restoredWorkspaceConversationId === conversationId;
+  const composerInputReady = COMPOSER_READY_PHASES.has(taskState.phase)
+    || (taskState.phase === 'waiting_for_input' && pendingInterrupt !== null);
+  const composerAutoFocusEnabled = Boolean(authUser) && composerWorkspaceReady && !composerDisabled && composerInputReady && taskState.phase !== 'cancelling';
+  const composerAutofocusKey = composerAutoFocusEnabled
+    ? [
+      conversationId || 'new',
+      taskState.phase,
+      pendingInterrupt?.interruptId ?? 'no-interrupt',
+      messages.length,
+    ].join(':')
+    : null;
 
   useEffect(() => {
     if (!authUser) return;
@@ -371,6 +456,23 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       clearWaitingInputRetryTimers();
     };
   }, [authUser]);
+
+  useEffect(() => {
+    if (!composerAutoFocusEnabled || composerAutofocusKey === null) return;
+    if (lastComposerAutofocusKeyRef.current === composerAutofocusKey) return;
+    lastComposerAutofocusKeyRef.current = composerAutofocusKey;
+    const frame = window.requestAnimationFrame(() => {
+      if (composingInputRef.current) return;
+      const textArea = resolveComposerTextArea(composerTextAreaRef, composerRootRef.current);
+      if (!textArea || textArea.disabled || taskPhaseRef.current === 'cancelling') return;
+      const phase = taskPhaseRef.current;
+      const phaseInputReady = COMPOSER_READY_PHASES.has(phase)
+        || (phase === 'waiting_for_input' && pendingInterrupt !== null);
+      if (!phaseInputReady || !canAutoFocusComposer(textArea, composerRootRef.current)) return;
+      focusTextAreaWithoutScroll(textArea);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [composerAutoFocusEnabled, composerAutofocusKey, pendingInterrupt]);
 
   useEffect(() => {
     if (!authUser || !conversationId || active || localTaskRuntimeActiveRef.current) return;
@@ -450,12 +552,60 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     };
   }, [active, api, currentTaskId, taskState.phase, waitingInputCheckDelayMs]);
 
+  useEffect(() => {
+    if (!currentTaskId || !currentAssistantId || taskState.phase !== 'cancelling') return;
+    let stopped = false;
+    let timer: ReturnType<typeof window.setTimeout> | null = null;
+    let attempts = 0;
+    const taskId = currentTaskId;
+    const assistantId = currentAssistantId;
+    const generation = restoreGenerationRef.current;
+    const targetConversationId = conversationIdRef.current;
+
+    const poll = async () => {
+      if (stopped) return;
+      attempts += 1;
+      try {
+        const task = await api.getTask(taskId);
+        const reconciled = await reconcileTerminalTaskStatus(task, taskId, assistantId, generation, targetConversationId);
+        if (reconciled || attempts >= CANCEL_RECONCILE_MAX_ATTEMPTS) {
+          stopped = true;
+          return;
+        }
+      } catch {
+        if (attempts >= CANCEL_RECONCILE_MAX_ATTEMPTS) {
+          stopped = true;
+          return;
+        }
+      }
+      timer = window.setTimeout(() => {
+        timer = null;
+        void poll();
+      }, CANCEL_RECONCILE_DELAY_MS);
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [api, currentAssistantId, currentTaskId, taskState.phase]);
+
   async function pollTaskGraphFallback(taskId: string): Promise<boolean> {
     try {
       await api.getTaskGraph(taskId);
       const task = await api.getTask(taskId);
-      if (['completed', 'failed', 'cancelled'].includes(task.status)) {
-        return true;
+      const assistantId = currentAssistantIdRef.current;
+      if (assistantId && isTerminalTaskStatus(task.status)) {
+        return await reconcileTerminalTaskStatus(
+          task,
+          taskId,
+          assistantId,
+          restoreGenerationRef.current,
+          conversationIdRef.current,
+        );
       }
     } catch {
       // The task graph is a best-effort fallback for resumable interrupts.
@@ -478,6 +628,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (!summary) {
       clearCurrentTaskRuntime({ closeSubscription: true });
       setMessages([]);
+      setRestoredWorkspaceConversationId(targetConversationId);
       return;
     }
     try {
@@ -485,6 +636,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       setMessages(loadedMessages);
       await restoreCurrentConversationTask(summary, generation);
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      setRestoredWorkspaceConversationId(targetConversationId);
     } catch {
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       showTransientNotice('历史消息加载失败，请稍后重试。');
@@ -515,6 +668,93 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   function isTerminalTaskStatus(status: string): boolean {
     return TERMINAL_TASK_STATUSES.has(status);
+  }
+
+  function shouldIgnoreNonTerminalTaskEvent(eventType: string): boolean {
+    if (eventType === 'task.cancellation_requested') return false;
+    return !TERMINAL_TASK_EVENT_TYPES.has(eventType)
+      && CANCELLATION_OR_TERMINAL_PHASES.has(taskPhaseRef.current);
+  }
+
+  function isTaskCancellationOrTerminalPhase(): boolean {
+    return CANCELLATION_OR_TERMINAL_PHASES.has(taskPhaseRef.current);
+  }
+
+  function markTaskCancelledState(state: TaskEventState): TaskEventState {
+    return {
+      ...state,
+      phase: 'cancelled',
+      statusText: '任务已取消',
+      currentCapabilityId: null,
+      currentCapabilityLabel: null,
+      currentActivityText: null,
+      errorMessage: null,
+    };
+  }
+
+  function settleCancelledTask(taskId: string, assistantId: string) {
+    taskPhaseRef.current = 'cancelled';
+    clearWaitingInputRetryTimers();
+    clearEventStreamReconnectTimer();
+    setPendingInterrupt(null);
+    updateAssistantMessage(assistantId, {
+      interruptPrompt: undefined,
+      activityText: '任务已取消',
+      activityStatus: 'cancelled',
+    });
+    localTaskRuntimeActiveRef.current = false;
+    setTaskState((state) => markTaskCancelledState(state));
+    updateCurrentTaskId(null);
+    restoredTaskIdsRef.current.delete(taskId);
+    taskPresentationModesRef.current.delete(taskId);
+    subscriptionRef.current?.close();
+    subscriptionRef.current = null;
+    void refreshConversationHistory();
+  }
+
+  async function reconcileTerminalTaskStatus(
+    task: Pick<TaskSummaryResponse, 'task_id' | 'status'>,
+    expectedTaskId: string,
+    assistantId: string,
+    generation: number,
+    targetConversationId: string,
+  ): Promise<boolean> {
+    if (task.task_id !== expectedTaskId) return false;
+    if (!isCurrentRestoreGeneration(generation, targetConversationId)) return true;
+    if (!isTerminalTaskStatus(task.status)) return false;
+    clearEventStreamReconnectTimer();
+    setPendingInterrupt(null);
+    if (task.status === 'completed') {
+      taskPhaseRef.current = 'loading_artifacts';
+      clearWaitingInputRetryTimers();
+      updateAssistantMessage(assistantId, { interruptPrompt: undefined });
+      updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
+      await loadArtifacts(expectedTaskId, assistantId);
+      return true;
+    }
+    if (task.status === 'failed') {
+      taskPhaseRef.current = 'failed';
+      clearWaitingInputRetryTimers();
+      localTaskRuntimeActiveRef.current = false;
+      setTaskState((state) => markTaskFailed(state, '本次任务未完成，请调整问题后重试。'));
+      updateAssistantMessage(assistantId, {
+        interruptPrompt: undefined,
+        activityText: '本次任务未完成',
+        activityStatus: 'failed',
+      });
+      updateCurrentTaskId(null);
+      restoredTaskIdsRef.current.delete(expectedTaskId);
+      taskPresentationModesRef.current.delete(expectedTaskId);
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      void refreshConversationHistory();
+      return true;
+    }
+    if (task.status === 'cancelled') {
+      settleCancelledTask(expectedTaskId, assistantId);
+      return true;
+    }
+    return false;
   }
 
   async function restoreCurrentConversationTask(conversation: ConversationSummaryResponse, generation: number): Promise<void> {
@@ -587,6 +827,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setAuthUser(result.user);
     const nextConversationId = loadOrCreateConversationId(result.user.username);
     initializedWorkspaceConversationIdRef.current = null;
+    setRestoredWorkspaceConversationId(null);
     setActiveConversationId(nextConversationId);
     setModelEdition(defaultModelEdition);
     setMessages([]);
@@ -602,6 +843,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     subscriptionRef.current?.close();
     setAuthUser(null);
     initializedWorkspaceConversationIdRef.current = null;
+    setRestoredWorkspaceConversationId(null);
     setActiveConversationId('');
     setMessages([]);
     setConversationHistory([]);
@@ -623,6 +865,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     subscriptionRef.current?.close();
     subscriptionRef.current = null;
     initializedWorkspaceConversationIdRef.current = null;
+    setRestoredWorkspaceConversationId(null);
     setActiveConversationId(nextConversationId);
     setMessages([]);
     setInput('');
@@ -648,6 +891,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (!authUser || active) return;
     saveConversationId(authUser.username, nextConversationId);
     const generation = beginRestoreGeneration();
+    setRestoredWorkspaceConversationId(null);
     clearCurrentTaskRuntime({ closeSubscription: true });
     if (nextConversationId !== conversationId) {
       initializedWorkspaceConversationIdRef.current = null;
@@ -835,6 +1079,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     initializedWorkspaceConversationIdRef.current = targetConversationId;
+    setRestoredWorkspaceConversationId(targetConversationId);
     const displayContent = content || (intent.kind === 'ready' ? intent.command.command : content);
     const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode };
     const assistantMessage: ConversationMessage = {
@@ -1046,7 +1291,19 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (TERMINAL_TASK_EVENT_TYPES.has(event.event_type)) {
       clearWaitingInputRetryTimers();
     }
+    if (event.event_type === 'task.cancellation_requested') {
+      taskPhaseRef.current = 'cancelling';
+      clearWaitingInputRetryTimers();
+      setPendingInterrupt(null);
+      updateAssistantMessage(assistantId, { interruptPrompt: undefined });
+    }
+    if (shouldIgnoreNonTerminalTaskEvent(event.event_type)) {
+      return;
+    }
     setTaskState((previous) => {
+      if (CANCELLATION_OR_TERMINAL_PHASES.has(previous.phase) && !TERMINAL_TASK_EVENT_TYPES.has(event.event_type)) {
+        return previous;
+      }
       const next = applyTaskEvent(previous, event);
       const previousProgressText = taskProgressDisplayText(previous);
       const nextProgressText = taskProgressDisplayText(next);
@@ -1070,10 +1327,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       } else if (nextProgressText !== previousProgressText) {
         updateAssistantMessage(assistantId, {
           activityText: assistantActivityText(next, nextProgressText),
-          activityStatus: 'pending',
+          activityStatus: next.phase === 'cancelled' ? 'cancelled' : 'pending',
         });
       }
       if (event.event_type === 'task.failed') {
+        taskPhaseRef.current = 'failed';
+        setPendingInterrupt(null);
+        updateAssistantMessage(assistantId, { interruptPrompt: undefined });
         localTaskRuntimeActiveRef.current = false;
         subscriptionRef.current?.close();
         subscriptionRef.current = null;
@@ -1082,6 +1342,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         taskPresentationModesRef.current.delete(taskId);
       }
       if (event.event_type === 'task.cancelled') {
+        taskPhaseRef.current = 'cancelled';
+        setPendingInterrupt(null);
+        updateAssistantMessage(assistantId, { interruptPrompt: undefined });
         localTaskRuntimeActiveRef.current = false;
         subscriptionRef.current?.close();
         subscriptionRef.current = null;
@@ -1092,6 +1355,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       return next;
     });
     if (event.event_type === 'task.completed') {
+      taskPhaseRef.current = 'loading_artifacts';
       updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
       void loadArtifacts(taskId, assistantId);
     }
@@ -1120,6 +1384,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     attempt = 0,
   ) {
     if (!isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) return;
+    if (isTaskCancellationOrTerminalPhase()) return;
     if (attempt === 0) {
       if (handledWaitingInputEventIdsRef.current.has(event.event_id)) return;
       handledWaitingInputEventIdsRef.current.add(event.event_id);
@@ -1176,6 +1441,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       clearWaitingInputRetryTimer(event.event_id);
       return true;
     }
+    if (isTaskCancellationOrTerminalPhase()) {
+      clearWaitingInputRetryTimer(event.event_id);
+      return true;
+    }
     if (attempt >= WAITING_INTERRUPT_MAX_RETRIES) {
       handledWaitingInputEventIdsRef.current.delete(event.event_id);
       clearWaitingInputRetryTimer(event.event_id);
@@ -1194,6 +1463,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const retryTimer = window.setTimeout(() => {
       waitingInputRetryTimersRef.current.delete(event.event_id);
       if (!isCurrentTaskEventStream(taskId, assistantId, generation, targetConversationId)) return;
+      if (isTaskCancellationOrTerminalPhase()) return;
       void loadPendingInterruptFromWaitingEvent(event, taskId, assistantId, generation, targetConversationId, attempt + 1);
     }, WAITING_INTERRUPT_RETRY_DELAY_MS);
     waitingInputRetryTimersRef.current.set(event.event_id, retryTimer);
@@ -1210,23 +1480,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       const task = await api.getTask(taskId);
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-      if (task.status === 'completed') {
-        clearWaitingInputRetryTimers();
-        await loadArtifacts(taskId, assistantId);
-      } else if (task.status === 'failed') {
-        clearWaitingInputRetryTimers();
-        localTaskRuntimeActiveRef.current = false;
-        setTaskState((state) => markTaskFailed(state, '本次任务未完成，请调整问题后重试。'));
-        updateAssistantMessage(assistantId, { activityText: '本次任务未完成', activityStatus: 'failed' });
-        updateCurrentTaskId(null);
-        restoredTaskIdsRef.current.delete(taskId);
-      } else if (task.status === 'cancelled') {
-        clearWaitingInputRetryTimers();
-        localTaskRuntimeActiveRef.current = false;
-        setTaskState((state) => ({ ...state, phase: 'cancelled', statusText: '任务已取消' }));
-        updateCurrentTaskId(null);
-        restoredTaskIdsRef.current.delete(taskId);
-      } else if (isActiveTaskStatus(task.status)) {
+      if (await reconcileTerminalTaskStatus(task, taskId, assistantId, generation, targetConversationId)) {
+        return;
+      }
+      if (isActiveTaskStatus(task.status)) {
         scheduleTaskEventReconnect(taskId, assistantId, generation, targetConversationId);
       }
     } catch {
@@ -1266,6 +1523,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         });
       }
       updateAssistantMessage(assistantId, { activityText: undefined });
+      taskPhaseRef.current = 'completed';
       setTaskState((state) => markTaskCompleted(state));
       updateCurrentTaskId(null);
       localTaskRuntimeActiveRef.current = false;
@@ -1287,6 +1545,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       void refreshConversationHistory();
     } catch {
       localTaskRuntimeActiveRef.current = false;
+      taskPhaseRef.current = 'completed';
       setTaskState((state) => markTaskCompleted(state, '任务已完成，但结果加载失败'));
       showTransientNotice('结果加载失败，可稍后重试。');
     }
@@ -1295,6 +1554,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   async function handleCancel() {
     if (!conversationId && !currentTaskId) return;
     const previousPhase = taskState.phase;
+    const previousPendingInterrupt = pendingInterrupt;
+    const taskIdForCancelObservation = currentTaskIdRef.current ?? currentTaskId;
+    const assistantIdForCancelObservation = currentAssistantIdRef.current ?? currentAssistantId;
+    const cancelObservationGeneration = restoreGenerationRef.current;
+    const cancelObservationConversationId = conversationIdRef.current;
+    taskPhaseRef.current = 'cancelling';
+    clearWaitingInputRetryTimers();
+    setPendingInterrupt(null);
     setTaskState((state) => ({
       ...state,
       phase: 'cancelling',
@@ -1311,9 +1578,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       const taskIds = await collectConversationTaskIdsToCancel();
       const cancelErrors: unknown[] = [];
+      const cancelResponses: Array<Pick<TaskSummaryResponse, 'task_id' | 'status'>> = [];
       for (const taskId of taskIds) {
         try {
-          await api.cancelTask(taskId);
+          cancelResponses.push(await api.cancelTask(taskId));
         } catch (error) {
           cancelErrors.push(error);
         }
@@ -1336,20 +1604,51 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           activityStatus: 'pending',
         });
       }
-      const taskIdToResubscribe = currentTaskIdRef.current;
-      const assistantIdToResubscribe = currentAssistantIdRef.current;
-      if (subscriptionRef.current === null && taskIdToResubscribe && assistantIdToResubscribe) {
-        subscribeToTask(taskIdToResubscribe, assistantIdToResubscribe);
+      const taskIdToResubscribe = taskIdForCancelObservation ?? currentTaskIdRef.current;
+      const assistantIdToResubscribe = assistantIdForCancelObservation ?? currentAssistantIdRef.current;
+      const currentCancelResponse = cancelResponses.find((response) => response.task_id === taskIdToResubscribe);
+      if (
+        taskIdToResubscribe
+        && assistantIdToResubscribe
+        && currentCancelResponse
+        && await reconcileTerminalTaskStatus(
+          currentCancelResponse,
+          taskIdToResubscribe,
+          assistantIdToResubscribe,
+          cancelObservationGeneration,
+          cancelObservationConversationId,
+        )
+      ) {
+        return;
+      }
+      if (taskPhaseRef.current === 'cancelling' && taskIdToResubscribe && assistantIdToResubscribe) {
+        subscribeToTask(
+          taskIdToResubscribe,
+          assistantIdToResubscribe,
+          cancelObservationGeneration,
+          cancelObservationConversationId,
+        );
       }
     } catch (error) {
       const message = friendlyError(error);
       showTransientNotice(message);
+      taskPhaseRef.current = previousPhase;
+      if (previousPendingInterrupt) {
+        setPendingInterrupt(previousPendingInterrupt);
+      }
       setTaskState((state) => ({
         ...state,
         phase: previousPhase,
         statusText: '取消任务失败，请稍后重试',
         errorMessage: message,
       }));
+      if (currentAssistantId && previousPendingInterrupt) {
+        updateAssistantMessage(currentAssistantId, {
+          interruptPrompt: previousPendingInterrupt,
+          activityText: undefined,
+          activityStatus: undefined,
+        });
+      }
     }
   }
 
@@ -1620,8 +1919,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       onSelect={selectSlashCommand}
                     />
                   ) : null}
-                  <div className="send-row" role="group" aria-label="消息发送栏">
+                  <div ref={composerRootRef} className="send-row" role="group" aria-label="消息发送栏">
                     <Input.TextArea
+                      ref={composerTextAreaRef}
                       aria-label="请输入问题"
                       value={input}
                       onChange={(event) => handleComposerInputChange(event.target.value)}
@@ -1646,7 +1946,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       placeholder={inputPlaceholder}
                       autoSize={{ minRows: 1, maxRows: 5 }}
                       wrap="soft"
-                      disabled={active && taskState.phase !== 'cancelling'}
+                      disabled={composerDisabled}
                     />
                     <Popover
                       content={composerMenuContent}
@@ -2338,12 +2638,13 @@ function FileArtifactCard({
   );
 }
 
-function ActivityNotice({ text, status = 'pending' }: { text: string; status?: 'pending' | 'failed' }) {
-  const failed = status === 'failed';
+function ActivityNotice({ text, status = 'pending' }: { text: string; status?: ActivityNoticeStatus }) {
+  const terminalWarning = status === 'failed' || status === 'cancelled';
+  const iconLabel = status === 'cancelled' ? '任务已取消' : '任务失败';
   return (
-    <div className={`activity-notice ${failed ? 'activity-notice-failed' : ''}`} role="status" aria-live="polite">
-      {failed ? <ExclamationCircleFilled className="activity-notice-error-icon" aria-label="任务失败" /> : <Spin size="small" />}
-      <Typography.Text type={failed ? 'danger' : 'secondary'}>{text}</Typography.Text>
+    <div className={`activity-notice ${terminalWarning ? 'activity-notice-failed' : ''}`} role="status" aria-live="polite">
+      {terminalWarning ? <ExclamationCircleFilled className="activity-notice-error-icon" aria-label={iconLabel} /> : <Spin size="small" />}
+      <Typography.Text type={terminalWarning ? 'danger' : 'secondary'}>{text}</Typography.Text>
     </div>
   );
 }
@@ -2378,6 +2679,9 @@ function ReasoningBox({ content, complete }: { content: string; complete?: boole
 function messageFromHistory(message: MessageResponse): ConversationMessage | null {
   if (message.role !== 'user' && message.role !== 'assistant') return null;
   const assistantReplyCompleted = message.role === 'assistant' && message.stream_status === 'complete';
+  const artifactDisplays = message.role === 'assistant'
+    ? parseCapabilityArtifactDisplays(message.artifacts ?? [])
+    : [];
   return {
     id: message.message_id,
     role: message.role,
@@ -2385,6 +2689,7 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
     mode: 'chat',
     finalContentLoaded: assistantReplyCompleted || undefined,
     replyCompleted: assistantReplyCompleted || undefined,
+    artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
   };
 }
 

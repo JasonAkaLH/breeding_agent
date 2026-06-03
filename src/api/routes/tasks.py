@@ -14,11 +14,11 @@ from src.core.enums import ArtifactType, EventVisibility, NodeStatus, TaskStatus
 from src.core.models import Artifact, EventRecord
 from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
 
+from ..artifact_responses import artifact_response, should_return_task_artifact
 from ..auth import get_optional_owned_conversation, require_authenticated_user, require_task_owner
 from ..dto import (
     AnswerInterruptRequest,
     AnswerInterruptResponse,
-    ArtifactResponse,
     CancelTaskRequest,
     CancelTaskResponse,
     InterruptResponse,
@@ -335,9 +335,9 @@ async def get_task_artifacts(task_id: str, request: Request) -> TaskArtifactsRes
     return TaskArtifactsResponse(
         task_id=task_id,
         artifacts=[
-            _artifact_response(artifact)
+            artifact_response(artifact)
             for artifact in artifacts
-            if _should_return_artifact(artifact)
+            if should_return_task_artifact(artifact)
         ],
     )
 
@@ -401,43 +401,6 @@ async def download_artifact(artifact_id: str, request: Request) -> FileResponse:
     )
 
 
-def _should_return_artifact(artifact: Artifact) -> bool:
-    if artifact.artifact_type != ArtifactType.FILE:
-        return True
-    return is_active_skill_output_file(parse_file_storage_ref(artifact.storage_ref))
-
-
-def _artifact_response(artifact: Artifact) -> ArtifactResponse:
-    if artifact.artifact_type != ArtifactType.FILE:
-        return ArtifactResponse(
-            artifact_id=artifact.artifact_id,
-            producer_node_id=artifact.producer_node_id,
-            artifact_type=str(artifact.artifact_type),
-            storage_ref=artifact.storage_ref,
-            summary=artifact.summary,
-            is_complete=artifact.is_complete,
-            created_at=artifact.created_at,
-        )
-    metadata = parse_file_storage_ref(artifact.storage_ref) or {}
-    return ArtifactResponse(
-        artifact_id=artifact.artifact_id,
-        producer_node_id=artifact.producer_node_id,
-        artifact_type=str(artifact.artifact_type),
-        storage_ref="",
-        summary=str(metadata.get("summary") or artifact.summary or ""),
-        is_complete=artifact.is_complete,
-        created_at=artifact.created_at,
-        filename=_optional_string(metadata.get("filename")),
-        mime_type=_optional_string(metadata.get("mime_type")),
-        size_bytes=_optional_int(metadata.get("size_bytes")),
-        sha256=_optional_string(metadata.get("sha256")),
-        download_url=f"/api/v1/artifacts/{artifact.artifact_id}/download",
-        source_file_count=_optional_int(metadata.get("source_file_count")),
-        archive_format=_optional_string(metadata.get("archive_format")),
-        retention_status=_optional_string(metadata.get("retention_status")),
-    )
-
-
 def _artifact_event(*, artifact: Artifact, event_type: str, payload: dict) -> EventRecord:
     return EventRecord(
         event_id=f"{artifact.artifact_id}:{event_type}:{uuid4().hex[:12]}",
@@ -448,17 +411,3 @@ def _artifact_event(*, artifact: Artifact, event_type: str, payload: dict) -> Ev
         payload=payload,
         visibility=EventVisibility.AUDIT_ONLY,
     )
-
-
-def _optional_string(value) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _optional_int(value) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None

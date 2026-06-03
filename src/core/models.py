@@ -158,6 +158,28 @@ class Artifact:
 
 
 @dataclass(slots=True, frozen=True)
+class TaskInputAttachment:
+    attachment_id: str
+    task_id: str
+    conversation_id: str
+    source_kind: str
+    source_upload_id: str | None = None
+    source_message_id: str | None = None
+    interrupt_answer_id: str | None = None
+    filename: str = ""
+    content_type: str = ""
+    file_type: str = ""
+    size_bytes: int = 0
+    sha256: str = ""
+    prompt_artifact: JsonMapping = field(default_factory=dict)
+    skill_artifact: JsonMapping = field(default_factory=dict)
+    source_payload: JsonMapping = field(default_factory=dict)
+    selected_sheet: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class EventRecord:
     event_id: str
     conversation_id: str
