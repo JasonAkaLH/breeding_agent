@@ -19,6 +19,7 @@ from src.core.models import (
     Message,
     Task,
     TaskEdge,
+    TaskInputAttachment,
     TaskNode,
 )
 from src.storage.sqlite.models import (
@@ -33,6 +34,7 @@ from src.storage.sqlite.models import (
     MailboxMessageRow,
     MessageRow,
     TaskEdgeRow,
+    TaskInputAttachmentRow,
     TaskNodeRow,
     TaskRow,
 )
@@ -105,6 +107,32 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                     is_complete=True,
                 )
             )
+            state_repo.save_task_input_attachment(
+                TaskInputAttachment(
+                    attachment_id="attachment-delete",
+                    task_id="task-delete",
+                    conversation_id="conv-delete",
+                    source_kind="message_upload",
+                    source_upload_id="upl-delete",
+                    source_message_id="msg-user",
+                    interrupt_answer_id="answer-delete",
+                    filename="materials.csv",
+                    content_type="text/csv",
+                    file_type="csv",
+                    size_bytes=42,
+                    sha256="sha-delete",
+                    prompt_artifact={"upload_id": "upl-delete", "filename": "materials.csv"},
+                    skill_artifact={
+                        "upload_id": "upl-delete",
+                        "filename": "materials.csv",
+                        "content": "ped_id\nA001\n",
+                    },
+                    source_payload={"encoding": "base64", "content_base64": "cGVkX2lkCkEwMDEK"},
+                    selected_sheet=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
             collab_repo.save_event_record(
                 EventRecord(
                     event_id="event-delete",
@@ -173,6 +201,7 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
         self.assertGreaterEqual(deleted_counts["message"], 1)
         self.assertGreaterEqual(deleted_counts["task"], 1)
         self.assertGreaterEqual(deleted_counts["event_record"], 1)
+        self.assertGreaterEqual(deleted_counts["task_input_attachment"], 1)
         self.assertGreaterEqual(deleted_counts["mailbox_delivery"], 1)
         self.assertGreaterEqual(deleted_counts["interrupt_answer"], 1)
         with self.session_factory() as session:
@@ -183,6 +212,7 @@ class SQLiteConversationDeleteTest(SQLiteStorageTestCase):
                 TaskNodeRow,
                 TaskEdgeRow,
                 ArtifactRow,
+                TaskInputAttachmentRow,
                 EventRecordRow,
                 MailboxMessageRow,
                 MailboxDeliveryRow,

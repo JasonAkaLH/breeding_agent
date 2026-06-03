@@ -160,6 +160,12 @@ function makeErrorEventSourceFactory(): EventSourceFactory {
   };
 }
 
+async function expectComposerFocused() {
+  const input = screen.getByLabelText('请输入问题');
+  await waitFor(() => expect(document.activeElement).toBe(input));
+  return input;
+}
+
 describe('App', () => {
   afterEach(() => {
     localStorage.clear();
@@ -247,6 +253,43 @@ describe('App', () => {
     expect(await screen.findByLabelText('深度思考')).toBeInTheDocument();
   });
 
+  it('composer safe autofocus focuses the idle composer after workspace restore', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const input = await expectComposerFocused();
+    expect(input).not.toBeDisabled();
+  });
+
+  it('composer safe autofocus waits for workspace restore before focusing an apparently idle composer', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const conversations = deferred<Awaited<ReturnType<ApiClient['listConversations']>>>();
+    const api = makeApi({
+      listConversations: vi.fn(() => conversations.promise),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '正在运行的问题', task_id: 'task-running', stream_status: null, created_at: null },
+        ],
+      })),
+      getTask: vi.fn(async () => taskSummary('task-running', 'running')),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    await waitFor(() => expect(api.listConversations).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const input = screen.getByLabelText('请输入问题');
+    expect(document.activeElement).not.toBe(input);
+
+    conversations.resolve({
+      conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-running', title: '历史问题', created_at: null, updated_at: null }],
+    });
+    expect(await screen.findByText('正在运行的问题')).toBeInTheDocument();
+    await waitFor(() => expect(input).toBeDisabled());
+  });
+
   it('shows stream interruption feedback as a five-second popup instead of an inline prompt box', async () => {
     const api = makeApi({
       getTask: vi.fn(async () => ({
@@ -320,6 +363,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+    (document.activeElement as HTMLElement | null)?.blur();
 
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
     expect(await screen.findByText('以前的问题')).toBeInTheDocument();
@@ -724,6 +768,45 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
   });
 
+  it('opens a fresh cancel event subscription even when the running stream is still open', async () => {
+    const urls: string[] = [];
+    const handlers: TaskEventHandlers[] = [];
+    const closeFns: Array<ReturnType<typeof vi.fn>> = [];
+    const eventSourceFactory: EventSourceFactory = (url, streamHandlers) => {
+      urls.push(url);
+      handlers.push(streamHandlers);
+      const close = vi.fn();
+      closeFns.push(close);
+      return { close };
+    };
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+      getTask: vi.fn(async () => taskSummary('task-1', 'cancelling')),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '停止订阅兜底测试' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalled());
+    await waitFor(() => expect(urls).toEqual(['/api/v1/tasks/task-1/events']));
+
+    fireEvent.click(screen.getByRole('button', { name: '停止' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    await waitFor(() => expect(urls).toEqual([
+      '/api/v1/tasks/task-1/events',
+      '/api/v1/tasks/task-1/events',
+    ]));
+    expect(closeFns[0]).toHaveBeenCalled();
+
+    await act(async () => {
+      handlers[1].onMessage(event('task.cancelled'));
+    });
+
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+    expect(screen.getByLabelText('请输入问题')).not.toBeDisabled();
+  });
+
   it('ignores stale conversation restore responses after switching conversations', async () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-a');
     const convA = deferred<ConversationMessagesResponse>();
@@ -855,6 +938,77 @@ describe('App', () => {
       conversationId: 'conv-history',
       content: '继续问一个问题',
     })));
+  });
+
+  it('composer safe autofocus waits during same-conversation history reload', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    let streamHandlers: TaskEventHandlers | null = null;
+    const reloadedConversations = deferred<Awaited<ReturnType<ApiClient['listConversations']>>>();
+    const initialConversations = {
+      conversations: [{
+        conversation_id: 'conv-history',
+        username: 'alice',
+        status: 'active',
+        current_task_id: null,
+        title: '历史问题',
+        created_at: null,
+        updated_at: null,
+      }],
+    };
+    const api = makeApi({
+      listConversations: vi.fn()
+        .mockResolvedValueOnce(initialConversations)
+        .mockResolvedValueOnce(initialConversations)
+        .mockReturnValueOnce(reloadedConversations.promise),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+          { message_id: 'msg-assistant', conversation_id: 'conv-history', role: 'assistant', content: '以前的回答', task_id: 'task-history', stream_status: 'complete', created_at: null },
+        ],
+      })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+    await expectComposerFocused();
+
+    const input = screen.getByLabelText('请输入问题');
+    fireEvent.change(input, { target: { value: '完成后刷新同一会话' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+      streamHandlers?.onMessage(event('task.completed'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalledWith('task-1'));
+    await expectComposerFocused();
+
+    input.blur();
+    fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+    (document.activeElement as HTMLElement | null)?.blur();
+    await waitFor(() => expect(api.listConversations).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(document.activeElement).not.toBe(input);
+    reloadedConversations.resolve({
+      conversations: [{
+        conversation_id: 'conv-history',
+        username: 'alice',
+        status: 'active',
+        current_task_id: null,
+        title: '历史问题',
+        created_at: null,
+        updated_at: null,
+      }],
+    });
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
   });
 
   it('shows a spinner only on the target history item while deletion is pending', async () => {
@@ -1121,6 +1275,112 @@ describe('App', () => {
     await screen.findByText(/已接通。/);
   });
 
+  it('composer safe autofocus focuses the composer after task completion', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    const input = screen.getByLabelText('请输入问题');
+    fireEvent.change(input, { target: { value: '完成后继续输入' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+      streamHandlers?.onMessage(event('task.completed'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalledWith('task-1'));
+    await expectComposerFocused();
+  });
+
+  it('composer safe autofocus does not steal focus from a focused history control', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '不要抢历史焦点' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    const sidebar = screen.getByRole('complementary', { name: '历史会话侧边栏' });
+    const refreshButton = within(sidebar).getByRole('button', { name: '刷新历史会话' });
+    refreshButton.focus();
+    expect(document.activeElement).toBe(refreshButton);
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.completed'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalledWith('task-1'));
+    expect(document.activeElement).toBe(refreshButton);
+  });
+
+  it('composer safe autofocus focuses the composer after task cancellation reaches terminal state', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消后继续输入' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.cancelled'));
+    });
+
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+    await expectComposerFocused();
+  });
+
+  it('composer safe autofocus does not focus while cancellation is still pending', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+      getTask: vi.fn(async () => taskSummary('task-1', 'cancelling')),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消中不聚焦' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    const sidebar = screen.getByRole('complementary', { name: '历史会话侧边栏' });
+    const refreshButton = within(sidebar).getByRole('button', { name: '刷新历史会话' });
+    refreshButton.focus();
+    fireEvent.click(screen.getByRole('button', { name: '停止' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(screen.getByText('正在停止当前对话任务')).toBeInTheDocument();
+    expect(document.activeElement).toBe(refreshButton);
+  });
+
   it('renders a failed task bubble with a red error icon instead of a spinner', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([
@@ -1172,6 +1432,93 @@ describe('App', () => {
 
     expect(await screen.findByLabelText('任务失败')).toBeInTheDocument();
     expect(close).toHaveBeenCalled();
+  });
+
+  it('composer safe autofocus focuses the composer when an interrupt prompt is ready', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => ({
+        task_id: 'task-1',
+        nodes: [{ node_id: 'task-1:skill_data_query', capability_id: 'skill.data_query', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null }],
+        edges: [],
+      })),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_data_query',
+          question: '请补充作物类型。',
+          reason_code: 'crop_not_resolved',
+          required_fields: { crop: { options: ['rice'] } },
+          status: 'open',
+        }],
+      })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} waitingInputCheckDelayMs={1} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询基因型' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+      streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-autofocus', 'task-1:skill_data_query'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText('请补充作物类型。')).toBeInTheDocument();
+    await expectComposerFocused();
+  });
+
+  it('composer safe autofocus waits until interrupt details are loaded before focusing', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const interruptResult = deferred<Awaited<ReturnType<ApiClient['listInterrupts']>>>();
+    const api = makeApi({
+      listInterrupts: vi.fn(() => interruptResult.promise),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} waitingInputCheckDelayMs={1} />);
+
+    const sidebar = screen.getByRole('complementary', { name: '历史会话侧边栏' });
+    const refreshButton = within(sidebar).getByRole('button', { name: '刷新历史会话' });
+    refreshButton.focus();
+    expect(document.activeElement).toBe(refreshButton);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等待补充信息' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    refreshButton.focus();
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+      streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-before-details', 'task-1:skill_data_query'));
+      await Promise.resolve();
+    });
+
+    expect(api.listInterrupts).toHaveBeenCalledWith('task-1');
+    expect(document.activeElement).toBe(refreshButton);
+    interruptResult.resolve({
+      task_id: 'task-1',
+      interrupts: [{
+        interrupt_id: 'interrupt-1',
+        conversation_id: 'conv-test',
+        task_id: 'task-1',
+        node_id: 'task-1:skill_data_query',
+        question: '请补充作物类型。',
+        reason_code: 'crop_not_resolved',
+        required_fields: { crop: { options: ['rice'] } },
+        status: 'open',
+      }],
+    });
+    await screen.findByText('请补充作物类型。');
+    expect(document.activeElement).toBe(refreshButton);
   });
 
   it('submits long composer input without a character cap', async () => {
@@ -1516,6 +1863,216 @@ describe('App', () => {
     await screen.findByText('思考内容');
     expect(await screen.findByText(/等待模型返回 reasoning_content|本次模型未返回 reasoning_content/)).toBeInTheDocument();
     await screen.findByText('最终回答');
+  });
+
+
+
+  it('restores data query artifact cards from conversation history message artifacts', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history-artifacts');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-history-artifacts', username: 'alice', status: 'active', current_task_id: null, title: '历史结果', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-artifacts',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history-artifacts', role: 'user', content: '查询隆平高科', task_id: 'task-history', stream_status: null, created_at: null },
+          {
+            message_id: 'msg-assistant',
+            conversation_id: 'conv-history-artifacts',
+            role: 'assistant',
+            content: '最终回答文本',
+            task_id: 'task-history',
+            stream_status: 'complete',
+            created_at: null,
+            artifacts: [
+              { artifact_id: 'filtered_query_result:history', producer_node_id: 'task-history:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ artifact_role: 'filtered_query_result', columns: ['品种名称'], rows: [{ 品种名称: '隆平381' }], row_count: 1, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
+            ],
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(await screen.findByText('最终回答文本')).toBeInTheDocument();
+    expect(await screen.findByText('数据查询结果')).toBeInTheDocument();
+    expect(screen.getByText('数据查询已完成，共返回 1 行结果。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '展开原始表格' }));
+    expect(await screen.findByText('隆平381')).toBeInTheDocument();
+  });
+
+  it('keeps restored task artifact cards after reloading conversation messages on completion', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-restored-artifacts');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-restored-artifacts', username: 'alice', status: 'active', current_task_id: 'task-1', title: '恢复中任务', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn()
+        .mockResolvedValueOnce({
+          conversation_id: 'conv-restored-artifacts',
+          messages: [
+            { message_id: 'msg-user', conversation_id: 'conv-restored-artifacts', role: 'user', content: '查询隆平高科', task_id: 'task-1', stream_status: null, created_at: null },
+          ],
+        })
+        .mockResolvedValue({
+          conversation_id: 'conv-restored-artifacts',
+          messages: [
+            { message_id: 'msg-user', conversation_id: 'conv-restored-artifacts', role: 'user', content: '查询隆平高科', task_id: 'task-1', stream_status: null, created_at: null },
+            {
+              message_id: 'task-1:assistant',
+              conversation_id: 'conv-restored-artifacts',
+              role: 'assistant',
+              content: '历史最终回答',
+              task_id: 'task-1',
+              stream_status: 'complete',
+              created_at: null,
+              artifacts: [
+                { artifact_id: 'filtered_query_result:restored-history', producer_node_id: 'task-1:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ artifact_role: 'filtered_query_result', columns: ['品种名称'], rows: [{ 品种名称: '隆平381' }], row_count: 1, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
+              ],
+            },
+          ],
+        }),
+      getTask: vi.fn(async () => taskSummary('task-1', 'running')),
+      getTaskArtifacts: vi.fn(async () => ({
+        task_id: 'task-1',
+        artifacts: [
+          { artifact_id: 'main_agent_text:1', producer_node_id: 'task-1:main_agent.respond', artifact_type: 'text', storage_ref: '实时最终回答', summary: 'final', is_complete: true, created_at: null },
+          { artifact_id: 'filtered_query_result:live', producer_node_id: 'task-1:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ artifact_role: 'filtered_query_result', columns: ['品种名称'], rows: [{ 品种名称: '隆平381' }], row_count: 1, truncated: false }), summary: 'filtered', is_complete: true, created_at: null },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    await waitFor(() => expect(api.getTaskArtifacts).toHaveBeenCalledWith('task-1'));
+    expect(await screen.findByText('历史最终回答')).toBeInTheDocument();
+    expect(await screen.findByText('数据查询结果')).toBeInTheDocument();
+    expect(screen.getByText('数据查询已完成，共返回 1 行结果。')).toBeInTheDocument();
+  });
+
+  it('restores downloadable file artifact cards from conversation history', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history-file');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-history-file', username: 'alice', status: 'active', current_task_id: null, title: '历史文件', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-file',
+        messages: [
+          {
+            message_id: 'task-file:assistant',
+            conversation_id: 'conv-history-file',
+            role: 'assistant',
+            content: '已生成文件。',
+            task_id: 'task-file',
+            stream_status: 'complete',
+            created_at: null,
+            artifacts: [
+              { artifact_id: 'art-file-history', producer_node_id: 'task-file:main_agent.respond', artifact_type: 'file', storage_ref: '', summary: 'HTML 布局', is_complete: true, created_at: null, filename: 'layout.html', mime_type: 'text/html', size_bytes: 12, download_url: '/api/v1/artifacts/art-file-history/download', source_file_count: 1, archive_format: null, retention_status: 'active' },
+            ],
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(await screen.findByText('layout.html')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /下\s*载/ }));
+    expect(api.downloadArtifact).toHaveBeenCalledWith('art-file-history', 'layout.html');
+  });
+
+  it('restores OCR raw text artifact cards from conversation history', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history-ocr');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-history-ocr', username: 'alice', status: 'active', current_task_id: null, title: '历史 OCR', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-ocr',
+        messages: [
+          {
+            message_id: 'task-ocr:assistant',
+            conversation_id: 'conv-history-ocr',
+            role: 'assistant',
+            content: '图片识别完成。',
+            task_id: 'task-ocr',
+            stream_status: 'complete',
+            created_at: null,
+            artifacts: [
+              {
+                artifact_id: 'task-ocr:ocr_raw_text',
+                producer_node_id: 'task-ocr:ocr:skill_execute',
+                artifact_type: 'json',
+                storage_ref: JSON.stringify({
+                  domain_kind: 'ocr',
+                  artifact_role: 'ocr_raw_text',
+                  raw_text: '品种：龙粳33\n处理：A1',
+                  filename: 'scan.png',
+                  status: 'succeeded',
+                }),
+                summary: 'OCR 回传原文：scan.png',
+                is_complete: true,
+                created_at: null,
+              },
+            ],
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const summary = await screen.findByText('图片识别完成。');
+    const assistantMessage = summary.closest('.message-assistant') as HTMLElement;
+    expect(assistantMessage).not.toBeNull();
+    const messageBody = assistantMessage.querySelector('.message-body') as HTMLElement;
+    expect(within(messageBody).getByText('OCR 回传原文：scan.png')).toBeInTheDocument();
+    expect(messageBody.querySelector('.ocr-raw-text-content')?.textContent).toBe('品种：龙粳33\n处理：A1');
+  });
+
+  it('does not render internal SQLQuery artifacts from conversation history', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history-internal');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [
+          { conversation_id: 'conv-history-internal', username: 'alice', status: 'active', current_task_id: null, title: '内部产物', created_at: null, updated_at: null },
+        ],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-internal',
+        messages: [
+          {
+            message_id: 'task-internal:assistant',
+            conversation_id: 'conv-history-internal',
+            role: 'assistant',
+            content: '只有文本回答',
+            task_id: 'task-internal',
+            stream_status: 'complete',
+            created_at: null,
+            artifacts: [
+              { artifact_id: 'generated_sql:1', producer_node_id: 'task-internal:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ artifact_role: 'generated_sql', sql: 'SELECT secret' }), summary: 'generated SQL', is_complete: true, created_at: null },
+              { artifact_id: 'guard_report:1', producer_node_id: 'task-internal:skill_data_query', artifact_type: 'json', storage_ref: JSON.stringify({ artifact_role: 'guard_report', guard_report: { status: 'passed' } }), summary: 'guard', is_complete: true, created_at: null },
+            ],
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    expect(await screen.findByText('只有文本回答')).toBeInTheDocument();
+    expect(screen.queryByText('数据查询结果')).not.toBeInTheDocument();
+    expect(screen.queryByText(/SELECT secret/)).not.toBeInTheDocument();
   });
 
   it('submits database questions through automatic planning without manual mode selection', async () => {
@@ -2248,6 +2805,42 @@ describe('App', () => {
     expect(screen.queryByText('正在等待任务给出补充信息')).not.toBeInTheDocument();
   });
 
+  it('does not let a pending waiting-input retry overwrite a cancelling task', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      listInterrupts: vi.fn(async () => ({ task_id: 'task-1', interrupts: [] })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等待 retry 后收到取消请求' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+      streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-before-cancelling', 'task-1:skill_data_query'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.cancellation_requested', { status: 'cancelling' }, 'task-cancelling-before-retry'));
+    });
+    expect(screen.getByText('正在取消当前任务')).toBeInTheDocument();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_800));
+    });
+    expect(api.listInterrupts).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('正在取消当前任务')).toBeInTheDocument();
+    expect(screen.queryByText('正在等待任务给出补充信息')).not.toBeInTheDocument();
+  });
+
   it('does not render the unfinished task list and still lets the user cancel the current task', async () => {
     const api = makeApi({
       cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
@@ -2291,6 +2884,90 @@ describe('App', () => {
     });
 
     expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+  });
+
+  it('renders a cancelled task bubble with a red cancelled icon instead of a spinner', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消后显示终态图标' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.cancelled', {}, 'task-cancelled-icon'));
+    });
+
+    const cancelledText = await screen.findByText('任务已取消');
+    const notice = cancelledText.closest('.activity-notice') as HTMLElement;
+    expect(notice).not.toBeNull();
+    expect(notice).toHaveClass('activity-notice-failed');
+    expect(within(notice).getByLabelText('任务已取消')).toBeInTheDocument();
+    expect(notice.querySelector('.ant-spin')).toBeNull();
+    expect(screen.queryByText('正在停止当前对话任务')).not.toBeInTheDocument();
+  });
+
+  it('settles a cancel request from a terminal cancel response without waiting for SSE', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelled', accepted: true })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消接口直接返回终态' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '发送' })).toBeInTheDocument();
+    expect(screen.queryByText('正在停止当前对话任务')).not.toBeInTheDocument();
+  });
+
+  it('reconciles a cancelling task from getTask when terminal SSE is missed', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+      getTaskGraph: vi.fn(async () => { throw new Error('graph unavailable'); }),
+      getTask: vi.fn()
+        .mockResolvedValueOnce({ ...taskSummary('task-1', 'running'), conversation_id: 'conv-test' })
+        .mockResolvedValue({ ...taskSummary('task-1', 'cancelled'), conversation_id: 'conv-test' }),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消后事件丢失' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+    await waitFor(() => expect(api.getTask).toHaveBeenCalledWith('task-1'));
+    expect(screen.queryByText('正在停止当前对话任务')).not.toBeInTheDocument();
   });
 
   it('resubscribes after cancelling a waiting-input interrupt and waits for task.cancelled', async () => {
@@ -2340,6 +3017,184 @@ describe('App', () => {
     });
 
     expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+  });
+
+  it('reconciles a waiting-input cancel from getTask when terminal SSE is missed', async () => {
+    const subscriptions: TaskEventHandlers[] = [];
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+      getTaskGraph: vi.fn(async () => { throw new Error('graph unavailable'); }),
+      getTask: vi.fn()
+        .mockResolvedValueOnce({ ...taskSummary('task-1', 'running'), conversation_id: 'conv-test' })
+        .mockResolvedValue({ ...taskSummary('task-1', 'cancelled'), conversation_id: 'conv-test' }),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_data_query',
+          question: '请补充作物类型',
+          required_fields: { crop: { options: ['rice'] } },
+          status: 'open',
+          created_at: null,
+          answered_at: null,
+        }],
+      })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等待输入时取消且事件丢失' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    await act(async () => {
+      subscriptions[0].onMessage(event('task.accepted'));
+      subscriptions[0].onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-before-cancel-fallback', 'task-1:skill_data_query'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '取消当前任务' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+    expect(screen.queryByText('请补充作物类型')).not.toBeInTheDocument();
+    expect(screen.queryByText('正在等待任务给出补充信息')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '发送' })).toBeInTheDocument();
+  });
+
+  it('restores the waiting-input prompt when cancelling from an interrupt fails', async () => {
+    const subscriptions: TaskEventHandlers[] = [];
+    const api = makeApi({
+      cancelTask: vi.fn(async () => { throw new Error('cancel unavailable'); }),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_data_query',
+          question: '请补充作物类型',
+          required_fields: { crop: { options: ['rice'] } },
+          status: 'open',
+          created_at: null,
+          answered_at: null,
+        }],
+      })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '等待输入时取消失败' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    await act(async () => {
+      subscriptions[0].onMessage(event('task.accepted'));
+      subscriptions[0].onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-before-cancel-failure', 'task-1:skill_data_query'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '取消当前任务' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(await screen.findByText('请补充作物类型')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取消当前任务' })).toBeInTheDocument();
+    expect(screen.queryByText('任务已取消')).not.toBeInTheDocument();
+  });
+
+  it('does not let stale non-terminal events override a terminal cancel state', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelled', accepted: true })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消后收到陈旧事件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.cancellation_requested', { status: 'cancelling' }, 'stale-cancel-request'));
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'main_agent.respond' }, 'stale-node-started', 'n1'));
+      streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-stale' }, 'stale-waiting', 'n1'));
+    });
+
+    expect(screen.getByText('任务已取消')).toBeInTheDocument();
+    expect(screen.queryByText('正在停止当前对话任务')).not.toBeInTheDocument();
+    expect(api.listInterrupts).not.toHaveBeenCalled();
+  });
+
+  it('ignores stale non-terminal events while cancelling so polling can settle the terminal state', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const terminalStatus = deferred<ReturnType<typeof taskSummary>>();
+    const api = makeApi({
+      cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
+      getTaskGraph: vi.fn(async () => { throw new Error('graph unavailable'); }),
+      getTask: vi.fn(async () => ({ ...await terminalStatus.promise, conversation_id: 'conv-test' })),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-stale',
+          task_id: 'task-1',
+          node_id: 'task-1:stale',
+          question: '请补充作物类型',
+          required_fields: { crop: { options: ['rice'] } },
+          status: 'open',
+          created_at: null,
+          answered_at: null,
+        }],
+      })),
+    });
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '取消中收到陈旧事件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    await act(async () => {
+      streamHandlers?.onMessage(event('task.accepted'));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: '停止' }));
+
+    await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('task-1'));
+    expect(screen.getByText('正在停止当前对话任务')).toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(event('node.started', { capability_id: 'main_agent.respond' }, 'stale-start-during-cancel', 'n1'));
+      streamHandlers?.onMessage(event('node.waiting_for_input', { interrupt_id: 'interrupt-stale' }, 'stale-wait-during-cancel', 'n1'));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('正在停止当前对话任务')).toBeInTheDocument();
+    expect(screen.queryByText('请补充作物类型')).not.toBeInTheDocument();
+    expect(api.listInterrupts).not.toHaveBeenCalled();
+
+    await act(async () => {
+      terminalStatus.resolve(taskSummary('task-1', 'cancelled'));
+      await Promise.resolve();
+    });
+    expect(await screen.findByText('任务已取消')).toBeInTheDocument();
+    expect(screen.queryByText('正在停止当前对话任务')).not.toBeInTheDocument();
   });
 
   it('replaces the send button with a stop button while a conversation task is active and cancels all unfinished tasks', async () => {

@@ -17,7 +17,19 @@ from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequ
 from src.core.enums import EventVisibility
 from src.core.models import Artifact, EventRecord, Interrupt
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
-from .helpers import SQL_QUERY_DOMAIN_KIND, SQL_QUERY_PUBLIC_CAPABILITY_ID, SQL_QUERY_SKILL_NAME
+from .helpers import (
+    SQL_QUERY_AUDIT_REPAIR_ATTEMPTED_EVENT,
+    SQL_QUERY_AUDIT_REPAIR_FAILED_EVENT,
+    SQL_QUERY_AUDIT_REPAIR_SUCCEEDED_EVENT,
+    SQL_QUERY_DOMAIN_KIND,
+    SQL_QUERY_PUBLIC_CAPABILITY_ID,
+    SQL_QUERY_SKILL_NAME,
+    make_audit_event,
+    sql_fingerprint,
+)
+
+
+SQL_REPAIR_MAX_ATTEMPTS = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -39,6 +51,15 @@ class SQLQueryEngineResult:
     events: tuple[EventRecord, ...]
     interrupt: Interrupt | None = None
     error: CapabilityExecutionError | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _StageRunResult:
+    stage_node_id: str
+    output_payload: Mapping[str, Any]
+    interrupt: Interrupt | None = None
+    error: CapabilityExecutionError | None = None
+    terminal: SQLQueryEngineResult | None = None
 
 
 class SQLQueryEngine:
@@ -79,65 +100,211 @@ class SQLQueryEngine:
 
     async def execute(self, request: SQLQueryEngineRequest) -> SQLQueryEngineResult:
         dependency_outputs: dict[str, Mapping[str, Any]] = {}
-        previous_stage_node_id: str | None = None
         artifacts: list[Artifact] = []
         events: list[EventRecord] = []
         last_output: Mapping[str, Any] = {}
 
-        for stage, label in self._STAGES:
-            stage_node_id = f"{request.node_id}:{stage}"
-            progress_event = self._progress_event(request, stage=stage, label=label)
-            if self._progress_event_recorder is not None:
-                maybe_result = self._progress_event_recorder(progress_event)
-                if inspect.isawaitable(maybe_result):
-                    await maybe_result
-            else:
-                events.append(progress_event)
-            capability = self._capabilities[stage]
-            input_payload: dict[str, Any] = {}
-            if stage == "intent_route":
-                input_payload = {"user_question": request.query}
-                if request.subtask_label:
-                    input_payload["subtask_label"] = request.subtask_label
-                if request.parent_question:
-                    input_payload["parent_question"] = request.parent_question
-            result = await capability.execute(
-                CapabilityExecutionRequest(
-                    capability_id=SQL_QUERY_PUBLIC_CAPABILITY_ID,
-                    conversation_id=request.conversation_id,
-                    task_id=request.task_id,
-                    node_id=stage_node_id,
-                    input_payload=input_payload,
-                    dependency_outputs=(
-                        {previous_stage_node_id: dependency_outputs[previous_stage_node_id]}
-                        if previous_stage_node_id is not None
-                        else {}
-                    ),
-                    metadata={**self._safe_metadata(request.metadata), "stage": stage, "component": stage},
-                )
+        repair_state: dict[str, Any] = {"attempted": False, "attempts": 0}
+
+        previous_stage_node_id: str | None = None
+        for stage, label in self._STAGES[:2]:
+            stage_result = await self._run_stage(
+                request,
+                stage=stage,
+                label=label,
+                previous_stage_node_id=previous_stage_node_id,
+                dependency_outputs=dependency_outputs,
+                events=events,
+                artifacts=artifacts,
             )
-            events.extend(result.events)
-            artifacts.extend(self._annotate_artifacts(result.artifacts, stage=stage, public_node_id=request.node_id))
-            last_output = dict(result.output_payload)
-            dependency_outputs[stage_node_id] = last_output
-            previous_stage_node_id = stage_node_id
-            if result.interrupt is not None:
-                return SQLQueryEngineResult(
-                    output_payload=self._final_payload(last_output, stage=stage),
-                    artifacts=tuple(artifacts),
-                    events=tuple(events),
-                    interrupt=replace(result.interrupt, node_id=request.node_id),
+            last_output = stage_result.output_payload
+            previous_stage_node_id = stage_result.stage_node_id
+            if stage_result.terminal is not None:
+                return stage_result.terminal
+
+        schema_stage_node_id = previous_stage_node_id
+        execute_stage_node_id: str | None = None
+        pending_repair_context: dict[str, Any] | None = None
+        attempt = 0
+        while True:
+            suffix = f":repair{attempt}" if attempt else ""
+            is_repair = attempt > 0
+            if is_repair:
+                repair_progress = self._progress_event(request, stage="sql_repair", label="正在修正查询语句")
+                await self._record_or_append_progress(repair_progress, events)
+
+            generate_result = await self._run_stage(
+                request,
+                stage="sql_generate",
+                label="正在重新生成安全查询语句" if is_repair else "正在生成安全查询语句",
+                previous_stage_node_id=schema_stage_node_id,
+                dependency_outputs=dependency_outputs,
+                events=events,
+                artifacts=artifacts,
+                node_id_suffix=suffix,
+                emit_progress=not is_repair,
+                input_payload={"sql_repair_context": pending_repair_context} if pending_repair_context else None,
+            )
+            last_output = generate_result.output_payload
+            if generate_result.interrupt is not None and is_repair:
+                error = self._repair_generation_error(pending_repair_context, reason="repair_returned_interrupt")
+                self._append_repair_event(
+                    request,
+                    events,
+                    event_type=SQL_QUERY_AUDIT_REPAIR_FAILED_EVENT,
+                    repair_context=pending_repair_context,
+                    final_error=error,
                 )
-            if result.error is not None:
                 return SQLQueryEngineResult(
-                    output_payload=self._final_payload(last_output, stage=stage),
+                    output_payload=self._with_repair_payload(self._final_payload(last_output, stage="sql_generate"), repair_state),
                     artifacts=tuple(artifacts),
                     events=tuple(events),
-                    error=result.error,
+                    error=error,
+                )
+            if generate_result.terminal is not None:
+                if is_repair:
+                    error = generate_result.error or self._repair_generation_error(
+                        pending_repair_context, reason="repair_generation_failed"
+                    )
+                    self._append_repair_event(
+                        request,
+                        events,
+                        event_type=SQL_QUERY_AUDIT_REPAIR_FAILED_EVENT,
+                        repair_context=pending_repair_context,
+                        final_error=error,
+                    )
+                    return SQLQueryEngineResult(
+                        output_payload=self._with_repair_payload(
+                            self._final_payload(last_output, stage="sql_generate"),
+                            repair_state,
+                        ),
+                        artifacts=tuple(artifacts),
+                        events=tuple(events),
+                        error=error,
+                    )
+                return generate_result.terminal
+
+            guard_result = await self._run_stage(
+                request,
+                stage="sql_guard",
+                label="正在检查修复后查询安全边界" if is_repair else "正在检查查询安全边界",
+                previous_stage_node_id=generate_result.stage_node_id,
+                dependency_outputs=dependency_outputs,
+                events=events,
+                artifacts=artifacts,
+                node_id_suffix=suffix,
+                emit_progress=not is_repair,
+            )
+            last_output = guard_result.output_payload
+            if guard_result.error is not None:
+                if is_repair:
+                    self._append_repair_event(
+                        request,
+                        events,
+                        event_type=SQL_QUERY_AUDIT_REPAIR_FAILED_EVENT,
+                        repair_context=pending_repair_context,
+                        final_error=guard_result.error,
+                    )
+                return SQLQueryEngineResult(
+                    output_payload=self._with_repair_payload(self._final_payload(last_output, stage="sql_guard"), repair_state),
+                    artifacts=tuple(artifacts),
+                    events=tuple(events),
+                    error=guard_result.error,
                 )
 
+            execute_result = await self._run_stage(
+                request,
+                stage="sql_execute_readonly",
+                label="正在检索数据库",
+                previous_stage_node_id=guard_result.stage_node_id,
+                dependency_outputs=dependency_outputs,
+                events=events,
+                artifacts=artifacts,
+                node_id_suffix=suffix,
+                emit_progress=not is_repair,
+            )
+            last_output = execute_result.output_payload
+            execute_stage_node_id = execute_result.stage_node_id
+            if execute_result.error is not None:
+                if is_repair or attempt >= SQL_REPAIR_MAX_ATTEMPTS or not self._is_repairable_sql_error(execute_result.error):
+                    if is_repair:
+                        self._append_repair_event(
+                            request,
+                            events,
+                            event_type=SQL_QUERY_AUDIT_REPAIR_FAILED_EVENT,
+                            repair_context=pending_repair_context,
+                            final_error=execute_result.error,
+                        )
+                    return SQLQueryEngineResult(
+                        output_payload=self._with_repair_payload(
+                            self._final_payload(last_output, stage="sql_execute_readonly"),
+                            repair_state,
+                        ),
+                        artifacts=tuple(artifacts),
+                        events=tuple(events),
+                        error=execute_result.error,
+                    )
+                attempt += 1
+                repair_state = {
+                    "attempted": True,
+                    "attempts": attempt,
+                    "repaired_from_stage": "sql_execute_readonly",
+                    "last_error_code": execute_result.error.code,
+                }
+                pending_repair_context = self._make_repair_context(
+                    failed_output=guard_result.output_payload or generate_result.output_payload,
+                    error=execute_result.error,
+                    attempt=attempt,
+                )
+                self._append_repair_event(
+                    request,
+                    events,
+                    event_type=SQL_QUERY_AUDIT_REPAIR_ATTEMPTED_EVENT,
+                    repair_context=pending_repair_context,
+                    final_error=execute_result.error,
+                )
+                continue
+            if is_repair:
+                self._append_repair_event(
+                    request,
+                    events,
+                    event_type=SQL_QUERY_AUDIT_REPAIR_SUCCEEDED_EVENT,
+                    repair_context=pending_repair_context,
+                )
+            break
+
+        if execute_stage_node_id is None:
+            error = CapabilityExecutionError(code="sql_execute_missing", message="SQL execution did not produce output.")
+            return SQLQueryEngineResult(
+                output_payload=self._with_repair_payload(self._final_payload(last_output, stage="sql_execute_readonly"), repair_state),
+                artifacts=tuple(artifacts),
+                events=tuple(events),
+                error=error,
+            )
+
+        result_stage, result_label = self._STAGES[-1]
+        result_filtering_result = await self._run_stage(
+            request,
+            stage=result_stage,
+            label=result_label,
+            previous_stage_node_id=execute_stage_node_id,
+            dependency_outputs=dependency_outputs,
+            events=events,
+            artifacts=artifacts,
+        )
+        last_output = result_filtering_result.output_payload
+        if result_filtering_result.terminal is not None:
+            terminal = result_filtering_result.terminal
+            return SQLQueryEngineResult(
+                output_payload=self._with_repair_payload(terminal.output_payload, repair_state),
+                artifacts=terminal.artifacts,
+                events=terminal.events,
+                interrupt=terminal.interrupt,
+                error=terminal.error,
+            )
+
         return SQLQueryEngineResult(
-            output_payload=self._final_payload(last_output, stage="result_filtering"),
+            output_payload=self._with_repair_payload(self._final_payload(last_output, stage="result_filtering"), repair_state),
             artifacts=tuple(artifacts),
             events=tuple(events),
         )
@@ -146,6 +313,168 @@ class SQLQueryEngine:
     def _safe_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         blocked = {"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"}
         return {str(key): value for key, value in metadata.items() if str(key) not in blocked}
+
+    async def _run_stage(
+        self,
+        request: SQLQueryEngineRequest,
+        *,
+        stage: str,
+        label: str,
+        previous_stage_node_id: str | None,
+        dependency_outputs: dict[str, Mapping[str, Any]],
+        events: list[EventRecord],
+        artifacts: list[Artifact],
+        node_id_suffix: str = "",
+        emit_progress: bool = True,
+        input_payload: Mapping[str, Any] | None = None,
+    ) -> _StageRunResult:
+        stage_node_id = f"{request.node_id}:{stage}{node_id_suffix}"
+        if emit_progress:
+            progress_event = self._progress_event(request, stage=stage, label=label)
+            await self._record_or_append_progress(progress_event, events)
+        capability = self._capabilities[stage]
+        stage_input_payload: dict[str, Any] = dict(input_payload or {})
+        if stage == "intent_route":
+            stage_input_payload = {"user_question": request.query}
+            if request.subtask_label:
+                stage_input_payload["subtask_label"] = request.subtask_label
+            if request.parent_question:
+                stage_input_payload["parent_question"] = request.parent_question
+        result = await capability.execute(
+            CapabilityExecutionRequest(
+                capability_id=SQL_QUERY_PUBLIC_CAPABILITY_ID,
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+                node_id=stage_node_id,
+                input_payload=stage_input_payload,
+                dependency_outputs=(
+                    {previous_stage_node_id: dependency_outputs[previous_stage_node_id]}
+                    if previous_stage_node_id is not None
+                    else {}
+                ),
+                metadata={**self._safe_metadata(request.metadata), "stage": stage, "component": stage},
+            )
+        )
+        events.extend(result.events)
+        artifacts.extend(self._annotate_artifacts(result.artifacts, stage=stage, public_node_id=request.node_id))
+        output_payload = dict(result.output_payload)
+        dependency_outputs[stage_node_id] = output_payload
+        terminal: SQLQueryEngineResult | None = None
+        if result.interrupt is not None:
+            terminal = SQLQueryEngineResult(
+                output_payload=self._final_payload(output_payload, stage=stage),
+                artifacts=tuple(artifacts),
+                events=tuple(events),
+                interrupt=replace(result.interrupt, node_id=request.node_id),
+            )
+        elif result.error is not None:
+            terminal = SQLQueryEngineResult(
+                output_payload=self._final_payload(output_payload, stage=stage),
+                artifacts=tuple(artifacts),
+                events=tuple(events),
+                error=result.error,
+            )
+        return _StageRunResult(
+            stage_node_id=stage_node_id,
+            output_payload=output_payload,
+            interrupt=result.interrupt,
+            error=result.error,
+            terminal=terminal,
+        )
+
+    async def _record_or_append_progress(self, event: EventRecord, events: list[EventRecord]) -> None:
+        if self._progress_event_recorder is not None:
+            maybe_result = self._progress_event_recorder(event)
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
+        else:
+            events.append(event)
+
+    @staticmethod
+    def _is_repairable_sql_error(error: CapabilityExecutionError) -> bool:
+        return bool(error.metadata.get("repairable_sql_error"))
+
+    @staticmethod
+    def _make_repair_context(
+        *,
+        failed_output: Mapping[str, Any],
+        error: CapabilityExecutionError,
+        attempt: int,
+    ) -> dict[str, Any]:
+        failed_sql = str(failed_output.get("sql") or "")
+        metadata = dict(error.metadata or {})
+        return {
+            "failed_sql": failed_sql,
+            "failed_stage": metadata.get("failed_stage") or "sql_execute_readonly",
+            "error_code": error.code,
+            "error_message": metadata.get("db_error_message") or error.message,
+            "sql_fingerprint": metadata.get("sql_fingerprint") or sql_fingerprint(failed_sql),
+            "attempt": attempt,
+            "max_attempts": SQL_REPAIR_MAX_ATTEMPTS,
+            "route_id": failed_output.get("route_id"),
+            "schema_profile_id": failed_output.get("schema_profile_id"),
+        }
+
+    def _append_repair_event(
+        self,
+        request: SQLQueryEngineRequest,
+        events: list[EventRecord],
+        *,
+        event_type: str,
+        repair_context: Mapping[str, Any] | None,
+        final_error: CapabilityExecutionError | None = None,
+    ) -> None:
+        context = dict(repair_context or {})
+        payload = {
+            "capability_id": SQL_QUERY_PUBLIC_CAPABILITY_ID,
+            "stage": "sql_repair",
+            "attempt": context.get("attempt"),
+            "max_attempts": context.get("max_attempts") or SQL_REPAIR_MAX_ATTEMPTS,
+            "failed_stage": context.get("failed_stage"),
+            "error_code": (final_error.code if final_error is not None else context.get("error_code")),
+            "sql_fingerprint": context.get("sql_fingerprint"),
+            "route_id": context.get("route_id"),
+            "schema_profile_id": context.get("schema_profile_id"),
+        }
+        if final_error is not None:
+            payload["final_error_code"] = final_error.code
+        event = make_audit_event(
+            CapabilityExecutionRequest(
+                capability_id=SQL_QUERY_PUBLIC_CAPABILITY_ID,
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                metadata=self._safe_metadata(request.metadata),
+            ),
+            event_type=event_type,
+            payload=payload,
+        )
+        events.append(event)
+
+    @staticmethod
+    def _repair_generation_error(
+        repair_context: Mapping[str, Any] | None,
+        *,
+        reason: str,
+    ) -> CapabilityExecutionError:
+        return CapabilityExecutionError(
+            code="sql_repair_generation_failed",
+            message=f"SQL repair generation failed: {reason}",
+            retriable=False,
+            metadata={
+                "repairable_sql_error": False,
+                "repair_attempt": int((repair_context or {}).get("attempt") or 1),
+                "failed_stage": (repair_context or {}).get("failed_stage"),
+                "last_error_code": (repair_context or {}).get("error_code"),
+            },
+        )
+
+    @staticmethod
+    def _with_repair_payload(payload: Mapping[str, Any], repair_state: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(payload)
+        if repair_state.get("attempted"):
+            result["sql_repair"] = dict(repair_state)
+        return result
 
     @staticmethod
     def _final_payload(output: Mapping[str, Any], *, stage: str) -> dict[str, Any]:

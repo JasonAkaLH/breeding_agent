@@ -343,7 +343,7 @@ class UploadsAPITest(APITestCase):
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
 
-    async def test_sheet_selection_resume_fails_closed_when_upload_is_gone(self) -> None:
+    async def test_sheet_selection_resume_uses_task_bound_attachment_when_staged_upload_is_gone(self) -> None:
         workbook = Workbook()
         workbook.active.title = "Alpha"
         workbook.active.append(["ped_id", "hyb_check"])
@@ -390,14 +390,24 @@ class UploadsAPITest(APITestCase):
             },
         )
 
-        self.assertEqual(answer.status_code, 400)
+        self.assertEqual(answer.status_code, 202, answer.text)
+        await self.runtime._await_existing_execution(task_id)
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
         interrupts_after = await self.runtime.list_interrupts(task_id)
-        self.assertEqual([item["status"] for item in interrupts_after], ["open"])
+        self.assertEqual([item["status"] for item in interrupts_after], ["answered"])
         node_after = await self.runtime.storage.get_task_node(open_interrupt["node_id"])
         self.assertIsNotNone(node_after)
-        self.assertEqual(str(node_after.status), "waiting_for_input")
+        self.assertNotEqual(str(node_after.status), "waiting_for_input")
         saved_answers = await self.runtime.storage.list_interrupt_answers(open_interrupt["interrupt_id"])
-        self.assertEqual(saved_answers, [])
+        self.assertEqual(len(saved_answers), 1)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_kind, "message_upload")
+        self.assertEqual(attachments[0].selected_sheet, "Beta")
+        self.assertEqual(attachments[0].interrupt_answer_id, saved_answers[0].interrupt_answer_id)
+        self.assertIn("content", attachments[0].skill_artifact)
+        self.assertNotIn("content", attachments[0].prompt_artifact)
 
     async def test_vnd_ms_excel_without_excel_magic_stays_csv_compatible(self) -> None:
         upload = await self.client.post(

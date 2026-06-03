@@ -194,6 +194,21 @@ class SQLQueryPromptBuildersTest(unittest.TestCase):
         self.assertEqual(payload["result_context"]["candidate_row_count"], 3)
         self.assertTrue(payload["result_context"]["truncated"])
 
+    def test_result_filtering_prompt_preserves_enterprise_alias_matches(self) -> None:
+        execute_context = {
+            "sql": "SELECT applicant, breeder FROM corn_varieties WHERE applicant LIKE '%隆平高科%' OR breeder LIKE '%隆平高科%'",
+            "columns": ["applicant", "breeder"],
+            "rows": [{"applicant": "广州隆平高科特种玉米有限公司", "breeder": "圣尼斯蔬菜种子有限公司"}],
+            "row_count": 1,
+        }
+
+        payload = build_result_filtering_prompt_payload(execute_context)
+        prompt = build_result_filtering_prompt(execute_context)
+
+        self.assertIn("organization_entity_alias_policy", payload["filtering_policy"])
+        self.assertIn("企业简称", prompt)
+        self.assertIn("子公司", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

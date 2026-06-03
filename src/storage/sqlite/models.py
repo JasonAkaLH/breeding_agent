@@ -188,6 +188,34 @@ class ArtifactRow(SQLiteBase):
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class TaskInputAttachmentRow(SQLiteBase):
+    __tablename__ = "task_input_attachment"
+    __table_args__ = (
+        Index("idx_task_input_attachment_task_created", "task_id", "created_at"),
+        Index("idx_task_input_attachment_conversation_task", "conversation_id", "task_id"),
+        Index("idx_task_input_attachment_upload", "source_upload_id"),
+    )
+
+    attachment_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_upload_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interrupt_answer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    file_type: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_artifact: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    skill_artifact: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    source_payload: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    selected_sheet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class EventRecordRow(SQLiteBase):
     __tablename__ = "event_record"
     __table_args__ = (

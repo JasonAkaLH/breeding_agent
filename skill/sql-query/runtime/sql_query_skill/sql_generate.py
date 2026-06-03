@@ -12,9 +12,17 @@ from src.core.contracts import (
 )
 from src.core.models import Interrupt
 
-from .helpers import SQL_QUERY_AUDIT_LLM_CALL_EVENT, SQL_QUERY_AUDIT_LLM_FALLBACK_EVENT, SQL_QUERY_PUBLIC_CAPABILITY_ID, find_dependency_output, make_artifact, make_audit_event, normalize_text
+from .helpers import (
+    SQL_QUERY_AUDIT_LLM_CALL_EVENT,
+    SQL_QUERY_AUDIT_LLM_FALLBACK_EVENT,
+    SQL_QUERY_PUBLIC_CAPABILITY_ID,
+    find_dependency_output,
+    make_artifact,
+    make_audit_event,
+    normalize_text,
+)
 from .llm_utils import LLMOutputError, TextGenerator, call_text_generator, parse_json_object, string_list
-from .prompt_builders import build_sql_generation_prompt
+from .prompt_builders import build_sql_generation_prompt, build_sql_repair_prompt
 
 _APPROVAL_DETAIL_COLUMNS = (
     "year",
@@ -57,22 +65,34 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
 
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         context = find_dependency_output(request, ("selected_tables", "selected_columns", "user_question"))
+        repair_context = _repair_context_from_request(request)
         if self._llm_text_generator is None:
-            return self._fallback_result(request, context, fallback_reason="llm_not_configured", llm_mode="not_configured")
+            return self._fallback_result(
+                request,
+                context,
+                fallback_reason="sql_repair_llm_not_configured" if repair_context else "llm_not_configured",
+                llm_mode="repair_not_configured" if repair_context else "not_configured",
+                repair_context=repair_context,
+            )
 
-        prompt = build_sql_generation_prompt(
-            context,
-            task_meta={"conversation_id": request.conversation_id, "task_id": request.task_id},
-        )
+        task_meta = {"conversation_id": request.conversation_id, "task_id": request.task_id}
+        if repair_context:
+            prompt = build_sql_repair_prompt(context, repair_context=repair_context, task_meta=task_meta)
+        else:
+            prompt = build_sql_generation_prompt(
+                context,
+                task_meta=task_meta,
+            )
         try:
             raw_output = await call_text_generator(self._llm_text_generator, prompt, request=request)
         except Exception as exc:
             return self._fallback_result(
                 request,
                 context,
-                fallback_reason="provider_failed",
-                llm_mode="provider_failed",
+                fallback_reason="sql_repair_provider_failed" if repair_context else "provider_failed",
+                llm_mode="repair_provider_failed" if repair_context else "provider_failed",
                 diagnostic=str(exc),
+                repair_context=repair_context,
             )
 
         try:
@@ -82,10 +102,24 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 llm_payload = self._raw_sql_payload_from_output(raw_output, context)
             mode = str(llm_payload.get("mode", "")).strip().lower()
             if mode == "answer":
-                return self._answer_result(request, context, llm_payload)
+                return self._answer_result(request, context, llm_payload, repair_context=repair_context)
             if mode == "clarify":
+                if repair_context:
+                    return self._repair_generation_failed_result(
+                        request,
+                        context,
+                        repair_context=repair_context,
+                        reason="repair_returned_clarify",
+                    )
                 return self._clarify_result(request, context, llm_payload)
             if mode == "reject":
+                if repair_context:
+                    return self._repair_generation_failed_result(
+                        request,
+                        context,
+                        repair_context=repair_context,
+                        reason="repair_returned_reject",
+                    )
                 return self._reject_result(request, context, llm_payload)
             raise LLMOutputError("validation_failed", f"Unsupported LLM mode: {mode!r}")
         except LLMOutputError as exc:
@@ -93,8 +127,9 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 request,
                 context,
                 fallback_reason=exc.reason,
-                llm_mode=exc.reason,
+                llm_mode=f"repair_{exc.reason}" if repair_context else exc.reason,
                 diagnostic=str(exc),
+                repair_context=repair_context,
             )
 
     def _base_output(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -112,6 +147,8 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         request: CapabilityExecutionRequest,
         context: dict[str, Any],
         llm_payload: dict[str, Any],
+        *,
+        repair_context: Mapping[str, Any] | None = None,
     ) -> CapabilityExecutionResult:
         self._validate_route_context(context, llm_payload)
         sql = str(llm_payload.get("sql") or "").strip()
@@ -143,13 +180,20 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "column_types_used": column_types_used,
             "join_hints_used": string_list(llm_payload.get("join_hints_used")),
             "generation_source": "llm",
-            "llm_mode": "answer",
+            "llm_mode": "repair_answer" if repair_context else "answer",
             "llm_output_format": str(llm_payload.get("_output_format") or "json"),
             "fallback_used": False,
             "fallback_reason": None,
         }
+        if repair_context:
+            output["sql_repair_attempt"] = int(repair_context.get("attempt") or 1)
+            output["sql_repair_from"] = {
+                "failed_stage": repair_context.get("failed_stage"),
+                "error_code": repair_context.get("error_code"),
+                "sql_fingerprint": repair_context.get("sql_fingerprint"),
+            }
         artifact = make_artifact(
-            name="generated_sql",
+            name=f"generated_sql_repair{repair_context.get('attempt')}" if repair_context else "generated_sql",
             task_id=request.task_id,
             node_id=request.node_id,
             payload=output,
@@ -161,9 +205,10 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             payload={
                 "capability_id": self.capability_id, "stage": "sql_generate",
                 "status": "succeeded",
-                "llm_mode": "answer",
+                "llm_mode": "repair_answer" if repair_context else "answer",
                 "fallback_used": False,
                 "prompt_recorded": False,
+                "repair_attempt": repair_context.get("attempt") if repair_context else None,
             },
         )
         return CapabilityExecutionResult(
@@ -172,6 +217,59 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             node_id=request.node_id,
             output_payload=output,
             artifacts=(artifact,),
+            events=(event,),
+        )
+
+    def _repair_generation_failed_result(
+        self,
+        request: CapabilityExecutionRequest,
+        context: dict[str, Any],
+        *,
+        repair_context: Mapping[str, Any],
+        reason: str,
+    ) -> CapabilityExecutionResult:
+        output = {
+            **self._base_output(context),
+            "generation_source": "llm",
+            "llm_mode": "repair_failed",
+            "fallback_used": False,
+            "fallback_reason": None,
+            "sql_repair_attempt": int(repair_context.get("attempt") or 1),
+            "sql_repair_from": {
+                "failed_stage": repair_context.get("failed_stage"),
+                "error_code": repair_context.get("error_code"),
+                "sql_fingerprint": repair_context.get("sql_fingerprint"),
+            },
+        }
+        event = make_audit_event(
+            request,
+            event_type=SQL_QUERY_AUDIT_LLM_CALL_EVENT,
+            payload={
+                "capability_id": self.capability_id,
+                "stage": "sql_generate",
+                "status": "repair_failed",
+                "llm_mode": "repair_failed",
+                "repair_attempt": repair_context.get("attempt"),
+                "reason": reason,
+                "prompt_recorded": False,
+            },
+        )
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload=output,
+            error=CapabilityExecutionError(
+                code="sql_repair_generation_failed",
+                message=f"SQL repair generation failed: {reason}",
+                retriable=False,
+                metadata={
+                    "repairable_sql_error": False,
+                    "repair_attempt": int(repair_context.get("attempt") or 1),
+                    "failed_stage": repair_context.get("failed_stage"),
+                    "last_error_code": repair_context.get("error_code"),
+                },
+            ),
             events=(event,),
         )
 
@@ -277,6 +375,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         fallback_reason: str,
         llm_mode: str,
         diagnostic: str | None = None,
+        repair_context: Mapping[str, Any] | None = None,
     ) -> CapabilityExecutionResult:
         sql = self._fallback_generator(context)
         output = {
@@ -295,8 +394,15 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "fallback_used": True,
             "fallback_reason": fallback_reason,
         }
+        if repair_context:
+            output["sql_repair_attempt"] = int(repair_context.get("attempt") or 1)
+            output["sql_repair_from"] = {
+                "failed_stage": repair_context.get("failed_stage"),
+                "error_code": repair_context.get("error_code"),
+                "sql_fingerprint": repair_context.get("sql_fingerprint"),
+            }
         artifact = make_artifact(
-            name="generated_sql",
+            name=f"generated_sql_repair{repair_context.get('attempt')}" if repair_context else "generated_sql",
             task_id=request.task_id,
             node_id=request.node_id,
             payload=output,
@@ -308,6 +414,8 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "llm_mode": llm_mode,
             "prompt_recorded": False,
         }
+        if repair_context:
+            event_payload["repair_attempt"] = repair_context.get("attempt")
         if diagnostic:
             event_payload["diagnostic"] = diagnostic[:300]
         event = make_audit_event(request, event_type=SQL_QUERY_AUDIT_LLM_FALLBACK_EVENT, payload=event_payload)
@@ -710,3 +818,13 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 "validation_failed",
                 "SQL must use LIKE instead of strict equality when filtering variety_name.",
             )
+
+
+def _repair_context_from_request(request: CapabilityExecutionRequest) -> Mapping[str, Any] | None:
+    value = request.input_payload.get("sql_repair_context")
+    if isinstance(value, Mapping):
+        return value
+    value = request.metadata.get("sql_repair_context")
+    if isinstance(value, Mapping):
+        return value
+    return None
