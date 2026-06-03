@@ -4,7 +4,7 @@ import inspect
 from datetime import datetime
 
 from src.core.enums import ArtifactType, DependencyType, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
-from src.core.models import Artifact, Task, TaskEdge, TaskNode
+from src.core.models import Artifact, Task, TaskEdge, TaskInputAttachment, TaskNode
 from src.lifecycle.rust_contract import status_list
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.storage.support import SQLiteStorageTestCase
@@ -77,6 +77,40 @@ class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
         self.assertEqual(loaded_node, node)
         self.assertEqual(loaded_edges, [edge])
         self.assertEqual(loaded_artifact, artifact)
+
+    def test_task_input_attachment_round_trip(self) -> None:
+        attachment = TaskInputAttachment(
+            attachment_id="tia-task-1-upl-1",
+            task_id="task-1",
+            conversation_id="conv-1",
+            source_kind="message_upload",
+            source_upload_id="upl-1",
+            source_message_id="msg-1",
+            filename="materials.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=32,
+            sha256="sha-1",
+            prompt_artifact={"upload_id": "upl-1", "filename": "materials.csv", "preview": {"row_count": 1}},
+            skill_artifact={"upload_id": "upl-1", "filename": "materials.csv", "content": "ped_id\nA001\n"},
+            source_payload={"encoding": "base64", "content_base64": "cGVkX2lkCkEwMDEK"},
+            created_at=datetime(2026, 6, 3, 9, 0, 0),
+            updated_at=datetime(2026, 6, 3, 9, 1, 0),
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            saved = repo.save_task_input_attachment(attachment)
+            session.commit()
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            loaded = repo.list_task_input_attachments_for_task("task-1")
+
+        self.assertEqual(saved, attachment)
+        self.assertEqual(loaded, [attachment])
+        self.assertNotIn("content", loaded[0].prompt_artifact)
+        self.assertEqual(loaded[0].skill_artifact["content"], "ped_id\nA001\n")
 
     def test_active_task_lookup_by_conversation(self) -> None:
         active = Task(task_id="task-active", conversation_id="conv-1", root_message_id="msg-1", status=TaskStatus.RUNNING)

@@ -46,6 +46,38 @@ class PostgresRuntimeSchemaManifestTest(unittest.TestCase):
         self.assertIn("idx_conversation_delete_status_updated", index_ddl)
         self.assertIn("delete_phase", index_ddl)
 
+    def test_task_input_attachment_is_bootstrapped_by_runtime_manifest_and_ddl(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        self.assertIn("task_input_attachment", manifest.runtime_table_names)
+        self.assertEqual(
+            manifest.table_columns["task_input_attachment"],
+            {
+                "attachment_id": "text",
+                "task_id": "text",
+                "conversation_id": "text",
+                "source_kind": "text",
+                "source_upload_id": "text",
+                "source_message_id": "text",
+                "interrupt_answer_id": "text",
+                "filename": "text",
+                "content_type": "text",
+                "file_type": "text",
+                "size_bytes": "integer",
+                "sha256": "text",
+                "prompt_artifact": "jsonb",
+                "skill_artifact": "jsonb",
+                "source_payload": "jsonb",
+                "selected_sheet": "text",
+                "created_at": "timestamp with time zone",
+                "updated_at": "timestamp with time zone",
+            },
+        )
+        self.assertIn("CREATE TABLE IF NOT EXISTS task_input_attachment", build_runtime_table_schema_ddl())
+        index_ddl = build_runtime_index_schema_ddl()
+        self.assertIn("idx_task_input_attachment_task_created", index_ddl)
+        self.assertIn("idx_task_input_attachment_conversation_task", index_ddl)
+        self.assertIn("idx_task_input_attachment_upload", index_ddl)
+
     def test_manifest_checksum_changes_when_table_spec_changes(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
         mutated = manifest.with_runtime_table_names((*manifest.runtime_table_names, "extra_table"))

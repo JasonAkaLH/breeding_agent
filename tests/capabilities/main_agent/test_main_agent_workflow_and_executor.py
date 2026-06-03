@@ -1421,7 +1421,7 @@ parameters:
         self.assertNotIn("secret-history", str(resolved_event.payload))
         self.assertNotIn("case-secret-history", str(result.output_payload["script_results"]))
 
-    async def test_auto_run_script_llm_fallback_failure_keeps_structured_missing_without_running_script(self) -> None:
+    async def test_auto_run_script_llm_failure_falls_back_to_text_and_runs_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_dir = Path(tmpdir) / "scripted"
             scripts_dir = skill_dir / "scripts"
@@ -1431,9 +1431,11 @@ parameters:
                 textwrap.dedent(
                     f"""
                     import json
+                    import sys
                     from pathlib import Path
+                    payload = json.load(sys.stdin)
                     Path({str(sentinel)!r}).write_text("ran", encoding="utf-8")
-                    print(json.dumps({{"answer": "script ran"}}, ensure_ascii=False))
+                    print(json.dumps({{"answer": "script ran", "blocks": payload.get("blocks")}}, ensure_ascii=False))
                     """
                 ).strip(),
                 encoding="utf-8",
@@ -1486,17 +1488,19 @@ parameters:
                 )
             )
 
-        self.assertFalse(sentinel.exists())
-        output = result.output_payload["script_results"][0]["output"]
-        self.assertEqual(output["missing"], ["blocks"])
-        self.assertIsNotNone(result.interrupt)
-        self.assertIn("blocks", result.interrupt.required_fields)
-        event_types = [event.event_type for event in result.events]
-        self.assertIn("skill.input_missing", event_types)
-        self.assertIn("skill.input_resolution_diagnostic", event_types)
-        self.assertNotIn("skill.script_started", event_types)
-        diagnostic_event = next(event for event in result.events if event.event_type == "skill.input_resolution_diagnostic")
-        self.assertEqual(diagnostic_event.payload["diagnostics"], ["llm_invalid_json"])
+            self.assertTrue(sentinel.exists())
+            output = result.output_payload["script_results"][0]["output"]
+            self.assertEqual(output["blocks"], 2)
+            self.assertIsNone(result.interrupt)
+            event_types = [event.event_type for event in result.events]
+            self.assertIn("skill.input_resolved", event_types)
+            self.assertIn("skill.input_resolution_diagnostic", event_types)
+            self.assertIn("skill.script_started", event_types)
+            self.assertNotIn("skill.input_missing", event_types)
+            diagnostic_event = next(event for event in result.events if event.event_type == "skill.input_resolution_diagnostic")
+            self.assertEqual(diagnostic_event.payload["diagnostics"], ["llm_invalid_json"])
+            resolved_event = next(event for event in result.events if event.event_type == "skill.input_resolved")
+            self.assertEqual(resolved_event.payload["sources"]["blocks"]["source"], "recent_user_message")
 
     async def test_auto_run_script_missing_required_artifact_parameter_does_not_run_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

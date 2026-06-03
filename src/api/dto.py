@@ -252,6 +252,24 @@ class DeleteConversationRequest(StrictRequestModel):
     conversation_id: str
 
 
+class ArtifactResponse(BaseModel):
+    artifact_id: str
+    producer_node_id: str
+    artifact_type: str
+    storage_ref: str
+    summary: str | None
+    is_complete: bool
+    created_at: datetime | None
+    filename: str | None = None
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    sha256: str | None = None
+    download_url: str | None = None
+    source_file_count: int | None = None
+    archive_format: str | None = None
+    retention_status: str | None = None
+
+
 class MessageResponse(BaseModel):
     message_id: str
     conversation_id: str
@@ -260,6 +278,7 @@ class MessageResponse(BaseModel):
     task_id: str | None
     stream_status: str | None
     created_at: datetime | None
+    artifacts: list[ArtifactResponse] = Field(default_factory=list)
 
 
 class ConversationMessagesResponse(BaseModel):
@@ -289,24 +308,6 @@ class TaskGraphResponse(BaseModel):
     task_id: str
     nodes: list[TaskNodeResponse]
     edges: list[TaskEdgeResponse]
-
-
-class ArtifactResponse(BaseModel):
-    artifact_id: str
-    producer_node_id: str
-    artifact_type: str
-    storage_ref: str
-    summary: str | None
-    is_complete: bool
-    created_at: datetime | None
-    filename: str | None = None
-    mime_type: str | None = None
-    size_bytes: int | None = None
-    sha256: str | None = None
-    download_url: str | None = None
-    source_file_count: int | None = None
-    archive_format: str | None = None
-    retention_status: str | None = None
 
 
 class TaskArtifactsResponse(BaseModel):

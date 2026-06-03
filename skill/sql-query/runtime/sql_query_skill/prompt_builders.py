@@ -109,6 +109,66 @@ def build_sql_generation_prompt(
     return _build_general_sql_generation_prompt(payload)
 
 
+def build_sql_repair_prompt(
+    context: Mapping[str, Any],
+    *,
+    repair_context: Mapping[str, Any],
+    task_meta: Mapping[str, Any] | None = None,
+) -> str:
+    payload = build_sql_generation_prompt_payload(
+        context,
+        task_meta={**dict(task_meta or {}), "stage": "sql_repair"},
+        guard_constraints={
+            "repair_mode": True,
+            "repair_contract": (
+                "基于 failed_sql 和 db_error 修复 SQL；不要改变 route/schema/table scope；"
+                "只输出修复后的单条只读 SELECT 或 WITH...SELECT。"
+            ),
+        },
+    )
+    schema_context = dict(payload.get("schema_context", {}))
+    route_context = dict(payload.get("route_context", {}))
+    failed_sql = str(repair_context.get("failed_sql") or "")
+    error_code = str(repair_context.get("error_code") or "")
+    error_message = str(repair_context.get("error_message") or "")
+    failed_stage = str(repair_context.get("failed_stage") or "")
+    attempt = repair_context.get("attempt")
+    max_attempts = repair_context.get("max_attempts")
+    return f"""
+    修正一个SQL查询来回答这个问题：{payload.get("user_question") or ""}
+    当前阶段：sql_repair
+    当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
+    修复尝试：{attempt}/{max_attempts}
+
+    ## 可用数据库结构
+    ```sql
+    {schema_context.get("database_schema") or ""}
+    ```
+
+    ## 上一次失败信息
+    failed_stage: {failed_stage}
+    error_code: {error_code}
+    error_message: {error_message}
+
+    ## 上一次失败SQL
+    ```sql
+    {failed_sql}
+    ```
+
+    ## 修复要求
+    - 只能使用上方数据库结构里的表和字段。
+    - 不能改变 route_id 或 schema_profile_id。
+    - 只能生成单条只读 SELECT 或 WITH...SELECT SQL。
+    - 禁止写操作、DDL、多语句、跨库访问、系统 schema、INTO OUTFILE、FOR UPDATE、LOCK。
+    - 不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT。
+    - 如果按品种名称 / variety_name 过滤，必须使用 LIKE 包含关系。
+
+    **注意！！你只需要输出修复后的SQL语句，不要输出 JSON、Markdown 或解释！！！**
+    修复后的SQL：
+    ```sql
+    """.strip()
+
+
 def _build_varieties_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
     query = str(payload.get("user_question") or "")
     schema_context = dict(payload.get("schema_context", {}))
@@ -341,6 +401,7 @@ def build_result_filtering_prompt_payload(
             "keep_all_matching_rows": True,
             "remove_clearly_unrelated_rows": True,
             "numbered_variety_exactness": "当用户明确查询带数字编号的单个品种（例如 龙粳18）时，只保留品种名规范化后等于该编号或该编号+“号”的行；不得保留继续追加数字/字母/后缀的其他品种（例如 龙粳1836、龙粳1823 不是 龙粳18）。",
+            "organization_entity_alias_policy": "当 SQL 在 applicant、breeder、transgenic_owner 等企业/主体字段中用 LIKE 查询企业简称或主体关键词（例如 隆平高科、大北农）时，包含该简称的完整公司名、子公司名、关联育种/申请主体都应视为匹配；不得因为不是精确公司全称而删除。",
             "conservative_when_uncertain": "如果某行只是简称、别名、缺字或多字但仍可能对应用户需求，可以保留；如果名称明显不是同一品种或实体，应移除。",
             "empty_result_allowed": True,
         },
@@ -368,6 +429,8 @@ def build_result_filtering_prompt(
         "不要总结，不要改写 SQL，不要要求补查数据库，不要根据字段名或常识编造候选集中不存在的行。\n"
         "特别注意：当用户查询的是带数字编号的单个品种（如“龙粳18”），只保留“龙粳18”和“龙粳18号”这类规范化等值名称；"
         "“龙粳1836”“龙粳1823”“龙粳1851”等是在编号后继续追加数字的其他品种，必须排除。\n"
+        "企业简称/主体关键词匹配规则：如果 SQL 在 applicant、breeder、transgenic_owner 等字段中用 LIKE 查询“隆平高科”“大北农”等企业简称，"
+        "候选行的完整公司名、子公司名、关联申请者或育种者字段只要包含该简称，就应保留；不要因为候选值不是精确公司全称而排除。\n"
         "如果某行名称明显不是用户要查的品种/实体，把它从 keep_row_indexes 中排除；如果名称只是简称、别名、缺字或多字但仍可能对应，可以保留。\n"
         "输出必须是 JSON，不要输出 Markdown；必须返回 keep_row_indexes，值只能是 candidate_rows 中已有 row_index 的数组。\n"
         "输入如下：\n"

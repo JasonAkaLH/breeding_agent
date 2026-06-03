@@ -18,6 +18,9 @@ SQL_QUERY_AUDIT_LLM_CALL_EVENT = "skill.llm_call"
 SQL_QUERY_AUDIT_LLM_FALLBACK_EVENT = "skill.llm_fallback"
 SQL_QUERY_AUDIT_GUARD_PASSED_EVENT = "skill.sql_guard_passed"
 SQL_QUERY_AUDIT_GUARD_BLOCKED_EVENT = "skill.sql_guard_blocked"
+SQL_QUERY_AUDIT_REPAIR_ATTEMPTED_EVENT = "skill.sql_repair_attempted"
+SQL_QUERY_AUDIT_REPAIR_SUCCEEDED_EVENT = "skill.sql_repair_succeeded"
+SQL_QUERY_AUDIT_REPAIR_FAILED_EVENT = "skill.sql_repair_failed"
 
 
 def skill_root() -> Path:
@@ -89,3 +92,8 @@ def make_audit_event(
 
 def normalize_text(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def sql_fingerprint(sql: Any) -> str:
+    digest = hashlib.sha256(str(sql or "").encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:16]}"

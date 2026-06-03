@@ -30,6 +30,7 @@ from src.core.models import (
     PendingSkillContext,
     Task,
     TaskEdge,
+    TaskInputAttachment,
     TaskNode,
 )
 from src.lifecycle.rust_contract import contract_value as lifecycle_contract_value
@@ -59,6 +60,7 @@ from .models import (
     MailboxMessageRow,
     MessageRow,
     PendingSkillContextRow,
+    TaskInputAttachmentRow,
     TaskEdgeRow,
     TaskNodeRow,
     TaskRow,
@@ -201,6 +203,29 @@ def _row_to_artifact(row: ArtifactRow) -> Artifact:
         summary=row.summary,
         is_complete=bool(row.is_complete),
         created_at=row.created_at,
+    )
+
+
+def _row_to_task_input_attachment(row: TaskInputAttachmentRow) -> TaskInputAttachment:
+    return TaskInputAttachment(
+        attachment_id=row.attachment_id,
+        task_id=row.task_id,
+        conversation_id=row.conversation_id,
+        source_kind=row.source_kind,
+        source_upload_id=row.source_upload_id,
+        source_message_id=row.source_message_id,
+        interrupt_answer_id=row.interrupt_answer_id,
+        filename=row.filename,
+        content_type=row.content_type,
+        file_type=row.file_type,
+        size_bytes=int(row.size_bytes or 0),
+        sha256=row.sha256,
+        prompt_artifact=dict(row.prompt_artifact or {}),
+        skill_artifact=dict(row.skill_artifact or {}),
+        source_payload=dict(row.source_payload or {}),
+        selected_sheet=row.selected_sheet,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -865,6 +890,7 @@ class SQLiteStateRepository:
             "mailbox_message": 0,
             "event_record": 0,
             "artifact": 0,
+            "task_input_attachment": 0,
             "task_edge": 0,
             "task_node": 0,
             "message": 0,
@@ -888,6 +914,10 @@ class SQLiteStateRepository:
         _delete("event_record", delete(EventRecordRow).where(or_(*event_conditions)))
         if task_ids:
             _delete("artifact", delete(ArtifactRow).where(ArtifactRow.task_id.in_(task_ids)))
+            _delete(
+                "task_input_attachment",
+                delete(TaskInputAttachmentRow).where(TaskInputAttachmentRow.task_id.in_(task_ids)),
+            )
             _delete("task_edge", delete(TaskEdgeRow).where(TaskEdgeRow.task_id.in_(task_ids)))
             _delete("task_node", delete(TaskNodeRow).where(TaskNodeRow.task_id.in_(task_ids)))
         _delete(
@@ -1062,6 +1092,39 @@ class SQLiteStateRepository:
             .order_by(ArtifactRow.created_at, ArtifactRow.artifact_id)
         ).all()
         return [_row_to_artifact(row) for row in rows]
+
+    def save_task_input_attachment(self, attachment: TaskInputAttachment) -> TaskInputAttachment:
+        row = TaskInputAttachmentRow(
+            attachment_id=attachment.attachment_id,
+            task_id=attachment.task_id,
+            conversation_id=attachment.conversation_id,
+            source_kind=attachment.source_kind,
+            source_upload_id=attachment.source_upload_id,
+            source_message_id=attachment.source_message_id,
+            interrupt_answer_id=attachment.interrupt_answer_id,
+            filename=attachment.filename,
+            content_type=attachment.content_type,
+            file_type=attachment.file_type,
+            size_bytes=attachment.size_bytes,
+            sha256=attachment.sha256,
+            prompt_artifact=dict(attachment.prompt_artifact),
+            skill_artifact=dict(attachment.skill_artifact),
+            source_payload=dict(attachment.source_payload),
+            selected_sheet=attachment.selected_sheet,
+            created_at=attachment.created_at,
+            updated_at=attachment.updated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_task_input_attachment(merged)
+
+    def list_task_input_attachments_for_task(self, task_id: str) -> list[TaskInputAttachment]:
+        rows = self._session.scalars(
+            select(TaskInputAttachmentRow)
+            .where(TaskInputAttachmentRow.task_id == task_id)
+            .order_by(TaskInputAttachmentRow.created_at, TaskInputAttachmentRow.attachment_id)
+        ).all()
+        return [_row_to_task_input_attachment(row) for row in rows]
 
 
 class SQLiteCollaborationRepository:
@@ -1849,6 +1912,12 @@ class SQLiteStorage(StoragePort):
 
     async def list_artifacts_for_conversation(self, conversation_id: str) -> list[Artifact]:
         return await self._run(lambda state, collab: state.list_artifacts_for_conversation(conversation_id))
+
+    async def save_task_input_attachment(self, attachment: TaskInputAttachment) -> TaskInputAttachment:
+        return await self._run(lambda state, collab: state.save_task_input_attachment(attachment))
+
+    async def list_task_input_attachments_for_task(self, task_id: str) -> list[TaskInputAttachment]:
+        return await self._run(lambda state, collab: state.list_task_input_attachments_for_task(task_id))
 
     async def append_event(self, event: EventRecord) -> EventRecord:
         sidecar_client = self._runtime_sidecar_client_for(

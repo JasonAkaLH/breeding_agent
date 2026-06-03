@@ -20,6 +20,7 @@ from .models import (
     PendingSkillContext,
     Task,
     TaskEdge,
+    TaskInputAttachment,
     TaskNode,
 )
 
@@ -208,6 +209,10 @@ class StoragePort(Protocol):
     async def list_artifacts_for_task(self, task_id: str) -> list[Artifact]: ...
 
     async def list_artifacts_for_conversation(self, conversation_id: str) -> list[Artifact]: ...
+
+    async def save_task_input_attachment(self, attachment: TaskInputAttachment) -> TaskInputAttachment: ...
+
+    async def list_task_input_attachments_for_task(self, task_id: str) -> list[TaskInputAttachment]: ...
 
     async def append_event(self, event: EventRecord) -> EventRecord: ...
 

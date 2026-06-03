@@ -10,6 +10,94 @@ from tests.api.support import APITestCase
 
 
 class SkillInputResolutionRuntimeAPITest(APITestCase):
+    async def test_interrupt_answer_chinese_integer_phrase_resolves_skill_parameter(self) -> None:
+        skill_dir = self.workspace / "skills" / "scripted-cn-int"
+        scripts_dir = skill_dir / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "answer.py").write_text(
+            textwrap.dedent(
+                """
+                import json
+                import sys
+                payload = json.load(sys.stdin)
+                print(json.dumps({"answer": "blocks=" + str(payload.get("blocks")), "blocks": payload.get("blocks")}, ensure_ascii=False))
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: scripted-cn-int
+triggers:
+  - 随机区组
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  blocks:
+    type: integer
+    required: true
+    aliases:
+      - 重复
+      - 区组
+    patterns:
+      - '(\\d+)\\s*(?:个|次)?(?:重复|区组)'
+---
+
+# Scripted Chinese Integer
+""",
+            encoding="utf-8",
+        )
+
+        answer_prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            answer_prompts.append(prompt)
+            yield "已完成。"
+
+        await self.reconfigure_runtime(
+            main_agent_stream_generator=streamer,
+            skill_roots=[self.workspace / "skills"],
+        )
+
+        first = await self.submit_message(
+            conversation_id="conv-cn-int-resume",
+            content="你帮我设计一个随机区组试验",
+            capability_id="skill.scripted_cn_int",
+        )
+        self.assertEqual(first.status_code, 202, first.text)
+        task_id = first.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        interrupts = await self.runtime.list_interrupts(task_id)
+        open_interrupt = next(item for item in interrupts if item["status"] == "open")
+        self.assertEqual(open_interrupt["reason_code"], "missing_blocks")
+
+        answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={
+                "task_id": task_id,
+                "interrupt_id": open_interrupt["interrupt_id"],
+                "answer_payload": {"blocks": "十个重复"},
+            },
+        )
+        self.assertEqual(answer.status_code, 202, answer.text)
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+
+        interrupts_after = await self.runtime.list_interrupts(task_id)
+        self.assertFalse(any(item["status"] == "open" for item in interrupts_after), interrupts_after)
+        self.assertIn("blocks=10", answer_prompts[-1])
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        resolved_events = [event for event in events if event.event_type == "skill.input_resolved"]
+        self.assertTrue(any("blocks" in event.payload.get("resolved_fields", ()) for event in resolved_events))
+
     async def test_followup_skill_script_receives_structured_parameter_without_raw_memory(self) -> None:
         skill_dir = self.workspace / "skills" / "scripted"
         scripts_dir = skill_dir / "scripts"

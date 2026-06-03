@@ -27,6 +27,7 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                 "task_node",
                 "task_edge",
                 "artifact",
+                "task_input_attachment",
                 "event_record",
                 "mailbox_message",
                 "mailbox_delivery",

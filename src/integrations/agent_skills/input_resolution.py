@@ -16,6 +16,8 @@ SkillInputTextGenerator = Callable[..., Any]
 
 _SCALAR_LLM_TYPES = {"string", "str", "int", "integer", "number", "float"}
 _TEXT_SOURCES = {"query", "current_user_message", "resolved_user_message", "recent_user_message"}
+_CHINESE_INTEGER_TOKEN = "零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟"
+_INTEGER_PHRASE_TOKEN_RE = rf"(?:\d+|[{_CHINESE_INTEGER_TOKEN}]+)"
 _SAFE_ARTIFACT_KEYS = {
     "upload_id",
     "filename",
@@ -106,6 +108,17 @@ def resolve_skill_inputs(
     context: SkillInputResolutionContext,
 ) -> SkillInputResolutionResult:
     del script  # The script hook is part of the public call shape; current rules are manifest scoped.
+    payload, sources = _resolve_structured_inputs(manifest, base_payload, context)
+    _resolve_text_inputs(manifest.parameters, payload, sources, context)
+    missing = tuple(name for name, spec in manifest.parameters.items() if spec.required and name not in payload)
+    return SkillInputResolutionResult(payload=payload, missing=missing, sources=sources)
+
+
+def _resolve_structured_inputs(
+    manifest: "SkillManifest",
+    base_payload: Mapping[str, Any],
+    context: SkillInputResolutionContext,
+) -> tuple[dict[str, Any], dict[str, SkillInputSource]]:
     payload = dict(base_payload)
     sources: dict[str, SkillInputSource] = {}
     metadata = payload.get("metadata")
@@ -129,14 +142,29 @@ def resolve_skill_inputs(
             payload[name] = explicit
             sources[name] = SkillInputSource(source="metadata", confidence="high")
             continue
+    return payload, sources
+
+
+def _resolve_text_inputs(
+    parameters: Mapping[str, SkillParameterSpec],
+    payload: dict[str, Any],
+    sources: dict[str, SkillInputSource],
+    context: SkillInputResolutionContext,
+    *,
+    names: tuple[str, ...] | None = None,
+) -> None:
+    target_names = names if names is not None else tuple(parameters.keys())
+    for name in target_names:
+        if name in payload:
+            continue
+        spec = parameters.get(name)
+        if spec is None:
+            continue
         resolved = _resolve_from_texts(spec, context)
         if resolved is not None:
             value, source = resolved
             payload[name] = value
             sources[name] = source
-
-    missing = tuple(name for name, spec in manifest.parameters.items() if spec.required and name not in payload)
-    return SkillInputResolutionResult(payload=payload, missing=missing, sources=sources)
 
 
 async def resolve_skill_inputs_with_llm(
@@ -147,88 +175,82 @@ async def resolve_skill_inputs_with_llm(
     *,
     text_generator: SkillInputTextGenerator | None = None,
 ) -> SkillInputResolutionResult:
-    """Resolve Skill inputs, using an LLM only as a validated missing-slot fallback.
+    """Resolve Skill inputs with structured facts first and LLM-first text slots.
 
-    The deterministic resolver remains the authority for payload, metadata, artifact,
-    and regex-derived values. The LLM path is intentionally constrained to still
-    missing scalar parameters and its output is treated as untrusted candidate JSON.
+    Payload, metadata, and artifact-derived facts remain deterministic authorities.
+    For still-missing scalar parameters sourced from natural-language context, the
+    LLM resolver runs before deterministic regex/text fallback. LLM output is always
+    treated as untrusted candidate JSON and validated before entering the payload.
     """
 
-    deterministic = resolve_skill_inputs(manifest, script, base_payload, context)
-    if text_generator is None or not deterministic.missing:
-        return deterministic
-
-    eligible_specs = _llm_eligible_missing_specs(manifest.parameters, deterministic.missing)
-    if not eligible_specs:
-        return deterministic
-
-    prompt_resolution = _build_llm_slot_prompt_resolution(
-        manifest=manifest,
-        script=script,
-        context=context,
-        resolved_payload=deterministic.payload,
-        missing_specs=eligible_specs,
-        trim_max_tokens=_metadata_trim_max_tokens(base_payload),
-    )
-    from src.orchestration.prompt_profiles import optional_profile_kwargs
-
-    try:
-        kwargs = optional_profile_kwargs(
-            text_generator,
-            prompt_profile=prompt_resolution.llm_call_payload,
-        )
-        raw_response = text_generator(prompt_resolution.prompt, **kwargs) if kwargs else text_generator(prompt_resolution.prompt)
-        if inspect.isawaitable(raw_response):
-            raw_response = await raw_response
-        candidates = _parse_llm_slot_candidates(str(raw_response or ""))
-    except json.JSONDecodeError:
-        return _copy_result(deterministic, diagnostics=("llm_invalid_json",), prompt_profile=prompt_resolution.llm_call_payload)
-    except Exception:
-        return _copy_result(deterministic, diagnostics=("llm_failed",), prompt_profile=prompt_resolution.llm_call_payload)
-
-    payload = dict(deterministic.payload)
-    sources = dict(deterministic.sources)
+    payload, sources = _resolve_structured_inputs(manifest, base_payload, context)
     diagnostics: list[str] = []
-    for name, candidate in candidates.items():
-        spec = eligible_specs.get(name)
-        if spec is None:
-            diagnostics.append("llm_rejected_unknown_parameter")
-            continue
-        accepted = _validate_llm_candidate(spec, candidate)
-        if accepted is None:
-            diagnostics.append("llm_rejected_invalid_value")
-            continue
-        value, source = accepted
-        payload[name] = value
-        sources[name] = source
+    prompt_profile: Mapping[str, Any] | None = None
+
+    structured_missing = tuple(name for name, spec in manifest.parameters.items() if spec.required and name not in payload)
+    if text_generator is not None and structured_missing:
+        eligible_specs = _llm_eligible_missing_specs(manifest.parameters, structured_missing)
+    else:
+        eligible_specs = {}
+
+    if eligible_specs:
+        prompt_resolution = _build_llm_slot_prompt_resolution(
+            manifest=manifest,
+            script=script,
+            context=context,
+            resolved_payload=payload,
+            missing_specs=eligible_specs,
+            trim_max_tokens=_metadata_trim_max_tokens(base_payload),
+        )
+        prompt_profile = prompt_resolution.llm_call_payload
+        from src.orchestration.prompt_profiles import optional_profile_kwargs
+
+        try:
+            kwargs = optional_profile_kwargs(
+                text_generator,
+                prompt_profile=prompt_resolution.llm_call_payload,
+            )
+            raw_response = (
+                text_generator(prompt_resolution.prompt, **kwargs) if kwargs else text_generator(prompt_resolution.prompt)
+            )
+            if inspect.isawaitable(raw_response):
+                raw_response = await raw_response
+            candidates = _parse_llm_slot_candidates(str(raw_response or ""))
+        except json.JSONDecodeError:
+            diagnostics.append("llm_invalid_json")
+        except Exception:
+            diagnostics.append("llm_failed")
+        else:
+            for name, candidate in candidates.items():
+                spec = eligible_specs.get(name)
+                if spec is None:
+                    diagnostics.append("llm_rejected_unknown_parameter")
+                    continue
+                if name in payload:
+                    continue
+                accepted = _validate_llm_candidate(spec, candidate)
+                if accepted is None:
+                    diagnostics.append("llm_rejected_invalid_value")
+                    continue
+                value, source = accepted
+                payload[name] = value
+                sources[name] = source
+
+    unresolved_names = tuple(name for name in manifest.parameters if name not in payload)
+    _resolve_text_inputs(manifest.parameters, payload, sources, context, names=unresolved_names)
 
     missing = tuple(name for name, spec in manifest.parameters.items() if spec.required and name not in payload)
     return SkillInputResolutionResult(
         payload=payload,
         missing=missing,
         sources=sources,
-        diagnostics=_dedupe((*deterministic.diagnostics, *diagnostics)),
-        prompt_profile=prompt_resolution.llm_call_payload,
+        diagnostics=_dedupe(tuple(diagnostics)),
+        prompt_profile=prompt_profile,
     )
 
 
 def _source_allowed(spec: SkillParameterSpec, source: str) -> bool:
     return not spec.sources or source in spec.sources
-
-
-def _copy_result(
-    result: SkillInputResolutionResult,
-    *,
-    diagnostics: tuple[str, ...] = (),
-    prompt_profile: Mapping[str, Any] | None = None,
-) -> SkillInputResolutionResult:
-    return SkillInputResolutionResult(
-        payload=dict(result.payload),
-        missing=result.missing,
-        sources=dict(result.sources),
-        diagnostics=_dedupe((*result.diagnostics, *diagnostics)),
-        prompt_profile=prompt_profile if prompt_profile is not None else result.prompt_profile,
-    )
 
 
 def _resolve_from_artifacts(
@@ -270,6 +292,12 @@ def _resolve_from_texts(
         candidates.append(("query", context.query, "high"))
     if _source_allowed(spec, "current_user_message") and context.current_user_message and context.current_user_message != context.query:
         candidates.append(("current_user_message", context.current_user_message, "high"))
+    if (
+        _source_allowed(spec, "resolved_user_message")
+        and context.resolved_user_message
+        and context.resolved_user_message not in {context.query, context.current_user_message}
+    ):
+        candidates.append(("resolved_user_message", context.resolved_user_message, "high"))
     if _source_allowed(spec, "recent_user_message"):
         for message in context.recent_user_messages:
             candidates.append(("recent_user_message", message, "medium"))
@@ -285,6 +313,12 @@ def _resolve_from_texts(
             coerced = _coerce_value(raw_value, spec)
             if coerced is not None:
                 return coerced, SkillInputSource(source=source_name, confidence=confidence)
+        if spec.type in {"int", "integer"}:
+            raw_value = _match_integer_phrase_from_terms(spec, text)
+            if raw_value is not None:
+                coerced = _coerce_value(raw_value, spec)
+                if coerced is not None:
+                    return coerced, SkillInputSource(source=source_name, confidence=confidence)
     return None
 
 
@@ -315,15 +349,27 @@ def _default_patterns(spec: SkillParameterSpec) -> tuple[str, ...]:
     return (rf"(?:{escaped})\s*[:：=]\s*([^\s,，。；;]+)",)
 
 
+def _match_integer_phrase_from_terms(spec: SkillParameterSpec, text: str) -> str | None:
+    terms = tuple(dict.fromkeys(str(term).strip() for term in (spec.name, *spec.aliases) if str(term).strip()))
+    if not terms:
+        return None
+    escaped = "|".join(re.escape(term) for term in terms)
+    patterns = (
+        rf"(?:{escaped})\s*(?::|：|=|是|为|就是)?\s*({_INTEGER_PHRASE_TOKEN_RE})\s*(?:个|次|遍|轮)?",
+        rf"({_INTEGER_PHRASE_TOKEN_RE})\s*(?:个|次|遍|轮)?\s*(?:{escaped})",
+    )
+    for pattern in patterns:
+        raw_value = _match_pattern(pattern, text)
+        if raw_value is not None:
+            return raw_value
+    return None
+
+
 def _coerce_value(value: Any, spec: SkillParameterSpec) -> Any | None:
     if value is None or isinstance(value, bool):
         return None
     if spec.type in {"int", "integer"}:
-        try:
-            parsed = int(str(value).strip())
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed > 0 else None
+        return _parse_positive_int(value)
     if spec.type in {"number", "float"}:
         try:
             return float(str(value).strip())
@@ -331,6 +377,98 @@ def _coerce_value(value: Any, spec: SkillParameterSpec) -> Any | None:
             return None
     text = str(value).strip()
     return text or None
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        if value.is_integer() and value > 0:
+            return int(value)
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\+?\d+", text):
+        parsed = int(text.lstrip("+") or "0")
+        return parsed if parsed > 0 else None
+    if re.search(r"[-−]\s*\d", text) or re.search(r"\d+\s*\.\s*\d+", text):
+        return None
+    arabic = re.search(r"(?<![\d.])(\d+)(?![\d.])", text)
+    if arabic is not None:
+        parsed = int(arabic.group(1))
+        return parsed if parsed > 0 else None
+    chinese = re.search(rf"[{_CHINESE_INTEGER_TOKEN}]+", text)
+    if chinese is None:
+        return None
+    parsed = _parse_chinese_positive_int_token(chinese.group(0))
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _parse_chinese_positive_int_token(token: str) -> int | None:
+    digit_map = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "壹": 1,
+        "贰": 2,
+        "叁": 3,
+        "肆": 4,
+        "伍": 5,
+        "陆": 6,
+        "柒": 7,
+        "捌": 8,
+        "玖": 9,
+    }
+    unit_map = {
+        "十": 10,
+        "拾": 10,
+        "百": 100,
+        "佰": 100,
+        "千": 1000,
+        "仟": 1000,
+    }
+    if not token or any(char not in digit_map and char not in unit_map and char not in {"万", "萬"} for char in token):
+        return None
+    if not any(char in unit_map or char in {"万", "萬"} for char in token):
+        digits = [str(digit_map[char]) for char in token]
+        parsed = int("".join(digits)) if digits else 0
+        return parsed if parsed > 0 else None
+
+    total = 0
+    section = 0
+    number = 0
+    for char in token:
+        if char in digit_map:
+            number = digit_map[char]
+            continue
+        if char in unit_map:
+            unit = unit_map[char]
+            if number == 0:
+                number = 1
+            section += number * unit
+            number = 0
+            continue
+        if char in {"万", "萬"}:
+            section += number
+            if section == 0:
+                section = 1
+            total += section * 10000
+            section = 0
+            number = 0
+    parsed = total + section + number
+    return parsed if parsed > 0 else None
 
 
 def _llm_eligible_missing_specs(

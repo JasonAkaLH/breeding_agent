@@ -149,6 +149,7 @@ export interface MessageResponse {
   task_id: string | null;
   stream_status: string | null;
   created_at: string | null;
+  artifacts?: ArtifactResponse[];
 }
 
 export interface ConversationMessagesResponse {

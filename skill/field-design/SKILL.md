@@ -3,7 +3,7 @@ name: field-design
 capability_id: skill.field_design
 display_name: 试验设计智能体
 description: >-
-  基于规范的 CSV/JSON 材料清单生成田间试验设计，包括随机区组设计、对角线增广设计和间比法设计；适用于准备或运行试验设计流程、设置重复/区组、配置对照比例与对照起始位置/间隔、生成 fieldbook、种植顺序、蛇形或笛卡尔布局以及 HTML 田间布局预览。
+  基于规范的 CSV/Excel 材料清单生成田间试验设计，包括随机区组设计、对角线增广设计和间比法设计；适用于准备或运行试验设计流程、设置重复/区组、配置对照比例与对照起始位置/间隔、生成 fieldbook、种植顺序、蛇形或笛卡尔布局以及 HTML 田间布局预览。
 triggers:
   - 试验设计
   - 田间试验设计
@@ -28,7 +28,7 @@ public_usage:
     - name: material_data
       required: true
       description: >-
-        CSV 或 JSON 材料清单；每行代表一个试验材料或对照材料。常见列包括 ped_id、hyb_check、set、plot_hint、备注等。
+        CSV 或 Excel（.xls/.xlsx）材料清单；每行代表一个试验材料或对照材料。推荐列名为 ped_id、hyb_check、set，对应中文含义是样本名称/材料代号、是否对照/材料类型标记、试验分组/集合。
       example_columns: [ped_id, hyb_check, set]
       notes:
         - hyb_check 可用于标记普通材料、对照材料或杂交检查分类；具体取值应与用户数据字典保持一致。
@@ -77,6 +77,8 @@ parameters:
     patterns:
       - '(?:blocks?|区组数|区组|重复数|重复|reps?|replications?)\s*[:：=]?\s*(\d+)'
       - '(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)'
+      - '(?:blocks?|区组数|区组|重复数|重复|reps?|replications?)\s*[:：=]?\s*([零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟]+)'
+      - '([零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟]+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)'
   ncols:
     type: integer
     required: false
@@ -144,7 +146,7 @@ wrapper and bundled R scripts:
 
 The project backend executes `scripts/run_field_design.py`. Do not declare
 `runtime: r` or ask the main agent to execute Markdown code blocks. The wrapper
-receives JSON stdin, resolves uploaded CSV/JSON material data, calls the bundled
+receives JSON stdin, resolves uploaded CSV/Excel material data, calls the bundled
 R scripts with `Rscript`, and returns a JSON object with `answer`, a 10-row
 preview, and downloadable CSV/HTML artifacts.
 
@@ -159,7 +161,11 @@ When this skill starts a user-facing field design task, or when the user invokes
 
 ped_id,hyb_check,set
 
-你可以直接上传 CSV/JSON 材料文件，或者把材料表粘贴过来。
+对应中文含义是：
+
+样本名称/材料代号(ped_id),是否对照/材料类型标记(hyb_check),试验分组/集合(set)
+
+你可以直接上传 CSV/Excel 材料文件，或者把材料表粘贴过来。
 ```
 
 If the user has not provided enough information, ask only for the missing items:
@@ -218,9 +224,9 @@ ped_id,hyb_check,set
 
 Interpret fields as:
 
-- `ped_id`: material ID.
-- `hyb_check`: check marker.
-- `set`: group ID; prefer letters such as `A`, `B`, `C` instead of numeric-only sets.
+- `ped_id`: 样本名称/材料代号；material ID.
+- `hyb_check`: 是否对照/材料类型标记；check marker.
+- `set`: 试验分组/集合；group ID; prefer letters such as `A`, `B`, `C` instead of numeric-only sets.
 
 For `RCBD`, interpret `hyb_check = 0` as test material and non-zero values as checks. RCBD also accepts `ped_id + design_check`, and the legacy `plot_id + hyb_check` schema. If `set` is missing, RCBD adds `set = "A"`.
 
@@ -232,7 +238,7 @@ For `Interval`, require `ped_id,hyb_check,set`. Interpret `hyb_check = 0` as tes
 
 Require:
 
-- `--input`: CSV or JSON material list.
+- `--input`: CSV or Excel material list.
 - `--blocks`: number of repeats/blocks. RCBD currently supports only `1`, `2`, or `3`.
 
 Use `--planter serpentine` for 蛇形排列 and `--planter cartesian` for 顺序排列 / 笛卡尔排列.
