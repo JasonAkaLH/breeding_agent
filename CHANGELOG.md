@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- 根目录 `AGENTS.md` 已转为本地私有操作手册：新增本地服务器数据库访问提示，并通过 `.gitignore` 防止继续跟随代码推送；Git 索引中移除该文件以便远端仓库删除 tracked 副本。敏感连接细节仅保留在本地未追踪文件中。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - 本地工作文档 `需求.md` 与 `本周工作周报.md` 已加入 `.gitignore`，并将从 Git 追踪中移除以避免继续推送到远端；本地文件可继续保留。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - API 文档面向外部调用方的解释性文案已增强：`docs/api/api-doc.html` 为 23 个 endpoint 卡片补齐“外部调用方说明”，逐项解释接口在登录、会话、上传、消息提交、SSE 任务账本、interrupt、resume、graph、artifact 与下载链路中的职责、调用时机、输入输出语义和注意事项；推荐调用流程新增“以 SSE 为主账本”和“interrupt 只由 `node.waiting_for_input` SSE 触发，`/graph` 不能替代事件触发”的明确口径，并扩展开发者文档回归锁定该说明覆盖所有 endpoint。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - v1 节点事件账本覆盖继续加固：runtime replan 移除非终态节点时新增 `node.orphaned` FRONTEND 事件；interrupt answer / resume 主路径新增 `node.ready_to_resume` 与 `node.resuming` 事件账本，且 `node.resuming` 在 resume graph_created 后、重新 node.started 前发送；前端 SSE client / reducer 补齐 orphan、ready-to-resume、resuming、cancelled、blocked-by-cancellation 节点事件消费，保持 `/interrupts` 只由 `node.waiting_for_input` SSE 触发；API 文档事件枚举和前后端回归同步更新。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
