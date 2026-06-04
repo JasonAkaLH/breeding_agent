@@ -30,7 +30,10 @@ from src.integrations.agent_skills import (
     resolve_skill_execution_config,
     select_skill_entrypoint,
 )
-from src.integrations.agent_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
+from src.integrations.agent_skills.missing_input_interrupt import (
+    build_missing_input_interrupt_with_question,
+    missing_input_fields_from_payload,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -56,6 +59,7 @@ class SkillExecutor(ExecutorPort):
         service_registry: SkillServiceRegistry | None = None,
     ) -> None:
         self._runtime_state = runtime_state
+        self._skill_input_text_generator = skill_input_text_generator
         self._script_service = SkillScriptExecutionService(
             script_runner=script_runner or SkillScriptRunner(),
             skill_input_text_generator=skill_input_text_generator,
@@ -324,12 +328,15 @@ class SkillExecutor(ExecutorPort):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
-            interrupt = build_missing_input_interrupt(
+            interrupt = await build_missing_input_interrupt_with_question(
                 request=request,
                 manifest=resolved.manifest,
                 skill_name=resolved.manifest.name,
                 entrypoint=script.name,
                 missing=script_result.missing,
+                resolved_payload=script_result.resolution.payload if script_result.resolution is not None else {},
+                sources=script_result.resolution.sources if script_result.resolution is not None else {},
+                question_text_generator=self._skill_input_text_generator,
             )
             return CapabilityExecutionResult(
                 capability_id=request.capability_id,
@@ -439,12 +446,15 @@ class SkillExecutor(ExecutorPort):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
-            interrupt = build_missing_input_interrupt(
+            interrupt = await build_missing_input_interrupt_with_question(
                 request=request,
                 manifest=resolved.manifest,
                 skill_name=resolved.manifest.name,
                 entrypoint=script.name,
                 missing=script_missing,
+                resolved_payload=script_result.resolution.payload if script_result.resolution is not None else {},
+                sources=script_result.resolution.sources if script_result.resolution is not None else {},
+                question_text_generator=self._skill_input_text_generator,
             )
             return CapabilityExecutionResult(
                 capability_id=request.capability_id,
@@ -735,14 +745,20 @@ class SkillExecutor(ExecutorPort):
             missing = handler_result.error.metadata.get("missing") if isinstance(handler_result.error.metadata, Mapping) else None
             if not missing:
                 missing = tuple(name for name, spec in resolved.manifest.parameters.items() if spec.required)
-            handler_interrupt = build_missing_input_interrupt(
+            handler_interrupt = await build_missing_input_interrupt_with_question(
                 request=request,
                 manifest=resolved.manifest,
                 skill_name=resolved.manifest.name,
                 entrypoint=execution.handler or execution.handler_module or "platform_service",
                 missing=missing,
+                question_text_generator=self._skill_input_text_generator,
             )
             if handler_interrupt is not None:
+                missing_fields = tuple(
+                    field
+                    for field in handler_interrupt.required_fields.keys()
+                    if not str(field).startswith("_")
+                )
                 events.append(
                     self._make_event(
                         request,
@@ -750,7 +766,7 @@ class SkillExecutor(ExecutorPort):
                         payload={
                             "skill_name": resolved.manifest.name,
                             "entrypoint": execution.handler or execution.handler_module or "platform_service",
-                            "missing": list(handler_interrupt.required_fields.keys()),
+                            "missing": list(missing_fields),
                         },
                         visibility=EventVisibility.AUDIT_ONLY,
                     )

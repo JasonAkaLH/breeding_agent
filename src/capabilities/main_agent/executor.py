@@ -21,8 +21,16 @@ from src.integrations.agent_skills import (
     build_public_skill_profile,
     resolve_skill_execution_config,
 )
-from src.integrations.agent_skills.missing_input_interrupt import build_missing_input_interrupt, missing_input_fields_from_payload
+from src.integrations.agent_skills.missing_input_interrupt import (
+    build_missing_input_interrupt_with_question,
+    missing_input_fields_from_payload,
+)
 from src.integrations.llm_client import LLMClient, ReasoningEffort
+from src.integrations.llm_request_options import (
+    resolve_llm_model_edition,
+    resolve_llm_reasoning_effort,
+    resolve_llm_thinking_enabled,
+)
 from src.integrations.provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.answer_roles import (
     ANSWER_SCOPE_METADATA_KEY,
@@ -47,7 +55,6 @@ from .skill_output_artifacts import (
 )
 from .workflow import MAIN_AGENT_CAPABILITY_DESCRIPTORS
 
-_REASONING_EFFORTS: set[str] = {"minimal", "high", "max"}
 _SENSITIVE_STREAM_METADATA_KEYS = {
     "api_key",
     "authorization",
@@ -553,7 +560,14 @@ class MainAgentRespondCapability(CapabilityContract):
         )
         soft_profile_events = (*soft_profile_events, *answer_profile_events)
         try:
-            answer, answer_chunk_count, answer_char_count, duration_ms = await self._generate_streaming_answer_text(
+            (
+                answer,
+                answer_chunk_count,
+                reasoning_chunk_count,
+                answer_char_count,
+                reasoning_char_count,
+                duration_ms,
+            ) = await self._generate_streaming_answer_text(
                 answer_prompt_resolution.prompt,
                 request=request,
                 stage="soft_skill_answer",
@@ -594,7 +608,9 @@ class MainAgentRespondCapability(CapabilityContract):
             },
             response_role_payload=response_role_payload,
             answer_chunk_count=answer_chunk_count,
+            reasoning_chunk_count=reasoning_chunk_count,
             answer_char_count=answer_char_count,
+            reasoning_char_count=reasoning_char_count,
             duration_ms=duration_ms,
             additional_events=soft_profile_events,
         )
@@ -900,13 +916,15 @@ class MainAgentRespondCapability(CapabilityContract):
         stage: str,
         prompt_profile: Mapping[str, Any] | None = None,
     ) -> str:
-        stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort="minimal")
+        thinking_enabled = self._resolve_thinking_enabled(request.metadata)
+        reasoning_effort = self._resolve_reasoning_effort(request.metadata, thinking_enabled=thinking_enabled)
+        stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort=reasoning_effort)
         chunks: list[str] = []
         async for stream_event in iter_stream_events(
             stream_generator,
             prompt,
-            reasoning_effort="minimal",
-            thinking=False,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking_enabled,
             model_edition=self._resolve_model_edition(request.metadata),
             stage=stage,
             prompt_profile=prompt_profile,
@@ -924,21 +942,44 @@ class MainAgentRespondCapability(CapabilityContract):
         stage: str,
         response_role_payload: dict[str, Any],
         prompt_profile: Mapping[str, Any] | None = None,
-    ) -> tuple[str, int, int, int]:
-        stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort="minimal")
+    ) -> tuple[str, int, int, int, int, int]:
+        thinking_enabled = self._resolve_thinking_enabled(request.metadata)
+        reasoning_effort = self._resolve_reasoning_effort(request.metadata, thinking_enabled=thinking_enabled)
+        stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort=reasoning_effort)
         started_at = time.monotonic()
         chunks: list[str] = []
         answer_ordinal = 0
+        reasoning_ordinal = 0
         answer_char_count = 0
+        reasoning_char_count = 0
         async for stream_event in iter_stream_events(
             stream_generator,
             prompt,
-            reasoning_effort="minimal",
-            thinking=False,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking_enabled,
             model_edition=self._resolve_model_edition(request.metadata),
             stage=stage,
             prompt_profile=prompt_profile,
         ):
+            reasoning_delta = stream_event.get("reasoning")
+            if thinking_enabled and reasoning_delta:
+                reasoning_text = str(reasoning_delta)
+                reasoning_ordinal += 1
+                reasoning_char_count += len(reasoning_text)
+                await self._publish_transient(
+                    make_event(
+                        request,
+                        event_type="main_agent.reasoning_delta",
+                        payload={
+                            "delta": reasoning_text,
+                            "ordinal": reasoning_ordinal,
+                            "stage": stage,
+                        },
+                        visibility=EventVisibility.FRONTEND,
+                        ordinal=reasoning_ordinal,
+                    )
+                )
+
             answer_delta = stream_event.get("answer")
             if not answer_delta:
                 continue
@@ -959,7 +1000,14 @@ class MainAgentRespondCapability(CapabilityContract):
                     ordinal=answer_ordinal,
                 )
             )
-        return "".join(chunks), answer_ordinal, answer_char_count, int((time.monotonic() - started_at) * 1000)
+        return (
+            "".join(chunks),
+            answer_ordinal,
+            reasoning_ordinal,
+            answer_char_count,
+            reasoning_char_count,
+            int((time.monotonic() - started_at) * 1000),
+        )
 
     @staticmethod
     def _parse_soft_skill_decision(raw_output: str) -> dict[str, Any]:
@@ -1014,7 +1062,9 @@ class MainAgentRespondCapability(CapabilityContract):
         decision: Mapping[str, Any],
         response_role_payload: dict[str, Any],
         answer_chunk_count: int = 0,
+        reasoning_chunk_count: int = 0,
         answer_char_count: int | None = None,
+        reasoning_char_count: int = 0,
         duration_ms: int = 0,
         additional_events: tuple[Any, ...] = (),
     ) -> CapabilityExecutionResult:
@@ -1024,9 +1074,9 @@ class MainAgentRespondCapability(CapabilityContract):
             payload={
                 "response_length": len(answer),
                 "answer_chunk_count": answer_chunk_count,
-                "reasoning_chunk_count": 0,
+                "reasoning_chunk_count": reasoning_chunk_count,
                 "answer_char_count": answer_char_count if answer_char_count is not None else len(answer),
-                "reasoning_char_count": 0,
+                "reasoning_char_count": reasoning_char_count,
                 "duration_ms": duration_ms,
                 **response_role_payload,
             },
@@ -1298,12 +1348,15 @@ class MainAgentRespondCapability(CapabilityContract):
                         resolved_fields=resolution.resolved_fields if resolution is not None else (),
                     )
                     if missing_interrupt is None:
-                        missing_interrupt = build_missing_input_interrupt(
+                        missing_interrupt = await build_missing_input_interrupt_with_question(
                             request=request,
                             manifest=match.manifest,
                             skill_name=match.manifest.name,
                             entrypoint=script.name,
                             missing=execution.missing,
+                            resolved_payload=resolution.payload if resolution is not None else {},
+                            sources=resolution.sources if resolution is not None else {},
+                            question_text_generator=self._skill_input_text_generator,
                         )
                     continue
                 events.append(
@@ -1341,12 +1394,15 @@ class MainAgentRespondCapability(CapabilityContract):
                         )
                     )
                     if missing_interrupt is None:
-                        missing_interrupt = build_missing_input_interrupt(
+                        missing_interrupt = await build_missing_input_interrupt_with_question(
                             request=request,
                             manifest=match.manifest,
                             skill_name=match.manifest.name,
                             entrypoint=script.name,
                             missing=script_missing,
+                            resolved_payload=resolution.payload if resolution is not None else {},
+                            sources=resolution.sources if resolution is not None else {},
+                            question_text_generator=self._skill_input_text_generator,
                         )
                     continue
                 artifact = execution.artifact
@@ -1445,33 +1501,18 @@ class MainAgentRespondCapability(CapabilityContract):
         return stream_generator, self._sanitize_stream_metadata(metadata)
 
     def _resolve_reasoning_effort(self, metadata: Mapping[str, Any], *, thinking_enabled: bool) -> ReasoningEffort:
-        if not thinking_enabled:
-            return "minimal"
-        explicit = metadata.get("main_agent_reasoning_effort")
-        if isinstance(explicit, str) and explicit in _REASONING_EFFORTS:
-            return explicit  # type: ignore[return-value]
-        return self._default_reasoning_effort
+        return resolve_llm_reasoning_effort(
+            metadata,
+            fallback=self._default_reasoning_effort,
+            thinking_enabled=thinking_enabled,
+        )
 
     def _resolve_thinking_enabled(self, metadata: Mapping[str, Any]) -> bool:
-        if "main_agent_thinking_enabled" in metadata:
-            return self._is_truthy(metadata.get("main_agent_thinking_enabled"))
-        return self._is_truthy(metadata.get("deep_thinking"))
+        return resolve_llm_thinking_enabled(metadata)
 
     @staticmethod
     def _resolve_model_edition(metadata: Mapping[str, Any]) -> str | None:
-        value = metadata.get("model_edition")
-        if isinstance(value, str):
-            cleaned = value.strip()
-            return cleaned or None
-        return None
-
-    @staticmethod
-    def _is_truthy(value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
-        return bool(value)
+        return resolve_llm_model_edition(metadata)
 
     @staticmethod
     def _memory_context_from_metadata(metadata: Mapping[str, Any]) -> Mapping[str, Any]:

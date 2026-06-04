@@ -17,13 +17,15 @@ from .table_upload_normalizer import (
 from .upload_errors import UploadValidationError
 
 
-UploadFileType = Literal["json", "csv", "spreadsheet", "image", "pdf"]
+UploadFileType = Literal["json", "csv", "spreadsheet", "image", "pdf", "vcf"]
+SUPPORTED_UPLOAD_DESCRIPTION = "JSON, CSV, Excel, PNG, JPG/JPEG, PDF, VCF, and VCF.GZ"
 
 SUPPORTED_UPLOAD_EXTENSIONS: dict[str, UploadFileType] = {
     ".json": "json",
     ".csv": "csv",
     ".xlsx": "spreadsheet",
     ".xls": "spreadsheet",
+    ".vcf": "vcf",
     ".png": "image",
     ".jpg": "image",
     ".jpeg": "image",
@@ -173,7 +175,7 @@ class InMemoryUploadStore:
             raise UploadValidationError(f"Uploaded file exceeds {self.max_file_bytes} bytes")
         file_type = _detect_file_type(normalized_filename, content_type, content)
         if file_type is None:
-            raise UploadValidationError("Only JSON, CSV, Excel, PNG, JPG/JPEG, and PDF files are supported")
+            raise UploadValidationError(f"Only {SUPPORTED_UPLOAD_DESCRIPTION} files are supported")
         normalized_content_type = None
         normalized_content_filename = None
         requires_sheet_selection = False
@@ -283,7 +285,7 @@ def _utcnow_naive() -> datetime:
 
 
 def _detect_file_type(filename: str, content_type: str | None, content: bytes) -> UploadFileType | None:
-    suffix_type = SUPPORTED_UPLOAD_EXTENSIONS.get(Path(filename).suffix.lower())
+    suffix_type = _detect_file_type_from_filename(filename)
     if suffix_type:
         if suffix_type in {"json", "csv", "spreadsheet"}:
             return detect_table_file_type(filename, content_type, content)
@@ -295,5 +297,12 @@ def _detect_file_type(filename: str, content_type: str | None, content: bytes) -
     return SUPPORTED_UPLOAD_CONTENT_TYPES.get(base_content_type)
 
 
-def _build_binary_preview(file_type: Literal["image", "pdf"], size_bytes: int) -> dict[str, Any]:
+def _detect_file_type_from_filename(filename: str) -> UploadFileType | None:
+    lower_name = filename.lower()
+    if lower_name.endswith(".vcf.gz"):
+        return "vcf"
+    return SUPPORTED_UPLOAD_EXTENSIONS.get(Path(filename).suffix.lower())
+
+
+def _build_binary_preview(file_type: Literal["image", "pdf", "vcf"], size_bytes: int) -> dict[str, Any]:
     return {"row_count": None, "columns": [], "shape": "binary", "size_bytes": size_bytes, "file_type": file_type}

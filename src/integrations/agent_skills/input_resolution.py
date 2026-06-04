@@ -125,6 +125,13 @@ def _resolve_structured_inputs(
     safe_metadata = metadata if isinstance(metadata, Mapping) else {}
 
     for name, spec in manifest.parameters.items():
+        if _artifact_requested(spec):
+            payload.pop(name, None)
+            artifact = _resolve_from_artifacts(spec, payload, context)
+            if artifact is not None:
+                payload[name] = artifact
+                sources[name] = SkillInputSource(source="artifact", confidence="high")
+            continue
         if _source_allowed(spec, "payload") and name in payload:
             coerced = _coerce_value(payload[name], spec)
             if coerced is not None:
@@ -159,6 +166,8 @@ def _resolve_text_inputs(
             continue
         spec = parameters.get(name)
         if spec is None:
+            continue
+        if _artifact_requested(spec):
             continue
         resolved = _resolve_from_texts(spec, context)
         if resolved is not None:
@@ -209,6 +218,7 @@ async def resolve_skill_inputs_with_llm(
             kwargs = optional_profile_kwargs(
                 text_generator,
                 prompt_profile=prompt_resolution.llm_call_payload,
+                metadata=base_payload.get("metadata"),
             )
             raw_response = (
                 text_generator(prompt_resolution.prompt, **kwargs) if kwargs else text_generator(prompt_resolution.prompt)
@@ -258,8 +268,7 @@ def _resolve_from_artifacts(
     payload: Mapping[str, Any],
     context: SkillInputResolutionContext,
 ) -> dict[str, Any] | None:
-    artifact_requested = spec.type in {"artifact", "file", "data"} or "artifact" in spec.sources
-    if not artifact_requested:
+    if not _artifact_requested(spec):
         return None
     if not _source_allowed(spec, "artifact"):
         return None
@@ -270,6 +279,10 @@ def _resolve_from_artifacts(
     if count <= 0:
         return None
     return {"available": True, "count": count}
+
+
+def _artifact_requested(spec: SkillParameterSpec) -> bool:
+    return spec.type in {"artifact", "file", "data"} or "artifact" in spec.sources
 
 
 def _resolve_from_metadata(spec: SkillParameterSpec, metadata: Mapping[str, Any]) -> Any | None:

@@ -210,7 +210,7 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
         request = make_request(
             "skill.sql_query",
             input_payload={"user_question": "帮我看看这个材料的分型信息"},
-            metadata={"deep_thinking": True, "main_agent_reasoning_effort": "medium"},
+            metadata={"deep_thinking": True, "main_agent_reasoning_effort": "max", "model_edition": "expert"},
         )
 
         result = asyncio.run(capability.execute(request))
@@ -219,7 +219,7 @@ class SQLQueryIntentRouteTest(unittest.TestCase):
         self.assertEqual(result.output_payload["route_id"], "genotype_db")
         self.assertEqual(
             seen_metadata,
-            [{"deep_thinking": False, "main_agent_reasoning_effort": "medium", "main_agent_thinking_enabled": False}],
+            [{"deep_thinking": True, "main_agent_reasoning_effort": "max", "model_edition": "expert"}],
         )
 
     def test_invalid_llm_semantic_router_output_falls_back_to_deterministic_route(self) -> None:

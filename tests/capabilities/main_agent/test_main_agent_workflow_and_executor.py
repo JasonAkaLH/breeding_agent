@@ -15,6 +15,7 @@ from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL
 from src.orchestration.prompt_envelope import LLMMessage
 from src.orchestration.models import OrchestrationRequest
 from src.integrations.agent_skills import SkillCatalog
+from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_FIELD
 
 
 async def _collecting_streamer(prompt: str):
@@ -176,6 +177,97 @@ class MainAgentWorkflowAndExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("scripts/run_demo.py", combined_prompts)
         self.assertNotIn("Rscript", combined_prompts)
         self.assertNotIn("handler", combined_prompts)
+
+    async def test_soft_skill_binding_llm_calls_inherit_frontend_model_and_thinking_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                textwrap.dedent(
+                    """\
+                    ---
+                    name: demo-skill
+                    capability_id: skill.demo
+                    description: 解释公开用法。
+                    public_usage:
+                      overview: 公开字段说明
+                      examples:
+                        - /demo 怎么填？
+                    ---
+                    Raw body.
+                    """
+                ),
+                encoding="utf-8",
+            )
+            catalog = SkillCatalog.from_roots((root,))
+
+        calls: list[dict[str, object]] = []
+        transient_events = []
+
+        async def streamer(
+            _prompt: str,
+            *,
+            reasoning_effort: str = "minimal",
+            thinking: bool = False,
+            model_edition: str | None = None,
+            stage: str | None = None,
+            **_kwargs: object,
+        ):
+            calls.append(
+                {
+                    "stage": stage,
+                    "reasoning_effort": reasoning_effort,
+                    "thinking": thinking,
+                    "model_edition": model_edition,
+                }
+            )
+            if stage == "soft_skill_decision":
+                yield '{"decision":"answer","target_capability_id":"skill.demo","confidence":0.9,"reason_code":"usage_question"}'
+            else:
+                yield {"reasoning": "先判断公开用法。", "answer": None}
+                yield {"answer": "公开说明。", "reasoning": None}
+
+        async def publish_transient(event):
+            transient_events.append(event)
+
+        executor = MainAgentExecutor(
+            stream_generator=streamer,
+            skill_catalog=catalog,
+            transient_event_publisher=publish_transient,
+        )
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "demo 怎么填？"},
+                metadata={
+                    "soft_skill_binding": {"capability_id": "skill.demo"},
+                    "deep_thinking": True,
+                    "main_agent_reasoning_effort": "max",
+                    "model_edition": "expert",
+                },
+            )
+        )
+
+        self.assertEqual(result.output_payload["response_text"], "公开说明。")
+        self.assertEqual(
+            calls,
+            [
+                {"stage": "soft_skill_decision", "reasoning_effort": "max", "thinking": True, "model_edition": "expert"},
+                {"stage": "soft_skill_answer", "reasoning_effort": "max", "thinking": True, "model_edition": "expert"},
+            ],
+        )
+        self.assertEqual(
+            [event.payload["delta"] for event in transient_events if event.event_type == "main_agent.reasoning_delta"],
+            ["先判断公开用法。"],
+        )
+        final_event = next(event for event in result.events if event.event_type == "main_agent.output_final")
+        self.assertEqual(final_event.payload["reasoning_chunk_count"], 1)
+        self.assertEqual(final_event.payload["reasoning_char_count"], len("先判断公开用法。"))
 
     async def test_soft_skill_binding_execute_returns_deterministic_replan_signal_without_user_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1290,12 +1382,23 @@ parameters:
             )
             catalog = SkillCatalog.from_roots([tmpdir])
             prompts: list[str] = []
+            question_prompts: list[str] = []
 
             async def streamer(prompt: str):
                 prompts.append(prompt)
                 yield "done"
 
-            result = await MainAgentExecutor(stream_generator=streamer, skill_catalog=catalog).execute(
+            async def slot_generator(prompt: str) -> str:
+                question_prompts.append(prompt)
+                if "补槽追问生成器" in prompt:
+                    return '{"question": "请告诉我重复数，例如回复：3次重复。", "ask_fields": ["blocks"], "answer_hint": "正整数", "style": "assistant_dialogue"}'
+                return '{"missing": ["blocks"]}'
+
+            result = await MainAgentExecutor(
+                stream_generator=streamer,
+                skill_catalog=catalog,
+                skill_input_text_generator=slot_generator,
+            ).execute(
                 CapabilityExecutionRequest(
                     capability_id="main_agent.respond",
                     conversation_id="conv-1",
@@ -1314,6 +1417,13 @@ parameters:
         self.assertEqual(prompts, [])
         self.assertIsNotNone(result.interrupt)
         self.assertIn("blocks", result.interrupt.required_fields)
+        self.assertIn(SLOT_COLLECTION_FIELD, result.interrupt.required_fields)
+        self.assertEqual(result.interrupt.required_fields[SLOT_COLLECTION_FIELD]["missing"], ["blocks"])
+        self.assertEqual(result.interrupt.required_fields[SLOT_COLLECTION_FIELD]["question_source"], "llm")
+        self.assertEqual(result.interrupt.required_fields[SLOT_COLLECTION_FIELD]["ask_fields"], ["blocks"])
+        self.assertEqual(result.interrupt.question, "请告诉我重复数，例如回复：3次重复。")
+        self.assertNotIn("请在输入框补充后继续当前任务", result.interrupt.question)
+        self.assertTrue(any("补槽追问生成器" in prompt for prompt in question_prompts))
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)
@@ -1570,6 +1680,8 @@ parameters:
         self.assertEqual(output["missing"], ["material_data"])
         self.assertIsNotNone(result.interrupt)
         self.assertIn("material_data", result.interrupt.required_fields)
+        self.assertIn(SLOT_COLLECTION_FIELD, result.interrupt.required_fields)
+        self.assertEqual(result.interrupt.required_fields[SLOT_COLLECTION_FIELD]["missing"], ["material_data"])
         self.assertIs(result.interrupt.required_fields["material_data"].get("accepts_upload"), True)
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
@@ -1719,6 +1831,8 @@ outputs:
         self.assertEqual(output["missing"], ["user_id"])
         self.assertIsNotNone(result.interrupt)
         self.assertIn("user_id", result.interrupt.required_fields)
+        self.assertIn(SLOT_COLLECTION_FIELD, result.interrupt.required_fields)
+        self.assertEqual(result.interrupt.required_fields[SLOT_COLLECTION_FIELD]["missing"], ["user_id"])
         event_types = [event.event_type for event in result.events]
         self.assertIn("skill.input_missing", event_types)
         self.assertNotIn("skill.script_started", event_types)

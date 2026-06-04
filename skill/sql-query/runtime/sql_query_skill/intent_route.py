@@ -142,7 +142,7 @@ class SQLQueryIntentRouteCapability(CapabilityContract):
             raw_output = await call_text_generator(
                 self._semantic_text_generator,
                 self._build_semantic_route_prompt(user_question),
-                request=self._semantic_route_request(request),
+                request=request,
             )
             decoded = parse_json_object(raw_output)
         except LLMOutputError as exc:
@@ -175,15 +175,6 @@ class SQLQueryIntentRouteCapability(CapabilityContract):
             route_resolution_strategy="llm_semantic",
             route_hint=None,
         ), None
-
-    @staticmethod
-    def _semantic_route_request(request: CapabilityExecutionRequest) -> CapabilityExecutionRequest:
-        """Use the SQLQuery LLM non-streaming path but disable thinking for route choice."""
-
-        metadata = dict(request.metadata)
-        metadata["deep_thinking"] = False
-        metadata["main_agent_thinking_enabled"] = False
-        return replace(request, metadata=metadata)
 
     def _build_semantic_route_prompt(self, user_question: str) -> str:
         routes = [

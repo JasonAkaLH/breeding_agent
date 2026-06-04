@@ -8,6 +8,7 @@ from typing import Any
 from src.core.contracts import CapabilityExecutionRequest, EventSink, ExecutorPort, StoragePort
 from src.core.enums import EventVisibility, NodeStatus, TaskStatus
 from src.core.models import EventRecord, Task, TaskEdge, TaskNode
+from src.integrations.agent_skills.missing_input_interrupt import slot_collection_event_payload
 
 from .backpressure import BackpressureGuard
 from .completion_policy import CompletionPolicy, CompletionStatus
@@ -553,6 +554,7 @@ class OrchestrationService:
                         "reason": saved_interrupt.reason_code,
                         "interrupt_id": saved_interrupt.interrupt_id,
                         "reason_code": saved_interrupt.reason_code,
+                        **slot_collection_event_payload(saved_interrupt.required_fields),
                     },
                 )
             )

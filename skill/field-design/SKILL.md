@@ -137,22 +137,17 @@ scripts:
 
 # 试验设计智能体
 
-Use this skill to run three field-design workflows through the declared Python
-wrapper and bundled R scripts:
+使用此 Skill 通过已声明的 Python wrapper 和随包 R 脚本运行三类 field-design 工作流：
 
-- `RCBD`: randomized complete block design / 随机完全区组设计.
-- `Diagonal`: diagonal augmented design / 对角线增广设计.
-- `Interval`: interval contrast design / 间比法设计.
+- `RCBD`: randomized complete block design / 随机完全区组设计。
+- `Diagonal`: diagonal augmented design / 对角线增广设计。
+- `Interval`: interval contrast design / 间比法设计。
 
-The project backend executes `scripts/run_field_design.py`. Do not declare
-`runtime: r` or ask the main agent to execute Markdown code blocks. The wrapper
-receives JSON stdin, resolves uploaded CSV/Excel material data, calls the bundled
-R scripts with `Rscript`, and returns a JSON object with `answer`, a 10-row
-preview, and downloadable CSV/HTML artifacts.
+项目后端执行 `scripts/run_field_design.py`。不要声明 `runtime: r`，也不要要求主代理执行 Markdown 代码块。wrapper 接收 JSON stdin，解析用户上传的 CSV/Excel 材料数据，通过 `Rscript` 调用随包 R 脚本，并返回包含 `answer`、10 行预览以及可下载 CSV/HTML artifact 的 JSON 对象。
 
-## Welcome Message
+## 欢迎语
 
-When this skill starts a user-facing field design task, or when the user invokes `$field-design` without a complete material list and parameters, first greet the user in Chinese with the exact message below. Do not rewrite, summarize, expand, shorten, localize, or add extra sentences to this welcome message.
+当此 Skill 启动面向用户的试验设计任务，或用户在材料清单和参数不完整时调用 `$field-design`，先用下面的精确文本用中文问候用户。不得改写、概括、扩写、缩短、本地化或添加额外句子。
 
 ```text
 欢迎使用试验设计智能体。目前支持随机区组试验设计（RCBD）、对角线增广试验设计和间比法试验设计（Interval）。你只需要提供试验材料清单，并告诉我要做哪一种设计即可开始：如果做 RCBD，请提供区组数/重复数；如果做对角线增广设计，请提供田块列数 ncols；如果做间比法设计，请先提供材料清单和田块列数 ncols，我会识别 CK 后请你按编号补充每个 CK 的起始位置和间隔数量。
@@ -168,80 +163,76 @@ ped_id,hyb_check,set
 你可以直接上传 CSV/Excel 材料文件，或者把材料表粘贴过来。
 ```
 
-If the user has not provided enough information, ask only for the missing items:
+如果用户提供的信息不足，只询问缺失项：
 
-- uploaded material list file or pasted material table.
-- design type: `RCBD`, `Diagonal`, or `Interval`.
-- design parameters, such as `blocks` for RCBD, `ncols`, `ck_ratio`, `planter`, `randomize`, and `seed` for Diagonal, or `ncols` and CK interval parameters for Interval. Do not ask for Interval `reps` in the first interaction.
+- 上传的材料清单文件或粘贴的材料表。
+- 设计类型：`RCBD`、`Diagonal` 或 `Interval`。
+- 设计参数，例如 RCBD 所需的 `blocks`，Diagonal 所需的 `ncols`、`ck_ratio`、`planter`、`randomize` 和 `seed`，或 Interval 所需的 `ncols` 与 CK interval 参数。首次交互不要询问 Interval 的 `reps`。
 
-For a bare `$field-design` invocation, show only the exact welcome message above. Do not run scripts until the required inputs are available.
+对于裸 `$field-design` 调用，只展示上面的精确欢迎语。必需输入可用前不要运行脚本。
 
-When the declared Python wrapper detects missing required user input, it must return the structured `missing_input` contract from `Skill构建指南.md`: `ok: false`, `is_error: true`, `error.type: missing_input`, `missing` with manifest parameter names, and a user-readable `answer`. For Interval designs, the CK lookup prompt (`status: needs_ck_parameters`) is still missing input, not a successful design result.
+当已声明的 Python wrapper 检测到缺少必需用户输入时，必须按 `Skill构建指南.md` 返回结构化 `missing_input` contract：`ok: false`、`is_error: true`、`error.type: missing_input`、使用 manifest 参数名的 `missing`，以及用户可读的 `answer`。对于 Interval 设计，CK 查询提示（`status: needs_ck_parameters`）仍属于缺失输入，不是成功设计结果。
 
-## Choose The Workflow
+## 选择工作流
 
-Use `RCBD` when the request mentions randomized complete block design, 随机区组, RCBD, blocks, reps, replicates, or repeated complete sets of entries.
+当请求提到 randomized complete block design、随机区组、RCBD、blocks、reps、replicates，或每个 entry 都重复出现在完整区组中时，使用 `RCBD`。
 
-Use `Diagonal` when the request mentions diagonal augmented design, 对角线增广设计, diagonal checks, ck_ratio, or arranging checks along diagonal positions with a field column count `ncols`.
+当请求提到 diagonal augmented design、对角线增广设计、diagonal checks、ck_ratio，或要求按田块列数 `ncols` 沿对角线布置对照时，使用 `Diagonal`。
 
-Use `Interval` when the request mentions interval contrast design, 间比法, start positions for CK, check intervals, or fixed CK insertion by starting position and interval.
+当请求提到 interval contrast design、间比法、CK 起始位置、check intervals，或按起始位置和间隔固定插入 CK 时，使用 `Interval`。
 
-## Workflow
+## 工作流
 
-For every design request:
+每个设计请求都按以下步骤处理：
 
-1. Confirm the input material list, design type, and required parameters.
-2. Run the declared Python wrapper, which calls the matching bundled R design script.
-3. Treat the generated JSON as an internal intermediate result only.
-4. Render the matching HTML layout preview from the generated JSON.
-5. Export the full planting-order fieldbook CSV from the generated JSON.
-6. In the conversation, show only the first 10 planting-order rows as a Markdown table.
-7. Provide links to the full CSV fieldbook and HTML layout preview.
+1. 确认输入材料清单、设计类型和必需参数。
+2. 运行已声明的 Python wrapper，由它调用匹配的随包 R 设计脚本。
+3. 将生成的 JSON 只视为内部中间结果。
+4. 从生成的 JSON 渲染匹配的 HTML layout preview。
+5. 从生成的 JSON 导出完整 planting-order fieldbook CSV。
+6. 在对话中只用 Markdown table 展示前 10 行 planting-order 结果。
+7. 提供完整 CSV fieldbook 和 HTML layout preview 的链接。
 
-Do not show or link the JSON result in the normal user-facing answer. Mention
-the JSON path only if the user explicitly asks for the internal source file or
-debugging details.
+默认用户回答中不要展示或链接 JSON 结果。只有用户明确索要内部源文件或调试细节时，才提及 JSON 路径。
 
-## Output Policy
+## 输出策略
 
-Use a progressive output flow:
+使用渐进式输出流程：
 
-1. `*_result.json`: internal source of truth for rendering and export.
-2. `*_layout.html`: full visual layout preview for the user.
-3. `*_fieldbook.csv`: full planting-order fieldbook for the user.
+1. `*_result.json`：用于渲染和导出的内部事实源。
+2. `*_layout.html`：面向用户的完整可视化 layout preview。
+3. `*_fieldbook.csv`：面向用户的完整 planting-order fieldbook。
 
-For the final response, lead with the design mode and core parameters, then the
-10-row preview table, then links to the CSV and HTML outputs. Keep JSON out of
-the answer by default.
+最终回复先说明设计模式和核心参数，再展示 10 行预览表，最后提供 CSV 和 HTML 输出链接。默认不要把 JSON 放进回答。
 
-## Input Schema
+## 输入 Schema
 
-Prefer new input files with exactly these columns:
+新的输入文件优先使用且只使用以下列：
 
 ```text
 ped_id,hyb_check,set
 ```
 
-Interpret fields as:
+字段解释：
 
-- `ped_id`: 样本名称/材料代号；material ID.
-- `hyb_check`: 是否对照/材料类型标记；check marker.
-- `set`: 试验分组/集合；group ID; prefer letters such as `A`, `B`, `C` instead of numeric-only sets.
+- `ped_id`：样本名称/材料代号；material ID。
+- `hyb_check`：是否对照/材料类型标记；check marker。
+- `set`：试验分组/集合；group ID；优先使用 `A`、`B`、`C` 等字母，不要只用数字型 set。
 
-For `RCBD`, interpret `hyb_check = 0` as test material and non-zero values as checks. RCBD also accepts `ped_id + design_check`, and the legacy `plot_id + hyb_check` schema. If `set` is missing, RCBD adds `set = "A"`.
+对于 `RCBD`，将 `hyb_check = 0` 解释为试验材料，非零值解释为 checks。RCBD 也接受 `ped_id + design_check`，以及 legacy `plot_id + hyb_check` schema。如果缺少 `set`，RCBD 会补充 `set = "A"`。
 
-For `Diagonal`, require `ped_id,hyb_check,set`. Interpret `hyb_check = 0` as test material, `1` as a non-diagonal marker that is treated like regular material in this workflow, and `2` as diagonal check material. Require at least one `hyb_check = 2` and at least one non-`2` entry.
+对于 `Diagonal`，要求 `ped_id,hyb_check,set`。将 `hyb_check = 0` 解释为试验材料，`1` 解释为在此工作流中按普通材料处理的非对角线标记，`2` 解释为 diagonal check material。至少需要一个 `hyb_check = 2`，且至少需要一个非 `2` entry。
 
-For `Interval`, require `ped_id,hyb_check,set`. Interpret `hyb_check = 0` as test material and non-zero values as CK. CK `ped_id` values must be globally unique. Interval designs are generated independently per `set`, and CK parameters are matched by the unique `ped_id`.
+对于 `Interval`，要求 `ped_id,hyb_check,set`。将 `hyb_check = 0` 解释为试验材料，非零值解释为 CK。CK 的 `ped_id` 必须全局唯一。Interval 设计按每个 `set` 独立生成，CK 参数通过唯一 `ped_id` 匹配。
 
-## Run RCBD
+## 运行 RCBD
 
-Require:
+必需参数：
 
-- `--input`: CSV or Excel material list.
-- `--blocks`: number of repeats/blocks. RCBD currently supports only `1`, `2`, or `3`.
+- `--input`：CSV 或 Excel 材料清单。
+- `--blocks`：重复数/区组数。RCBD 当前只支持 `1`、`2` 或 `3`。
 
-Use `--planter serpentine` for 蛇形排列 and `--planter cartesian` for 顺序排列 / 笛卡尔排列.
+使用 `--planter serpentine` 表示蛇形排列，使用 `--planter cartesian` 表示顺序排列 / 笛卡尔排列。
 
 ```powershell
 Set-Variable skillDir 'skill/field-design'
@@ -256,7 +247,7 @@ Rscript `
   --output "$outDir/rcbd_result.json"
 ```
 
-Render the RCBD HTML preview:
+渲染 RCBD HTML preview：
 
 ```powershell
 Rscript `
@@ -266,7 +257,7 @@ Rscript `
   --title "Field Design RCBD Layout"
 ```
 
-Export the full RCBD fieldbook CSV:
+导出完整 RCBD fieldbook CSV：
 
 ```powershell
 Rscript `
@@ -276,25 +267,22 @@ Rscript `
   --output "$outDir/rcbd_fieldbook.csv"
 ```
 
-Report only the first 10 planting-order fieldbook rows in the conversation,
-then link the full CSV and HTML preview. Do not link or display the JSON result
-unless the user asks for it. Do not sort the conversation fieldbook by
-`ranges,pass` unless the user asks for physical layout order.
+在对话中只报告前 10 行 planting-order fieldbook，然后链接完整 CSV 和 HTML preview。除非用户索要，不要链接或展示 JSON 结果。除非用户要求 physical layout order，否则不要按 `ranges,pass` 重新排序对话中的 fieldbook。
 
-## Run Diagonal
+## 运行 Diagonal
 
-Require:
+必需参数：
 
-- `--input`: CSV material list with `ped_id,hyb_check,set`.
-- `--ncols`: field column count.
+- `--input`：包含 `ped_id,hyb_check,set` 的 CSV 材料清单。
+- `--ncols`：田块列数。
 
-Defaults:
+默认值：
 
-- `--ck-ratio A`: low-density checks.
-- `--planter serpentine`: serpentine planting order.
-- `--randomize true`: randomize test materials.
+- `--ck-ratio A`：低密度 checks。
+- `--planter serpentine`：蛇形 planting order。
+- `--randomize true`：随机化试验材料。
 
-Use `--randomize false` only when the user asks to preserve list order, e.g. “按我的清单顺序”, “不要随机”, or “保持原始顺序”.
+只有当用户要求保留清单顺序时才使用 `--randomize false`，例如“按我的清单顺序”、“不要随机”或“保持原始顺序”。
 
 ```powershell
 Set-Variable skillDir 'skill/field-design'
@@ -311,7 +299,7 @@ Rscript `
   --output "$outDir/diagonal_result.json"
 ```
 
-Render the diagonal HTML preview:
+渲染 diagonal HTML preview：
 
 ```powershell
 Rscript `
@@ -321,7 +309,7 @@ Rscript `
   --title "Field Design Diagonal Layout"
 ```
 
-Export the full diagonal fieldbook CSV:
+导出完整 diagonal fieldbook CSV：
 
 ```powershell
 Rscript `
@@ -331,48 +319,40 @@ Rscript `
   --output "$outDir/diagonal_fieldbook.csv"
 ```
 
-After generating the internal diagonal result JSON, always display only the
-first 10 diagonal design rows in the conversation as a Markdown table. Read
-`out_design` from the generated JSON and preserve its planting order; do not
-re-sort by `ranges,pass` unless the user explicitly asks for physical layout
-order. Include these columns:
+生成内部 diagonal 结果 JSON 后，始终在对话中只用 Markdown table 展示前 10 行 diagonal design。读取生成 JSON 中的 `out_design` 并保持 planting order；除非用户明确要求 physical layout order，否则不要按 `ranges,pass` 重新排序。包含以下列：
 
 ```text
 plots | ped_id | hyb_type | ranges | pass | set | design_check
 ```
 
-For every diagonal design, show the first 10 planting-order rows in the
-conversation, then provide the full CSV fieldbook path/link and HTML preview
-path/link. Do not skip this table just because the HTML preview exists. Do not
-display or link raw JSON in the conversation unless the user explicitly asks
-for it.
+每个 diagonal design 都要在对话中展示前 10 行 planting-order 结果，然后提供完整 CSV fieldbook 路径/链接和 HTML preview 路径/链接。不要因为已有 HTML preview 就跳过该表。除非用户明确索要，不要在对话中展示或链接原始 JSON。
 
-Use `ck_ratio` levels as:
+`ck_ratio` 等级含义：
 
-- `A`: target `5% - 10%` checks.
-- `B`: target `10% - 15%` checks.
-- `C`: target `15% - 20%` checks.
+- `A`：目标 `5% - 10%` checks。
+- `B`：目标 `10% - 15%` checks。
+- `C`：目标 `15% - 20%` checks。
 
-Start with the requested level, defaulting to `A`. If the requested level cannot satisfy the diagonal layout, the script automatically upgrades from `A` to `B`, then to `C`. Always tell the user the requested level, used level, whether it was auto-upgraded, and the actual check ratio/percent.
+从用户请求的等级开始，默认使用 `A`。如果请求等级无法满足 diagonal layout，脚本会自动从 `A` 升级到 `B`，再升级到 `C`。始终告知用户请求等级、实际使用等级、是否自动升级，以及实际 check ratio/percent。
 
-Do not expose `filler`, `filler.end`, or multi-site parameters for diagonal design. For multiple independent diagonal designs, run `run_diagonal_local.R` multiple times with different seeds and return separate design tables.
+不要为 diagonal design 暴露 `filler`、`filler.end` 或 multi-site 参数。对于多个独立 diagonal designs，应以不同 seeds 多次运行 `run_diagonal_local.R`，并返回相互独立的设计表。
 
-## Run Interval
+## 运行 Interval
 
-Require:
+必需参数：
 
-- `--input`: CSV material list with `ped_id,hyb_check,set`.
-- `--ncols`: field column count.
-- CK parameters after CK listing: `ck_no,start_pos,interval`.
+- `--input`：包含 `ped_id,hyb_check,set` 的 CSV 材料清单。
+- `--ncols`：田块列数。
+- CK 列表之后提供的 CK 参数：`ck_no,start_pos,interval`。
 
-Defaults:
+默认值：
 
-- `--planter serpentine`: serpentine planting order.
-- `--randomize true`: randomize test materials.
+- `--planter serpentine`：蛇形 planting order。
+- `--randomize true`：随机化试验材料。
 
-### Step 1: List CK Materials
+### 步骤 1：列出 CK 材料
 
-After the user provides the material list and asks for Interval design, run the CK listing step before asking for CK parameters:
+用户提供材料清单并请求 Interval design 后，先运行 CK 列表步骤，再询问 CK 参数：
 
 ```powershell
 Set-Variable skillDir 'skill/field-design'
@@ -385,41 +365,41 @@ Rscript `
   --output "$outDir/interval_ck_table.json"
 ```
 
-Read the generated `ck_table` and show it to the user as:
+读取生成的 `ck_table`，并按以下形式展示给用户：
 
 ```text
 ck_no | ped_id | set
 ```
 
-Then ask the user to provide CK parameters in this format:
+然后要求用户按以下格式提供 CK 参数：
 
 ```text
 ck_no,start_pos,interval
 ```
 
-Multiple CKs can be separated with semicolons, for example:
+多个 CK 可用分号分隔，例如：
 
 ```text
 1,1,10; 2,5,10
 ```
 
-### Step 2: Confirm CK Parameters
+### 步骤 2：确认 CK 参数
 
-After the user provides `ck_no,start_pos,interval` values, parse them and show a confirmation table before running the design:
+用户提供 `ck_no,start_pos,interval` 值后，解析这些值，并在运行设计前展示确认表：
 
 ```text
 ck_no | ped_id | set | start_pos | interval
 ```
 
-Use this Chinese confirmation sentence:
+使用下面这句中文确认语：
 
 ```text
 请确认以上 CK 起始位置和间隔数量是否正确。确认后我再开始生成间比法设计。
 ```
 
-Do not run the final Interval design until the user confirms.
+用户确认前不要运行最终 Interval design。
 
-### Step 3: Generate Interval Design
+### 步骤 3：生成 Interval Design
 
 ```powershell
 Set-Variable skillDir 'skill/field-design'
@@ -436,9 +416,9 @@ Rscript `
   --output "$outDir/interval_result.json"
 ```
 
-The Interval script generates one single-run design per call. After the first design is complete, if the user asks for multiple repeats, run the same command once per repeat with different seeds and output names. Add or preserve `r` as the repeat number in each repeat fieldbook. For example, if the user later asks for `reps = 2`, run repeat 1 with `--seed 20260519 --output "$outDir/interval_result_r1.json"` and repeat 2 with `--seed 20260520 --output "$outDir/interval_result_r2.json"`.
+Interval 脚本每次调用只生成一个 single-run design。第一次设计完成后，如果用户要求多个重复，则用不同 seeds 和输出名按每个重复运行同一命令一次。在每个重复的 fieldbook 中添加或保留 `r` 作为重复编号。例如，如果用户随后要求 `reps = 2`，重复 1 使用 `--seed 20260519 --output "$outDir/interval_result_r1.json"`，重复 2 使用 `--seed 20260520 --output "$outDir/interval_result_r2.json"`。
 
-Render the Interval HTML preview using the shared RCBD/Interval layout renderer because both designs use the same visible fieldbook columns:
+使用共享的 RCBD/Interval layout renderer 渲染 Interval HTML preview，因为两个设计使用相同的可见 fieldbook 列：
 
 ```powershell
 Rscript `
@@ -448,7 +428,7 @@ Rscript `
   --title "Field Design Interval Layout"
 ```
 
-Export the full Interval fieldbook CSV:
+导出完整 Interval fieldbook CSV：
 
 ```powershell
 Rscript `
@@ -458,60 +438,57 @@ Rscript `
   --output "$outDir/interval_fieldbook.csv"
 ```
 
-For every Interval design, show only the first 10 planting-order rows in the conversation with these columns:
+每个 Interval design 都只在对话中展示前 10 行 planting-order rows，并使用以下列：
 
 ```text
 plots | r | ped_id | ranges | pass | set | hyb_check | hyb_type
 ```
 
-For Interval layout previews, keep all sets in one continuous field layout. Do not force a new row just because the set changes; the next set should continue from the next available planting position. CK cells should remain in the existing yellow check color family, but use interpolated shade variations by CK `ped_id` so different CKs are visually distinguishable without leaving the check color system.
+对于 Interval layout previews，将所有 sets 保持在一个连续 field layout 中。不要因为 set 变化就强制换到新行；下一个 set 应从下一个可用 planting position 继续。CK 单元格应保留现有黄色 check 色系，但按 CK `ped_id` 使用插值色阶变化，使不同 CK 在不脱离 check 色系的前提下可区分。
 
-After the first Interval design is complete, ask the user whether they need multiple repeats. Do not ask this before the first design is complete. Use this wording in Chinese:
+第一次 Interval design 完成后，再询问用户是否需要多个重复。不要在第一次设计完成前询问。使用下面这句中文：
 
 ```text
 当前已完成 1 轮间比法设计。是否需要生成多个重复设计？如果需要，请告诉我重复数。例如 3 个重复将生成 3 个单独结果，且重复之间使用不同随机种子。
 ```
 
-For Interval, `reps` means `重复` only. Do not call it blocks or 区组. If the user asks for `reps = 3`, generate 3 separate Interval results by calling the single-run script 3 times with different seeds and output names. Keep each repeat as a separate result unless the user explicitly asks to merge them.
+对于 Interval，`reps` 只表示 `重复`。不要称为 blocks 或区组。如果用户要求 `reps = 3`，通过以不同 seeds 和输出名调用 single-run script 3 次，生成 3 个独立 Interval results。除非用户明确要求合并，否则每个重复都保留为独立结果。
 
-### Interval Validation Rules
+### Interval 校验规则
 
-Before final design:
+最终设计前：
 
-- material data must contain `ped_id,hyb_check,set`.
-- `ncols` must be available.
-- every CK in `ck_table` must receive `start_pos` and `interval`.
-- `start_pos` and `interval` must be positive integers.
-- each `set` is checked independently for CK position overlaps.
+- material data 必须包含 `ped_id,hyb_check,set`。
+- `ncols` 必须可用。
+- `ck_table` 中的每个 CK 都必须收到 `start_pos` 和 `interval`。
+- `start_pos` 和 `interval` 必须是正整数。
+- 每个 `set` 都独立检查 CK position overlap。
 
-If a CK position overlap is detected, stop and ask the user to adjust the related CK start position or interval.
+如果检测到 CK position overlap，停止并要求用户调整相关 CK 的起始位置或间隔。
 
-## Report Outputs
+## 报告输出
 
-For every run, report:
+每次运行都报告：
 
-- design mode used: `RCBD`, `Diagonal`, or `Interval`.
-- input path, core parameters, and seed.
-- full CSV fieldbook path and HTML preview path.
-- for `Diagonal`, requested `ck_ratio`, used `ck_ratio`, `auto_upgraded`, and actual check percent.
-- for `Interval`, the confirmed CK parameter table.
-- a concise fieldbook table with only the first 10 planting-order rows. Generate this table from JSON `out_design`, but do not display the raw JSON result.
+- 使用的 design mode：`RCBD`、`Diagonal` 或 `Interval`。
+- input path、核心参数和 seed。
+- 完整 CSV fieldbook path 与 HTML preview path。
+- 对于 `Diagonal`，报告 requested `ck_ratio`、used `ck_ratio`、`auto_upgraded` 和实际 check percent。
+- 对于 `Interval`，报告已确认的 CK 参数表。
+- 只包含前 10 行 planting-order rows 的简洁 fieldbook table。该表从 JSON `out_design` 生成，但不要展示原始 JSON result。
 
-Use the generated JSON as the internal source of truth and as input for HTML and CSV rendering. Important output fields include:
+使用生成的 JSON 作为内部事实源，并作为 HTML 与 CSV 渲染输入。重要输出字段包括：
 
-- RCBD CSV columns: `plots`, `r`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`, `hyb_type`.
-- Diagonal CSV columns: `plots`, `ped_id`, `hyb_type`, `ranges`, `pass`, `set`, `design_check`.
-- Interval CSV columns: `plots`, `r`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`, `hyb_type`.
+- RCBD CSV 列：`plots`, `r`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`, `hyb_type`。
+- Diagonal CSV 列：`plots`, `ped_id`, `hyb_type`, `ranges`, `pass`, `set`, `design_check`。
+- Interval CSV 列：`plots`, `r`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`, `hyb_type`。
 
-When reporting a result, never paste JSON content by default. Provide the CSV and HTML links as the user-facing complete outputs.
+报告结果时，默认绝不粘贴 JSON 内容。将 CSV 和 HTML 链接作为面向用户的完整输出。
 
-## Environment
+## 环境
 
-Use `Rscript` from the current environment `PATH`. Do not hardcode a
-machine-specific R installation path in normal workflow examples. The current
-validated Windows environment uses R `4.5.3`; target Mac deployments can use
-the current Mac R release if `jsonlite` is installed.
+从当前环境 `PATH` 使用 `Rscript`。正常 workflow examples 中不要硬编码 machine-specific R installation path。当前已验证 Windows 环境使用 R `4.5.3`；目标 Mac 部署只要安装了 `jsonlite`，即可使用当前 Mac R release。
 
-Required R package:
+必需 R package：
 
 - `jsonlite`
