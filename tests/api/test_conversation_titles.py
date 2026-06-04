@@ -35,6 +35,48 @@ class ConversationTitleAPITest(APITestCase):
         self.assertIs(calls[0]["thinking"], False)
         self.assertEqual(calls[0]["reasoning_effort"], "minimal")
 
+    async def test_title_generation_receives_current_request_llm_options_metadata(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        async def title_generator(message: str, *, metadata=None) -> str:
+            calls.append({"message": message, "metadata": dict(metadata or {})})
+            return "深度标题"
+
+        await self.reconfigure_runtime(
+            conversation_title_generator=title_generator,
+            main_agent_llm_config={
+                "api_key": "test",
+                "base_url": "http://example.test",
+                "model_editions": {
+                    "default": "flash",
+                    "options": [{"value": "flash", "label": "Flash"}, {"value": "pro", "label": "Pro"}],
+                },
+            },
+            main_agent_stream_generator=lambda _prompt: ["已收到。"],
+        )
+
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-title-options",
+                "content": "帮我查询龙粳33的品种信息",
+                "routing_mode": "auto",
+                "capability_id": None,
+                "model_edition": "pro",
+                "metadata": {"deep_thinking": True, "main_agent_reasoning_effort": "max"},
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+
+        async def title_generated() -> bool:
+            conversation = await self.runtime.storage.get_conversation("conv-title-options")
+            return conversation is not None and conversation.title == "深度标题"
+
+        await self.wait_for_condition(title_generated)
+        self.assertEqual(calls[0]["metadata"]["deep_thinking"], True)
+        self.assertEqual(calls[0]["metadata"]["main_agent_reasoning_effort"], "max")
+        self.assertEqual(calls[0]["metadata"]["model_edition"], "pro")
+
     async def test_title_generation_failure_keeps_title_empty_so_next_round_retries_with_all_user_messages(self) -> None:
         calls: list[str] = []
 

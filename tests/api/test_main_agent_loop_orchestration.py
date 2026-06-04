@@ -402,7 +402,9 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
         self.assertEqual({node.capability_id for node in nodes}, {"skill.generic_data_lookup", "main_agent.respond"})
 
         calls = FakeMainAgentLLM.instances[0].calls
-        self.assertEqual([call["method"] for call in calls], ["generate_text_with_thinking", "generate_text_with_thinking"])
+        self.assertEqual([call["method"] for call in calls], ["generate_text", "generate_text_with_thinking"])
+        self.assertEqual(calls[0]["thinking"], True)
+        self.assertEqual(calls[0]["reasoning_effort"], "high")
         self.assertEqual(calls[-1]["thinking"], True)
         self.assertEqual(calls[-1]["reasoning_effort"], "high")
 

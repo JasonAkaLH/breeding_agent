@@ -181,6 +181,42 @@ parameters:
         self.assertNotIn("material_data", result.payload)
         self.assertEqual(result.missing, ("material_data",))
 
+    def test_artifact_parameter_without_explicit_source_cannot_be_satisfied_by_text_payload(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        skill_file = Path(tmpdir.name) / "SKILL.md"
+        skill_file.write_text(
+            """---
+name: artifact-text-guard
+scripts:
+  - name: run
+    path: scripts/run.py
+    auto_run: true
+parameters:
+  material_data:
+    type: artifact
+    required: true
+    aliases:
+      - material_data
+      - 材料清单
+---
+
+# Artifact text guard
+""",
+            encoding="utf-8",
+        )
+        manifest = parse_skill_file(skill_file)
+
+        result = resolve_skill_inputs(
+            manifest,
+            manifest.scripts[0],
+            {"query": "继续生成", "material_data": "/tmp/fake.csv", "metadata": {"material_data": "/tmp/fake.csv"}},
+            SkillInputResolutionContext(query="material_data=/tmp/fake.csv"),
+        )
+
+        self.assertNotIn("material_data", result.payload)
+        self.assertEqual(result.missing, ("material_data",))
+
     async def test_structured_payload_resolution_is_not_overridden_by_llm(self) -> None:
         manifest = self._manifest()
         called = False
@@ -326,7 +362,13 @@ parameters:
         calls: list[dict] = []
 
         async def slot_generator(prompt: str, **kwargs) -> str:
-            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "prompt_profile": kwargs.get("prompt_profile"),
+                    "metadata": kwargs.get("metadata"),
+                }
+            )
             return '{"resolved": {"blocks": {"value": 2, "source": "recent_user_message"}}}'
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
@@ -336,7 +378,12 @@ parameters:
                 {
                     "query": "按照你的操作继续生成。",
                     "uploaded_artifacts": [{"filename": "data.csv"}],
-                    "metadata": {"trim_max_tokens": 4000},
+                    "metadata": {
+                        "trim_max_tokens": 4000,
+                        "deep_thinking": True,
+                        "main_agent_reasoning_effort": "max",
+                        "model_edition": "expert",
+                    },
                 },
                 SkillInputResolutionContext(
                     query="按照你的操作继续生成。",
@@ -356,6 +403,9 @@ parameters:
         self.assertEqual(result.payload["blocks"], 2)
         self.assertEqual(calls[0]["prompt_profile"]["template_id"], "skill_input_resolver")
         self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
+        self.assertEqual(calls[0]["metadata"]["deep_thinking"], True)
+        self.assertEqual(calls[0]["metadata"]["main_agent_reasoning_effort"], "max")
+        self.assertEqual(calls[0]["metadata"]["model_edition"], "expert")
         self.assertEqual(result.prompt_profile["template_id"], "skill_input_resolver")
         self.assertNotIn("entrypoint", calls[0]["prompt"])
         self.assertNotIn("scripts/run.py", calls[0]["prompt"])

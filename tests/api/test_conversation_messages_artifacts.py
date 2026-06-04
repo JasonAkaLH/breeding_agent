@@ -50,7 +50,7 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
             Artifact(
                 artifact_id,
                 f"{conversation_id}:task-1",
-                f"{conversation_id}:skill.sql_query",
+                f"{conversation_id}:skill_data_query",
                 ArtifactType.JSON,
                 storage_ref,
                 summary=summary,

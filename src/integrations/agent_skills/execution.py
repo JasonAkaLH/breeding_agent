@@ -44,7 +44,16 @@ _SAFE_ARTIFACT_KEYS = frozenset({
     "requires_sheet_selection",
 })
 _SCRIPT_ARTIFACT_KEYS = frozenset((*_SAFE_ARTIFACT_KEYS, "content", "content_base64", "encoding"))
-_BLOCKED_METADATA_KEYS = frozenset({"conversation_memory", "memory_context", "recent_messages", "history_summary", "resolved_user_message"})
+_BLOCKED_METADATA_KEYS = frozenset(
+    {
+        "conversation_memory",
+        "history_summary",
+        "memory_context",
+        "recent_messages",
+        "resolved_user_message",
+        "skill_slot_collection",
+    }
+)
 
 
 class SkillExecutionConfigError(ValueError):

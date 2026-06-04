@@ -1720,7 +1720,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     <Space direction="vertical" size="middle" className="composer-menu">
       <Button
         block
-        aria-label="选择 JSON、CSV、图片或 PDF 文件"
+        aria-label="选择 JSON、CSV、VCF、图片或 PDF 文件"
         onClick={() => uploadInputRef.current?.click()}
         disabled={!canUploadInCurrentComposer || uploadingFile}
         loading={uploadingFile}
@@ -1877,6 +1877,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                         <Tag key={upload.upload_id} className="upload-file-tag">
                           {upload.filename}
                           {upload.file_type === 'spreadsheet' ? ' · Excel' : ''}
+                          {upload.file_type === 'vcf' ? ' · VCF' : ''}
                           {upload.preview.source_encoding ? ` · ${upload.preview.source_encoding}` : ''}
                           {typeof upload.preview.row_count === 'number' ? ` · ${upload.preview.row_count} 行` : ''}
                           {upload.preview.columns.length > 0 ? ` · ${upload.preview.columns.slice(0, 3).join('/')}` : ''}
@@ -2006,9 +2007,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   <input
                     ref={uploadInputRef}
                     className="file-input-hidden"
-                    aria-label="上传 JSON、CSV、Excel、图片或 PDF 文件"
+                    aria-label="上传 JSON、CSV、Excel、VCF、图片或 PDF 文件"
                     type="file"
-                    accept=".json,.csv,.xlsx,.xls,.png,.jpg,.jpeg,.pdf,application/json,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg,application/pdf"
+                    accept=".json,.csv,.xlsx,.xls,.vcf,.vcf.gz,.png,.jpg,.jpeg,.pdf,application/json,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg,application/pdf"
                     disabled={!canUploadInCurrentComposer || uploadingFile}
                     onChange={(event) => void handleUploadFile(event.target.files?.[0])}
                   />
@@ -2240,7 +2241,7 @@ function buildInterruptAnswerPayload(
   if (interruptSheetSelectionField(interrupt)) {
     return { upload_sheet_selections: selectedSheets };
   }
-  const fieldNames = Object.keys(interrupt.requiredFields ?? {});
+  const fieldNames = interruptVisibleFieldNames(interrupt);
   const uploadIds = uploads.map((upload) => upload.upload_id);
   const filenames = uploads.map((upload) => upload.filename);
   const payload: Record<string, unknown> = {};
@@ -2275,6 +2276,9 @@ function sheetSelectionDisplayText(field: SheetSelectionField | null, selections
 }
 
 function InterruptPromptCard({ interrupt }: { interrupt: PendingInterrupt }) {
+  if (interruptIsScalarDialogue(interrupt)) {
+    return <Typography.Paragraph className="interrupt-card-question">{interrupt.question}</Typography.Paragraph>;
+  }
   const fieldLabels = interruptFieldLabels(interrupt);
   const optionLabels = interruptOptionLabels(interrupt);
   return (
@@ -2343,11 +2347,11 @@ function InterruptInputBanner({ interrupt, onCancel, cancelling }: { interrupt: 
 }
 
 function interruptFieldLabels(interrupt: PendingInterrupt): string[] {
-  return Object.keys(interrupt.requiredFields ?? {}).map((field) => INTERRUPT_FIELD_LABELS[field] ?? field);
+  return interruptVisibleFieldNames(interrupt).map((field) => INTERRUPT_FIELD_LABELS[field] ?? field);
 }
 
 function interruptAcceptsUpload(interrupt: PendingInterrupt): boolean {
-  return Object.values(interrupt.requiredFields ?? {}).some((field) => {
+  return interruptVisibleFieldValues(interrupt).some((field) => {
     if (!field || typeof field !== 'object') return false;
     const metadata = field as { accepts_upload?: unknown; type?: unknown };
     return metadata.accepts_upload === true || ['artifact', 'file', 'data'].includes(String(metadata.type ?? ''));
@@ -2409,9 +2413,35 @@ function interruptFieldSummary(interrupt: PendingInterrupt): string {
 }
 
 function interruptOptionLabels(interrupt: PendingInterrupt): string[] {
-  return Object.values(interrupt.requiredFields ?? {})
+  return interruptVisibleFieldValues(interrupt)
     .flatMap((field) => extractInterruptOptions(field))
     .map((option) => INTERRUPT_OPTION_LABELS[option] ?? option);
+}
+
+function interruptVisibleFieldNames(interrupt: PendingInterrupt): string[] {
+  return Object.keys(interrupt.requiredFields ?? {}).filter((field) => !isReservedInterruptField(field));
+}
+
+function interruptVisibleFieldValues(interrupt: PendingInterrupt): unknown[] {
+  return Object.entries(interrupt.requiredFields ?? {})
+    .filter(([field]) => !isReservedInterruptField(field))
+    .map(([, value]) => value);
+}
+
+function isReservedInterruptField(field: string): boolean {
+  return field.startsWith('_');
+}
+
+function interruptIsScalarDialogue(interrupt: PendingInterrupt): boolean {
+  if (!interrupt.requiredFields || !Object.prototype.hasOwnProperty.call(interrupt.requiredFields, '_slot_collection')) return false;
+  const fields = interruptVisibleFieldValues(interrupt);
+  if (fields.length === 0) return false;
+  if (interruptSheetSelectionField(interrupt) || interruptAcceptsUpload(interrupt)) return false;
+  return fields.every((field) => {
+    if (!field || typeof field !== 'object') return true;
+    const metadata = field as { type?: unknown };
+    return !['artifact', 'file', 'data', 'sheet_selection'].includes(String(metadata.type ?? ''));
+  });
 }
 
 function extractInterruptOptions(field: unknown): string[] {

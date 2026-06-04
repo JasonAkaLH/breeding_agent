@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 from io import BytesIO
 import json
 import unittest
@@ -467,6 +468,76 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(script_artifact["content_base64"], base64.b64encode(png_content).decode("ascii"))
         self.assertEqual(script_artifact["encoding"], "base64")
         self.assertNotIn("content", script_artifact)
+
+    async def test_upload_vcf_resolves_binary_content_only_for_skill_scripts(self) -> None:
+        vcf_content = (
+            b"##fileformat=VCFv4.2\n"
+            b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample_1\n"
+            b"1\t42\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\n"
+        )
+        self.runtime.upload_store.max_preview_bytes = 8
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-rice-vcf"},
+            files={"file": ("sample.vcf", vcf_content, "text/plain")},
+        )
+
+        self.assertEqual(upload.status_code, 201, upload.text)
+        payload = upload.json()
+        self.assertEqual(payload["filename"], "sample.vcf")
+        self.assertEqual(payload["file_type"], "vcf")
+        self.assertEqual(payload["preview"]["shape"], "binary")
+        self.assertIsNone(payload["preview"]["row_count"])
+        self.assertNotIn("content", payload)
+        self.assertNotIn("content_base64", payload)
+
+        resolved = await self.runtime.resolve_uploads_for_message(
+            "conv-rice-vcf", "acc-1", [payload["upload_id"]]
+        )
+        prompt_artifact = resolved["uploaded_artifacts"][0]
+        script_artifact = resolved["skill_artifacts"][0]
+        self.assertEqual(prompt_artifact["filename"], "sample.vcf")
+        self.assertEqual(prompt_artifact["file_type"], "vcf")
+        self.assertNotIn("content", prompt_artifact)
+        self.assertNotIn("content_base64", prompt_artifact)
+        self.assertEqual(script_artifact["filename"], "sample.vcf")
+        self.assertEqual(script_artifact["content_base64"], base64.b64encode(vcf_content).decode("ascii"))
+        self.assertEqual(script_artifact["encoding"], "base64")
+        self.assertNotIn("content", script_artifact)
+
+    async def test_upload_vcf_gz_resolves_by_compound_extension_without_accepting_plain_gz(self) -> None:
+        compressed_vcf = gzip.compress(
+            b"##fileformat=VCFv4.2\n"
+            b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample_1\n"
+            b"1\t42\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\n"
+        )
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-rice-vcf-gz"},
+            files={"file": ("sample.vcf.gz", compressed_vcf, "application/gzip")},
+        )
+
+        self.assertEqual(upload.status_code, 201, upload.text)
+        payload = upload.json()
+        self.assertEqual(payload["filename"], "sample.vcf.gz")
+        self.assertEqual(payload["file_type"], "vcf")
+        resolved = await self.runtime.resolve_uploads_for_message(
+            "conv-rice-vcf-gz", "acc-1", [payload["upload_id"]]
+        )
+        self.assertEqual(resolved["skill_artifacts"][0]["filename"], "sample.vcf.gz")
+        self.assertEqual(
+            resolved["skill_artifacts"][0]["content_base64"],
+            base64.b64encode(compressed_vcf).decode("ascii"),
+        )
+
+        plain_gz = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-rice-vcf-gz"},
+            files={"file": ("archive.gz", compressed_vcf, "application/gzip")},
+        )
+        self.assertEqual(plain_gz.status_code, 400)
 
     async def test_list_and_delete_uploads_for_conversation(self) -> None:
         first = await self.client.post(

@@ -60,6 +60,7 @@ class SQLQueryEngineTest(unittest.IsolatedAsyncioTestCase):
                     "resolved_user_message": "secret",
                     "deep_thinking": True,
                     "main_agent_reasoning_effort": "high",
+                    "model_edition": "expert",
                 },
             )
         )
@@ -74,6 +75,7 @@ class SQLQueryEngineTest(unittest.IsolatedAsyncioTestCase):
         for metadata in seen_metadata:
             self.assertFalse(blocked_keys & set(metadata))
             self.assertEqual(metadata["main_agent_reasoning_effort"], "high")
+            self.assertEqual(metadata["model_edition"], "expert")
         self.assertEqual(seen_metadata[0]["deep_thinking"], True)
         self.assertEqual(seen_metadata[1]["deep_thinking"], True)
         self.assertTrue(any(event.event_type == "skill.progress" for event in result.events))

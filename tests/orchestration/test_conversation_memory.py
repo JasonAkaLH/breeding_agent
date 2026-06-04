@@ -281,7 +281,13 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         calls: list[dict] = []
 
         async def resolver(prompt: str, **kwargs) -> str:
-            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "prompt_profile": kwargs.get("prompt_profile"),
+                    "metadata": kwargs.get("metadata"),
+                }
+            )
             return json.dumps(
                 {
                     "should_resolve": True,
@@ -315,13 +321,26 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
             context = await builder.build(
-                OrchestrationRequest("task-2", "conv-1", "msg-current", "那它的基因型呢？"),
+                OrchestrationRequest(
+                    "task-2",
+                    "conv-1",
+                    "msg-current",
+                    "那它的基因型呢？",
+                    metadata={
+                        "deep_thinking": True,
+                        "main_agent_reasoning_effort": "max",
+                        "model_edition": "expert",
+                    },
+                ),
                 username="alice",
             )
 
         self.assertEqual(context.resolved_user_message, "查询龙粳18的基因型信息")
         self.assertEqual(calls[0]["prompt_profile"]["template_id"], "conversation_memory_resolution")
         self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
+        self.assertEqual(calls[0]["metadata"]["deep_thinking"], True)
+        self.assertEqual(calls[0]["metadata"]["main_agent_reasoning_effort"], "max")
+        self.assertEqual(calls[0]["metadata"]["model_edition"], "expert")
         self.assertEqual(context.resolution_metadata["prompt_profile"]["template_id"], "conversation_memory_resolution")
         self.assertIn("不要回答用户问题", calls[0]["prompt"])
 
@@ -329,7 +348,13 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
         calls: list[dict] = []
 
         async def summarizer(prompt: str, **kwargs) -> str:
-            calls.append({"prompt": prompt, "prompt_profile": kwargs.get("prompt_profile")})
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "prompt_profile": kwargs.get("prompt_profile"),
+                    "metadata": kwargs.get("metadata"),
+                }
+            )
             return "忠实摘要：用户反复查询龙粳33。"
 
         now = datetime(2026, 5, 8, 9, 0, 0)
@@ -369,13 +394,26 @@ class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("os.environ", {"MAF_PROMPT_ENVELOPE_MODE": "string"}):
             context = await builder.build(
-                OrchestrationRequest("task-current", "conv-1", "msg-current", "继续"),
+                OrchestrationRequest(
+                    "task-current",
+                    "conv-1",
+                    "msg-current",
+                    "继续",
+                    metadata={
+                        "deep_thinking": True,
+                        "main_agent_reasoning_effort": "max",
+                        "model_edition": "expert",
+                    },
+                ),
                 username="alice",
             )
 
         self.assertEqual(context.history_summary, "忠实摘要：用户反复查询龙粳33。")
         self.assertEqual(calls[0]["prompt_profile"]["template_id"], "conversation_memory_summary")
         self.assertEqual(calls[0]["prompt_profile"]["final_input_token_budget"], 3000)
+        self.assertEqual(calls[0]["metadata"]["deep_thinking"], True)
+        self.assertEqual(calls[0]["metadata"]["main_agent_reasoning_effort"], "max")
+        self.assertEqual(calls[0]["metadata"]["model_edition"], "expert")
         self.assertEqual(storage.saved_summaries[0].model_metadata_safe["prompt_profile"]["template_id"], "conversation_memory_summary")
         self.assertEqual(context.to_audit_payload()["summary_prompt_profile"]["template_id"], "conversation_memory_summary")
         self.assertIn("不得引入新事实", calls[0]["prompt"])

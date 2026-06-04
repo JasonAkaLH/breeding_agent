@@ -36,12 +36,18 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       upload_id: 'upl-1',
       conversation_id: 'conv-test',
       filename: file.name,
-      content_type: file.type || 'text/csv',
-      file_type: file.name.endsWith('.json') ? 'json' : 'csv',
+      content_type: file.type || 'application/octet-stream',
+      file_type: file.name.endsWith('.vcf') || file.name.endsWith('.vcf.gz')
+        ? 'vcf'
+        : file.name.endsWith('.json')
+          ? 'json'
+          : 'csv',
       size_bytes: file.size,
       sha256: 'hash',
       expires_at: '2026-05-07T10:00:00',
-      preview: { row_count: 1, columns: ['ped_id', 'design_check'], shape: 'table' },
+      preview: file.name.endsWith('.vcf') || file.name.endsWith('.vcf.gz')
+        ? { row_count: null, columns: [], shape: 'binary' }
+        : { row_count: 1, columns: ['ped_id', 'design_check'], shape: 'table' },
     })),
     cancelTask: vi.fn(async () => ({ task_id: 'task-1', status: 'cancelling', accepted: true })),
     listConversations: vi.fn(async () => ({ conversations: [] })),
@@ -244,11 +250,14 @@ describe('App', () => {
     expect(inputMenuButton.querySelector('img')).toHaveAttribute('src', '/pics/input-menu-plus-button.svg');
     expect(sendButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '发送');
     expect(inputMenuButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '打开输入功能菜单');
-    expect(within(sendRow).queryByRole('button', { name: '选择 JSON、CSV、图片或 PDF 文件' })).not.toBeInTheDocument();
+    expect(within(sendRow).queryByRole('button', { name: '选择 JSON、CSV、VCF、图片或 PDF 文件' })).not.toBeInTheDocument();
     expect(sendBar).toHaveClass('floating-composer');
 
     fireEvent.click(inputMenuButton);
-    expect(await screen.findByRole('button', { name: '选择 JSON、CSV、图片或 PDF 文件' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '选择 JSON、CSV、VCF、图片或 PDF 文件' })).toBeInTheDocument();
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件') as HTMLInputElement;
+    expect(uploadInput.getAttribute('accept')).toContain('.vcf');
+    expect(uploadInput.getAttribute('accept')).toContain('.vcf.gz');
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
     expect(await screen.findByLabelText('深度思考')).toBeInTheDocument();
   });
@@ -1710,7 +1719,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '/mini-breedstat-rcbd 用这个文件做3个区组RCBD' } });
@@ -1777,7 +1786,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     await screen.findByText(/1 行/);
@@ -1789,6 +1798,24 @@ describe('App', () => {
       metadata: { upload_ids: ['upl-1'] },
     })));
     expect(screen.getByText(/materials.csv/)).toBeInTheDocument();
+  });
+
+  it('uploads a VCF.GZ file and submits its upload id with the next message', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    const file = new File(['vcf-bytes'], 'sample.vcf.gz', { type: 'application/gzip' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+
+    await screen.findByText(/sample.vcf.gz/);
+    await screen.findByText(/VCF/);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析这个水稻 VCF' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledWith(expect.any(String), file));
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { upload_ids: ['upl-1'] },
+    })));
   });
 
   it('uploads a CSV file by drag and drop', async () => {
@@ -2040,7 +2067,7 @@ describe('App', () => {
     expect(messageBody.querySelector('.ocr-raw-text-content')?.textContent).toBe('品种：龙粳33\n处理：A1');
   });
 
-  it('does not render internal SQLQuery artifacts from conversation history', async () => {
+  it('does not render internal query artifacts from conversation history', async () => {
     localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history-internal');
     const api = makeApi({
       listConversations: vi.fn(async () => ({
@@ -2443,7 +2470,7 @@ describe('App', () => {
     expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
     expect(screen.getByText('试验材料文件')).toBeInTheDocument();
     expect(screen.getByText('可直接上传文件，或回复文字后继续当前任务。')).toBeInTheDocument();
-    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件') as HTMLInputElement;
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件') as HTMLInputElement;
     expect(uploadInput).not.toBeDisabled();
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(uploadInput, { target: { files: [file] } });
@@ -2537,9 +2564,18 @@ describe('App', () => {
           conversation_id: 'conv-test',
           task_id: 'task-1',
           node_id: 'task-1:skill_rice_genie',
-          question: '请补充品种名称。',
+          question: '水稻品种分析还差品种名称。例如可以回复：龙粳31。',
           reason_code: 'missing_variety',
-          required_fields: { variety: { type: 'string', description: '例如 龙粳31' } },
+          required_fields: {
+            variety: { type: 'string', description: '例如 龙粳31' },
+            _slot_collection: {
+              schema_version: 1,
+              collection_id: 'slot-1',
+              round: 1,
+              missing: ['variety'],
+              slots: [{ name: 'variety', type: 'string', status: 'missing', label: '品种名称' }],
+            },
+          },
           status: 'open',
         }],
       })),
@@ -2558,17 +2594,23 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查品种信息' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
-    expect(screen.getByText('品种名称')).toBeInTheDocument();
-    expect(screen.getByText('回复后将继续当前任务。')).toBeInTheDocument();
+    expect(await screen.findByText('水稻品种分析还差品种名称。例如可以回复：龙粳31。')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
+    expect(screen.queryByText('需要补充：')).not.toBeInTheDocument();
+    expect(screen.queryByText('_slot_collection')).not.toBeInTheDocument();
+    expect(screen.getByText(/当前任务等待补充信息：品种名称/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
-    expect(screen.getByRole('button', { name: '选择 JSON、CSV、图片或 PDF 文件' })).toBeDisabled();
-    expect(screen.getByLabelText('上传 JSON、CSV、Excel、图片或 PDF 文件')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '选择 JSON、CSV、VCF、图片或 PDF 文件' })).toBeDisabled();
+    expect(screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件')).toBeDisabled();
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     expect(api.uploadConversationFile).not.toHaveBeenCalled();
     expect(api.answerInterrupt).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '龙粳31' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', { variety: '龙粳31' }));
   });
 
   it('keeps the final assistant answer visible with capability results after interrupt resume', async () => {

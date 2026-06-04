@@ -10,6 +10,7 @@ from src.capabilities.skill_tool import SkillExecutor
 from src.core.contracts import CapabilityExecutionRequest
 from src.integrations.agent_skills import SkillRuntimeState, SkillScriptRunner
 from src.integrations.agent_skills.execution import SkillPlatformHandlerRegistry, SkillServiceRegistry
+from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_FIELD
 
 
 class SkillExecutorTest(unittest.IsolatedAsyncioTestCase):
@@ -465,6 +466,8 @@ outputs:
         self.assertIsNotNone(result.interrupt)
         self.assertEqual(result.interrupt.reason_code, 'missing_variety')
         self.assertIn('variety', result.interrupt.required_fields)
+        self.assertIn(SLOT_COLLECTION_FIELD, result.interrupt.required_fields)
+        self.assertEqual(result.interrupt.required_fields[SLOT_COLLECTION_FIELD]['missing'], ['variety'])
 
     async def test_structured_stdout_missing_input_returns_interrupt(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -527,6 +530,8 @@ outputs:
         self.assertIsNotNone(result.interrupt)
         self.assertEqual(result.interrupt.reason_code, 'missing_field_data')
         self.assertIn('field_data', result.interrupt.required_fields)
+        self.assertIn(SLOT_COLLECTION_FIELD, result.interrupt.required_fields)
+        self.assertEqual(result.interrupt.required_fields[SLOT_COLLECTION_FIELD]['missing'], ['field_data'])
         self.assertEqual(result.interrupt.required_fields['field_data']['type'], 'artifact')
         self.assertIs(result.interrupt.required_fields['field_data']['accepts_upload'], True)
         self.assertEqual(result.output_payload['missing'], ['field_data'])
@@ -1156,6 +1161,8 @@ execution:
         self.assertEqual(result.error.code, 'skill_input_missing')
         self.assertIsNotNone(result.interrupt)
         self.assertIn('query', result.interrupt.required_fields)
+        self.assertIn(SLOT_COLLECTION_FIELD, result.interrupt.required_fields)
+        self.assertNotIn(SLOT_COLLECTION_FIELD, next(event.payload['missing'] for event in result.events if event.event_type == 'skill.input_missing'))
         event_types = [event.event_type for event in result.events]
         self.assertIn('skill.input_missing', event_types)
         self.assertIn('skill.execution_interrupted', event_types)

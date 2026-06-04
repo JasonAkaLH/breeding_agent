@@ -494,6 +494,7 @@ class ConversationMemoryBuilder:
             config=config,
             summary_text=latest_summary.summary_text if latest_summary is not None else None,
             capability_summaries=capability_summaries,
+            request_metadata=request.metadata,
         )
 
         context = await self._compress(
@@ -664,6 +665,7 @@ class ConversationMemoryBuilder:
                             self._summary_generator,
                             prompt_resolution.prompt,
                             prompt_profile=prompt_resolution.llm_call_payload,
+                            metadata=request.metadata,
                         )
                         if inspect.isawaitable(generated):
                             generated = await generated
@@ -864,6 +866,7 @@ class ConversationMemoryBuilder:
         config: ConversationMemoryConfig,
         summary_text: str | None = None,
         capability_summaries: tuple[dict[str, Any], ...] = (),
+        request_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         llm_invalid_reason: str | None = None
         llm_prompt_profile: Mapping[str, Any] | None = None
@@ -875,6 +878,7 @@ class ConversationMemoryBuilder:
                     config=config,
                     summary_text=summary_text,
                     capability_summaries=capability_summaries,
+                    request_metadata=request_metadata,
                 )
             except _ResolutionGeneratorFailed as exc:
                 llm_resolution = None
@@ -910,6 +914,7 @@ class ConversationMemoryBuilder:
         config: ConversationMemoryConfig,
         summary_text: str | None,
         capability_summaries: tuple[dict[str, Any], ...],
+        request_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[str | None, dict[str, Any]] | _InvalidResolutionAttempt | None:
         if self._resolution_generator is None:
             return None
@@ -925,6 +930,7 @@ class ConversationMemoryBuilder:
                 self._resolution_generator,
                 prompt_resolution.prompt,
                 prompt_profile=prompt_resolution.llm_call_payload,
+                metadata=request_metadata,
             )
             if inspect.isawaitable(generated):
                 generated = await generated
@@ -1234,17 +1240,19 @@ def _call_memory_generator(
     prompt: str,
     *,
     prompt_profile: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ):
     kwargs: dict[str, Any] = {}
-    if prompt_profile is not None:
-        try:
-            signature = inspect.signature(generator)
-        except (TypeError, ValueError):
-            signature = None
-        if signature is not None:
-            accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
-            if accepts_kwargs or "prompt_profile" in signature.parameters:
-                kwargs["prompt_profile"] = prompt_profile
+    try:
+        signature = inspect.signature(generator)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+        if prompt_profile is not None and (accepts_kwargs or "prompt_profile" in signature.parameters):
+            kwargs["prompt_profile"] = prompt_profile
+        if metadata is not None and (accepts_kwargs or "metadata" in signature.parameters):
+            kwargs["metadata"] = metadata
     return generator(prompt, **kwargs) if kwargs else generator(prompt)
 
 

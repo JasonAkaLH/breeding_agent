@@ -3,16 +3,31 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
-ConversationTitleGenerator: TypeAlias = Callable[[str], str | Awaitable[str]]
+ConversationTitleGenerator: TypeAlias = Callable[..., str | Awaitable[str]]
 
 MAX_CONVERSATION_TITLE_LENGTH = 60
 AUTO_CONVERSATION_TITLE_LENGTH = 24
 
 
-async def call_title_generator(generator: ConversationTitleGenerator, title_source: str) -> str:
-    result = generator(title_source)
+async def call_title_generator(
+    generator: ConversationTitleGenerator,
+    title_source: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    kwargs: dict[str, Any] = {}
+    if metadata is not None:
+        try:
+            signature = inspect.signature(generator)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+            if accepts_kwargs or "metadata" in signature.parameters:
+                kwargs["metadata"] = metadata
+    result = generator(title_source, **kwargs) if kwargs else generator(title_source)
     if inspect.isawaitable(result):
         result = await result
     return str(result or "")
