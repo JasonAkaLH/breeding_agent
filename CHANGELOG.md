@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Skill 缺参多轮对话补槽设计已落地为本地设计文档：新增 `docs/superpowers/specs/2026-06-04-skill-slot-dialogue-design.md`，明确以后端 interrupt 生命周期 + 持久化 slot table 为唯一补槽状态源、LLM 生成自然语言追问与抽取候选参数，并要求清理旧硬编码缺参追问、普通 pending context 缺参文本和普通参数硬卡片体验。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Docker 镜像发布版本提升到 `0.1.12`：发布历史会话 artifact 恢复、SQLQuery SQL repair loop 与 result_filtering 企业简称保护；backend / frontend 已推送到 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.12`，并确认镜像内状态库 DSN 数据库名统一为 `biobin_db`。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - SQLQuery result_filtering 企业简称匹配已收紧：结果筛选 prompt 明确 applicant / breeder / transgenic_owner 企业字段中 `LIKE '%隆平高科%'`、`LIKE '%大北农%'` 等简称命中时，完整公司名、子公司名和关联申请/育种主体应保留；同时新增 deterministic 保护，避免 LLM 合法返回空 `keep_row_indexes` 时把 SQL 已召回且企业字段包含简称的候选行全部删掉。新增回归覆盖企业简称子公司/完整名称、中文列别名与 prompt 策略。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - 历史会话 artifact 恢复已落地：`/api/v1/conversations/{conversation_id}/messages` 现在会为 assistant 历史消息附带可展示 artifact（SQLQuery filtered/query preview、OCR raw text、仍 active 的 skill output file），并复用任务 artifact response 脱敏逻辑；前端恢复历史消息时会重建 data-query 表格卡片、OCR 原文卡片与文件下载卡片，刷新/切换历史后不再丢失可恢复的 artifact 展示。新增 API 与 App 回归覆盖内部 SQL artifact 过滤、坏 JSON 跳过、file active/inactive 边界、无 task N+1 与历史卡片恢复。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
