@@ -85,7 +85,7 @@ export interface UploadFileResponse {
   conversation_id: string;
   filename: string;
   content_type: string;
-  file_type: 'json' | 'csv' | 'spreadsheet' | string;
+  file_type: 'json' | 'csv' | 'spreadsheet' | 'image' | 'pdf' | 'vcf' | string;
   size_bytes: number;
   sha256: string;
   expires_at: string;

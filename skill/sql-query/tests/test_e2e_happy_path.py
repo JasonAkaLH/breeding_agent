@@ -15,7 +15,7 @@ class SQLQueryHappyPathE2ETest(SQLQueryE2EAPITestCase):
 
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(terminal["completed_node_count"], 2)
+        self.assertEqual(terminal["completed_node_count"], 3)
 
         iterator = self.runtime.iter_frontend_events(task_id).__aiter__()
         seen = set()

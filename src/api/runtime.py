@@ -55,6 +55,11 @@ from src.integrations.agent_skills import (
     SkillRuntimeState,
     SkillScriptRunner,
 )
+from src.integrations.agent_skills.missing_input_interrupt import (
+    SLOT_COLLECTION_FIELD,
+    SLOT_COLLECTION_METADATA_KEY,
+    slot_collection_from_required_fields,
+)
 from src.integrations.agent_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
 from src.integrations.agent_skills.rust_contract import (
     error_policy as skill_runtime_error_policy,
@@ -63,6 +68,12 @@ from src.integrations.agent_skills.rust_contract import (
 from src.integrations.agent_skills.skill_sandbox_client import SkillSandboxGrpcClient
 from src.integrations.agent_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
+from src.integrations.llm_request_options import (
+    resolve_llm_model_edition,
+    resolve_llm_reasoning_effort,
+    resolve_llm_request_options,
+    resolve_llm_thinking_enabled,
+)
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.model_editions import config_for_model_edition, default_model_edition, model_edition_options, validate_model_edition
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
@@ -444,7 +455,10 @@ class ApiRuntime:
             created_at=now,
         )
         await self.storage.save_message(message)
-        await self._maybe_schedule_conversation_title_generation(conversation_id)
+        title_metadata = self._drop_user_supplied_system_metadata(request.metadata)
+        if selected_model_edition:
+            title_metadata["model_edition"] = selected_model_edition
+        await self._maybe_schedule_conversation_title_generation(conversation_id, metadata=title_metadata)
 
         task = Task(
             task_id=task_id,
@@ -846,7 +860,12 @@ class ApiRuntime:
         detail = "；".join(parts) if parts else "上传的 Excel 文件"
         return f"检测到多 sheet Excel：{detail}。请为每个文件选择一个 sheet 后继续。"
 
-    async def _maybe_schedule_conversation_title_generation(self, conversation_id: str) -> None:
+    async def _maybe_schedule_conversation_title_generation(
+        self,
+        conversation_id: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         if self._conversation_title_generator is None:
             return
         conversation = await self.storage.get_conversation(conversation_id)
@@ -869,6 +888,7 @@ class ApiRuntime:
                 conversation_id,
                 title_source,
                 expected_user_message_count=expected_user_message_count,
+                metadata=dict(metadata or {}),
             )
         )
         self._running_title_tasks.add(task)
@@ -880,9 +900,14 @@ class ApiRuntime:
         title_source: str,
         *,
         expected_user_message_count: int,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         try:
-            raw_title = await call_title_generator(self._conversation_title_generator, title_source)
+            raw_title = await call_title_generator(
+                self._conversation_title_generator,
+                title_source,
+                metadata=metadata,
+            )
             title = normalize_generated_conversation_title(raw_title)
         except Exception:
             return
@@ -1633,6 +1658,7 @@ class ApiRuntime:
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
         if interrupt.reason_code == "sheet_selection_required":
             self._validate_sheet_selection_answer(interrupt, answer_payload)
+        previous_slot_collection = slot_collection_from_required_fields(interrupt.required_fields)
 
         existing_answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
         answer_payloads = (*existing_answer_payloads, dict(answer_payload))
@@ -1647,6 +1673,8 @@ class ApiRuntime:
             **sheet_selection_resume_metadata,
             **self._resume_skill_revision_metadata(task.task_id),
         }
+        if previous_slot_collection is not None:
+            resume_metadata[SLOT_COLLECTION_METADATA_KEY] = dict(previous_slot_collection)
         for payload in answer_payloads:
             resume_metadata.update(self._answer_payload_metadata(payload))
         answer = InterruptAnswer(
@@ -2442,7 +2470,7 @@ class ApiRuntime:
         metadata: dict[str, object] = {}
         for key, value in answer_payload.items():
             key_text = str(key).strip()
-            if not key_text or key_text == "upload_ids":
+            if not key_text or key_text == "upload_ids" or key_text.startswith("_") or key_text == SLOT_COLLECTION_FIELD:
                 continue
             if key_text in USER_SUPPLIED_METADATA_DENYLIST:
                 continue
@@ -2494,6 +2522,8 @@ class ApiRuntime:
                 key_text = str(key).strip()
                 if not key_text:
                     continue
+                if key_text.startswith("_"):
+                    continue
                 if key_text == "upload_ids":
                     upload_ids.extend(cls._answer_upload_ids(payload))
                     continue
@@ -2516,7 +2546,7 @@ class ApiRuntime:
     def _format_answer_message(cls, answer_payload: dict[str, object]) -> str:
         parts: list[str] = []
         for key, value in answer_payload.items():
-            if key == "upload_ids":
+            if key == "upload_ids" or str(key).startswith("_"):
                 continue
             parts.append(f"{key}={cls._format_answer_value(value)}")
         if parts:
@@ -3410,14 +3440,17 @@ def _resolve_platform_text_generator(
             config_source="injected_config" if platform_llm_config is not None else "environment",
         )
 
-    async def generate(prompt: str, **_: Any) -> str:
+    async def generate(prompt: str, **kwargs: Any) -> str:
+        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
         return await runtime.generate_text(
             prompt,
-            thinking=False,
-            reasoning_effort="minimal",
+            thinking=options.thinking,
+            reasoning_effort=options.reasoning_effort,
+            model_edition=options.model_edition,
         )
 
     return generate
+
 
 def _resolve_conversation_title_generator(
     *,
@@ -3430,11 +3463,13 @@ def _resolve_conversation_title_generator(
     if not enable_conversation_title_llm:
         return None
 
-    async def generate(title_source: str) -> str:
+    async def generate(title_source: str, **kwargs: Any) -> str:
+        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
         return await main_agent_llm_runtime.generate_text(
             build_conversation_title_prompt(title_source),
-            thinking=False,
-            reasoning_effort="minimal",
+            thinking=options.thinking,
+            reasoning_effort=options.reasoning_effort,
+            model_edition=options.model_edition,
         )
 
     return generate
@@ -3451,11 +3486,13 @@ def _resolve_skill_input_text_generator(
     if not enable_skill_input_llm:
         return None
 
-    async def generate(prompt: str) -> str:
+    async def generate(prompt: str, **kwargs: Any) -> str:
+        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
         return await main_agent_llm_runtime.generate_text(
             prompt,
-            thinking=False,
-            reasoning_effort="minimal",
+            thinking=options.thinking,
+            reasoning_effort=options.reasoning_effort,
+            model_edition=options.model_edition,
         )
 
     return generate
@@ -3476,18 +3513,22 @@ def _resolve_conversation_memory_builder(
     if not enable_conversation_memory:
         return None
 
-    async def generate_summary(prompt: str) -> str:
+    async def generate_summary(prompt: str, **kwargs: Any) -> str:
+        model_edition = resolve_llm_model_edition(_metadata_from_llm_kwargs(kwargs))
         return await main_agent_llm_runtime.generate_text(
             prompt,
             thinking=False,
             reasoning_effort="minimal",
+            model_edition=model_edition,
         )
 
-    async def generate_resolution(prompt: str) -> str:
+    async def generate_resolution(prompt: str, **kwargs: Any) -> str:
+        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
         return await main_agent_llm_runtime.generate_text(
             prompt,
-            thinking=False,
-            reasoning_effort="minimal",
+            thinking=options.thinking,
+            reasoning_effort=options.reasoning_effort,
+            model_edition=options.model_edition,
         )
 
     def resolve_memory_config(request: OrchestrationRequest) -> ConversationMemoryConfig:
@@ -3503,6 +3544,18 @@ def _resolve_conversation_memory_builder(
         resolution_generator=resolution_generator or (generate_resolution if enable_resolution_llm else None),
         config_resolver=resolve_memory_config,
     )
+
+
+def _metadata_from_llm_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    request = kwargs.get("request")
+    request_metadata = getattr(request, "metadata", None)
+    if isinstance(request_metadata, Mapping):
+        metadata.update(request_metadata)
+    explicit_metadata = kwargs.get("metadata")
+    if isinstance(explicit_metadata, Mapping):
+        metadata.update(explicit_metadata)
+    return metadata
 
 
 def _coerce_nonnegative_int(value: Any) -> int | None:
@@ -3806,6 +3859,7 @@ def _resolve_planner_text_generator(
         return planner_text_generator
     if not enable_llm_planner:
         return None
+    del reasoning_event_publisher  # Planner is a background LLM branch; do not surface reasoning_content.
 
     call_ordinal = 0
 
@@ -3819,7 +3873,6 @@ def _resolve_planner_text_generator(
         nonlocal call_ordinal
         call_ordinal += 1
         call_id = call_ordinal
-        reasoning_ordinal = 0
 
         if request is not None and prompt_profile is not None:
             maybe_result = event_recorder(
@@ -3836,43 +3889,13 @@ def _resolve_planner_text_generator(
             if inspect.isawaitable(maybe_result):
                 await maybe_result
 
-        async def record_reasoning(delta: str) -> None:
-            nonlocal reasoning_ordinal
-            if request is None:
-                return
-            reasoning_ordinal += 1
-            publisher = reasoning_event_publisher or event_recorder
-            maybe_result = publisher(
-                EventRecord(
-                    event_id=f"{request.task_id}:main_agent.{stage}.reasoning:{call_id}:{reasoning_ordinal}",
-                    conversation_id=request.conversation_id,
-                    task_id=request.task_id,
-                    node_id="main_agent.orchestrator",
-                    event_type="main_agent.reasoning_delta",
-                    payload={
-                        "delta": delta,
-                        "ordinal": reasoning_ordinal,
-                        "call_id": call_id,
-                        "stage": stage,
-                        "llm_runtime_id": main_agent_llm_runtime.runtime_id,
-                    },
-                    visibility=EventVisibility.FRONTEND,
-                )
-            )
-            if inspect.isawaitable(maybe_result):
-                await maybe_result
-
         metadata = dict(request.metadata) if request is not None else {}
-        thinking = _resolve_request_thinking_enabled(metadata)
-        reasoning_effort = _resolve_request_reasoning_effort(
-            metadata, fallback=planner_reasoning_effort, thinking_enabled=thinking
-        )
+        options = resolve_llm_request_options(metadata, fallback_reasoning_effort=planner_reasoning_effort)
         return await main_agent_llm_runtime.generate_text(
             prompt,
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
-            model_edition=_resolve_request_model_edition(metadata),
-            on_reasoning_delta=record_reasoning,
+            thinking=options.thinking,
+            reasoning_effort=options.reasoning_effort,
+            model_edition=options.model_edition,
         )
 
     return generate
@@ -3884,34 +3907,15 @@ def _resolve_request_reasoning_effort(
     fallback: ReasoningEffort,
     thinking_enabled: bool,
 ) -> ReasoningEffort:
-    if not thinking_enabled:
-        return "minimal"
-    explicit = metadata.get("main_agent_reasoning_effort")
-    if isinstance(explicit, str) and explicit in {"minimal", "high", "max"}:
-        return explicit  # type: ignore[return-value]
-    return fallback
+    return resolve_llm_reasoning_effort(metadata, fallback=fallback, thinking_enabled=thinking_enabled)
 
 
 def _resolve_request_thinking_enabled(metadata: Mapping[str, Any]) -> bool:
-    if "main_agent_thinking_enabled" in metadata:
-        return _is_truthy(metadata.get("main_agent_thinking_enabled"))
-    return _is_truthy(metadata.get("deep_thinking"))
+    return resolve_llm_thinking_enabled(metadata)
 
 
 def _resolve_request_model_edition(metadata: Mapping[str, Any]) -> str | None:
-    value = metadata.get("model_edition")
-    if isinstance(value, str):
-        cleaned = value.strip()
-        return cleaned or None
-    return None
-
-
-def _is_truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
-    return bool(value)
+    return resolve_llm_model_edition(metadata)
 
 
 def _resolve_main_agent_stream_binding(
