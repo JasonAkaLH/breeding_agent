@@ -15,20 +15,20 @@
 - soft binding answer 分支可调用 `SkillResourceService` 读取 public resource。
 - soft binding execute 分支保持 replan 到 `skill.*`。
 - planner/replanner public capability context 可看到新 contract 注册的 Skill。
-- 新格式 Skill 禁止 main-agent 内部 `_run_auto_scripts` 执行。
-- `match_skills` 可保留为候选召回，但不得执行新格式脚本。
+- v2 Skill 禁止 main-agent 内部 `_run_auto_scripts` 执行。
+- `match_skills` 在本阶段只能作为过渡期候选召回，不得执行 v2 脚本；生产删除归属阶段七。
 
 ### 1.2 Out of scope
 
 - 不实现 SkillExecutor v2。
 - 不迁移项目级 Skill 文件。
-- 旧 main-agent auto-run 生产路径的删除验收归属阶段七。
+- 旧 main-agent auto-run 生产路径的删除验收归属阶段七；本阶段只要求 v2 public profile / soft binding 不会调用该路径。
 
 ## 2. 现有代码锚点
 
 | 锚点 | 当前事实 | 本阶段约束 |
 | --- | --- | --- |
-| `src/capabilities/main_agent/executor.py` | 当前存在 `_resolve_skill_matches()` 与 `_run_auto_scripts()` 隐式执行路径。 | v2 Skill 命中后只能回答用法或发出 execute/replan signal，不能在 main_agent 内执行 entrypoint；旧 auto-run 不能用于 v2。 |
+| `src/capabilities/main_agent/executor.py` | 当前存在 `_resolve_skill_matches()` 与 `_run_auto_scripts()` 隐式执行路径。 | v2 Skill 命中后只能回答用法或发出 execute/replan signal，不能在 main_agent 内执行 entrypoint；旧 auto-run 必须与 v2 profile 隔离。 |
 | `src/orchestration/soft_skill_replanner.py` | slash soft binding 已能将 execute signal replan 到 `skill.*`。 | v2 slash 与自然语言都要复用显式 `skill.*` 节点路径。 |
 | `src/orchestration/skill_workflow_provider.py` | `skill.*` capability 可展开 Skill node + finalizer。 | public capability context 必须来自 contract registry，finalizer 禁止再次触发 Skill matching。 |
 
@@ -43,8 +43,8 @@
 | C4-005 | 执行请求 replan 到 `skill.*`。 | `/field-design 用这个材料表做间比法设计` 生成 execute signal。 |
 | C4-006 | 普通自然语言可触发 Skill。 | planner/replanner 规划 `skill.field_design`，无需 slash。 |
 | C4-007 | finalizer 不再触发 Skill。 | finalizer metadata 禁止 Skill invocation/matching/resource unrelated reads。 |
-| C4-008 | v2 Skill 不走 main-agent auto-run。 | main_agent 对 contract Skill 不调用 entrypoint。 |
-| C4-009 | 明确区分自然语言规划与旧 auto-run。 | 普通自然语言可以规划 `skill.*` node；但规划前后都不能在 `main_agent.respond` 内部执行脚本。 |
+| C4-008 | v2 Skill 不走 main-agent auto-run。 | main_agent 对 contract Skill 不调用 entrypoint；测试证明 `_run_auto_scripts` 不接收 v2 contract Skill。 |
+| C4-009 | 明确区分自然语言规划与旧 auto-run。 | 普通自然语言可以规划 `skill.*` node；但规划前后都不能在 `main_agent.respond` 内部执行 v2 entrypoint。 |
 | C4-010 | resource answer 分支可审计。 | 用法类问题读取 public resource 时产生 `skill.resource_read` audit event，最终回答不包含内部路径。 |
 
 ## 4. 测试计划
@@ -60,4 +60,4 @@
 - public profile 安全扫描通过。
 - 普通自然语言规划 skill node 的测试通过。
 - 无 contract Skill 不出现在 public profile、slash soft binding 候选或 planner public capability context 中。
-- v2 Skill 的 answer/execute/finalizer 三分支均有负向测试，确认没有内部脚本执行。
+- v2 Skill 的 answer/execute/finalizer 三分支均有负向测试，确认没有 main-agent 内部 entrypoint 执行。
