@@ -6,7 +6,7 @@
 
 | 顺序 | 文档 | 说明 | 状态 |
 | --- | --- | --- | --- |
-| 00 | [`00-SkillContract渐进式披露与显式执行总纲PRD.md`](00-SkillContract渐进式披露与显式执行总纲PRD.md) | 跨阶段目标、不变量、总体架构、验收标准与风险控制 | 拆分完成，待实施 |
+| 00 | [`00-SkillContract渐进式披露与显式执行总纲PRD.md`](00-SkillContract渐进式披露与显式执行总纲PRD.md) | 跨阶段目标、不变量、总体架构、验收标准与风险控制 | 加固完成，待实施 |
 | 01 | [`01-契约解析与LegacyAdapterPRD.md`](01-契约解析与LegacyAdapterPRD.md) | `skill.contract.yaml` 解析、capability 注册、legacy adapter 与 diagnostic | 待实施 |
 | 02 | [`02-InputSchema与SchemaSelectorPRD.md`](02-InputSchema与SchemaSelectorPRD.md) | `schemas/*.input.yaml` 解析、schema selector、selected-schema 作用域 required | 待实施 |
 | 03 | [`03-SkillResourceService按需读取PRD.md`](03-SkillResourceService按需读取PRD.md) | bundle 内默认可读 + 黑名单 + audience policy 的按需资源读取、安全裁剪、脱敏与审计 | 待实施 |
@@ -21,10 +21,10 @@
 01 契约解析/LegacyAdapter
  ├─ 02 InputSchema/SchemaSelector
  ├─ 03 SkillResourceService
- └─ 04 PublicProfile/主代理适配
-       └─ 05 SkillExecutorV2/SlotCollectionV2
-             └─ 06 项目级 Skill 迁移
-                   └─ 07 文档/API/测试/Legacy 下线门禁
+ ├─ 04 PublicProfile/主代理适配（依赖 02、03 的公开摘要与资源读取）
+ └─ 05 SkillExecutorV2/SlotCollectionV2（依赖 02、03 的 schema/resource 能力）
+       └─ 06 项目级 Skill 迁移
+             └─ 07 文档/API/测试/Legacy 下线门禁
 ```
 
 03 可与 02 并行实施；04/05 必须同时依赖 01-03 的稳定契约。每个编号 PRD 都是可独立验收的交付单元，00 只维护跨阶段不变量和总体口径。
