@@ -101,7 +101,7 @@ scripts/ 或 runtime/       # 实际执行实现
 | 01 | [`01-SkillContract解析与注册PRD.md`](01-SkillContract解析与注册PRD.md) | 解析 `skill.contract.yaml`、注册 capability、建立 v2 diagnostics；没有 contract 的 Skill 不注册。 | 无 |
 | 02 | [`02-InputSchema与SchemaSelectorPRD.md`](02-InputSchema与SchemaSelectorPRD.md) | 解析 `schemas/*.input.yaml`，实现 schema selection 与 selected-schema 作用域 required。 | 01 |
 | 03 | [`03-SkillResourceService按需读取PRD.md`](03-SkillResourceService按需读取PRD.md) | 建立按需资源读取服务、默认 allow + denylist、安全裁剪/脱敏/审计。 | 01 |
-| 04 | [`04-PublicProfile与主代理适配PRD.md`](04-PublicProfile与主代理适配PRD.md) | 主代理消费 public profile 与 resource index；用法问题可读资源，执行请求进入显式 `skill.*`，删除内部 auto-run。 | 01、02、03 |
+| 04 | [`04-PublicProfile与主代理适配PRD.md`](04-PublicProfile与主代理适配PRD.md) | 主代理消费 public profile 与 resource index；用法问题可读资源，执行请求进入显式 `skill.*`，并隔离旧 auto-run 影响。 | 01、02、03 |
 | 05 | [`05-SkillExecutorV2与SlotCollectionV2PRD.md`](05-SkillExecutorV2与SlotCollectionV2PRD.md) | v2 `skill.*` node 按 selected schema 补槽、执行 entrypoint、校验 output contract；不支持 v1 manifest execution。 | 01、02、03 |
 | 06 | [`06-项目级Skill迁移PRD.md`](06-项目级Skill迁移PRD.md) | 将 field-design、field-analysis、rice-genie、OCR、SQLQuery 全量改造成 v2。 | 01-05 |
 | 07 | [`07-文档API测试与旧路径删除PRD.md`](07-文档API测试与旧路径删除PRD.md) | 文档/API/测试矩阵收口，删除 v1 manifest 执行/注册路径。 | 01-06 |
@@ -150,5 +150,5 @@ scripts/ 或 runtime/       # 实际执行实现
 | 用户自定义旧 Skill 不再注册 | 07 在 `Skill构建指南.md` 和 API 文档明确 v2-only 规则，并提供 v2 模板。 |
 | schema selector 误选导致错补槽或错执行 | 02/05 要求 selected schema 持久化，低置信或 ambiguous 只补 schema selector，不执行 entrypoint。 |
 | 默认可读策略泄漏内部实现或 secret | 03 以硬黑名单、路径边界、audience policy、脱敏和审计 fail closed。 |
-| 主代理继续走隐式 auto-run | 04/07 明确删除 main-agent 内部 Skill auto-run 生产路径，执行请求必须进入 `skill.*` node。 |
+| 主代理继续走隐式 auto-run | 04 先保证 v2 soft binding 不调用旧 auto-run；07 删除或禁用旧 auto-run 生产路径，执行请求必须进入 `skill.*` node。 |
 | 迁移期间半新半旧导致不可恢复状态 | 06 要求单 Skill 原子迁移；回滚方式是移除该 Skill 的 v2 文件并接受该 Skill 暂不注册。 |

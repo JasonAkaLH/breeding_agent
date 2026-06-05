@@ -6,7 +6,7 @@
 
 | 顺序 | 文档 | 说明 | 状态 |
 | --- | --- | --- | --- |
-| 00 | [`00-SkillContract渐进式披露与显式执行总纲PRD.md`](00-SkillContract渐进式披露与显式执行总纲PRD.md) | 跨阶段目标、不变量、总体架构、验收标准与风险控制 | 加固完成，待实施 |
+| 00 | [`00-SkillContract渐进式披露与显式执行总纲PRD.md`](00-SkillContract渐进式披露与显式执行总纲PRD.md) | 跨阶段目标、不变量、总体架构、验收标准与风险控制 | v2-only 复审完成，待实施 |
 | 01 | [`01-SkillContract解析与注册PRD.md`](01-SkillContract解析与注册PRD.md) | `skill.contract.yaml` 解析、capability 注册、v2 diagnostics；无 contract Skill 不注册 | 待实施 |
 | 02 | [`02-InputSchema与SchemaSelectorPRD.md`](02-InputSchema与SchemaSelectorPRD.md) | `schemas/*.input.yaml` 解析、schema selector、selected-schema 作用域 required | 待实施 |
 | 03 | [`03-SkillResourceService按需读取PRD.md`](03-SkillResourceService按需读取PRD.md) | bundle 内默认可读 + 黑名单 + audience policy 的按需资源读取、安全裁剪、脱敏与审计 | 待实施 |
