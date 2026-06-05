@@ -1,6 +1,6 @@
 # Skill Contract 渐进式披露与显式执行总纲 PRD
 
-- **状态**：拆分完成，待实施
+- **状态**：document-perfectization 加固完成，待实施
 - **日期**：2026-06-05
 - **目标模块**：Skill runtime、Skill capability 注册、main-agent soft binding / planner / replanner、SkillExecutor、slot_collection、Skill 资源读取、项目级 `skill/*` bundle
 - **目标结果**：把膨胀的 `SKILL.md` frontmatter 拆分为轻量 `SKILL.md`、平台执行契约 `skill.contract.yaml`、机器输入 schema `schemas/*.input.yaml` 与按需资源读取；所有新格式 Skill 通过显式 `skill.*` 节点执行，不再依赖 main-agent 内部隐式 `auto_run`。
@@ -116,7 +116,19 @@ scripts/ 或 runtime/       # 实际执行实现
 - checkpoint/time travel 需要能恢复 selected schema、resolved inputs、slot_collection、entrypoint 与 output contract 状态。
 - legacy adapter 只服务未迁移 Skill；新格式 contract 存在时禁止新旧执行契约混用。
 
-## 10. 全局验收标准
+
+## 10. 跨阶段非功能要求
+
+| 维度 | 要求 | 验证方式 |
+| --- | --- | --- |
+| 兼容性 | 未迁移 legacy Skill 继续按当前 `SKILL.md` frontmatter 路径工作；新格式 Skill 出现 contract 后不得再读取旧 `scripts/parameters/execution` 作为执行事实源。 | legacy parser/capability/executor 回归 + 新格式冲突 fixture。 |
+| 安全与隐私 | prompt-facing 读取必须拒绝脚本、runtime、schema 原文、config、secret、越界路径和二进制原文；audit 不记录文件原文或敏感值。 | ResourceService 安全单测、脱敏快照、路径穿越/软链负向测试。 |
+| 可恢复性 | running task 必须绑定 `skill_bundle_revision`、`selected_schema_id`、`selected_entrypoint` 与 slot_collection state；runtime refresh 不改变已运行节点的 contract 解析结果。 | interrupt/resume、bundle revision retention、checkpoint/time travel 回归。 |
+| 可观测性 | contract load、schema selection、resource read、input resolution、slot open、entrypoint start、output validation 都有结构化事件；拒绝事件也要审计。 | event payload 单测/API 回归。 |
+| 性能与资源 | public profile 只携带摘要和资源索引；资源正文按需读取并裁剪；schema selector 候选集只来自当前 Skill contract allowlist。 | profile 大小断言、resource truncation 测试、selector allowlist 测试。 |
+| 可测试性 | 每个阶段必须能用 fixture 验证，无需真实 LLM 或真实远端服务；LLM 分支使用 fake provider 固定输出。 | 阶段 PRD 指定的 unit/integration/API/e2e 测试。 |
+
+## 11. 全局验收标准
 
 - 01-07 全部完成门禁通过。
 - 五个项目级公开 Skill 均完成新结构迁移，并从 `/api/v1/capabilities` 以 contract registry 注册。
@@ -127,7 +139,7 @@ scripts/ 或 runtime/       # 实际执行实现
 - 新格式 examples 与文档不再包含 `auto_run`。
 - targeted backend/API/e2e 回归通过；CHANGELOG 记录 License Requirement；无新增依赖或许可风险。
 
-## 11. 风险与控制
+## 12. 风险与控制
 
 | 风险 | 控制 |
 | --- | --- |
