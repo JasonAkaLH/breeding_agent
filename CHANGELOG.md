@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Skill Contract 渐进式披露 PRD 已落地：新增 `docs/superpowers/specs/2026-06-05-skill-contract-progressive-disclosure-design.md`，明确新 Skill bundle 拆分为轻量 `SKILL.md`、`skill.contract.yaml`、`schemas/*.input.yaml` 与 `references/*`，参数 schema 按场景选择，主代理通过受控 `SkillResourceService` 按需读取资源，新格式移除 `auto_run` 并统一走显式 `skill.*` 节点执行；覆盖主代理适配、SkillExecutor v2、slot_collection v2、资源读取安全、现有 Skill 迁移与测试矩阵。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Skill 动态补槽解析已修复：interrupt/resume 阶段当 `skill_slot_collection.missing` 存在时，以当前 slot_collection 缺参列表作为 LLM 抽取的 `required_now` 权威输入，不再用 `manifest.required` 决定是否提取；支持 field-design 间比法这类 manifest 非必填但运行时动态必填的 `ncols` / `ck_spec` 从前端普通 `{answer: ...}` 回复中一次性补齐。新增 integrations/API 回归覆盖动态缺参和 generic answer payload。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Docker 镜像发布版本提升到 `0.1.13`：按当前本地工作树构建并推送 backend / frontend 到 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.13`，用于发布本轮 Skill slot-table 多轮补槽、SQLQuery / 对话记忆 / 上传与前端本地未提交改动集合。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - 上传文件系统已兼容水稻基因型 VCF 输入：后端上传白名单新增 `.vcf` 与 `.vcf.gz`，按文件名扩展名识别为 `vcf` 二进制上传，不做表格预览解码，Prompt 通道只暴露安全元数据，Skill 执行通道继续以 base64 传递原始字节；`.vcf.gz` 使用复合扩展名放行且不会因 `application/gzip` 误接受普通 `.gz`。前端文件选择器新增 VCF/VCF.GZ accept 与展示标记，新增后端上传回归和前端 App 回归覆盖。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
