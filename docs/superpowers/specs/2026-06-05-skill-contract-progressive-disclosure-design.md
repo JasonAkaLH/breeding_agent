@@ -54,7 +54,31 @@ scripts/ 或 runtime/       # 实际执行实现
 - 不把 SQL guard、数据库权限、OCR 远端配置等内部业务安全规则塞进 input schema；input schema 只描述进入 Skill 前的用户输入契约。
 - 不要求用户必须 slash command；自然语言仍可由 planner/router/replanner 触发显式 `skill.*` node。
 
-## 3. 当前状态与证据
+## 3. 用户、干系人与受影响系统
+
+| 类别 | 对象 | 关注点 |
+| --- | --- | --- |
+| 终端用户 | 业务对话台用户、slash command 用户、普通自然语言用户 | 不需要理解内部 Skill 结构；能自然提问、补参、下载结果；普通自然语言和 slash 都能触发正确能力。 |
+| Skill 作者 | 项目级 `skill/*` 维护者 | `SKILL.md` 编写负担降低；参数 schema 可按方法拆分；执行契约有稳定、可测试的机器格式。 |
+| 主代理 | `main_agent.respond`、soft binding、planner/replanner | 只消费 public profile 和按需 public resource，不直接执行脚本、不读取内部实现。 |
+| Skill runtime | `src/integrations/agent_skills/`、`src/capabilities/skill_tool/` | 统一 contract/schema/resource 解析、schema selection、input resolution、slot_collection、output validation。 |
+| 编排与状态 | `src/orchestration/`、`src/api/runtime.py`、event log/checkpoint/time travel | 所有 Skill 执行必须是显式 `skill.*` 节点，关键选择和资源读取事件可恢复、可审计。 |
+| 前端 | slash command 菜单、任务图、waiting-input UX、artifact 下载 | capability/display name 来自 contract；补槽继续通过 interrupt/resume；任务图能看到 Skill node。 |
+| 运维/安全 | audit、secret 管理、资源读取边界 | bundle 内默认可读不等于 prompt 可泄漏；硬黑名单、脱敏、审计和路径边界必须 fail closed。 |
+
+## 4. 术语与边界
+
+| 术语 | 定义 |
+| --- | --- |
+| AgentSkillManifest | 从 `SKILL.md` 读取的轻量 agent-facing 描述，只包含 `name`、`description`、body 与资源导航文本。 |
+| SkillContract | 从 `skill.contract.yaml` 读取的平台执行事实源，负责 capability、routing、runtime、entrypoints、schemas、outputs、resource policy。 |
+| Input Schema | `schemas/*.input.yaml` 中的机器可读输入契约；`required` 只在当前 selected schema 内生效。 |
+| Public Resource | 可进入主代理或补槽 LLM prompt 的说明资源；必须经 `SkillResourceService` 读取、裁剪、脱敏和审计。 |
+| Machine Resource | 给 SkillExecutor、schema selector、validator 使用的机器资源，例如 input schema；默认不得原文进入主代理 prompt。 |
+| 显式 Skill node | 任务图中 capability_id 为 `skill.*` 的节点；新格式 Skill 的唯一执行入口。 |
+| 隐式 auto-run | `main_agent.respond` 内部通过 `match_skills -> scripts[].auto_run` 直接执行脚本的 legacy 行为；新格式禁止。 |
+
+## 5. 当前状态与证据
 
 | 证据 | 当前行为 |
 | --- | --- |
@@ -69,7 +93,7 @@ scripts/ 或 runtime/       # 实际执行实现
 | `skill/field-design/SKILL.md` | RCBD / Diagonal / Interval 参数平铺在一个 `parameters` 下，`ck_spec` 只能设为非 required，导致 Interval 动态必填需要脚本/slot_collection 补救。 |
 | `skill/sql-query/SKILL.md` | platform_service contract 与 public_usage 也放在 `SKILL.md` frontmatter 中。 |
 
-## 4. 设计原则
+## 6. 设计原则
 
 1. **职责分离**：`SKILL.md` 面向 agent/human，`skill.contract.yaml` 面向平台，`schemas/*.input.yaml` 面向参数解析/补槽/校验，`references/*` 面向按需说明。
 2. **显式节点**：所有新格式 Skill 执行必须出现在任务图中，不能藏在 `main_agent.respond` 内部。
@@ -78,7 +102,7 @@ scripts/ 或 runtime/       # 实际执行实现
 5. **默认可读但不裸奔**：Skill bundle 内资源读取不做逐文件白名单；默认允许读取 bundle 内文件，但强制应用路径越界保护、硬黑名单、audience 策略、大小限制、脱敏和审计。
 6. **旧格式只兼容**：legacy adapter 只为现有未迁移 Skill 服务；新规范和新项目级 Skill 不支持 `auto_run`。
 
-## 5. 目标文件结构
+## 7. 目标文件结构
 
 以 `field-design` 为例：
 
@@ -131,9 +155,9 @@ description: 基于材料清单生成田间试验设计；适用于随机区组�
 
 `SKILL.md` 的资源索引是人类和 agent 导航，不是 runtime 事实源。runtime 事实源是 `skill.contract.yaml`。
 
-## 6. `skill.contract.yaml` 契约
+## 8. `skill.contract.yaml` 契约
 
-### 6.1 顶层结构
+### 8.1 顶层结构
 
 ```yaml
 contract_version: 1
@@ -233,6 +257,7 @@ resource_policy:
       - .env.*
       - "**/scripts/**"
       - "**/runtime/**"
+      - "**/schemas/**"
       - "**/native/**"
       - "**/outputs/**"
       - "**/.git/**"
@@ -249,7 +274,7 @@ resource_policy:
       - "**/__pycache__/**"
 ```
 
-### 6.2 Capability 注册
+### 8.2 Capability 注册
 
 能力注册事实源从旧的 `SKILL.md frontmatter.capability_id` 改为：
 
@@ -275,7 +300,7 @@ skill.contract.yaml capability.id
 }
 ```
 
-### 6.3 Entrypoint
+### 8.3 Entrypoint
 
 新 contract 不支持：
 
@@ -292,7 +317,7 @@ selected_schema_id -> input_schemas[].entrypoint -> entrypoints[entrypoint]
 
 如果无法选择 schema，则不执行 entrypoint，生成 selector 补槽。
 
-### 6.4 Platform service
+### 8.4 Platform service
 
 `platform_service` 使用同一 contract：
 
@@ -313,9 +338,9 @@ entrypoints:
 
 服务绑定仍必须由 runtime allowlist 和 trust scope fail-closed 管理。
 
-## 7. Input Schema Contract
+## 9. Input Schema Contract
 
-### 7.1 通用结构
+### 9.1 通用结构
 
 ```yaml
 schema_version: 1
@@ -401,7 +426,7 @@ entrypoint_mapping:
   ck_spec: ck_spec
 ```
 
-### 7.2 `required` 语义
+### 9.2 `required` 语义
 
 `required` 表示：
 
@@ -413,7 +438,7 @@ entrypoint_mapping:
 - `field-design.rcbd` 中不存在 `ck_spec` 或 `ck_spec.required=false`。
 - resume 时 `slot_collection.missing/invalid` 是本轮补槽权威。
 
-### 7.3 字段类型
+### 9.3 字段类型
 
 可交付版本必须支持：
 
@@ -437,7 +462,7 @@ string, integer, number, boolean, object, array, artifact
 - `validation.regex/min/max/min_length/max_length/message`
 - `expose.to_llm/to_user/to_entrypoint`
 
-### 7.4 Artifact 安全
+### 9.4 Artifact 安全
 
 artifact 参数只能来自 artifact context / task input attachment ledger：
 
@@ -446,9 +471,9 @@ artifact 参数只能来自 artifact context / task input attachment ledger：
 - artifact value 只能保存 upload/artifact descriptor，不保存 raw content。
 - 缺 artifact 时生成上传型 interrupt 或普通追问，具体 UI 由现有上传控件承载。
 
-## 8. SkillResourceService 按需读取
+## 10. SkillResourceService 按需读取
 
-### 8.1 服务定位
+### 10.1 服务定位
 
 资源按需读取不放在 `SkillExecutor` 内。新增独立服务：
 
@@ -463,7 +488,7 @@ SkillResourceService / SkillResourceReader
 - `SchemaSelector/InputResolver`：读取 machine schemas 或 schema references。
 - `SkillExecutor`：执行侧如需读取 runtime 资源，也通过该服务但 audience 为 `runtime`。
 
-### 8.2 接口概念
+### 10.2 接口概念
 
 ```python
 @dataclass(frozen=True)
@@ -488,18 +513,28 @@ class SkillResourceReadResult:
     redactions: tuple[str, ...]
 ```
 
-### 8.3 读取策略
+### 10.3 读取策略
 
 - 不逐文件白名单；bundle 内默认允许读取。
 - 所有读取必须限制在 Skill bundle 根目录内。
 - 禁止 `../` 越界、绝对路径越界、symlink 越界。
 - 全局硬黑名单永远生效，包括 `.git/`、`.env*`、secret/token/credential 文件、缓存目录。
-- `main_agent` / `slot_question` audience 读取到 prompt-facing 内容前必须拒绝脚本、runtime、native、config、outputs 等内部实现目录。
+- `main_agent` / `slot_question` audience 读取到 prompt-facing 内容前必须拒绝脚本、runtime、schemas、native、config、outputs 等内部实现目录；input schema 原文属于 machine resource，只能以 schema summary 进入 public profile。
 - 非文本或超大资源不得原样进入 prompt；返回 metadata 或裁剪内容，并标记 `truncated=true`。
 - 返回前做 secret/token/password/base_url 等脱敏扫描。
 - 每次读取记录 `skill.resource_read` audit event，包含 capability、resource/path、audience、truncated、redaction count，不记录敏感原文。
 
-### 8.4 Public profile 中的资源索引
+### 10.4 `SKILL.md` 索引与按需读取关系
+
+`SKILL.md` 正文中的资源索引可以作为主代理的导航线索，但不能作为执行契约事实源：
+
+- 主代理可以看到 `SKILL.md` body 的安全摘要和资源索引文本。
+- 当主代理需要读取某个索引指向的资源时，必须通过 `SkillResourceService` 发起 `resource_id` 或 bundle-relative `path` 请求。
+- `SkillResourceService` 负责判断该 path 是否允许以当前 audience 读取；被黑名单命中的路径必须拒绝，即使 `SKILL.md` 显式索引了它。
+- runtime 不能从 `SKILL.md` 正文推导 capability、entrypoint、schema 或 output contract；这些只能来自 `skill.contract.yaml` 与 `schemas/*.input.yaml`。
+- 如果 contract 中声明了 `resources.public`，public profile 应优先使用声明的 resource index；如果没有声明，runtime 可以从 `SKILL.md` body 中提取可见相对路径作为候选索引，但读取仍受同一安全策略约束。
+
+### 10.5 Public profile 中的资源索引
 
 主代理初始只看到资源目录，不看到所有全文：
 
@@ -530,9 +565,9 @@ SkillResourceService.read(capability_id="skill.field_design", resource_id="inter
 
 主代理不直接解析路径，也不读取 machine schema 原文。
 
-## 9. 主代理与调用流程
+## 11. 主代理与调用流程
 
-### 9.1 Capability 注册到主代理
+### 11.1 Capability 注册到主代理
 
 ```text
 skill.contract.yaml capability
@@ -559,7 +594,7 @@ skill.contract.yaml capability
 - config 路径
 - secret 或内部 runtime 细节
 
-### 9.2 Slash soft binding
+### 11.2 Slash soft binding
 
 用户：
 
@@ -593,7 +628,7 @@ main_agent.respond soft binding
   -> SkillExecutor
 ```
 
-### 9.3 自然语言触发
+### 11.3 自然语言触发
 
 用户不写 slash：
 
@@ -613,7 +648,7 @@ planner/router/replanner 根据 public capability profile 规划 skill.field_des
 main_agent.respond 内部 match_skills 后直接执行 scripts
 ```
 
-### 9.4 Finalizer
+### 11.4 Finalizer
 
 当 `answer_mode=requires_finalizer`：
 
@@ -629,7 +664,7 @@ finalizer 必须：
 - 不按需读取无关 Skill resources。
 - 不触发第二个 skill node。
 
-## 10. SkillExecutor v2 流程
+## 12. SkillExecutor v2 流程
 
 显式 `skill.*` node 执行：
 
@@ -646,7 +681,7 @@ resolve skill by capability_id
   -> return result / artifacts / events
 ```
 
-### 10.1 Schema selection
+### 12.1 Schema selection
 
 规则：
 
@@ -670,7 +705,7 @@ resolve skill by capability_id
 }
 ```
 
-### 10.2 Input resolution
+### 12.2 Input resolution
 
 新 resolver 以 `SkillInputSchema.inputs` 为事实源：
 
@@ -707,7 +742,7 @@ resolve_skill_inputs_v2(schema, base_payload, context)
 }
 ```
 
-### 10.3 SlotCollection v2
+### 12.3 SlotCollection v2
 
 ```json
 {
@@ -738,9 +773,9 @@ resume 规则：
 - 用户伪造 `_slot_collection` 被拒绝；只能使用后端保存的 interrupt metadata。
 - 如果用户明确要求切换方法，按 contract 策略处理：允许切换则清理不兼容字段并重建 slot_collection；不允许则提示新开任务。
 
-## 11. 现有 Skill 目标迁移形态
+## 13. 现有 Skill 目标迁移形态
 
-### 11.1 field-design
+### 13.1 field-design
 
 ```text
 schemas/rcbd.input.yaml
@@ -761,7 +796,7 @@ references/interval.md
 - 缺 design 时先追问设计类型。
 - output contract 校验 CSV/HTML artifact。
 
-### 11.2 field-analysis
+### 13.2 field-analysis
 
 ```text
 schemas/rcbd-analysis.input.yaml
@@ -775,7 +810,7 @@ references/field-data.md
 - 缺 `field_data` 或 `design` 进入 slot_collection。
 - JSON report output contract 生效。
 
-### 11.3 rice-genie
+### 13.3 rice-genie
 
 ```text
 schemas/qtn-check.input.yaml
@@ -791,7 +826,7 @@ references/gene-check-json.md
 - `sample/samples/run_id` 可选参数解析。
 - Markdown report output contract 生效。
 
-### 11.4 OCR
+### 13.4 OCR
 
 ```text
 schemas/document-ocr.input.yaml
@@ -815,7 +850,7 @@ constraints:
 - 缺两者时补槽。
 - OCR 错误码保留。
 
-### 11.5 SQLQuery
+### 13.5 SQLQuery
 
 ```text
 schemas/readonly-query.input.yaml
@@ -831,9 +866,9 @@ runtime/sql_query_skill/
 - 服务 allowlist 生效。
 - SQL guard / readonly adapter 仍在 handler 内部。
 
-## 12. 后端模型清单
+## 14. 后端模型清单
 
-### 12.1 新增/重构模型
+### 14.1 新增/重构模型
 
 ```text
 AgentSkillManifest
@@ -856,7 +891,7 @@ SkillSchemaSelectionResult
 SkillInputResolutionResultV2
 ```
 
-### 12.2 Legacy adapter
+### 14.2 Legacy adapter
 
 ```text
 legacy SKILL.md frontmatter
@@ -870,7 +905,7 @@ legacy SKILL.md frontmatter
 - 新旧执行契约同时存在且冲突时 fail closed 或 startup diagnostic。
 - 旧 `auto_run` 只存在 legacy adapter；新 contract parser 遇到 `auto_run` fail closed。
 
-## 13. 功能需求
+## 15. 功能需求
 
 | ID | Requirement | 验收 |
 | --- | --- | --- |
@@ -888,8 +923,10 @@ legacy SKILL.md frontmatter
 | FR-012 | OutputContract 校验 required keys 和文件约束。 | 缺 required 或扩展名不允许 fail closed/拒绝 artifact。 |
 | FR-013 | finalizer 不触发二次 Skill。 | finalizer metadata 禁止 skill invocation。 |
 | FR-014 | 旧格式 Skill 继续兼容。 | 未迁移 legacy 测试通过。 |
+| FR-015 | `SKILL.md` 索引可作为按需读取导航，但不作为执行事实源。 | 主代理可通过 ResourceService 读取索引资源；runtime 不从 body 推导 contract。 |
+| FR-016 | 新格式 Skill 关键执行步骤必须事件化。 | schema selection、resource read、slot_collection、entrypoint、output validation 均有审计证据。 |
 
-## 14. 非功能需求
+## 16. 非功能需求
 
 | 类别 | Requirement |
 | --- | --- |
@@ -901,9 +938,9 @@ legacy SKILL.md frontmatter
 | 兼容 | legacy adapter 保留旧格式运行能力，但新 contract 优先。 |
 | 可测试 | 每个 FR 至少有 parser/integration/API/e2e/frontend 或 contract 测试覆盖。 |
 
-## 15. 测试矩阵
+## 17. 测试矩阵
 
-### 15.1 Contract parser
+### 17.1 Contract parser
 
 - 解析合法 `skill.contract.yaml`。
 - 缺 `capability.id` fail closed。
@@ -915,7 +952,7 @@ legacy SKILL.md frontmatter
 - platform_service 缺 handler fail closed。
 - python_subprocess 声明 services fail closed。
 
-### 15.2 Input schema parser / validator
+### 17.2 Input schema parser / validator
 
 - 支持 string/integer/number/boolean/object/array/artifact。
 - `schema_id` 与 contract ref 不一致 fail closed。
@@ -924,7 +961,7 @@ legacy SKILL.md frontmatter
 - constraints any_of/one_of/mutually_exclusive/dependencies 生效。
 - artifact source policy 拒绝 LLM/text 伪造。
 
-### 15.3 Capability 注册 / public profile
+### 17.3 Capability 注册 / public profile
 
 - 新格式 Skill 注册到 `/api/v1/capabilities`。
 - capability id/display_name 来自 contract。
@@ -932,14 +969,14 @@ legacy SKILL.md frontmatter
 - public profile 不包含 script path/handler module/services/config/regex 全文。
 - 新旧 capability id 冲突 fail closed 或 diagnostic。
 
-### 15.4 MainAgent
+### 17.4 MainAgent
 
 - `/field-design ck_spec 怎么填？`：读取相关 resource，回答用法，不执行 skill node。
 - `/field-design 用这个材料表做间比法设计`：soft binding execute，replan 到 `skill.field_design`。
 - 普通自然语言“帮我用这个材料表生成间比法田间设计”：规划显式 skill node，无需 slash。
 - finalizer 不再次触发 Skill，不读取无关 resource。
 
-### 15.5 Schema selection
+### 17.5 Schema selection
 
 - RCBD 输入选 `field-design.rcbd`。
 - Diagonal 输入选 `field-design.diagonal`。
@@ -947,7 +984,7 @@ legacy SKILL.md frontmatter
 - “帮我做田间试验设计” ambiguous：缺 `design`，不执行 entrypoint。
 - resume 恢复 selected schema，不重新猜。
 
-### 15.6 ResourceService
+### 17.6 ResourceService
 
 - 读取 `.md/.txt/.yaml/.json` 资源成功。
 - 读取 `scripts/run_field_design.py` 作为 main_agent audience 被拒。
@@ -957,8 +994,10 @@ legacy SKILL.md frontmatter
 - 大文件裁剪并标记 `truncated=true`。
 - secret/token/password 脱敏。
 - 每次读取记录 `skill.resource_read`。
+- `SKILL.md` 索引到 allowed `.md` 文件时可通过 ResourceService 读取。
+- `SKILL.md` 索引到 `scripts/`、`schemas/` 或 `config.yaml` 时 main_agent audience 被拒。
 
-### 15.7 SkillExecutor
+### 17.7 SkillExecutor
 
 - 新格式 python_subprocess Skill 执行成功。
 - 新格式 platform_service Skill 执行成功。
@@ -968,7 +1007,43 @@ legacy SKILL.md frontmatter
 - `requires_finalizer` 添加 finalizer node。
 - 执行不依赖 `auto_run`。
 
-## 16. 文档与迁移要求
+### 17.8 Event/recovery
+
+- `skill.contract_loaded`、`skill.input_schema_selected`、`skill.resource_read`、`skill.input_resolved`、`skill.slot_collection_opened`、`skill.entrypoint_started`、`skill.output_contract_validated` 事件字段完整。
+- resume 后从 interrupt metadata 恢复 selected schema 和 entrypoint。
+- time-travel/checkpoint 读取事件可重建一次 Skill 执行的 schema/resource/slot/entrypoint 轨迹。
+
+## 18. 事件、审计与恢复证据
+
+新格式 Skill 必须至少记录以下 AUDIT_ONLY 或 FRONTEND-safe 事件，供 checkpoint/time travel、排障和测试断言使用：
+
+| 事件 | 可见性 | 必需字段 |
+| --- | --- | --- |
+| `skill.contract_loaded` | AUDIT_ONLY | capability_id、skill_name、contract_version、bundle_revision |
+| `skill.input_schema_selected` | AUDIT_ONLY | schema_id、entrypoint、source、confidence、selector |
+| `skill.resource_read` | AUDIT_ONLY | capability_id、resource_id/path、audience、truncated、redaction_count、denied_reason（如拒绝） |
+| `skill.input_resolved` | AUDIT_ONLY | schema_id、resolved_fields、sources、missing、invalid |
+| `skill.slot_collection_opened` | AUDIT_ONLY + waiting-input payload summary | selected_schema_id、round、missing、invalid、ask_fields |
+| `skill.entrypoint_started` | AUDIT_ONLY | entrypoint、execution_mode、schema_id |
+| `skill.output_contract_validated` | AUDIT_ONLY | output_contract、required_present、file_count、rejection_count |
+
+恢复要求：
+
+- task resume 必须从持久化 interrupt metadata 恢复 `selected_schema_id`、`selected_entrypoint`、`missing/invalid/resolved`。
+- checkpoint/time travel 视图必须能从事件序列回答：当时选了哪个 schema、读了哪些 public resource、为什么追问、最终执行了哪个 entrypoint。
+- 资源读取拒绝也必须记录审计事件，但不能把被拒文件内容写入事件。
+
+## 19. 迁移、回滚与兼容策略
+
+迁移以“每个 Skill 原子切换”为单位，不引入降级阶段语义：
+
+1. 一个 Skill 一旦提交 `skill.contract.yaml`，runtime 必须以新 contract 为事实源。
+2. 同一个 Skill 不得同时让新 contract 与旧 frontmatter execution/parameters/scripts 生效；若两者冲突，启动诊断必须 fail closed 或跳过该 Skill。
+3. 回滚方式是移除或禁用该 Skill 的 `skill.contract.yaml`，恢复 legacy adapter 路径；回滚不得保留半迁移 contract。
+4. 迁移 PR 必须包含该 Skill 的 `SKILL.md` 瘦身、contract、schemas、references、测试和文档更新。
+5. 当全部项目级 Skill 完成迁移并稳定后，旧 `auto_run` 与 legacy frontmatter execution 路径可另立 deprecation PRD 下线；本 PRD 只要求新格式不使用它。
+
+## 20. 文档与迁移要求
 
 必须更新：
 
@@ -989,7 +1064,7 @@ legacy SKILL.md frontmatter
 - 主代理按需读取资源必须走 `SkillResourceService`。
 - 旧格式仅兼容，不作为新写法。
 
-## 17. 风险与缓解
+## 21. 风险与缓解
 
 | 风险 | 缓解 |
 | --- | --- |
@@ -1000,7 +1075,7 @@ legacy SKILL.md frontmatter
 | 自然语言触发能力下降 | planner/router/replanner 必须消费 public capability profile；保留 match_skills 作为候选召回但不得执行。 |
 | checkpoint/time travel 状态不足 | schema selection/resource read/slot/output validation 全部事件化。 |
 
-## 18. 已确认决策
+## 22. 已确认决策
 
 - 采用分层方案：`SKILL.md` + `skill.contract.yaml` + `schemas/*.input.yaml` + `references/*`。
 - 参数 schema 保留机器可读 YAML/JSON，不放在 `SKILL.md` frontmatter。
@@ -1011,7 +1086,7 @@ legacy SKILL.md frontmatter
 - 新格式移除 `auto_run`；所有 Skill 执行必须是显式 `skill.*` node。
 - 用户不必须 slash；普通自然语言仍可触发 Skill，但要进入显式节点。
 
-## 19. Stop condition
+## 23. Stop condition
 
 本 PRD 的实施完成条件：
 
@@ -1020,3 +1095,4 @@ legacy SKILL.md frontmatter
 3. 新格式 Skill 不依赖旧 `SKILL.md` frontmatter execution/parameters/scripts/outputs。
 4. main-agent 不再对新格式 Skill 执行隐式 `auto_run`。
 5. 所有新格式 Skill 执行、补槽、资源读取、输出校验都有可恢复/可审计事件证据。
+6. main-agent prompt-facing 资源读取不能暴露 `schemas/` 原文、scripts、runtime、config、secret 或 raw artifact content。
