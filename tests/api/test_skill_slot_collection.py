@@ -12,6 +12,7 @@ class SkillSlotCollectionAPITest(APITestCase):
         self.skill_root = self.workspace / "slot-skills"
         self._write_two_scalar_skill()
         self._write_one_scalar_skill()
+        self._write_optional_dynamic_slot_skill()
         self._write_artifact_skill()
         self._write_plain_fail_skill()
         await self.reconfigure_runtime(
@@ -117,6 +118,72 @@ parameters:
 ---
 
 # Slot one scalar
+""",
+            encoding="utf-8",
+        )
+
+    def _write_optional_dynamic_slot_skill(self) -> None:
+        skill_dir = self.skill_root / "slot-optional-dynamic"
+        scripts = skill_dir / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "answer.py").write_text(
+            textwrap.dedent(
+                """
+                import json
+                import sys
+
+                payload = json.load(sys.stdin)
+                missing = [name for name in ("ncols", "ck_spec") if not payload.get(name)]
+                if missing:
+                    print(json.dumps({
+                        "ok": False,
+                        "is_error": True,
+                        "error": {"type": "missing_input", "message": "缺少动态参数"},
+                        "missing": missing,
+                        "answer": "请补充田块列数和 CK 参数。",
+                    }, ensure_ascii=False))
+                else:
+                    print(json.dumps({
+                        "answer": f"ncols={payload.get('ncols')}, ck_spec={payload.get('ck_spec')}",
+                        "ncols": payload.get("ncols"),
+                        "ck_spec": payload.get("ck_spec"),
+                    }, ensure_ascii=False))
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: slot-optional-dynamic
+capability_id: skill.slot_optional_dynamic
+description: manifest 非 required 但脚本按模式动态缺参的补槽测试 Skill
+scripts:
+  - name: answer
+    path: scripts/answer.py
+    runtime: python
+    auto_run: true
+    inputs:
+      required:
+        - query
+outputs:
+  required:
+    - answer
+parameters:
+  ncols:
+    type: integer
+    required: false
+    aliases:
+      - ncols
+      - 田块列数
+  ck_spec:
+    type: string
+    required: false
+    aliases:
+      - ck_spec
+      - CK参数
+---
+
+# Slot optional dynamic
 """,
             encoding="utf-8",
         )
@@ -260,6 +327,67 @@ outputs:
         waiting_events = [event for event in events if event.event_type == "node.waiting_for_input"]
         self.assertTrue(any(event.payload.get("round") == 1 for event in waiting_events))
         self.assertTrue(any(event.payload.get("round") == 2 for event in waiting_events))
+
+    async def test_dynamic_slot_missing_fields_are_resolved_from_generic_answer_payload(self) -> None:
+        slot_prompts: list[str] = []
+
+        async def slot_generator(prompt: str, **_kwargs) -> str:
+            if "补槽追问生成器" in prompt:
+                return (
+                    '{"question":"请补充田块列数和 CK 参数。",'
+                    '"ask_fields":["ncols","ck_spec"],'
+                    '"answer_hint":"田块列数10；CK参数：1,2,8",'
+                    '"style":"assistant_dialogue"}'
+                )
+            slot_prompts.append(prompt)
+            return (
+                '{"resolved": {'
+                '"ncols": {"value": 10, "source": "query"}, '
+                '"ck_spec": {"value": "1,2,8; 2,6,11; 3,1,9; 4,6,12", "source": "query"}'
+                "}}"
+            )
+
+        await self.reconfigure_runtime(
+            skill_roots=(self.default_project_skill_root, self.skill_root),
+            public_skill_roots=(self.default_project_skill_root, self.skill_root),
+            skill_input_text_generator=slot_generator,
+            enable_skill_input_llm=True,
+        )
+        response = await self.submit_message(
+            conversation_id="conv-slot-dynamic-llm",
+            content="请生成间比法设计",
+            capability_id="skill.slot_optional_dynamic",
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+
+        first_interrupt = await self._open_interrupt(task_id)
+        first_collection = first_interrupt["required_fields"][SLOT_COLLECTION_FIELD]
+        self.assertEqual(set(first_collection["missing"]), {"ncols", "ck_spec"})
+
+        answer = await self.client.post(
+            "/api/v1/tasks/interrupts/answer",
+            json={
+                "task_id": task_id,
+                "interrupt_id": first_interrupt["interrupt_id"],
+                "answer_payload": {"answer": "1,2,8; 2,6,11; 3,1,9; 4,6,12，田块列数10"},
+            },
+        )
+        self.assertEqual(answer.status_code, 202, answer.text)
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+
+        self.assertEqual(len(slot_prompts), 1)
+        self.assertIn("ncols", slot_prompts[0])
+        self.assertIn("ck_spec", slot_prompts[0])
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        resolved_events = [event for event in events if event.event_type == "skill.input_resolved"]
+        self.assertTrue(
+            any({"ncols", "ck_spec"}.issubset(set(event.payload.get("resolved_fields", ()))) for event in resolved_events),
+            [event.payload for event in resolved_events],
+        )
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertFalse(any(interrupt["status"] == "open" for interrupt in interrupts), interrupts)
 
     async def test_invalid_scalar_answer_keeps_task_waiting_for_next_round(self) -> None:
         response = await self.submit_message(

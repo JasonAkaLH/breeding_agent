@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
+from .missing_input_interrupt import SLOT_COLLECTION_METADATA_KEY
 from .parameters import SkillParameterSpec
 
 if TYPE_CHECKING:
@@ -52,6 +53,7 @@ class SkillInputResolutionContext:
     resolved_user_message: str = ""
     recent_user_messages: tuple[str, ...] = ()
     artifact_summaries: tuple[Mapping[str, Any], ...] = ()
+    active_slot_collection: Mapping[str, Any] | None = None
 
     @classmethod
     def from_metadata(
@@ -73,6 +75,7 @@ class SkillInputResolutionContext:
             resolved_user_message=resolved_user_message,
             recent_user_messages=recent_user_messages,
             artifact_summaries=artifact_summaries,
+            active_slot_collection=_metadata_slot_collection(metadata),
         )
 
 
@@ -110,7 +113,13 @@ def resolve_skill_inputs(
     del script  # The script hook is part of the public call shape; current rules are manifest scoped.
     payload, sources = _resolve_structured_inputs(manifest, base_payload, context)
     _resolve_text_inputs(manifest.parameters, payload, sources, context)
-    missing = tuple(name for name, spec in manifest.parameters.items() if spec.required and name not in payload)
+    active_slot_collection = _active_slot_collection(base_payload) or context.active_slot_collection
+    missing = _current_missing_fields(
+        manifest.parameters,
+        payload,
+        base_payload,
+        active_slot_collection=active_slot_collection,
+    )
     return SkillInputResolutionResult(payload=payload, missing=missing, sources=sources)
 
 
@@ -196,9 +205,15 @@ async def resolve_skill_inputs_with_llm(
     diagnostics: list[str] = []
     prompt_profile: Mapping[str, Any] | None = None
 
-    structured_missing = tuple(name for name, spec in manifest.parameters.items() if spec.required and name not in payload)
-    if text_generator is not None and structured_missing:
-        eligible_specs = _llm_eligible_missing_specs(manifest.parameters, structured_missing)
+    active_slot_collection = _active_slot_collection(base_payload) or context.active_slot_collection
+    llm_target_missing = _llm_target_missing_fields(
+        manifest.parameters,
+        payload,
+        base_payload,
+        active_slot_collection=active_slot_collection,
+    )
+    if text_generator is not None and llm_target_missing:
+        eligible_specs = _llm_eligible_missing_specs(manifest.parameters, llm_target_missing)
     else:
         eligible_specs = {}
 
@@ -209,6 +224,7 @@ async def resolve_skill_inputs_with_llm(
             context=context,
             resolved_payload=payload,
             missing_specs=eligible_specs,
+            active_slot_collection=active_slot_collection,
             trim_max_tokens=_metadata_trim_max_tokens(base_payload),
         )
         prompt_profile = prompt_resolution.llm_call_payload
@@ -249,7 +265,12 @@ async def resolve_skill_inputs_with_llm(
     unresolved_names = tuple(name for name in manifest.parameters if name not in payload)
     _resolve_text_inputs(manifest.parameters, payload, sources, context, names=unresolved_names)
 
-    missing = tuple(name for name, spec in manifest.parameters.items() if spec.required and name not in payload)
+    missing = _current_missing_fields(
+        manifest.parameters,
+        payload,
+        base_payload,
+        active_slot_collection=active_slot_collection,
+    )
     return SkillInputResolutionResult(
         payload=payload,
         missing=missing,
@@ -514,6 +535,7 @@ def _build_llm_slot_prompt(
     context: SkillInputResolutionContext,
     resolved_payload: Mapping[str, Any],
     missing_specs: Mapping[str, SkillParameterSpec],
+    active_slot_collection: Mapping[str, Any] | None = None,
 ) -> str:
     prompt_payload = {
         "skill": {
@@ -525,7 +547,7 @@ def _build_llm_slot_prompt(
             {
                 "name": spec.name,
                 "type": spec.type,
-                "required": spec.required,
+                "required_now": True,
                 "aliases": list(spec.aliases),
                 "allowed_sources": list(spec.sources) if spec.sources else sorted(_TEXT_SOURCES),
             }
@@ -538,10 +560,13 @@ def _build_llm_slot_prompt(
             "resolved_user_message": context.resolved_user_message,
             "recent_user_messages": list(context.recent_user_messages),
             "artifact_summaries": [_safe_artifact_summary(item) for item in context.artifact_summaries],
+            "active_slot_collection": _safe_slot_collection(active_slot_collection),
         },
     }
     return (
         "你是一个受限的 Skill 参数补槽器。只根据给定上下文抽取缺失参数，禁止编造文件、数据或未声明字段。\n"
+        "parameters_to_resolve 是当前必须补齐的字段；如果存在 active_slot_collection，"
+        "以 active_slot_collection.missing 为本轮补槽权威，不要根据 manifest.required 判断是否抽取。\n"
         "先判断每个参数是否能从 query/current_user_message/resolved_user_message/recent_user_messages 中直接推出；"
         "不能确定就放入 missing。\n"
         "只返回 JSON 对象，不要返回 Markdown。格式：\n"
@@ -559,6 +584,7 @@ def _build_llm_slot_prompt_resolution(
     context: SkillInputResolutionContext,
     resolved_payload: Mapping[str, Any],
     missing_specs: Mapping[str, SkillParameterSpec],
+    active_slot_collection: Mapping[str, Any] | None = None,
     trim_max_tokens: int | None = None,
 ):
     from src.orchestration.prompt_envelope import PromptSegment
@@ -570,6 +596,7 @@ def _build_llm_slot_prompt_resolution(
         context=context,
         resolved_payload=resolved_payload,
         missing_specs=missing_specs,
+        active_slot_collection=active_slot_collection,
     )
     public_skill_schema = {
         "name": manifest.name,
@@ -578,7 +605,7 @@ def _build_llm_slot_prompt_resolution(
             {
                 "name": spec.name,
                 "type": spec.type,
-                "required": spec.required,
+                "required_now": True,
                 "aliases": list(spec.aliases),
                 "allowed_sources": list(spec.sources) if spec.sources else sorted(_TEXT_SOURCES),
             }
@@ -591,6 +618,7 @@ def _build_llm_slot_prompt_resolution(
         "resolved_user_message": context.resolved_user_message,
         "recent_user_messages": list(context.recent_user_messages),
         "artifact_summaries": [_safe_artifact_summary(item) for item in context.artifact_summaries],
+        "active_slot_collection": _safe_slot_collection(active_slot_collection),
     }
     return resolve_profile_prompt_for_mode(
         legacy_prompt=legacy_prompt,
@@ -603,6 +631,8 @@ def _build_llm_slot_prompt_resolution(
                 role="system",
                 content=(
                     "你是一个受限的 Skill 参数补槽器。只根据给定上下文抽取缺失参数；"
+                    "parameters_to_resolve 是当前必须补齐的字段；如果存在 active_slot_collection，"
+                    "以 active_slot_collection.missing 为本轮补槽权威，不要根据 manifest.required 判断是否抽取。"
                     "禁止编造文件、数据、未声明字段、内部入口或执行细节。不能确定就放入 missing。"
                 ),
                 priority=0,
@@ -673,6 +703,114 @@ def _metadata_trim_max_tokens(base_payload: Mapping[str, Any]) -> int | None:
         safe_metadata.get("skill_input_trim_max_tokens"),
         safe_metadata.get("trim_max_tokens"),
     )
+
+
+def _active_slot_collection(base_payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    metadata = base_payload.get("metadata")
+    return _metadata_slot_collection(metadata)
+
+
+def _metadata_slot_collection(metadata: Any) -> Mapping[str, Any] | None:
+    if not isinstance(metadata, Mapping):
+        return None
+    collection = metadata.get(SLOT_COLLECTION_METADATA_KEY)
+    return collection if isinstance(collection, Mapping) else None
+
+
+def _active_slot_missing_fields(
+    parameters: Mapping[str, SkillParameterSpec],
+    payload: Mapping[str, Any],
+    base_payload: Mapping[str, Any],
+    *,
+    active_slot_collection: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    collection = active_slot_collection or _active_slot_collection(base_payload)
+    if collection is None:
+        return ()
+    names = _string_tuple(collection.get("missing"))
+    return tuple(name for name in names if name in parameters and name not in payload)
+
+
+def _manifest_required_missing_fields(
+    parameters: Mapping[str, SkillParameterSpec],
+    payload: Mapping[str, Any],
+) -> tuple[str, ...]:
+    return tuple(name for name, spec in parameters.items() if spec.required and name not in payload)
+
+
+def _llm_target_missing_fields(
+    parameters: Mapping[str, SkillParameterSpec],
+    payload: Mapping[str, Any],
+    base_payload: Mapping[str, Any],
+    *,
+    active_slot_collection: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    slot_missing = _active_slot_missing_fields(
+        parameters,
+        payload,
+        base_payload,
+        active_slot_collection=active_slot_collection,
+    )
+    if slot_missing:
+        return slot_missing
+    return _manifest_required_missing_fields(parameters, payload)
+
+
+def _current_missing_fields(
+    parameters: Mapping[str, SkillParameterSpec],
+    payload: Mapping[str, Any],
+    base_payload: Mapping[str, Any],
+    *,
+    active_slot_collection: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    return _dedupe(
+        (
+            *_manifest_required_missing_fields(parameters, payload),
+            *_active_slot_missing_fields(
+                parameters,
+                payload,
+                base_payload,
+                active_slot_collection=active_slot_collection,
+            ),
+        )
+    )
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        values: tuple[Any, ...] = ()
+    elif isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, list | tuple | set):
+        values = tuple(value)
+    else:
+        values = (value,)
+    return tuple(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
+
+
+def _safe_slot_collection(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    safe: dict[str, Any] = {}
+    for key in (
+        "schema_version",
+        "collection_id",
+        "round",
+        "status",
+        "missing",
+        "ask_fields",
+        "last_question",
+        "no_progress_rounds",
+    ):
+        raw = value.get(key)
+        if isinstance(raw, str | int | float | bool) or raw is None:
+            safe[key] = raw
+        elif isinstance(raw, list | tuple):
+            safe[key] = [item for item in raw if isinstance(item, str | int | float | bool) or item is None][:20]
+    resolved = value.get("resolved")
+    if isinstance(resolved, Mapping):
+        safe["resolved"] = _safe_resolved_payload(resolved)
+    return safe
 
 
 def _safe_resolved_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
