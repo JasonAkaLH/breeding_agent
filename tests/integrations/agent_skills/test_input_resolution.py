@@ -11,6 +11,7 @@ from src.integrations.agent_skills import (
     resolve_skill_inputs,
     resolve_skill_inputs_with_llm,
 )
+from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_METADATA_KEY
 
 
 class SkillInputResolutionTest(unittest.IsolatedAsyncioTestCase):
@@ -294,6 +295,79 @@ parameters:
         self.assertEqual(result.payload["blocks"], 10)
         self.assertEqual(result.sources["blocks"].source, "llm_slot_resolver:query")
         self.assertEqual(result.missing, ())
+
+    async def test_llm_resolves_active_slot_collection_missing_without_manifest_required(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        skill_file = Path(tmpdir.name) / "SKILL.md"
+        skill_file.write_text(
+            """---
+name: interval-like
+triggers:
+  - 间比法
+scripts:
+  - name: run
+    path: scripts/run.py
+    auto_run: true
+parameters:
+  ncols:
+    type: integer
+    required: false
+    aliases:
+      - ncols
+      - 田块列数
+  ck_spec:
+    type: string
+    required: false
+    aliases:
+      - ck_spec
+      - CK参数
+---
+
+# Interval-like
+""",
+            encoding="utf-8",
+        )
+        manifest = parse_skill_file(skill_file)
+        prompts: list[str] = []
+
+        async def slot_generator(prompt: str) -> str:
+            prompts.append(prompt)
+            return (
+                '{"resolved": {'
+                '"ncols": {"value": 10, "source": "query"}, '
+                '"ck_spec": {"value": "1,2,8; 2,6,11; 3,1,9; 4,6,12", "source": "query"}'
+                "}}"
+            )
+
+        result = await resolve_skill_inputs_with_llm(
+            manifest,
+            manifest.scripts[0],
+            {
+                "query": "请使用间比法帮我设计一个田间试验\n补充信息：answer=1,2,8; 2,6,11; 3,1,9; 4,6,12，田块列数10",
+                "metadata": {
+                    SLOT_COLLECTION_METADATA_KEY: {
+                        "missing": ["ncols", "ck_spec"],
+                        "last_question": "请提供田块列数，以及 CK 参数，格式：ck_no,start_pos,interval。",
+                        "resolved": {"design": "间比法"},
+                    }
+                },
+            },
+            SkillInputResolutionContext(
+                query="请使用间比法帮我设计一个田间试验\n补充信息：answer=1,2,8; 2,6,11; 3,1,9; 4,6,12，田块列数10",
+            ),
+            text_generator=slot_generator,
+        )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(result.payload["ncols"], 10)
+        self.assertEqual(result.payload["ck_spec"], "1,2,8; 2,6,11; 3,1,9; 4,6,12")
+        self.assertEqual(result.sources["ncols"].source, "llm_slot_resolver:query")
+        self.assertEqual(result.sources["ck_spec"].source, "llm_slot_resolver:query")
+        self.assertEqual(result.missing, ())
+        self.assertIn("ncols", prompts[0])
+        self.assertIn("ck_spec", prompts[0])
+        self.assertNotIn('"required": false', prompts[0])
 
     def test_explicit_chinese_integer_phrase_payload_is_coerced(self) -> None:
         manifest = self._manifest()
