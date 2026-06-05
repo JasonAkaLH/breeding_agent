@@ -92,7 +92,7 @@ no_progress_rounds
 
 ## 7. 完成门禁
 
-- 新格式 python_subprocess 与 platform_service fake Skill 均通过。
+- v2 python_subprocess 与 platform_service fake Skill 均通过。
 - slot_collection v2 resume 测试通过。
 - output contract 测试通过。
 - 无 contract Skill 或 v1 manifest execution 请求必须 fail closed，不执行。

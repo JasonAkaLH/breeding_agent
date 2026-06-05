@@ -49,9 +49,12 @@ skill/field-design/references/interval.md
 文件：
 
 ```text
-schemas/rcbd-analysis.input.yaml
-schemas/diagonal-analysis.input.yaml
-references/field-data.md
+skill/field-analysis/SKILL.md
+skill/field-analysis/skill.contract.yaml
+skill/field-analysis/schemas/rcbd-analysis.input.yaml
+skill/field-analysis/schemas/diagonal-analysis.input.yaml
+skill/field-analysis/references/usage.md
+skill/field-analysis/references/field-data.md
 ```
 
 验收：RCBD/Diagonal schema selection；JSON report output contract。
@@ -61,10 +64,13 @@ references/field-data.md
 文件：
 
 ```text
-schemas/qtn-check.input.yaml
-schemas/report-from-gene-check.input.yaml
-references/vcf-input.md
-references/gene-check-json.md
+skill/rice-genie/SKILL.md
+skill/rice-genie/skill.contract.yaml
+skill/rice-genie/schemas/qtn-check.input.yaml
+skill/rice-genie/schemas/report-from-gene-check.input.yaml
+skill/rice-genie/references/usage.md
+skill/rice-genie/references/vcf-input.md
+skill/rice-genie/references/gene-check-json.md
 ```
 
 验收：VCF/VCF.GZ 选 qtn-check；gene_check JSON 选 report schema；Markdown report output contract。
@@ -74,9 +80,12 @@ references/gene-check-json.md
 文件：
 
 ```text
-schemas/document-ocr.input.yaml
-references/supported-files.md
-references/output-formats.md
+skill/ocr/SKILL.md
+skill/ocr/skill.contract.yaml
+skill/ocr/schemas/document-ocr.input.yaml
+skill/ocr/references/usage.md
+skill/ocr/references/supported-files.md
+skill/ocr/references/output-formats.md
 ```
 
 验收：上传文件或 `file_path` any_of；`output_format` enum；缺文件补槽；OCR 错误码保留。
@@ -86,20 +95,23 @@ references/output-formats.md
 文件：
 
 ```text
-schemas/readonly-query.input.yaml
-references/query-examples.md
-references/data-boundaries.md
-runtime/sql_query_skill/
+skill/sql-query/SKILL.md
+skill/sql-query/skill.contract.yaml
+skill/sql-query/schemas/readonly-query.input.yaml
+skill/sql-query/references/usage.md
+skill/sql-query/references/query-examples.md
+skill/sql-query/references/data-boundaries.md
+skill/sql-query/runtime/sql_query_skill/
 ```
 
 验收：platform_service contract 注册；query-only schema；服务 allowlist；SQL guard 保持在 handler 内部。
 
 ## 4. 测试计划
 
-- 每个 Skill 现有 integration tests 改为新结构 fixture。
+- 每个 Skill 现有 integration tests 改为 v2 结构 fixture。
 - API e2e 覆盖 field-design interval 补槽、OCR any_of、SQLQuery platform_service。
 - public profile/resource tests 覆盖每个 Skill 的 references。
-- 每个 Skill 都要有迁移前后行为等价用例：同样输入产生同类 output payload/artifact，差异只允许来自新 contract/schema 的显式状态字段。
+- 每个 Skill 都要有迁移前后行为等价用例：同样输入产生同类 output payload/artifact，差异只允许来自 v2 contract/schema 的显式状态字段。
 
 ## 5. 完成门禁
 

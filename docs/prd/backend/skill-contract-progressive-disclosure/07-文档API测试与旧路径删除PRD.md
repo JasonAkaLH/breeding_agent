@@ -15,7 +15,7 @@
 - 更新 PRD 索引与 README。
 - 形成 v2 Skill 模板或示例片段。
 - 建立全量测试矩阵和推荐命令。
-- 删除或禁用旧 `SKILL.md` frontmatter 中 `capability_id`、`public_usage`、`parameters`、`scripts`、`execution`、`auto_run` 作为平台契约的生产路径。
+- 删除或禁用旧 `SKILL.md` frontmatter 中 `capability_id`、`public_usage`、`parameters`、`scripts`、`execution`、`auto_run` 作为平台契约的生产路径；如果代码保留解析结构，只能用于 diagnostic 或历史测试 fixture。
 - 明确无 `skill.contract.yaml` 的 Skill 不注册、不执行、不进入 capability 列表。
 
 ### 1.2 Out of scope
@@ -40,8 +40,8 @@
 | C7-002 | API 文档说明 direct skill execution、slash soft binding、natural language planning。 | 外部调用方知道不能直接硬提交 `skill.*`，而是提交用户消息/附件/interrupt answer。 |
 | C7-003 | 文档说明 ResourceService 按需读取边界。 | 主代理不能读取 scripts/runtime/schemas/config 原文。 |
 | C7-004 | 测试矩阵可重复执行。 | backend integration/API/e2e 命令列明。 |
-| C7-005 | 旧注册路径删除。 | capability registry 不再从旧 metadata/name 派生公开 Skill capability；无 contract Skill 不注册。 |
-| C7-006 | 旧执行路径删除。 | main-agent `_run_auto_scripts` 生产路径、SkillExecutor manifest execution/scripts/parameters 路径不再执行项目 Skill。 |
+| C7-005 | 旧注册路径删除。 | capability registry 不再从旧 metadata/name 派生公开 Skill capability；无 contract Skill 不注册；保留的旧解析代码不得影响 public registry。 |
+| C7-006 | 旧执行路径删除。 | main-agent `_run_auto_scripts` 生产路径、SkillExecutor manifest execution/scripts/parameters 路径不再执行项目 Skill；保留代码只能返回 diagnostic/fail-closed。 |
 | C7-007 | v2 模板不包含 v1 字段。 | 示例中不得出现 `public_usage`、顶层 `parameters`、`scripts[].auto_run`、`execution` 或 `run_by_default`。 |
 
 ## 4. 旧路径删除验收
@@ -61,4 +61,4 @@
 - 迁移后 full targeted regression 通过。
 - License Requirement 记录完整。
 - 文档 grep 门禁通过：v2 示例不包含 `auto_run` / `run_by_default` / 顶层 `parameters` / `scripts` / `execution` / `public_usage` 作为平台契约。
-- 代码 grep 门禁通过：旧 manifest 执行/注册生产路径已删除或只保留为失败 diagnostic，不再执行项目 Skill。
+- 代码 grep 门禁通过：旧 manifest 执行/注册生产路径已删除或只保留为 diagnostic/fail-closed，不再注册或执行项目 Skill。
