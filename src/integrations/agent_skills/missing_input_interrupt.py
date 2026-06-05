@@ -49,6 +49,7 @@ _FIELD_DESCRIPTIONS = {
 _ARTIFACT_FIELDS = {"field_data", "file_path", "material_data", "rice_input"}
 SLOT_COLLECTION_FIELD = "_slot_collection"
 SLOT_COLLECTION_SCHEMA_VERSION = 1
+SLOT_COLLECTION_V2_SCHEMA_VERSION = 2
 SLOT_COLLECTION_METADATA_KEY = "skill_slot_collection"
 _SENSITIVE_SLOT_KEYS = {
     "authorization",
@@ -286,24 +287,60 @@ def build_slot_collection(
     no_progress_rounds = _positive_int(previous_collection.get("no_progress_rounds")) if isinstance(previous_collection, Mapping) else 0
     if previous_collection and set(_clean_missing_fields(previous_collection.get("missing"))) == set(missing_fields):
         no_progress_rounds += 1
+    selected_schema_id = _safe_source_text(resolved_payload.get("_selected_schema_id"))
+    selected_entrypoint = _safe_source_text(resolved_payload.get("_selected_entrypoint")) or entrypoint
+    invalid = _v2_invalid_fields(resolved_payload)
+    schema_version = SLOT_COLLECTION_V2_SCHEMA_VERSION if getattr(manifest, "contract", None) is not None else SLOT_COLLECTION_SCHEMA_VERSION
     return {
-        "schema_version": SLOT_COLLECTION_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "collection_id": collection_id,
         "task_id": request.task_id,
         "node_id": request.node_id,
         "capability_id": request.capability_id,
         "skill_name": skill_name,
         "entrypoint": entrypoint,
+        "selected_schema_id": selected_schema_id,
+        "selected_entrypoint": selected_entrypoint,
         "round": round_number,
         "status": "collecting",
         "slots": slots,
         "resolved": resolved,
         "missing": list(missing_fields),
+        "invalid": invalid,
+        "resource_hints": _v2_resource_hints(manifest, missing_fields),
         "validation_errors": validation_errors,
         "no_progress_rounds": no_progress_rounds,
         "last_question": question,
         "question_source": "fallback",
     }
+
+
+def _v2_invalid_fields(resolved_payload: Mapping[str, Any]) -> list[dict[str, str]]:
+    raw = resolved_payload.get("_invalid")
+    if not isinstance(raw, list | tuple):
+        return []
+    invalid: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        field = _safe_source_text(item.get("field"))
+        reason = _safe_source_text(item.get("reason"))
+        if field:
+            invalid.append({"field": field, "reason": reason or "invalid"})
+    return invalid
+
+
+def _v2_resource_hints(manifest: SkillManifest, missing_fields: tuple[str, ...]) -> list[dict[str, str]]:
+    contract = getattr(manifest, "contract", None)
+    if contract is None:
+        return []
+    hints: list[dict[str, str]] = []
+    for field in missing_fields:
+        for resource in contract.resources.values():
+            if "slot_question" in resource.audience:
+                hints.append({"field": field, "resource_id": resource.resource_id, "title": resource.title or resource.resource_id})
+                break
+    return hints
 
 
 def slot_collection_from_required_fields(required_fields: Mapping[str, Any]) -> Mapping[str, Any] | None:

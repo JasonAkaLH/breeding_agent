@@ -76,19 +76,14 @@ class FieldAnalysisSkillCompatibilityTest(unittest.TestCase):
         manifest = parse_skill_file(self.skill_file)
 
         self.assertEqual(manifest.name, "field-analysis")
-        self.assertEqual(manifest.metadata.get("capability_id"), "skill.field_analysis")
-        self.assertEqual(manifest.metadata.get("execution", {}).get("mode"), "python_subprocess")
-        self.assertEqual(manifest.metadata.get("execution", {}).get("answer_mode"), "requires_finalizer")
-        self.assertEqual(manifest.outputs.required, ("answer",))
-        self.assertIn("field_data", manifest.parameters)
-        self.assertTrue(manifest.parameters["field_data"].required)
-        self.assertEqual(manifest.parameters["field_data"].type, "artifact")
-        self.assertIn("design", manifest.parameters)
-        self.assertTrue(manifest.parameters["design"].required)
+        self.assertIsNotNone(manifest.contract)
+        contract = manifest.contract
+        self.assertEqual(contract.capability.id, "skill.field_analysis")
+        self.assertEqual(contract.runtime.mode, "python_subprocess")
+        self.assertEqual(contract.runtime.answer_mode, "requires_finalizer")
+        self.assertIn("rcbd_analysis", contract.input_schemas)
         self.assertEqual(len(manifest.scripts), 1)
         self.assertEqual(manifest.scripts[0].path, "scripts/run_field_analysis.py")
-        self.assertEqual(manifest.scripts[0].runtime, "python")
-        self.assertTrue(manifest.scripts[0].auto_run)
 
     def test_project_catalog_matches_field_analysis_queries(self) -> None:
         catalog = SkillCatalog.from_roots(["skill"])

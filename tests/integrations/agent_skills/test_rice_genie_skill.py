@@ -26,20 +26,14 @@ class RiceGenieSkillCompatibilityTest(unittest.TestCase):
         manifest = parse_skill_file(self.skill_file)
 
         self.assertEqual(manifest.name, "rice-genie")
-        self.assertEqual(manifest.metadata.get("capability_id"), "skill.rice_genie")
-        self.assertEqual(manifest.metadata.get("execution", {}).get("mode"), "python_subprocess")
-        self.assertEqual(manifest.metadata.get("execution", {}).get("answer_mode"), "requires_finalizer")
-        self.assertGreaterEqual(len(manifest.triggers), 8)
-        self.assertEqual(manifest.outputs.required, ("answer",))
-        self.assertIn("rice_input", manifest.parameters)
-        self.assertTrue(manifest.parameters["rice_input"].required)
-        self.assertEqual(manifest.parameters["rice_input"].type, "artifact")
-        self.assertIn("sample", manifest.parameters)
-        self.assertIn("samples", manifest.parameters)
+        self.assertIsNotNone(manifest.contract)
+        contract = manifest.contract
+        self.assertEqual(contract.capability.id, "skill.rice_genie")
+        self.assertEqual(contract.runtime.mode, "python_subprocess")
+        self.assertEqual(contract.runtime.answer_mode, "requires_finalizer")
+        self.assertIn("qtn_check", contract.input_schemas)
         self.assertEqual(len(manifest.scripts), 1)
         self.assertEqual(manifest.scripts[0].path, "scripts/run_rice_genie.py")
-        self.assertEqual(manifest.scripts[0].runtime, "python")
-        self.assertTrue(manifest.scripts[0].auto_run)
 
     def test_project_catalog_matches_rice_genie_queries(self) -> None:
         catalog = SkillCatalog.from_roots(["skill"])

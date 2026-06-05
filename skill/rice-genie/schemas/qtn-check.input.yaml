@@ -1,0 +1,9 @@
+schema_id: qtn_check
+title: VCF QTN 检查
+inputs:
+  rice_input_type: {type: string, required: true, const: vcf, aliases: [vcf, VCF, vcf.gz]}
+
+  rice_input: {type: artifact, required: true, source: {allowed: [artifact]}, aliases: [VCF文件, 水稻VCF, gene_check, rice_input]}
+  sample: {type: string, required: false, aliases: [sample, 样本, 材料]}
+  samples: {type: string, required: false, aliases: [samples, 多样本, 材料列表]}
+  run_id: {type: string, required: false}

@@ -1,5 +1,27 @@
 # API 更新日志
 
+## 2026-06-05
+
+### 本次更新摘要
+
+Skill 后端接入切换为 v2-only Skill Contract：公开能力只从 `skill.contract.yaml` 注册；`SKILL.md` 只保留轻量说明；执行输入由 `schemas/*.input.yaml` 和 slot_collection v2 驱动；主代理答疑只能通过 `SkillResourceService` 按需读取 prompt-facing resources。
+
+### `/api/v1/capabilities`
+
+- `skill.*` capability 只来自同 bundle 的 v2 contract；无 contract、contract invalid、旧 frontmatter-only Skill 不注册、不进入能力列表。
+- 能力发现只暴露 capability/display/routing 摘要和相对 `source_path`；不会暴露脚本路径、handler、runtime、service、内部配置或 secret。
+
+### `/api/v1/conversations/chat-messages`
+
+- 外部 direct `capability_id=skill.*` 仍 fail closed，错误码为 `direct_skill_execution_disabled`。
+- slash / API 点名 Skill 仍使用 `main_agent.respond + metadata.soft_skill_binding`；自然语言规划继续推荐 `capability_id=null`。
+- v2 Skill 缺参 interrupt 的 `_slot_collection.schema_version=2`，包含 `selected_schema_id`、`selected_entrypoint`、`invalid`、`resource_hints`，客户端不得伪造内部 resume 字段。
+
+### Skill ResourceService
+
+- 主代理只可读取 contract 授权给 `main_agent` audience 的 prompt-facing resources；不得读取 `scripts/`、`runtime/`、`schemas/`、`native/`、`configs/`、`config.yaml`、`.env`、`.git` 或 secret/token/credential 路径原文。
+- 资源读取会产生 audit-only `skill.resource_read` 事件，事件 payload 不包含原文内容。
+
 > 维护口径：这里只记录 API 的“最新外部行为”和客户端迁移提醒；字段级细节、请求 / 响应 schema、事件 payload 与错误码以 `/api-doc` 正式接口文档为准。后续 API 行为变化继续追加到本文件顶部。
 
 ## 2026-06-01

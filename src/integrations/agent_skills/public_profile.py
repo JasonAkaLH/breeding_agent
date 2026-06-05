@@ -7,78 +7,13 @@ from src.orchestration.models import CapabilityDescriptor
 
 from .manifest import SkillManifest
 
-_PUBLIC_USAGE_KEYS = frozenset(
-    {
-        "overview",
-        "input_formats",
-        "examples",
-        "outputs",
-        "limits",
-        "when_to_use",
-        "required_data",
-        "parameters",
-        "data_fields",
-        "answerable_questions",
-        "notes",
-    }
-)
-_PUBLIC_IO_SCHEMA_KEYS = frozenset(
-    {
-        "description",
-        "type",
-        "required",
-        "files",
-        "fields",
-        "columns",
-        "example_columns",
-        "formats",
-        "examples",
-        "schema",
-        "properties",
-        "items",
-        "enum",
-        "mime_types",
-        "extensions",
-    }
-)
 _FORBIDDEN_KEY_PARTS = (
-    "source_path",
-    "script",
-    "handler",
-    "handler_module",
-    "handler_factory",
-    "runtime",
-    "sidecar",
-    "endpoint",
-    "base_url",
-    "url",
-    "dsn",
-    "token",
-    "secret",
-    "password",
-    "api_key",
-    "authorization",
-    "config",
-    "module",
-    "path",
-    "sql",
+    "source_path", "script", "handler", "handler_module", "handler_factory", "runtime", "sidecar", "endpoint",
+    "base_url", "url", "dsn", "token", "secret", "password", "api_key", "authorization", "config", "module", "path", "sql",
 )
 _FORBIDDEN_TEXT_PARTS = (
-    "scripts/",
-    "runtime/",
-    "runtime",
-    "python_subprocess",
-    "rscript",
-    "wrapper",
-    "platform_service",
-    "handler",
-    "sidecar",
-    "config.yaml",
-    "mysql://",
-    "postgresql://",
-    "api_key",
-    "token",
-    "secret",
+    "scripts/", "runtime/", "python_subprocess", "platform_service", "handler", "config.yaml", "mysql://",
+    "postgresql://", "api_key", "token", "secret",
 )
 
 
@@ -89,10 +24,13 @@ class PublicSkillProfile:
     display_name: str
     description: str
     triggers: tuple[str, ...]
-    parameters: tuple[dict[str, Any], ...]
-    inputs: dict[str, Any]
-    outputs: dict[str, Any]
-    public_usage: dict[str, Any]
+    parameters: tuple[dict[str, Any], ...] = ()
+    inputs: dict[str, Any] | None = None
+    outputs: dict[str, Any] | None = None
+    public_usage: dict[str, Any] | None = None
+    resource_index: tuple[dict[str, Any], ...] = ()
+    schema_summaries: tuple[dict[str, Any], ...] = ()
+    routing_examples: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -102,9 +40,12 @@ class PublicSkillProfile:
             "description": self.description,
             "triggers": list(self.triggers),
             "parameters": list(self.parameters),
-            "inputs": self.inputs,
-            "outputs": self.outputs,
-            "public_usage": self.public_usage,
+            "inputs": self.inputs or {},
+            "outputs": self.outputs or {},
+            "public_usage": self.public_usage or {},
+            "resource_index": list(self.resource_index),
+            "schema_summaries": list(self.schema_summaries),
+            "routing_examples": list(self.routing_examples),
         }
 
 
@@ -114,13 +55,44 @@ def build_public_skill_profile(
     capability_id: str,
     descriptor: CapabilityDescriptor | None = None,
 ) -> PublicSkillProfile:
-    """Build the LLM-safe public description for soft Skill binding.
+    if manifest.contract is not None:
+        contract = manifest.contract
+        resolved_capability_id = contract.capability.id
+        display_name = _public_text(contract.capability.display_name, fallback=manifest.name)
+        description = _public_text(contract.capability.description or manifest.description)
+        return PublicSkillProfile(
+            capability_id=resolved_capability_id,
+            name=_public_text(manifest.name, fallback=resolved_capability_id),
+            display_name=display_name,
+            description=description,
+            triggers=_public_text_tuple((*contract.routing.triggers, *contract.routing.intent_aliases)),
+            parameters=(),
+            inputs={"schema_count": len(contract.input_schemas)},
+            outputs={"output_contracts": sorted(contract.outputs)},
+            public_usage={},
+            resource_index=tuple(
+                {
+                    "resource_id": resource.resource_id,
+                    "title": _public_text(resource.title, fallback=resource.resource_id),
+                    "description": _public_text(resource.description),
+                    "audience": [item for item in resource.audience if item in {"main_agent", "slot_question"}],
+                }
+                for resource in contract.resources.values()
+                if any(item in {"main_agent", "slot_question"} for item in resource.audience)
+            ),
+            schema_summaries=tuple(
+                {
+                    "schema_id": ref.schema_id,
+                    "title": _public_text(ref.title, fallback=ref.schema_id),
+                    "description": _public_text(ref.description),
+                    "aliases": list(_public_text_tuple(ref.aliases)),
+                }
+                for ref in contract.input_schemas.values()
+            ),
+            routing_examples=_public_text_tuple(contract.routing.examples),
+        )
 
-    This profile is intentionally derived from manifest frontmatter and a small
-    public_usage allowlist. It never reads or serializes ``manifest.body`` or
-    runtime/script fields.
-    """
-
+    # Historical fallback for non-contract tests/fixtures. Public registry no longer uses this path.
     name = _public_text(manifest.name, fallback=capability_id)
     raw_display_name = (descriptor.display_name if descriptor else "") or str(manifest.metadata.get("display_name") or "").strip()
     display_name = _public_text(raw_display_name, fallback=name)
@@ -131,43 +103,11 @@ def build_public_skill_profile(
         display_name=display_name,
         description=_public_text(raw_description),
         triggers=_public_text_tuple(manifest.triggers),
-        parameters=tuple(
-            payload
-            for parameter_name, spec in manifest.parameters.items()
-            if (payload := _parameter_payload(parameter_name, spec))
-        ),
-        inputs=_io_contract_payload(manifest.inputs),
-        outputs=_io_contract_payload(manifest.outputs),
-        public_usage=_public_usage_payload(manifest.metadata.get("public_usage")),
+        parameters=(),
+        inputs={},
+        outputs={},
+        public_usage={},
     )
-
-
-def _parameter_payload(name: str, spec: Any) -> dict[str, Any] | None:
-    safe_name = _public_text(name)
-    if not safe_name:
-        return None
-    payload: dict[str, Any] = {
-        "name": safe_name,
-        "type": _public_text(getattr(spec, "type", "string") or "string", fallback="string"),
-        "required": bool(getattr(spec, "required", False)),
-    }
-    sources = _public_text_tuple(getattr(spec, "sources", ()))
-    if sources:
-        payload["sources"] = list(sources)
-    aliases = _public_text_tuple(getattr(spec, "aliases", ()))
-    if aliases:
-        payload["aliases"] = list(aliases)
-    patterns = _public_text_tuple(getattr(spec, "patterns", ()))
-    if patterns:
-        payload["patterns"] = list(patterns)
-    enum = _public_text_tuple(getattr(spec, "enum", ()))
-    if enum:
-        payload["enum"] = list(enum)
-    default = getattr(spec, "default", None)
-    safe_default = _sanitize_public_value(default)
-    if safe_default not in (None, "", [], {}):
-        payload["default"] = safe_default
-    return payload
 
 
 def _public_text(value: Any, *, fallback: str = "") -> str:
@@ -182,35 +122,6 @@ def _public_text_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(sanitized, list | tuple):
         return ()
     return tuple(str(item).strip() for item in sanitized if isinstance(item, str) and str(item).strip())
-
-
-def _io_contract_payload(value: Any) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    required = tuple(str(item) for item in getattr(value, "required", ()) if str(item).strip())
-    if required:
-        payload["required"] = list(required)
-    schema = getattr(value, "schema", None)
-    if isinstance(schema, Mapping):
-        for key in _PUBLIC_IO_SCHEMA_KEYS:
-            if key == "required" or key not in schema:
-                continue
-            sanitized = _sanitize_public_value(schema[key])
-            if sanitized not in (None, "", [], {}):
-                payload[key] = sanitized
-    return payload
-
-
-def _public_usage_payload(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        return {}
-    payload: dict[str, Any] = {}
-    for key in _PUBLIC_USAGE_KEYS:
-        if key not in value:
-            continue
-        sanitized = _sanitize_public_value(value[key])
-        if sanitized not in (None, "", [], {}):
-            payload[key] = sanitized
-    return payload
 
 
 def _sanitize_public_value(value: Any) -> Any:

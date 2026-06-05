@@ -9,35 +9,53 @@ from src.integrations.agent_skills.skill_capabilities import build_skill_capabil
 
 
 class SkillCapabilityMappingTest(unittest.TestCase):
-    def _write_skill(self, root: Path, dirname: str, *, name: str, description: str = "生成设计", metadata: str = "") -> Path:
+    def _write_skill(
+        self,
+        root: Path,
+        dirname: str,
+        *,
+        name: str,
+        description: str = "生成设计",
+        contract: str | None = None,
+        frontmatter_extra: str = "",
+    ) -> Path:
         skill_dir = root / dirname
         skill_dir.mkdir(parents=True)
-        metadata_block = f"metadata:\n{metadata}" if metadata else ""
+        extra = f"\n{frontmatter_extra.rstrip()}" if frontmatter_extra else ""
         (skill_dir / "SKILL.md").write_text(
             f"""---
 name: {name}
 description: {description}
 triggers:
-  - 随机区组
-{metadata_block}
+  - 随机区组{extra}
 ---
 
 # {name}
 """,
             encoding="utf-8",
         )
+        if contract is None:
+            contract = f"""
+contract_version: '2'
+capability:
+  id: skill.{name.replace('-', '_').replace(' ', '_')}
+  display_name: 田间试验设计
+  description: {description}
+runtime:
+  mode: python_subprocess
+  answer_mode: direct
+entrypoints:
+  run:
+    path: scripts/run.py
+"""
+        if contract:
+            (skill_dir / "skill.contract.yaml").write_text(contract, encoding="utf-8")
         return skill_dir / "SKILL.md"
 
-    def test_project_skill_becomes_public_skill_capability(self) -> None:
+    def test_project_skill_becomes_public_skill_capability_from_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir) / "skill"
-            self._write_skill(
-                project_root,
-                "rcbd",
-                name="mini-breedstat-rcbd",
-                description="生成 RCBD 随机区组设计",
-                metadata="  display_name: 田间试验设计\n",
-            )
+            self._write_skill(project_root, "rcbd", name="mini-breedstat-rcbd", description="生成 RCBD 随机区组设计")
             catalog = SkillCatalog.from_roots([project_root])
 
             registry = build_skill_capability_registry(catalog, public_skill_roots=(project_root,))
@@ -69,9 +87,20 @@ triggers:
     def test_invalid_and_duplicate_capability_ids_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir) / "skill"
-            self._write_skill(project_root, "invalid", name="bad", metadata="  capability_id: main_agent.respond\n")
-            self._write_skill(project_root, "first", name="same name")
-            self._write_skill(project_root, "second", name="same_name")
+            self._write_skill(project_root, "invalid", name="bad", contract="""
+contract_version: '2'
+capability: {id: main_agent.respond, display_name: Bad}
+runtime: {mode: python_subprocess}
+entrypoints: {run: {path: scripts/run.py}}
+""")
+            duplicate_contract = """
+contract_version: '2'
+capability: {id: skill.same, display_name: Same}
+runtime: {mode: python_subprocess}
+entrypoints: {run: {path: scripts/run.py}}
+"""
+            self._write_skill(project_root, "first", name="same name", contract=duplicate_contract)
+            self._write_skill(project_root, "second", name="same_name", contract=duplicate_contract)
             catalog = SkillCatalog.from_roots([project_root])
 
             registry = build_skill_capability_registry(catalog, public_skill_roots=(project_root,))
@@ -80,34 +109,36 @@ triggers:
         reasons = sorted(diagnostic.reason for diagnostic in registry.diagnostics)
         self.assertEqual(reasons, ["duplicate", "duplicate", "invalid_id"])
 
-    def test_unsupported_script_runtime_is_not_public_capability(self) -> None:
+    def test_missing_contract_is_not_public_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir) / "skill"
-            skill_dir = project_root / "shell"
-            skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text(
-                """---
-name: shell-helper
-description: 不应公开的 shell runtime
-scripts:
-  - name: run
-    path: run.sh
-    runtime: shell
-    auto_run: true
----
+            self._write_skill(project_root, "legacy", name="legacy-helper", contract="")
+            catalog = SkillCatalog.from_roots([project_root])
 
-# Shell
+            registry = build_skill_capability_registry(catalog, public_skill_roots=(project_root,))
+
+        self.assertEqual(set(registry.descriptors_by_id), set())
+        self.assertEqual(registry.diagnostics[0].skill_name, "legacy-helper")
+        self.assertEqual(registry.diagnostics[0].reason, "contract_missing")
+
+    def test_v1_platform_fields_fail_closed_for_v2_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir) / "skill"
+            self._write_skill(
+                project_root,
+                "bad-v2",
+                name="bad-v2",
+                frontmatter_extra="""
+parameters:
+  query: {type: string, required: true}
 """,
-                encoding="utf-8",
             )
             catalog = SkillCatalog.from_roots([project_root])
 
             registry = build_skill_capability_registry(catalog, public_skill_roots=(project_root,))
 
         self.assertEqual(set(registry.descriptors_by_id), set())
-        self.assertEqual(len(registry.diagnostics), 1)
-        self.assertEqual(registry.diagnostics[0].skill_name, "shell-helper")
-        self.assertEqual(registry.diagnostics[0].reason, "unsupported_runtime")
+        self.assertEqual(registry.diagnostics[0].reason, "v1_field_forbidden")
 
 
 if __name__ == "__main__":

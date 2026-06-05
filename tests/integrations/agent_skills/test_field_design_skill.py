@@ -51,33 +51,21 @@ class FieldDesignSkillCompatibilityTest(unittest.TestCase):
         manifest = parse_skill_file(self.skill_file)
 
         self.assertEqual(manifest.name, "field-design")
-        self.assertEqual(manifest.metadata.get("capability_id"), "skill.field_design")
-        self.assertEqual(manifest.metadata.get("execution", {}).get("mode"), "python_subprocess")
-        self.assertEqual(manifest.metadata.get("execution", {}).get("answer_mode"), "requires_finalizer")
-        self.assertGreaterEqual(len(manifest.triggers), 8)
-        self.assertEqual(manifest.outputs.required, ("answer",))
-        self.assertIn("material_data", manifest.parameters)
-        self.assertTrue(manifest.parameters["material_data"].required)
-        self.assertEqual(manifest.parameters["material_data"].type, "artifact")
-        self.assertIn("design", manifest.parameters)
-        self.assertTrue(manifest.parameters["design"].required)
-        self.assertIn("blocks", manifest.parameters)
-        self.assertIn("ncols", manifest.parameters)
-        self.assertIn("ck_spec", manifest.parameters)
+        self.assertIsNotNone(manifest.contract)
+        contract = manifest.contract
+        self.assertEqual(contract.capability.id, "skill.field_design")
+        self.assertEqual(contract.runtime.mode, "python_subprocess")
+        self.assertEqual(contract.runtime.answer_mode, "requires_finalizer")
+        self.assertIn("rcbd", contract.input_schemas)
+        self.assertIn("interval", contract.input_schemas)
         self.assertEqual(len(manifest.scripts), 1)
         self.assertEqual(manifest.scripts[0].path, "scripts/run_field_design.py")
-        self.assertEqual(manifest.scripts[0].runtime, "python")
         self.assertTrue(manifest.scripts[0].auto_run)
 
     def test_public_usage_keeps_material_header_as_ped_id(self) -> None:
-        manifest = parse_skill_file(self.skill_file)
-        public_usage = manifest.metadata.get("public_usage", {})
-        input_formats = public_usage.get("input_formats", [])
-        material_data = next(item for item in input_formats if item.get("name") == "material_data")
-
-        self.assertIn("ped_id", material_data.get("description", ""))
-        self.assertIn("ped_id", material_data.get("example_columns", []))
-        self.assertNotIn("variety_name", material_data.get("example_columns", []))
+        text = (self.skill_file.parent / "references" / "material-data.md").read_text(encoding="utf-8")
+        self.assertIn("ped_id", text)
+        self.assertNotIn("variety_name", text)
 
     def test_project_catalog_matches_field_design_queries(self) -> None:
         catalog = SkillCatalog.from_roots(["skill"])

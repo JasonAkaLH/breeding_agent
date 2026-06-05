@@ -46,6 +46,20 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("excel_sheets_truncated", response.text)
         self.assertIn("metadata.soft_skill_binding", response.text)
         self.assertIn("direct_skill_execution_disabled", response.text)
+        self.assertIn("skill.contract.yaml", response.text)
+        self.assertIn("schemas/*.input.yaml", response.text)
+        self.assertIn("SkillResourceService", response.text)
+        self.assertIn("schema_version=2", response.text)
+        self.assertIn("selected_schema_id", response.text)
+        self.assertIn("selected_entrypoint", response.text)
+        self.assertIn("resource_hints", response.text)
+        self.assertIn("skill.resource_read", response.text)
+        self.assertIn("skill.output_contract_validated", response.text)
+        self.assertIn("主代理不能读取", response.text)
+        self.assertIn("scripts/", response.text)
+        self.assertIn("runtime/", response.text)
+        self.assertIn("schemas/", response.text)
+        self.assertIn("config.yaml", response.text)
         self.assertIn("soft_skill_binding.decision", response.text)
         self.assertIn("main_agent.output_delta", response.text)
         self.assertIn("文件产物判定规则", response.text)
@@ -154,6 +168,8 @@ class DeveloperDocsAPITest(APITestCase):
             "skill.script_completed",
             "skill.service_denied",
             "skill.service_bound",
+            "skill.resource_read",
+            "skill.output_contract_validated",
             "soft_skill_binding.decision",
             "soft_skill_binding.llm_failed",
             "task.late_result_discarded",
@@ -196,6 +212,12 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertEqual(changelog_response.status_code, 200)
         self.assertIn("text/markdown", changelog_response.headers["content-type"])
         self.assertIn("# API 更新日志", changelog_response.text)
+        self.assertIn("2026-06-05", changelog_response.text)
+        self.assertIn("v2-only Skill Contract", changelog_response.text)
+        self.assertIn("skill.contract.yaml", changelog_response.text)
+        self.assertIn("_slot_collection.schema_version=2", changelog_response.text)
+        self.assertIn("SkillResourceService", changelog_response.text)
+        self.assertIn("skill.resource_read", changelog_response.text)
         self.assertIn("2026-06-01", changelog_response.text)
         self.assertIn("sheet_selection_required", changelog_response.text)
         self.assertIn("upload_sheet_selections", changelog_response.text)

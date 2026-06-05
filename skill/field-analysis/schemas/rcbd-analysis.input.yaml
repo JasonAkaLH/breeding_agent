@@ -1,0 +1,7 @@
+schema_id: rcbd_analysis
+title: RCBD 分析
+inputs:
+  design: {type: string, required: true, const: rcbd, aliases: [rcbd, 随机区组]}
+
+  field_data: {type: artifact, required: true, source: {allowed: [artifact]}, aliases: [田间数据, 表型数据, field_data]}
+  run_id: {type: string, required: false}

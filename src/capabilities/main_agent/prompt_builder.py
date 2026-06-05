@@ -304,6 +304,11 @@ def sanitize_script_results_for_prompt(script_results: list[dict[str, Any]]) -> 
 
 
 def _manifest_capability_id(manifest: Any) -> str:
+    contract = getattr(manifest, "contract", None)
+    capability = getattr(contract, "capability", None)
+    contract_id = str(getattr(capability, "id", "") or "").strip()
+    if contract_id:
+        return contract_id
     metadata = getattr(manifest, "metadata", {})
     if isinstance(metadata, Mapping):
         direct = str(metadata.get("capability_id") or "").strip()
