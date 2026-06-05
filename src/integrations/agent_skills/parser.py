@@ -8,6 +8,7 @@ import yaml
 from .io_contract import SkillIOContract
 from .manifest import SkillManifest
 from .parameters import parse_parameter_specs
+from .contract import forbidden_v1_fields, parse_skill_contract_file
 from .rust_contract import status_list as skill_runtime_status_list
 from .script_manifest import SkillScriptEntrypoint
 from .value_utils import string_tuple
@@ -40,6 +41,27 @@ def parse_skill_file(path: str | Path) -> SkillManifest:
     metadata = {key: value for key, value in data.items() if key not in _KNOWN_FIELDS}
     _validate_skill_owned_rust_metadata(metadata, source_path)
 
+    contract = None
+    contract_scripts: tuple[SkillScriptEntrypoint, ...] = ()
+    contract_path = source_path.parent / "skill.contract.yaml"
+    if contract_path.exists() and not forbidden_v1_fields(data):
+        try:
+            contract = parse_skill_contract_file(contract_path)
+            contract_scripts = tuple(
+                SkillScriptEntrypoint(
+                    name=entrypoint.name,
+                    path=entrypoint.path,
+                    runtime="python",
+                    auto_run=True,
+                    timeout_seconds=entrypoint.timeout_seconds,
+                )
+                for entrypoint in contract.entrypoints.values()
+                if entrypoint.runtime == "python_subprocess" and entrypoint.path
+            )
+        except Exception:
+            contract = None
+            contract_scripts = ()
+
     return SkillManifest(
         name=name,
         description=description,
@@ -48,9 +70,10 @@ def parse_skill_file(path: str | Path) -> SkillManifest:
         source_path=source_path,
         inputs=SkillIOContract.from_mapping(data.get("inputs")),
         outputs=SkillIOContract.from_mapping(data.get("outputs")),
-        scripts=_parse_scripts(data.get("scripts"), source_path),
+        scripts=contract_scripts or _parse_scripts(data.get("scripts"), source_path),
         parameters=parse_parameter_specs(data.get("parameters") or data.get("input_parameters")),
         metadata=metadata,
+        contract=contract,
     )
 
 

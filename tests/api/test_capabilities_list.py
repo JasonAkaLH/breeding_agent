@@ -28,13 +28,27 @@ class CapabilitiesListAPITest(APITestCase):
         (skill_dir / "SKILL.md").write_text(
             """---
 name: mini-breedstat-rcbd
-display_name: 田间试验设计
 description: 生成 RCBD 随机区组设计
 triggers:
   - 随机区组
 ---
 
 # RCBD
+""",
+            encoding="utf-8",
+        )
+        (skill_dir / "skill.contract.yaml").write_text(
+            """contract_version: '2'
+capability:
+  id: skill.mini_breedstat_rcbd
+  display_name: 田间试验设计
+  description: 生成 RCBD 随机区组设计
+runtime:
+  mode: python_subprocess
+  answer_mode: direct
+entrypoints:
+  run:
+    path: scripts/run.py
 """,
             encoding="utf-8",
         )

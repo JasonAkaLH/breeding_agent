@@ -1,104 +1,59 @@
 ---
 name: sql-query
-capability_id: skill.sql_query
-display_name: 审定品种与基因型数据库查询
-description: 通过项目级 Skill 平台服务安全回答品种、审定、基因型、表型和数据库类只读查询问题；适用于需要从受控 MySQL 只读库检索业务数据并返回表格预览的请求。
-triggers:
-  - 查询品种
-  - 查询审定品种
-  - 查询基因型
-  - 审定信息
-  - 基因型
-  - 表型数据
-  - 审定品种库
-  - 品种审定库
-  - 审定品种
-  - 审定
-  - 品种审定
-  - 品种审定公告
-  - 申请审定
-  - 品种信息
-  - 品种详情
-  - 品种资料
-  - 基因型数据库
-  - 基因
-  - 基因组
-  - 基因型分析
-  - 基因型测序
-  - 基因型测序数据
-  - QTN
-  - 变异
-  - 变异位点
-  - 粳稻
-  - 籼稻
-  - 粳籼稻
-  - 籼粳稻
-  - 粳型
-  - 籼型
-public_usage:
-  overview: >-
-    面向品种、审定、基因型、表型和业务资料的只读查询问答；适合用户用自然语言询问品种信息、审定公告、基因型位点或表型记录。
-  input_formats:
-    - name: query
-      required: true
-      description: 用户自然语言查询；应说明查询对象、条件、地区、年份、品种名称、基因或性状等业务限定。
-  parameters:
-    - name: query
-      description: 查询问题本身；系统只返回只读结果摘要和表格预览，不执行写入、修改或删除。
-  examples:
-    - /sql-query 查询某品种的审定信息
-    - /sql-query 对比这些品种的基因型记录
-    - /sql-query 查找 2020 年以后某地区的审定公告
-  outputs:
-    - 查询结果摘要
-    - 表格预览
-    - 必要的数据口径和筛选说明
-parameters:
-  query:
-    type: string
-    required: true
-outputs:
-  required:
-    - summary
-    - filtered_query_result
-execution:
-  mode: platform_service
-  trust_scope: project
-  handler: skill.sql_query.platform_handler
-  handler_module: runtime/sql_query_skill/platform_handler.py
-  handler_factory: build_handler
-  answer_mode: requires_finalizer
-  services:
-    - mysql_readonly
-    - llm.non_stream
-    - artifact_writer
-    - progress_events
+description: >-
+  通过项目级受控平台服务安全回答品种、审定、基因型、表型和业务数据库类只读查询问题。适用于查询品种信息、审定公告、申请审定、审定年份/地区、粳稻/籼稻类型、基因型测序数据、QTN/变异位点、表型记录、数据库结果摘要、表格预览、自然语言转只读查询，以及询问查询口径或筛选条件的场景。
 ---
 
 # SQLQuery Skill（Platform Service）
 
 ## Use when
-- 用户需要查询品种、审定、基因型、表型或数据库中的只读业务数据。
 
-## Implementation
-- 由通用 `SkillExecutor` 执行，公开 capability 固定为 `skill.sql_query`。
-- 使用 runtime 预注册且 allowlist 通过的 `skill.sql_query.platform_handler` 平台服务 handler。
-- 业务链路由本 Skill bundle 内 `runtime/sql_query_skill/` 实现，包含意图理解、schema context、SQL 生成、SQL Guard、只读执行和结果筛选。
-- `answer_mode: requires_finalizer` 表示 Skill 输出结构化查询结果后，再由主代理生成最终自然语言回答。
+- 用户需要查询品种、审定、基因型、表型或数据库中的只读业务数据。
+- 用户用自然语言询问某个品种、材料、地区、年份、审定公告、基因、QTN、变异位点或表型记录。
+- 用户希望获得结果摘要、表格预览、筛选口径或进一步追问查询结果。
+
+平台执行事实源由同目录 `skill.contract.yaml` 决定。本文只提供 agent-facing 查询流程和安全边界；SQL guard、schema context、handler、service allowlist 和连接配置属于平台内部实现，不进入主代理 prompt，也不向用户暴露。
+
+## 查询输入
+
+用户应尽量说明：
+
+- 查询对象：品种、材料、基因、QTN、变异位点、性状、地区或年份。
+- 查询条件：名称、时间范围、地域、类型、审定状态、基因型或表型限定。
+- 期望输出：摘要、表格预览、对比、筛选解释或后续分析。
+
+缺少关键查询实体时，先进行可控澄清。不要为了执行而编造品种名、地区、年份、基因或 SQL 条件。
+
+按需读取：
+
+- `references/usage.md`：查询示例、输入口径和输出说明。
+- `references/query-boundaries.md`：只读边界、澄清策略和安全提示。
 
 ## Workflow
+
 1. 判断查询意图和目标数据域。
-2. 准备 schema context。
-3. 生成候选只读 SQL。
-4. SQL 必须经过 guard 校验。
-5. 只允许通过 readonly adapter 执行。
-6. 对查询结果做 LLM / fallback 筛选。
-7. 返回业务摘要、原始 preview、筛选后 preview 和必要诊断。
+2. 提取用户给出的实体、条件、时间/地区/类型限定和期望输出。
+3. 如果关键实体缺失，先追问一个最重要的问题。
+4. 让平台服务准备 schema context、生成候选只读查询、执行 guard 校验、只读执行和结果筛选。
+5. 基于平台返回的业务摘要、原始 preview、筛选后 preview 和诊断生成最终回答。
+6. 对 follow-up questions，沿用当前会话中的查询语境和结果摘要；必要时再次发起受控只读查询。
+
+## 输出策略
+
+默认最终回复应包含：
+
+- 查询问题的理解和关键筛选条件。
+- 结果摘要。
+- 表格预览或字段摘要。
+- 数据口径、筛选限制或未命中的原因。
+- 如果结果过多，说明已做截断/筛选，并建议用户补充条件。
+
+不要把内部 SQL、完整 prompt、数据库 schema 原文或连接信息直接展示给用户。只有用户明确要求解释查询口径时，才用业务语言解释筛选逻辑，不暴露安全实现细节。
 
 ## Boundaries
-- 不执行写入、删除、更新、DDL、权限变更或多语句 SQL。
-- 不暴露数据库连接信息、账号、密码、LLM key 或完整 prompt。
-- 不转换为 `python_subprocess`，也不让普通脚本直接绑定 MySQL、内部 LLM、secret 或完整环境变量。
-- 前端和编排层只能把 `skill.sql_query` 当作公共 SQLQuery 入口；领域阶段只存在于 handler 内部。
-- SQLQuery 进度与产物使用 `domain_kind=sql_query` 和 `capability_id=skill.sql_query` metadata。
-- 缺少关键查询实体时返回可控澄清，不编造 SQL。
+
+- 只读：不执行写入、删除、更新、DDL、权限变更、多语句 SQL 或高风险管理操作。
+- 不暴露数据库连接信息、账号、密码、LLM key、完整 prompt、handler、service、内部配置或本机路径。
+- 不把本 Skill 转成普通脚本执行，也不让普通脚本直接绑定数据库、内部 LLM、secret 或完整环境变量。
+- 前端和编排层只能把 `skill.sql_query` 当作公共查询入口；领域阶段和安全校验属于平台内部。
+- 缺少关键查询实体时返回可控澄清，不编造 SQL 或业务数据。

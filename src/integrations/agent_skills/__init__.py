@@ -1,4 +1,19 @@
 from .catalog import SkillCatalog
+from .contract import (
+    SkillCapabilityContract,
+    SkillContract,
+    SkillContractDiagnostic,
+    SkillContractParseError,
+    SkillEntrypointContract,
+    SkillInputSchemaRef,
+    SkillOutputContract,
+    SkillResourcePolicy,
+    SkillResourceRef,
+    SkillRoutingContract,
+    SkillRuntimeContract,
+    SkillSchemaSelectorContract,
+    parse_skill_contract_file,
+)
 from .execution import (
     SkillExecutionConfig,
     SkillExecutionConfigError,
@@ -26,6 +41,20 @@ from .input_resolution import (
     resolve_skill_inputs,
     resolve_skill_inputs_with_llm,
 )
+from .input_schema import (
+    SkillInputClarification,
+    SkillInputField,
+    SkillInputSchema,
+    SkillInputSchemaParseError,
+    SkillInputSourcePolicy,
+    SkillInputValidationIssue,
+    SkillInputValidationResult,
+    SkillInputValidationRule,
+    load_input_schemas_for_contract,
+    parse_input_schema_file,
+    validate_selected_schema_payload,
+)
+from .input_schema_selector import SkillSchemaSelectionResult, select_input_schema
 from .io_contract import SkillIOContract
 from .manifest import SkillManifest
 from .matcher import SkillMatch, match_skills
@@ -33,6 +62,7 @@ from .parameters import SkillParameterSpec
 from .parser import SkillParseError, parse_skill_file
 from .pyo3_policy import SkillRuntimePyo3PolicyClient, try_load_skill_runtime_pyo3_policy_client
 from .public_profile import PublicSkillProfile, build_public_skill_profile
+from .resource_service import SkillResourceReadResult, SkillResourceService
 from .script_manifest import SkillScriptEntrypoint
 from .script_runner import SkillSandboxUnavailableError, SkillScriptError, SkillScriptOutputValidationError, SkillScriptRunner, SkillScriptTimeoutError
 from .skill_capabilities import SkillCapabilityDiagnostic, SkillCapabilityRegistry, build_skill_capability_registry
@@ -51,6 +81,14 @@ __all__ = [
     "SkillExecutionConfigError",
     "SkillInputResolutionContext",
     "SkillInputResolutionResult",
+    "SkillInputClarification",
+    "SkillInputField",
+    "SkillInputSchema",
+    "SkillInputSchemaParseError",
+    "SkillInputSourcePolicy",
+    "SkillInputValidationIssue",
+    "SkillInputValidationResult",
+    "SkillInputValidationRule",
     "SkillInputSource",
     "SkillInputTextGenerator",
     "SkillIOContract",
@@ -71,12 +109,27 @@ __all__ = [
     "SkillScriptTimeoutError",
     "SkillServiceRegistry",
     "SkillCapabilityDiagnostic",
+    "SkillCapabilityContract",
+    "SkillContract",
+    "SkillContractDiagnostic",
+    "SkillContractParseError",
+    "SkillEntrypointContract",
+    "SkillInputSchemaRef",
+    "SkillOutputContract",
+    "SkillResourcePolicy",
+    "SkillResourceRef",
+    "SkillRoutingContract",
+    "SkillRuntimeContract",
+    "SkillSchemaSelectorContract",
+    "SkillSchemaSelectionResult",
     "SkillCapabilityRegistry",
     "SkillRuntimeBundle",
     "SkillRuntimeRefreshResult",
     "SkillRuntimeState",
     "SkillRuntimePyo3PolicyClient",
     "PublicSkillProfile",
+    "SkillResourceReadResult",
+    "SkillResourceService",
     "build_skill_artifact_context",
     "build_skill_script_artifact_context",
     "build_skill_safe_metadata",
@@ -88,10 +141,15 @@ __all__ = [
     "normalize_skill_response_payload",
     "normalize_platform_handler_result",
     "parse_skill_file",
+    "parse_skill_contract_file",
+    "parse_input_schema_file",
+    "load_input_schemas_for_contract",
     "resolve_skill_execution_config",
     "resolve_skill_inputs",
     "resolve_skill_inputs_with_llm",
     "select_skill_entrypoint",
+    "select_input_schema",
+    "validate_selected_schema_payload",
     "try_load_skill_runtime_pyo3_policy_client",
     "validate_skill_runtime_artifact_provenance",
     "validate_skill_runtime_benchmark_report",

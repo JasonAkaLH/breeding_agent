@@ -16,6 +16,7 @@ from src.integrations.agent_skills import (
     SkillMatch,
     SkillScriptExecutionService,
     SkillScriptRunner,
+    SkillResourceService,
     match_skills,
     normalize_skill_response_payload,
     build_public_skill_profile,
@@ -541,6 +542,13 @@ class MainAgentRespondCapability(CapabilityContract):
             answer_reason_code = "target_mismatch"
         elif decision.get("decision") == "execute" and not self._is_high_confidence(decision.get("confidence")):
             answer_reason_code = "low_confidence"
+        resource_context, resource_events = self._read_soft_skill_public_resources(
+            request=request,
+            manifest=manifest,
+            capability_id=capability_id,
+        )
+        if resource_context:
+            profile = {**profile, "resource_context": resource_context}
         answer_prompt_resolution = self._build_soft_skill_answer_prompt_resolution(
             user_message=user_message,
             artifact_context=artifact_context,
@@ -558,7 +566,7 @@ class MainAgentRespondCapability(CapabilityContract):
             profiles=(answer_prompt_resolution.llm_call_payload,),
             stages=("soft_skill_answer",),
         )
-        soft_profile_events = (*soft_profile_events, *answer_profile_events)
+        soft_profile_events = (*soft_profile_events, *resource_events, *answer_profile_events)
         try:
             (
                 answer,
@@ -624,6 +632,11 @@ class MainAgentRespondCapability(CapabilityContract):
 
     @staticmethod
     def _manifest_capability_id(manifest: Any) -> str:
+        contract = getattr(manifest, "contract", None)
+        capability = getattr(contract, "capability", None)
+        contract_id = str(getattr(capability, "id", "") or "").strip()
+        if contract_id:
+            return contract_id
         direct = str(getattr(manifest, "metadata", {}).get("capability_id") or "").strip()
         if direct:
             return direct
@@ -635,6 +648,49 @@ class MainAgentRespondCapability(CapabilityContract):
         normalized = re.sub(r"[^a-z0-9]+", "_", str(manifest.name).lower()).strip("_")
         normalized = re.sub(r"_+", "_", normalized)
         return f"skill.{normalized or 'unnamed'}"
+
+    def _read_soft_skill_public_resources(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        manifest: Any,
+        capability_id: str,
+    ) -> tuple[list[dict[str, Any]], tuple[Any, ...]]:
+        contract = getattr(manifest, "contract", None)
+        if contract is None or not getattr(contract, "resources", None):
+            return [], ()
+        service = SkillResourceService()
+        contexts: list[dict[str, Any]] = []
+        events: list[Any] = []
+        for resource in contract.resources.values():
+            if "main_agent" not in resource.audience:
+                continue
+            result = service.read(
+                contract,
+                skill_name=getattr(manifest, "name", capability_id),
+                audience="main_agent",
+                resource_id=resource.resource_id,
+                max_bytes=8192,
+            )
+            events.append(
+                make_event(
+                    request,
+                    event_type="skill.resource_read",
+                    payload=result.audit_payload(),
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+            if not result.ok:
+                continue
+            contexts.append(
+                {
+                    "resource_id": result.resource_id,
+                    "content": result.content,
+                    "truncated": result.truncated,
+                    "redaction_count": result.redaction_count,
+                }
+            )
+        return contexts, tuple(events)
 
     @staticmethod
     def _build_soft_skill_decision_prompt(
@@ -1273,6 +1329,8 @@ class MainAgentRespondCapability(CapabilityContract):
         raw_script_artifacts = request.metadata.get("skill_artifacts")
         script_input_artifacts = raw_script_artifacts if isinstance(raw_script_artifacts, list | tuple) else artifact_context
         for match in skill_matches:
+            if getattr(match.manifest, "contract", None) is not None:
+                continue
             try:
                 execution_config = resolve_skill_execution_config(match.manifest)
             except SkillExecutionConfigError:

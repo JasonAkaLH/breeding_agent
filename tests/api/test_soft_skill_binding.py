@@ -181,6 +181,7 @@ class SoftSkillBindingAPITest(APITestCase):
             await self.wait_for_terminal_task(task_id)
 
         events = await self.runtime.storage.list_events_for_task(task_id)
+        self.assertTrue(any(event.event_type == "skill.resource_read" and event.payload.get("ok") is True for event in events))
         decision_event = next(event for event in events if event.event_type == "soft_skill_binding.decision")
         profile_templates = [
             event.payload["template_id"]

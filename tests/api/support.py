@@ -372,26 +372,15 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
     def _write_generic_data_lookup_skill(root: Path) -> None:
         skill_dir = root / GENERIC_DATA_SKILL_NAME
         runtime_dir = skill_dir / "runtime" / "generic_data_lookup"
+        references_dir = skill_dir / "references"
         runtime_dir.mkdir(parents=True, exist_ok=True)
+        references_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(
             textwrap.dedent(
                 f"""\
                 ---
                 name: {GENERIC_DATA_SKILL_NAME}
-                capability_id: {GENERIC_DATA_SKILL_ID}
                 description: 测试用受控数据查询平台服务，用于系统级 API 编排回归，不承载具体业务领域语义。
-                triggers:
-                  - 查询数据
-                  - 查一下
-                execution:
-                  mode: platform_service
-                  trust_scope: project
-                  handler: skill.generic_data_lookup.platform_handler
-                  handler_module: runtime/generic_data_lookup/platform_handler.py
-                  handler_factory: build_handler
-                  answer_mode: requires_finalizer
-                  services:
-                    - mysql_readonly
                 ---
 
                 # Generic Data Lookup
@@ -401,6 +390,52 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             ),
             encoding="utf-8",
         )
+        (skill_dir / "skill.contract.yaml").write_text(
+            textwrap.dedent(
+                f"""\
+                contract_version: '2'
+                capability:
+                  id: {GENERIC_DATA_SKILL_ID}
+                  display_name: Generic Data Lookup
+                  description: 测试用受控数据查询平台服务，用于系统级 API 编排回归，不承载具体业务领域语义。
+                  version: '1'
+                routing:
+                  triggers:
+                    - 查询数据
+                    - 查一下
+                runtime:
+                  mode: platform_service
+                  trust_scope: project
+                  handler: skill.generic_data_lookup.platform_handler
+                  handler_module: runtime/generic_data_lookup/platform_handler.py
+                  handler_factory: build_handler
+                  answer_mode: requires_finalizer
+                  services:
+                    - mysql_readonly
+                entrypoints:
+                  query:
+                    runtime: platform_service
+                    handler: skill.generic_data_lookup.platform_handler
+                    handler_module: runtime/generic_data_lookup/platform_handler.py
+                    handler_factory: build_handler
+                    services: [mysql_readonly]
+                    answer_mode: requires_finalizer
+                    output: query_output
+                outputs:
+                  query_output:
+                    required: [summary]
+                resources:
+                  usage:
+                    path: references/usage.md
+                    title: 用法说明
+                    description: 公开说明需要品种名或上传数据。
+                    audience: [main_agent, slot_question]
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        (references_dir / "usage.md").write_text("公开用法：需要品种名或上传数据；不要提供密码 token=abc。", encoding="utf-8")
         (runtime_dir / "platform_handler.py").write_text(
             textwrap.dedent(
                 """\

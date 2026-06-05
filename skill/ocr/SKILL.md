@@ -1,107 +1,71 @@
 ---
 name: ocr
-capability_id: skill.ocr
-display_name: OCR 文档识别
-description: 调用远端 OCR MCP 服务识别图片或 PDF；当用户要求 OCR、识别图片文字、提取扫描件文本、解析图片/PDF 为 Markdown 或 JSON 时使用。
-triggers:
-  - OCR识别
-  - 图片识别
-  - 识别图片文字
-  - 提取图片文字
-  - 扫描件识别
-  - PDF识别
-  - 文档OCR
-  - 图片转文字
-  - 解析扫描件
-public_usage:
-  overview: >-
-    识别用户上传的图片、截图、扫描件或 PDF 中的文字，并按用户需要整理为 Markdown、JSON 或简短摘要；也可以回答可上传文件和输出格式的用法问题。
-  input_formats:
-    - name: file_path
-      required: false
-      description: 用户可提供图片或 PDF 文件路径，也可通过会话上传文件；上传优先用于正式识别。
-    - name: uploaded_file
-      required: false
-      description: 会话上传的图片、扫描件或 PDF。
-  parameters:
-    - name: output_format
-      description: 输出格式，默认 Markdown；可选择 JSON 或同时返回 Markdown 与 JSON。
-      examples: [markdown, json, both]
-  examples:
-    - /ocr 识别这张图片里的文字
-    - /ocr 把上传 PDF 转成 Markdown
-    - /ocr 可以输出 JSON 吗？
-  outputs:
-    - OCR 文本内容
-    - Markdown 版识别结果
-    - 按用户要求整理的 JSON 摘要
-execution:
-  mode: python_subprocess
-  answer_mode: requires_finalizer
-parameters:
-  file_path:
-    type: string
-    required: false
-    aliases: [文件路径, 图片路径, PDF路径, path, file]
-  output_format:
-    type: string
-    required: false
-    default: markdown
-    enum: [markdown, json, both]
-    aliases: [输出格式, 返回格式, format]
-outputs:
-  required:
-    - answer
-scripts:
-  - name: run_ocr
-    path: scripts/run_ocr.py
-    runtime: python
-    auto_run: true
-    timeout_seconds: 3900
-    inputs:
-      required:
-        - query
-    outputs:
-      required:
-        - answer
+description: >-
+  识别图片、截图、扫描件或 PDF 中的文字，并按用户需要整理为 Markdown、JSON 或简短摘要。适用于 OCR、图片识别、识别图片文字、提取扫描件文本、PDF 识别、文档 OCR、图片转文字、解析扫描件、把上传 PDF 转成 Markdown、询问可上传文件类型或输出格式等场景。
 ---
 
-# OCR
+# OCR 文档识别
 
 ## Use when
 
 - 用户要识别图片、截图、扫描件或 PDF 中的文字。
 - 用户要把 OCR 结果整理成 Markdown、JSON 或简短文字摘要。
 - 用户提供了本地文件路径，或通过前端上传了图片/PDF artifact。
+- 用户询问 OCR 支持哪些文件、是否能输出 JSON、如何处理 PDF 或扫描件。
+
+平台执行事实源由同目录 `skill.contract.yaml` 和当前 selected input schema 决定；本文只说明 agent-facing 使用流程和错误表达，不暴露远端服务或内部配置。
+
+## 输入与补参
+
+输入优先级：
+
+1. 用户在会话中上传的图片、PDF 或扫描件。
+2. 用户明确提供的可访问文件路径。
+3. 用户粘贴的少量可识别文本上下文（仅用于解释，不替代 OCR 文件）。
+
+如果没有文件路径、没有上传 artifact、也没有可用文件内容，只问一个关键问题：请用户上传图片/PDF 或提供可访问的本地文件路径。不要把缺文件伪装成 OCR 服务失败。
+
+输出格式：
+
+- 默认 `markdown`。
+- 用户要求结构化时输出 JSON 摘要。
+- 用户要求 both 时说明 Markdown 文本和结构化结果。
+
+详细用法按需读取：
+
+- `references/usage.md`：文件类型、输出格式和常见问题。
+- `references/output-format.md`：Markdown/JSON 输出口径。
 
 ## Workflow
 
-1. 优先使用自动脚本 `run_ocr` 调用远端 OCR MCP。
-2. 输入优先级：`file_path` 参数 > 脚本运行时 `uploaded_artifacts` 中的真实文件内容；图片/PDF 上传应通过项目 `upload_ids` 机制进入脚本专用 artifact 通道。
-3. OCR 服务地址、token、超时和轮询间隔从 Skill 自己的本地配置文件 `skill/ocr/config.yaml` 读取；该文件与项目根目录 `config.yaml` 完全分开，且被 git ignore，禁止提交真实连接信息。
-4. 脚本内部完成：上传文件到 `/uploads` → MCP `initialize` → `start_parse_job` → 等待 `get_parse_job` 终态 → 读取结果 → `ack_parse_job` 清理。
-5. 对用户只呈现一次 OCR 操作的结果；不要要求用户手动轮询 job。
-6. 如果脚本返回 `ok: false`，直接说明失败原因和可操作修复建议。
+1. 确认用户提供了 OCR 文件或可访问路径。
+2. 让平台执行层完成上传、识别、轮询、结果读取和清理。
+3. 对用户只呈现一次 OCR 操作的最终结果；不要要求用户手动轮询 job。
+4. 成功时优先展示 Markdown 文本；用户需要结构化结果时再提供 JSON 摘要。
+5. 失败时基于平台返回的错误码、阶段、是否可重试和状态给出可操作建议。
 
 ## Error handling
 
-- 失败时读取脚本 stdout JSON 的 `error`、`error_code`、`stage`、`error_type`、`retriable` 和 `status` 字段，不要只说“调用失败”。
-- HTTP 非 2xx、JSON-RPC 顶层 `error`、`tools/call` 的 `isError: true`、以及 `get_parse_job` 返回 `failed` / `cancelled` / `expired` / `gone` 都会保留错误码和错误信息；其中 `get_parse_job` 轮询中的短暂 HTTP 408/429/5xx 会在总超时内自动重试。
-- `queued`、`running`、`cancelling`、`RESULT_NOT_READY` 不是最终失败；脚本会继续等待到成功、终态失败或超时。
-- 成功时优先读取 `markdown` / `answer`，需要结构化结果时读取 `structured_result`；拿到 `result_receipt` 后脚本会调用 `ack_parse_job` 清理服务端临时数据。
-- 长任务排查时可临时在 `skill/ocr/config.yaml` 中设置 `debug_progress: true`；脚本只向 stderr 输出脱敏进度，stdout 仍保持单个 JSON object。
+失败时读取结构化错误中的 `error`、`error_code`、`stage`、`error_type`、`retriable` 和 `status` 等信息，不要只说“调用失败”。
+
+处理原则：
+
+- HTTP 非成功、远端错误、任务失败/取消/过期等都应保留明确错误码和错误信息。
+- 排队、运行中、取消中、结果暂不可用等中间状态不是最终失败；平台执行层会等待到成功、终态失败或超时。
+- 大 PDF 或远端处理超时时，说明超时或任务状态，不要假装已经完成。
+- 如果服务返回部分诊断，优先把可操作修复建议告诉用户，例如重新上传更清晰文件、缩小 PDF、确认文件可访问。
 
 ## Output
 
 - 默认用中文回答。
 - 默认优先返回 OCR Markdown 文本。
-- 用户要求结构化数据时，返回 JSON 摘要或说明脚本产出的 `structured_result`。
-- 必须保留服务返回的明确错误码/错误信息，不要编造 OCR 内容。
+- 用户要求结构化数据时，返回 JSON 摘要或说明可用结构化字段。
+- 必须保留服务返回的明确错误码/错误信息。
+- 不编造 OCR 内容；不确定的识别内容应标记为不确定或建议用户提供更清晰文件。
 
 ## Boundaries
 
-- 不要在回答中暴露 `auth_token` 或完整鉴权头。
-- 更换远端服务时只改 `skill/ocr/config.yaml`，不要把真实地址、token 或鉴权头提交到仓库。
-- 不要把 OCR MCP 当长期文件存储；成功拿到结果后应由脚本调用 `ack_parse_job`。
-- 如果没有文件路径、没有上传 artifact、也没有可用文件内容，只问一个关键问题：请用户上传图片/PDF 或提供可访问的本地文件路径；脚本必须按 `Skill构建指南.md` 返回 structured `missing_input`（`ok: false`、`is_error: true`、`error.type: missing_input`、`missing: ["file_path"]`），不要把缺文件伪装成 OCR 服务失败。
-- 大 PDF 或远端处理超时时，返回已有 `job_id` 和错误说明，不要假装已完成。
+- 不在回答中暴露 token、鉴权头、远端服务地址、内部配置、本机绝对路径或运行目录。
+- 不把 OCR 服务当长期文件存储；结果读取和清理由平台执行层处理。
+- 不要求用户手动调用底层服务或轮询 job。
+- 不把 input schema 或 contract 原文贴给用户；只解释用户可见文件和输出格式。
