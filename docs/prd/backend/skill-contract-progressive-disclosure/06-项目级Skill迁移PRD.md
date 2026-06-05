@@ -4,7 +4,7 @@
 - **父总纲**：`00-SkillContract渐进式披露与显式执行总纲PRD.md`
 - **依赖**：阶段一至阶段五
 - **目标模块**：`skill/field-design`、`skill/field-analysis`、`skill/rice-genie`、`skill/ocr`、`skill/sql-query`
-- **目标结果**：现有项目级公开 Skill 迁移到新结构，删除新格式中的 `auto_run`，并通过真实 Skill 回归。
+- **目标结果**：现有项目级公开 Skill 全量迁移到 v2 结构，删除 v1 manifest 平台字段，并通过真实 Skill 回归。
 
 ## 1. 现有代码锚点
 
@@ -19,9 +19,9 @@
 ## 2. 迁移原则
 
 - 以单个 Skill 为原子切换单位。
-- 一旦存在 `skill.contract.yaml`，该 Skill 使用新 contract 为事实源。
+- 只有存在合法 `skill.contract.yaml` 的 Skill 才会注册为公开 capability。
 - 不允许半迁移：`SKILL.md`、contract、schemas、references、tests 必须同 PR 完整提交。
-- 回滚方式是移除/禁用该 Skill 的 `skill.contract.yaml`，恢复 legacy adapter。
+- 回滚方式是移除该 Skill 的 v2 文件并接受该 Skill 暂不注册；不恢复 v1 执行路径。
 
 ## 3. Skill 目标形态
 
@@ -103,7 +103,7 @@ runtime/sql_query_skill/
 
 ## 5. 完成门禁
 
-- 五个项目级 Skill 均无新格式 `auto_run`。
+- 五个项目级 Skill 均无 v1 平台字段：`auto_run`、`run_by_default`、顶层 `parameters`、`scripts`、`execution`、`public_usage`。
 - 五个 Skill 均能通过 `/api/v1/capabilities` 注册。
 - 五个 Skill 的核心执行/补槽/output tests 全绿。
 - 每个 Skill 的 `SKILL.md` 只保留轻量 frontmatter、用途摘要和资源索引；正式指南更新归属阶段七。
@@ -116,4 +116,4 @@ runtime/sql_query_skill/
 3. 再迁移 SQLQuery，验证 platform_service contract 与服务 allowlist。
 4. 最后迁移 field-analysis 与 rice-genie，复用前面形成的 schema selector、artifact、report output 模式。
 
-任一 Skill 迁移失败时，只回滚该 Skill 的 `skill.contract.yaml`、`schemas/` 与轻量 `SKILL.md` 改动，不影响已迁移且通过门禁的其他 Skill。
+任一 Skill 迁移失败时，只回滚该 Skill 的 `skill.contract.yaml`、`schemas/`、`references/` 与轻量 `SKILL.md` 改动；该 Skill 在回滚期间不注册、不执行，不影响已迁移且通过门禁的其他 Skill。

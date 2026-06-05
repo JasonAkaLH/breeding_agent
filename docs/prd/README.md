@@ -10,7 +10,7 @@
 | `docs/prd/backend/postgresql-state-platform/` | PostgreSQL State Platform 防死锁、写队列、runtime integration 与 SQLite migration/cutover Phase PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/prompt-envelope/` | 大语言模型提示词信封、动态上下文预算、KV Cache 友好组装与多大语言模型调用档案分步 PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/table-upload-normalization/` | 表格上传编码兼容、表头技术清洗、Excel sheet 选择与 prompt-safe 摘要上限分步 PRD | Phase 拆分已落地；待实施 |
-| `docs/prd/backend/skill-contract-progressive-disclosure/` | Skill Contract 渐进式披露、显式 skill.* 执行、input schema、ResourceService 与 legacy auto_run 兼容边界 | 拆分与加固完成；待实施 |
+| `docs/prd/backend/skill-contract-progressive-disclosure/` | Skill Contract v2-only 渐进式披露、显式 skill.* 执行、input schema、ResourceService 与 v1 manifest 路径删除 | clean cutover 设计确认；待实施 |
 | `docs/prd/MCP/` | MCP Runtime 长任务流式 SSE、Rust sidecar 联合改造 Phase PRD、MCP Client 四版本兼容 PRD，以及官方 SDK 引入轨道 | Phase 拆分已冻结；client 四版本兼容与官方 SDK PRD 已新增 |
 | `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | 已开始，v1 业务对话台 PRD 草案 |
 

@@ -23,16 +23,16 @@
 
 - 不迁移具体 Skill bundle。
 - 不改前端视觉体验，沿用现有 interrupt/waiting-input 能力。
-- 不下线 legacy SkillExecutor 路径。
+- 不支持 v1 manifest execution/scripts/parameters 路径。
 
 ## 2. 现有代码锚点
 
 | 锚点 | 当前事实 | 本阶段约束 |
 | --- | --- | --- |
-| `src/capabilities/skill_tool/executor.py` | 当前显式 SkillExecutor 读取旧 manifest execution/scripts/parameters。 | v2 必须优先读取 contract + selected schema；legacy executor 路径只服务未迁移 Skill。 |
+| `src/capabilities/skill_tool/executor.py` | 当前显式 SkillExecutor 读取旧 manifest execution/scripts/parameters。 | v2 必须只读取 contract + selected schema；旧 manifest execution/scripts/parameters 路径不得执行项目 Skill。 |
 | `src/integrations/agent_skills/missing_input_interrupt.py` | 当前 `_slot_collection` 已作为 waiting-input 的结构化字段存在。 | slot_collection v2 必须沿用前端可识别 envelope，同时扩展 selected schema、entrypoint、invalid、resource_hints。 |
 | `src/api/runtime.py` | resume 会把 previous slot_collection 放进 metadata。 | resume 必须恢复 v2 slot_collection，不重选 schema、不丢 resolved/invalid。 |
-| `src/orchestration/service.py` | `node.waiting_for_input` 会携带 slot_collection event payload。 | v2 事件必须兼容现有 waiting-input UX，并补充 schema/entrypoint 元数据。 |
+| `src/orchestration/service.py` | `node.waiting_for_input` 会携带 slot_collection event payload。 | v2 事件必须复用现有 waiting-input envelope，并补充 schema/entrypoint 元数据。 |
 
 ## 3. 功能需求
 
@@ -46,7 +46,7 @@
 | C5-006 | 参数完整后执行 bound entrypoint。 | selected schema 对应 entrypoint 被调用。 |
 | C5-007 | output contract 生效。 | 缺 required key fail closed；非法文件扩展拒绝 artifact。 |
 | C5-008 | finalizer dependency context 安全。 | 只包含 summary/download_url/schema id，不含内部路径。 |
-| C5-009 | slot_collection v2 envelope 向前兼容。 | `Interrupt.required_fields._slot_collection` 仍存在；新增字段不得破坏前端旧字段读取。 |
+| C5-009 | slot_collection v2 复用现有 waiting-input envelope。 | `Interrupt.required_fields._slot_collection` 仍存在；新增字段不得破坏当前前端字段读取。 |
 | C5-010 | running task 绑定 bundle revision。 | 已开始的 Skill node 使用 request metadata 中的 `skill_bundle_revision` 查 contract/schema，不被热更新影响。 |
 
 ## 4. 事件要求
@@ -81,7 +81,7 @@ last_question
 no_progress_rounds
 ```
 
-前端仍只依赖 `_slot_collection` envelope 展示 waiting-input；新增字段主要供 runtime/checkpoint/time travel 和补槽 LLM 使用。
+前端仍通过 `_slot_collection` envelope 展示 waiting-input；新增字段主要供 runtime/checkpoint/time travel 和补槽 LLM 使用。
 
 ## 6. 测试计划
 
@@ -95,5 +95,5 @@ no_progress_rounds
 - 新格式 python_subprocess 与 platform_service fake Skill 均通过。
 - slot_collection v2 resume 测试通过。
 - output contract 测试通过。
-- legacy tests 保持通过。
-- `_slot_collection` v1 展示兼容测试与 v2 resume 恢复测试均通过。
+- 无 contract Skill 或 v1 manifest execution 请求必须 fail closed，不执行。
+- 当前 `_slot_collection` 展示回归与 v2 resume 恢复测试均通过。
