@@ -4,9 +4,30 @@
 
 ## 文档入口
 
-| 文档 | 说明 | 状态 |
-| --- | --- | --- |
-| `00-SkillContract渐进式披露与显式执行PRD.md` | 新 Skill contract 结构、主代理适配、SkillExecutor v2、slot_collection v2、ResourceService、迁移/回滚与验收测试矩阵 | 设计确认，待实施计划拆解 |
+| 顺序 | 文档 | 说明 | 状态 |
+| --- | --- | --- | --- |
+| 00 | [`00-SkillContract渐进式披露与显式执行总纲PRD.md`](00-SkillContract渐进式披露与显式执行总纲PRD.md) | 跨阶段目标、不变量、总体架构、验收标准与风险控制 | 拆分完成，待实施 |
+| 01 | [`01-契约解析与LegacyAdapterPRD.md`](01-契约解析与LegacyAdapterPRD.md) | `skill.contract.yaml` 解析、capability 注册、legacy adapter 与 diagnostic | 待实施 |
+| 02 | [`02-InputSchema与SchemaSelectorPRD.md`](02-InputSchema与SchemaSelectorPRD.md) | `schemas/*.input.yaml` 解析、schema selector、selected-schema 作用域 required | 待实施 |
+| 03 | [`03-SkillResourceService按需读取PRD.md`](03-SkillResourceService按需读取PRD.md) | bundle 内默认可读 + 黑名单 + audience policy 的按需资源读取、安全裁剪、脱敏与审计 | 待实施 |
+| 04 | [`04-PublicProfile与主代理适配PRD.md`](04-PublicProfile与主代理适配PRD.md) | 主代理 public profile、soft binding、用法问题 resource read、执行请求显式 `skill.*` | 待实施 |
+| 05 | [`05-SkillExecutorV2与SlotCollectionV2PRD.md`](05-SkillExecutorV2与SlotCollectionV2PRD.md) | 新格式 SkillExecutor、InputResolver v2、slot_collection v2、output contract validation | 待实施 |
+| 06 | [`06-项目级Skill迁移PRD.md`](06-项目级Skill迁移PRD.md) | field-design、field-analysis、rice-genie、OCR、SQLQuery 的项目级迁移 | 待实施 |
+| 07 | [`07-文档API测试与Legacy下线门禁PRD.md`](07-文档API测试与Legacy下线门禁PRD.md) | 文档、API、测试矩阵与 legacy `auto_run` 下线门禁 | 待实施 |
+
+## 交付关系
+
+```text
+01 契约解析/LegacyAdapter
+ ├─ 02 InputSchema/SchemaSelector
+ ├─ 03 SkillResourceService
+ └─ 04 PublicProfile/主代理适配
+       └─ 05 SkillExecutorV2/SlotCollectionV2
+             └─ 06 项目级 Skill 迁移
+                   └─ 07 文档/API/测试/Legacy 下线门禁
+```
+
+03 可与 02 并行实施；04/05 必须同时依赖 01-03 的稳定契约。每个编号 PRD 都是可独立验收的交付单元，00 只维护跨阶段不变量和总体口径。
 
 ## 关联 PRD
 
