@@ -19,7 +19,15 @@ def match_skills(query: str, catalog: SkillCatalog, *, max_matches: int = 1) -> 
     for skill in catalog.skills:
         score = 0
         reasons: list[str] = []
-        for trigger in skill.triggers:
+        triggers = list(skill.triggers)
+        if skill.contract is not None:
+            triggers.extend(skill.contract.routing.triggers)
+            triggers.extend(skill.contract.routing.intent_aliases)
+            triggers.extend(skill.contract.routing.examples)
+            for ref in skill.contract.input_schemas.values():
+                triggers.extend(ref.aliases)
+                triggers.extend([ref.title, ref.description])
+        for trigger in triggers:
             normalized = trigger.lower().strip()
             if normalized and normalized in text:
                 score += 100

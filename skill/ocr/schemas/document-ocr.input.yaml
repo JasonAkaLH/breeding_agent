@@ -1,0 +1,9 @@
+schema_id: document_ocr
+title: OCR 文档输入
+inputs:
+  document: {type: artifact, required: false, source: {allowed: [artifact]}, aliases: [上传文件, 图片, PDF]}
+  file_path: {type: string, required: false, aliases: [文件路径, 图片路径, PDF路径, path, file]}
+  output_format: {type: string, required: false, default: markdown, enum: [markdown, json, both], aliases: [输出格式, format]}
+constraints:
+  - any_of: [document, file_path]
+  - mutually_exclusive: [document, file_path]

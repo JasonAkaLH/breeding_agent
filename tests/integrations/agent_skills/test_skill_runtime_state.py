@@ -23,6 +23,22 @@ Body.
 """,
             encoding="utf-8",
         )
+        capability_id = "skill." + name.replace("-", "_")
+        (skill_dir / "skill.contract.yaml").write_text(
+            f"""contract_version: '2'
+capability:
+  id: {capability_id}
+  display_name: {name}
+  description: {description}
+runtime:
+  mode: python_subprocess
+  answer_mode: direct
+entrypoints:
+  run:
+    path: scripts/run.py
+""",
+            encoding="utf-8",
+        )
 
     def test_refresh_builds_new_active_bundle_and_retains_old_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

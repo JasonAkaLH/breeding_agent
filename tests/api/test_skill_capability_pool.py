@@ -9,7 +9,9 @@ class SkillCapabilityPoolAPITest(APITestCase):
     async def test_fake_planner_can_select_project_skill_capability_and_force_main_agent_skill(self) -> None:
         project_skill_root = self.workspace / "skill"
         skill_dir = project_skill_root / "rcbd"
-        skill_dir.mkdir(parents=True)
+        scripts_dir = skill_dir / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "run.py").write_text("import json\nprint(json.dumps({'answer': 'done'}, ensure_ascii=False))\n", encoding="utf-8")
         (skill_dir / "SKILL.md").write_text(
             """---
 name: mini-breedstat-rcbd
@@ -20,6 +22,21 @@ triggers:
 
 # RCBD
 请使用随机区组设计 Skill。
+""",
+            encoding="utf-8",
+        )
+        (skill_dir / "skill.contract.yaml").write_text(
+            """contract_version: '2'
+capability:
+  id: skill.mini_breedstat_rcbd
+  display_name: 田间试验设计
+  description: 生成 RCBD 随机区组设计
+runtime:
+  mode: python_subprocess
+  answer_mode: direct
+entrypoints:
+  run:
+    path: scripts/run.py
 """,
             encoding="utf-8",
         )
@@ -47,14 +64,12 @@ triggers:
 
         self.assertIn("skill.mini_breedstat_rcbd", prompts[0])
         nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
-        self.assertEqual([node.capability_id for node in nodes], ["main_agent.respond"])
+        self.assertIn("skill.mini_breedstat_rcbd", [node.capability_id for node in nodes])
         events = await self.runtime.storage.list_events_for_task(task_id)
         event_types = [event.event_type for event in events]
-        self.assertIn("skill.forced_selected", event_types)
-        self.assertIn("skill.matched", event_types)
+        self.assertIn("skill.execution_started", event_types)
+        self.assertIn("skill.execution_completed", event_types)
         self.assertNotIn("skill.match_fallback", event_types)
-        forced_selected = next(event for event in events if event.event_type == "skill.forced_selected")
-        self.assertEqual(forced_selected.payload["source"], "planner")
 
     async def test_user_metadata_cannot_force_skill_without_skill_capability_route(self) -> None:
         project_skill_root = self.workspace / "skill"
@@ -70,6 +85,21 @@ triggers:
 
 # RCBD
 请使用随机区组设计 Skill。
+""",
+            encoding="utf-8",
+        )
+        (skill_dir / "skill.contract.yaml").write_text(
+            """contract_version: '2'
+capability:
+  id: skill.mini_breedstat_rcbd
+  display_name: 田间试验设计
+  description: 生成 RCBD 随机区组设计
+runtime:
+  mode: python_subprocess
+  answer_mode: direct
+entrypoints:
+  run:
+    path: scripts/run.py
 """,
             encoding="utf-8",
         )

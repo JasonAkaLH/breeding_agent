@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .catalog import SkillCatalog
+from .contract import SkillContract, SkillContractDiagnostic
 from .skill_capabilities import SkillCapabilityRegistry, build_skill_capability_registry
 
 
@@ -20,6 +21,9 @@ class SkillRuntimeBundle:
     fingerprint: tuple[tuple[str, str], ...]
     catalog: SkillCatalog
     skill_capabilities: SkillCapabilityRegistry
+    contracts_by_skill_name: dict[str, SkillContract]
+    contract_by_capability_id: dict[str, SkillContract]
+    contract_diagnostics: tuple[SkillContractDiagnostic, ...] = ()
     script_package_snapshot: bool = False
 
 
@@ -194,6 +198,21 @@ class SkillRuntimeState:
             public_skill_roots=self._public_skill_roots,
             reserved_capability_ids=self._reserved_capability_ids,
         )
+        contracts_by_skill_name = {
+            skill.name: skill.contract
+            for skill in catalog.skills
+            if skill.contract is not None
+        }
+        contract_by_capability_id = {
+            capability_id: contracts_by_skill_name[skill_name]
+            for capability_id, skill_name in capabilities.skill_name_by_capability_id.items()
+            if skill_name in contracts_by_skill_name
+        }
+        contract_diagnostics = tuple(
+            diagnostic
+            for skill in catalog.skills
+            for diagnostic in skill.contract_diagnostics
+        )
         return SkillRuntimeBundle(
             revision=revision,
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -202,6 +221,9 @@ class SkillRuntimeState:
             fingerprint=fingerprint,
             catalog=catalog,
             skill_capabilities=capabilities,
+            contracts_by_skill_name=contracts_by_skill_name,
+            contract_by_capability_id=contract_by_capability_id,
+            contract_diagnostics=contract_diagnostics,
             script_package_snapshot=False,
         )
 

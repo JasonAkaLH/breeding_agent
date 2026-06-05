@@ -486,6 +486,22 @@ class SkillExecutor(ExecutorPort):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
+        output_error = self._validate_output_contract(
+            request=request,
+            resolved=resolved,
+            output_payload=output_payload,
+        )
+        events.append(output_error[0])
+        if output_error[1] is not None:
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload=output_payload,
+                artifacts=tuple(artifacts),
+                events=tuple(events),
+                error=output_error[1],
+            )
         events.append(
             self._make_event(
                 request,
@@ -775,6 +791,22 @@ class SkillExecutor(ExecutorPort):
         if execution.answer_mode == "direct" and response_text:
             artifacts.append(self._make_text_artifact(request, response_text))
         events.extend(handler_result.events)
+        output_error = self._validate_output_contract(
+            request=request,
+            resolved=resolved,
+            output_payload=output_payload,
+        )
+        events.append(output_error[0])
+        if output_error[1] is not None:
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                output_payload=output_payload,
+                artifacts=tuple(artifacts),
+                events=tuple(events),
+                error=output_error[1],
+            )
         if handler_result.error is None and handler_interrupt is None:
             events.append(
                 self._make_event(
@@ -827,6 +859,48 @@ class SkillExecutor(ExecutorPort):
             events=tuple(events),
             interrupt=handler_interrupt,
             error=handler_result.error,
+        )
+
+    def _validate_output_contract(
+        self,
+        *,
+        request: CapabilityExecutionRequest,
+        resolved: _ResolvedSkill,
+        output_payload: Mapping[str, Any],
+    ) -> tuple[EventRecord, CapabilityExecutionError | None]:
+        contract = resolved.manifest.contract
+        if contract is None or not contract.outputs:
+            return (
+                self._make_event(
+                    request,
+                    event_type="skill.output_contract_validated",
+                    payload={"skill_name": resolved.manifest.name, "schema_validated": True, "contract": "legacy"},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                ),
+                None,
+            )
+        output_contract = next(iter(contract.outputs.values()))
+        missing = [key for key in output_contract.required if key not in output_payload]
+        ok = not missing
+        event = self._make_event(
+            request,
+            event_type="skill.output_contract_validated",
+            payload={
+                "capability_id": request.capability_id,
+                "skill_name": resolved.manifest.name,
+                "output_id": output_contract.output_id,
+                "schema_validated": ok,
+                "missing": missing,
+            },
+            visibility=EventVisibility.AUDIT_ONLY,
+        )
+        if ok:
+            return event, None
+        return event, CapabilityExecutionError(
+            code="skill_output_contract_invalid",
+            message="Skill output did not satisfy output contract.",
+            retriable=False,
+            metadata={"missing": missing},
         )
 
     @staticmethod

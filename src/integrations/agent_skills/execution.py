@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -15,6 +16,9 @@ from src.core.contracts import CapabilityExecutionError
 from src.core.models import Artifact, Interrupt
 
 from .input_resolution import SkillInputResolutionContext, SkillInputResolutionResult, SkillInputTextGenerator, resolve_skill_inputs_with_llm
+from .input_resolution import SkillInputSource
+from .input_schema import load_input_schemas_for_contract, validate_selected_schema_payload
+from .input_schema_selector import select_input_schema
 from .internal_keys import SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY, SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY
 from .manifest import SkillManifest
 from .rust_contract import load_skill_runtime_contract
@@ -390,17 +394,26 @@ class SkillScriptExecutionService:
             "uploaded_artifacts": list(prompt_artifact_context),
             "metadata": build_skill_safe_metadata(metadata),
         }
-        resolution = await resolve_skill_inputs_with_llm(
-            manifest,
-            script,
-            base_payload,
-            SkillInputResolutionContext.from_metadata(
-                query=user_message,
-                metadata=metadata,
-                artifact_summaries=prompt_artifact_context,
-            ),
-            text_generator=self._skill_input_text_generator,
+        context = SkillInputResolutionContext.from_metadata(
+            query=user_message,
+            metadata=metadata,
+            artifact_summaries=prompt_artifact_context,
         )
+        if manifest.contract is not None:
+            resolution = self._resolve_v2_inputs(
+                manifest=manifest,
+                script=script,
+                base_payload=base_payload,
+                context=context,
+            )
+        else:
+            resolution = await resolve_skill_inputs_with_llm(
+                manifest,
+                script,
+                base_payload,
+                context,
+                text_generator=self._skill_input_text_generator,
+            )
         missing = resolution.missing
         if missing:
             return SkillScriptExecutionResult(
@@ -445,8 +458,86 @@ class SkillScriptExecutionService:
             output_file_count=output_file_count,
         )
 
+    def _resolve_v2_inputs(
+        self,
+        *,
+        manifest: SkillManifest,
+        script: SkillScriptEntrypoint,
+        base_payload: Mapping[str, Any],
+        context: SkillInputResolutionContext,
+    ) -> SkillInputResolutionResult:
+        assert manifest.contract is not None
+        try:
+            schemas = load_input_schemas_for_contract(manifest.contract)
+        except Exception as exc:
+            return SkillInputResolutionResult(payload=dict(base_payload), missing=(), diagnostics=(f"schema_load_failed:{type(exc).__name__}",))
+        if not manifest.contract.input_schemas:
+            payload = dict(base_payload)
+            payload["_selected_schema_id"] = ""
+            payload["_selected_entrypoint"] = script.name
+            return SkillInputResolutionResult(payload=payload, missing=(), sources={})
+        selection = select_input_schema(
+            manifest.contract,
+            schemas,
+            query=context.query,
+            payload=base_payload,
+            metadata=base_payload.get("metadata") if isinstance(base_payload.get("metadata"), Mapping) else {},
+            artifact_summaries=context.artifact_summaries,
+        )
+        payload = dict(base_payload)
+        sources: dict[str, SkillInputSource] = {}
+        if not selection.selected:
+            field = selection.missing_selector_field or "schema"
+            payload["_selected_schema_id"] = ""
+            payload["_selected_entrypoint"] = script.name
+            payload["_schema_selection_reason"] = selection.reason
+            return SkillInputResolutionResult(payload=payload, missing=(field,), sources=sources, diagnostics=(f"schema_selector:{selection.reason}",))
+        schema = schemas[selection.selected_schema_id]
+        payload["_selected_schema_id"] = selection.selected_schema_id
+        payload["_selected_entrypoint"] = selection.selected_entrypoint or script.name
+        resolved_payload, sources = _resolve_v2_schema_fields(schema, payload, context)
+        validation = validate_selected_schema_payload(
+            schema,
+            resolved_payload,
+            candidate_sources={name: source.source for name, source in sources.items()},
+        )
+        if validation.invalid:
+            resolved_payload["_invalid"] = [
+                {"field": issue.field, "reason": issue.reason, "message": issue.message}
+                for issue in validation.invalid
+            ]
+        diagnostics = tuple(f"invalid:{issue.field}:{issue.reason}" for issue in validation.invalid)
+        missing = tuple(dict.fromkeys((*validation.missing, *(issue.field for issue in validation.invalid if issue.field in schema.inputs))))
+        return SkillInputResolutionResult(payload=resolved_payload, missing=missing, sources=sources, diagnostics=diagnostics)
+
 
 def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionConfig:
+    if manifest.contract is not None:
+        contract = manifest.contract
+        runtime = contract.runtime
+        entrypoint = next(iter(contract.entrypoints.values()), None)
+        mode = (entrypoint.runtime if entrypoint is not None else runtime.mode).strip().lower()
+        answer_mode = (
+            (entrypoint.answer_mode if entrypoint is not None else "")
+            or runtime.answer_mode
+            or (
+                skill_runtime_contract_mapping("default_answer_mode_by_execution_mode").get(mode)
+                if mode in skill_runtime_contract_mapping("default_answer_mode_by_execution_mode")
+                else ""
+            )
+        )
+        if not answer_mode:
+            raise SkillExecutionConfigError("v2 skill contract must declare runtime.answer_mode")
+        return SkillExecutionConfig(
+            mode=mode,
+            answer_mode=answer_mode,
+            trust_scope=runtime.trust_scope,
+            services=entrypoint.services if entrypoint is not None and entrypoint.services else runtime.services,
+            handler=entrypoint.handler if entrypoint is not None and entrypoint.handler else runtime.handler,
+            handler_module=entrypoint.handler_module if entrypoint is not None and entrypoint.handler_module else runtime.handler_module,
+            handler_factory=entrypoint.handler_factory if entrypoint is not None and entrypoint.handler_factory else runtime.handler_factory,
+            explicit_answer_mode=True,
+        )
     execution = manifest.metadata.get("execution") if isinstance(manifest.metadata.get("execution"), Mapping) else {}
     mode = str(execution.get("mode") or "").strip().lower()
     if not mode:
@@ -488,6 +579,19 @@ def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionCon
 
 
 def select_skill_entrypoint(manifest: SkillManifest) -> SkillScriptEntrypoint:
+    if manifest.contract is not None:
+        entrypoint = next(iter(manifest.contract.entrypoints.values()), None)
+        if entrypoint is None:
+            raise SkillExecutionConfigError("Skill contract does not declare an entrypoint.")
+        if entrypoint.runtime != "python_subprocess":
+            raise SkillExecutionConfigError("Contract entrypoint is not a python_subprocess script.")
+        return SkillScriptEntrypoint(
+            name=entrypoint.name,
+            path=entrypoint.path,
+            runtime="python",
+            auto_run=True,
+            timeout_seconds=entrypoint.timeout_seconds,
+        )
     auto_run_scripts = tuple(script for script in manifest.scripts if script.auto_run)
     if len(auto_run_scripts) == 1:
         return auto_run_scripts[0]
@@ -498,6 +602,101 @@ def select_skill_entrypoint(manifest: SkillManifest) -> SkillScriptEntrypoint:
     if not manifest.scripts:
         raise SkillExecutionConfigError("Skill does not declare a script entrypoint.")
     raise SkillExecutionConfigError("Skill declares multiple scripts and no unique auto-run entrypoint.")
+
+
+def _resolve_v2_schema_fields(schema, payload: Mapping[str, Any], context: SkillInputResolutionContext) -> tuple[dict[str, Any], dict[str, SkillInputSource]]:
+    resolved = dict(payload)
+    sources: dict[str, SkillInputSource] = {}
+    artifacts = resolved.get("uploaded_artifacts")
+    artifact_count = len(artifacts) if isinstance(artifacts, list | tuple) else len(context.artifact_summaries)
+    text_sources = (
+        ("query", context.query),
+        ("current_user_message", context.current_user_message),
+        ("resolved_user_message", context.resolved_user_message),
+        *(("recent_user_message", item) for item in context.recent_user_messages),
+    )
+    safe_metadata = resolved.get("metadata") if isinstance(resolved.get("metadata"), Mapping) else {}
+    for name, field in schema.inputs.items():
+        if name in resolved and resolved[name] not in (None, ""):
+            sources[name] = SkillInputSource(source="payload", confidence="high")
+            continue
+        if name in safe_metadata and safe_metadata[name] not in (None, ""):
+            resolved[name] = safe_metadata[name]
+            sources[name] = SkillInputSource(source="metadata", confidence="high")
+            continue
+        if field.const is not None:
+            resolved[name] = field.const
+            sources[name] = SkillInputSource(source="schema_const", confidence="high")
+            continue
+        if field.type in {"artifact", "file", "data"}:
+            if artifact_count > 0:
+                resolved[name] = {"available": True, "count": artifact_count}
+                sources[name] = SkillInputSource(source="artifact", confidence="high")
+            continue
+        for source_name, text in text_sources:
+            if not text:
+                continue
+            value = _match_v2_field(field, text)
+            if value is not None:
+                resolved[name] = value
+                sources[name] = SkillInputSource(source=source_name, confidence="high")
+                break
+    return resolved, sources
+
+
+def _match_v2_field(field, text: str) -> Any | None:
+    for pattern in field.patterns:
+        try:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+        except re.error:
+            continue
+        if match is None:
+            continue
+        raw = next((group for group in match.groups() if group not in (None, "")), match.group(0))
+        return _coerce_v2_value(field, raw)
+    aliases = tuple(dict.fromkeys((field.name, *field.aliases)))
+    for alias in aliases:
+        if not alias:
+            continue
+        if field.enum:
+            for item in field.enum:
+                if item and item.lower() in text.lower():
+                    return item
+        if field.type in {"integer", "int"}:
+            patterns = (
+                rf"(?:{re.escape(alias)})\\s*[:：=]?\\s*(\\d+)",
+                rf"(\\d+)\\s*(?:个|次|列)?\\s*(?:{re.escape(alias)})",
+            )
+        else:
+            patterns = (rf"(?:{re.escape(alias)})\\s*[:：=]\\s*([^\\s,，。；;]+)",)
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match is not None:
+                return _coerce_v2_value(field, match.group(1))
+    return None
+
+
+def _coerce_v2_value(field, value: Any) -> Any | None:
+    if field.type in {"integer", "int"}:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    if field.type in {"number", "float"}:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if field.type in {"boolean", "bool"}:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"true", "yes", "1"}:
+            return True
+        if text in {"false", "no", "0"}:
+            return False
+        return None
+    return str(value).strip() or None
 
 
 def build_skill_artifact_context(metadata: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:

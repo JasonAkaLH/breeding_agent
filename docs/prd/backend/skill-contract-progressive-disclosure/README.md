@@ -6,14 +6,14 @@
 
 | 顺序 | 文档 | 说明 | 状态 |
 | --- | --- | --- | --- |
-| 00 | [`00-SkillContract渐进式披露与显式执行总纲PRD.md`](00-SkillContract渐进式披露与显式执行总纲PRD.md) | 跨阶段目标、不变量、总体架构、验收标准与风险控制 | v2-only 复审完成，待实施 |
-| 01 | [`01-SkillContract解析与注册PRD.md`](01-SkillContract解析与注册PRD.md) | `skill.contract.yaml` 解析、capability 注册、v2 diagnostics；无 contract Skill 不注册 | 待实施 |
-| 02 | [`02-InputSchema与SchemaSelectorPRD.md`](02-InputSchema与SchemaSelectorPRD.md) | `schemas/*.input.yaml` 解析、schema selector、selected-schema 作用域 required | 待实施 |
-| 03 | [`03-SkillResourceService按需读取PRD.md`](03-SkillResourceService按需读取PRD.md) | bundle 内默认可读 + 黑名单 + audience policy 的按需资源读取、安全裁剪、脱敏与审计 | 待实施 |
-| 04 | [`04-PublicProfile与主代理适配PRD.md`](04-PublicProfile与主代理适配PRD.md) | 主代理 public profile、soft binding、用法问题 resource read、执行请求显式 `skill.*` | 待实施 |
-| 05 | [`05-SkillExecutorV2与SlotCollectionV2PRD.md`](05-SkillExecutorV2与SlotCollectionV2PRD.md) | v2 SkillExecutor、InputResolver v2、slot_collection v2、output contract validation | 待实施 |
-| 06 | [`06-项目级Skill迁移PRD.md`](06-项目级Skill迁移PRD.md) | field-design、field-analysis、rice-genie、OCR、SQLQuery 的项目级迁移 | 待实施 |
-| 07 | [`07-文档API测试与旧路径删除PRD.md`](07-文档API测试与旧路径删除PRD.md) | 文档、API、测试矩阵与 v1 manifest 注册/执行路径删除 | 待实施 |
+| 00 | [`00-SkillContract渐进式披露与显式执行总纲PRD.md`](00-SkillContract渐进式披露与显式执行总纲PRD.md) | 跨阶段目标、不变量、总体架构、验收标准与风险控制 | 已实施 |
+| 01 | [`01-SkillContract解析与注册PRD.md`](01-SkillContract解析与注册PRD.md) | `skill.contract.yaml` 解析、capability 注册、v2 diagnostics；无 contract Skill 不注册 | 已实施 |
+| 02 | [`02-InputSchema与SchemaSelectorPRD.md`](02-InputSchema与SchemaSelectorPRD.md) | `schemas/*.input.yaml` 解析、schema selector、selected-schema 作用域 required | 已实施 |
+| 03 | [`03-SkillResourceService按需读取PRD.md`](03-SkillResourceService按需读取PRD.md) | bundle 内默认可读 + 黑名单 + audience policy 的按需资源读取、安全裁剪、脱敏与审计 | 已实施 |
+| 04 | [`04-PublicProfile与主代理适配PRD.md`](04-PublicProfile与主代理适配PRD.md) | 主代理 public profile、soft binding、用法问题 resource read、执行请求显式 `skill.*` | 已实施 |
+| 05 | [`05-SkillExecutorV2与SlotCollectionV2PRD.md`](05-SkillExecutorV2与SlotCollectionV2PRD.md) | v2 SkillExecutor、InputResolver v2、slot_collection v2、output contract validation | 已实施 |
+| 06 | [`06-项目级Skill迁移PRD.md`](06-项目级Skill迁移PRD.md) | field-design、field-analysis、rice-genie、OCR、SQLQuery 的项目级迁移 | 已实施 |
+| 07 | [`07-文档API测试与旧路径删除PRD.md`](07-文档API测试与旧路径删除PRD.md) | 文档、API、测试矩阵与 v1 manifest 注册/执行路径删除 | 已实施 |
 
 ## 交付关系
 
