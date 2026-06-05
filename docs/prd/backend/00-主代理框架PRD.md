@@ -83,6 +83,7 @@
 | Skill 动态加载与热部署 | `docs/prd/backend/13-Skill动态加载与热部署PRD.md` | 新聊天首次任务前动态刷新 Skill runtime bundle，实现公开 Skill 热加载、原子激活与运行中任务保护 |
 | MCP Runtime 实现需求 | `docs/prd/backend/14-MCPRuntime实现需求PRD.md` | 按 MCP latest spec 2025-11-25 设计外部 MCP server / tools 接入、标准通信、capability 包装与安全治理 |
 | Skill Executor 实现需求 | `docs/prd/backend/15-SkillExecutor实现需求PRD.md` | 定义 `skill.*` 一等执行器的职责边界、service binding、安全约束、artifact/event 归一化与 数据查询 Skill 化前置要求 |
+| Skill Contract 渐进式披露与显式执行 | `docs/prd/backend/skill-contract-progressive-disclosure/README.md` | 将项目级 Skill bundle 拆分为轻量 `SKILL.md`、`skill.contract.yaml`、`schemas/*.input.yaml` 与按需资源读取，统一新格式 Skill 走显式 `skill.*` node，移除新格式 `auto_run` 语义 |
 | Rust 化 Runtime 模块评估 | `docs/prd/backend/16-Rust化Runtime模块评估PRD.md` | 评估主体 runtime substrate、Skill/MCP、storage/event、artifact 与 deterministic kernel 的 Rust native 下沉边界；不针对单个业务 Skill 做专项优化 |
 | MCP 长任务与流式 SSE | `docs/prd/backend/17-MCP长任务流式SSEPRD.md` | 将 MCP Runtime 从单条 SSE 兼容升级为完整长任务流式 SSE、断线恢复、progress、task status、取消与 API/SSE 事件桥接 |
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
@@ -239,6 +240,7 @@
 - Skill 输出文件 Artifact 与下载 PRD：`docs/prd/backend/11-Skill输出文件Artifact与下载PRD.md`
 - Skill 一等 Capability 能力池 PRD：`docs/prd/backend/12-Skill一等Capability能力池PRD.md`
 - Skill 动态加载与热部署 PRD：`docs/prd/backend/13-Skill动态加载与热部署PRD.md`
+- Skill Contract 渐进式披露与显式执行 PRD：`docs/prd/backend/skill-contract-progressive-disclosure/README.md`
 - MCP Runtime 实现需求 PRD：`docs/prd/backend/14-MCPRuntime实现需求PRD.md`
 - Skill Executor 实现需求 PRD：`docs/prd/backend/15-SkillExecutor实现需求PRD.md`
 - Rust 化 Runtime 模块评估 PRD：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md`
