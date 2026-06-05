@@ -22,7 +22,15 @@
 - 不立即删除 legacy adapter，除非所有迁移和门禁满足。
 - 不新增前端专属业务卡片。
 
-## 2. 功能需求
+## 2. 现有文档与 API 锚点
+
+| 锚点 | 当前事实 | 本阶段约束 |
+| --- | --- | --- |
+| `Skill构建指南.md` | 当前仍描述大 frontmatter manifest。 | 指南必须改成轻量 `SKILL.md` + contract + schemas + references 的新结构。 |
+| `docs/api/api-doc.html` 与开发者文档测试 | API 文档已有 endpoint 说明回归。 | 必须补充 capability、skill execution、interrupt/resume、resource read 的外部调用边界。 |
+| `tests/api/test_developer_docs.py` | 当前锁定 API 文档说明质量。 | 新 Skill contract/API 说明必须被文档回归覆盖。 |
+
+## 3. 功能需求
 
 | ID | Requirement | 验收 |
 | --- | --- | --- |
@@ -31,8 +39,10 @@
 | C7-003 | 文档说明 ResourceService 按需读取边界。 | 主代理不能读取 scripts/runtime/schemas/config 原文。 |
 | C7-004 | 测试矩阵可重复执行。 | backend integration/API/e2e 命令列明。 |
 | C7-005 | Legacy 下线门禁明确。 | 只有全部项目级 Skill 迁移且回归全绿后，才允许另 PR 删除 legacy auto-run。 |
+| C7-006 | 文档不误导外部调用方硬调 `skill.*`。 | API 文档说明外部调用方提交用户消息/附件/interrupt answer，`skill.*` 由后端 planner/replanner/task graph 产生。 |
+| C7-007 | 新模板不包含 legacy 字段。 | 示例中不得出现 `public_usage.parameters`、顶层 `parameters`、`scripts[].auto_run` 或 `run_by_default`。 |
 
-## 3. Legacy 下线门禁
+## 4. Legacy 下线门禁
 
 满足以下条件后，才允许另立 PR 删除旧 main-agent 隐式 `auto_run` 路径：
 
@@ -42,8 +52,9 @@
 4. field-design、field-analysis、rice-genie、OCR、SQLQuery e2e 全绿。
 5. 旧格式用户级或测试 Skill 有明确兼容替代或保留说明。
 
-## 4. 完成门禁
+## 5. 完成门禁
 
 - 文档、API、PRD、CHANGELOG 全部同步。
 - 迁移后 full targeted regression 通过。
 - License Requirement 记录完整。
+- 文档 grep 门禁通过：新格式示例不包含 `auto_run` / `run_by_default` / 旧 `parameters` manifest。

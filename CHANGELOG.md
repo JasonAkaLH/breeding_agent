@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+- Skill Contract 渐进式披露拆分 PRD 完成 document-perfectization 复审：为 00 总纲补齐跨阶段非功能要求，为 01-07 阶段 PRD 增加现有代码/文档锚点、selector allowlist、ResourceService 限额与结构化失败、main-agent 隐式执行负向约束、slot_collection v2 向前兼容形态、项目级 Skill 迁移顺序，以及文档/API/Legacy 下线 grep 门禁；修正测试路径和阶段 06/07 文档归属重复。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Skill Contract 渐进式披露 PRD 已拆分为总纲 + 7 个可交付阶段 PRD：新增契约解析/LegacyAdapter、InputSchema/SchemaSelector、SkillResourceService、PublicProfile/主代理适配、SkillExecutorV2/SlotCollectionV2、项目级 Skill 迁移、文档/API/测试/Legacy 下线门禁文档；00 总纲只保留跨阶段目标、不变量、验收标准与风险控制。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Skill Contract 渐进式披露 PRD 已迁入正式 PRD 目录：从 `docs/superpowers/specs/` 移至 `docs/prd/backend/skill-contract-progressive-disclosure/00-SkillContract渐进式披露与显式执行总纲PRD.md`，新增专题 README，并同步更新 `docs/prd/README.md` 与后端主代理 PRD 索引。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Skill Contract 渐进式披露 PRD 完成 document-perfectization 加固：补齐用户/受影响系统、术语边界、`SKILL.md` 索引与 `SkillResourceService` 按需读取关系、main_agent 拒读 machine schema 原文的资源策略、事件/审计/恢复证据矩阵，以及按 Skill 原子迁移和回滚规则；明确新格式仍以 contract/schema 为执行事实源，索引只做导航。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。

@@ -25,7 +25,15 @@
 - 不改 SkillExecutor 执行逻辑。
 - 不实现全文搜索/RAG；只做受控文件读取与裁剪。
 
-## 2. 功能需求
+## 2. 现有代码锚点
+
+| 锚点 | 当前事实 | 本阶段约束 |
+| --- | --- | --- |
+| `src/integrations/agent_skills/public_profile.py` | 当前 public profile 只序列化 allowlist metadata，不读取 `manifest.body` 或正文索引。 | ResourceService 必须成为读取 `references/*` 的唯一 prompt-facing 通道。 |
+| `src/capabilities/main_agent/prompt_builder.py` | 当前主代理 prompt 消费 public usage 摘要。 | 主代理只能看到资源索引和经 ResourceService 返回的裁剪/脱敏文本。 |
+| Skill bundle 目录 | 当前脚本、runtime、references、配置可能同目录共存。 | 默认可读只适用于通过 audience policy 过滤后的 bundle 内文本资源，不等于 prompt 可裸读。 |
+
+## 3. 功能需求
 
 | ID | Requirement | 验收 |
 | --- | --- | --- |
@@ -36,22 +44,25 @@
 | C3-005 | 内容裁剪和脱敏生效。 | 超大文件 truncated；token/password/base_url 被脱敏。 |
 | C3-006 | 每次读取/拒绝均审计。 | `skill.resource_read` payload 不含文件原文。 |
 | C3-007 | `SKILL.md` 索引只是导航。 | 索引到 allowed 文档可读；索引到 denied 路径被拒；不推导 contract。 |
+| C3-008 | prompt-facing 读取有硬上限。 | 单次返回默认不超过 64KB 或配置的更小值；超限必须 `truncated=true` 并保留摘要边界。 |
+| C3-009 | 读取失败可解释且可恢复。 | denied/not_found/too_large/binary_unsupported 均返回结构化 reason，不抛出未分类异常给主代理。 |
 
-## 3. 安全策略
+## 4. 安全策略
 
 - 全局硬黑名单不可由 contract 放开。
 - prompt-facing audience 不得读取 machine schema 原文。
 - 非文本文件不得原样进入 prompt。
 - 审计只记录路径摘要、resource id、audience、truncated、redaction_count、denied_reason。
 
-## 4. 测试计划
+## 5. 测试计划
 
 - `tests/integrations/agent_skills/test_skill_resource_service.py`
-- API/runtime smoke 覆盖 audit event。
+- `tests/api/test_skill_resource_service.py` 覆盖 resource read audit event 与 API/runtime 调用边界。
 
-## 5. 完成门禁
+## 6. 完成门禁
 
 - 所有资源读取安全测试通过。
 - 无 secret/raw content 进入 audit。
 - public profile 尚未消费全文，只能消费 resource index。
+- denied/not_found/truncated/redacted 四类结果均有测试证据。
 - CHANGELOG 记录 License Requirement。
