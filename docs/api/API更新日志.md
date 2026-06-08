@@ -77,7 +77,7 @@ Skill 后端接入切换为 v2-only Skill Contract：公开能力只从 `skill.c
 
 ### `/api/v1/tasks/interrupts` 与 `/api/v1/tasks/interrupts/answer`
 
-- Skill 缺参统一表现为 open interrupt，前端应按 interrupt 的 `reason_code`、`question`、`required_fields` 渲染补充输入卡片。
+- Skill 缺参统一表现为 open interrupt；当前前端直接展示 interrupt 的 `question` 文本，`required_fields` 仅用于构造回答 payload、上传引用和 sheet 选择兼容。
 - 回答 interrupt 后，服务端复用原 interrupted Skill 节点和原 finalizer，任务 root 保持稳定；客户端 payload 中伪造的内部 resume 字段会被忽略。
 - 同一任务内多轮补参会合并已接受的历史 answer payload 与上传 artifact metadata。用户先上传文件、再补标量参数时，不需要重复上传文件。
 

@@ -17,8 +17,10 @@ from src.core.models import Artifact, Interrupt
 
 from .input_resolution import SkillInputResolutionContext, SkillInputResolutionResult, SkillInputTextGenerator, resolve_skill_inputs_with_llm
 from .input_resolution import SkillInputSource
-from .input_schema import load_input_schemas_for_contract, validate_selected_schema_payload
+from .input_schema import SkillInputField, SkillInputSchema, load_input_schemas_for_contract, validate_selected_schema_payload
 from .input_schema_selector import select_input_schema
+from .missing_input_interrupt import SLOT_COLLECTION_METADATA_KEY
+from .slot_state import schema_from_snapshot
 from .internal_keys import SKILL_OUTPUT_ARTIFACT_INTERNAL_KEY, SKILL_OUTPUT_REJECTIONS_INTERNAL_KEY
 from .manifest import SkillManifest
 from .rust_contract import load_skill_runtime_contract
@@ -400,7 +402,7 @@ class SkillScriptExecutionService:
             artifact_summaries=prompt_artifact_context,
         )
         if manifest.contract is not None:
-            resolution = self._resolve_v2_inputs(
+            resolution = await self._resolve_v2_inputs(
                 manifest=manifest,
                 script=script,
                 base_payload=base_payload,
@@ -458,7 +460,7 @@ class SkillScriptExecutionService:
             output_file_count=output_file_count,
         )
 
-    def _resolve_v2_inputs(
+    async def _resolve_v2_inputs(
         self,
         *,
         manifest: SkillManifest,
@@ -476,12 +478,50 @@ class SkillScriptExecutionService:
             payload["_selected_schema_id"] = ""
             payload["_selected_entrypoint"] = script.name
             return SkillInputResolutionResult(payload=payload, missing=(), sources={})
+        active_slot_collection = context.active_slot_collection if isinstance(context.active_slot_collection, Mapping) else None
+        if active_slot_collection and active_slot_collection.get("selected_schema_id") and isinstance(active_slot_collection.get("schema_snapshot"), Mapping):
+            try:
+                schema = schema_from_snapshot(active_slot_collection["schema_snapshot"])
+            except Exception as exc:
+                return SkillInputResolutionResult(
+                    payload=dict(base_payload),
+                    missing=("_slot_schema_snapshot",),
+                    diagnostics=(f"schema_snapshot_load_failed:{type(exc).__name__}",),
+                )
+            selected_schema_id = str(active_slot_collection.get("selected_schema_id") or "")
+            if schema.schema_id != selected_schema_id:
+                return SkillInputResolutionResult(
+                    payload=dict(base_payload),
+                    missing=("_slot_schema_snapshot",),
+                    diagnostics=("schema_snapshot_mismatch",),
+                )
+            payload = dict(base_payload)
+            payload["_selected_schema_id"] = schema.schema_id
+            payload["_selected_entrypoint"] = str(active_slot_collection.get("selected_entrypoint") or script.name)
+            sources: dict[str, SkillInputSource] = {}
+            _resolve_v2_fields_from_slot_collection(schema, payload, sources, active_slot_collection)
+            validation = validate_selected_schema_payload(
+                schema,
+                payload,
+                candidate_sources={name: source.source for name, source in sources.items()},
+            )
+            if validation.invalid:
+                payload["_invalid"] = [
+                    {"field": issue.field, "reason": issue.reason, "message": issue.message}
+                    for issue in validation.invalid
+                ]
+            diagnostics = tuple(f"invalid:{issue.field}:{issue.reason}" for issue in validation.invalid)
+            missing = tuple(dict.fromkeys((*validation.missing, *(issue.field for issue in validation.invalid if issue.field in schema.inputs))))
+            return SkillInputResolutionResult(payload=payload, missing=missing, sources=sources, diagnostics=diagnostics)
+        selection_metadata = dict(base_payload.get("metadata")) if isinstance(base_payload.get("metadata"), Mapping) else {}
+        if active_slot_collection is not None:
+            selection_metadata[SLOT_COLLECTION_METADATA_KEY] = active_slot_collection
         selection = select_input_schema(
             manifest.contract,
             schemas,
             query=context.query,
             payload=base_payload,
-            metadata=base_payload.get("metadata") if isinstance(base_payload.get("metadata"), Mapping) else {},
+            metadata=selection_metadata,
             artifact_summaries=context.artifact_summaries,
         )
         payload = dict(base_payload)
@@ -495,7 +535,19 @@ class SkillScriptExecutionService:
         schema = schemas[selection.selected_schema_id]
         payload["_selected_schema_id"] = selection.selected_schema_id
         payload["_selected_entrypoint"] = selection.selected_entrypoint or script.name
-        resolved_payload, sources = _resolve_v2_schema_fields(schema, payload, context)
+        resolved_payload, sources = _resolve_v2_structured_schema_fields(schema, payload, context)
+        llm_diagnostics, prompt_profile = await _resolve_v2_schema_fields_with_llm(
+            manifest=manifest,
+            script=script,
+            schema=schema,
+            payload=resolved_payload,
+            sources=sources,
+            context=context,
+            text_generator=self._skill_input_text_generator,
+            base_payload=base_payload,
+        )
+        _resolve_v2_text_schema_fields(schema, resolved_payload, sources, context)
+        _resolve_v2_fields_from_slot_collection(schema, resolved_payload, sources, context.active_slot_collection)
         validation = validate_selected_schema_payload(
             schema,
             resolved_payload,
@@ -506,9 +558,9 @@ class SkillScriptExecutionService:
                 {"field": issue.field, "reason": issue.reason, "message": issue.message}
                 for issue in validation.invalid
             ]
-        diagnostics = tuple(f"invalid:{issue.field}:{issue.reason}" for issue in validation.invalid)
+        diagnostics = tuple(dict.fromkeys((*llm_diagnostics, *(f"invalid:{issue.field}:{issue.reason}" for issue in validation.invalid))))
         missing = tuple(dict.fromkeys((*validation.missing, *(issue.field for issue in validation.invalid if issue.field in schema.inputs))))
-        return SkillInputResolutionResult(payload=resolved_payload, missing=missing, sources=sources, diagnostics=diagnostics)
+        return SkillInputResolutionResult(payload=resolved_payload, missing=missing, sources=sources, diagnostics=diagnostics, prompt_profile=prompt_profile)
 
 
 def resolve_skill_execution_config(manifest: SkillManifest) -> SkillExecutionConfig:
@@ -604,17 +656,11 @@ def select_skill_entrypoint(manifest: SkillManifest) -> SkillScriptEntrypoint:
     raise SkillExecutionConfigError("Skill declares multiple scripts and no unique auto-run entrypoint.")
 
 
-def _resolve_v2_schema_fields(schema, payload: Mapping[str, Any], context: SkillInputResolutionContext) -> tuple[dict[str, Any], dict[str, SkillInputSource]]:
+def _resolve_v2_structured_schema_fields(schema: SkillInputSchema, payload: Mapping[str, Any], context: SkillInputResolutionContext) -> tuple[dict[str, Any], dict[str, SkillInputSource]]:
     resolved = dict(payload)
     sources: dict[str, SkillInputSource] = {}
     artifacts = resolved.get("uploaded_artifacts")
     artifact_count = len(artifacts) if isinstance(artifacts, list | tuple) else len(context.artifact_summaries)
-    text_sources = (
-        ("query", context.query),
-        ("current_user_message", context.current_user_message),
-        ("resolved_user_message", context.resolved_user_message),
-        *(("recent_user_message", item) for item in context.recent_user_messages),
-    )
     safe_metadata = resolved.get("metadata") if isinstance(resolved.get("metadata"), Mapping) else {}
     for name, field in schema.inputs.items():
         if name in resolved and resolved[name] not in (None, ""):
@@ -633,15 +679,302 @@ def _resolve_v2_schema_fields(schema, payload: Mapping[str, Any], context: Skill
                 resolved[name] = {"available": True, "count": artifact_count}
                 sources[name] = SkillInputSource(source="artifact", confidence="high")
             continue
+    return resolved, sources
+
+
+async def _resolve_v2_schema_fields_with_llm(
+    *,
+    manifest: SkillManifest,
+    script: SkillScriptEntrypoint,
+    schema: SkillInputSchema,
+    payload: dict[str, Any],
+    sources: dict[str, SkillInputSource],
+    context: SkillInputResolutionContext,
+    text_generator: SkillInputTextGenerator | None,
+    base_payload: Mapping[str, Any],
+) -> tuple[tuple[str, ...], Mapping[str, Any] | None]:
+    if text_generator is None:
+        return (), None
+    target_fields = {
+        name: field
+        for name, field in schema.inputs.items()
+        if name not in payload and _v2_llm_can_resolve(field)
+    }
+    if not target_fields:
+        return (), None
+
+    prompt_payload = _v2_llm_slot_prompt_payload(
+        manifest=manifest,
+        script=script,
+        schema=schema,
+        fields=target_fields,
+        payload=payload,
+        context=context,
+    )
+    prompt = (
+        "你是一个受限的 v2 Skill 参数补槽器。只根据给定上下文抽取 selected_schema 声明的参数，禁止编造文件、数据、路径或未声明字段。\n"
+        "结构化事实已经预先写入 already_resolved；不要覆盖这些字段。对 parameters_to_resolve 中每个字段，如果用户原句、当前消息、解析后消息或近期用户消息中已经给出参数，请抽取 canonical value。\n"
+        "artifact/file/data 字段不能由文本伪造；未给出充分证据的字段放入 missing。\n"
+        "只返回 JSON 对象，不要 Markdown。格式："
+        '{"resolved":{"字段名":{"raw_value":"原文片段","value":规范值,"source":"query|current_user_message|resolved_user_message|recent_user_message"}},'
+        '"missing":["字段名"]}\n'
+        + json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True)
+    )
+    prompt_profile: Mapping[str, Any] = {
+        "template_id": "v2_skill_input_resolver",
+        "schema_id": schema.schema_id,
+        "skill_name": manifest.name,
+        "entrypoint": script.name,
+        "target_fields": sorted(target_fields),
+    }
+    try:
+        from src.orchestration.prompt_profiles import optional_profile_kwargs
+
+        kwargs = optional_profile_kwargs(
+            text_generator,
+            prompt_profile=prompt_profile,
+            metadata=base_payload.get("metadata"),
+        )
+        raw_response = text_generator(prompt, **kwargs) if kwargs else text_generator(prompt)
+        if inspect.isawaitable(raw_response):
+            raw_response = await raw_response
+        candidates = _parse_v2_llm_slot_candidates(str(raw_response or ""))
+    except json.JSONDecodeError:
+        return ("v2_llm_invalid_json",), prompt_profile
+    except Exception:
+        return ("v2_llm_failed",), prompt_profile
+
+    diagnostics: list[str] = []
+    for name, candidate in candidates.items():
+        field = target_fields.get(name)
+        if field is None:
+            diagnostics.append("v2_llm_rejected_unknown_field")
+            continue
+        if name in payload:
+            continue
+        accepted = _validate_v2_llm_candidate(field, candidate)
+        if accepted is None:
+            diagnostics.append(f"v2_llm_rejected_invalid_value:{name}")
+            continue
+        value, source = accepted
+        payload[name] = value
+        sources[name] = source
+    return tuple(dict.fromkeys(diagnostics)), prompt_profile
+
+
+def _resolve_v2_text_schema_fields(
+    schema: SkillInputSchema,
+    payload: dict[str, Any],
+    sources: dict[str, SkillInputSource],
+    context: SkillInputResolutionContext,
+) -> None:
+    text_sources = (
+        ("query", context.query),
+        ("current_user_message", context.current_user_message),
+        ("resolved_user_message", context.resolved_user_message),
+        *(("recent_user_message", item) for item in context.recent_user_messages),
+    )
+    for name, field in schema.inputs.items():
+        if name in payload:
+            continue
+        if field.type in {"artifact", "file", "data"}:
+            continue
         for source_name, text in text_sources:
             if not text:
                 continue
             value = _match_v2_field(field, text)
             if value is not None:
-                resolved[name] = value
+                payload[name] = value
                 sources[name] = SkillInputSource(source=source_name, confidence="high")
                 break
-    return resolved, sources
+
+
+def _v2_llm_can_resolve(field: SkillInputField) -> bool:
+    if not field.expose:
+        return False
+    if field.const is not None:
+        return False
+    if field.type in {"artifact", "file", "data", "object", "array"}:
+        return False
+    allowed = tuple(str(item).strip() for item in field.source.allowed if str(item).strip())
+    if allowed and not any(source in {"query", "current_user_message", "resolved_user_message", "recent_user_message", "text"} for source in allowed):
+        return False
+    return field.type in {"string", "integer", "int", "number", "float", "boolean", "bool"}
+
+
+def _v2_llm_slot_prompt_payload(
+    *,
+    manifest: SkillManifest,
+    script: SkillScriptEntrypoint,
+    schema: SkillInputSchema,
+    fields: Mapping[str, SkillInputField],
+    payload: Mapping[str, Any],
+    context: SkillInputResolutionContext,
+) -> dict[str, Any]:
+    return {
+        "skill": {
+            "name": manifest.name,
+            "description": manifest.description,
+            "entrypoint": script.name,
+        },
+        "selected_schema": {
+            "schema_id": schema.schema_id,
+            "title": schema.title,
+            "description": schema.description,
+        },
+        "parameters_to_resolve": [
+            {
+                "name": field.name,
+                "type": field.type,
+                "required_now": bool(field.required or field.required_when),
+                "required_when": dict(field.required_when),
+                "aliases": list(field.aliases),
+                "patterns": list(field.patterns),
+                "enum": list(field.enum),
+                "description": field.description,
+                "clarification": {
+                    "hint": field.clarification.hint,
+                    "examples": list(field.clarification.examples),
+                },
+                "validation": _v2_field_validation_prompt(field),
+            }
+            for field in fields.values()
+        ],
+        "already_resolved": _v2_safe_resolved_payload(payload),
+        "context": {
+            "query": context.query,
+            "current_user_message": context.current_user_message,
+            "resolved_user_message": context.resolved_user_message,
+            "recent_user_messages": list(context.recent_user_messages),
+            "artifact_summaries": [_v2_safe_artifact_summary(item) for item in context.artifact_summaries],
+        },
+    }
+
+
+def _v2_field_validation_prompt(field: SkillInputField) -> dict[str, Any]:
+    validation: dict[str, Any] = {}
+    if field.validation.regex:
+        validation["regex"] = field.validation.regex
+    if field.validation.min is not None:
+        validation["min"] = field.validation.min
+    if field.validation.max is not None:
+        validation["max"] = field.validation.max
+    if field.validation.min_length is not None:
+        validation["min_length"] = field.validation.min_length
+    if field.validation.max_length is not None:
+        validation["max_length"] = field.validation.max_length
+    return validation
+
+
+def _v2_safe_resolved_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in payload.items():
+        key_text = str(key)
+        if key_text in {"metadata", "uploaded_artifacts", "skill_artifacts"}:
+            continue
+        if isinstance(value, str | int | float | bool) or value is None:
+            safe[key_text] = value
+        elif isinstance(value, Mapping) and value.get("available") is True:
+            safe[key_text] = {"available": True, "count": value.get("count")}
+    return safe
+
+
+def _v2_safe_artifact_summary(value: Mapping[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, raw_value in value.items():
+        key_text = str(key)
+        if key_text.lower() not in _SAFE_ARTIFACT_KEYS:
+            continue
+        if isinstance(raw_value, str | int | float | bool) or raw_value is None:
+            safe[key_text] = raw_value
+        elif isinstance(raw_value, list | tuple):
+            safe[key_text] = [item for item in raw_value if isinstance(item, str | int | float | bool) or item is None][:20]
+    return safe
+
+
+def _parse_v2_llm_slot_candidates(text: str) -> dict[str, dict[str, Any]]:
+    parsed = _load_v2_json_object(text)
+    resolved = parsed.get("resolved")
+    if not isinstance(resolved, Mapping):
+        resolved = {
+            key: value
+            for key, value in parsed.items()
+            if key not in {"missing", "diagnostics", "reasoning"}
+        }
+    candidates: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_candidate in resolved.items():
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        if isinstance(raw_candidate, Mapping):
+            candidate = dict(raw_candidate)
+            if "value" not in candidate:
+                candidate = {"value": raw_candidate}
+        else:
+            candidate = {"value": raw_candidate}
+        candidates[name] = candidate
+    return candidates
+
+
+def _load_v2_json_object(text: str) -> Mapping[str, Any]:
+    stripped = text.strip()
+    if not stripped:
+        raise json.JSONDecodeError("empty response", text, 0)
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end < start:
+            raise
+        parsed = json.loads(stripped[start : end + 1])
+    if not isinstance(parsed, Mapping):
+        raise json.JSONDecodeError("response is not a JSON object", stripped, 0)
+    return parsed
+
+
+def _validate_v2_llm_candidate(
+    field: SkillInputField,
+    candidate: Mapping[str, Any],
+) -> tuple[Any, SkillInputSource] | None:
+    source_hint = str(candidate.get("source") or "").strip()
+    if source_hint and source_hint not in {"query", "current_user_message", "resolved_user_message", "recent_user_message"}:
+        return None
+    value = _coerce_v2_value(field, candidate.get("value"))
+    if value is None:
+        return None
+    source = f"llm_slot_resolver:{source_hint}" if source_hint else "llm_slot_resolver"
+    return value, SkillInputSource(source=source, confidence="medium")
+
+
+def _resolve_v2_fields_from_slot_collection(
+    schema,
+    payload: dict[str, Any],
+    sources: dict[str, SkillInputSource],
+    active_slot_collection: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(active_slot_collection, Mapping):
+        return
+    selected_schema_id = str(active_slot_collection.get("selected_schema_id") or "").strip()
+    if selected_schema_id and selected_schema_id != schema.schema_id:
+        return
+    resolved = active_slot_collection.get("resolved")
+    if not isinstance(resolved, Mapping):
+        return
+    for name, item in resolved.items():
+        field_name = str(name)
+        if field_name not in schema.inputs:
+            continue
+        if not isinstance(item, Mapping):
+            value = item
+            source = "slot_collection"
+        else:
+            value = item.get("value", item.get("raw_value"))
+            source = str(item.get("source") or "slot_collection")
+        if value in (None, ""):
+            continue
+        payload[field_name] = value
+        sources[field_name] = SkillInputSource(source=source, confidence="high")
 
 
 def _match_v2_field(field, text: str) -> Any | None:

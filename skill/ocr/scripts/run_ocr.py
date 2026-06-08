@@ -138,7 +138,7 @@ def _failure_payload(*, error_message: str, error: OCRSkillError) -> dict[str, A
         base.update(
             {
                 "error": {"type": "missing_input", "message": error_message},
-                "missing": ["file_path"],
+                "missing": ["document"],
             }
         )
     else:
@@ -316,17 +316,6 @@ def _classify_error_code(stage: str, exc: Exception) -> str:
 
 
 def _resolve_input_file(payload: dict[str, Any]) -> tuple[bytes, str, str]:
-    file_path = payload.get("file_path") or _extract_path_from_query(str(payload.get("query") or ""))
-    if file_path:
-        path = Path(str(file_path)).expanduser()
-        if not path.is_file():
-            raise RuntimeError(f"找不到文件：{path}")
-        suffix = path.suffix.lower()
-        if suffix not in SUPPORTED_SUFFIXES:
-            raise RuntimeError("仅支持 PNG、JPG/JPEG、PDF")
-        data = path.read_bytes()
-        return data, path.name, _guess_mime(path.name)
-
     artifacts = payload.get("uploaded_artifacts")
     if isinstance(artifacts, list):
         for artifact in artifacts:
@@ -337,24 +326,12 @@ def _resolve_input_file(payload: dict[str, Any]) -> tuple[bytes, str, str]:
                 return resolved
 
     raise OCRSkillError(
-        "缺少 OCR 输入文件。请上传图片/PDF，或提供 file_path。",
+        "缺少 OCR 输入文件。请上传图片/PDF。",
         error_code="ocr_input_missing",
         stage="input",
         retriable=False,
         error_type="missing_input",
     )
-
-
-def _extract_path_from_query(query: str) -> str | None:
-    patterns = [
-        r"(?:file_path|path|文件路径|图片路径|PDF路径)\s*[:：=]\s*([^\s]+)",
-        r"([~/\.A-Za-z0-9_\-/]+\.(?:png|jpg|jpeg|pdf))",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, query, re.IGNORECASE)
-        if match:
-            return match.group(1).strip().strip('"\'')
-    return None
 
 
 def _artifact_to_file(artifact: dict[str, Any]) -> tuple[bytes, str, str] | None:

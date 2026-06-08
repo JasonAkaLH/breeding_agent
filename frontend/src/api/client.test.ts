@@ -206,6 +206,21 @@ describe('createApiClient', () => {
       method: 'POST',
       body: JSON.stringify({ task_id: 'task-1', interrupt_id: 'interrupt-1', answer_payload: { crop: '水稻' } }),
     }));
+
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ interrupt_id: 'interrupt-2', status: 'answered', node_id: 'node-2', answer_payload: {} }), { status: 202 }));
+    await api.answerInterrupt('task-1', 'interrupt-2', {
+      client_request_id: 'req-v2-1',
+      answer: { text: '12列', upload_ids: ['upl-1'] },
+    });
+    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/tasks/interrupts/answer', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        task_id: 'task-1',
+        interrupt_id: 'interrupt-2',
+        client_request_id: 'req-v2-1',
+        answer: { text: '12列', upload_ids: ['upl-1'] },
+      }),
+    }));
   });
 
   it('lists conversations and conversation messages for history restore', async () => {

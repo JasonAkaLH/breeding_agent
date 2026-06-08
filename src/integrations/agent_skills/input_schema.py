@@ -89,7 +89,18 @@ class SkillInputValidationResult:
 
 _ALLOWED_TYPES = {"string", "integer", "int", "number", "float", "boolean", "bool", "object", "array", "artifact", "file", "data"}
 _ARTIFACT_TYPES = {"artifact", "file", "data"}
-_LLM_TEXT_SOURCES = {"llm", "query", "current_user_message", "resolved_user_message", "recent_user_message", "text"}
+_ARTIFACT_TRUSTED_SOURCES = {"payload", "slot_collection", "artifact", "task_attachment", "validated_artifact", "upload_ledger"}
+_LLM_TEXT_SOURCES = {
+    "llm",
+    "query",
+    "current_answer",
+    "current_user_message",
+    "resolved_user_message",
+    "recent_user_message",
+    "text",
+    "history",
+    "artifact",
+}
 
 
 def parse_input_schema_file(path: str | Path) -> SkillInputSchema:
@@ -210,7 +221,7 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
 
 
 def _validate_field_value(field: SkillInputField, value: Any, *, source: str) -> SkillInputValidationIssue | None:
-    if field.type in _ARTIFACT_TYPES and source in _LLM_TEXT_SOURCES:
+    if field.type in _ARTIFACT_TYPES and source not in _ARTIFACT_TRUSTED_SOURCES:
         return SkillInputValidationIssue(field.name, "artifact_source_denied", "Artifact inputs must come from artifact metadata/ledger.")
     if field.const is not None and value != field.const:
         return SkillInputValidationIssue(field.name, "const_mismatch", f"Expected const value {field.const!r}.")

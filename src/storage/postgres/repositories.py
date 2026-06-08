@@ -140,6 +140,8 @@ class PostgreSQLStorage(SQLiteStorage):
             "conversation_pending_skill_context": 0,
             "mailbox_delivery": 0,
             "interrupt_answer": 0,
+            "slot_event": 0,
+            "slot_collection": 0,
             "checkpoint": 0,
             "interrupt": 0,
             "mailbox_message": 0,
@@ -180,6 +182,26 @@ class PostgreSQLStorage(SQLiteStorage):
                     i.conversation_id = :conversation_id
                     OR i.task_id IN (SELECT task_id FROM task WHERE conversation_id = :conversation_id)
                   )
+                """,
+            ),
+            (
+                "slot_event",
+                """
+                DELETE FROM slot_event e
+                USING slot_collection c
+                WHERE e.collection_id = c.collection_id
+                  AND (
+                    c.conversation_id = :conversation_id
+                    OR c.task_id IN (SELECT task_id FROM task WHERE conversation_id = :conversation_id)
+                  )
+                """,
+            ),
+            (
+                "slot_collection",
+                """
+                DELETE FROM slot_collection c
+                WHERE c.conversation_id = :conversation_id
+                   OR c.task_id IN (SELECT task_id FROM task WHERE conversation_id = :conversation_id)
                 """,
             ),
             (

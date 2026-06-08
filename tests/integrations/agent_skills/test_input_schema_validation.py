@@ -15,6 +15,19 @@ def _schema(text: str):
 
 
 class InputSchemaValidationTest(unittest.TestCase):
+    def test_field_design_diagonal_and_interval_require_ncols_from_schema(self) -> None:
+        diagonal = parse_input_schema_file("skill/field-design/schemas/diagonal.input.yaml")
+        interval = parse_input_schema_file("skill/field-design/schemas/interval.input.yaml")
+
+        self.assertTrue(diagonal.inputs["ncols"].required)
+        self.assertTrue(interval.inputs["ncols"].required)
+        self.assertIn("对角线增广", diagonal.inputs["design"].aliases)
+        self.assertEqual(validate_selected_schema_payload(diagonal, {"design": "diagonal"}).missing, ("material_data", "ncols"))
+        self.assertEqual(
+            validate_selected_schema_payload(interval, {"design": "interval", "ck_spec": "1,1,10"}).missing,
+            ("material_data", "ncols"),
+        )
+
     def test_required_is_scoped_to_selected_schema(self) -> None:
         rcbd = _schema("""
 schema_id: rcbd

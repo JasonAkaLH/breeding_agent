@@ -791,22 +791,23 @@ class SkillExecutor(ExecutorPort):
         if execution.answer_mode == "direct" and response_text:
             artifacts.append(self._make_text_artifact(request, response_text))
         events.extend(handler_result.events)
-        output_error = self._validate_output_contract(
-            request=request,
-            resolved=resolved,
-            output_payload=output_payload,
-        )
-        events.append(output_error[0])
-        if output_error[1] is not None:
-            return CapabilityExecutionResult(
-                capability_id=request.capability_id,
-                task_id=request.task_id,
-                node_id=request.node_id,
+        if handler_interrupt is None:
+            output_error = self._validate_output_contract(
+                request=request,
+                resolved=resolved,
                 output_payload=output_payload,
-                artifacts=tuple(artifacts),
-                events=tuple(events),
-                error=output_error[1],
             )
+            events.append(output_error[0])
+            if output_error[1] is not None:
+                return CapabilityExecutionResult(
+                    capability_id=request.capability_id,
+                    task_id=request.task_id,
+                    node_id=request.node_id,
+                    output_payload=output_payload,
+                    artifacts=tuple(artifacts),
+                    events=tuple(events),
+                    error=output_error[1],
+                )
         if handler_result.error is None and handler_interrupt is None:
             events.append(
                 self._make_event(
