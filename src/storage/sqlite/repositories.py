@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -28,6 +29,8 @@ from src.core.models import (
     MailboxMessage,
     Message,
     PendingSkillContext,
+    SlotCollection,
+    SlotEvent,
     Task,
     TaskEdge,
     TaskInputAttachment,
@@ -60,6 +63,8 @@ from .models import (
     MailboxMessageRow,
     MessageRow,
     PendingSkillContextRow,
+    SlotCollectionRow,
+    SlotEventRow,
     TaskInputAttachmentRow,
     TaskEdgeRow,
     TaskNodeRow,
@@ -315,6 +320,83 @@ def _row_to_interrupt_answer(row: InterruptAnswerRow) -> InterruptAnswer:
         accepted=bool(row.accepted),
         created_at=row.created_at,
         accepted_at=row.accepted_at,
+    )
+
+
+def _slot_collection_row_values(collection: SlotCollection) -> dict[str, object]:
+    return {
+        "task_id": collection.task_id,
+        "node_id": collection.node_id,
+        "conversation_id": collection.conversation_id,
+        "capability_id": collection.capability_id,
+        "skill_name": collection.skill_name,
+        "kind": collection.kind,
+        "status": collection.status,
+        "round": collection.round,
+        "revision": collection.revision,
+        "selected_schema_id": collection.selected_schema_id,
+        "selected_entrypoint": collection.selected_entrypoint,
+        "skill_bundle_revision": collection.skill_bundle_revision,
+        "contract_revision": collection.contract_revision,
+        "schema_digest": collection.schema_digest,
+        "schema_snapshot_json": dict(collection.schema_snapshot),
+        "slots_json": dict(collection.slots),
+        "resolved_json": dict(collection.resolved),
+        "missing_json": list(collection.missing),
+        "invalid_json": [dict(item) for item in collection.invalid],
+        "last_question": collection.last_question,
+        "created_at": collection.created_at,
+        "updated_at": collection.updated_at,
+        "completed_at": collection.completed_at,
+        "cancelled_at": collection.cancelled_at,
+        "failed_at": collection.failed_at,
+    }
+
+
+def _row_to_slot_collection(row: SlotCollectionRow) -> SlotCollection:
+    return SlotCollection(
+        collection_id=row.collection_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        conversation_id=row.conversation_id,
+        capability_id=row.capability_id,
+        skill_name=row.skill_name,
+        kind=row.kind,
+        status=row.status,
+        round=int(row.round or 1),
+        revision=int(row.revision or 0),
+        selected_schema_id=row.selected_schema_id,
+        selected_entrypoint=row.selected_entrypoint,
+        skill_bundle_revision=row.skill_bundle_revision,
+        contract_revision=row.contract_revision,
+        schema_digest=row.schema_digest,
+        schema_snapshot=dict(row.schema_snapshot_json or {}),
+        slots=dict(row.slots_json or {}),
+        resolved=dict(row.resolved_json or {}),
+        missing=tuple(str(item) for item in (row.missing_json or ())),
+        invalid=tuple(dict(item) for item in (row.invalid_json or ()) if isinstance(item, Mapping)),
+        last_question=row.last_question,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        completed_at=row.completed_at,
+        cancelled_at=row.cancelled_at,
+        failed_at=row.failed_at,
+    )
+
+
+def _row_to_slot_event(row: SlotEventRow) -> SlotEvent:
+    return SlotEvent(
+        slot_event_id=row.slot_event_id,
+        collection_id=row.collection_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        conversation_id=row.conversation_id,
+        event_type=row.event_type,
+        round=int(row.round or 1),
+        revision=int(row.revision or 0),
+        idempotency_key=row.idempotency_key,
+        payload=dict(row.payload_json or {}),
+        created_at=row.created_at,
     )
 
 
@@ -863,11 +945,15 @@ class SQLiteStateRepository:
         event_conditions = [EventRecordRow.conversation_id == conversation_id]
         interrupt_conditions = [InterruptRow.conversation_id == conversation_id]
         message_conditions = [MessageRow.conversation_id == conversation_id]
+        slot_collection_conditions = [SlotCollectionRow.conversation_id == conversation_id]
+        slot_event_conditions = [SlotEventRow.conversation_id == conversation_id]
         if task_ids:
             mailbox_conditions.append(MailboxMessageRow.task_id.in_(task_ids))
             event_conditions.append(EventRecordRow.task_id.in_(task_ids))
             interrupt_conditions.append(InterruptRow.task_id.in_(task_ids))
             message_conditions.append(MessageRow.task_id.in_(task_ids))
+            slot_collection_conditions.append(SlotCollectionRow.task_id.in_(task_ids))
+            slot_event_conditions.append(SlotEventRow.task_id.in_(task_ids))
 
         mailbox_message_ids = list(
             self._session.scalars(
@@ -879,12 +965,21 @@ class SQLiteStateRepository:
                 select(InterruptRow.interrupt_id).where(or_(*interrupt_conditions))
             ).all()
         )
+        slot_collection_ids = list(
+            self._session.scalars(
+                select(SlotCollectionRow.collection_id).where(or_(*slot_collection_conditions))
+            ).all()
+        )
+        if slot_collection_ids:
+            slot_event_conditions.append(SlotEventRow.collection_id.in_(slot_collection_ids))
 
         deleted_counts: dict[str, int] = {
             "conversation_memory_summary": 0,
             "conversation_pending_skill_context": 0,
             "mailbox_delivery": 0,
             "interrupt_answer": 0,
+            "slot_event": 0,
+            "slot_collection": 0,
             "checkpoint": 0,
             "interrupt": 0,
             "mailbox_message": 0,
@@ -907,6 +1002,8 @@ class SQLiteStateRepository:
             _delete("mailbox_delivery", delete(MailboxDeliveryRow).where(MailboxDeliveryRow.message_id.in_(mailbox_message_ids)))
         if interrupt_ids:
             _delete("interrupt_answer", delete(InterruptAnswerRow).where(InterruptAnswerRow.interrupt_id.in_(interrupt_ids)))
+        _delete("slot_event", delete(SlotEventRow).where(or_(*slot_event_conditions)))
+        _delete("slot_collection", delete(SlotCollectionRow).where(or_(*slot_collection_conditions)))
         if task_ids:
             _delete("checkpoint", delete(CheckpointRow).where(CheckpointRow.task_id.in_(task_ids)))
         _delete("interrupt", delete(InterruptRow).where(or_(*interrupt_conditions)))
@@ -1400,6 +1497,118 @@ class SQLiteCollaborationRepository:
             )
         ).all()
         return [_row_to_interrupt_answer(row) for row in rows]
+
+    def save_slot_collection(self, collection: SlotCollection) -> SlotCollection:
+        row = SlotCollectionRow(
+            collection_id=collection.collection_id,
+            **_slot_collection_row_values(collection),
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_slot_collection(merged)
+
+    def get_slot_collection(self, collection_id: str) -> SlotCollection | None:
+        row = self._session.get(SlotCollectionRow, collection_id)
+        return None if row is None else _row_to_slot_collection(row)
+
+    def get_active_slot_collection_for_node(self, task_id: str, node_id: str) -> SlotCollection | None:
+        terminal_statuses = ("completed", "cancelled", "failed")
+        row = self._session.scalar(
+            select(SlotCollectionRow)
+            .where(
+                SlotCollectionRow.task_id == task_id,
+                SlotCollectionRow.node_id == node_id,
+                ~SlotCollectionRow.status.in_(terminal_statuses),
+            )
+            .order_by(
+                SlotCollectionRow.updated_at.desc(),
+                SlotCollectionRow.created_at.desc(),
+                SlotCollectionRow.collection_id.desc(),
+            )
+        )
+        return None if row is None else _row_to_slot_collection(row)
+
+    def list_slot_collections_for_task(self, task_id: str) -> list[SlotCollection]:
+        rows = self._session.scalars(
+            select(SlotCollectionRow)
+            .where(SlotCollectionRow.task_id == task_id)
+            .order_by(SlotCollectionRow.created_at, SlotCollectionRow.collection_id)
+        ).all()
+        return [_row_to_slot_collection(row) for row in rows]
+
+    def apply_slot_transition(
+        self,
+        collection_id: str,
+        expected_revision: int,
+        next_collection: SlotCollection,
+        slot_event: SlotEvent,
+        *,
+        idempotency_key: str | None = None,
+    ) -> SlotCollection | None:
+        key = idempotency_key or slot_event.idempotency_key
+        if key:
+            existing_event = self.get_slot_event_by_idempotency_key(collection_id, key)
+            if existing_event is not None:
+                return self.get_slot_collection(collection_id)
+        if next_collection.collection_id != collection_id:
+            return None
+
+        result = self._session.execute(
+            update(SlotCollectionRow)
+            .where(
+                SlotCollectionRow.collection_id == collection_id,
+                SlotCollectionRow.revision == expected_revision,
+            )
+            .values(**_slot_collection_row_values(next_collection))
+        )
+        if result.rowcount != 1:
+            self._session.flush()
+            return None
+
+        event_to_save = slot_event if key is None or slot_event.idempotency_key == key else replace(slot_event, idempotency_key=key)
+        self.append_slot_event(event_to_save)
+        row = self._session.get(SlotCollectionRow, collection_id)
+        self._session.flush()
+        return None if row is None else _row_to_slot_collection(row)
+
+    def append_slot_event(self, event: SlotEvent) -> SlotEvent:
+        if event.idempotency_key:
+            existing = self.get_slot_event_by_idempotency_key(event.collection_id, event.idempotency_key)
+            if existing is not None:
+                return existing
+        row = SlotEventRow(
+            slot_event_id=event.slot_event_id,
+            collection_id=event.collection_id,
+            task_id=event.task_id,
+            node_id=event.node_id,
+            conversation_id=event.conversation_id,
+            event_type=event.event_type,
+            round=event.round,
+            revision=event.revision,
+            idempotency_key=event.idempotency_key,
+            payload_json=dict(event.payload),
+            created_at=event.created_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_slot_event(row)
+
+    def list_slot_events(self, collection_id: str) -> list[SlotEvent]:
+        rows = self._session.scalars(
+            select(SlotEventRow)
+            .where(SlotEventRow.collection_id == collection_id)
+            .order_by(SlotEventRow.created_at, SlotEventRow.slot_event_id)
+        ).all()
+        return [_row_to_slot_event(row) for row in rows]
+
+    def get_slot_event_by_idempotency_key(self, collection_id: str, key: str) -> SlotEvent | None:
+        row = self._session.scalar(
+            select(SlotEventRow).where(
+                SlotEventRow.collection_id == collection_id,
+                SlotEventRow.idempotency_key == key,
+            )
+        )
+        return None if row is None else _row_to_slot_event(row)
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         row = CheckpointRow(
@@ -2050,6 +2259,46 @@ class SQLiteStorage(StoragePort):
 
     async def list_interrupt_answers(self, interrupt_id: str) -> list[InterruptAnswer]:
         return await self._run(lambda state, collab: collab.list_interrupt_answers(interrupt_id))
+
+    async def save_slot_collection(self, collection: SlotCollection) -> SlotCollection:
+        return await self._run(lambda state, collab: collab.save_slot_collection(collection))
+
+    async def get_slot_collection(self, collection_id: str) -> SlotCollection | None:
+        return await self._run(lambda state, collab: collab.get_slot_collection(collection_id))
+
+    async def get_active_slot_collection_for_node(self, task_id: str, node_id: str) -> SlotCollection | None:
+        return await self._run(lambda state, collab: collab.get_active_slot_collection_for_node(task_id, node_id))
+
+    async def list_slot_collections_for_task(self, task_id: str) -> list[SlotCollection]:
+        return await self._run(lambda state, collab: collab.list_slot_collections_for_task(task_id))
+
+    async def apply_slot_transition(
+        self,
+        collection_id: str,
+        expected_revision: int,
+        next_collection: SlotCollection,
+        slot_event: SlotEvent,
+        *,
+        idempotency_key: str | None = None,
+    ) -> SlotCollection | None:
+        return await self._run(
+            lambda state, collab: collab.apply_slot_transition(
+                collection_id,
+                expected_revision,
+                next_collection,
+                slot_event,
+                idempotency_key=idempotency_key,
+            )
+        )
+
+    async def append_slot_event(self, event: SlotEvent) -> SlotEvent:
+        return await self._run(lambda state, collab: collab.append_slot_event(event))
+
+    async def list_slot_events(self, collection_id: str) -> list[SlotEvent]:
+        return await self._run(lambda state, collab: collab.list_slot_events(collection_id))
+
+    async def get_slot_event_by_idempotency_key(self, collection_id: str, key: str) -> SlotEvent | None:
+        return await self._run(lambda state, collab: collab.get_slot_event_by_idempotency_key(collection_id, key))
 
     async def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         return await self._run(lambda state, collab: collab.save_checkpoint(checkpoint))

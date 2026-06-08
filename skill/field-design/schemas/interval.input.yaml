@@ -1,14 +1,38 @@
 schema_id: interval
 title: 间比法设计
 inputs:
-  design: {type: string, required: true, const: interval, aliases: [interval, 间比法]}
+  design:
+    type: string
+    required: true
+    const: interval
+    aliases: [interval, 间比法, 间比]
+    description: 设计类型；本模式固定为间比法设计。
+    clarification: {hint: 可回答“间比法”或 “interval”。, examples: [间比法, interval]}
 
-  material_data: {type: artifact, required: true, source: {allowed: [artifact]}, aliases: [材料清单, material_data]}
+  material_data:
+    type: artifact
+    required: true
+    source: {allowed: [artifact]}
+    aliases: [材料清单, material_data]
+    description: 试验材料清单文件，需包含可识别 CK 的 hyb_check 信息。
+    clarification: {hint: 请上传 CSV/Excel 材料清单。, examples: [上传 interval_materials.xlsx]}
   blocks: {type: integer, required: false, aliases: [blocks, 区组数, 重复数, 重复], validation: {min: 1, max: 100}}
-  ncols: {type: integer, required: false, aliases: [ncols, 列数, 田块列数], validation: {min: 1, max: 1000}}
+  ncols:
+    type: integer
+    required: true
+    aliases: [ncols, 列数, 田块列数]
+    description: 田块每行列数，用于计算间比法插入 CK 后的布局宽度。
+    clarification: {hint: 请提供正整数列数，例如“12列”。, examples: [12列, ncols=12]}
+    validation: {min: 1, max: 1000}
   ck_ratio: {type: string, required: false, default: A}
   planter: {type: string, required: false, default: serpentine}
   randomize: {type: string, required: false, default: 'true'}
   seed: {type: integer, required: false}
   run_id: {type: string, required: false}
-  ck_spec: {type: string, required: true, aliases: [ck_spec, CK参数, CK间隔], reference_resource: interval}
+  ck_spec:
+    type: string
+    required: true
+    aliases: [ck_spec, CK参数, CK间隔]
+    reference_resource: interval
+    description: 每个 CK 的起始位置和间隔，格式为 ck_no,start_pos,interval；多个 CK 用分号分隔。
+    clarification: {hint: 例如“1,1,10; 2,5,10”。, examples: ["1,1,10; 2,5,10"]}

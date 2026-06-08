@@ -284,7 +284,7 @@ async def answer_task_interrupt(
     interrupt_id = body.interrupt_id
     await require_task_owner(runtime, task_id, user)
     try:
-        result = await runtime.answer_interrupt(task_id, interrupt_id, body.answer_payload)
+        result = await runtime.answer_interrupt(task_id, interrupt_id, body.runtime_answer_payload())
     except UploadValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ValueError as exc:

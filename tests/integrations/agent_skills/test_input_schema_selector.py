@@ -43,6 +43,26 @@ input_schemas:
         self.assertEqual(result.selected_schema_id, "interval")
         self.assertEqual(result.selected_entrypoint, "run")
 
+    def test_user_text_schema_match_beats_weak_artifact_filename_match(self) -> None:
+        tmp, contract, schemas = self._fixture()
+        self.addCleanup(tmp.cleanup)
+        result = select_input_schema(
+            contract,
+            schemas,
+            query="你帮我设计一个对角线增广试验",
+            artifact_summaries=(
+                {
+                    "upload_id": "upl-interval-name",
+                    "filename": "interval_realistic_two_sets.csv",
+                    "preview": {"columns": ["ped_id", "hyb_check", "set"], "row_count": 60},
+                },
+            ),
+        )
+
+        self.assertTrue(result.selected)
+        self.assertEqual(result.selected_schema_id, "diagonal")
+        self.assertEqual(result.reason, "deterministic_alias")
+
     def test_ambiguous_request_does_not_select(self) -> None:
         tmp, contract, schemas = self._fixture()
         self.addCleanup(tmp.cleanup)

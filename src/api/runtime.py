@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import json
 import os
@@ -32,7 +33,7 @@ from src.capabilities.main_agent import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import ConversationStatus, EventVisibility, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
+from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
 from src.core.models import (
     Conversation,
     EventRecord,
@@ -40,6 +41,8 @@ from src.core.models import (
     InterruptAnswer,
     Message,
     PendingSkillContext,
+    SlotCollection,
+    SlotEvent,
     Task,
     TaskInputAttachment,
     TaskNode,
@@ -54,11 +57,29 @@ from src.integrations.agent_skills import (
     SkillRuntimeRefreshResult,
     SkillRuntimeState,
     SkillScriptRunner,
+    SlotExtractionCandidate,
+    SlotExtractionResult,
+    apply_extraction_result_to_collection,
+    build_backend_slot_extraction,
+    build_history_recall_prompt,
+    build_normal_extraction_prompt,
+    initialize_input_collection,
+    load_input_schemas_for_contract,
+    merge_slot_extraction_results,
+    parse_slot_extraction_response,
+    schema_from_snapshot,
+    select_input_schema,
+    should_trigger_history_recall,
+    transition_slot_collection,
 )
 from src.integrations.agent_skills.missing_input_interrupt import (
     SLOT_COLLECTION_FIELD,
     SLOT_COLLECTION_METADATA_KEY,
+    SLOT_COLLECTION_REF_FIELD,
+    SLOT_COLLECTION_V2_SCHEMA_VERSION,
     slot_collection_from_required_fields,
+    slot_collection_ref_from_required_fields,
+    slot_collection_required_fields_ref,
 )
 from src.integrations.agent_skills.pyo3_policy import try_load_skill_runtime_pyo3_policy_client
 from src.integrations.agent_skills.rust_contract import (
@@ -186,6 +207,18 @@ USER_SUPPLIED_METADATA_DENYLIST = frozenset(
     }
 )
 
+_SLOT_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed"})
+_SLOT_WAITING_STATUSES = frozenset({"waiting_for_user", "collecting", "extracting", "validating"})
+
+
+def _is_v2_slot_collection_payload(value: Mapping[str, Any] | None) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    try:
+        return int(value.get("schema_version") or 0) == SLOT_COLLECTION_V2_SCHEMA_VERSION
+    except (TypeError, ValueError):
+        return False
+
 
 def _sanitize_delete_error(exc: BaseException) -> str:
     message = str(exc).replace("\n", " ").replace("\r", " ").strip()
@@ -229,6 +262,7 @@ class ApiRuntime:
         artifact_file_store: LocalArtifactFileStore | None = None,
         audit_sink: JsonlAuditSink | None = None,
         skill_runtime_state: SkillRuntimeState | None = None,
+        skill_input_text_generator: SkillInputTextGenerator | None = None,
         mcp_runtime_state: MCPRuntimeState | None = None,
         runtime_sidecar_client: Any | None = None,
         model_edition_config: Mapping[str, Any] | None = None,
@@ -257,6 +291,7 @@ class ApiRuntime:
         self.artifact_file_store = artifact_file_store or LocalArtifactFileStore(Path("runtime/artifacts"))
         self._audit_sink = audit_sink
         self._skill_runtime_state = skill_runtime_state
+        self._skill_input_text_generator = skill_input_text_generator
         self._mcp_runtime_state = mcp_runtime_state
         self._runtime_sidecar_client = runtime_sidecar_client
         self._model_edition_config = dict(model_edition_config or {})
@@ -1413,12 +1448,177 @@ class ApiRuntime:
                     )
                 )
         task = await self.cancellation_service.cancel_task_context(task_id)
+        await self._cancel_active_slot_collections_for_task(task)
         if task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
             await self._cancel_existing_execution(task_id)
         if task.status not in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
             self._locally_cancelled_task_ids.discard(task_id)
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
         return task
+
+    async def _cancel_active_slot_collections_for_task(self, task: Task) -> None:
+        now = self._utcnow_naive()
+        for collection in await self.storage.list_slot_collections_for_task(task.task_id):
+            if collection.status in _SLOT_TERMINAL_STATUSES:
+                continue
+            cancel_key = f"slot:{collection.collection_id}:cancelled"
+            if await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, cancel_key) is not None:
+                continue
+            try:
+                next_collection, event = transition_slot_collection(
+                    collection,
+                    to_status="cancelled",
+                    event_type="slot.collection_cancelled",
+                    payload={"reason": "task_cancelled"},
+                    idempotency_key=cancel_key,
+                    now=now,
+                )
+            except Exception:
+                next_collection = replace(collection, status="cancelled", cancelled_at=now, updated_at=now)
+                event = SlotEvent(
+                    slot_event_id=f"{collection.collection_id}:event:cancelled:{int(now.timestamp() * 1_000_000)}",
+                    collection_id=collection.collection_id,
+                    task_id=collection.task_id,
+                    node_id=collection.node_id,
+                    conversation_id=collection.conversation_id,
+                    event_type="slot.collection_cancelled",
+                    round=collection.round,
+                    revision=collection.revision + 1,
+                    idempotency_key=cancel_key,
+                    payload={"reason": "task_cancelled", "forced": True},
+                    created_at=now,
+                )
+            saved = await self.storage.apply_slot_transition(
+                collection.collection_id,
+                collection.revision,
+                next_collection,
+                event,
+                idempotency_key=cancel_key,
+            )
+            cancelled = saved or await self.storage.get_slot_collection(collection.collection_id)
+            if cancelled is None:
+                continue
+            await self._record_event(
+                self._make_event(
+                    task_id=cancelled.task_id,
+                    conversation_id=cancelled.conversation_id,
+                    node_id=cancelled.node_id,
+                    event_type="slot.collection_cancelled",
+                    payload={
+                        "slot_collection_id": cancelled.collection_id,
+                        "status": cancelled.status,
+                        "reason": "task_cancelled",
+                    },
+                )
+            )
+
+    async def _recover_missing_v2_slot_interrupts(self, task_id: str) -> None:
+        task = await self.storage.get_task(task_id)
+        if task is None:
+            return
+        if await self._has_running_execution(task_id):
+            return
+        task_interrupts = await self.storage.list_interrupts_for_task(task_id)
+        open_slot_collection_ids = {
+            str(ref.get("collection_id") or "").strip()
+            for interrupt in task_interrupts
+            if interrupt.status == InterruptStatus.OPEN
+            for ref in (slot_collection_ref_from_required_fields(interrupt.required_fields),)
+            if isinstance(ref, Mapping) and str(ref.get("collection_id") or "").strip()
+        }
+        for collection in await self.storage.list_slot_collections_for_task(task_id):
+            if collection.status == "ready":
+                script_key = f"slot:{collection.collection_id}:script_scheduled"
+                if await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, script_key) is None:
+                    scheduled_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(collection)
+                    if scheduled_new and scheduled_collection.status == "script_scheduled":
+                        latest_interrupt = await self.storage.get_interrupt_for_node(task_id, collection.node_id)
+                        if latest_interrupt is not None and latest_interrupt.status == InterruptStatus.OPEN:
+                            await self.storage.save_interrupt(
+                                replace(
+                                    latest_interrupt,
+                                    status=InterruptStatus.ANSWERED,
+                                    answered_at=self._utcnow_naive(),
+                                )
+                            )
+                        recovery_interrupt = Interrupt(
+                            interrupt_id=f"{collection.collection_id}:interrupt:ready_recovery",
+                            conversation_id=collection.conversation_id,
+                            task_id=collection.task_id,
+                            node_id=collection.node_id,
+                            source_agent=collection.capability_id,
+                            source_message_id="",
+                            question=collection.last_question or "",
+                            reason_code="ready_v2_slot_recovered",
+                            required_fields=slot_collection_required_fields_ref(scheduled_collection),
+                            status=InterruptStatus.ANSWERED,
+                            created_at=self._utcnow_naive(),
+                            answered_at=self._utcnow_naive(),
+                        )
+                        await self._schedule_v2_slot_resume(
+                            task=task,
+                            interrupt=recovery_interrupt,
+                            collection=scheduled_collection,
+                            raw_answer={},
+                        )
+                continue
+            if collection.status not in _SLOT_WAITING_STATUSES:
+                continue
+            node = await self.storage.get_task_node(collection.node_id)
+            if node is None or node.status != NodeStatus.WAITING_FOR_INPUT:
+                continue
+            if collection.collection_id in open_slot_collection_ids:
+                continue
+            latest_interrupt = await self.storage.get_interrupt_for_node(task_id, collection.node_id)
+            if latest_interrupt is not None and latest_interrupt.status == InterruptStatus.OPEN:
+                continue
+            now = self._utcnow_naive()
+            interrupt_id = f"{collection.collection_id}:interrupt:{collection.round}:{collection.revision}"
+            interrupt = Interrupt(
+                interrupt_id=interrupt_id,
+                conversation_id=collection.conversation_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                source_agent=collection.capability_id,
+                source_message_id="",
+                question=collection.last_question or "请补充当前 Skill 所需参数。",
+                reason_code="missing_v2_slot_input_recovered",
+                required_fields=slot_collection_required_fields_ref(collection),
+                status=InterruptStatus.OPEN,
+                created_at=now,
+            )
+            await self.storage.save_interrupt(interrupt)
+            recovery_key = f"slot:{collection.collection_id}:interrupt_recovered:{collection.round}:{collection.revision}"
+            await self.storage.append_slot_event(
+                SlotEvent(
+                    slot_event_id=f"{collection.collection_id}:event:recovered:{collection.round}:{collection.revision}",
+                    collection_id=collection.collection_id,
+                    task_id=collection.task_id,
+                    node_id=collection.node_id,
+                    conversation_id=collection.conversation_id,
+                    event_type="slot.interrupt_recovered",
+                    round=collection.round,
+                    revision=collection.revision,
+                    idempotency_key=recovery_key,
+                    payload={"interrupt_id": interrupt_id},
+                    created_at=now,
+                )
+            )
+            await self._record_event(
+                self._make_event(
+                    task_id=collection.task_id,
+                    conversation_id=collection.conversation_id,
+                    node_id=collection.node_id,
+                    event_type="slot.interrupt_recovered",
+                    payload={"slot_collection_id": collection.collection_id, "interrupt_id": interrupt_id},
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+
+    async def _has_running_execution(self, task_id: str) -> bool:
+        async with self._lock:
+            handle = self._running_tasks.get(task_id)
+        return handle is not None and not handle.done()
 
     def _track_conversation_delete_task(
         self,
@@ -1634,6 +1834,7 @@ class ApiRuntime:
             return await self.storage.save_conversation(updated)
 
     async def list_interrupts(self, task_id: str) -> list[dict[str, object]]:
+        await self._recover_missing_v2_slot_interrupts(task_id)
         interrupts = await self.storage.list_interrupts_for_task(task_id)
         return [
             {
@@ -1658,7 +1859,17 @@ class ApiRuntime:
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
         if interrupt.reason_code == "sheet_selection_required":
             self._validate_sheet_selection_answer(interrupt, answer_payload)
+        if slot_collection_ref_from_required_fields(interrupt.required_fields) is not None:
+            return await self._answer_v2_slot_interrupt(task=task, interrupt=interrupt, answer_payload=answer_payload)
         previous_slot_collection = slot_collection_from_required_fields(interrupt.required_fields)
+        if _is_v2_slot_collection_payload(previous_slot_collection):
+            collection_id = str(previous_slot_collection.get("collection_id") or "").strip() if previous_slot_collection else ""
+            collection = await self.storage.get_slot_collection(collection_id) if collection_id else None
+            if collection is None:
+                raise UploadValidationError("slot collection state is missing; restart the Skill")
+            recovered_interrupt = replace(interrupt, required_fields=slot_collection_required_fields_ref(collection))
+            await self.storage.save_interrupt(recovered_interrupt)
+            return await self._answer_v2_slot_interrupt(task=task, interrupt=recovered_interrupt, answer_payload=answer_payload)
 
         existing_answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
         answer_payloads = (*existing_answer_payloads, dict(answer_payload))
@@ -1749,6 +1960,755 @@ class ApiRuntime:
             "node_id": saved_interrupt.node_id,
             "answer_payload": dict(answer_payload),
         }
+
+    async def _answer_v2_slot_interrupt(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        answer_payload: dict[str, object],
+    ) -> dict[str, object]:
+        slot_ref = slot_collection_ref_from_required_fields(interrupt.required_fields)
+        if slot_ref is None:
+            raise UploadValidationError("v2 slot interrupt is missing slot collection reference")
+        client_request_id = str(answer_payload.get("client_request_id") or "").strip()
+        raw_answer = answer_payload.get("answer")
+        if not client_request_id:
+            raise UploadValidationError("v2 slot answers require client_request_id")
+        if not isinstance(raw_answer, Mapping):
+            raise UploadValidationError("v2 slot answers require answer object")
+        legacy_field_keys = [
+            key for key in answer_payload
+            if key not in {"client_request_id", "answer", "task_id", "interrupt_id"} and not str(key).startswith("_")
+        ]
+        if legacy_field_keys:
+            raise UploadValidationError("v2 slot answers must not submit field-shaped payloads")
+        collection_id = str(slot_ref.get("collection_id") or "").strip()
+        collection = await self.storage.get_slot_collection(collection_id)
+        if collection is None:
+            raise UploadValidationError("slot collection state is missing; restart the Skill")
+
+        answer_key = f"answer:{interrupt.interrupt_id}:{client_request_id}"
+        if await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, answer_key) is not None:
+            current_collection = await self.storage.get_slot_collection(collection.collection_id) or collection
+            if current_collection.status == "ready":
+                current_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(current_collection)
+                if scheduled_new and current_collection.status == "script_scheduled":
+                    await self._schedule_v2_slot_resume(
+                        task=task,
+                        interrupt=interrupt,
+                        collection=current_collection,
+                        raw_answer=dict(raw_answer),
+                    )
+            return {
+                "interrupt_id": interrupt.interrupt_id,
+                "status": str(interrupt.status),
+                "node_id": interrupt.node_id,
+                "answer_payload": {"client_request_id": client_request_id},
+            }
+
+        answer = InterruptAnswer(
+            interrupt_answer_id=self._make_id("interrupt-answer"),
+            interrupt_id=interrupt.interrupt_id,
+            answer_payload={"client_request_id": client_request_id, "answer": dict(raw_answer)},
+            source_message_id=self._make_id("msg"),
+            created_at=self._utcnow_naive(),
+        )
+        upload_ids = self._v2_answer_upload_ids(raw_answer)
+        if upload_ids:
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is None:
+                raise ValueError(f"Unknown conversation: {task.conversation_id}")
+            await self._bind_or_update_resume_input_attachments(
+                task=task,
+                username=conversation.username,
+                upload_ids=upload_ids,
+                source_kind="interrupt_answer_upload",
+                source_message_id=answer.source_message_id,
+                interrupt_answer_id=answer.interrupt_answer_id,
+                upload_sheet_selections=self._v2_answer_sheet_selections(raw_answer),
+            )
+
+        saved_interrupt = await self.interrupt_service.record_answer(answer)
+        answer_message = Message(
+            message_id=answer.source_message_id or self._make_id("msg"),
+            conversation_id=task.conversation_id,
+            role=MessageRole.USER,
+            content=self._format_v2_answer_message(raw_answer),
+            task_id=task.task_id,
+            created_at=self._utcnow_naive(),
+        )
+        await self.storage.save_message(answer_message)
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="task.interrupt_answered",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "slot_collection_id": collection.collection_id,
+                    "client_request_id": client_request_id,
+                },
+            )
+        )
+
+        current_collection = await self._apply_v2_slot_answer(
+            collection=collection,
+            interrupt=interrupt,
+            raw_answer=dict(raw_answer),
+            client_request_id=client_request_id,
+        )
+        should_schedule_resume = True
+        if current_collection.status == "ready":
+            current_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(current_collection)
+            if current_collection.status != "script_scheduled":
+                return {
+                    "interrupt_id": saved_interrupt.interrupt_id,
+                    "status": str(saved_interrupt.status),
+                    "node_id": saved_interrupt.node_id,
+                    "answer_payload": {"client_request_id": client_request_id},
+                }
+            should_schedule_resume = scheduled_new
+        elif current_collection.status in {"script_scheduled", "completed", "cancelled", "failed"}:
+            should_schedule_resume = False
+        if should_schedule_resume:
+            await self._schedule_v2_slot_resume(
+                task=task,
+                interrupt=interrupt,
+                collection=current_collection,
+                raw_answer=dict(raw_answer),
+            )
+        return {
+            "interrupt_id": saved_interrupt.interrupt_id,
+            "status": str(saved_interrupt.status),
+            "node_id": saved_interrupt.node_id,
+            "answer_payload": {"client_request_id": client_request_id},
+        }
+
+    async def _schedule_v2_slot_resume(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        raw_answer: dict[str, object],
+    ) -> None:
+        await self._await_existing_execution(task.task_id)
+        root_message = await self.storage.get_message(task.root_message_id)
+        resume_metadata = {
+            **self._resume_skill_revision_metadata(task.task_id),
+            SLOT_COLLECTION_METADATA_KEY: self._slot_collection_resume_metadata(collection),
+            "slot_collection_id": collection.collection_id,
+            "slot_collection_revision": collection.revision,
+            "resume_interrupted_node_id": interrupt.node_id,
+        }
+        resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
+        resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupt.node_id)
+        if resume_finalizer_node_id:
+            resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
+        resume_capability_id = task.requested_capability_id
+        interrupted_node = await self.storage.get_task_node(interrupt.node_id)
+        if interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
+            resume_capability_id = interrupted_node.capability_id
+        elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
+            resume_capability_id = interrupt.source_agent
+        await self._schedule_execution(
+            OrchestrationRequest(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                root_message_id=task.root_message_id,
+                user_message=self._combine_v2_resume_message(
+                    root_message.content if root_message is not None else task.summary or "",
+                    raw_answer,
+                ),
+                requested_capability_id=resume_capability_id,
+                metadata=resume_metadata,
+            )
+        )
+
+    async def _apply_v2_slot_answer(
+        self,
+        *,
+        collection: SlotCollection,
+        interrupt: Interrupt,
+        raw_answer: dict[str, object],
+        client_request_id: str,
+    ) -> SlotCollection:
+        if collection.status in _SLOT_TERMINAL_STATUSES or collection.status == "script_scheduled":
+            return collection
+        answer_key = f"answer:{interrupt.interrupt_id}:{client_request_id}"
+        if collection.kind == "schema_selection":
+            return await self._apply_v2_schema_selection_answer(
+                collection=collection,
+                raw_answer=raw_answer,
+                answer_key=answer_key,
+            )
+        schema = self._schema_for_slot_collection(collection)
+        if schema is None:
+            return await self._fail_v2_slot_collection(
+                collection,
+                reason="schema_snapshot_unavailable",
+                idempotency_key=f"{answer_key}:schema_missing",
+            )
+
+        extracting = collection
+        if extracting.status == "waiting_for_user":
+            extracting, _ = await self._transition_v2_slot_collection(
+                extracting,
+                to_status="extracting",
+                event_type="slot.extraction_started",
+                payload={"client_request_id": client_request_id, "mode": "history_recall" if should_trigger_history_recall(self._v2_answer_text(raw_answer)) else "normal"},
+                idempotency_key=f"{answer_key}:extracting",
+            )
+        if extracting.status == "extracting":
+            validating, _ = await self._transition_v2_slot_collection(
+                extracting,
+                to_status="validating",
+                event_type="slot.validation_started",
+                payload={"client_request_id": client_request_id},
+                idempotency_key=f"{answer_key}:validating",
+            )
+        else:
+            validating = extracting
+        if validating.status != "validating":
+            return validating
+
+        answer_text = self._v2_answer_text(raw_answer)
+        history_recall = should_trigger_history_recall(answer_text)
+        artifact_summaries = tuple(await self._task_input_attachment_prompt_summaries(collection.task_id))
+        accepted_answer_summaries = tuple(
+            await self._v2_accepted_answer_summaries(
+                validating.task_id,
+                exclude_client_request_id=client_request_id,
+            )
+        )
+        prompt = (
+            build_history_recall_prompt(
+                validating,
+                current_user_answer=answer_text,
+                accepted_answer_summaries=accepted_answer_summaries,
+            )
+            if history_recall
+            else build_normal_extraction_prompt(
+                validating,
+                current_user_answer=answer_text,
+                artifact_summaries=artifact_summaries,
+            )
+        )
+        raw_response = ""
+        if self._skill_input_text_generator is not None:
+            try:
+                generated = self._skill_input_text_generator(prompt)
+                if inspect.isawaitable(generated):
+                    generated = await generated
+                raw_response = str(generated or "")
+            except Exception:
+                raw_response = ""
+        extraction = parse_slot_extraction_response(raw_response, validating) if raw_response else parse_slot_extraction_response("{}", validating)
+        backend_extraction = build_backend_slot_extraction(
+            validating,
+            schema,
+            current_user_answer=answer_text,
+            current_upload_ids=self._v2_answer_upload_ids(raw_answer),
+            artifact_summaries=artifact_summaries,
+            accepted_answer_summaries=accepted_answer_summaries,
+            history_recall=history_recall,
+        )
+        extraction = merge_slot_extraction_results(extraction, backend_extraction, collection=validating)
+        if not extraction.resolved:
+            extraction = self._fallback_v2_slot_extraction(
+                validating,
+                schema,
+                raw_answer=raw_answer,
+            )
+        next_collection, event = apply_extraction_result_to_collection(
+            validating,
+            schema,
+            extraction,
+            now=self._utcnow_naive(),
+        )
+        if next_collection.status == "waiting_for_user":
+            next_collection = replace(
+                next_collection,
+                round=validating.round + 1,
+                last_question=self._slot_question_from_collection(next_collection),
+            )
+        event = replace(event, idempotency_key=answer_key)
+        saved = await self.storage.apply_slot_transition(
+            validating.collection_id,
+            validating.revision,
+            next_collection,
+            event,
+            idempotency_key=answer_key,
+        )
+        return saved or await self.storage.get_slot_collection(validating.collection_id) or validating
+
+    async def _apply_v2_schema_selection_answer(
+        self,
+        *,
+        collection: SlotCollection,
+        raw_answer: Mapping[str, object],
+        answer_key: str,
+    ) -> SlotCollection:
+        manifest = self._manifest_for_slot_collection(collection)
+        if manifest is None or manifest.contract is None:
+            return await self._fail_v2_slot_collection(
+                collection,
+                reason="manifest_unavailable_for_schema_selection",
+                idempotency_key=f"{answer_key}:manifest_missing",
+            )
+        schemas = load_input_schemas_for_contract(manifest.contract)
+        selection = select_input_schema(
+            manifest.contract,
+            schemas,
+            query=self._v2_answer_text(raw_answer),
+            payload={},
+            metadata={},
+            artifact_summaries=(),
+            llm_text_generator=self._skill_input_text_generator,
+        )
+        if not selection.selected:
+            extracting, _ = await self._transition_v2_slot_collection(
+                collection,
+                to_status="extracting",
+                event_type="slot.schema_selection_started",
+                payload={"selected": False},
+                idempotency_key=f"{answer_key}:schema_selecting",
+            )
+            retry = replace(
+                extracting,
+                status="waiting_for_user",
+                revision=extracting.revision + 1,
+                round=extracting.round + 1,
+                last_question=extracting.last_question or "请确认要使用哪一种输入模式。",
+                updated_at=self._utcnow_naive(),
+            )
+            event = SlotEvent(
+                slot_event_id=f"{collection.collection_id}:event:schema_selection_failed:{retry.round}",
+                collection_id=collection.collection_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                conversation_id=collection.conversation_id,
+                event_type="slot.validation_failed",
+                round=retry.round,
+                revision=retry.revision,
+                idempotency_key=answer_key,
+                payload={"missing": list(retry.missing), "reason": "schema_not_selected"},
+                created_at=self._utcnow_naive(),
+            )
+            saved = await self.storage.apply_slot_transition(
+                extracting.collection_id,
+                extracting.revision,
+                retry,
+                event,
+                idempotency_key=answer_key,
+            )
+            return saved or await self.storage.get_slot_collection(collection.collection_id) or collection
+
+        extracting, _ = await self._transition_v2_slot_collection(
+            collection,
+            to_status="extracting",
+            event_type="slot.schema_selection_started",
+            payload={"selected": True},
+            idempotency_key=f"{answer_key}:schema_selecting",
+        )
+        schema = schemas[selection.selected_schema_id]
+        initialized, _ = initialize_input_collection(
+            collection_id=collection.collection_id,
+            task_id=collection.task_id,
+            node_id=collection.node_id,
+            conversation_id=collection.conversation_id,
+            capability_id=collection.capability_id,
+            skill_name=collection.skill_name,
+            schema=schema,
+            selected_entrypoint=selection.selected_entrypoint,
+            now=self._utcnow_naive(),
+            skill_bundle_revision=collection.skill_bundle_revision,
+            contract_revision=collection.contract_revision,
+            schema_digest=None,
+            resources=manifest.contract.resources,
+        )
+        selected_schema_digest = self._slot_schema_digest(initialized.schema_snapshot)
+        selector_field = manifest.contract.schema_selector.selector_field or "design"
+        resolved = dict(collection.resolved)
+        selector_schema_field = schema.inputs.get(selector_field)
+        if selector_schema_field is not None and selector_schema_field.const is not None:
+            resolved[selector_field] = {
+                "raw_value": self._v2_answer_text(raw_answer),
+                "value": selector_schema_field.const,
+                "source": "schema_selection",
+            }
+        selected_base = replace(
+            initialized,
+            status="validating",
+            revision=extracting.revision,
+            round=collection.round + 1,
+            schema_digest=selected_schema_digest,
+            resolved=resolved,
+            updated_at=self._utcnow_naive(),
+        )
+        answer_text = self._v2_answer_text(raw_answer)
+        history_recall = should_trigger_history_recall(answer_text)
+        artifact_summaries = tuple(await self._task_input_attachment_prompt_summaries(collection.task_id))
+        backend_extraction = build_backend_slot_extraction(
+            selected_base,
+            schema,
+            current_user_answer=answer_text,
+            current_upload_ids=self._v2_answer_upload_ids(raw_answer),
+            artifact_summaries=artifact_summaries,
+            accepted_answer_summaries=tuple(await self._v2_accepted_answer_summaries(collection.task_id)),
+            history_recall=history_recall,
+        )
+        selected, applied_event = apply_extraction_result_to_collection(
+            selected_base,
+            schema,
+            backend_extraction,
+            now=self._utcnow_naive(),
+        )
+        if selected.status == "waiting_for_user":
+            selected = replace(
+                selected,
+                last_question=self._slot_question_from_collection(selected),
+            )
+        event = replace(
+            applied_event,
+            event_type="slot.schema_selected",
+            idempotency_key=answer_key,
+            payload={
+                "selected_schema_id": selection.selected_schema_id,
+                "selected_entrypoint": selection.selected_entrypoint,
+                "missing": list(selected.missing),
+                "resolved_fields": sorted(backend_extraction.resolved),
+                "diagnostics": list(backend_extraction.diagnostics),
+            },
+        )
+        saved = await self.storage.apply_slot_transition(
+            extracting.collection_id,
+            extracting.revision,
+            selected,
+            event,
+            idempotency_key=answer_key,
+        )
+        return saved or await self.storage.get_slot_collection(collection.collection_id) or collection
+
+    async def _transition_v2_slot_collection(
+        self,
+        collection: SlotCollection,
+        *,
+        to_status: str,
+        event_type: str,
+        payload: Mapping[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> tuple[SlotCollection, bool]:
+        if idempotency_key and await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, idempotency_key) is not None:
+            current = await self.storage.get_slot_collection(collection.collection_id)
+            return current or collection, False
+        next_collection, event = transition_slot_collection(
+            collection,
+            to_status=to_status,
+            event_type=event_type,
+            payload=payload or {},
+            idempotency_key=idempotency_key,
+            now=self._utcnow_naive(),
+        )
+        saved = await self.storage.apply_slot_transition(
+            collection.collection_id,
+            collection.revision,
+            next_collection,
+            event,
+            idempotency_key=idempotency_key,
+        )
+        return saved or await self.storage.get_slot_collection(collection.collection_id) or collection, saved is not None
+
+    async def _fail_v2_slot_collection(
+        self,
+        collection: SlotCollection,
+        *,
+        reason: str,
+        idempotency_key: str,
+    ) -> SlotCollection:
+        if collection.status in _SLOT_TERMINAL_STATUSES:
+            return collection
+        try:
+            failed, event = transition_slot_collection(
+                collection,
+                to_status="failed",
+                event_type="slot.collection_failed",
+                payload={"reason": reason},
+                idempotency_key=idempotency_key,
+                now=self._utcnow_naive(),
+            )
+        except Exception:
+            failed = replace(collection, status="failed", failed_at=self._utcnow_naive(), updated_at=self._utcnow_naive(), revision=collection.revision + 1)
+            event = SlotEvent(
+                slot_event_id=f"{collection.collection_id}:event:failed:{int(self._utcnow_naive().timestamp() * 1_000_000)}",
+                collection_id=collection.collection_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                conversation_id=collection.conversation_id,
+                event_type="slot.collection_failed",
+                round=collection.round,
+                revision=failed.revision,
+                idempotency_key=idempotency_key,
+                payload={"reason": reason, "forced": True},
+                created_at=self._utcnow_naive(),
+            )
+        saved = await self.storage.apply_slot_transition(
+            collection.collection_id,
+            collection.revision,
+            failed,
+            event,
+            idempotency_key=idempotency_key,
+        )
+        return saved or await self.storage.get_slot_collection(collection.collection_id) or collection
+
+    async def _mark_v2_slot_script_scheduled(self, collection: SlotCollection) -> tuple[SlotCollection, bool]:
+        script_key = f"slot:{collection.collection_id}:script_scheduled"
+        existing = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, script_key)
+        if existing is not None:
+            current = await self.storage.get_slot_collection(collection.collection_id)
+            return current or collection, False
+        try:
+            next_collection, event = transition_slot_collection(
+                collection,
+                to_status="script_scheduled",
+                event_type="slot.script_scheduled",
+                payload={"selected_entrypoint": collection.selected_entrypoint},
+                idempotency_key=script_key,
+                now=self._utcnow_naive(),
+            )
+        except Exception:
+            return collection, False
+        saved = await self.storage.apply_slot_transition(
+            collection.collection_id,
+            collection.revision,
+            next_collection,
+            event,
+            idempotency_key=script_key,
+        )
+        if saved is not None:
+            return saved, True
+        return await self.storage.get_slot_collection(collection.collection_id) or collection, False
+
+    def _manifest_for_slot_collection(self, collection: SlotCollection):
+        if self._skill_runtime_state is None:
+            return None
+        try:
+            catalog = self._skill_runtime_state.catalog_for_revision(collection.skill_bundle_revision)
+        except Exception:
+            catalog = self._skill_runtime_state.active_bundle.catalog
+        return catalog.get(collection.skill_name)
+
+    def _schema_for_slot_collection(self, collection: SlotCollection):
+        if not collection.selected_schema_id:
+            return None
+        try:
+            schema = schema_from_snapshot(collection.schema_snapshot)
+        except Exception:
+            return None
+        if schema.schema_id != collection.selected_schema_id:
+            return None
+        if collection.schema_digest and self._slot_schema_digest(collection.schema_snapshot) != collection.schema_digest:
+            return None
+        return schema
+
+    @staticmethod
+    def _slot_schema_digest(schema_snapshot: Mapping[str, object]) -> str:
+        encoded = json.dumps(dict(schema_snapshot), sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
+
+    def _slot_question_from_collection(self, collection: SlotCollection) -> str:
+        return self._slot_question_from_parts(slots=collection.slots, missing=collection.missing, invalid=collection.invalid)
+
+    @staticmethod
+    def _slot_question_from_parts(
+        *,
+        slots: Mapping[str, object],
+        missing: Iterable[str],
+        invalid: Iterable[Mapping[str, object]],
+    ) -> str:
+        labels: list[str] = []
+        for field in missing:
+            slot = slots.get(field) if isinstance(slots, Mapping) else None
+            if isinstance(slot, Mapping):
+                labels.append(str(slot.get("label") or slot.get("description") or field))
+            else:
+                labels.append(str(field))
+        invalid_fields = [str(item.get("field")) for item in invalid if isinstance(item, Mapping) and item.get("field")]
+        if invalid_fields and labels:
+            return f"刚才的 {', '.join(invalid_fields)} 无法通过校验，请重新补充：{'、'.join(labels)}。"
+        return f"请补充：{'、'.join(labels)}。" if labels else "请补充缺失参数。"
+
+    async def _task_input_attachment_prompt_summaries(self, task_id: str) -> list[dict[str, object]]:
+        summaries: list[dict[str, object]] = []
+        for attachment in await self.storage.list_task_input_attachments_for_task(task_id):
+            prompt_artifact = attachment.prompt_artifact if isinstance(attachment.prompt_artifact, Mapping) else {}
+            preview = prompt_artifact.get("preview") if isinstance(prompt_artifact.get("preview"), Mapping) else {}
+            summaries.append(
+                {
+                    "upload_id": attachment.source_upload_id,
+                    "filename": attachment.filename,
+                    "content_type": attachment.content_type,
+                    "file_type": attachment.file_type,
+                    "size_bytes": attachment.size_bytes,
+                    "sha256": attachment.sha256,
+                    "selected_sheet": attachment.selected_sheet,
+                    "columns": list(preview.get("columns") or ()) if isinstance(preview.get("columns"), list | tuple) else None,
+                    "row_count": preview.get("row_count"),
+                    "column_count": preview.get("column_count"),
+                    "source_kind": attachment.source_kind,
+                    "source_message_id": attachment.source_message_id,
+                    "interrupt_answer_id": attachment.interrupt_answer_id,
+                    "created_at": attachment.created_at.isoformat() if attachment.created_at is not None else None,
+                }
+            )
+        return summaries
+
+    async def _v2_accepted_answer_summaries(
+        self,
+        task_id: str,
+        *,
+        exclude_client_request_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        summaries: list[dict[str, object]] = []
+        for interrupt in await self.storage.list_interrupts_for_task(task_id):
+            for answer in await self.storage.list_interrupt_answers(interrupt.interrupt_id):
+                if not answer.accepted:
+                    continue
+                payload = answer.answer_payload if isinstance(answer.answer_payload, Mapping) else {}
+                client_request_id = str(payload.get("client_request_id") or "").strip()
+                if exclude_client_request_id and client_request_id == exclude_client_request_id:
+                    continue
+                raw_answer = payload.get("answer")
+                if not isinstance(raw_answer, Mapping):
+                    continue
+                summary: dict[str, object] = {
+                    "interrupt_id": interrupt.interrupt_id,
+                    "client_request_id": client_request_id,
+                }
+                text = self._v2_answer_text(raw_answer)
+                if text:
+                    summary["text"] = text
+                upload_ids = self._v2_answer_upload_ids(raw_answer)
+                if upload_ids:
+                    summary["upload_ids"] = list(upload_ids)
+                sheet_selections = self._v2_answer_sheet_selections(raw_answer)
+                if sheet_selections:
+                    summary["sheet_selections"] = sheet_selections
+                if answer.accepted_at is not None:
+                    summary["accepted_at"] = answer.accepted_at.isoformat()
+                summaries.append(summary)
+        return summaries
+
+    def _fallback_v2_slot_candidates(
+        self,
+        collection: SlotCollection,
+        schema,
+        *,
+        raw_answer: Mapping[str, object],
+    ) -> dict[str, dict[str, object]]:
+        extraction = build_backend_slot_extraction(
+            collection,
+            schema,
+            current_user_answer=self._v2_answer_text(raw_answer),
+            current_upload_ids=self._v2_answer_upload_ids(raw_answer),
+        )
+        return {
+            field: {
+                "raw_value": candidate.raw_value,
+                "value": candidate.value,
+                "source": candidate.source,
+            }
+            for field, candidate in extraction.resolved.items()
+        }
+
+    def _fallback_v2_slot_extraction(
+        self,
+        collection: SlotCollection,
+        schema,
+        *,
+        raw_answer: Mapping[str, object],
+    ) -> SlotExtractionResult:
+        candidates = {
+            field: SlotExtractionCandidate(
+                field=field,
+                raw_value=dict(candidate["raw_value"]) if isinstance(candidate.get("raw_value"), Mapping) else candidate.get("raw_value"),
+                value=dict(candidate["value"]) if isinstance(candidate.get("value"), Mapping) else candidate.get("value"),
+                source=str(candidate.get("source") or "current_answer"),
+            )
+            for field, candidate in self._fallback_v2_slot_candidates(collection, schema, raw_answer=raw_answer).items()
+        }
+        return SlotExtractionResult(resolved=candidates)
+
+    @staticmethod
+    def _slot_collection_resume_metadata(collection: SlotCollection) -> dict[str, object]:
+        return {
+            "schema_version": SLOT_COLLECTION_V2_SCHEMA_VERSION,
+            "collection_id": collection.collection_id,
+            "task_id": collection.task_id,
+            "node_id": collection.node_id,
+            "kind": collection.kind,
+            "status": collection.status,
+            "round": collection.round,
+            "revision": collection.revision,
+            "selected_schema_id": collection.selected_schema_id,
+            "selected_entrypoint": collection.selected_entrypoint,
+            "schema_snapshot": dict(collection.schema_snapshot),
+            "slots": dict(collection.slots),
+            "resolved": dict(collection.resolved),
+            "missing": list(collection.missing),
+            "invalid": [dict(item) for item in collection.invalid],
+            "last_question": collection.last_question,
+        }
+
+    @staticmethod
+    def _v2_answer_text(answer: Mapping[str, object]) -> str:
+        value = answer.get("text")
+        return str(value).strip() if value is not None else ""
+
+    @staticmethod
+    def _v2_answer_upload_ids(answer: Mapping[str, object]) -> tuple[str, ...]:
+        raw = answer.get("upload_ids")
+        if raw is None:
+            return ()
+        if isinstance(raw, str):
+            values = (raw,)
+        elif isinstance(raw, list | tuple):
+            values = raw
+        else:
+            raise UploadValidationError("answer.upload_ids must be a list")
+        return tuple(str(value).strip() for value in values if str(value).strip())
+
+    @staticmethod
+    def _v2_answer_sheet_selections(answer: Mapping[str, object]) -> dict[str, str]:
+        raw = answer.get("sheet_selections") or answer.get("upload_sheet_selections")
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, Mapping):
+            raise UploadValidationError("answer.sheet_selections must be an object")
+        return {str(key).strip(): str(value).strip() for key, value in raw.items() if str(key).strip() and str(value).strip()}
+
+    @classmethod
+    def _format_v2_answer_message(cls, answer: Mapping[str, object]) -> str:
+        text = cls._v2_answer_text(answer)
+        upload_ids = cls._v2_answer_upload_ids(answer)
+        sheet_selections = cls._v2_answer_sheet_selections(answer)
+        parts: list[str] = []
+        if text:
+            parts.append(text)
+        if upload_ids:
+            parts.append("已上传补充文件")
+        if sheet_selections:
+            parts.append("已选择工作表")
+        return "；".join(parts)
+
+    @classmethod
+    def _combine_v2_resume_message(cls, root_content: str, answer: Mapping[str, object]) -> str:
+        answer_text = cls._format_v2_answer_message(answer)
+        if not answer_text:
+            return root_content
+        return f"{root_content}\n补充信息：{answer_text}"
 
     async def _bind_task_input_uploads(
         self,
@@ -2470,7 +3430,12 @@ class ApiRuntime:
         metadata: dict[str, object] = {}
         for key, value in answer_payload.items():
             key_text = str(key).strip()
-            if not key_text or key_text == "upload_ids" or key_text.startswith("_") or key_text == SLOT_COLLECTION_FIELD:
+            if (
+                not key_text
+                or key_text in {"upload_ids", "client_request_id", "answer"}
+                or key_text.startswith("_")
+                or key_text in {SLOT_COLLECTION_FIELD, SLOT_COLLECTION_REF_FIELD}
+            ):
                 continue
             if key_text in USER_SUPPLIED_METADATA_DENYLIST:
                 continue
@@ -2546,7 +3511,12 @@ class ApiRuntime:
     def _format_answer_message(cls, answer_payload: dict[str, object]) -> str:
         parts: list[str] = []
         for key, value in answer_payload.items():
-            if key == "upload_ids" or str(key).startswith("_"):
+            if key in {"upload_ids", "client_request_id"} or str(key).startswith("_"):
+                continue
+            if key == "answer" and isinstance(value, Mapping):
+                rendered = cls._format_v2_answer_message(value)
+                if rendered:
+                    parts.append(rendered)
                 continue
             parts.append(f"{key}={cls._format_answer_value(value)}")
         if parts:
@@ -3006,6 +3976,7 @@ def build_api_runtime(
         artifact_file_store=artifact_file_store,
         audit_sink=audit_sink,
         skill_runtime_state=skill_runtime_state,
+        skill_input_text_generator=resolved_skill_input_text_generator,
         mcp_runtime_state=resolved_mcp_runtime_state,
         runtime_sidecar_client=resolved_runtime_sidecar_client,
         local_cancelled_task_ids=runtime_cancelled_task_ids,

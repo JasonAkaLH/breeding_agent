@@ -264,6 +264,51 @@ class InterruptAnswer:
 
 
 @dataclass(slots=True, frozen=True)
+class SlotCollection:
+    collection_id: str
+    task_id: str
+    node_id: str
+    conversation_id: str
+    capability_id: str
+    skill_name: str
+    kind: str
+    status: str
+    round: int = 1
+    revision: int = 0
+    selected_schema_id: str | None = None
+    selected_entrypoint: str | None = None
+    skill_bundle_revision: str | None = None
+    contract_revision: str | None = None
+    schema_digest: str | None = None
+    schema_snapshot: JsonMapping = field(default_factory=dict)
+    slots: JsonMapping = field(default_factory=dict)
+    resolved: JsonMapping = field(default_factory=dict)
+    missing: tuple[str, ...] = ()
+    invalid: tuple[JsonMapping, ...] = ()
+    last_question: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    completed_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    failed_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SlotEvent:
+    slot_event_id: str
+    collection_id: str
+    task_id: str
+    node_id: str
+    conversation_id: str
+    event_type: str
+    round: int = 1
+    revision: int = 0
+    idempotency_key: str | None = None
+    payload: JsonMapping = field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class Checkpoint:
     checkpoint_id: str
     task_id: str

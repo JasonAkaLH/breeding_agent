@@ -69,6 +69,17 @@ export interface ApiClient {
   answerInterrupt(taskId: string, interruptId: string, answerPayload: Record<string, unknown>): Promise<AnswerInterruptResponse>;
 }
 
+function isV2SlotAnswerPayload(answerPayload: Record<string, unknown>): answerPayload is {
+  client_request_id: string;
+  answer: Record<string, unknown>;
+} {
+  return typeof answerPayload.client_request_id === 'string'
+    && answerPayload.client_request_id.length > 0
+    && Boolean(answerPayload.answer)
+    && typeof answerPayload.answer === 'object'
+    && !Array.isArray(answerPayload.answer);
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: unknown;
@@ -207,10 +218,20 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       body: JSON.stringify({ task_id: taskId }),
     }),
     listInterrupts: (taskId) => request<TaskInterruptsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/interrupts`),
-    answerInterrupt: (taskId, interruptId, answerPayload) => request<AnswerInterruptResponse>(
-      '/api/v1/tasks/interrupts/answer',
-      { method: 'POST', body: JSON.stringify({ task_id: taskId, interrupt_id: interruptId, answer_payload: answerPayload }) },
-    ),
+    answerInterrupt: (taskId, interruptId, answerPayload) => {
+      const body = isV2SlotAnswerPayload(answerPayload)
+        ? {
+          task_id: taskId,
+          interrupt_id: interruptId,
+          client_request_id: answerPayload.client_request_id,
+          answer: answerPayload.answer,
+        }
+        : { task_id: taskId, interrupt_id: interruptId, answer_payload: answerPayload };
+      return request<AnswerInterruptResponse>(
+        '/api/v1/tasks/interrupts/answer',
+        { method: 'POST', body: JSON.stringify(body) },
+      );
+    },
     getTaskArtifacts: (taskId) => request<TaskArtifactsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts`),
     downloadArtifact: async (artifactId, filename) => {
       const response = await fetcher(`${baseUrl}/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`, {

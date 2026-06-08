@@ -2407,13 +2407,9 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledWith('task-1'));
-    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
-    expect(screen.getByText('回复后将继续当前任务。')).toBeInTheDocument();
-    expect(screen.getByText('作物类型')).toBeInTheDocument();
-    expect(screen.getByText('玉米')).toBeInTheDocument();
-    expect(screen.getByText('水稻')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
     expect(screen.getByText(/你的下一条消息会继续这个任务/)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('请输入作物类型，例如“水稻”')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请补充要查询的作物类型。')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '取消当前任务' })).toBeInTheDocument();
     expect(await screen.findByText(/请补充要查询的作物类型/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
@@ -2467,9 +2463,8 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '生成随机区组设计' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
-    expect(screen.getByText('试验材料文件')).toBeInTheDocument();
-    expect(screen.getByText('可直接上传文件，或回复文字后继续当前任务。')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
+    expect(await screen.findByText(/试验设计智能体 还缺少/)).toBeInTheDocument();
     const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件') as HTMLInputElement;
     expect(uploadInput).not.toBeDisabled();
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'materials.csv', { type: 'text/csv' });
@@ -2536,15 +2531,96 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用多 sheet Excel 做设计' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
-    expect(screen.getByText('Excel sheet 选择')).toBeInTheDocument();
-    expect(screen.getByText('选择 Excel sheet')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('选择 materials.xlsx 的 sheet'), { target: { value: 'Beta' } });
+    expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
+    expect(await screen.findByText('检测到多 sheet Excel，请选择。')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: 'Beta' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', {
       upload_sheet_selections: { 'upl-book': 'Beta' },
     }));
+  });
+
+  it('submits v2 slot interrupt answers as raw DTOs without business parameter parsing', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:skill_field_design', capability_id: 'skill.field_design', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => waitingGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_field_design',
+          question: '对角线增广设计还差列数。请回复列数，例如 12 列。',
+          reason_code: 'missing_v2_slot_input',
+          required_fields: {
+            _slot_collection_ref: {
+              schema_version: 2,
+              collection_id: 'slot-1',
+              task_id: 'task-1',
+              node_id: 'task-1:skill_field_design',
+              kind: 'input_collection',
+              status: 'waiting_for_user',
+              round: 1,
+              revision: 0,
+              selected_schema_id: 'diagonal',
+              selected_entrypoint: 'run',
+              missing: ['ncols'],
+              invalid: [],
+              last_question: '对角线增广设计还差列数。请回复列数，例如 12 列。',
+              slots: [
+                { name: 'ncols', label: '列数', type: 'integer', status: 'missing', required_now: true },
+              ],
+            },
+          },
+          status: 'open',
+        }],
+      })),
+      answerInterrupt: vi.fn(async () => ({
+        interrupt_id: 'interrupt-1',
+        status: 'answered',
+        node_id: 'task-1:skill_field_design',
+        answer_payload: {},
+      })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [
+          event('task.accepted', {}, 'accepted-before-v2-slot-interrupt'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-v2-slot-interrupt', 'task-1:skill_field_design'),
+        ],
+        [event('task.accepted', {}, 'accepted-after-v2-slot-interrupt')],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '做对角线增广设计' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByText('对角线增广设计还差列数。请回复列数，例如 12 列。')).toBeInTheDocument();
+    expect(screen.queryByText('_slot_collection_ref')).not.toBeInTheDocument();
+    expect(screen.getByText(/当前任务等待补充信息。你的下一条消息会继续这个任务/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '12列' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.answerInterrupt).toHaveBeenCalledWith('task-1', 'interrupt-1', {
+      client_request_id: expect.stringMatching(/^interrupt-answer-/),
+      answer: { text: '12列' },
+    }));
+    const payload = vi.mocked(api.answerInterrupt).mock.calls[0][2];
+    expect(payload).not.toHaveProperty('design');
+    expect(payload).not.toHaveProperty('ncols');
+    expect(screen.getByText('12列')).toBeInTheDocument();
+    expect(screen.queryByText('design=对角线增广')).not.toBeInTheDocument();
   });
 
   it('does not allow upload-only answers for scalar interrupts', async () => {
@@ -2598,7 +2674,7 @@ describe('App', () => {
     expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
     expect(screen.queryByText('需要补充：')).not.toBeInTheDocument();
     expect(screen.queryByText('_slot_collection')).not.toBeInTheDocument();
-    expect(screen.getByText(/当前任务等待补充信息：品种名称/)).toBeInTheDocument();
+    expect(screen.getByText(/当前任务等待补充信息。你的下一条消息会继续这个任务/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
     expect(screen.getByRole('button', { name: '选择 JSON、CSV、VCF、图片或 PDF 文件' })).toBeDisabled();
     expect(screen.getByLabelText('上传 JSON、CSV、Excel、VCF、图片或 PDF 文件')).toBeDisabled();
@@ -2669,7 +2745,8 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '查询适合宁夏种植的棉花' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
-    expect(await screen.findByRole('region', { name: '需要补充信息' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
+    expect(await screen.findByText('请选择查询范围。')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '审定品种库' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 

@@ -1,11 +1,29 @@
 schema_id: diagonal
 title: 对角线增广设计
 inputs:
-  design: {type: string, required: true, const: diagonal, aliases: [diagonal, 对角线]}
+  design:
+    type: string
+    required: true
+    const: diagonal
+    aliases: [diagonal, 对角线, 对角线增广]
+    description: 设计类型；本模式固定为对角线增广设计。
+    clarification: {hint: 可回答“对角线增广”或 “diagonal”。, examples: [对角线增广, diagonal]}
 
-  material_data: {type: artifact, required: true, source: {allowed: [artifact]}, aliases: [材料清单, material_data]}
+  material_data:
+    type: artifact
+    required: true
+    source: {allowed: [artifact]}
+    aliases: [材料清单, material_data]
+    description: 试验材料清单文件，推荐列名 ped_id、hyb_check、set。
+    clarification: {hint: 请上传 CSV/Excel 材料清单。, examples: [上传 materials.csv]}
   blocks: {type: integer, required: false, aliases: [blocks, 区组数, 重复数, 重复], validation: {min: 1, max: 100}}
-  ncols: {type: integer, required: false, aliases: [ncols, 列数, 田块列数], validation: {min: 1, max: 1000}}
+  ncols:
+    type: integer
+    required: true
+    aliases: [ncols, 列数, 田块列数]
+    description: 田块每行列数，用于固定对角线增广布局宽度。
+    clarification: {hint: 请提供正整数列数，例如“12列”。, examples: [12列, ncols=12]}
+    validation: {min: 1, max: 1000}
   ck_ratio: {type: string, required: false, default: A}
   planter: {type: string, required: false, default: serpentine}
   randomize: {type: string, required: false, default: 'true'}
