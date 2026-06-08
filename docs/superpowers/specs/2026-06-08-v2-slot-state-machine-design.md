@@ -1,6 +1,6 @@
 # V2 Skill Slot State Machine Design
 
-- **Status**: Draft approved for planning review
+- **Status**: Document-perfectization reviewed; ready for implementation planning after user approval
 - **Date**: 2026-06-08
 - **Target modules**: Agent Skill runtime, v2 Skill contracts, input schema selection, slot collection, interrupt/resume lifecycle, storage repositories, frontend waiting-input UX
 - **Primary outcome**: Replace mixed v1/v2 Skill parameter resolution with a v2-only, event-driven, durable Slot State Machine that lets LLMs extract user-provided parameters from schema-aware context while backend validation remains the execution authority.
@@ -52,6 +52,7 @@ Start v2 Skill
 - Do not store raw artifact content, credentials, provider config, database URLs, cookies, or secrets in slot state.
 - Do not use full assistant history as default extraction context.
 - Do not use `Interrupt.required_fields._slot_collection` as the long-term state authority.
+- Do not expose a sanitized slot timeline/debugging API in this delivery; SlotEvent is backend/internal until a separate UX requirement exists.
 
 ## 3. Superseded decisions and relationship to existing docs
 
@@ -68,7 +69,7 @@ This design aligns with and strengthens the v2-only direction in:
 Updated position:
 
 - Existing interrupt/resume UX remains useful.
-- Existing `_slot_collection` envelope may remain as a frontend-compatible reference/summary.
+- Existing interrupt envelopes may carry a frontend-compatible `_slot_collection_ref` reference/summary.
 - Durable slot state must live in first-class slot storage.
 - v1 manifest execution/scripts/parameters must be removed from Agent Skill execution as a supported path.
 
@@ -268,13 +269,15 @@ save_slot_collection(collection)
 get_slot_collection(collection_id)
 get_active_slot_collection_for_node(task_id, node_id)
 list_slot_collections_for_task(task_id)
-compare_and_swap_slot_collection(collection_id, expected_revision, next_collection)
+apply_slot_transition(collection_id, expected_revision, next_collection, slot_event, idempotency_key=None)
 append_slot_event(event)
 list_slot_events(collection_id)
 get_slot_event_by_idempotency_key(collection_id, key)
 ```
 
-SQLite and PostgreSQL repositories must implement equivalent semantics.
+`apply_slot_transition()` is the authoritative mutation API. It must update `SlotCollection.revision` and append the corresponding `SlotEvent` in one repository transaction. Separate `save_slot_collection()` / `append_slot_event()` calls are allowed only for collection bootstrap, read-only tests, or repair tooling where no state transition is being claimed.
+
+SQLite and PostgreSQL repositories must implement equivalent semantics. PostgreSQL runtime schema is generated from `SQLiteBase.metadata`, so implementation must add SQLAlchemy row models and repository contract tests that prove both backends expose the same JSON, index, uniqueness, and CAS behavior before enabling the runtime.
 
 ## 9. Concurrency, idempotency, and recovery
 
@@ -368,6 +371,12 @@ slot.runtime_rollback
 
 `SlotEvent` is the internal domain event. `EventRecord` remains the existing runtime/SSE/audit event surface.
 
+Transaction boundary:
+
+- `SlotCollection` mutation and `SlotEvent` append must be atomic through `apply_slot_transition()`.
+- `EventRecord` mirroring happens after the slot transaction commits; `EventRecord` is a projection/notification surface, not slot authority.
+- If EventRecord mirroring fails, the backend must leave SlotCollection/SlotEvent committed and make recovery possible through repository state plus existing interrupt polling. User-visible prompts or validation failures must be queryable from the persisted collection even if SSE delivery is delayed.
+
 | SlotEvent | Mirror to EventRecord | Visibility |
 | --- | --- | --- |
 | `slot.collection_started` | Yes | AUDIT_ONLY |
@@ -387,7 +396,7 @@ slot.runtime_rollback
 | `slot.collection_failed` | Yes | FRONTEND/AUDIT if user-visible |
 | `slot.runtime_rollback` | Yes | AUDIT_ONLY |
 
-Frontend must continue to rely on task/interrupt events for UX. It must not consume internal SlotEvent directly unless a future API exposes a sanitized slot timeline.
+Frontend must continue to rely on task/interrupt events for UX. It must not consume internal SlotEvent directly in this delivery.
 
 ## 11. LLM context design
 
@@ -618,7 +627,7 @@ For v2 slot interrupts, frontend must submit raw answer payloads.
 }
 ```
 
-Implementation may either revise the existing endpoint DTO or introduce a v2-compatible answer DTO behind the same endpoint. The externally visible contract must reject business field-shaped payloads for v2 slot interrupts.
+Use the existing `POST /api/v1/tasks/{task_id}/interrupts/{interrupt_id}/answer` surface and evolve its request DTO into a discriminated answer shape. For v2 slot interrupts, the accepted discriminator is the presence of top-level `answer` plus `client_request_id`; the backend must route that payload to SlotStateMachine instead of merging field-shaped metadata into the root task message. The externally visible contract must reject business field-shaped payloads for v2 slot interrupts.
 
 Rejected v2 payload example:
 
@@ -716,11 +725,11 @@ Because v2 schema is the only execution fact source, field-design schemas must b
 
 Required cleanup:
 
-- `diagonal.input.yaml`: mark `ncols` required if diagonal design requires it.
-- `interval.input.yaml`: mark `ncols` required if interval design requires it.
-- Add complete aliases where necessary, e.g. `对角线增广` as a design alias if expected from users.
-- Add descriptions/hints for user-facing prompt generation.
-- Add validation bounds where business rules require them.
+- `diagonal.input.yaml`: mark `ncols` as `required: true`.
+- `interval.input.yaml`: mark `ncols` as `required: true`.
+- `diagonal.input.yaml`: add `对角线增广` to the `design` field aliases in addition to schema-ref aliases, so schema selection and field canonicalization share the same user language.
+- Add descriptions and clarification hints/examples for user-facing prompt generation, including `material_data`, `design`, `ncols`, and `ck_spec`.
+- Preserve existing validation bounds unless product rules require stricter ones; `ncols` must keep a bounded integer validation rule.
 - Keep `design.const` canonical values: `rcbd`, `diagonal`, `interval`.
 
 Runtime must not use `SKILL.md` prose to infer missing required fields.
@@ -739,6 +748,8 @@ Phases:
 4. Change frontend answer submission to raw answer payload.
 5. Clean field-design schemas.
 6. Remove or fail-close v1 project Skill execution paths.
+
+Migration naming and rollback must follow the repository's existing storage conventions: SQLite row models remain the runtime metadata source, PostgreSQL fresh-cutover DDL is regenerated through `src/state/postgres/runtime_schema.py`, and the implementation plan must document rollback/deactivation behavior before `MAF_V2_SLOT_RUNTIME=enabled`.
 
 ### 15.2 Runtime guard
 
@@ -760,7 +771,7 @@ If enabled mode fails severely:
 
 - Set `MAF_V2_SLOT_RUNTIME=disabled`.
 - Stop creating new SlotCollections.
-- Mark open slot collections `failed` or `cancelled_by_runtime_rollback` according to product decision.
+- Mark open slot collections `failed` with failure code `slot_runtime_rollback`; users must restart the Skill instead of resuming a partially migrated collection.
 - Do not auto-delete already produced artifacts.
 - Append `slot.runtime_rollback` and mirror audit event.
 
@@ -860,6 +871,8 @@ If enabled mode fails severely:
 - Validation failure loops back with new question.
 - Cancellation path does not execute Skill.
 - v2 slot interrupt rejects field-shaped old payload.
+- Legacy tests that expect `_slot_collection` as the authoritative state must be migrated to assert `_slot_collection_ref` plus persisted SlotCollection/SlotEvent authority.
+- Existing v1/no-contract project Skill execution tests must be removed or changed to assert fail-closed behavior in Agent Skill execution.
 
 ### 20.4 Frontend tests
 
@@ -891,13 +904,26 @@ Delivery is complete only when all of the following are true:
 6. Frontend no longer parses business parameters for v2 slot interrupts.
 7. User answers display as raw user text in history.
 8. `design=对角线增广` no longer appears in normal chat display.
-9. Field-design diagonal/interval schemas encode required `ncols` if required by business flow.
+9. Field-design diagonal/interval schemas encode required `ncols`.
 10. Field-design answer `对角线增广` ultimately executes with canonical `design="diagonal"`.
 11. Multi-round slot flow survives restart and can be audited through SlotEvent.
 12. Duplicate answer/schedule paths are idempotent.
 13. All required tests in Section 20 pass.
 
-## 22. Rollout risks, assumptions, and open questions
+## 22. Dependencies and integration points
+
+| Dependency / integration point | Required decision |
+| --- | --- |
+| `StoragePort`, SQLite repositories, PostgreSQL runtime schema | Add SlotCollection/SlotEvent models, atomic `apply_slot_transition()`, shared repository contract tests, and physical deletion cleanup for slot rows. |
+| `src/integrations/agent_skills/execution.py` | Replace the current deterministic `_resolve_v2_inputs()` resume loop with V2SkillExecutionCoordinator and fail closed for no-contract project Skills. |
+| `src/integrations/agent_skills/input_schema.py` and selector | Use selected schema snapshots as durable extraction context; selector may use deterministic aliases first and LLM fallback when configured. |
+| `src/integrations/agent_skills/missing_input_interrupt.py` | Stop building authoritative slot state from `manifest.parameters`; produce only frontend-safe interrupt refs/summaries for v2 slot waits. |
+| `src/api/runtime.py` | Route v2 answer DTOs to SlotStateMachine, store raw user answer messages, and stop formatting v2 answers as `key=value`. |
+| Upload/artifact ledger | Validate artifact slots and sheet selections from existing upload/task attachment records; never accept LLM-created artifacts. |
+| Frontend client/types/tests | Submit raw `answer` payloads with `client_request_id`, display backend question/raw answer, and avoid business parsing. |
+| LLM prompt profiles/fake generators | Add separate Normal Extraction, History Recall, History Reference Classifier, and Prompt Generation contracts with strict JSON output. |
+
+## 23. Rollout risks, assumptions, and resolved planning decisions
 
 ### Risks
 
@@ -916,11 +942,11 @@ Delivery is complete only when all of the following are true:
 - Existing task/node/interrupt/upload/artifact/checkpoint infrastructure is stable enough to reuse.
 - Field-design business rules should be expressed in input schema rather than `SKILL.md` prose.
 
-### Open questions for implementation planning
+### Resolved planning decisions
 
-- Whether the answer API should add a new endpoint or evolve the existing endpoint DTO with discriminated payloads.
-- Whether `slot_event` should be mirrored synchronously inside the same transaction as SlotCollection update or through a best-effort event sink wrapper.
-- Exact PostgreSQL migration naming and rollback convention for the slot tables.
-- Whether to expose a sanitized slot timeline API in a later frontend debugging feature.
+- Answer API: use the existing interrupt answer endpoint with a discriminated v2 answer DTO.
+- Slot transactionality: SlotCollection mutation and SlotEvent append are atomic; EventRecord mirroring is a post-commit projection.
+- PostgreSQL schema path: add SQLAlchemy runtime rows and rely on the existing PostgreSQL fresh-cutover schema generator/reconciler instead of inventing a parallel migration convention.
+- Slot timeline API: out of scope for this delivery.
 
-These questions do not block the product design, but they must be resolved in implementation planning.
+No known open product questions remain in this document.
