@@ -330,6 +330,63 @@ class InterruptAnswerRow(SQLiteBase):
     accepted_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class SlotCollectionRow(SQLiteBase):
+    __tablename__ = "slot_collection"
+    __table_args__ = (
+        Index("idx_slot_collection_task_node_status", "task_id", "node_id", "status"),
+        Index("idx_slot_collection_task_status", "task_id", "status"),
+        Index("idx_slot_collection_conversation_status_updated", "conversation_id", "status", "updated_at"),
+    )
+
+    collection_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    capability_id: Mapped[str] = mapped_column(Text, nullable=False)
+    skill_name: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    round: Mapped[int] = mapped_column(Integer, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    selected_schema_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_entrypoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skill_bundle_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contract_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_snapshot_json: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    slots_json: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    resolved_json: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    missing_json: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
+    invalid_json: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
+    last_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    completed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    cancelled_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    failed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class SlotEventRow(SQLiteBase):
+    __tablename__ = "slot_event"
+    __table_args__ = (
+        UniqueConstraint("collection_id", "idempotency_key", name="uq_slot_event_collection_idempotency"),
+        Index("idx_slot_event_collection_created", "collection_id", "created_at"),
+        Index("idx_slot_event_task_created", "task_id", "created_at"),
+    )
+
+    slot_event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    collection_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    round: Mapped[int] = mapped_column(Integer, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class CheckpointRow(SQLiteBase):
     __tablename__ = "checkpoint"
     __table_args__ = (

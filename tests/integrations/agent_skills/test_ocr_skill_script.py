@@ -289,7 +289,7 @@ ocr_mcp:
         self.assertEqual(result["error_type"], "missing_input")
         self.assertEqual(result["stage"], "input")
         self.assertEqual(result["status"], "missing_input")
-        self.assertIn("file_path", result["missing"])
+        self.assertIn("document", result["missing"])
         self.assertIn("请上传图片/PDF", result["answer"])
 
     def test_main_returns_structured_error_when_ocr_base_url_is_missing(self) -> None:

@@ -9,11 +9,13 @@ from typing import Any
 
 from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import InterruptStatus
-from src.core.models import Interrupt
+from src.core.models import Interrupt, SlotCollection, SlotEvent
 from src.integrations.llm_request_options import llm_option_metadata
 
+from .input_schema import load_input_schemas_for_contract
 from .manifest import SkillManifest
 from .parameters import SkillParameterSpec
+from .slot_state import build_schema_snapshot, redact_prompt_safe
 
 
 _FIELD_LABELS = {
@@ -48,6 +50,7 @@ _FIELD_DESCRIPTIONS = {
 
 _ARTIFACT_FIELDS = {"field_data", "file_path", "material_data", "rice_input"}
 SLOT_COLLECTION_FIELD = "_slot_collection"
+SLOT_COLLECTION_REF_FIELD = "_slot_collection_ref"
 SLOT_COLLECTION_SCHEMA_VERSION = 1
 SLOT_COLLECTION_V2_SCHEMA_VERSION = 2
 SLOT_COLLECTION_METADATA_KEY = "skill_slot_collection"
@@ -100,7 +103,7 @@ def build_missing_input_interrupt(
     digest = hashlib.sha256(
         f"{request.node_id}:{skill_name}:{entrypoint}:{slot_collection['round']}:{','.join(missing_fields)}".encode("utf-8")
     ).hexdigest()[:12]
-    required_fields = {
+    required_fields = {} if manifest.contract is not None else {
         name: _required_field_payload(name, manifest.parameters.get(name))
         for name in missing_fields
     }
@@ -226,6 +229,18 @@ def build_slot_collection(
     sources: Mapping[str, Any],
     previous_collection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if manifest.contract is not None:
+        return _build_v2_slot_collection(
+            request=request,
+            manifest=manifest,
+            skill_name=skill_name,
+            entrypoint=entrypoint,
+            missing_fields=missing_fields,
+            resolved_payload=resolved_payload,
+            sources=sources,
+            previous_collection=previous_collection,
+        )
+
     previous_slots = _previous_slots(previous_collection)
     resolved: dict[str, Any] = {}
     slots: list[dict[str, Any]] = []
@@ -343,21 +358,288 @@ def _v2_resource_hints(manifest: SkillManifest, missing_fields: tuple[str, ...])
     return hints
 
 
+def _build_v2_slot_collection(
+    *,
+    request: CapabilityExecutionRequest,
+    manifest: SkillManifest,
+    skill_name: str,
+    entrypoint: str,
+    missing_fields: tuple[str, ...],
+    resolved_payload: Mapping[str, Any],
+    sources: Mapping[str, Any],
+    previous_collection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    assert manifest.contract is not None
+    selected_schema_id = _safe_source_text(resolved_payload.get("_selected_schema_id"))
+    selected_entrypoint = _safe_source_text(resolved_payload.get("_selected_entrypoint")) or entrypoint
+    schemas = {}
+    try:
+        schemas = load_input_schemas_for_contract(manifest.contract)
+    except Exception:
+        schemas = {}
+    selected_schema = schemas.get(selected_schema_id) if selected_schema_id else None
+    previous_round = _positive_int(previous_collection.get("round")) if isinstance(previous_collection, Mapping) else 0
+    round_number = previous_round + 1 if previous_round else 1
+    previous_id = _safe_source_text(previous_collection.get("collection_id")) if isinstance(previous_collection, Mapping) else ""
+    kind = "input_collection" if selected_schema is not None else "schema_selection"
+    collection_id = previous_id or f"{request.node_id}:slot:{_collection_digest(skill_name, selected_schema_id or 'schema', missing_fields, resolved_payload)}"
+    resolved: dict[str, Any] = {}
+    slots: dict[str, Any] = {}
+    if selected_schema is not None:
+        schema_snapshot = build_schema_snapshot(selected_schema, resources=manifest.contract.resources)
+        for name, field in selected_schema.inputs.items():
+            if not field.expose:
+                continue
+            value = _safe_slot_value(_resolved_payload_value(resolved_payload, name))
+            source_payload = _source_payload(sources.get(name))
+            if value is None and field.default is not None and name not in missing_fields:
+                value = field.default
+                source_payload = "schema_default"
+            status = "missing" if name in missing_fields else ("resolved" if value is not None else "optional")
+            slot: dict[str, Any] = {
+                "name": name,
+                "label": field.description or _FIELD_LABELS.get(name, name),
+                "type": field.type,
+                "required_now": bool(field.required or field.required_when),
+                "status": status,
+                "source": {"allowed": list(field.source.allowed)},
+                "aliases": list(field.aliases),
+            }
+            if field.const is not None:
+                slot["const"] = field.const
+            if field.enum:
+                slot["enum"] = list(field.enum)
+            if field.default is not None:
+                slot["default"] = field.default
+            if value is not None and status == "resolved":
+                resolved[name] = {
+                    "raw_value": value,
+                    "value": value,
+                    "source": source_payload or "payload",
+                }
+                slot["raw_value"] = value
+                slot["value"] = value
+            slots[name] = slot
+    else:
+        selector_field = manifest.contract.schema_selector.selector_field or (missing_fields[0] if missing_fields else "schema")
+        allowed = []
+        for schema_id, ref in manifest.contract.input_schemas.items():
+            allowed.append(
+                {
+                    "schema_id": schema_id,
+                    "title": ref.title or schema_id,
+                    "description": ref.description,
+                    "aliases": list(ref.aliases),
+                }
+            )
+        schema_snapshot = {
+            "kind": "schema_selection",
+            "selector_field": selector_field,
+            "allowed_schemas": allowed,
+        }
+        slots[selector_field] = {
+            "name": selector_field,
+            "label": _FIELD_LABELS.get(selector_field, selector_field),
+            "type": "string",
+            "required_now": True,
+            "status": "missing",
+            "allowed_schemas": allowed,
+        }
+    invalid = _v2_invalid_fields(resolved_payload)
+    question = _v2_slot_question(
+        schema_snapshot=schema_snapshot,
+        missing_fields=missing_fields,
+        invalid=invalid,
+        kind=kind,
+    )
+    return {
+        "schema_version": SLOT_COLLECTION_V2_SCHEMA_VERSION,
+        "collection_id": collection_id,
+        "task_id": request.task_id,
+        "node_id": request.node_id,
+        "conversation_id": request.conversation_id,
+        "capability_id": request.capability_id,
+        "skill_name": skill_name,
+        "kind": kind,
+        "status": "waiting_for_user",
+        "entrypoint": entrypoint,
+        "selected_schema_id": selected_schema_id,
+        "selected_entrypoint": selected_entrypoint,
+        "skill_bundle_revision": _safe_source_text(request.metadata.get("skill_bundle_revision")),
+        "contract_revision": _safe_source_text(request.metadata.get("contract_revision")),
+        "schema_digest": _schema_snapshot_digest(schema_snapshot),
+        "schema_snapshot": schema_snapshot,
+        "round": round_number,
+        "revision": _positive_int(previous_collection.get("revision")) if isinstance(previous_collection, Mapping) else 0,
+        "slots": slots,
+        "resolved": resolved,
+        "missing": list(missing_fields),
+        "invalid": invalid,
+        "validation_errors": {str(item.get("field")): str(item.get("reason")) for item in invalid if isinstance(item, Mapping) and item.get("field")},
+        "resource_hints": _v2_resource_hints(manifest, missing_fields),
+        "last_question": question,
+        "question_source": "schema_snapshot",
+    }
+
+
+def _resolved_payload_value(payload: Mapping[str, Any], name: str) -> Any:
+    if name in payload:
+        return payload[name]
+    metadata = payload.get("metadata")
+    if isinstance(metadata, Mapping) and name in metadata:
+        return metadata[name]
+    return None
+
+
+def _v2_slot_question(
+    *,
+    schema_snapshot: Mapping[str, Any],
+    missing_fields: tuple[str, ...],
+    invalid: list[dict[str, str]],
+    kind: str,
+) -> str:
+    if kind == "schema_selection":
+        allowed = schema_snapshot.get("allowed_schemas") if isinstance(schema_snapshot, Mapping) else ()
+        titles = []
+        if isinstance(allowed, list | tuple):
+            titles = [str(item.get("title") or item.get("schema_id")) for item in allowed if isinstance(item, Mapping)]
+        choices = " / ".join(title for title in titles if title)
+        return f"请确认要使用哪一种设计类型：{choices}。" if choices else "请确认要使用哪一种输入模式。"
+    inputs = schema_snapshot.get("inputs") if isinstance(schema_snapshot, Mapping) else {}
+    labels = []
+    for field in missing_fields:
+        field_snapshot = inputs.get(field) if isinstance(inputs, Mapping) else None
+        if isinstance(field_snapshot, Mapping):
+            labels.append(str(field_snapshot.get("description") or field_snapshot.get("name") or field))
+        else:
+            labels.append(_FIELD_LABELS.get(field, field))
+    if invalid:
+        invalid_labels = [str(item.get("field")) for item in invalid if item.get("field")]
+        if invalid_labels:
+            return f"刚才的 {', '.join(invalid_labels)} 无法通过校验，请重新补充：{ '、'.join(labels) }。"
+    return f"请补充：{'、'.join(labels)}。" if labels else "请补充缺失参数。"
+
+
 def slot_collection_from_required_fields(required_fields: Mapping[str, Any]) -> Mapping[str, Any] | None:
     value = required_fields.get(SLOT_COLLECTION_FIELD)
     return value if isinstance(value, Mapping) else None
 
 
+def slot_collection_ref_from_required_fields(required_fields: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    value = required_fields.get(SLOT_COLLECTION_REF_FIELD)
+    return value if isinstance(value, Mapping) else None
+
+
+def slot_collection_required_fields_ref(collection: SlotCollection) -> dict[str, Any]:
+    slots = collection.slots if isinstance(collection.slots, Mapping) else {}
+    slot_summaries = []
+    for name, slot in slots.items():
+        if isinstance(slot, Mapping):
+            slot_summaries.append(
+                {
+                    "name": str(slot.get("name") or name),
+                    "label": str(slot.get("label") or slot.get("description") or name),
+                    "type": str(slot.get("type") or "string"),
+                    "status": str(slot.get("status") or ""),
+                    "required_now": bool(slot.get("required_now", slot.get("required", False))),
+                    **({"validation_error": dict(slot["validation_error"])} if isinstance(slot.get("validation_error"), Mapping) else {}),
+                }
+            )
+    return {
+        SLOT_COLLECTION_REF_FIELD: {
+            "schema_version": SLOT_COLLECTION_V2_SCHEMA_VERSION,
+            "collection_id": collection.collection_id,
+            "task_id": collection.task_id,
+            "node_id": collection.node_id,
+            "kind": collection.kind,
+            "status": collection.status,
+            "round": collection.round,
+            "revision": collection.revision,
+            "selected_schema_id": collection.selected_schema_id,
+            "selected_entrypoint": collection.selected_entrypoint,
+            "missing": list(collection.missing),
+            "invalid": [dict(item) for item in collection.invalid],
+            "last_question": collection.last_question,
+            "slots": slot_summaries,
+        }
+    }
+
+
+def slot_collection_model_from_carrier(carrier: Mapping[str, Any], *, now: Any | None = None) -> SlotCollection:
+    slots = carrier.get("slots") if isinstance(carrier.get("slots"), Mapping) else {}
+    resolved = carrier.get("resolved") if isinstance(carrier.get("resolved"), Mapping) else {}
+    invalid_raw = carrier.get("invalid") if isinstance(carrier.get("invalid"), list | tuple) else ()
+    return SlotCollection(
+        collection_id=str(carrier.get("collection_id") or ""),
+        task_id=str(carrier.get("task_id") or ""),
+        node_id=str(carrier.get("node_id") or ""),
+        conversation_id=str(carrier.get("conversation_id") or ""),
+        capability_id=str(carrier.get("capability_id") or ""),
+        skill_name=str(carrier.get("skill_name") or ""),
+        kind=str(carrier.get("kind") or "input_collection"),
+        status=str(carrier.get("status") or "waiting_for_user"),
+        round=_positive_int(carrier.get("round")) or 1,
+        revision=_positive_int(carrier.get("revision")) or 0,
+        selected_schema_id=_safe_source_text(carrier.get("selected_schema_id")) or None,
+        selected_entrypoint=_safe_source_text(carrier.get("selected_entrypoint")) or _safe_source_text(carrier.get("entrypoint")) or None,
+        skill_bundle_revision=_safe_source_text(carrier.get("skill_bundle_revision")) or None,
+        contract_revision=_safe_source_text(carrier.get("contract_revision")) or None,
+        schema_digest=_safe_source_text(carrier.get("schema_digest")) or None,
+        schema_snapshot=redact_prompt_safe(carrier.get("schema_snapshot") if isinstance(carrier.get("schema_snapshot"), Mapping) else {}),
+        slots=redact_prompt_safe(slots),
+        resolved=redact_prompt_safe(resolved),
+        missing=_clean_missing_fields(carrier.get("missing")),
+        invalid=tuple(dict(item) for item in invalid_raw if isinstance(item, Mapping)),
+        last_question=_safe_source_text(carrier.get("last_question")) or None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def slot_collection_bootstrap_events(collection: SlotCollection, *, now: Any | None = None) -> tuple[SlotEvent, ...]:
+    started = SlotEvent(
+        slot_event_id=f"{collection.collection_id}:event:000:started",
+        collection_id=collection.collection_id,
+        task_id=collection.task_id,
+        node_id=collection.node_id,
+        conversation_id=collection.conversation_id,
+        event_type="slot.collection_started",
+        round=collection.round,
+        revision=collection.revision,
+        idempotency_key=f"slot:{collection.collection_id}:started",
+        payload={"kind": collection.kind, "missing": list(collection.missing)},
+        created_at=now,
+    )
+    prompt = SlotEvent(
+        slot_event_id=f"{collection.collection_id}:event:001:prompt:{collection.round}",
+        collection_id=collection.collection_id,
+        task_id=collection.task_id,
+        node_id=collection.node_id,
+        conversation_id=collection.conversation_id,
+        event_type="slot.prompt_generated",
+        round=collection.round,
+        revision=collection.revision,
+        idempotency_key=f"slot:{collection.collection_id}:prompt:{collection.round}",
+        payload={"question": collection.last_question, "missing": list(collection.missing)},
+        created_at=now,
+    )
+    return (started, prompt)
+
+
 def slot_collection_event_payload(required_fields: Mapping[str, Any]) -> dict[str, Any]:
-    collection = slot_collection_from_required_fields(required_fields)
+    collection = slot_collection_ref_from_required_fields(required_fields) or slot_collection_from_required_fields(required_fields)
     if collection is None:
         return {}
     payload: dict[str, Any] = {}
-    for key in ("collection_id", "round", "missing", "question_source"):
+    for key in ("collection_id", "round", "revision", "missing", "question_source"):
         value = collection.get(key)
         if value is not None:
             output_key = "slot_collection_id" if key == "collection_id" else key
             payload[output_key] = list(value) if isinstance(value, tuple) else value
+    if collection.get("kind"):
+        payload["kind"] = collection.get("kind")
+    if collection.get("selected_schema_id"):
+        payload["selected_schema_id"] = collection.get("selected_schema_id")
     validation_errors = collection.get("validation_errors")
     if isinstance(validation_errors, Mapping) and validation_errors:
         payload["validation_errors"] = {
@@ -592,7 +874,11 @@ def _safe_slot_value(value: Any) -> Any | None:
                     if isinstance(item, str | int | float | bool) or item is None
                 ]
         if safe.get("available") is True:
-            return {"available": True, **({"count": safe.get("count")} if "count" in safe else {})}
+            artifact_value: dict[str, Any] = {"available": True}
+            for key in ("count", "upload_ids", "filename", "filenames", "selected_sheet"):
+                if key in safe:
+                    artifact_value[key] = safe[key]
+            return artifact_value
         return safe or None
     return None
 
@@ -631,3 +917,8 @@ def _collection_digest(
     return hashlib.sha256(
         repr((skill_name, entrypoint, missing_fields, sorted(resolved))).encode("utf-8")
     ).hexdigest()[:10]
+
+
+def _schema_snapshot_digest(snapshot: Mapping[str, Any]) -> str:
+    rendered = json.dumps(dict(snapshot), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]

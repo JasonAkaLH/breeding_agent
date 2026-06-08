@@ -7,8 +7,15 @@ from typing import Any
 
 from src.core.contracts import CapabilityExecutionRequest, EventSink, ExecutorPort, StoragePort
 from src.core.enums import EventVisibility, NodeStatus, TaskStatus
-from src.core.models import EventRecord, Task, TaskEdge, TaskNode
-from src.integrations.agent_skills.missing_input_interrupt import slot_collection_event_payload
+from src.core.models import EventRecord, Interrupt, Task, TaskEdge, TaskNode
+from src.integrations.agent_skills.missing_input_interrupt import (
+    SLOT_COLLECTION_V2_SCHEMA_VERSION,
+    slot_collection_bootstrap_events,
+    slot_collection_event_payload,
+    slot_collection_from_required_fields,
+    slot_collection_model_from_carrier,
+    slot_collection_required_fields_ref,
+)
 
 from .backpressure import BackpressureGuard
 from .completion_policy import CompletionPolicy, CompletionStatus
@@ -94,6 +101,61 @@ class OrchestrationService:
         await self._storage.append_event(event)
         if self._event_sink is not None:
             await self._event_sink.publish(event)
+
+    async def _persist_v2_slot_collection_for_interrupt(self, interrupt: Interrupt, *, now: datetime) -> Interrupt:
+        carrier = slot_collection_from_required_fields(interrupt.required_fields)
+        if carrier is None:
+            return interrupt
+        if int(carrier.get("schema_version") or 0) != SLOT_COLLECTION_V2_SCHEMA_VERSION:
+            return interrupt
+        collection = slot_collection_model_from_carrier(carrier, now=now)
+        if not collection.collection_id:
+            return interrupt
+        existing = await self._storage.get_slot_collection(collection.collection_id)
+        if existing is None:
+            await self._storage.save_slot_collection(collection)
+            for event in slot_collection_bootstrap_events(collection, now=now):
+                await self._storage.append_slot_event(event)
+        else:
+            prompt_key = f"slot:{existing.collection_id}:prompt:{collection.round}"
+            if await self._storage.get_slot_event_by_idempotency_key(existing.collection_id, prompt_key) is None:
+                merged = replace(
+                    existing,
+                    status=collection.status or existing.status,
+                    round=max(existing.round, collection.round),
+                    selected_schema_id=collection.selected_schema_id or existing.selected_schema_id,
+                    selected_entrypoint=collection.selected_entrypoint or existing.selected_entrypoint,
+                    schema_digest=collection.schema_digest or existing.schema_digest,
+                    schema_snapshot=dict(collection.schema_snapshot or existing.schema_snapshot),
+                    slots=dict(collection.slots or existing.slots),
+                    resolved=dict(collection.resolved or existing.resolved),
+                    missing=tuple(collection.missing),
+                    invalid=tuple(collection.invalid),
+                    last_question=collection.last_question or existing.last_question,
+                    revision=existing.revision + 1,
+                    created_at=existing.created_at,
+                    updated_at=now,
+                )
+                prompt_event = slot_collection_bootstrap_events(collection, now=now)[-1]
+                prompt_event = replace(
+                    prompt_event,
+                    revision=merged.revision,
+                    idempotency_key=prompt_key,
+                    payload={
+                        **dict(prompt_event.payload),
+                        "replaces_revision": existing.revision,
+                    },
+                )
+                collection = await self._storage.apply_slot_transition(
+                    existing.collection_id,
+                    existing.revision,
+                    merged,
+                    prompt_event,
+                    idempotency_key=prompt_key,
+                ) or await self._storage.get_slot_collection(existing.collection_id) or existing
+            else:
+                collection = existing
+        return replace(interrupt, required_fields=slot_collection_required_fields_ref(collection))
 
     def _ensure_event_created_at(self, event: EventRecord) -> EventRecord:
         if event.created_at is not None:
@@ -542,6 +604,7 @@ class OrchestrationService:
             updated = replace(latest_node, status=NodeStatus.WAITING_FOR_INPUT)
             saved_node = await self._storage.save_task_node(updated)
             interrupt = replace(result.interrupt, created_at=result.interrupt.created_at or now)
+            interrupt = await self._persist_v2_slot_collection_for_interrupt(interrupt, now=now)
             saved_interrupt = await self._storage.save_interrupt(interrupt)
             await self._record_event(
                 self._make_event(

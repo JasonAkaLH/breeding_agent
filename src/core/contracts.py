@@ -18,6 +18,8 @@ from .models import (
     MailboxMessage,
     Message,
     PendingSkillContext,
+    SlotCollection,
+    SlotEvent,
     Task,
     TaskEdge,
     TaskInputAttachment,
@@ -261,6 +263,30 @@ class StoragePort(Protocol):
     async def get_interrupt_answer(self, interrupt_answer_id: str) -> InterruptAnswer | None: ...
 
     async def list_interrupt_answers(self, interrupt_id: str) -> list[InterruptAnswer]: ...
+
+    async def save_slot_collection(self, collection: SlotCollection) -> SlotCollection: ...
+
+    async def get_slot_collection(self, collection_id: str) -> SlotCollection | None: ...
+
+    async def get_active_slot_collection_for_node(self, task_id: str, node_id: str) -> SlotCollection | None: ...
+
+    async def list_slot_collections_for_task(self, task_id: str) -> list[SlotCollection]: ...
+
+    async def apply_slot_transition(
+        self,
+        collection_id: str,
+        expected_revision: int,
+        next_collection: SlotCollection,
+        slot_event: SlotEvent,
+        *,
+        idempotency_key: str | None = None,
+    ) -> SlotCollection | None: ...
+
+    async def append_slot_event(self, event: SlotEvent) -> SlotEvent: ...
+
+    async def list_slot_events(self, collection_id: str) -> list[SlotEvent]: ...
+
+    async def get_slot_event_by_idempotency_key(self, collection_id: str, key: str) -> SlotEvent | None: ...
 
     async def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint: ...
 
