@@ -1,9 +1,0 @@
-{
-  "jsonrpc": "2.0",
-  "id": "tasks-cancel-1",
-  "method": "tasks/cancel",
-  "params": {
-    "taskId": "raw-mcp-task-1",
-    "reason": "user_requested"
-  }
-}

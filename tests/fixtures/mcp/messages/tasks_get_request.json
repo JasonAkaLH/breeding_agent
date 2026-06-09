@@ -1,8 +1,0 @@
-{
-  "jsonrpc": "2.0",
-  "id": "tasks-get-1",
-  "method": "tasks/get",
-  "params": {
-    "taskId": "raw-mcp-task-1"
-  }
-}

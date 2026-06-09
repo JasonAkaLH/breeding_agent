@@ -1,6 +1,0 @@
-{
-  "jsonrpc": "2.0",
-  "id": "tools-list-2025-11-25",
-  "method": "tools/list",
-  "params": {}
-}
