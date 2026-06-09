@@ -1,3 +1,0 @@
-event: message
-data: {"jsonrpc":"2.0","id":"tools-1","result":{"tools":[]}}
-

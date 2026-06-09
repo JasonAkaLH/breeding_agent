@@ -113,6 +113,7 @@ from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, Workflo
 from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, OrchestrationRunResult, WorkflowPlan
 from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
+from src.orchestration.visible_message_history import INTERRUPT_VISIBLE_STREAM_STATUS, persist_interrupt_question_message
 from src.orchestration.composite_executor import CompositeExecutor
 from src.orchestration.registry import CapabilityRegistry, InstanceRegistry
 from src.orchestration.runtime_replanner import CompositeRuntimeReplanner, RuntimeReplanner
@@ -1141,6 +1142,7 @@ class ApiRuntime:
         )
         self._task_sheet_selection_resume_metadata[task.task_id] = dict(metadata)
         saved_interrupt = await self.interrupt_service.open_interrupt(interrupt, now=now)
+        await persist_interrupt_question_message(self.storage, saved_interrupt, created_at=now)
         await self._record_event(
             self._make_event(
                 task_id=task.task_id,
@@ -1377,7 +1379,9 @@ class ApiRuntime:
         )
 
     async def sync_assistant_history_messages(self, conversation_id: str) -> None:
-        tasks = await self.storage.list_tasks_for_conversation(conversation_id, statuses={TaskStatus.COMPLETED})
+        all_tasks = await self.storage.list_tasks_for_conversation(conversation_id)
+        await self._sync_interrupt_visible_messages_for_tasks(all_tasks)
+        tasks = [task for task in all_tasks if task.status == TaskStatus.COMPLETED]
         messages = await self.storage.list_messages_for_conversation(conversation_id)
         completed_assistant_task_ids = {
             message.task_id
@@ -1392,7 +1396,19 @@ class ApiRuntime:
             await self.try_sync_assistant_history_message_for_task(task.task_id, task.conversation_id)
 
     async def sync_assistant_history_message_for_task(self, task_id: str, conversation_id: str) -> None:
+        task = await self.storage.get_task(task_id)
+        if task is not None and task.conversation_id == conversation_id:
+            await self._sync_interrupt_visible_messages_for_tasks([task])
         await self._persist_assistant_history_message(task_id, conversation_id)
+
+    async def _sync_interrupt_visible_messages_for_tasks(self, tasks: Iterable[Task]) -> None:
+        for task in tasks:
+            for interrupt in await self.storage.list_interrupts_for_task(task.task_id):
+                await persist_interrupt_question_message(
+                    self.storage,
+                    interrupt,
+                    created_at=interrupt.created_at,
+                )
 
     async def try_sync_assistant_history_message_for_task(self, task_id: str, conversation_id: str) -> None:
         try:
@@ -1860,6 +1876,7 @@ class ApiRuntime:
                 created_at=now,
             )
             await self.storage.save_interrupt(interrupt)
+            await persist_interrupt_question_message(self.storage, interrupt, created_at=now)
             recovery_key = f"slot:{collection.collection_id}:interrupt_recovered:{collection.round}:{collection.revision}"
             await self.storage.append_slot_event(
                 SlotEvent(
@@ -2148,6 +2165,7 @@ class ApiRuntime:
                 raise UploadValidationError("slot collection state is missing; restart the Skill")
             recovered_interrupt = replace(interrupt, required_fields=slot_collection_required_fields_ref(collection))
             await self.storage.save_interrupt(recovered_interrupt)
+            await persist_interrupt_question_message(self.storage, recovered_interrupt)
             return await self._answer_v2_slot_interrupt(task=task, interrupt=recovered_interrupt, answer_payload=answer_payload, source_message_id=source_message_id)
 
         existing_answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
@@ -2582,6 +2600,7 @@ class ApiRuntime:
                 role=MessageRole.ASSISTANT,
                 content=assistant_message,
                 task_id=task.task_id,
+                stream_status=INTERRUPT_VISIBLE_STREAM_STATUS,
                 created_at=self._utcnow_naive(),
             )
             await self.storage.save_message(assistant_message_record)
@@ -3589,6 +3608,7 @@ class ApiRuntime:
             status=InterruptStatus.OPEN,
         )
         await self.storage.save_interrupt(saved_interrupt)
+        await persist_interrupt_question_message(self.storage, saved_interrupt, created_at=self._utcnow_naive())
         metadata = {
             "old_schema_id": old_schema_id,
             "new_schema_id": target_schema_id,
@@ -3709,14 +3729,14 @@ class ApiRuntime:
             idempotency_key=confirm_key,
         )
         active = saved or await self.storage.get_slot_collection(collection.collection_id) or next_collection
-        await self.storage.save_interrupt(
-            replace(
-                interrupt,
-                question=active.last_question or interrupt.question,
-                required_fields=slot_collection_required_fields_ref(active),
-                status=InterruptStatus.OPEN,
-            )
+        saved_interrupt = replace(
+            interrupt,
+            question=active.last_question or interrupt.question,
+            required_fields=slot_collection_required_fields_ref(active),
+            status=InterruptStatus.OPEN,
         )
+        await self.storage.save_interrupt(saved_interrupt)
+        await persist_interrupt_question_message(self.storage, saved_interrupt, created_at=self._utcnow_naive())
         if part.reuse_decision == "reuse":
             message = "已复用旧 schema 中同名字段的参数。"
         else:
@@ -4103,6 +4123,7 @@ class ApiRuntime:
             role=MessageRole.ASSISTANT,
             content=assistant_text,
             task_id=task.task_id,
+            stream_status=INTERRUPT_VISIBLE_STREAM_STATUS,
             created_at=self._utcnow_naive(),
         )
         await self.storage.save_message(assistant_message)

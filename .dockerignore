@@ -63,3 +63,20 @@ native/fuzz/target/
 skill/**/docs/
 skill/**/examples/
 skill/**/outputs/
+
+# Test sources/scripts are local-only and must not enter Docker context/images.
+frontend/src/*.test.ts
+frontend/src/*.test.tsx
+frontend/src/*.spec.ts
+frontend/src/*.spec.tsx
+frontend/src/**/*.test.ts
+frontend/src/**/*.test.tsx
+frontend/src/**/*.spec.ts
+frontend/src/**/*.spec.tsx
+frontend/src/test/
+mcp_test.json
+scripts/smoke_*.py
+scripts/validate_*.py
+scripts/run_rust_coverage_thresholds.py
+scripts/run_rust_quality_gates.py
+scripts/prd_evidence.py

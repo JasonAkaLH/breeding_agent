@@ -404,26 +404,30 @@ class _BusinessTurn:
     turn_id: str
     root: Message | None = None
     clarifications: list[Message] = field(default_factory=list)
-    assistant: Message | None = None
+    assistants: list[Message] = field(default_factory=list)
     artifact_fallback: Artifact | None = None
 
     @property
     def created_at(self) -> datetime | None:
-        for item in (self.root, self.assistant):
-            if item is not None and item.created_at is not None:
-                return item.created_at
-        if self.clarifications and self.clarifications[0].created_at is not None:
-            return self.clarifications[0].created_at
-        return None
+        timestamps = [
+            message.created_at
+            for message in (self.root, *self.clarifications, *self.assistants)
+            if message is not None and message.created_at is not None
+        ]
+        return min(timestamps) if timestamps else None
 
     def memory_messages(self) -> list[ConversationMemoryMessage]:
         messages: list[ConversationMemoryMessage] = []
         if self.root is not None:
             messages.append(ConversationMemoryMessage.from_message(self.root, kind="root"))
-        messages.extend(ConversationMemoryMessage.from_message(message, kind="clarification") for message in self.clarifications)
-        if self.assistant is not None:
-            messages.append(ConversationMemoryMessage.from_message(self.assistant, kind="assistant"))
-        elif self.artifact_fallback is not None and self.artifact_fallback.storage_ref.strip():
+        followups: list[tuple[Message, str]] = []
+        followups.extend((message, "clarification") for message in self.clarifications)
+        followups.extend((message, "assistant") for message in self.assistants)
+        messages.extend(
+            ConversationMemoryMessage.from_message(message, kind=kind)
+            for message, kind in sorted(followups, key=lambda item: (item[0].created_at or datetime.min, item[0].message_id))
+        )
+        if not self.assistants and self.artifact_fallback is not None and self.artifact_fallback.storage_ref.strip():
             messages.append(
                 ConversationMemoryMessage(
                     message_id=f"{self.artifact_fallback.task_id}:assistant_artifact",
@@ -555,7 +559,7 @@ class ConversationMemoryBuilder:
                 else:
                     turn.root = message
             elif message.role == MessageRole.ASSISTANT:
-                turn.assistant = message
+                turn.assistants.append(message)
                 if message.task_id:
                     task_ids_with_assistant_message.add(message.task_id)
 
@@ -565,7 +569,7 @@ class ConversationMemoryBuilder:
             if task.task_id not in include_artifact_task_ids:
                 continue
             turn = turns_by_id.setdefault(task.task_id, _BusinessTurn(turn_id=task.task_id))
-            if turn.assistant is not None:
+            if turn.assistants:
                 continue
             text_artifact = await self._final_text_artifact(task.task_id)
             if text_artifact is not None:

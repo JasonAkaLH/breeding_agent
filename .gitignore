@@ -104,3 +104,23 @@ native/target/
 # Local private working documents
 /需求.md
 /本周工作周报.md
+
+# Test sources/scripts kept local-only
+/tests/
+/frontend/src/*.test.ts
+/frontend/src/*.test.tsx
+/frontend/src/*.spec.ts
+/frontend/src/*.spec.tsx
+/frontend/src/**/*.test.ts
+/frontend/src/**/*.test.tsx
+/frontend/src/**/*.spec.ts
+/frontend/src/**/*.spec.tsx
+/frontend/src/test/
+/native/**/tests/
+/skill/**/tests/
+/mcp_test.json
+/scripts/smoke_*.py
+/scripts/validate_*.py
+/scripts/run_rust_coverage_thresholds.py
+/scripts/run_rust_quality_gates.py
+/scripts/prd_evidence.py
