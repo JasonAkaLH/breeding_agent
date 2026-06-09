@@ -57,6 +57,7 @@ from src.integrations.agent_skills import (
     SkillRuntimeRefreshResult,
     SkillRuntimeState,
     SkillScriptRunner,
+    SkillResourceService,
     SlotExtractionCandidate,
     SlotExtractionResult,
     apply_extraction_result_to_collection,
@@ -209,6 +210,59 @@ USER_SUPPLIED_METADATA_DENYLIST = frozenset(
 
 _SLOT_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed"})
 _SLOT_WAITING_STATUSES = frozenset({"waiting_for_user", "collecting", "extracting", "validating"})
+_INTERRUPT_TURN_SLOT_ANSWER_CONFIDENCE = 0.78
+_INTERRUPT_TURN_LLM_METADATA = {"deep_thinking": True, "main_agent_reasoning_effort": "max"}
+_INTERRUPT_OPEN_TURN_PART_KINDS = frozenset(
+    {"slot_answer", "skill_question", "off_topic_guidance", "schema_switch", "ambiguous"}
+)
+_INTERRUPT_SCHEMA_SWITCH_EXECUTION_CONFIDENCE = 0.85
+_V2_INTERRUPT_RAW_ANSWER_ALLOWED_KEYS = frozenset(
+    {"text", "upload_ids", "sheet_selections", "upload_sheet_selections"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptTurnDecision:
+    intent: str
+    confidence: float
+    reason: str = ""
+    clarification_answer: str = ""
+    extracted_answer: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptResumeVerification:
+    allow_resume: bool
+    confidence: float
+    reason: str = ""
+    clarification_answer: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptOpenTurnPart:
+    part_id: str
+    kind: str
+    text: str = ""
+    target_slots: tuple[str, ...] = ()
+    target_schema_id: str | None = None
+    reuse_decision: str = "unspecified"
+    execution_confirmation: bool = False
+    execution_confirmation_confidence: float = 0.0
+    uses_uploads: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+    blocks_resume: bool = False
+    block_reason: str = ""
+    assistant_message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptOpenTurnPlan:
+    parts: tuple[InterruptOpenTurnPart, ...]
+    confidence: float = 0.0
+    reason: str = ""
+    fallback: bool = False
+    fallback_reason: str = ""
 
 
 def _is_v2_slot_collection_payload(value: Mapping[str, Any] | None) -> bool:
@@ -393,6 +447,223 @@ class ApiRuntime:
         if self.username_token_service is None:
             return False
         return await self.username_token_service.token_is_current_for_username(raw_token, username, touch=touch)
+
+    async def submit_chat_message(
+        self,
+        conversation_id: str,
+        request: SubmitMessageRequest,
+        *,
+        authenticated_username: str | None = None,
+    ) -> dict[str, object]:
+        interrupt_result = await self._try_submit_chat_as_interrupt_turn(
+            conversation_id,
+            request,
+            authenticated_username=authenticated_username,
+        )
+        if interrupt_result is not None:
+            return interrupt_result
+        message, task = await self.submit_message(
+            conversation_id,
+            request,
+            authenticated_username=authenticated_username,
+        )
+        return {
+            "conversation_id": conversation_id,
+            "message_id": message.message_id,
+            "task_id": task.task_id,
+            "status": "accepted",
+            "action": "task_accepted",
+        }
+
+    async def _try_submit_chat_as_interrupt_turn(
+        self,
+        conversation_id: str,
+        request: SubmitMessageRequest,
+        *,
+        authenticated_username: str | None,
+    ) -> dict[str, object] | None:
+        if authenticated_username is None:
+            raise ValueError("authenticated_username is required")
+        requested_interrupt_id = self._chat_message_requested_interrupt_id(request.metadata)
+        conversation = await self.storage.get_conversation(conversation_id)
+        if conversation is None:
+            if requested_interrupt_id:
+                raise ValueError(f"Unknown open interrupt for current conversation: {requested_interrupt_id}")
+            return None
+        if conversation.username != authenticated_username:
+            raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
+        if conversation.status != ConversationStatus.ACTIVE:
+            raise PermissionError(f"Conversation is not available: {conversation_id}")
+
+        active_task = await self.storage.get_active_task_for_conversation(conversation_id)
+        if active_task is None:
+            if requested_interrupt_id:
+                replay_interrupt = await self.storage.get_interrupt(requested_interrupt_id)
+                if (
+                    replay_interrupt is None
+                    or replay_interrupt.conversation_id != conversation_id
+                    or slot_collection_ref_from_required_fields(replay_interrupt.required_fields) is None
+                ):
+                    raise ValueError(f"No active task is waiting for interrupt: {requested_interrupt_id}")
+                message_id = request.client_message_id or self._make_id("msg")
+                answer_payload = self._chat_message_interrupt_answer_payload(replay_interrupt, request, client_request_id=message_id)
+                result = await self.answer_interrupt(
+                    replay_interrupt.task_id,
+                    replay_interrupt.interrupt_id,
+                    answer_payload,
+                    source_message_id=message_id,
+                )
+                return {
+                    "conversation_id": conversation_id,
+                    "message_id": str(result.get("source_message_id") or message_id),
+                    "task_id": replay_interrupt.task_id,
+                    "status": "accepted",
+                    "action": self._chat_message_interrupt_action(result.get("action")),
+                    "interrupt_id": replay_interrupt.interrupt_id,
+                    "assistant_message": result.get("assistant_message"),
+                    "answer_payload": dict(result.get("answer_payload") or {}),
+                }
+            return None
+        open_interrupt = await self._select_open_interrupt_for_chat_turn(active_task.task_id, request.metadata)
+        if open_interrupt is None:
+            if requested_interrupt_id:
+                replay_interrupt = await self.storage.get_interrupt(requested_interrupt_id)
+                if (
+                    replay_interrupt is not None
+                    and replay_interrupt.task_id == active_task.task_id
+                    and replay_interrupt.conversation_id == conversation_id
+                    and slot_collection_ref_from_required_fields(replay_interrupt.required_fields) is not None
+                ):
+                    open_interrupt = replay_interrupt
+                else:
+                    return None
+            else:
+                return None
+
+        message_id = request.client_message_id or self._make_id("msg")
+        answer_payload = self._chat_message_interrupt_answer_payload(open_interrupt, request, client_request_id=message_id)
+        result = await self.answer_interrupt(
+            active_task.task_id,
+            open_interrupt.interrupt_id,
+            answer_payload,
+            source_message_id=message_id,
+        )
+        return {
+            "conversation_id": conversation_id,
+            "message_id": str(result.get("source_message_id") or message_id),
+            "task_id": active_task.task_id,
+            "status": "accepted",
+            "action": self._chat_message_interrupt_action(result.get("action")),
+            "interrupt_id": open_interrupt.interrupt_id,
+            "assistant_message": result.get("assistant_message"),
+            "answer_payload": dict(result.get("answer_payload") or {}),
+        }
+
+    @staticmethod
+    def _chat_message_interrupt_action(action: object) -> str:
+        normalized = str(action or "resumed")
+        if normalized.startswith("interrupt_"):
+            return normalized
+        if normalized == "clarification_answer":
+            return "interrupt_clarification_answer"
+        if normalized == "resumed":
+            return "interrupt_resumed"
+        return f"interrupt_{normalized}"
+
+    async def _select_open_interrupt_for_chat_turn(
+        self,
+        task_id: str,
+        metadata: Mapping[str, Any],
+    ) -> Interrupt | None:
+        await self._recover_missing_v2_slot_interrupts(task_id)
+        interrupts = await self.storage.list_interrupts_for_task(task_id)
+        open_interrupts = [interrupt for interrupt in interrupts if interrupt.status == InterruptStatus.OPEN]
+        requested_interrupt_id = self._chat_message_requested_interrupt_id(metadata)
+        if not open_interrupts:
+            if requested_interrupt_id:
+                replay_interrupt = await self.storage.get_interrupt(requested_interrupt_id)
+                if replay_interrupt is not None and replay_interrupt.task_id == task_id:
+                    return None
+                raise ValueError(f"Unknown open interrupt for current task: {requested_interrupt_id}")
+            return None
+        if requested_interrupt_id:
+            for interrupt in open_interrupts:
+                if interrupt.interrupt_id == requested_interrupt_id:
+                    return interrupt
+            replay_interrupt = await self.storage.get_interrupt(requested_interrupt_id)
+            if replay_interrupt is not None and replay_interrupt.task_id == task_id:
+                return None
+            raise ValueError(f"Unknown open interrupt for current task: {requested_interrupt_id}")
+        if len(open_interrupts) == 1:
+            return open_interrupts[0]
+        raise ValueError("Multiple open interrupts are waiting; submit metadata.interrupt_id to choose one")
+
+    @staticmethod
+    def _chat_message_requested_interrupt_id(metadata: Mapping[str, Any]) -> str:
+        return str(
+            metadata.get("interrupt_id")
+            or metadata.get("pending_interrupt_id")
+            or ""
+        ).strip()
+
+    def _chat_message_interrupt_answer_payload(
+        self,
+        interrupt: Interrupt,
+        request: SubmitMessageRequest,
+        *,
+        client_request_id: str,
+    ) -> dict[str, object]:
+        upload_ids = self._chat_message_upload_ids(request.metadata)
+        sheet_selections = self._chat_message_sheet_selections(request.metadata)
+        if slot_collection_ref_from_required_fields(interrupt.required_fields) is not None:
+            answer: dict[str, object] = {"text": request.content}
+            if upload_ids:
+                answer["upload_ids"] = list(upload_ids)
+            if sheet_selections:
+                answer["sheet_selections"] = dict(sheet_selections)
+            return {"client_request_id": client_request_id, "answer": answer}
+
+        previous_slot_collection = slot_collection_from_required_fields(interrupt.required_fields)
+        if _is_v2_slot_collection_payload(previous_slot_collection):
+            answer = {"text": request.content}
+            if upload_ids:
+                answer["upload_ids"] = list(upload_ids)
+            if sheet_selections:
+                answer["sheet_selections"] = dict(sheet_selections)
+            return {"client_request_id": client_request_id, "answer": answer}
+
+        if interrupt.reason_code == "sheet_selection_required" or "upload_sheet_selections" in interrupt.required_fields:
+            return {"upload_sheet_selections": dict(sheet_selections)}
+
+        field_names = [field for field in interrupt.required_fields if not str(field).startswith("_")]
+        payload: dict[str, object] = {}
+        if len(field_names) == 1:
+            field_name = str(field_names[0])
+            payload[field_name] = (
+                {"text": request.content, "upload_ids": list(upload_ids)}
+                if upload_ids
+                else request.content
+            )
+        else:
+            payload["answer"] = request.content
+        if upload_ids:
+            payload["upload_ids"] = list(upload_ids)
+        return payload
+
+    def _chat_message_upload_ids(self, metadata: Mapping[str, Any]) -> tuple[str, ...]:
+        raw_upload_ids = metadata.get("upload_ids")
+        if raw_upload_ids in (None, ""):
+            return ()
+        return self._normalize_upload_ids(raw_upload_ids)
+
+    def _chat_message_sheet_selections(self, metadata: Mapping[str, Any]) -> dict[str, str]:
+        raw_sheet_selections = (
+            metadata.get("upload_sheet_selections")
+            or metadata.get("sheet_selections")
+        )
+        if raw_sheet_selections in (None, ""):
+            return {}
+        return self._normalize_upload_sheet_selections(raw_sheet_selections)
 
     async def submit_message(
         self,
@@ -1516,8 +1787,6 @@ class ApiRuntime:
         task = await self.storage.get_task(task_id)
         if task is None:
             return
-        if await self._has_running_execution(task_id):
-            return
         task_interrupts = await self.storage.list_interrupts_for_task(task_id)
         open_slot_collection_ids = {
             str(ref.get("collection_id") or "").strip()
@@ -1526,9 +1795,10 @@ class ApiRuntime:
             for ref in (slot_collection_ref_from_required_fields(interrupt.required_fields),)
             if isinstance(ref, Mapping) and str(ref.get("collection_id") or "").strip()
         }
+        has_running_execution = await self._has_running_execution(task_id)
         for collection in await self.storage.list_slot_collections_for_task(task_id):
             if collection.status == "ready":
-                script_key = f"slot:{collection.collection_id}:script_scheduled"
+                script_key = self._v2_slot_script_scheduled_key(collection)
                 if await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, script_key) is None:
                     scheduled_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(collection)
                     if scheduled_new and scheduled_collection.status == "script_scheduled":
@@ -1571,6 +1841,8 @@ class ApiRuntime:
                 continue
             latest_interrupt = await self.storage.get_interrupt_for_node(task_id, collection.node_id)
             if latest_interrupt is not None and latest_interrupt.status == InterruptStatus.OPEN:
+                continue
+            if latest_interrupt is None and has_running_execution:
                 continue
             now = self._utcnow_naive()
             interrupt_id = f"{collection.collection_id}:interrupt:{collection.round}:{collection.revision}"
@@ -1850,7 +2122,14 @@ class ApiRuntime:
             for interrupt in interrupts
         ]
 
-    async def answer_interrupt(self, task_id: str, interrupt_id: str, answer_payload: dict[str, object]) -> dict[str, object]:
+    async def answer_interrupt(
+        self,
+        task_id: str,
+        interrupt_id: str,
+        answer_payload: dict[str, object],
+        *,
+        source_message_id: str | None = None,
+    ) -> dict[str, object]:
         task = await self.storage.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
@@ -1860,7 +2139,7 @@ class ApiRuntime:
         if interrupt.reason_code == "sheet_selection_required":
             self._validate_sheet_selection_answer(interrupt, answer_payload)
         if slot_collection_ref_from_required_fields(interrupt.required_fields) is not None:
-            return await self._answer_v2_slot_interrupt(task=task, interrupt=interrupt, answer_payload=answer_payload)
+            return await self._answer_v2_slot_interrupt(task=task, interrupt=interrupt, answer_payload=answer_payload, source_message_id=source_message_id)
         previous_slot_collection = slot_collection_from_required_fields(interrupt.required_fields)
         if _is_v2_slot_collection_payload(previous_slot_collection):
             collection_id = str(previous_slot_collection.get("collection_id") or "").strip() if previous_slot_collection else ""
@@ -1869,7 +2148,7 @@ class ApiRuntime:
                 raise UploadValidationError("slot collection state is missing; restart the Skill")
             recovered_interrupt = replace(interrupt, required_fields=slot_collection_required_fields_ref(collection))
             await self.storage.save_interrupt(recovered_interrupt)
-            return await self._answer_v2_slot_interrupt(task=task, interrupt=recovered_interrupt, answer_payload=answer_payload)
+            return await self._answer_v2_slot_interrupt(task=task, interrupt=recovered_interrupt, answer_payload=answer_payload, source_message_id=source_message_id)
 
         existing_answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
         answer_payloads = (*existing_answer_payloads, dict(answer_payload))
@@ -1892,7 +2171,7 @@ class ApiRuntime:
             interrupt_answer_id=self._make_id("interrupt-answer"),
             interrupt_id=interrupt_id,
             answer_payload=dict(answer_payload),
-            source_message_id=self._make_id("msg"),
+            source_message_id=source_message_id or self._make_id("msg"),
             created_at=self._utcnow_naive(),
         )
         upload_ids = self._merged_answer_upload_ids(answer_payloads)
@@ -1959,6 +2238,7 @@ class ApiRuntime:
             "status": str(saved_interrupt.status),
             "node_id": saved_interrupt.node_id,
             "answer_payload": dict(answer_payload),
+            "source_message_id": answer.source_message_id,
         }
 
     async def _answer_v2_slot_interrupt(
@@ -1967,6 +2247,7 @@ class ApiRuntime:
         task: Task,
         interrupt: Interrupt,
         answer_payload: dict[str, object],
+        source_message_id: str | None = None,
     ) -> dict[str, object]:
         slot_ref = slot_collection_ref_from_required_fields(interrupt.required_fields)
         if slot_ref is None:
@@ -1983,35 +2264,796 @@ class ApiRuntime:
         ]
         if legacy_field_keys:
             raise UploadValidationError("v2 slot answers must not submit field-shaped payloads")
+        self._validate_v2_interrupt_raw_answer(raw_answer)
         collection_id = str(slot_ref.get("collection_id") or "").strip()
         collection = await self.storage.get_slot_collection(collection_id)
         if collection is None:
             raise UploadValidationError("slot collection state is missing; restart the Skill")
 
-        answer_key = f"answer:{interrupt.interrupt_id}:{client_request_id}"
-        if await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, answer_key) is not None:
+        return await self._process_v2_interrupt_open_turn(
+            task=task,
+            interrupt=interrupt,
+            collection=collection,
+            raw_answer=dict(raw_answer),
+            client_request_id=client_request_id,
+            source_message_id=source_message_id,
+        )
+
+    @staticmethod
+    def _validate_v2_interrupt_raw_answer(raw_answer: Mapping[str, object]) -> None:
+        unsupported = sorted(str(key) for key in raw_answer if str(key) not in _V2_INTERRUPT_RAW_ANSWER_ALLOWED_KEYS)
+        if unsupported:
+            raise UploadValidationError(
+                "v2 slot answer only supports answer.text, answer.upload_ids, "
+                "answer.sheet_selections and answer.upload_sheet_selections; "
+                f"unsupported fields: {', '.join(unsupported)}"
+            )
+        ApiRuntime._v2_answer_upload_ids(raw_answer)
+        ApiRuntime._v2_answer_sheet_selections(raw_answer)
+
+    async def _process_v2_interrupt_open_turn(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        raw_answer: dict[str, object],
+        client_request_id: str,
+        source_message_id: str | None = None,
+    ) -> dict[str, object]:
+        turn_key = f"interrupt_turn:{interrupt.interrupt_id}:{client_request_id}"
+        existing_summary = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, turn_key)
+        if existing_summary is not None and existing_summary.event_type == "slot.interrupt_turn_processed":
+            payload = dict(existing_summary.payload)
+            return self._interrupt_open_turn_response_from_summary(
+                interrupt=interrupt,
+                summary=payload,
+                fallback_source_message_id=source_message_id,
+            )
+
+        # Compatibility with pre-query-split idempotency keys. New turns are always
+        # persisted with the turn-level key above; legacy keys are read only.
+        legacy_answer_key = f"answer:{interrupt.interrupt_id}:{client_request_id}"
+        existing_legacy_event = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, legacy_answer_key)
+        if existing_legacy_event is not None:
+            if existing_legacy_event.event_type == "slot.clarification_answered":
+                return {
+                    "interrupt_id": interrupt.interrupt_id,
+                    "status": str(interrupt.status),
+                    "node_id": interrupt.node_id,
+                    "answer_payload": {"client_request_id": client_request_id},
+                    "action": "clarification_answer",
+                    "assistant_message": str(existing_legacy_event.payload.get("assistant_message") or ""),
+                    "source_message_id": str(existing_legacy_event.payload.get("source_message_id") or source_message_id or ""),
+                }
             current_collection = await self.storage.get_slot_collection(collection.collection_id) or collection
-            if current_collection.status == "ready":
-                current_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(current_collection)
-                if scheduled_new and current_collection.status == "script_scheduled":
-                    await self._schedule_v2_slot_resume(
-                        task=task,
-                        interrupt=interrupt,
-                        collection=current_collection,
-                        raw_answer=dict(raw_answer),
-                    )
             return {
                 "interrupt_id": interrupt.interrupt_id,
                 "status": str(interrupt.status),
                 "node_id": interrupt.node_id,
                 "answer_payload": {"client_request_id": client_request_id},
+                "action": "resumed" if current_collection.status in {"script_scheduled", "completed"} else None,
+                "source_message_id": str(existing_legacy_event.payload.get("source_message_id") or source_message_id or ""),
             }
 
+        if interrupt.status != InterruptStatus.OPEN:
+            raise UploadValidationError(
+                "v2 slot interrupt is not open; retry with the original client_request_id to replay an accepted turn"
+            )
+
+        plan = await self._plan_v2_interrupt_open_turn(
+            task=task,
+            interrupt=interrupt,
+            collection=collection,
+            raw_answer=raw_answer,
+            client_request_id=client_request_id,
+        )
+        await self._record_v2_interrupt_turn_planned(
+            task=task,
+            interrupt=interrupt,
+            collection=collection,
+            client_request_id=client_request_id,
+            plan=plan,
+        )
+
+        user_message = await self._save_v2_interrupt_user_message(
+            task=task,
+            raw_answer=raw_answer,
+            source_message_id=source_message_id,
+        )
+        processed_parts: list[dict[str, object]] = []
+        assistant_sections: list[str] = []
+        schema_switch_metadata: dict[str, object] | None = None
+        requires_confirmation = False
+        has_schema_switch = any(part.kind == "schema_switch" for part in plan.parts)
+        blocking_parts = [part for part in plan.parts if part.blocks_resume]
+        verifier_block: InterruptResumeVerification | None = None
+        if self._requires_v2_interrupt_resume_verification(plan, raw_answer=raw_answer):
+            verifier_decision = InterruptTurnDecision(
+                intent="slot_answer",
+                confidence=max((part.confidence for part in plan.parts if part.kind == "slot_answer"), default=0.0),
+                reason=plan.reason,
+            )
+            verifier_block_candidate = await self._verify_v2_interrupt_resume(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                raw_answer=raw_answer,
+                decision=verifier_decision,
+            )
+            if not verifier_block_candidate.allow_resume:
+                verifier_block = verifier_block_candidate
+                blocking_parts.append(
+                    InterruptOpenTurnPart(
+                        part_id="verifier-block",
+                        kind="ambiguous",
+                        text=self._v2_answer_text(raw_answer),
+                        confidence=1.0 - verifier_block_candidate.confidence,
+                        reason=verifier_block_candidate.reason,
+                        blocks_resume=True,
+                        block_reason=verifier_block_candidate.clarification_answer,
+                        assistant_message=verifier_block_candidate.clarification_answer,
+                    )
+                )
+
+        current_collection = collection
+        schema_switch_parts = [part for part in plan.parts if part.kind == "schema_switch"]
+        if schema_switch_parts:
+            current_collection, schema_switch_metadata, schema_message, schema_requires_confirmation = await self._process_v2_schema_switch_part(
+                task=task,
+                interrupt=interrupt,
+                collection=current_collection,
+                part=schema_switch_parts[0],
+                raw_answer=raw_answer,
+                client_request_id=client_request_id,
+            )
+            processed_parts.append(self._interrupt_part_summary(schema_switch_parts[0], result={"status": current_collection.status}))
+            if schema_message:
+                assistant_sections.append(schema_message)
+            requires_confirmation = requires_confirmation or schema_requires_confirmation
+
+        may_apply_slot_answers = verifier_block is None and not (
+            schema_switch_metadata is not None
+            and str(schema_switch_metadata.get("reuse_decision") or "unspecified") == "unspecified"
+        )
+        if may_apply_slot_answers:
+            for part in [part for part in plan.parts if part.kind == "slot_answer"]:
+                part_answer = self._raw_answer_for_interrupt_part(raw_answer, part)
+                current_collection = await self._process_v2_slot_answer_part(
+                    task=task,
+                    interrupt=interrupt,
+                    collection=current_collection,
+                    raw_answer=part_answer,
+                    client_request_id=client_request_id,
+                    source_message_id=user_message.message_id,
+                )
+                processed_parts.append(
+                    self._interrupt_part_summary(
+                        part,
+                        result={
+                            "slot_status": current_collection.status,
+                            "resolved": sorted(current_collection.resolved),
+                            "missing": list(current_collection.missing),
+                        },
+                    )
+                )
+
+        latest_collection = await self.storage.get_slot_collection(current_collection.collection_id) or current_collection
+        for part in [part for part in plan.parts if part.kind == "skill_question"]:
+            answer = part.assistant_message.strip()
+            if answer:
+                await self._record_v2_interrupt_question_answered(
+                    task=task,
+                    interrupt=interrupt,
+                    collection=latest_collection,
+                    part=part,
+                    answer=answer,
+                )
+            else:
+                answer = await self._process_v2_skill_question_part(
+                    task=task,
+                    interrupt=interrupt,
+                    collection=latest_collection,
+                    part=part,
+                )
+            if answer:
+                assistant_sections.append(answer)
+                await self._append_v2_question_answer_slot_event(
+                    collection=latest_collection,
+                    interrupt=interrupt,
+                    client_request_id=client_request_id,
+                    part=part,
+                    assistant_message=answer,
+                    source_message_id=user_message.message_id,
+                )
+            processed_parts.append(self._interrupt_part_summary(part, result={"answered": bool(answer)}))
+
+        for part in [part for part in plan.parts if part.kind == "off_topic_guidance"]:
+            answer = self._process_v2_off_topic_guidance_part(collection=latest_collection, part=part)
+            assistant_sections.append(answer)
+            processed_parts.append(self._interrupt_part_summary(part, result={"guided": True}))
+
+        ambiguous_parts = [part for part in plan.parts if part.kind == "ambiguous"]
+        if verifier_block is not None:
+            ambiguous_parts.append(
+                InterruptOpenTurnPart(
+                    part_id="verifier-block",
+                    kind="ambiguous",
+                    text=self._v2_answer_text(raw_answer),
+                    confidence=1.0 - verifier_block.confidence,
+                    reason=verifier_block.reason,
+                    blocks_resume=True,
+                    block_reason=verifier_block.clarification_answer,
+                    assistant_message=verifier_block.clarification_answer,
+                )
+            )
+        for part in ambiguous_parts:
+            message = part.assistant_message.strip() or part.block_reason.strip()
+            if not message:
+                message = await self._generate_v2_interrupt_clarification_answer(
+                    task=task,
+                    interrupt=interrupt,
+                    collection=latest_collection,
+                    user_text=part.text or self._v2_answer_text(raw_answer),
+                    decision=InterruptTurnDecision(intent="ambiguous", confidence=part.confidence, reason=part.reason),
+                )
+            if not message:
+                message = self._interrupt_ambiguity_message(latest_collection)
+            if message:
+                assistant_sections.append(message)
+            processed_parts.append(self._interrupt_part_summary(part, result={"blocked": part.blocks_resume}))
+
+        latest_collection = await self.storage.get_slot_collection(latest_collection.collection_id) or latest_collection
+        if (
+            verifier_block is None
+            and any(part.kind == "slot_answer" for part in plan.parts)
+            and latest_collection.status != "ready"
+            and latest_collection.status not in {"script_scheduled", "completed"}
+        ):
+            await self._save_v2_interrupt_answer_without_closing(
+                interrupt=interrupt,
+                raw_answer=raw_answer,
+                client_request_id=client_request_id,
+                source_message_id=user_message.message_id,
+            )
+        blocked = bool(blocking_parts)
+        will_resume = False
+        saved_interrupt = interrupt
+        if latest_collection.status == "ready":
+            if has_schema_switch and not self._schema_switch_execution_gates_pass(plan, schema_switch_metadata=schema_switch_metadata):
+                requires_confirmation = True
+                latest_collection = await self._hold_ready_v2_collection_for_confirmation(
+                    latest_collection,
+                    question="参数已经补齐。请明确回复“确认执行”后，我再运行当前 Skill。",
+                    idempotency_key=f"{turn_key}:hold_confirmation",
+                )
+                assistant_sections.append("参数已经补齐，但切换设计/schema 后需要你明确确认执行；请回复“确认执行”或继续修改参数。")
+            elif blocked:
+                requires_confirmation = True
+                latest_collection = await self._hold_ready_v2_collection_for_confirmation(
+                    latest_collection,
+                    question=self._interrupt_ambiguity_message(latest_collection),
+                    idempotency_key=f"{turn_key}:hold_blocking_ambiguity",
+                )
+            else:
+                answer = await self._record_v2_interrupt_answer_for_resume(
+                    task=task,
+                    interrupt=interrupt,
+                    raw_answer=raw_answer,
+                    client_request_id=client_request_id,
+                    source_message_id=user_message.message_id,
+                    save_user_message=False,
+                )
+                saved_interrupt = await self.interrupt_service.record_answer(answer)
+                await self._record_event(
+                    self._make_event(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        node_id=interrupt.node_id,
+                        event_type="task.interrupt_answered",
+                        payload={
+                            "interrupt_id": interrupt.interrupt_id,
+                            "slot_collection_id": latest_collection.collection_id,
+                            "client_request_id": client_request_id,
+                        },
+                    )
+                )
+                latest_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(latest_collection)
+                if scheduled_new and latest_collection.status == "script_scheduled":
+                    await self._schedule_v2_slot_resume(
+                        task=task,
+                        interrupt=saved_interrupt,
+                        collection=latest_collection,
+                        raw_answer=raw_answer,
+                    )
+                will_resume = latest_collection.status in {"script_scheduled", "completed"}
+
+        if not assistant_sections and not will_resume:
+            assistant_sections.append(self._slot_progress_message(latest_collection))
+        if will_resume and assistant_sections:
+            assistant_sections.append("参数已补齐，我会继续执行当前 Skill。")
+        if has_schema_switch and not will_resume:
+            requires_confirmation = True
+        assistant_message = "\n\n".join(dict.fromkeys(section.strip() for section in assistant_sections if section.strip()))
+        if assistant_message:
+            assistant_message_record = Message(
+                message_id=self._make_id("msg"),
+                conversation_id=task.conversation_id,
+                role=MessageRole.ASSISTANT,
+                content=assistant_message,
+                task_id=task.task_id,
+                created_at=self._utcnow_naive(),
+            )
+            await self.storage.save_message(assistant_message_record)
+
+        action = self._interrupt_open_turn_action(
+            will_resume=will_resume,
+            has_schema_switch=has_schema_switch,
+            has_slot_answer=verifier_block is None and any(part.kind == "slot_answer" for part in plan.parts),
+            has_question=verifier_block is not None or any(part.kind in {"skill_question", "off_topic_guidance", "ambiguous"} for part in plan.parts),
+        )
+        summary_payload: dict[str, object] = {
+            "interrupt_id": interrupt.interrupt_id,
+            "client_request_id": client_request_id,
+            "source_message_id": user_message.message_id,
+            "assistant_message": assistant_message,
+            "action": action,
+            "processed_parts": processed_parts,
+            "slot_status": latest_collection.status,
+            "slot_missing": list(latest_collection.missing),
+            "will_resume": will_resume,
+            "requires_confirmation": requires_confirmation,
+            "active_slot_collection_id": latest_collection.collection_id,
+        }
+        if schema_switch_metadata is not None:
+            summary_payload["schema_switch"] = schema_switch_metadata
+        await self.storage.append_slot_event(
+            SlotEvent(
+                slot_event_id=f"{collection.collection_id}:event:interrupt_turn:{client_request_id}",
+                collection_id=collection.collection_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                conversation_id=collection.conversation_id,
+                event_type="slot.interrupt_turn_processed",
+                round=latest_collection.round,
+                revision=latest_collection.revision,
+                idempotency_key=turn_key,
+                payload=summary_payload,
+                created_at=self._utcnow_naive(),
+            )
+        )
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="task.interrupt_turn_processed",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "slot_collection_id": latest_collection.collection_id,
+                    "client_request_id": client_request_id,
+                    "action": action,
+                    "will_resume": will_resume,
+                    "requires_confirmation": requires_confirmation,
+                },
+            )
+        )
+        return self._interrupt_open_turn_response_from_summary(
+            interrupt=saved_interrupt,
+            summary=summary_payload,
+            fallback_source_message_id=user_message.message_id,
+        )
+
+    @staticmethod
+    def _interrupt_open_turn_response_from_summary(
+        *,
+        interrupt: Interrupt,
+        summary: Mapping[str, object],
+        fallback_source_message_id: str | None = None,
+    ) -> dict[str, object]:
+        answer_payload: dict[str, object] = {
+            "client_request_id": str(summary.get("client_request_id") or ""),
+            "processed_parts": list(summary.get("processed_parts") or []),
+            "slot_status": str(summary.get("slot_status") or ""),
+            "slot_missing": list(summary.get("slot_missing") or []),
+            "will_resume": bool(summary.get("will_resume")),
+            "requires_confirmation": bool(summary.get("requires_confirmation")),
+            "active_slot_collection_id": str(summary.get("active_slot_collection_id") or ""),
+        }
+        if isinstance(summary.get("schema_switch"), Mapping):
+            answer_payload["schema_switch"] = dict(summary["schema_switch"])  # type: ignore[index]
+        return {
+            "interrupt_id": interrupt.interrupt_id,
+            "status": str(interrupt.status),
+            "node_id": interrupt.node_id,
+            "answer_payload": answer_payload,
+            "action": str(summary.get("action") or "mixed_processed"),
+            "assistant_message": str(summary.get("assistant_message") or ""),
+            "source_message_id": str(summary.get("source_message_id") or fallback_source_message_id or ""),
+        }
+
+    async def _plan_v2_interrupt_open_turn(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        raw_answer: dict[str, object],
+        client_request_id: str,
+    ) -> InterruptOpenTurnPlan:
+        text = self._v2_answer_text(raw_answer)
+        has_structured_attachment = bool(self._v2_answer_upload_ids(raw_answer) or self._v2_answer_sheet_selections(raw_answer))
+        pending_schema_switch = await self._pending_v2_schema_switch_reuse_proposal(collection)
+        pending_reuse_decision = self._pending_v2_schema_switch_reuse_decision(text) if pending_schema_switch is not None else None
+        if pending_schema_switch is not None and pending_reuse_decision is not None:
+            return InterruptOpenTurnPlan(
+                parts=(
+                    InterruptOpenTurnPart(
+                        part_id="pending-schema-switch-reuse",
+                        kind="schema_switch",
+                        text=text,
+                        target_schema_id=str(pending_schema_switch.get("new_schema_id") or collection.selected_schema_id or "") or None,
+                        reuse_decision=pending_reuse_decision,
+                        confidence=1.0,
+                        reason="pending_schema_switch_reuse_confirmation",
+                    ),
+                ),
+                confidence=1.0,
+                reason="pending_schema_switch_reuse_confirmation",
+            )
+        if not text and has_structured_attachment:
+            return InterruptOpenTurnPlan(
+                parts=(
+                    InterruptOpenTurnPart(
+                        part_id="part-1",
+                        kind="slot_answer",
+                        uses_uploads=True,
+                        confidence=1.0,
+                        reason="structured_upload_or_sheet_selection",
+                    ),
+                ),
+                confidence=1.0,
+                reason="structured_upload_or_sheet_selection",
+                fallback=True,
+                fallback_reason="structured_upload_shortcut",
+            )
+        prompt = json.dumps(
+            {
+                "mode": "interrupt_turn_understanding",
+                "planning_version": "interrupt_open_query_split_v1",
+                "instructions": [
+                    "Return JSON only.",
+                    "The task is already interrupted and open; do not choose a new skill or start normal chat planning.",
+                    "Split the user's current turn into ordered semantic parts.",
+                    "Use slot_answer for values, uploads, or choices that should update the current slot collection.",
+                    "Use skill_question for questions about this interrupted skill, its input data, examples, tradeoffs, or parameter meaning.",
+                    "Use off_topic_guidance for unrelated questions; guide back to the current skill instead of refusing.",
+                    "Use schema_switch only for same-skill input schema/design changes. Include target_schema_id and reuse_decision.",
+                    "Use ambiguous when a part is unclear; set blocks_resume=true only if it should block execution.",
+                    "For schema switches, set execution_confirmation=true only when the user explicitly says to execute/run after the switch.",
+                ],
+                "output_schema": {
+                    "parts": [
+                        {
+                            "part_id": "stable id",
+                            "kind": "slot_answer | skill_question | off_topic_guidance | schema_switch | ambiguous",
+                            "text": "part text",
+                            "target_slots": ["optional slot ids"],
+                            "target_schema_id": "optional schema id for schema_switch",
+                            "reuse_decision": "reuse | do_not_reuse | unspecified",
+                            "execution_confirmation": False,
+                            "execution_confirmation_confidence": 0.0,
+                            "uses_uploads": False,
+                            "confidence": 0.0,
+                            "reason": "brief rationale",
+                            "blocks_resume": False,
+                            "block_reason": "why execution should be blocked",
+                            "assistant_message": "optional already-grounded answer for question/ambiguity",
+                        }
+                    ],
+                    "confidence": 0.0,
+                    "reason": "brief plan rationale",
+                },
+                "task": {"task_id": task.task_id, "summary": task.summary},
+                "interrupt": {
+                    "interrupt_id": interrupt.interrupt_id,
+                    "question": interrupt.question,
+                    "reason_code": interrupt.reason_code,
+                },
+                "current_user_answer": text,
+                "current_upload_ids": list(self._v2_answer_upload_ids(raw_answer)),
+                "current_sheet_selections": dict(self._v2_answer_sheet_selections(raw_answer)),
+                "client_request_id": client_request_id,
+                "slot_collection": self._slot_collection_prompt_payload(collection),
+                "pending_schema_switch": dict(pending_schema_switch) if pending_schema_switch is not None else None,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if self._skill_input_text_generator is None:
+            return self._heuristic_interrupt_open_turn_plan(text, has_structured_attachment=has_structured_attachment)
+        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        parsed = self._parse_interrupt_open_turn_plan(raw_response)
+        if parsed is not None:
+            return parsed
+        legacy = self._parse_interrupt_turn_decision(raw_response)
+        if legacy is not None:
+            return self._turn_decision_to_open_turn_plan(legacy, raw_answer=raw_answer)
+        return InterruptOpenTurnPlan(
+            parts=(
+                InterruptOpenTurnPart(
+                    part_id="part-1",
+                    kind="ambiguous",
+                    text=text,
+                    confidence=1.0,
+                    reason="interrupt_open_turn_planner_invalid",
+                    blocks_resume=True,
+                    block_reason="",
+                ),
+            ),
+            confidence=1.0,
+            reason="interrupt_open_turn_planner_invalid",
+            fallback=True,
+            fallback_reason="invalid_llm_output",
+        )
+
+    @classmethod
+    def _parse_interrupt_open_turn_plan(cls, raw_response: str) -> InterruptOpenTurnPlan | None:
+        if not raw_response.strip():
+            return None
+        try:
+            parsed = json.loads(raw_response)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, Mapping) or not isinstance(parsed.get("parts"), list):
+            return None
+        parts: list[InterruptOpenTurnPart] = []
+        for idx, raw_part in enumerate(parsed.get("parts") or [], start=1):
+            if not isinstance(raw_part, Mapping):
+                continue
+            kind = str(raw_part.get("kind") or "").strip()
+            if kind not in _INTERRUPT_OPEN_TURN_PART_KINDS:
+                continue
+            reuse_decision = str(raw_part.get("reuse_decision") or "unspecified").strip()
+            if reuse_decision not in {"reuse", "do_not_reuse", "unspecified"}:
+                reuse_decision = "unspecified"
+            target_slots_raw = raw_part.get("target_slots")
+            target_slots = tuple(
+                str(item).strip()
+                for item in (target_slots_raw if isinstance(target_slots_raw, list | tuple) else ())
+                if str(item).strip()
+            )
+            parts.append(
+                InterruptOpenTurnPart(
+                    part_id=str(raw_part.get("part_id") or f"part-{idx}").strip() or f"part-{idx}",
+                    kind=kind,
+                    text=str(raw_part.get("text") or "").strip(),
+                    target_slots=target_slots,
+                    target_schema_id=str(raw_part.get("target_schema_id") or "").strip() or None,
+                    reuse_decision=reuse_decision,
+                    execution_confirmation=bool(raw_part.get("execution_confirmation")),
+                    execution_confirmation_confidence=cls._confidence(raw_part.get("execution_confirmation_confidence")),
+                    uses_uploads=bool(raw_part.get("uses_uploads")),
+                    confidence=cls._confidence(raw_part.get("confidence")),
+                    reason=str(raw_part.get("reason") or "").strip(),
+                    blocks_resume=bool(raw_part.get("blocks_resume")),
+                    block_reason=str(raw_part.get("block_reason") or "").strip(),
+                    assistant_message=str(raw_part.get("assistant_message") or "").strip(),
+                )
+            )
+        if not parts:
+            return None
+        return InterruptOpenTurnPlan(
+            parts=tuple(parts),
+            confidence=cls._confidence(parsed.get("confidence")),
+            reason=str(parsed.get("reason") or "").strip(),
+        )
+
+    @staticmethod
+    def _confidence(value: object) -> float:
+        try:
+            return max(0.0, min(float(value), 1.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _turn_decision_to_open_turn_plan(
+        cls,
+        decision: InterruptTurnDecision,
+        *,
+        raw_answer: Mapping[str, object],
+    ) -> InterruptOpenTurnPlan:
+        text = cls._v2_answer_text(raw_answer)
+        uses_uploads = bool(cls._v2_answer_upload_ids(raw_answer) or cls._v2_answer_sheet_selections(raw_answer))
+        if decision.intent == "slot_answer":
+            kind = "slot_answer"
+            parts = (
+                InterruptOpenTurnPart(
+                    part_id="part-1",
+                    kind=kind,
+                    text=str((decision.extracted_answer or {}).get("text") or text),
+                    uses_uploads=uses_uploads,
+                    confidence=decision.confidence,
+                    reason=decision.reason,
+                ),
+            )
+        elif decision.intent == "mixed":
+            part_list: list[InterruptOpenTurnPart] = []
+            extracted_text = str((decision.extracted_answer or {}).get("text") or "").strip()
+            if extracted_text or uses_uploads:
+                part_list.append(
+                    InterruptOpenTurnPart(
+                        part_id="part-1",
+                        kind="slot_answer",
+                        text=extracted_text or text,
+                        uses_uploads=uses_uploads,
+                        confidence=decision.confidence,
+                        reason=decision.reason,
+                    )
+                )
+            part_list.append(
+                InterruptOpenTurnPart(
+                    part_id=f"part-{len(part_list)+1}",
+                    kind="skill_question",
+                    text=text,
+                    confidence=decision.confidence,
+                    reason=decision.reason,
+                    assistant_message=decision.clarification_answer,
+                )
+            )
+            parts = tuple(part_list)
+        elif decision.intent == "clarification_question":
+            parts = (
+                InterruptOpenTurnPart(
+                    part_id="part-1",
+                    kind="skill_question",
+                    text=text,
+                    confidence=decision.confidence,
+                    reason=decision.reason,
+                    assistant_message=decision.clarification_answer,
+                ),
+            )
+        else:
+            parts = (
+                InterruptOpenTurnPart(
+                    part_id="part-1",
+                    kind="ambiguous",
+                    text=text,
+                    confidence=decision.confidence,
+                    reason=decision.reason,
+                    blocks_resume=True,
+                    block_reason=decision.clarification_answer,
+                    assistant_message=decision.clarification_answer,
+                ),
+            )
+        return InterruptOpenTurnPlan(parts=parts, confidence=decision.confidence, reason=decision.reason, fallback=True, fallback_reason="legacy_decision_shape")
+
+    @classmethod
+    def _heuristic_interrupt_open_turn_plan(
+        cls,
+        text: str,
+        *,
+        has_structured_attachment: bool,
+    ) -> InterruptOpenTurnPlan:
+        if has_structured_attachment:
+            return InterruptOpenTurnPlan(
+                parts=(
+                    InterruptOpenTurnPart(
+                        part_id="part-1",
+                        kind="slot_answer",
+                        text=text,
+                        uses_uploads=True,
+                        confidence=1.0,
+                        reason="structured_attachment",
+                    ),
+                ),
+                confidence=1.0,
+                reason="structured_attachment",
+                fallback=True,
+                fallback_reason="heuristic",
+            )
+        decision = cls._heuristic_interrupt_turn_decision(text)
+        return cls._turn_decision_to_open_turn_plan(decision, raw_answer={"text": text})
+
+    async def _record_v2_interrupt_turn_planned(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        client_request_id: str,
+        plan: InterruptOpenTurnPlan,
+    ) -> None:
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="task.interrupt_turn_planned",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "slot_collection_id": collection.collection_id,
+                    "client_request_id": client_request_id,
+                    "part_kinds": [part.kind for part in plan.parts],
+                    "confidence": plan.confidence,
+                    "fallback": plan.fallback,
+                    "fallback_reason": plan.fallback_reason,
+                },
+            )
+        )
+
+    async def _save_v2_interrupt_user_message(
+        self,
+        *,
+        task: Task,
+        raw_answer: Mapping[str, object],
+        source_message_id: str | None,
+    ) -> Message:
+        message = Message(
+            message_id=source_message_id or self._make_id("msg"),
+            conversation_id=task.conversation_id,
+            role=MessageRole.USER,
+            content=self._format_v2_answer_message(raw_answer) or self._v2_answer_text(raw_answer),
+            task_id=task.task_id,
+            created_at=self._utcnow_naive(),
+        )
+        await self.storage.save_message(message)
+        return message
+
+    @staticmethod
+    def _raw_answer_for_interrupt_part(raw_answer: Mapping[str, object], part: InterruptOpenTurnPart) -> dict[str, object]:
+        answer = dict(raw_answer)
+        if part.text:
+            answer["text"] = part.text
+        return answer
+
+    async def _process_v2_slot_answer_part(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        raw_answer: dict[str, object],
+        client_request_id: str,
+        source_message_id: str,
+    ) -> SlotCollection:
+        upload_ids = self._v2_answer_upload_ids(raw_answer)
+        if upload_ids:
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is None:
+                raise ValueError(f"Unknown conversation: {task.conversation_id}")
+            await self._bind_or_update_resume_input_attachments(
+                task=task,
+                username=conversation.username,
+                upload_ids=upload_ids,
+                source_kind="interrupt_answer_upload",
+                source_message_id=source_message_id,
+                interrupt_answer_id=None,
+                upload_sheet_selections=self._v2_answer_sheet_selections(raw_answer),
+            )
+        return await self._apply_v2_slot_answer(
+            collection=collection,
+            interrupt=interrupt,
+            raw_answer=raw_answer,
+            client_request_id=client_request_id,
+        )
+
+    async def _record_v2_interrupt_answer_for_resume(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        raw_answer: Mapping[str, object],
+        client_request_id: str,
+        source_message_id: str,
+        save_user_message: bool,
+    ) -> InterruptAnswer:
         answer = InterruptAnswer(
             interrupt_answer_id=self._make_id("interrupt-answer"),
             interrupt_id=interrupt.interrupt_id,
             answer_payload={"client_request_id": client_request_id, "answer": dict(raw_answer)},
-            source_message_id=self._make_id("msg"),
+            source_message_id=source_message_id,
             created_at=self._utcnow_naive(),
         )
         upload_ids = self._v2_answer_upload_ids(raw_answer)
@@ -2024,67 +3066,765 @@ class ApiRuntime:
                 username=conversation.username,
                 upload_ids=upload_ids,
                 source_kind="interrupt_answer_upload",
-                source_message_id=answer.source_message_id,
+                source_message_id=source_message_id,
                 interrupt_answer_id=answer.interrupt_answer_id,
                 upload_sheet_selections=self._v2_answer_sheet_selections(raw_answer),
             )
+        if save_user_message:
+            await self._save_v2_interrupt_user_message(task=task, raw_answer=raw_answer, source_message_id=source_message_id)
+        return answer
 
-        saved_interrupt = await self.interrupt_service.record_answer(answer)
-        answer_message = Message(
-            message_id=answer.source_message_id or self._make_id("msg"),
-            conversation_id=task.conversation_id,
-            role=MessageRole.USER,
-            content=self._format_v2_answer_message(raw_answer),
-            task_id=task.task_id,
-            created_at=self._utcnow_naive(),
+    @staticmethod
+    def _requires_v2_interrupt_resume_verification(
+        plan: InterruptOpenTurnPlan,
+        *,
+        raw_answer: Mapping[str, object],
+    ) -> bool:
+        if ApiRuntime._v2_answer_upload_ids(raw_answer) or ApiRuntime._v2_answer_sheet_selections(raw_answer):
+            return False
+        return (
+            len(plan.parts) == 1
+            and plan.parts[0].kind == "slot_answer"
+            and plan.parts[0].confidence >= _INTERRUPT_TURN_SLOT_ANSWER_CONFIDENCE
         )
-        await self.storage.save_message(answer_message)
+
+    async def _save_v2_interrupt_answer_without_closing(
+        self,
+        *,
+        interrupt: Interrupt,
+        raw_answer: Mapping[str, object],
+        client_request_id: str,
+        source_message_id: str,
+    ) -> None:
+        existing = await self.storage.list_interrupt_answers(interrupt.interrupt_id)
+        if any(
+            isinstance(answer.answer_payload, Mapping)
+            and str(answer.answer_payload.get("client_request_id") or "").strip() == client_request_id
+            for answer in existing
+        ):
+            return
+        await self.storage.save_interrupt_answer(
+            InterruptAnswer(
+                interrupt_answer_id=self._make_id("interrupt-answer"),
+                interrupt_id=interrupt.interrupt_id,
+                answer_payload={"client_request_id": client_request_id, "answer": dict(raw_answer)},
+                source_message_id=source_message_id,
+                accepted=True,
+                created_at=self._utcnow_naive(),
+                accepted_at=self._utcnow_naive(),
+            )
+        )
+
+    async def _process_v2_skill_question_part(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        part: InterruptOpenTurnPart,
+    ) -> str:
+        resource_context, resource_audits = self._slot_question_resource_context(collection)
+        await self._record_v2_interrupt_soft_binding_audit(
+            task=task,
+            interrupt=interrupt,
+            collection=collection,
+            part=part,
+            resource_audits=resource_audits,
+        )
+        prompt = json.dumps(
+            {
+                "mode": "interrupt_skill_question_answer",
+                "instructions": [
+                    "Answer inside the currently interrupted Skill context.",
+                    "Use the provided SKILL.md overview, skill resources, and slot schema; do not execute the skill and do not close the interrupt.",
+                    "Treat SKILL.md as the current Skill overview/runbook; treat references as detailed user-facing facts.",
+                    "If the user asks for examples, include concrete examples from resources or SKILL.md when available.",
+                    "Keep the answer concise, then guide the user back to the missing slot values.",
+                ],
+                "task": {"task_id": task.task_id, "summary": task.summary},
+                "interrupt": {"question": interrupt.question, "reason_code": interrupt.reason_code},
+                "user_question": part.text,
+                "slot_collection": self._slot_collection_prompt_payload(collection),
+                "resource_context": resource_context,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        answer = self._parse_clarification_answer(raw_response)
+        if not answer and resource_context:
+            snippets = []
+            for resource in resource_context[:2]:
+                content = str(resource.get("content") or "").strip()
+                if content:
+                    snippets.append(content[:800])
+            if snippets:
+                answer = "\n\n".join(snippets)
+        if not answer:
+            answer = self._slot_progress_message(collection)
+        await self._record_v2_interrupt_question_answered(
+            task=task,
+            interrupt=interrupt,
+            collection=collection,
+            part=part,
+            answer=answer,
+            resource_ids=[str(item.get("resource_id") or "") for item in resource_context],
+        )
+        return answer
+
+    async def _record_v2_interrupt_question_answered(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        part: InterruptOpenTurnPart,
+        answer: str,
+        resource_ids: Iterable[str] = (),
+    ) -> None:
         await self._record_event(
             self._make_event(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
                 node_id=interrupt.node_id,
-                event_type="task.interrupt_answered",
+                event_type="task.interrupt_question_answered",
                 payload={
                     "interrupt_id": interrupt.interrupt_id,
                     "slot_collection_id": collection.collection_id,
-                    "client_request_id": client_request_id,
+                    "part_id": part.part_id,
+                    "answer_length": len(answer),
+                    "resource_ids": list(resource_ids),
+                },
+            )
+        )
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="task.interrupt_clarification_answered",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "slot_collection_id": collection.collection_id,
+                    "part_id": part.part_id,
                 },
             )
         )
 
-        current_collection = await self._apply_v2_slot_answer(
-            collection=collection,
-            interrupt=interrupt,
-            raw_answer=dict(raw_answer),
-            client_request_id=client_request_id,
-        )
-        should_schedule_resume = True
-        if current_collection.status == "ready":
-            current_collection, scheduled_new = await self._mark_v2_slot_script_scheduled(current_collection)
-            if current_collection.status != "script_scheduled":
-                return {
-                    "interrupt_id": saved_interrupt.interrupt_id,
-                    "status": str(saved_interrupt.status),
-                    "node_id": saved_interrupt.node_id,
-                    "answer_payload": {"client_request_id": client_request_id},
-                }
-            should_schedule_resume = scheduled_new
-        elif current_collection.status in {"script_scheduled", "completed", "cancelled", "failed"}:
-            should_schedule_resume = False
-        if should_schedule_resume:
-            await self._schedule_v2_slot_resume(
-                task=task,
-                interrupt=interrupt,
-                collection=current_collection,
-                raw_answer=dict(raw_answer),
+    async def _append_v2_question_answer_slot_event(
+        self,
+        *,
+        collection: SlotCollection,
+        interrupt: Interrupt,
+        client_request_id: str,
+        part: InterruptOpenTurnPart,
+        assistant_message: str,
+        source_message_id: str,
+    ) -> None:
+        key = f"question:{interrupt.interrupt_id}:{client_request_id}:{part.part_id}"
+        if await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, key) is not None:
+            return
+        await self.storage.append_slot_event(
+            SlotEvent(
+                slot_event_id=f"{collection.collection_id}:event:question:{client_request_id}:{part.part_id}",
+                collection_id=collection.collection_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                conversation_id=collection.conversation_id,
+                event_type="slot.clarification_answered",
+                round=collection.round,
+                revision=collection.revision,
+                idempotency_key=key,
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "client_request_id": client_request_id,
+                    "part_id": part.part_id,
+                    "intent": "skill_question",
+                    "confidence": part.confidence,
+                    "reason": part.reason,
+                    "assistant_message": assistant_message,
+                    "source_message_id": source_message_id,
+                },
+                created_at=self._utcnow_naive(),
             )
-        return {
-            "interrupt_id": saved_interrupt.interrupt_id,
-            "status": str(saved_interrupt.status),
-            "node_id": saved_interrupt.node_id,
-            "answer_payload": {"client_request_id": client_request_id},
+        )
+
+    async def _record_v2_interrupt_soft_binding_audit(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        part: InterruptOpenTurnPart,
+        resource_audits: Iterable[Mapping[str, object]],
+    ) -> None:
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="soft_skill_binding.decision",
+                visibility=EventVisibility.AUDIT_ONLY,
+                payload={
+                    "decision": "answer",
+                    "target_capability_id": collection.capability_id,
+                    "confidence": part.confidence,
+                    "reason_code": "interrupt_skill_question",
+                    "interrupt_id": interrupt.interrupt_id,
+                    "slot_collection_id": collection.collection_id,
+                    "part_id": part.part_id,
+                    "execute_suppressed": True,
+                },
+            )
+        )
+        for audit_payload in resource_audits:
+            await self._record_event(
+                self._make_event(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    node_id=interrupt.node_id,
+                    event_type="skill.resource_read",
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    payload=dict(audit_payload),
+                )
+            )
+
+    def _slot_question_resource_context(self, collection: SlotCollection) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        manifest = self._manifest_for_slot_collection(collection)
+        contract = getattr(manifest, "contract", None)
+        if manifest is None or contract is None:
+            return [], []
+        service = SkillResourceService()
+        skill_name = getattr(manifest, "name", collection.skill_name)
+        contexts: list[dict[str, object]] = []
+        audits: list[dict[str, object]] = []
+
+        skill_overview_result = service.read(
+            contract,
+            skill_name=skill_name,
+            audience="slot_question",
+            path="SKILL.md",
+            max_bytes=8192,
+        )
+        skill_overview_audit = skill_overview_result.audit_payload()
+        skill_overview_audit["resource_id"] = "skill_overview"
+        skill_overview_audit["description"] = "Current Skill SKILL.md overview/runbook"
+        audits.append(skill_overview_audit)
+        if skill_overview_result.ok:
+            contexts.append(
+                {
+                    "resource_id": "skill_overview",
+                    "path": skill_overview_result.path or "SKILL.md",
+                    "title": "SKILL.md 总纲",
+                    "description": "当前 Skill 的 agent-facing 总纲、资源导航和边界。",
+                    "content": skill_overview_result.content,
+                    "truncated": skill_overview_result.truncated,
+                    "redaction_count": skill_overview_result.redaction_count,
+                }
+            )
+
+        for resource in getattr(contract, "resources", {}).values():
+            if "slot_question" not in resource.audience and "main_agent" not in resource.audience:
+                continue
+            audience = "slot_question" if "slot_question" in resource.audience else "main_agent"
+            result = service.read(
+                contract,
+                skill_name=skill_name,
+                audience=audience,
+                resource_id=resource.resource_id,
+                max_bytes=8192,
+            )
+            audits.append(result.audit_payload())
+            if not result.ok:
+                continue
+            contexts.append(
+                {
+                    "resource_id": result.resource_id,
+                    "path": result.path,
+                    "title": getattr(resource, "title", "") or result.resource_id,
+                    "description": getattr(resource, "description", ""),
+                    "content": result.content,
+                    "truncated": result.truncated,
+                    "redaction_count": result.redaction_count,
+                }
+            )
+        return contexts, audits
+
+    def _process_v2_off_topic_guidance_part(self, *, collection: SlotCollection, part: InterruptOpenTurnPart) -> str:
+        missing = "、".join(collection.missing) if collection.missing else "当前待确认参数"
+        topic = part.text.strip() or "这个问题"
+        return (
+            f"关于“{topic}”，我先不切换到新的任务；当前还在 {collection.skill_name} 的 interrupt 中。"
+            f"你可以把它和当前 Skill 需求关联起来问，或先补充：{missing}。interrupt 会继续保持打开。"
+        )
+
+    async def _pending_v2_schema_switch_reuse_proposal(self, collection: SlotCollection) -> dict[str, object] | None:
+        for event in reversed(await self.storage.list_slot_events(collection.collection_id)):
+            if event.event_type == "slot.schema_switch_reuse_confirmed":
+                return None
+            if event.event_type != "slot.schema_switched":
+                continue
+            payload = dict(event.payload)
+            if payload.get("pending_reuse_confirmation") is True and str(payload.get("reuse_decision") or "") == "unspecified":
+                return payload
+            return None
+        return None
+
+    @staticmethod
+    def _pending_v2_schema_switch_reuse_decision(text: str) -> str | None:
+        normalized = str(text or "").strip().lower()
+        compact = "".join(ch for ch in normalized if ch not in {" ", "\t", "\n", "\r", "，", ",", "。", ".", "！", "!", "？", "?"})
+        if not compact:
+            return None
+        negative_markers = (
+            "不复用",
+            "不要复用",
+            "不沿用",
+            "不要沿用",
+            "不保留",
+            "重新填",
+            "重新提供",
+            "空的",
+            "空collection",
+            "do not reuse",
+            "dont reuse",
+            "don't reuse",
+            "no reuse",
+        )
+        if any(marker in normalized or marker.replace(" ", "") in compact for marker in negative_markers):
+            return "do_not_reuse"
+        positive_markers = (
+            "复用",
+            "沿用",
+            "保留",
+            "用旧",
+            "使用已有",
+            "用已有",
+            "reuse",
+            "yes",
+            "确认",
+            "可以",
+        )
+        if any(marker in normalized or marker.replace(" ", "") in compact for marker in positive_markers):
+            return "reuse"
+        if compact in {"是", "好", "好的", "可以", "确认", "ok", "yes", "y"}:
+            return "reuse"
+        if compact in {"否", "不用", "不要", "no", "n"}:
+            return "do_not_reuse"
+        return None
+
+    @staticmethod
+    def _schema_switch_const_candidates(schema, *, raw_value: object) -> dict[str, SlotExtractionCandidate]:
+        candidates: dict[str, SlotExtractionCandidate] = {}
+        for field, schema_field in schema.inputs.items():
+            const_value = getattr(schema_field, "const", None)
+            if const_value is None:
+                continue
+            candidates[field] = SlotExtractionCandidate(
+                field=field,
+                raw_value=raw_value,
+                value=const_value,
+                source="schema_switch",
+                confidence=1.0,
+            )
+        return candidates
+
+    async def _process_v2_schema_switch_part(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        part: InterruptOpenTurnPart,
+        raw_answer: Mapping[str, object],
+        client_request_id: str,
+    ) -> tuple[SlotCollection, dict[str, object], str, bool]:
+        pending_reuse = await self._pending_v2_schema_switch_reuse_proposal(collection)
+        if pending_reuse is not None and part.reuse_decision in {"reuse", "do_not_reuse"}:
+            pending_target_schema_id = str(pending_reuse.get("new_schema_id") or collection.selected_schema_id or "").strip()
+            if not part.target_schema_id or part.target_schema_id == pending_target_schema_id:
+                return await self._confirm_pending_v2_schema_switch_reuse(
+                    interrupt=interrupt,
+                    collection=collection,
+                    part=part,
+                    proposal=pending_reuse,
+                    client_request_id=client_request_id,
+                )
+
+        manifest = self._manifest_for_slot_collection(collection)
+        contract = getattr(manifest, "contract", None)
+        if manifest is None or contract is None:
+            metadata = {"allowed": False, "reason": "manifest_unavailable", "reuse_decision": part.reuse_decision}
+            return collection, metadata, "当前 Skill 配置不可用，无法切换输入 schema；interrupt 会继续保持打开。", True
+        schemas = load_input_schemas_for_contract(contract)
+        target_schema_id = str(part.target_schema_id or "").strip()
+        if target_schema_id not in schemas:
+            metadata = {
+                "allowed": False,
+                "reason": "target_schema_unavailable",
+                "target_schema_id": target_schema_id,
+                "available_schema_ids": sorted(schemas),
+                "reuse_decision": part.reuse_decision,
+            }
+            return collection, metadata, "我还不能确认要切换到哪一种设计/schema，请说明目标设计类型。", True
+
+        old_schema_id = collection.selected_schema_id
+        schema = schemas[target_schema_id]
+        selected_entrypoint = schema.entrypoint_mapping or collection.selected_entrypoint or "run"
+        initialized, _ = initialize_input_collection(
+            collection_id=collection.collection_id,
+            task_id=collection.task_id,
+            node_id=collection.node_id,
+            conversation_id=collection.conversation_id,
+            capability_id=collection.capability_id,
+            skill_name=collection.skill_name,
+            schema=schema,
+            selected_entrypoint=selected_entrypoint,
+            now=self._utcnow_naive(),
+            skill_bundle_revision=collection.skill_bundle_revision,
+            contract_revision=collection.contract_revision,
+            schema_digest=None,
+            resources=contract.resources,
+        )
+        initialized = replace(
+            initialized,
+            revision=collection.revision + 1,
+            round=collection.round + 1,
+            schema_digest=self._slot_schema_digest(initialized.schema_snapshot),
+            created_at=collection.created_at,
+            updated_at=self._utcnow_naive(),
+        )
+        copied_fields: list[str] = []
+        old_schema_inputs = set()
+        if isinstance(collection.schema_snapshot, Mapping) and isinstance(collection.schema_snapshot.get("inputs"), Mapping):
+            old_schema_inputs = {str(field) for field in collection.schema_snapshot["inputs"]}
+        discarded_fields = sorted((old_schema_inputs or set(collection.resolved)) - set(schema.inputs))
+        copyable_resolved = {
+            str(field): dict(value)
+            for field, value in collection.resolved.items()
+            if str(field) in schema.inputs
+            and getattr(schema.inputs[str(field)], "const", None) is None
+            and isinstance(value, Mapping)
         }
+        next_collection = initialized
+        const_candidates = self._schema_switch_const_candidates(schema, raw_value=target_schema_id or self._v2_answer_text(raw_answer))
+        if const_candidates:
+            validating = replace(next_collection, status="validating")
+            next_collection, _ = apply_extraction_result_to_collection(
+                validating,
+                schema,
+                SlotExtractionResult(resolved=const_candidates, diagnostics=("schema_switch_target_const",)),
+                now=self._utcnow_naive(),
+            )
+            if next_collection.status == "waiting_for_user":
+                next_collection = replace(next_collection, last_question=self._slot_question_from_collection(next_collection))
+        if part.reuse_decision == "reuse":
+            candidates: dict[str, SlotExtractionCandidate] = dict(const_candidates)
+            for field, value in copyable_resolved.items():
+                copied_fields.append(field)
+                candidates[field] = SlotExtractionCandidate(
+                    field=field,
+                    raw_value=value.get("raw_value", value.get("value")),
+                    value=value.get("value", value.get("raw_value")),
+                    source="slot_collection",
+                    confidence=1.0,
+                )
+            validating = replace(next_collection, status="validating")
+            next_collection, event = apply_extraction_result_to_collection(
+                validating,
+                schema,
+                SlotExtractionResult(resolved=candidates, diagnostics=("schema_switch_reuse",)),
+                now=self._utcnow_naive(),
+            )
+            if next_collection.status == "waiting_for_user":
+                next_collection = replace(next_collection, last_question=self._slot_question_from_collection(next_collection))
+        elif part.reuse_decision == "unspecified":
+            next_collection = replace(
+                next_collection,
+                status="waiting_for_user",
+                last_question="你要复用旧设计里同名字段的参数吗？回复“复用”或“不复用”，也可以直接给新的参数。",
+            )
+        else:
+            next_collection = replace(
+                next_collection,
+                status="waiting_for_user" if next_collection.missing else "waiting_for_user",
+                last_question=self._slot_question_from_collection(next_collection) if next_collection.missing else "已切换 schema。请确认是否继续执行，或继续修改参数。",
+            )
+        event = SlotEvent(
+            slot_event_id=f"{collection.collection_id}:event:schema_switched:{client_request_id}",
+            collection_id=collection.collection_id,
+            task_id=collection.task_id,
+            node_id=collection.node_id,
+            conversation_id=collection.conversation_id,
+            event_type="slot.schema_switched",
+            round=next_collection.round,
+            revision=next_collection.revision,
+            idempotency_key=f"schema_switch:{interrupt.interrupt_id}:{client_request_id}",
+            payload={
+                "old_schema_id": old_schema_id,
+                "new_schema_id": target_schema_id,
+                "reuse_decision": part.reuse_decision,
+                "copied_fields": copied_fields,
+                "discarded_fields": discarded_fields,
+                "empty_required_fields": list(next_collection.missing),
+                "current_user_text": self._v2_answer_text(raw_answer),
+                "pending_reuse_confirmation": part.reuse_decision == "unspecified",
+                "copyable_resolved": copyable_resolved if part.reuse_decision == "unspecified" else {},
+            },
+            created_at=self._utcnow_naive(),
+        )
+        saved = await self.storage.apply_slot_transition(
+            collection.collection_id,
+            collection.revision,
+            next_collection,
+            event,
+            idempotency_key=event.idempotency_key,
+        )
+        active = saved or await self.storage.get_slot_collection(collection.collection_id) or next_collection
+        saved_interrupt = replace(
+            interrupt,
+            question=active.last_question or interrupt.question,
+            required_fields=slot_collection_required_fields_ref(active),
+            status=InterruptStatus.OPEN,
+        )
+        await self.storage.save_interrupt(saved_interrupt)
+        metadata = {
+            "old_schema_id": old_schema_id,
+            "new_schema_id": target_schema_id,
+            "reuse_decision": part.reuse_decision,
+            "copied_fields": copied_fields,
+            "discarded_fields": discarded_fields,
+            "empty_required_fields": list(active.missing),
+            "active_slot_collection_id": active.collection_id,
+        }
+        if part.reuse_decision == "unspecified":
+            return active, metadata, "已切换到新的 schema；你要复用旧参数中同名字段的值吗？回复“复用”或“不复用”。", True
+        return active, metadata, f"已切换到 {target_schema_id} schema。" if target_schema_id else "已切换 schema。", False
+
+    async def _confirm_pending_v2_schema_switch_reuse(
+        self,
+        *,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        part: InterruptOpenTurnPart,
+        proposal: Mapping[str, object],
+        client_request_id: str,
+    ) -> tuple[SlotCollection, dict[str, object], str, bool]:
+        schema = self._schema_for_slot_collection(collection)
+        if schema is None:
+            metadata = {
+                "allowed": False,
+                "reason": "schema_snapshot_unavailable",
+                "reuse_decision": part.reuse_decision,
+                "active_slot_collection_id": collection.collection_id,
+            }
+            return collection, metadata, "当前 schema 状态不可用，无法确认是否复用旧参数；interrupt 会继续保持打开。", True
+
+        confirm_key = f"schema_switch_reuse:{interrupt.interrupt_id}:{client_request_id}"
+        existing = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, confirm_key)
+        if existing is not None:
+            current = await self.storage.get_slot_collection(collection.collection_id) or collection
+            metadata = dict(existing.payload)
+            metadata.setdefault("active_slot_collection_id", current.collection_id)
+            return current, metadata, "", False
+
+        copied_fields: list[str] = []
+        copyable_raw = proposal.get("copyable_resolved")
+        copyable_resolved = dict(copyable_raw) if isinstance(copyable_raw, Mapping) else {}
+        discarded_fields = list(proposal.get("discarded_fields") or [])
+        next_collection = collection
+        if part.reuse_decision == "reuse":
+            candidates: dict[str, SlotExtractionCandidate] = {}
+            for field, raw_value in copyable_resolved.items():
+                field_name = str(field)
+                if field_name not in schema.inputs or not isinstance(raw_value, Mapping):
+                    continue
+                copied_fields.append(field_name)
+                value = dict(raw_value)
+                candidates[field_name] = SlotExtractionCandidate(
+                    field=field_name,
+                    raw_value=value.get("raw_value", value.get("value")),
+                    value=value.get("value", value.get("raw_value")),
+                    source="slot_collection",
+                    confidence=1.0,
+                )
+            validating = replace(collection, status="validating")
+            next_collection, event = apply_extraction_result_to_collection(
+                validating,
+                schema,
+                SlotExtractionResult(resolved=candidates, diagnostics=("schema_switch_reuse_confirmed",)),
+                now=self._utcnow_naive(),
+            )
+            if next_collection.status == "waiting_for_user":
+                next_collection = replace(
+                    next_collection,
+                    round=collection.round + 1,
+                    last_question=self._slot_question_from_collection(next_collection),
+                )
+        else:
+            next_collection = replace(
+                collection,
+                status="waiting_for_user",
+                revision=collection.revision + 1,
+                round=collection.round + 1,
+                last_question=self._slot_question_from_collection(collection),
+                updated_at=self._utcnow_naive(),
+            )
+            event = SlotEvent(
+                slot_event_id=f"{collection.collection_id}:event:schema_switch_reuse:{client_request_id}",
+                collection_id=collection.collection_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                conversation_id=collection.conversation_id,
+                event_type="slot.schema_switch_reuse_confirmed",
+                round=next_collection.round,
+                revision=next_collection.revision,
+                idempotency_key=confirm_key,
+                payload={},
+                created_at=self._utcnow_naive(),
+            )
+
+        metadata = {
+            "old_schema_id": str(proposal.get("old_schema_id") or ""),
+            "new_schema_id": str(proposal.get("new_schema_id") or collection.selected_schema_id or ""),
+            "reuse_decision": part.reuse_decision,
+            "copied_fields": copied_fields,
+            "discarded_fields": discarded_fields,
+            "empty_required_fields": list(next_collection.missing),
+            "active_slot_collection_id": next_collection.collection_id,
+            "pending_reuse_confirmation": False,
+        }
+        event = replace(
+            event,
+            event_type="slot.schema_switch_reuse_confirmed",
+            idempotency_key=confirm_key,
+            payload=metadata,
+        )
+        saved = await self.storage.apply_slot_transition(
+            collection.collection_id,
+            collection.revision,
+            next_collection,
+            event,
+            idempotency_key=confirm_key,
+        )
+        active = saved or await self.storage.get_slot_collection(collection.collection_id) or next_collection
+        await self.storage.save_interrupt(
+            replace(
+                interrupt,
+                question=active.last_question or interrupt.question,
+                required_fields=slot_collection_required_fields_ref(active),
+                status=InterruptStatus.OPEN,
+            )
+        )
+        if part.reuse_decision == "reuse":
+            message = "已复用旧 schema 中同名字段的参数。"
+        else:
+            message = "已确认不复用旧参数；请按新 schema 重新补充缺失字段。"
+        return active, {**metadata, "empty_required_fields": list(active.missing)}, message, False
+
+    @staticmethod
+    def _schema_switch_execution_gates_pass(
+        plan: InterruptOpenTurnPlan,
+        *,
+        schema_switch_metadata: Mapping[str, object] | None,
+    ) -> bool:
+        if schema_switch_metadata is None or schema_switch_metadata.get("allowed") is False:
+            return False
+        if str(schema_switch_metadata.get("reuse_decision") or "unspecified") not in {"reuse", "do_not_reuse"}:
+            return False
+        if any(part.blocks_resume for part in plan.parts):
+            return False
+        return any(
+            part.kind == "schema_switch"
+            and part.execution_confirmation
+            and part.execution_confirmation_confidence >= _INTERRUPT_SCHEMA_SWITCH_EXECUTION_CONFIDENCE
+            for part in plan.parts
+        )
+
+    async def _hold_ready_v2_collection_for_confirmation(
+        self,
+        collection: SlotCollection,
+        *,
+        question: str,
+        idempotency_key: str,
+    ) -> SlotCollection:
+        if collection.status != "ready":
+            return collection
+        held = replace(
+            collection,
+            status="waiting_for_user",
+            revision=collection.revision + 1,
+            round=collection.round + 1,
+            last_question=question,
+            updated_at=self._utcnow_naive(),
+        )
+        event = SlotEvent(
+            slot_event_id=f"{collection.collection_id}:event:confirmation_required:{held.revision}",
+            collection_id=collection.collection_id,
+            task_id=collection.task_id,
+            node_id=collection.node_id,
+            conversation_id=collection.conversation_id,
+            event_type="slot.confirmation_required",
+            round=held.round,
+            revision=held.revision,
+            idempotency_key=idempotency_key,
+            payload={"question": question},
+            created_at=self._utcnow_naive(),
+        )
+        saved = await self.storage.apply_slot_transition(
+            collection.collection_id,
+            collection.revision,
+            held,
+            event,
+            idempotency_key=idempotency_key,
+        )
+        return saved or await self.storage.get_slot_collection(collection.collection_id) or held
+
+    @staticmethod
+    def _interrupt_part_summary(part: InterruptOpenTurnPart, *, result: Mapping[str, object] | None = None) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "part_id": part.part_id,
+            "kind": part.kind,
+            "text": part.text,
+            "target_slots": list(part.target_slots),
+            "target_schema_id": part.target_schema_id,
+            "reuse_decision": part.reuse_decision,
+            "execution_confirmation": part.execution_confirmation,
+            "execution_confirmation_confidence": part.execution_confirmation_confidence,
+            "uses_uploads": part.uses_uploads,
+            "confidence": part.confidence,
+            "reason": part.reason,
+            "blocks_resume": part.blocks_resume,
+            "block_reason": part.block_reason,
+        }
+        if result:
+            payload["result"] = dict(result)
+        return payload
+
+    @staticmethod
+    def _interrupt_open_turn_action(
+        *,
+        will_resume: bool,
+        has_schema_switch: bool,
+        has_slot_answer: bool,
+        has_question: bool,
+    ) -> str:
+        if will_resume:
+            return "resumed"
+        if has_schema_switch:
+            return "schema_switched"
+        if has_slot_answer or has_question:
+            return "mixed_processed" if has_slot_answer and has_question else "clarification_answer" if has_question else "mixed_processed"
+        return "mixed_processed"
+
+    def _slot_progress_message(self, collection: SlotCollection) -> str:
+        if collection.missing:
+            return f"已保留当前 interrupt 状态。还需要补充：{'、'.join(collection.missing)}。"
+        return "已保留当前 interrupt 状态；请确认是否继续执行或继续修改参数。"
+
+    def _interrupt_ambiguity_message(self, collection: SlotCollection) -> str:
+        return f"我还不能安全确认这一部分是否应该执行。{self._slot_progress_message(collection)}"
 
     async def _schedule_v2_slot_resume(
         self,
@@ -2126,6 +3866,385 @@ class ApiRuntime:
                 metadata=resume_metadata,
             )
         )
+
+    async def _understand_v2_interrupt_turn(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        raw_answer: dict[str, object],
+        client_request_id: str,
+    ) -> InterruptTurnDecision:
+        text = self._v2_answer_text(raw_answer)
+        if not text and (self._v2_answer_upload_ids(raw_answer) or self._v2_answer_sheet_selections(raw_answer)):
+            return InterruptTurnDecision(intent="slot_answer", confidence=1.0, reason="structured_upload_or_sheet_selection")
+
+        prompt = json.dumps(
+            {
+                "mode": "interrupt_turn_understanding",
+                "instructions": [
+                    "Return JSON only.",
+                    "Classify the user's current interrupt turn before any state transition.",
+                    "Use slot_answer only when the user is clearly providing data/choice needed by the current slot prompt.",
+                    "Use clarification_question when the user asks about format, examples, differences, tradeoffs, meaning, or how to decide.",
+                    "Use ambiguous when uncertain. State safety rule: ambiguous keeps the interrupt open.",
+                ],
+                "output_schema": {
+                    "intent": "slot_answer | clarification_question | mixed | ambiguous",
+                    "confidence": 0.0,
+                    "reason": "brief rationale",
+                    "clarification_answer": "answer user question if intent is clarification_question or mixed",
+                    "extracted_answer": {"text": "optional canonical answer text"},
+                },
+                "task": {"task_id": task.task_id, "summary": task.summary},
+                "interrupt": {
+                    "interrupt_id": interrupt.interrupt_id,
+                    "question": interrupt.question,
+                    "reason_code": interrupt.reason_code,
+                },
+                "current_user_answer": text,
+                "client_request_id": client_request_id,
+                "slot_collection": self._slot_collection_prompt_payload(collection),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if self._skill_input_text_generator is None:
+            return self._heuristic_interrupt_turn_decision(text)
+        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        decision = self._parse_interrupt_turn_decision(raw_response)
+        if decision is not None:
+            return decision
+        return InterruptTurnDecision(
+            intent="ambiguous",
+            confidence=1.0,
+            reason="interrupt_turn_llm_unavailable_or_invalid",
+        )
+
+    @staticmethod
+    def _parse_interrupt_turn_decision(raw_response: str) -> InterruptTurnDecision | None:
+        if not raw_response.strip():
+            return None
+        try:
+            parsed = json.loads(raw_response)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, Mapping):
+            return None
+        intent = str(parsed.get("intent") or "").strip()
+        if intent not in {"slot_answer", "clarification_question", "mixed", "ambiguous"}:
+            return None
+        try:
+            confidence = float(parsed.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        extracted = parsed.get("extracted_answer")
+        return InterruptTurnDecision(
+            intent=intent,
+            confidence=max(0.0, min(confidence, 1.0)),
+            reason=str(parsed.get("reason") or ""),
+            clarification_answer=str(parsed.get("clarification_answer") or ""),
+            extracted_answer=dict(extracted) if isinstance(extracted, Mapping) else None,
+        )
+
+    @staticmethod
+    def _heuristic_interrupt_turn_decision(text: str) -> InterruptTurnDecision:
+        normalized = str(text or "").strip()
+        question_markers = (
+            "?",
+            "？",
+            "什么",
+            "怎么",
+            "如何",
+            "区别",
+            "差别",
+            "利弊",
+            "优缺点",
+            "格式",
+            "例子",
+            "示例",
+            "说明",
+            "解释",
+            "含义",
+            "意思",
+            "哪种",
+            "为什么",
+        )
+        if normalized and any(marker in normalized for marker in question_markers):
+            return InterruptTurnDecision(intent="clarification_question", confidence=0.92, reason="question_marker")
+        return InterruptTurnDecision(intent="slot_answer", confidence=0.82 if normalized else 0.0, reason="fallback_preserve_existing_answer_flow")
+
+    @staticmethod
+    def _should_resume_from_interrupt_turn(
+        decision: InterruptTurnDecision,
+        *,
+        raw_answer: dict[str, object],
+    ) -> bool:
+        has_structured_attachment = bool(
+            ApiRuntime._v2_answer_upload_ids(raw_answer)
+            or ApiRuntime._v2_answer_sheet_selections(raw_answer)
+        )
+        if has_structured_attachment and not ApiRuntime._v2_answer_text(raw_answer):
+            return True
+        return decision.intent == "slot_answer" and decision.confidence >= _INTERRUPT_TURN_SLOT_ANSWER_CONFIDENCE
+
+    async def _verify_v2_interrupt_resume(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        raw_answer: dict[str, object],
+        decision: InterruptTurnDecision,
+    ) -> InterruptResumeVerification:
+        if self._v2_answer_upload_ids(raw_answer) or self._v2_answer_sheet_selections(raw_answer):
+            return InterruptResumeVerification(allow_resume=True, confidence=1.0, reason="structured_attachment")
+        prompt = json.dumps(
+            {
+                "mode": "interrupt_resume_verification",
+                "instructions": [
+                    "Return JSON only.",
+                    "Act as a conservative state-transition verifier.",
+                    "Set allow_resume=true only if the current user turn is clearly a final slot answer, not a question about the slot.",
+                    "Set allow_resume=false for format questions, comparison/tradeoff questions, examples, how-to-decide questions, or low-confidence cases.",
+                ],
+                "output_schema": {
+                    "allow_resume": True,
+                    "confidence": 0.0,
+                    "reason": "brief rationale",
+                    "clarification_answer": "optional response if resume should be blocked",
+                },
+                "task": {"task_id": task.task_id, "summary": task.summary},
+                "interrupt": {
+                    "interrupt_id": interrupt.interrupt_id,
+                    "question": interrupt.question,
+                    "reason_code": interrupt.reason_code,
+                },
+                "current_user_answer": self._v2_answer_text(raw_answer),
+                "understanding_decision": {
+                    "intent": decision.intent,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                    "extracted_answer": dict(decision.extracted_answer or {}),
+                },
+                "slot_collection": self._slot_collection_prompt_payload(collection),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if self._skill_input_text_generator is None:
+            return InterruptResumeVerification(allow_resume=True, confidence=decision.confidence, reason="verifier_disabled_fallback_to_heuristic_understanding")
+        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        parsed = self._parse_interrupt_resume_verification(raw_response)
+        if parsed is not None:
+            return parsed
+        return InterruptResumeVerification(
+            allow_resume=False,
+            confidence=1.0,
+            reason="interrupt_resume_verifier_unavailable_or_invalid",
+            clarification_answer=decision.clarification_answer,
+        )
+
+    @staticmethod
+    def _parse_interrupt_resume_verification(raw_response: str) -> InterruptResumeVerification | None:
+        if not raw_response.strip():
+            return None
+        try:
+            parsed = json.loads(raw_response)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, Mapping) or not isinstance(parsed.get("allow_resume"), bool):
+            return None
+        try:
+            confidence = float(parsed.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        return InterruptResumeVerification(
+            allow_resume=bool(parsed.get("allow_resume")),
+            confidence=max(0.0, min(confidence, 1.0)),
+            reason=str(parsed.get("reason") or ""),
+            clarification_answer=str(parsed.get("clarification_answer") or ""),
+        )
+
+    async def _record_v2_interrupt_clarification(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        raw_answer: dict[str, object],
+        client_request_id: str,
+        decision: InterruptTurnDecision,
+        idempotency_key: str,
+        source_message_id: str | None = None,
+    ) -> dict[str, object]:
+        user_message = Message(
+            message_id=source_message_id or self._make_id("msg"),
+            conversation_id=task.conversation_id,
+            role=MessageRole.USER,
+            content=self._format_v2_answer_message(raw_answer) or self._v2_answer_text(raw_answer),
+            task_id=task.task_id,
+            created_at=self._utcnow_naive(),
+        )
+        await self.storage.save_message(user_message)
+        assistant_text = decision.clarification_answer.strip() or await self._generate_v2_interrupt_clarification_answer(
+            task=task,
+            interrupt=interrupt,
+            collection=collection,
+            user_text=self._v2_answer_text(raw_answer),
+            decision=decision,
+        )
+        assistant_message = Message(
+            message_id=self._make_id("msg"),
+            conversation_id=task.conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=assistant_text,
+            task_id=task.task_id,
+            created_at=self._utcnow_naive(),
+        )
+        await self.storage.save_message(assistant_message)
+        await self.storage.append_slot_event(
+            SlotEvent(
+                slot_event_id=f"{collection.collection_id}:event:clarification:{client_request_id}",
+                collection_id=collection.collection_id,
+                task_id=collection.task_id,
+                node_id=collection.node_id,
+                conversation_id=collection.conversation_id,
+                event_type="slot.clarification_answered",
+                round=collection.round,
+                revision=collection.revision,
+                idempotency_key=idempotency_key,
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "client_request_id": client_request_id,
+                    "intent": decision.intent,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                    "assistant_message": assistant_text,
+                    "source_message_id": user_message.message_id,
+                },
+                created_at=self._utcnow_naive(),
+            )
+        )
+        await self._record_event(
+            self._make_event(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                node_id=interrupt.node_id,
+                event_type="task.interrupt_clarification_answered",
+                payload={
+                    "interrupt_id": interrupt.interrupt_id,
+                    "slot_collection_id": collection.collection_id,
+                    "client_request_id": client_request_id,
+                },
+            )
+        )
+        return {
+            "interrupt_id": interrupt.interrupt_id,
+            "status": str(interrupt.status),
+            "node_id": interrupt.node_id,
+            "answer_payload": {"client_request_id": client_request_id},
+            "action": "clarification_answer",
+            "assistant_message": assistant_text,
+            "source_message_id": user_message.message_id,
+        }
+
+    async def _generate_v2_interrupt_clarification_answer(
+        self,
+        *,
+        task: Task,
+        interrupt: Interrupt,
+        collection: SlotCollection,
+        user_text: str,
+        decision: InterruptTurnDecision,
+    ) -> str:
+        prompt = json.dumps(
+            {
+                "mode": "interrupt_clarification_answer",
+                "instructions": [
+                    "Answer the user's question without closing or resuming the interrupt.",
+                    "Use only the provided interrupt, slot schema, resources, and current slot state.",
+                    "If the available context is insufficient, say what is known and what remains uncertain.",
+                    "Keep the answer concise and useful for choosing or filling the missing data.",
+                ],
+                "task": {"task_id": task.task_id, "summary": task.summary},
+                "interrupt": {
+                    "question": interrupt.question,
+                    "reason_code": interrupt.reason_code,
+                },
+                "user_question": user_text,
+                "understanding": {
+                    "intent": decision.intent,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                },
+                "slot_collection": self._slot_collection_prompt_payload(collection),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        answer = self._parse_clarification_answer(raw_response)
+        if answer:
+            return answer
+        missing_labels = []
+        for field in collection.missing:
+            slot = collection.slots.get(field) if isinstance(collection.slots, Mapping) else None
+            if isinstance(slot, Mapping):
+                missing_labels.append(str(slot.get("label") or slot.get("description") or field))
+            else:
+                missing_labels.append(str(field))
+        target = "、".join(missing_labels) if missing_labels else "当前缺失参数"
+        return f"当前任务还在等待补充：{target}。你可以继续询问格式、示例或不同选项的区别；确认后直接回复要采用的值即可。"
+
+    @staticmethod
+    def _parse_clarification_answer(raw_response: str) -> str:
+        stripped = str(raw_response or "").strip()
+        if not stripped:
+            return ""
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+        if isinstance(parsed, Mapping):
+            for key in ("answer", "clarification_answer", "message", "content"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return stripped
+
+    async def _call_skill_input_text_generator(self, prompt: str, **kwargs: Any) -> str:
+        if self._skill_input_text_generator is None:
+            return ""
+        try:
+            generated = self._skill_input_text_generator(prompt, **kwargs)
+            if inspect.isawaitable(generated):
+                generated = await generated
+            return str(generated or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _slot_collection_prompt_payload(collection: SlotCollection) -> dict[str, object]:
+        return {
+            "collection_id": collection.collection_id,
+            "kind": collection.kind,
+            "status": collection.status,
+            "round": collection.round,
+            "revision": collection.revision,
+            "selected_schema_id": collection.selected_schema_id,
+            "selected_entrypoint": collection.selected_entrypoint,
+            "schema_snapshot": dict(collection.schema_snapshot),
+            "slots": dict(collection.slots),
+            "resolved": dict(collection.resolved),
+            "missing": list(collection.missing),
+            "invalid": [dict(item) for item in collection.invalid],
+            "last_question": collection.last_question,
+        }
 
     async def _apply_v2_slot_answer(
         self,
@@ -2464,7 +4583,7 @@ class ApiRuntime:
         return saved or await self.storage.get_slot_collection(collection.collection_id) or collection
 
     async def _mark_v2_slot_script_scheduled(self, collection: SlotCollection) -> tuple[SlotCollection, bool]:
-        script_key = f"slot:{collection.collection_id}:script_scheduled"
+        script_key = self._v2_slot_script_scheduled_key(collection)
         existing = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, script_key)
         if existing is not None:
             current = await self.storage.get_slot_collection(collection.collection_id)
@@ -2490,6 +4609,10 @@ class ApiRuntime:
         if saved is not None:
             return saved, True
         return await self.storage.get_slot_collection(collection.collection_id) or collection, False
+
+    @staticmethod
+    def _v2_slot_script_scheduled_key(collection: SlotCollection) -> str:
+        return f"slot:{collection.collection_id}:script_scheduled:{collection.revision}"
 
     def _manifest_for_slot_collection(self, collection: SlotCollection):
         if self._skill_runtime_state is None:

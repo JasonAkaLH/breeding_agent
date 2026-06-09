@@ -13,3 +13,4 @@ resources:
   usage: {path: references/usage.md, title: 用法说明, audience: [main_agent, slot_question]}
   vcf_input: {path: references/vcf-input.md, title: VCF 输入, audience: [main_agent, slot_question]}
   gene_check_json: {path: references/gene-check-json.md, title: gene_check JSON, audience: [main_agent, slot_question]}
+  qtn_report: {path: references/qtn-report.md, title: QTN 报告结构, audience: [main_agent, slot_question]}

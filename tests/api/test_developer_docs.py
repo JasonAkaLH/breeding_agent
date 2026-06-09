@@ -27,6 +27,12 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("access_token", response.text)
         self.assertIn("/api/v1/conversations/chat-messages", response.text)
         self.assertIn("metadata.deep_thinking", response.text)
+        self.assertIn("metadata.interrupt_id", response.text)
+        self.assertIn("interrupt_resumed", response.text)
+        self.assertIn("interrupt_clarification_answer", response.text)
+        self.assertIn("interrupt_mixed_processed", response.text)
+        self.assertIn("interrupt_schema_switched", response.text)
+        self.assertIn("slot collection revision", response.text)
         self.assertIn("Thinking / reasoning_effort 组合规则", response.text)
         self.assertIn("metadata.deep_thinking=false", response.text)
         self.assertIn("强制降为", response.text)
@@ -34,9 +40,17 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("API 更新日志", response.text)
         self.assertIn("api-changelog-content", response.text)
         self.assertIn("/api-doc/API更新日志.md", response.text)
+        self.assertIn("openapi-schema-status", response.text)
+        self.assertIn("data-openapi-source=\"/openapi.json\"", response.text)
+        self.assertIn("fetch(source, { cache: 'no-store' })", response.text)
+        self.assertIn("components.schemas", response.text)
+        self.assertIn("字段结构在浏览器运行时读取", response.text)
         self.assertIn("CSV / JSON 多编码", response.text)
         self.assertIn("sheet_selection_required", response.text)
         self.assertIn("upload_sheet_selections", response.text)
+        self.assertIn("clarification_answer", response.text)
+        self.assertIn("assistant_message", response.text)
+        self.assertIn("node.ready_to_resume", response.text)
         self.assertIn("source_encoding", response.text)
         self.assertIn("requires_sheet_selection", response.text)
         self.assertIn("不会消费原 open interrupt", response.text)
@@ -77,7 +91,8 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertIn("只有当 SSE 中收到", response.text)
         self.assertIn("不能替代 SSE 触发 interrupt", response.text)
         self.assertIn("graph 只能说明“现在看起来是什么状态”", response.text)
-        self.assertIn("它不是创建新任务，而是恢复同一个", response.text)
+        self.assertIn("既可能是正式补参答案", response.text)
+        self.assertIn("开放性追问", response.text)
         self.assertIn("不要传用户身份、伪造节点 ID 或内部 resume 字段", response.text)
         self.assertIn("SSE event_type 枚举", response.text)
         event_enum_section = response.text[
@@ -104,6 +119,7 @@ class DeveloperDocsAPITest(APITestCase):
             "task.cancellation_requested",
             "task.cancelled",
             "task.interrupt_answered",
+            "task.interrupt_clarification_answered",
             "node.started",
             "node.completed",
             "node.failed",
@@ -197,8 +213,14 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertNotIn('"source_path": "skill/field-design/SKILL.md"', unescaped_html)
         openapi_response = await self.client.get("/openapi.json")
         self.assertEqual(openapi_response.status_code, 200)
-        for path in openapi_response.json()["paths"]:
+        openapi = openapi_response.json()
+        for path in openapi["paths"]:
             self.assertIn(path, response.text)
+        message_accepted_schema = openapi["components"]["schemas"]["MessageAcceptedResponse"]
+        self.assertIn("action", message_accepted_schema["properties"])
+        self.assertIn("interrupt_id", message_accepted_schema["properties"])
+        self.assertIn("assistant_message", message_accepted_schema["properties"])
+        self.assertIn("answer_payload", message_accepted_schema["properties"])
         self.assertNotIn("__Host-maf_session", response.text)
         self.assertNotIn("Set-Cookie", response.text)
         self.assertNotIn("Cookie", response.text)
@@ -212,6 +234,23 @@ class DeveloperDocsAPITest(APITestCase):
         self.assertEqual(changelog_response.status_code, 200)
         self.assertIn("text/markdown", changelog_response.headers["content-type"])
         self.assertIn("# API 更新日志", changelog_response.text)
+        self.assertIn("2026-06-09", changelog_response.text)
+        self.assertIn("_slot_collection_ref", changelog_response.text)
+        self.assertIn("client_request_id", changelog_response.text)
+        self.assertIn("clarification_answer", changelog_response.text)
+        self.assertIn("metadata.interrupt_id", changelog_response.text)
+        self.assertIn("MessageAcceptedResponse.action", changelog_response.text)
+        self.assertIn("interrupt_resumed", changelog_response.text)
+        self.assertIn("interrupt_mixed_processed", changelog_response.text)
+        self.assertIn("interrupt_schema_switched", changelog_response.text)
+        self.assertIn("collection_id + revision", changelog_response.text)
+        self.assertIn("will_resume=true", changelog_response.text)
+        self.assertIn("interrupt_clarification_answer", changelog_response.text)
+        self.assertIn("assistant_message", changelog_response.text)
+        self.assertIn("History Recall", changelog_response.text)
+        self.assertIn("model_edition", changelog_response.text)
+        self.assertIn("messages[].artifacts", changelog_response.text)
+        self.assertIn("file_type=vcf", changelog_response.text)
         self.assertIn("2026-06-05", changelog_response.text)
         self.assertIn("v2-only Skill Contract", changelog_response.text)
         self.assertIn("skill.contract.yaml", changelog_response.text)

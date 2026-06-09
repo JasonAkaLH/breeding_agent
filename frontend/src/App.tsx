@@ -1224,13 +1224,57 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     }));
 
     try {
-      await api.answerInterrupt(interrupt.taskId, interrupt.interruptId, buildInterruptAnswerPayload(interrupt, content, uploads, selectedSheets));
+      const response = await api.submitMessage({
+        conversationId: targetConversationId,
+        content,
+        mode: interrupt.mode,
+        clientMessageId: userMessage.id,
+        metadata: interruptSubmitMetadata(interrupt, uploads, selectedSheets),
+      });
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-      taskPresentationModesRef.current.set(interrupt.taskId, interrupt.mode);
+      if (isInterruptKeepOpenResponse(response)) {
+        const assistantContent = typeof response.assistant_message === 'string' && response.assistant_message.trim() ? response.assistant_message : '我已经理解这是一个追问，当前任务仍会等待你补充正式信息。';
+        updateAssistantMessage(assistantMessage.id, {
+          content: assistantContent,
+          activityText: undefined,
+          replyCompleted: true,
+        });
+        setTaskState((state) =>
+          markWaitingInputRequired({
+            ...state,
+            assistantText: '',
+            reasoningText: '',
+            errorMessage: null,
+          }),
+        );
+        const keepOpenTaskId = response.task_id || interrupt.taskId;
+        let refreshedInterrupt = interrupt;
+        try {
+          const interrupts = await api.listInterrupts(keepOpenTaskId);
+          const openInterrupt = interrupts.interrupts.find((item) => item.status === 'open' && item.interrupt_id === (response.interrupt_id || interrupt.interruptId)) ?? interrupts.interrupts.find((item) => item.status === 'open');
+          if (openInterrupt) {
+            refreshedInterrupt = {
+              taskId: keepOpenTaskId,
+              interruptId: openInterrupt.interrupt_id,
+              question: openInterrupt.question,
+              requiredFields: openInterrupt.required_fields,
+              mode: interrupt.mode,
+            };
+          }
+        } catch {
+          refreshedInterrupt = interrupt;
+        }
+        setPendingInterrupt(refreshedInterrupt);
+        updateCurrentTaskId(keepOpenTaskId);
+        taskPresentationModesRef.current.set(keepOpenTaskId, interrupt.mode);
+        return;
+      }
+      const resumedTaskId = response.task_id || interrupt.taskId;
+      taskPresentationModesRef.current.set(resumedTaskId, interrupt.mode);
       setPendingUploads([]);
       setPendingInterrupt(null);
-      updateCurrentTaskId(interrupt.taskId);
-      subscribeToTask(interrupt.taskId, assistantMessage.id, generation, targetConversationId);
+      updateCurrentTaskId(resumedTaskId);
+      subscribeToTask(resumedTaskId, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
       localTaskRuntimeActiveRef.current = false;
       setTaskState((state) => markTaskFailed(state, friendlyError(error)));
@@ -1820,7 +1864,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         ) : null}
         <main className="chat-workspace" aria-label="对话工作区">
           <section className="app-content" aria-label="当前对话面板">
-            <div ref={conversationListRef} className="conversation-list" aria-label="对话内容" onScroll={handleConversationScroll}>
+            <div
+              ref={conversationListRef}
+              className={`conversation-list${pendingInterrupt ? ' conversation-list-with-interrupt-composer' : ''}`}
+              aria-label="对话内容"
+              onScroll={handleConversationScroll}
+            >
               {messages.length === 0 ? <EmptyWelcome key={conversationId} /> : messages.map((message) => (
                 <MessageBubble key={message.id} message={message} onDownloadArtifact={handleDownloadArtifact} />
               ))}
@@ -1834,8 +1883,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
               onDragLeave={handleUploadDragLeave}
               onDrop={handleUploadDrop}
             >
-              <div className="chat-upload-drop-hint" aria-hidden={!draggingUpload}>释放文件以上传到当前对话</div>
-              {pendingInterrupt ? <InterruptInputBanner interrupt={pendingInterrupt} onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
+              <div className="chat-upload-drop-hint" aria-hidden={!draggingUpload}>
+                释放文件以上传到当前对话
+              </div>
               <Card
                 className={`composer-card floating-composer${draggingUpload ? ' floating-composer-dragging' : ''}`}
                 role="region"
@@ -1891,89 +1941,92 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       onSelect={selectSlashCommand}
                     />
                   ) : null}
-                  <div ref={composerRootRef} className="send-row" role="group" aria-label="消息发送栏">
-                    <Input.TextArea
-                      ref={composerTextAreaRef}
-                      aria-label="请输入问题"
-                      value={input}
-                      onChange={(event) => handleComposerInputChange(event.target.value)}
-                      onCompositionStart={() => {
-                        composingInputRef.current = true;
-                      }}
-                      onCompositionEnd={() => {
-                        composingInputRef.current = false;
-                      }}
-                      onPressEnter={(event) => {
-                        if (!event.shiftKey && !isComposerImeConfirming(event)) {
-                          if (handleSlashKeyDown(event)) return;
-                          event.preventDefault();
-                          void handleSubmit();
-                        }
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter' && !isComposerImeConfirming(event)) {
-                          handleSlashKeyDown(event);
-                        }
-                      }}
-                      placeholder={inputPlaceholder}
-                      autoSize={{ minRows: 1, maxRows: 5 }}
-                      wrap="soft"
-                      disabled={composerDisabled}
-                    />
-                    <Popover
-                      content={composerMenuContent}
-                      trigger="click"
-                      placement="topRight"
-                      overlayClassName="composer-menu-popover"
-                    >
-                      <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="打开输入功能菜单">
-                        <Button
-                          aria-label="打开输入功能菜单"
-                          className="composer-action-button composer-image-button composer-plus-button"
-                        >
-                          <img
-                            aria-hidden="true"
-                            alt=""
-                            className="composer-button-image"
-                            draggable={false}
-                            src={INPUT_MENU_BUTTON_IMAGE}
-                          />
-                        </Button>
-                      </span>
-                    </Popover>
-                    {active ? (
-                      <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="停止">
-                        <Button
-                          danger
-                          type="primary"
-                          aria-label="停止"
-                          className="composer-send-button composer-stop-button"
-                          onClick={handleCancel}
-                          loading={taskState.phase === 'cancelling'}
-                          disabled={taskState.phase === 'submitting' && !currentTaskId}
-                        >
-                          <span aria-hidden="true" className="composer-stop-icon" />
-                        </Button>
-                      </span>
-                    ) : (
-                      <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="发送">
-                        <Button
-                          type="primary"
-                          aria-label="发送"
-                          className="composer-send-button composer-image-button"
-                          onClick={handleSubmit}
-                          disabled={!canSubmitComposer || uploadingFile}
-                        >
-                          <img
-                            aria-hidden="true"
-                            alt=""
-                            className="composer-button-image"
-                            draggable={false}
-                            src={SEND_BUTTON_IMAGE}
-                          />
-                        </Button>
-                      </span>
-                    )}
+                  <div className={`composer-input-stack${pendingInterrupt ? ' composer-input-stack-interrupt' : ''}`}>
+                    {pendingInterrupt ? <InterruptComposerStatus onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
+                    <div ref={composerRootRef} className="send-row" role="group" aria-label="消息发送栏">
+                      <Input.TextArea
+                        ref={composerTextAreaRef}
+                        aria-label="请输入问题"
+                        value={input}
+                        onChange={(event) => handleComposerInputChange(event.target.value)}
+                        onCompositionStart={() => {
+                          composingInputRef.current = true;
+                        }}
+                        onCompositionEnd={() => {
+                          composingInputRef.current = false;
+                        }}
+                        onPressEnter={(event) => {
+                          if (!event.shiftKey && !isComposerImeConfirming(event)) {
+                            if (handleSlashKeyDown(event)) return;
+                            event.preventDefault();
+                            void handleSubmit();
+                          }
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Enter' && !isComposerImeConfirming(event)) {
+                            handleSlashKeyDown(event);
+                          }
+                        }}
+                        placeholder={inputPlaceholder}
+                        autoSize={{ minRows: 1, maxRows: 5 }}
+                        wrap="soft"
+                        disabled={composerDisabled}
+                      />
+                      <Popover
+                        content={composerMenuContent}
+                        trigger="click"
+                        placement="topRight"
+                        overlayClassName="composer-menu-popover"
+                      >
+                        <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="打开输入功能菜单">
+                          <Button
+                            aria-label="打开输入功能菜单"
+                            className="composer-action-button composer-image-button composer-plus-button"
+                          >
+                            <img
+                              aria-hidden="true"
+                              alt=""
+                              className="composer-button-image"
+                              draggable={false}
+                              src={INPUT_MENU_BUTTON_IMAGE}
+                            />
+                          </Button>
+                        </span>
+                      </Popover>
+                      {active ? (
+                        <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="停止">
+                          <Button
+                            danger
+                            type="primary"
+                            aria-label="停止"
+                            className="composer-send-button composer-stop-button"
+                            onClick={handleCancel}
+                            loading={taskState.phase === 'cancelling'}
+                            disabled={taskState.phase === 'submitting' && !currentTaskId}
+                          >
+                            <span aria-hidden="true" className="composer-stop-icon" />
+                          </Button>
+                        </span>
+                      ) : (
+                        <span className="button-tooltip-anchor composer-button-tooltip-anchor" data-tooltip="发送">
+                          <Button
+                            type="primary"
+                            aria-label="发送"
+                            className="composer-send-button composer-image-button"
+                            onClick={handleSubmit}
+                            disabled={!canSubmitComposer || uploadingFile}
+                          >
+                            <img
+                              aria-hidden="true"
+                              alt=""
+                              className="composer-button-image"
+                              draggable={false}
+                              src={SEND_BUTTON_IMAGE}
+                            />
+                          </Button>
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <input
                     ref={uploadInputRef}
@@ -2203,44 +2256,18 @@ function EmptyWelcome() {
   );
 }
 
-function buildInterruptAnswerPayload(
-  interrupt: PendingInterrupt,
-  content: string,
-  uploads: UploadFileResponse[] = [],
-  selectedSheets: Record<string, string> = {},
-): Record<string, unknown> {
-  if (interruptSlotCollectionRef(interrupt)) {
-    const answer: Record<string, unknown> = { text: content };
-    const uploadIds = uploads.map((upload) => upload.upload_id);
-    if (uploadIds.length > 0) {
-      answer.upload_ids = uploadIds;
-    }
-    if (Object.keys(selectedSheets).length > 0) {
-      answer.sheet_selections = selectedSheets;
-    }
-    return {
-      client_request_id: makeClientId('interrupt-answer'),
-      answer,
-    };
-  }
-  if (interruptSheetSelectionField(interrupt)) {
-    return { upload_sheet_selections: selectedSheets };
-  }
-  const fieldNames = interruptVisibleFieldNames(interrupt);
+function interruptSubmitMetadata(interrupt: PendingInterrupt, uploads: UploadFileResponse[] = [], selectedSheets: Record<string, string> = {}): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    interrupt_id: interrupt.interruptId,
+  };
   const uploadIds = uploads.map((upload) => upload.upload_id);
-  const filenames = uploads.map((upload) => upload.filename);
-  const payload: Record<string, unknown> = {};
-  if (fieldNames.length === 1) {
-    payload[fieldNames[0]] = uploadIds.length > 0
-      ? { text: content, upload_ids: uploadIds, filenames }
-      : content;
-  } else {
-    payload.answer = content;
-  }
   if (uploadIds.length > 0) {
-    payload.upload_ids = uploadIds;
+    metadata.upload_ids = uploadIds;
   }
-  return payload;
+  if (Object.keys(selectedSheets).length > 0) {
+    metadata.upload_sheet_selections = selectedSheets;
+  }
+  return metadata;
 }
 
 function uploadAnswerDisplayText(uploads: UploadFileResponse[]): string {
@@ -2260,15 +2287,27 @@ function sheetSelectionDisplayText(field: SheetSelectionField | null, selections
   return parts.length > 0 ? `已选择 sheet：${parts.join('；')}` : '';
 }
 
+function isInterruptKeepOpenResponse(response: { action?: string | null; answer_payload?: Record<string, unknown> | null }): boolean {
+  const action = response.action || '';
+  if (action === 'interrupt_clarification_answer' || action === 'clarification_answer') return true;
+  if (action === 'interrupt_mixed_processed' || action === 'interrupt_schema_switched') {
+    const payload = response.answer_payload || {};
+    return payload.will_resume !== true || payload.requires_confirmation === true;
+  }
+  return false;
+}
+
 function InterruptQuestionText({ interrupt }: { interrupt: PendingInterrupt }) {
   return <MarkdownText content={interrupt.question} />;
 }
 
-function InterruptInputBanner({ interrupt, onCancel, cancelling }: { interrupt: PendingInterrupt; onCancel: () => void; cancelling: boolean }) {
+function InterruptComposerStatus({ onCancel, cancelling }: { onCancel: () => void; cancelling: boolean }) {
   return (
-    <div className="interrupt-input-banner" role="status">
-      <span>当前任务等待补充信息。你的下一条消息会继续这个任务。</span>
-      <Button danger size="small" aria-label="取消当前任务" onClick={onCancel} loading={cancelling}>取消当前任务</Button>
+    <div className="interrupt-composer-status" role="status" aria-live="polite">
+      <span className="interrupt-composer-status-text">等待补充 · 下一条消息将继续当前任务</span>
+      <Button danger type="text" size="small" aria-label="结束任务" onClick={onCancel} loading={cancelling}>
+        结束任务
+      </Button>
     </div>
   );
 }
@@ -2561,21 +2600,13 @@ function OcrRawTextCard({ result }: { result: Extract<CapabilityArtifactDisplay,
           {result.filename ? <Tag>{result.filename}</Tag> : null}
           {result.status ? <Tag color={result.status === 'succeeded' ? 'green' : undefined}>{result.status}</Tag> : null}
         </Space>
-        <pre className={`ocr-raw-text-content ${expanded ? 'ocr-raw-text-content-expanded' : ''}`}>
-          {result.rawText}
-        </pre>
+        <pre className={`ocr-raw-text-content ${expanded ? 'ocr-raw-text-content-expanded' : ''}`}>{result.rawText}</pre>
       </Space>
     </Card>
   );
 }
 
-function FileArtifactCard({
-  result,
-  onDownloadArtifact,
-}: {
-  result: FileArtifactResult;
-  onDownloadArtifact: (result: FileArtifactResult) => void;
-}) {
+function FileArtifactCard({ result, onDownloadArtifact }: { result: FileArtifactResult; onDownloadArtifact: (result: FileArtifactResult) => void }) {
   return (
     <Card size="small" className="capability-card" title="生成文件">
       <Space direction="vertical" size="small">

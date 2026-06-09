@@ -147,6 +147,10 @@ class MessageAcceptedResponse(BaseModel):
     message_id: str
     task_id: str
     status: str
+    action: str | None = None
+    interrupt_id: str | None = None
+    assistant_message: str | None = None
+    answer_payload: dict[str, Any] | None = None
 
 
 class UploadPreviewResponse(BaseModel):
@@ -374,6 +378,8 @@ class AnswerInterruptResponse(BaseModel):
     status: str
     node_id: str
     answer_payload: dict[str, Any]
+    action: str | None = None
+    assistant_message: str | None = None
 
 
 class CapabilityResponse(BaseModel):
