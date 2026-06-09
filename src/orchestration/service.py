@@ -23,6 +23,7 @@ from .models import OrchestrationRequest, OrchestrationRunResult, WorkflowNodePl
 from .registry import CapabilityRegistry, InstanceRegistry
 from .runtime_replanner import NoopRuntimeReplanner, RuntimeReplanContext, RuntimeReplanDecision, RuntimeReplanner
 from .scheduler import Scheduler
+from .visible_message_history import persist_interrupt_question_message
 from .workflow_plan_validator import WorkflowPlanValidator
 
 _SYSTEM_NODE_METADATA_KEYS = frozenset(
@@ -606,6 +607,7 @@ class OrchestrationService:
             interrupt = replace(result.interrupt, created_at=result.interrupt.created_at or now)
             interrupt = await self._persist_v2_slot_collection_for_interrupt(interrupt, now=now)
             saved_interrupt = await self._storage.save_interrupt(interrupt)
+            await persist_interrupt_question_message(self._storage, saved_interrupt, created_at=saved_interrupt.created_at or now)
             await self._record_event(
                 self._make_event(
                     task_id=request.task_id,

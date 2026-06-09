@@ -112,7 +112,11 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
                 created_at=message.created_at,
                 artifacts=(
                     artifacts_by_task_id.get(message.task_id, [])
-                    if message.role == MessageRole.ASSISTANT and message.task_id is not None
+                    if (
+                        message.role == MessageRole.ASSISTANT
+                        and message.task_id is not None
+                        and message.stream_status == "complete"
+                    )
                     else []
                 ),
             )
@@ -129,7 +133,9 @@ async def _history_display_artifacts_by_task_id(
     assistant_task_ids = {
         message.task_id
         for message in messages
-        if message.role == MessageRole.ASSISTANT and message.task_id is not None
+        if message.role == MessageRole.ASSISTANT
+        and message.task_id is not None
+        and message.stream_status == "complete"
     }
     if not assistant_task_ids:
         return {}
