@@ -224,6 +224,11 @@
     .changelog-status { color: var(--muted); font-size: 14px; }
     .changelog-viewer { margin-top: 16px; display: grid; gap: 14px; }
     .changelog-viewer:empty { display: none; }
+    .changelog-scrollback { max-height: min(620px, 52vh); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(180deg, rgba(255,255,255,.92), rgba(246,250,247,.96)); padding: 18px; box-shadow: inset 0 1px 0 rgba(255,255,255,.85), 0 10px 30px rgba(31, 91, 69, .08); scrollbar-width: thin; scrollbar-color: rgba(31, 91, 69, .38) rgba(31, 91, 69, .08); }
+    .changelog-scrollback:focus-visible { outline: 3px solid rgba(31, 91, 69, .22); outline-offset: 3px; }
+    .changelog-scrollback::-webkit-scrollbar { width: 10px; }
+    .changelog-scrollback::-webkit-scrollbar-track { background: rgba(31, 91, 69, .06); border-radius: 999px; }
+    .changelog-scrollback::-webkit-scrollbar-thumb { background: rgba(31, 91, 69, .34); border-radius: 999px; border: 2px solid rgba(255,255,255,.88); }
     .changelog-viewer h3, .changelog-viewer h4, .changelog-viewer h5, .changelog-viewer h6 { margin: 10px 0 0; color: var(--leaf-900); letter-spacing: -.015em; }
     .changelog-viewer h3 { font-size: 24px; }
     .changelog-viewer h4 { font-size: 20px; }
@@ -331,7 +336,7 @@
           <div class="note-card"><b>收录口径</b><p>只记录 REST、SSE、任务图、interrupt、artifact 等客户端可观察行为；PRD-only、Docker 命令和内部重构不作为已上线 API 变更。</p></div>
         </div>
         <div class="changelog-source-row"><a class="ghost-action" href="/api-doc/API更新日志.md" target="_blank" rel="noopener">打开 Markdown 原文</a><span id="api-changelog-status" class="changelog-status">正在读取 API 更新日志…</span></div>
-        <article id="api-changelog-content" class="changelog-viewer" data-source="/api-doc/API更新日志.md" aria-live="polite"></article>
+        <article id="api-changelog-content" class="changelog-viewer changelog-scrollback" data-source="/api-doc/API更新日志.md" aria-live="polite" role="region" aria-label="API 更新日志滚动阅读窗" tabindex="0"></article>
       </section>
 
       <section class="panel" id="auth-model">
