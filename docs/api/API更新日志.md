@@ -1,5 +1,49 @@
 # API 更新日志
 
+## 2026-06-09
+
+### 本次更新摘要
+
+6 月 5 日之后，API 有几处会影响客户端接入的变化：v2 Skill 的补参状态改为后端持久化，`/api/v1/conversations/chat-messages` 同时处理普通新消息和 interrupt 后续输入，interrupt 回答改为提交用户原文并支持开放性追问，历史消息可以带回可展示 artifact，上传接口开始接受 VCF 文件，LLM 选项也会随本次请求传到更多内部调用。字段细节仍以 `/api-doc` 和 `/openapi.json` 为准；这里只记录客户端需要改动或关注的行为。
+
+### `/api/v1/conversations/chat-messages`、`/api/v1/tasks/interrupts` 与 `/api/v1/tasks/interrupts/answer`
+
+- 推荐客户端复用 `POST /api/v1/conversations/chat-messages` 提交 interrupt 状态下的下一条用户消息。目标 conversation 存在 open interrupt 时，服务端优先把该消息路由成 interrupt turn，不创建新 task；没有 open interrupt 时仍按普通新消息创建 task。
+- 回答 interrupt 时可在 `metadata.interrupt_id` 指定目标 interrupt；单 open interrupt 可省略，多个 open interrupt 未指定会返回 400。上传回答继续放 `metadata.upload_ids`，多 sheet 选择放 `metadata.upload_sheet_selections`。
+- `MessageAcceptedResponse.action` 用来区分本次提交：`task_accepted` 表示新任务，`interrupt_resumed` 表示正式回答并恢复同一个 task，`interrupt_clarification_answer` 表示纯追问/澄清，`interrupt_mixed_processed` 表示同一条消息里同时包含补参和追问/引导，`interrupt_schema_switched` 表示已在当前 Skill 内切换 input schema。后面三类通常通过 `assistant_message` 返回解释；客户端再根据 `answer_payload.will_resume` / `answer_payload.requires_confirmation` 判断是否继续保持 interrupt open。
+- 兼容端点 `POST /api/v1/tasks/interrupts/answer` 仍保留；它适合旧客户端或已经持有结构化 `AnswerInterruptRequest` 的集成。新聊天式客户端优先只接入 `chat-messages`。
+- v2 Skill 的缺参状态现在由后端 `SlotCollection` / `SlotEvent` 保存。`Interrupt.required_fields` 只给客户端一个 `_slot_collection_ref` 摘要，客户端不要修改它，也不要把它当成真实状态表。
+- v2 slot 回答走顶层 `client_request_id` 和 `answer`，例如 `{task_id, interrupt_id, client_request_id, answer:{text:"12列"}}`。旧版 `answer_payload` 继续用于非 v2 slot、sheet 选择等老路径。
+- v2 slot 只接收用户原文或上传选择；`answer` 对象只允许 `text`、`upload_ids`、`sheet_selections` / `upload_sheet_selections`。缺少 `client_request_id`、`answer` 不是对象、提交 `design=...` / `ncols=...` 这类字段形 payload，或者夹带内部 resume 字段，都会被服务端拒绝。
+- `client_request_id` 是同一个 interrupt turn 的幂等键。v2 open interrupt 使用 `interrupt_turn:{interrupt_id}:{client_request_id}` 记录 turn summary；重复提交同一个键不会再次调用 planner、LLM 问答或 slot 抽取，也不会重复调度脚本，服务端会返回同一份 `assistant_message` 和 `answer_payload` 摘要。已经 answered / 非 open 的 v2 interrupt 只允许用原 `client_request_id` replay 既有 summary；新 key 会 fail closed，避免 stale interrupt 重跑。
+- 同一个 v2 `SlotCollection` 如果在后续 revision 再次补齐并进入 ready 状态，脚本调度会按 `collection_id + revision` 做幂等。这样可以避免旧 revision 的调度记录阻止新的 ready revision 恢复执行。客户端不需要提交 revision，也不需要额外确认；以 `action=interrupt_resumed`、`answer_payload.will_resume=true` 和后续 `node.ready_to_resume` / `node.resuming` 为准。
+- v2 slot interrupt 中，用户可以直接问开放性问题，例如“这个数据要什么格式？”、“这几种设计区别和利弊是什么？”。后端会先进入 interrupt-open query split planner，把同一条 Query 拆成 `slot_answer`、`skill_question`、`off_topic_guidance`、`schema_switch`、`ambiguous` 等部分；没有 open interrupt 的普通 Query 不走这个 planner。
+- 如果本轮是追问、低置信、LLM 输出无效、off-topic 引导，或 schema switch 需要确认，`chat-messages` 响应可能是 `action=interrupt_clarification_answer`、`interrupt_mixed_processed` 或 `interrupt_schema_switched`；兼容 answer endpoint 响应为 `action=clarification_answer` / `mixed_processed` / `schema_switched`。响应会带 `assistant_message`，并在 `answer_payload` 中返回 `processed_parts`、`slot_status`、`will_resume`、`requires_confirmation`、`active_slot_collection_id`、可选 `schema_switch`。只要 `will_resume=false` 或 `requires_confirmation=true`，客户端应继续保持 interrupt 输入态。
+- 正式回答成功后，`chat-messages` 响应为 `action=interrupt_resumed`；兼容 answer endpoint 响应为 `action=resumed`，并写入 `task.interrupt_answered`。事件 payload 只带 `interrupt_id`、`slot_collection_id`、`client_request_id` 等安全字段；后续仍订阅同一个 `task_id` 的 SSE，看 `node.ready_to_resume`、`node.resuming` 和任务终态。
+- schema switch 仅允许在当前 interrupted Skill 内切换 input schema。若用户未说明是否复用旧参数，服务端会先保存待确认 proposal 并询问；后续用户回复“复用”才复制新旧 schema 同名字段，回复“不复用”则保留新 schema 的空 collection（目标 schema 的 const 选择值除外）。旧有但新 schema 不存在的字段会丢弃，新 schema 需要但旧 collection 没有的字段继续留空。即使新 collection 已 ready，schema switch 后也只有在用户明确“确认执行/直接跑”等且 planner 高置信确认时才会调度脚本。
+- interrupt open 状态下的无关问题不会被硬拒绝，也不会创建新 task；服务端会带着当前 Skill/slot 上下文引导用户回到任务，并保持 interrupt open。
+
+- v2 slot 前端直接展示后端给的 `question`，聊天历史保存用户原话。不要把 `design=对角线增广` 这类内部键值展示给用户。
+- 用户说“刚才”“上次”“前面文件”时，后端会走单独的 History Recall 模式。普通参数抽取和历史召回分开处理，客户端不用自己拼完整历史。
+
+### `/api/v1/conversations/chat-messages` 与 `/api/v1/config/model-editions`（普通新任务参数）
+
+- `model_edition` 仍是顶层请求字段，候选值来自 `GET /api/v1/config/model-editions`。客户端不要自己猜模型枚举，也不要提交 `trim_max_tokens`。
+- `metadata.deep_thinking` 和 `metadata.main_agent_reasoning_effort` 会随本次请求传给主代理、Soft Skill、planner、SQLQuery、Skill slot 抽取 / 追问、会话标题和记忆解析等 LLM 调用。
+- 如果 `metadata.deep_thinking=false`，服务端会把伪造的 `high` / `max` 推理强度降成 `minimal`。后台 LLM 分支不向前端暴露 `reasoning_content`，历史消息只保存最终 answer content。
+- v2 Skill 首次执行时，后端可以按已选 input schema 从用户原文里抽参数。客户端仍然只提交用户原文、上传 ID 和模型选项，不解析业务字段。
+
+### `/api/v1/conversations/{conversation_id}/messages`
+
+- `MessageResponse` 新增可选 `artifacts` 数组。读取历史消息时，assistant 消息可能带回可展示 artifact，用来在刷新或切换历史会话后恢复数据查询表格卡片、OCR 原文卡片和仍 active 的文件下载卡片。
+- 历史 artifact 继续使用 `ArtifactResponse` 的脱敏结构。内部 SQL、坏 JSON、inactive file artifact 不会作为可展示 artifact 返回。
+- 实时任务仍以 SSE 和 `/api/v1/tasks/{task_id}/artifacts` 为主。`messages[].artifacts` 主要用于历史恢复，以及任务结束后补齐展示。
+
+### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+
+- 上传白名单新增 `.vcf` 和 `.vcf.gz`，返回 `file_type=vcf`。`.vcf.gz` 按复合扩展名识别，不会因为 `application/gzip` 就放行普通 `.gz`。
+- VCF / VCF.GZ 按二进制文件处理，不做 CSV / JSON / Excel 表格预览解码。prompt-safe 通道只暴露文件名、大小、摘要等安全元数据，Skill 执行通道继续按 artifact 机制传原始字节。
+
 ## 2026-06-05
 
 ### 本次更新摘要

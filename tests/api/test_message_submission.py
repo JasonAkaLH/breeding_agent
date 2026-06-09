@@ -73,6 +73,67 @@ class MessageSubmissionAPITest(APITestCase):
         terminal = await self.wait_for_terminal_task(first_payload["task_id"])
         self.assertEqual(terminal["status"], "completed")
 
+    async def test_chat_message_answers_waiting_interrupt_without_creating_new_task(self) -> None:
+        first = await self.submit_message(content="帮我查询一下", capability_id="skill.generic_data_lookup")
+        self.assertEqual(first.status_code, 202)
+        first_payload = first.json()
+
+        async def has_open_interrupt() -> bool:
+            response = await self.client.get(f"/api/v1/tasks/{first_payload['task_id']}/interrupts")
+            return response.status_code == 200 and any(
+                interrupt["status"] == "open" for interrupt in response.json()["interrupts"]
+            )
+
+        await self.wait_for_condition(has_open_interrupt)
+        interrupts = await self.client.get(f"/api/v1/tasks/{first_payload['task_id']}/interrupts")
+        open_interrupt = interrupts.json()["interrupts"][0]
+
+        answer = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": first_payload["conversation_id"],
+                "content": "龙粳33",
+                "routing_mode": "auto",
+                "capability_id": None,
+                "client_message_id": "client-chat-interrupt-answer-1",
+                "metadata": {"interrupt_id": open_interrupt["interrupt_id"]},
+            },
+        )
+        self.assertEqual(answer.status_code, 202, answer.text)
+        payload = answer.json()
+        self.assertEqual(payload["conversation_id"], first_payload["conversation_id"])
+        self.assertEqual(payload["task_id"], first_payload["task_id"])
+        self.assertEqual(payload["message_id"], "client-chat-interrupt-answer-1")
+        self.assertEqual(payload["action"], "interrupt_resumed")
+        self.assertEqual(payload["interrupt_id"], open_interrupt["interrupt_id"])
+
+        terminal = await self.wait_for_terminal_task(first_payload["task_id"])
+        self.assertEqual(terminal["status"], "completed")
+        conversations = await self.runtime.storage.list_tasks_for_conversation(first_payload["conversation_id"])
+        self.assertEqual([task.task_id for task in conversations], [first_payload["task_id"]])
+
+    async def test_chat_message_with_stale_interrupt_id_does_not_create_new_task(self) -> None:
+        first = await self.submit_message(content="你好")
+        self.assertEqual(first.status_code, 202)
+        first_payload = first.json()
+        terminal = await self.wait_for_terminal_task(first_payload["task_id"])
+        self.assertEqual(terminal["status"], "completed")
+
+        stale = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": first_payload["conversation_id"],
+                "content": "这本来想回答一个旧 interrupt",
+                "routing_mode": "auto",
+                "capability_id": None,
+                "metadata": {"interrupt_id": "interrupt-stale"},
+            },
+        )
+        self.assertEqual(stale.status_code, 400)
+        self.assertIn("No active task is waiting for interrupt", stale.text)
+        tasks = await self.runtime.storage.list_tasks_for_conversation(first_payload["conversation_id"])
+        self.assertEqual([task.task_id for task in tasks], [first_payload["task_id"]])
+
     async def test_legacy_generic_data_lookup_native_capability_id_is_rejected(self) -> None:
         response = await self.submit_message(content="查询龙粳33", capability_id="legacy.query")
         self.assertEqual(response.status_code, 400)

@@ -138,6 +138,7 @@ describe('taskEvents', () => {
         'task.replan_available',
         'mcp.long_task_progress',
         'mcp.long_task_cancelled',
+        'task.interrupt_clarification_answered',
         'node.waiting_for_input',
         'node.cancelled',
         'node.blocked_by_cancellation',
@@ -170,7 +171,17 @@ describe('taskEvents', () => {
     }
 
     expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'node.waiting_for_input' }));
+    listeners.get('task.interrupt_clarification_answered')?.(new MessageEvent('task.interrupt_clarification_answered', {
+      data: JSON.stringify({
+        event_id: 'evt-clarification',
+        event_type: 'task.interrupt_clarification_answered',
+        task_id: 'task-1',
+        payload: { interrupt_id: 'interrupt-1' },
+      }),
+    }));
+
     expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'node.ready_to_resume' }));
+    expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'task.interrupt_clarification_answered' }));
     expect(onError).not.toHaveBeenCalled();
   });
 });

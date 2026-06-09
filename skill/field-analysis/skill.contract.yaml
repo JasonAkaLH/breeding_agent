@@ -12,3 +12,4 @@ outputs:
 resources:
   usage: {path: references/usage.md, title: 用法说明, audience: [main_agent, slot_question]}
   field_data: {path: references/field-data.md, title: 田间数据字段, audience: [main_agent, slot_question]}
+  report_structure: {path: references/report-structure.md, title: 报告结构, audience: [main_agent, slot_question]}

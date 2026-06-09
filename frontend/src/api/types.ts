@@ -59,6 +59,10 @@ export interface MessageAcceptedResponse {
   message_id: string;
   task_id: string;
   status: 'accepted' | string;
+  action?: 'task_accepted' | 'interrupt_resumed' | 'interrupt_clarification_answer' | 'interrupt_mixed_processed' | 'interrupt_schema_switched' | string | null;
+  interrupt_id?: string | null;
+  assistant_message?: string | null;
+  answer_payload?: Record<string, unknown> | null;
 }
 
 export interface UploadPreviewResponse {
@@ -237,6 +241,8 @@ export interface AnswerInterruptResponse {
   status: string;
   node_id: string;
   answer_payload: Record<string, unknown>;
+  action?: 'clarification_answer' | 'resumed' | string | null;
+  assistant_message?: string | null;
 }
 
 export interface CancelTaskResponse {
