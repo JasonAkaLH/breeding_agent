@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from src.core.enums import ConversationStatus, MessageRole
 from src.core.models import Artifact, Conversation, Message
 from src.lifecycle.errors import ConversationBusyError
+from src.api.upload_store import UploadValidationError
 
 from ..artifact_responses import artifact_response, should_return_history_display_artifact
 from ..auth import require_authenticated_user, require_conversation_owner
@@ -51,20 +52,17 @@ async def submit_message(body: SubmitMessageRequest, request: Request) -> Messag
     user = await require_authenticated_user(request)
     conversation_id = body.conversation_id
     try:
-        message, task = await runtime.submit_message(conversation_id, body, authenticated_username=user.username)
+        result = await runtime.submit_chat_message(conversation_id, body, authenticated_username=user.username)
     except ConversationBusyError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}") from exc
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    return MessageAcceptedResponse(
-        conversation_id=conversation_id,
-        message_id=message.message_id,
-        task_id=task.task_id,
-        status="accepted",
-    )
+    return MessageAcceptedResponse(**result)
 
 
 @router.get("/api/v1/conversations", response_model=ConversationListResponse)
