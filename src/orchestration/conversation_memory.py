@@ -499,6 +499,7 @@ class ConversationMemoryBuilder:
             summary_text=latest_summary.summary_text if latest_summary is not None else None,
             capability_summaries=capability_summaries,
             request_metadata=request.metadata,
+            request=request,
         )
 
         context = await self._compress(
@@ -871,6 +872,7 @@ class ConversationMemoryBuilder:
         summary_text: str | None = None,
         capability_summaries: tuple[dict[str, Any], ...] = (),
         request_metadata: Mapping[str, Any] | None = None,
+        request: OrchestrationRequest | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         llm_invalid_reason: str | None = None
         llm_prompt_profile: Mapping[str, Any] | None = None
@@ -883,6 +885,7 @@ class ConversationMemoryBuilder:
                     summary_text=summary_text,
                     capability_summaries=capability_summaries,
                     request_metadata=request_metadata,
+                    request=request,
                 )
             except _ResolutionGeneratorFailed as exc:
                 llm_resolution = None
@@ -919,6 +922,7 @@ class ConversationMemoryBuilder:
         summary_text: str | None,
         capability_summaries: tuple[dict[str, Any], ...],
         request_metadata: Mapping[str, Any] | None = None,
+        request: OrchestrationRequest | None = None,
     ) -> tuple[str | None, dict[str, Any]] | _InvalidResolutionAttempt | None:
         if self._resolution_generator is None:
             return None
@@ -935,6 +939,7 @@ class ConversationMemoryBuilder:
                 prompt_resolution.prompt,
                 prompt_profile=prompt_resolution.llm_call_payload,
                 metadata=request_metadata,
+                request=request,
             )
             if inspect.isawaitable(generated):
                 generated = await generated
@@ -1245,6 +1250,7 @@ def _call_memory_generator(
     *,
     prompt_profile: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    request: OrchestrationRequest | None = None,
 ):
     kwargs: dict[str, Any] = {}
     try:
@@ -1257,6 +1263,8 @@ def _call_memory_generator(
             kwargs["prompt_profile"] = prompt_profile
         if metadata is not None and (accepts_kwargs or "metadata" in signature.parameters):
             kwargs["metadata"] = metadata
+        if request is not None and (accepts_kwargs or "request" in signature.parameters):
+            kwargs["request"] = request
     return generator(prompt, **kwargs) if kwargs else generator(prompt)
 
 

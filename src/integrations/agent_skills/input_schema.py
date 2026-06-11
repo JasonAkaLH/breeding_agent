@@ -39,6 +39,7 @@ class SkillInputClarification:
 class SkillInputField:
     name: str
     type: str = "string"
+    title: str = ""
     required: bool = False
     required_when: Mapping[str, Any] = field(default_factory=dict)
     source: SkillInputSourcePolicy = SkillInputSourcePolicy()
@@ -48,6 +49,7 @@ class SkillInputField:
     enum: tuple[str, ...] = ()
     const: Any | None = None
     description: str = ""
+    question: str = ""
     reference_resource: str = ""
     clarification: SkillInputClarification = SkillInputClarification()
     validation: SkillInputValidationRule = SkillInputValidationRule()
@@ -194,6 +196,7 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
     return SkillInputField(
         name=name,
         type=field_type,
+        title=str(value.get("title") or "").strip(),
         required=bool(value.get("required", False)),
         required_when=dict(value.get("required_when") or {}) if isinstance(value.get("required_when"), Mapping) else {},
         source=SkillInputSourcePolicy(allowed=_string_tuple(source_allowed)),
@@ -203,6 +206,7 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
         enum=_string_tuple(value.get("enum") or value.get("choices")),
         const=value.get("const"),
         description=str(value.get("description") or "").strip(),
+        question=str(value.get("question") or "").strip(),
         reference_resource=str(value.get("reference_resource") or "").strip(),
         clarification=SkillInputClarification(
             hint=str(clarification.get("hint") or "").strip() if isinstance(clarification, Mapping) else "",

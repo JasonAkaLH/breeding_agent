@@ -2,11 +2,11 @@
 
 ## 背景
 
-当前用户在任务进入 `waiting_for_input` / interrupt 后，前端会把下一条输入直接提交到 `/api/v1/tasks/interrupts/answer`。后端随后把 interrupt 从 `open` 置为 `answered` 并调度 resume。这个语义无法支持用户在补槽前先问开放性问题，例如“这个数据要什么格式？”、“几种设计方法区别和利弊是什么？”。
+当前用户在任务进入 `waiting_for_input` / interrupt 后，前端会把下一条输入继续提交到 `POST /api/v1/conversations/chat-messages`，并通过 `metadata.interrupt_id` 指向当前 open interrupt。后端随后按本轮意图决定保持 interrupt open、回答追问，或把 interrupt 从 `open` 置为 `answered` 并调度 resume。这个语义需要支持用户在补槽前先问开放性问题，例如“这个数据要什么格式？”、“几种设计方法区别和利弊是什么？”。
 
 ## 目标
 
-- 复用现有 `/api/v1/tasks/interrupts/answer` API，不新增 endpoint。
+- 复用现有 `POST /api/v1/conversations/chat-messages` 作为 interrupt turn 入口，不新增专用回答 endpoint。
 - interrupt 状态下，用户可以自然输入问题或答案，由 LLM 判断本轮意图。
 - 只有高置信判断为正式补槽答案时，才关闭 interrupt 并恢复任务。
 - 解释性、比较性、格式性、利弊性、低置信或模糊输入均保持 interrupt 为 `open`。
@@ -20,9 +20,9 @@
 
 ## 设计
 
-### 1. API 兼容扩展
+### 1. Chat messages interrupt turn 扩展
 
-继续使用 `POST /api/v1/tasks/interrupts/answer`。请求格式保持兼容。响应保留旧字段，并增加可选字段：
+继续使用 `POST /api/v1/conversations/chat-messages`。请求的 `content` 是用户本轮原文，`metadata.interrupt_id` 指向当前 open interrupt；响应使用 `MessageAcceptedResponse.action` 区分本轮处理结果：
 
 ```json
 {
@@ -30,12 +30,12 @@
   "status": "open|answered",
   "node_id": "...",
   "answer_payload": {},
-  "action": "clarification_answer|resumed",
+  "action": "interrupt_clarification_answer|interrupt_resumed|interrupt_mixed_processed|interrupt_schema_switched",
   "assistant_message": "..."
 }
 ```
 
-旧前端只看旧字段仍可工作；新前端根据 `action` 分支。
+前端根据 `action` 分支；`assistant_message` 用于展示追问回答、低置信解释或 schema switch 确认。
 
 ### 2. 高准确理解器
 
@@ -69,10 +69,11 @@ clarification turn 不调用 `InterruptService.record_answer()`，因此：
 
 ### 4. 前端行为
 
-`handleInterruptAnswer()` 仍调用 `api.answerInterrupt()`。收到响应后：
+`handleSendMessage()` 在存在 `pendingInterrupt` 时仍调用 `api.sendMessage()` / `chat-messages`，并附带 `metadata.interrupt_id`。收到响应后：
 
-- `action === 'clarification_answer'`：追加 assistant 解释消息；保留 `pendingInterrupt`；task phase 仍为 `waiting_for_input`；不订阅 resume stream。
-- 其他或 `action === 'resumed'`：沿用既有 resume 行为。
+- `action === 'interrupt_clarification_answer'`：追加 assistant 解释消息；保留 `pendingInterrupt`；task phase 仍为 `waiting_for_input`；不订阅新的 task stream。
+- `action === 'interrupt_mixed_processed'` 或 `action === 'interrupt_schema_switched'`：展示 `assistant_message`，按 `answer_payload.will_resume` / `requires_confirmation` 决定是否继续保持 interrupt 输入态。
+- `action === 'interrupt_resumed'`：沿用既有 resume 行为，继续订阅同一个 task 的 SSE。
 
 ## 测试
 

@@ -60,6 +60,24 @@ def decode_artifact_content(artifact: Mapping[str, Any]) -> bytes | None:
 
 
 def write_uploaded_input(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
+    direct = payload.get("rice_input")
+    if isinstance(direct, Mapping):
+        content = decode_artifact_content(direct)
+        if content is not None:
+            path = work_dir / artifact_filename(direct)
+            path.write_bytes(content)
+            return path
+        for key in ("path", "file_path", "local_path", "tmp_path"):
+            raw = direct.get(key)
+            if isinstance(raw, str) and raw.strip():
+                candidate = Path(raw).expanduser()
+                if candidate.exists() and candidate.is_file():
+                    return candidate.resolve()
+    elif isinstance(direct, str) and direct.strip():
+        candidate = Path(direct).expanduser()
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+
     artifacts = payload.get("uploaded_artifacts")
     if not isinstance(artifacts, list | tuple):
         return None
@@ -79,7 +97,15 @@ def resolve_input_path(payload: Mapping[str, Any], work_dir: Path) -> Path | Non
     uploaded = write_uploaded_input(payload, work_dir)
     if uploaded is not None:
         return uploaded
-    for key in ("input_file", "file_path", "path", "vcf"):
+    metadata = payload.get("metadata")
+    if isinstance(metadata, Mapping):
+        for key in ("rice_input", "input_file", "file_path", "path", "vcf"):
+            raw = metadata.get(key)
+            if isinstance(raw, str) and raw.strip():
+                candidate = Path(raw).expanduser()
+                if candidate.exists() and candidate.is_file():
+                    return candidate.resolve()
+    for key in ("rice_input", "input_file", "file_path", "path", "vcf"):
         raw = payload.get(key)
         if isinstance(raw, str) and raw.strip():
             candidate = Path(raw).expanduser()
@@ -100,18 +126,46 @@ def is_gene_check_json(path: Path) -> bool:
     return isinstance(data, dict) and isinstance(data.get("samples"), dict) and isinstance(data.get("metadata"), dict)
 
 
-def output_file(path: Path, *, label: str, summary: str) -> dict[str, str]:
+def output_file(path: Path, *, label: str, summary: str, mime_type: str = "text/html") -> dict[str, str]:
+    if path.suffix.lower() == ".html":
+        label = label.replace("Markdown", "HTML")
+        summary = "HTML user report generated from the current QTN matching facts."
     return {
         "path": f"outputs/{path.name}",
         "filename": path.name,
-        "mime_type": "text/markdown",
+        "mime_type": mime_type,
         "label": label,
         "summary": summary,
     }
 
 
+def _utf8_locale(value: str | None) -> str:
+    text = str(value or "").strip()
+    normalized = text.upper().replace("_", "-")
+    if "UTF-8" in normalized or "UTF8" in normalized:
+        return text
+    return "C.UTF-8"
+
+
+def subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    lang = _utf8_locale(env.get("LANG"))
+    env["LANG"] = lang
+    env["LC_ALL"] = _utf8_locale(env.get("LC_ALL") or lang)
+    env["LC_CTYPE"] = _utf8_locale(env.get("LC_CTYPE") or env.get("LC_ALL") or lang)
+    return env
+
+
 def run_process(command: list[str], *, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+    return subprocess.run(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+        env=subprocess_env(),
+    )
 
 
 def process_error(process: subprocess.CompletedProcess[str]) -> str:
@@ -119,7 +173,18 @@ def process_error(process: subprocess.CompletedProcess[str]) -> str:
 
 
 def run_interpret(gene_check_path: Path, report_path: Path, payload: Mapping[str, Any]) -> subprocess.CompletedProcess[str]:
-    command = [sys.executable, str(INTERPRET), "--input", str(gene_check_path), "--mode", "key-trait-report", "--output", str(report_path)]
+    command = [
+        sys.executable,
+        str(INTERPRET),
+        "--input",
+        str(gene_check_path),
+        "--mode",
+        "key-trait-report",
+        "--output",
+        str(report_path),
+        "--format",
+        "html",
+    ]
     sample = payload.get("sample")
     samples = payload.get("samples")
     if isinstance(sample, str) and sample.strip():
@@ -174,12 +239,12 @@ def main() -> int:
                 emit(fail("水稻 QTN 匹配完成但未生成预期结果。", error_type="result_missing"))
                 return 0
 
-        report_path = output_dir / f"rice-genie-{prefix}-report.md"
+        report_path = output_dir / f"rice-genie-{prefix}-report.html"
         interpret = run_interpret(gene_check_path, report_path, payload)
         if interpret.returncode != 0:
             emit(fail("水稻基因型体检报告生成失败：" + process_error(interpret), error_type="interpret_failed"))
             return 0
-        answer = report_path.read_text(encoding="utf-8-sig") if report_path.exists() else interpret.stdout
+        answer = report_path.read_text(encoding="utf-8") if report_path.exists() else interpret.stdout
         answer = answer.strip()
         if not answer:
             emit(fail("水稻基因型体检报告为空。", error_type="empty_report"))
@@ -189,7 +254,7 @@ def main() -> int:
         {
             "ok": True,
             "answer": answer,
-            "report_format": "rice-genie-key-trait-report-v1",
+            "report_format": "rice-genie-key-trait-report-html-v1",
             "output_files": [
                 output_file(report_path, label="水稻基因型体检报告 Markdown", summary="基于当前 QTN 匹配事实生成的用户报告。")
             ],

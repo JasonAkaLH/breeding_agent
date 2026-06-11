@@ -1,38 +1,208 @@
 schema_id: interval
-title: 间比法设计
+version: 1.0.0
+title: Interval contrast design input
+description: 间比法试验设计输入，要求提供材料清单、田块列数 ncols，并在识别 CK 后补充 CK 起始位置和间隔数量。
+activation:
+  aliases:
+    - interval
+    - 间比
+    - 间比法
+    - interval contrast
 inputs:
+  material_data:
+    type: artifact
+    required: false
+    title: 材料清单
+    question: 请上传或提供材料清单文件，推荐列名为 ped_id、hyb_check、set。
+    source:
+      allowed:
+        - artifact
+        - upload
+        - task_attachment
+        - upload_ledger
+        - metadata
+    aliases:
+      - material_data
+      - material_file
+      - input_file
+      - 材料清单
+      - 材料表
+    validation:
+      file_extensions: [.csv, .xls, .xlsx]
+  input_data:
+    type: string
+    required: false
+    title: 粘贴的材料表
+    question: 如果没有文件，也可以直接粘贴 CSV 格式材料表。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases:
+      - input_data
+      - pasted_material_data
+      - pasted_data
+      - 材料表
   design:
     type: string
     required: true
+    title: 设计类型
+    question: 设计类型已选择为 Interval。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
     const: interval
-    aliases: [interval, 间比法, 间比]
-    description: 设计类型；本模式固定为间比法设计。
-    clarification: {hint: 可回答“间比法”或 “interval”。, examples: [间比法, interval]}
-
-  material_data:
-    type: artifact
-    required: true
-    source: {allowed: [artifact]}
-    aliases: [材料清单, material_data]
-    description: 试验材料清单文件，需包含可识别 CK 的 hyb_check 信息。
-    clarification: {hint: 请上传 CSV/Excel 材料清单。, examples: [上传 interval_materials.xlsx]}
-  blocks: {type: integer, required: false, aliases: [blocks, 区组数, 重复数, 重复], validation: {min: 1, max: 100}}
+    enum: [interval]
+    aliases: [design, design_type, 设计类型, 试验设计]
+    patterns:
+      - '(?i)\b(interval|interval contrast)\b'
+      - '间比|间比法'
   ncols:
     type: integer
     required: true
-    aliases: [ncols, 列数, 田块列数]
-    description: 田块每行列数，用于计算间比法插入 CK 后的布局宽度。
-    clarification: {hint: 请提供正整数列数，例如“12列”。, examples: [12列, ncols=12]}
-    validation: {min: 1, max: 1000}
-  ck_ratio: {type: string, required: false, default: A}
-  planter: {type: string, required: false, default: serpentine}
-  randomize: {type: string, required: false, default: 'true'}
-  seed: {type: integer, required: false}
-  run_id: {type: string, required: false}
+    title: 田块列数
+    question: 请提供田块列数 ncols，例如 ncols=10 或列数10。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [ncols, columns, field_columns, 列数, 田块列数]
+    patterns:
+      - '(?:ncols|columns?|列数|田块列数)\s*[:：=]?\s*(\d+)'
+      - '(\d+)\s*(?:列|columns?)'
+    validation:
+      min: 1
   ck_spec:
     type: string
-    required: true
-    aliases: [ck_spec, CK参数, CK间隔]
-    reference_resource: interval
-    description: 每个 CK 的起始位置和间隔，格式为 ck_no,start_pos,interval；多个 CK 用分号分隔。
-    clarification: {hint: 例如“1,1,10; 2,5,10”。, examples: ["1,1,10; 2,5,10"]}
+    required: false
+    title: 对照位置约束
+    question: 这是间比法设计中的 CK 对照位置约束，不是品种规格。识别 CK 后，请下载对照位置参数清单，补充“起始位置”和“间隔数量”两列后上传 CSV 或 Excel。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases:
+      - ck_spec
+      - ck-spec
+      - 对照位置约束
+      - CK位置约束
+      - CK起始位置
+      - CK间隔
+      - CK布局参数
+      - CK参数
+      - 对照布局
+      - 起始位置
+      - 间隔数量
+  ck_spec_file:
+    type: artifact
+    required: false
+    title: 对照位置参数清单
+    question: 请上传补好“起始位置”和“间隔数量”的对照位置参数清单，支持 CSV、XLS 或 XLSX。
+    source:
+      allowed:
+        - artifact
+        - upload
+        - task_attachment
+        - upload_ledger
+        - metadata
+    aliases:
+      - ck_spec_file
+      - ck_params_file
+      - ck_position_file
+      - 对照位置参数清单
+      - 对照位置约束表
+      - CK参数表
+    validation:
+      file_extensions: [.csv, .xls, .xlsx]
+  planter:
+    type: string
+    required: false
+    title: 播种路径
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: serpentine
+    enum: [serpentine, cartesian]
+    aliases: [planter, planting_path, 播种路径, 走向]
+    patterns:
+      - '(?i)(serpentine|cartesian)'
+      - '蛇形|往返'
+      - '笛卡尔|逐行'
+  randomize:
+    type: boolean
+    required: false
+    title: 是否随机化
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: true
+    aliases: [randomize, randomise, 随机化, 打乱]
+    patterns:
+      - '(?:randomi[sz]e|随机化|打乱)\s*[:：=]?\s*(true|false|yes|no|是|否)'
+  seed:
+    type: integer
+    required: false
+    title: 随机种子
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [seed, random_seed, 随机种子]
+    patterns:
+      - '(?:seed|random_seed|随机种子)\s*[:：=]?\s*(\d+)'
+    validation:
+      min: 1
+  run_id:
+    type: string
+    required: false
+    title: 运行名称
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [run_id, run-id, 运行名称, 任务名]
+constraints:
+  - any_of: [material_data, input_data]

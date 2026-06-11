@@ -1,0 +1,182 @@
+schema_id: pop_gene
+version: 1.0.0
+title: Population genetics input
+description: 群体遗传分析输入，支持 PCA、ADMIXTURE、遗传距离、PCoA 和系统发育树。
+activation:
+  aliases:
+    - pop-gene
+    - population genetics
+    - genotype analysis
+    - 群体遗传分析
+    - 基因型分析
+inputs:
+  genotype_file:
+    type: artifact
+    required: false
+    title: 基因型数据文件
+    question: 请上传基因型数据文件，支持 HapMap、VCF 和 PLINK。
+    source:
+      allowed:
+        - artifact
+        - upload
+        - task_attachment
+        - upload_ledger
+        - metadata
+    aliases: [genotype_file, genotype, input_file, file, 基因型文件, 基因型数据]
+    validation:
+      file_extensions: [.hmp, .txt, .vcf, .vcf.gz, .ped, .map, .bed, .bim, .fam]
+  file_path:
+    type: string
+    required: false
+    title: 基因型文件路径
+    question: 也可以提供本地基因型文件路径。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [file_path, path, genotype_path, input_path, 文件路径]
+  file_type:
+    type: string
+    required: false
+    title: 输入格式
+    question: 如果无法自动识别，请指定 simple_hapmap、tassel_hapmap、vcf 或 plink。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [file_type, input_format, format, 文件格式, 输入格式]
+    enum: [simple_hapmap, tassel_hapmap, vcf, plink]
+    patterns:
+      - '(?i)\b(simple_hapmap|tassel_hapmap|vcf|plink)\b'
+      - '(?:文件格式|输入格式|format|file_type)\s*[:：=]?\s*(simple_hapmap|tassel_hapmap|vcf|plink)'
+  analysis:
+    type: string
+    required: false
+    title: 分析流程
+    question: 可指定 pca、admixture、genetic_distance、pcoa、tree 或 report；不指定默认运行 prepare-genotype -> pca。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: default
+    aliases: [analysis, workflow, mode, analysis_type, 分析类型, 流程]
+    enum: [default, pca, admixture, genetic_distance, pcoa, tree, report]
+    patterns:
+      - '(?i)\b(default|pca|admixture|genetic_distance|genetic distance|pcoa|tree|report)\b'
+      - '群体结构|遗传距离|系统发育树|进化树|完整报告'
+  run_id:
+    type: string
+    required: false
+    title: 运行名称
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [run_id, run-id, 运行名称, 任务名]
+  kmin:
+    type: integer
+    required: false
+    title: ADMIXTURE 最小 K
+    question: ADMIXTURE 的最小 K，默认 2。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 2
+    aliases: [kmin, K_min, 最小K]
+    patterns:
+      - '(?:kmin|K_min|最小K)\s*[:：=]?\s*(\d+)'
+      - 'K\s*(?:从|起始|最小)\s*(\d+)'
+    validation:
+      min: 2
+      max: 20
+  kmax:
+    type: integer
+    required: false
+    title: ADMIXTURE 最大 K
+    question: ADMIXTURE 的最大 K，默认 8。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 8
+    aliases: [kmax, K_max, 最大K]
+    patterns:
+      - '(?:kmax|K_max|最大K)\s*[:：=]?\s*(\d+)'
+      - 'K\s*(?:到|结束|最大)\s*(\d+)'
+    validation:
+      min: 2
+      max: 20
+  tree_method:
+    type: string
+    required: false
+    title: 系统发育树方法
+    question: 系统发育树方法可选 bionj 或 upgma，默认 bionj。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: bionj
+    aliases: [tree_method, method, 建树方法, 树方法]
+    enum: [bionj, upgma]
+    patterns:
+      - '(?i)\b(bionj|upgma)\b'
+      - '(?:tree_method|建树方法|树方法)\s*[:：=]?\s*(bionj|upgma)'
+  maf:
+    type: number
+    required: false
+    title: MAF 阈值
+    question: MAF 过滤阈值，默认 0.000001。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 0.000001
+    aliases: [maf, MAF, maf_threshold]
+    patterns:
+      - '(?:maf|MAF|maf_threshold)\s*[:：=]?\s*(0(?:\.\d+)?|1(?:\.0+)?)'
+    validation:
+      min: 0
+      max: 0.5
+constraints:
+  - any_of: [genotype_file, file_path]

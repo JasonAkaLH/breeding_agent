@@ -50,7 +50,11 @@ from src.orchestration.prompt_profiles import (
 
 from .helpers import StreamGenerator, TransientEventPublisher, iter_stream_events, make_event, make_text_artifact
 from .prompt_envelope_builder import resolve_main_agent_prompt_for_mode
-from .prompt_builder import build_artifact_context, build_dependency_context
+from .prompt_builder import (
+    MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT,
+    build_artifact_context,
+    build_dependency_context,
+)
 from .skill_output_artifacts import (
     SkillOutputArtifactManager,
 )
@@ -263,13 +267,14 @@ class MainAgentRespondCapability(CapabilityContract):
                         reasoning_char_count=reasoning_char_count,
                     )
                 reasoning_delta = stream_event.get("reasoning")
-                if thinking_enabled and reasoning_delta:
+                if reasoning_delta:
+                    reasoning_text = str(reasoning_delta)
                     reasoning_ordinal += 1
-                    reasoning_char_count += len(reasoning_delta)
+                    reasoning_char_count += len(reasoning_text)
                     reasoning_event = make_event(
                         request,
                         event_type="main_agent.reasoning_delta",
-                        payload={"delta": reasoning_delta, "ordinal": reasoning_ordinal},
+                        payload={"delta": reasoning_text, "ordinal": reasoning_ordinal},
                         visibility=EventVisibility.FRONTEND,
                         ordinal=reasoning_ordinal,
                     )
@@ -837,6 +842,7 @@ class MainAgentRespondCapability(CapabilityContract):
             "你是主代理的 Skill 软绑定公开回答器。\n"
             "用户用 slash command 点名了一个公开 Skill；当前应先回答用法、字段、数据格式、示例或缺失信息，而不是执行 Skill。\n"
             "请只基于公开 Skill profile 和上传摘要作答，不要暴露内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。\n"
+            f"{MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT}\n"
             "如果用户实际想执行但信息不足，请明确说明缺少哪些用户可补充的数据或参数。\n\n"
             f"判定原因：{decision_reason_code}\n\n"
             f"公开 Skill profile：\n{json.dumps(profile, ensure_ascii=False, indent=2, default=str)}\n\n"
@@ -870,6 +876,9 @@ class MainAgentRespondCapability(CapabilityContract):
                     "你是主代理的 Skill 软绑定公开回答器。当前应回答用法、字段、数据格式、示例或缺失信息，而不是执行 Skill。"
                     "只能基于公开 Skill profile、上传摘要和对话记忆上下文作答；"
                     "不要暴露内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。"
+                    "\n"
+                    + MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT
+                    + "\n"
                     "如果用户实际想执行但信息不足，请说明缺少哪些用户可补充的数据或参数。"
                 ),
                 priority=0,
@@ -976,6 +985,7 @@ class MainAgentRespondCapability(CapabilityContract):
         reasoning_effort = self._resolve_reasoning_effort(request.metadata, thinking_enabled=thinking_enabled)
         stream_generator, _metadata = self._resolve_stream_binding(reasoning_effort=reasoning_effort)
         chunks: list[str] = []
+        reasoning_ordinal = 0
         async for stream_event in iter_stream_events(
             stream_generator,
             prompt,
@@ -985,6 +995,23 @@ class MainAgentRespondCapability(CapabilityContract):
             stage=stage,
             prompt_profile=prompt_profile,
         ):
+            reasoning_delta = stream_event.get("reasoning")
+            if reasoning_delta:
+                reasoning_ordinal += 1
+                await self._publish_transient(
+                    make_event(
+                        request,
+                        event_type="soft_skill.reasoning_delta",
+                        payload={
+                            "delta": str(reasoning_delta),
+                            "ordinal": reasoning_ordinal,
+                            "stage": stage,
+                            "response_role": "soft_skill",
+                        },
+                        visibility=EventVisibility.FRONTEND,
+                        ordinal=reasoning_ordinal,
+                    )
+                )
             answer = stream_event.get("answer")
             if answer:
                 chunks.append(str(answer))
@@ -1018,7 +1045,7 @@ class MainAgentRespondCapability(CapabilityContract):
             prompt_profile=prompt_profile,
         ):
             reasoning_delta = stream_event.get("reasoning")
-            if thinking_enabled and reasoning_delta:
+            if reasoning_delta:
                 reasoning_text = str(reasoning_delta)
                 reasoning_ordinal += 1
                 reasoning_char_count += len(reasoning_text)
@@ -1461,6 +1488,7 @@ class MainAgentRespondCapability(CapabilityContract):
                             resolved_payload=resolution.payload if resolution is not None else {},
                             sources=resolution.sources if resolution is not None else {},
                             question_text_generator=self._skill_input_text_generator,
+                            runtime_output_payload=output,
                         )
                     continue
                 artifact = execution.artifact

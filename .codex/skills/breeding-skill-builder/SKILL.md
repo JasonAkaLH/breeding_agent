@@ -28,6 +28,8 @@ skill/<skill-name>/
 5. Put detailed user-visible explanations in `references/*.md`, and list when to read them from `SKILL.md`.
 6. Use `SkillResourceService` boundaries: prompt-facing resources must not expose scripts, runtime, schemas, native code, config, secrets, tokens, credentials, `.env`, `.git`, or absolute/local paths.
 7. External callers never submit `capability_id=skill.*` directly. Slash/API skill selection goes through `main_agent.respond + metadata.soft_skill_binding`.
+8. Write descriptive and explanatory prose in Chinese by default. Keep only necessary parameter names, filenames, paths, code identifiers, API terms, enum values, and domain-standard terms in their original language.
+9. Hardcode every platform-read field that the runtime will not infer: capability id, routing triggers, entrypoint names/paths, input schema refs, schema aliases, selected-schema constants, source policies, enum/default/range/pattern rules, output artifact extensions/MIME types, resources, and platform-service handlers/services.
 
 ## Workflow
 
@@ -57,7 +59,8 @@ description: >-
   What the skill does and specific situations/user phrasing that should trigger it.
 ```
 
-The body should be a compact agent runbook, usually 50-200 lines:
+The body should be a compact agent runbook, usually 50-200 lines. Keep only
+the decisions and interaction rules an agent needs immediately after trigger:
 
 - Overview and supported workflows.
 - Welcome/start protocol if the skill is user-facing.
@@ -66,6 +69,12 @@ The body should be a compact agent runbook, usually 50-200 lines:
 - Resource navigation: list each relevant `references/*.md` and when to read it.
 - Output strategy and follow-up behavior.
 - Boundaries: no internal paths/config/secrets/runtime details in user-facing answers.
+- Language: descriptive/explanatory prose should be Chinese except necessary parameter names, filenames, paths, identifiers, API terms, enum values, and domain-standard terms.
+
+Do not copy long field tables, full examples, report templates, service boundary
+details, or implementation notes into `SKILL.md`. Put those in `references/*.md`
+when they are user-safe and prompt-facing, or keep them only in contract/runtime
+files when they are platform/internal.
 
 Do not place old v1 platform fields in `SKILL.md`: `capability_id`, `display_name`, `triggers`, `public_usage`, top-level `parameters`, `input_parameters`, `scripts`, `outputs` as execution contract, `execution`, `auto_run`, or `run_by_default`.
 
@@ -78,10 +87,12 @@ Use the contract for platform facts:
 - `routing.triggers`, `intent_aliases`, `examples`
 - `runtime.mode`, `answer_mode`, trust/service config when platform service
 - `entrypoints`
-- `input_schemas`
-- `schema_selector` when more than one schema can match
-- `outputs` / `output_contracts`
+- `input_schemas` with bundle-relative paths and schema-level `aliases` for every mode phrase the selector must recognize
+- `schema_selector` when more than one schema can match; remember current selector behavior is driven by schema refs/aliases/titles/descriptions, not free-form prose
+- `outputs` / `output_contracts`; file outputs must be declared with `artifacts`, not `files`
 - `resources` and `resource_policy`
+
+Hardcode contract internals deliberately. The runtime does not infer script paths, entrypoint ids, selected input schema ids, output contracts, artifact allowlists, platform handlers, or service allowlists from `SKILL.md` prose.
 
 For templates, read `references/templates.md`.
 
@@ -92,18 +103,39 @@ Use one schema per business mode when required fields differ. Examples:
 - RCBD and Interval should be separate schemas if CK parameters are only required for Interval.
 - OCR file input and SQL query input can each be a single schema.
 
-Each field should describe type, title/question, sources, required/required_when, aliases/patterns, and validation. Artifact fields must come from upload/artifact sources, not LLM-generated file paths.
+Each schema file must use the current backend shape: top-level `schema_id` (or
+`id`) and `inputs`, with each field using `source.allowed` for accepted sources.
+Each field should describe type, title/question or clarification,
+required/required_when, aliases/patterns, and validation. Artifact fields must
+come from trusted upload/artifact sources, not LLM-generated file paths. Do not
+use unsupported `fields:` or `sources:` keys in new project skills.
+
+Hardcode schema internals the resolver depends on:
+
+- For multi-schema skills, add `input_schemas.<schema_id>.aliases` in `skill.contract.yaml`; do not rely on schema-local `activation.aliases` alone for schema selection.
+- If selecting a schema implies a fixed field value, put `const` on the field, for example `design.const: rcbd`; do not require the LLM or user to restate it.
+- Put `enum` / `choices` at the field top level when validation depends on it; do not hide executable enums only under `validation.enum`.
+- For natural-language slot extraction, include resolver-readable sources such as `query`, `current_user_message`, `resolved_user_message`, `recent_user_message`, or `text`; do not use only `user_text` unless the runtime has explicit support for it.
+- For important scalar slots, hardcode `patterns` that match expected Chinese and English phrasing, especially numeric phrases like `3次重复`, `列数10`, `K=3`, or `maf=0.05`.
+- Keep field names aligned with script/handler payload keys (`material_data`, `blocks`, `ncols`, `analysis`, etc.); changing field names requires changing runtime code too.
+- Hardcode defaults such as `planter: serpentine`, `randomize: true`, `ck_ratio: A`, and range limits on the field, not only in explanatory text.
 
 ### 6. Write or update `references/*.md`
 
-References are prompt-facing help resources. Put detailed but user-safe content there:
+References are prompt-facing help resources loaded on demand. Put detailed but
+user-safe content there, not in `SKILL.md`:
 
 - Field definitions and accepted formats.
-- Business examples.
-- Report structure and interpretation rules.
-- Query boundaries and user-facing safety notes.
+- Business examples and longer input/output examples.
+- Report structure, interpretation rules, and final-answer style.
+- Query/data boundaries and user-facing safety notes.
 
-Do not put secrets, connection strings, handler names, raw script internals, deployment endpoints, or config values in prompt-facing references.
+References must still be safe for the main agent to read. Do not put secrets,
+connection strings, handler names, raw script internals, runtime/service
+selection rules, deployment endpoints, config values, local absolute paths, or
+schema/runtime implementation details in prompt-facing references. If a note is
+needed only by a wrapper or service operator, keep it out of `references/` or do
+not expose it with `audience: [main_agent]`.
 
 ### 7. Verify
 

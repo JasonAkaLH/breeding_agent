@@ -31,6 +31,7 @@ from src.capabilities.main_agent import (
     StreamGenerator,
     build_local_main_agent_instance,
 )
+from src.capabilities.main_agent.prompt_builder import MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
@@ -513,6 +514,7 @@ class ApiRuntime:
                     replay_interrupt.interrupt_id,
                     answer_payload,
                     source_message_id=message_id,
+                    request_metadata=self._chat_message_request_llm_metadata(request),
                 )
                 return {
                     "conversation_id": conversation_id,
@@ -548,6 +550,7 @@ class ApiRuntime:
             open_interrupt.interrupt_id,
             answer_payload,
             source_message_id=message_id,
+            request_metadata=self._chat_message_request_llm_metadata(request),
         )
         return {
             "conversation_id": conversation_id,
@@ -570,6 +573,15 @@ class ApiRuntime:
         if normalized == "resumed":
             return "interrupt_resumed"
         return f"interrupt_{normalized}"
+
+    def _chat_message_request_llm_metadata(self, request: SubmitMessageRequest) -> dict[str, object]:
+        metadata = self._drop_user_supplied_system_metadata(request.metadata)
+        selected_model_edition = self._validate_requested_model_edition(request.model_edition)
+        if selected_model_edition:
+            metadata["model_edition"] = selected_model_edition
+        else:
+            metadata.pop("model_edition", None)
+        return self._llm_request_metadata(metadata, include_defaults=True)
 
     async def _select_open_interrupt_for_chat_turn(
         self,
@@ -787,6 +799,10 @@ class ApiRuntime:
                 payload={
                     "message_id": message_id,
                     "status": str(task.status),
+                    **self._llm_request_metadata(
+                        self._accepted_task_llm_source_metadata(request.metadata, selected_model_edition),
+                        include_defaults=True,
+                    ),
                     **({"model_edition": selected_model_edition} if selected_model_edition else {}),
                 },
                 created_at=now,
@@ -811,6 +827,8 @@ class ApiRuntime:
             metadata["soft_skill_binding_requested_capability_id"] = requested_capability_id
         if selected_model_edition:
             metadata["model_edition"] = selected_model_edition
+        else:
+            metadata.pop("model_edition", None)
         if request.capability_id != requested_capability_id and request.capability_id is not None:
             metadata["requested_capability_alias"] = request.capability_id
             metadata["canonical_capability_id"] = requested_capability_id
@@ -870,6 +888,68 @@ class ApiRuntime:
         for key in USER_SUPPLIED_METADATA_DENYLIST:
             values.pop(key, None)
         return values
+
+    def _accepted_task_llm_source_metadata(
+        self,
+        metadata: Mapping[str, Any],
+        selected_model_edition: str | None,
+    ) -> dict[str, Any]:
+        values = self._drop_user_supplied_system_metadata(metadata)
+        if selected_model_edition:
+            values["model_edition"] = selected_model_edition
+        else:
+            values.pop("model_edition", None)
+        return values
+
+    def _llm_request_metadata(
+        self,
+        metadata: Mapping[str, Any] | None,
+        *,
+        include_defaults: bool = False,
+    ) -> dict[str, object]:
+        values = metadata if isinstance(metadata, Mapping) else {}
+        result: dict[str, object] = {}
+        model_edition = resolve_llm_model_edition(values)
+        if model_edition:
+            selected_model_edition = self._validate_requested_model_edition(model_edition)
+            if selected_model_edition:
+                result["model_edition"] = selected_model_edition
+        thinking_was_explicit = "deep_thinking" in values or "main_agent_thinking_enabled" in values
+        if include_defaults or thinking_was_explicit:
+            thinking_enabled = resolve_llm_thinking_enabled(values)
+            result["deep_thinking"] = thinking_enabled
+            result["main_agent_thinking_enabled"] = thinking_enabled
+            result["main_agent_reasoning_effort"] = resolve_llm_reasoning_effort(
+                values,
+                fallback="minimal",
+                thinking_enabled=thinking_enabled,
+            )
+        elif "main_agent_reasoning_effort" in values:
+            result["main_agent_reasoning_effort"] = resolve_llm_reasoning_effort(
+                values,
+                fallback="minimal",
+                thinking_enabled=True,
+            )
+        return result
+
+    async def _task_accepted_llm_metadata(self, task_id: str) -> dict[str, object]:
+        events = await self.storage.list_events_for_task(task_id)
+        for event in events:
+            if event.event_type != "task.accepted":
+                continue
+            payload = event.payload if isinstance(event.payload, Mapping) else {}
+            return self._llm_request_metadata(payload, include_defaults=False)
+        return {}
+
+    async def _resume_llm_metadata(
+        self,
+        task: Task,
+        request_metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, object]:
+        metadata = await self._task_accepted_llm_metadata(task.task_id)
+        if request_metadata is not None:
+            metadata.update(self._llm_request_metadata(request_metadata, include_defaults=True))
+        return metadata
 
     def _normalize_soft_skill_binding(self, metadata: Mapping[str, Any]) -> dict[str, Any] | None:
         raw = metadata.get(SOFT_SKILL_BINDING_METADATA_KEY)
@@ -2146,6 +2226,7 @@ class ApiRuntime:
         answer_payload: dict[str, object],
         *,
         source_message_id: str | None = None,
+        request_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, object]:
         task = await self.storage.get_task(task_id)
         if task is None:
@@ -2156,7 +2237,13 @@ class ApiRuntime:
         if interrupt.reason_code == "sheet_selection_required":
             self._validate_sheet_selection_answer(interrupt, answer_payload)
         if slot_collection_ref_from_required_fields(interrupt.required_fields) is not None:
-            return await self._answer_v2_slot_interrupt(task=task, interrupt=interrupt, answer_payload=answer_payload, source_message_id=source_message_id)
+            return await self._answer_v2_slot_interrupt(
+                task=task,
+                interrupt=interrupt,
+                answer_payload=answer_payload,
+                source_message_id=source_message_id,
+                request_metadata=request_metadata,
+            )
         previous_slot_collection = slot_collection_from_required_fields(interrupt.required_fields)
         if _is_v2_slot_collection_payload(previous_slot_collection):
             collection_id = str(previous_slot_collection.get("collection_id") or "").strip() if previous_slot_collection else ""
@@ -2166,7 +2253,13 @@ class ApiRuntime:
             recovered_interrupt = replace(interrupt, required_fields=slot_collection_required_fields_ref(collection))
             await self.storage.save_interrupt(recovered_interrupt)
             await persist_interrupt_question_message(self.storage, recovered_interrupt)
-            return await self._answer_v2_slot_interrupt(task=task, interrupt=recovered_interrupt, answer_payload=answer_payload, source_message_id=source_message_id)
+            return await self._answer_v2_slot_interrupt(
+                task=task,
+                interrupt=recovered_interrupt,
+                answer_payload=answer_payload,
+                source_message_id=source_message_id,
+                request_metadata=request_metadata,
+            )
 
         existing_answer_payloads = await self._task_interrupt_answer_payloads(task.task_id)
         answer_payloads = (*existing_answer_payloads, dict(answer_payload))
@@ -2207,6 +2300,7 @@ class ApiRuntime:
                 upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
             )
         resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
+        resume_metadata.update(await self._resume_llm_metadata(task, request_metadata))
         saved_interrupt = await self.interrupt_service.record_answer(answer)
 
         answer_message = Message(
@@ -2266,6 +2360,7 @@ class ApiRuntime:
         interrupt: Interrupt,
         answer_payload: dict[str, object],
         source_message_id: str | None = None,
+        request_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, object]:
         slot_ref = slot_collection_ref_from_required_fields(interrupt.required_fields)
         if slot_ref is None:
@@ -2295,6 +2390,7 @@ class ApiRuntime:
             raw_answer=dict(raw_answer),
             client_request_id=client_request_id,
             source_message_id=source_message_id,
+            request_metadata=request_metadata,
         )
 
     @staticmethod
@@ -2318,6 +2414,7 @@ class ApiRuntime:
         raw_answer: dict[str, object],
         client_request_id: str,
         source_message_id: str | None = None,
+        request_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, object]:
         turn_key = f"interrupt_turn:{interrupt.interrupt_id}:{client_request_id}"
         existing_summary = await self.storage.get_slot_event_by_idempotency_key(collection.collection_id, turn_key)
@@ -2359,12 +2456,14 @@ class ApiRuntime:
                 "v2 slot interrupt is not open; retry with the original client_request_id to replay an accepted turn"
             )
 
+        turn_llm_metadata = await self._resume_llm_metadata(task, request_metadata)
         plan = await self._plan_v2_interrupt_open_turn(
             task=task,
             interrupt=interrupt,
             collection=collection,
             raw_answer=raw_answer,
             client_request_id=client_request_id,
+            llm_metadata=turn_llm_metadata,
         )
         await self._record_v2_interrupt_turn_planned(
             task=task,
@@ -2398,6 +2497,7 @@ class ApiRuntime:
                 collection=collection,
                 raw_answer=raw_answer,
                 decision=verifier_decision,
+                llm_metadata=turn_llm_metadata,
             )
             if not verifier_block_candidate.allow_resume:
                 verifier_block = verifier_block_candidate
@@ -2441,6 +2541,7 @@ class ApiRuntime:
                     task=task,
                     interrupt=interrupt,
                     collection=current_collection,
+                    part=part,
                     raw_answer=part_answer,
                     client_request_id=client_request_id,
                     source_message_id=user_message.message_id,
@@ -2473,6 +2574,7 @@ class ApiRuntime:
                     interrupt=interrupt,
                     collection=latest_collection,
                     part=part,
+                    llm_metadata=turn_llm_metadata,
                 )
             if answer:
                 assistant_sections.append(answer)
@@ -2514,6 +2616,7 @@ class ApiRuntime:
                     collection=latest_collection,
                     user_text=part.text or self._v2_answer_text(raw_answer),
                     decision=InterruptTurnDecision(intent="ambiguous", confidence=part.confidence, reason=part.reason),
+                    llm_metadata=turn_llm_metadata,
                 )
             if not message:
                 message = self._interrupt_ambiguity_message(latest_collection)
@@ -2583,6 +2686,7 @@ class ApiRuntime:
                         interrupt=saved_interrupt,
                         collection=latest_collection,
                         raw_answer=raw_answer,
+                        request_metadata=request_metadata,
                     )
                 will_resume = latest_collection.status in {"script_scheduled", "completed"}
 
@@ -2699,6 +2803,7 @@ class ApiRuntime:
         collection: SlotCollection,
         raw_answer: dict[str, object],
         client_request_id: str,
+        llm_metadata: Mapping[str, Any] | None = None,
     ) -> InterruptOpenTurnPlan:
         text = self._v2_answer_text(raw_answer)
         has_structured_attachment = bool(self._v2_answer_upload_ids(raw_answer) or self._v2_answer_sheet_selections(raw_answer))
@@ -2792,7 +2897,16 @@ class ApiRuntime:
         )
         if self._skill_input_text_generator is None:
             return self._heuristic_interrupt_open_turn_plan(text, has_structured_attachment=has_structured_attachment)
-        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        raw_response = await self._call_skill_input_text_generator(
+            prompt,
+            metadata=dict(llm_metadata or _INTERRUPT_TURN_LLM_METADATA),
+            reasoning_context=self._interrupt_reasoning_context(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                stage="interrupt_open_turn",
+            ),
+        )
         parsed = self._parse_interrupt_open_turn_plan(raw_response)
         if parsed is not None:
             return parsed
@@ -3033,6 +3147,7 @@ class ApiRuntime:
         task: Task,
         interrupt: Interrupt,
         collection: SlotCollection,
+        part: InterruptOpenTurnPart,
         raw_answer: dict[str, object],
         client_request_id: str,
         source_message_id: str,
@@ -3054,6 +3169,7 @@ class ApiRuntime:
         return await self._apply_v2_slot_answer(
             collection=collection,
             interrupt=interrupt,
+            planner_part=part,
             raw_answer=raw_answer,
             client_request_id=client_request_id,
         )
@@ -3141,6 +3257,7 @@ class ApiRuntime:
         interrupt: Interrupt,
         collection: SlotCollection,
         part: InterruptOpenTurnPart,
+        llm_metadata: Mapping[str, Any] | None = None,
     ) -> str:
         resource_context, resource_audits = self._slot_question_resource_context(collection)
         await self._record_v2_interrupt_soft_binding_audit(
@@ -3157,6 +3274,7 @@ class ApiRuntime:
                     "Answer inside the currently interrupted Skill context.",
                     "Use the provided SKILL.md overview, skill resources, and slot schema; do not execute the skill and do not close the interrupt.",
                     "Treat SKILL.md as the current Skill overview/runbook; treat references as detailed user-facing facts.",
+                    MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT,
                     "If the user asks for examples, include concrete examples from resources or SKILL.md when available.",
                     "Keep the answer concise, then guide the user back to the missing slot values.",
                 ],
@@ -3170,7 +3288,16 @@ class ApiRuntime:
             sort_keys=True,
             default=str,
         )
-        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        raw_response = await self._call_skill_input_text_generator(
+            prompt,
+            metadata=dict(llm_metadata or _INTERRUPT_TURN_LLM_METADATA),
+            reasoning_context=self._interrupt_reasoning_context(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                stage="interrupt_skill_question_answer",
+            ),
+        )
         answer = self._parse_clarification_answer(raw_response)
         if not answer and resource_context:
             snippets = []
@@ -3853,6 +3980,7 @@ class ApiRuntime:
         interrupt: Interrupt,
         collection: SlotCollection,
         raw_answer: dict[str, object],
+        request_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         await self._await_existing_execution(task.task_id)
         root_message = await self.storage.get_message(task.root_message_id)
@@ -3864,6 +3992,7 @@ class ApiRuntime:
             "resume_interrupted_node_id": interrupt.node_id,
         }
         resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
+        resume_metadata.update(await self._resume_llm_metadata(task, request_metadata))
         resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupt.node_id)
         if resume_finalizer_node_id:
             resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
@@ -3933,7 +4062,16 @@ class ApiRuntime:
         )
         if self._skill_input_text_generator is None:
             return self._heuristic_interrupt_turn_decision(text)
-        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        raw_response = await self._call_skill_input_text_generator(
+            prompt,
+            metadata=_INTERRUPT_TURN_LLM_METADATA,
+            reasoning_context=self._interrupt_reasoning_context(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                stage="interrupt_turn_understanding",
+            ),
+        )
         decision = self._parse_interrupt_turn_decision(raw_response)
         if decision is not None:
             return decision
@@ -4018,6 +4156,7 @@ class ApiRuntime:
         collection: SlotCollection,
         raw_answer: dict[str, object],
         decision: InterruptTurnDecision,
+        llm_metadata: Mapping[str, Any] | None = None,
     ) -> InterruptResumeVerification:
         if self._v2_answer_upload_ids(raw_answer) or self._v2_answer_sheet_selections(raw_answer):
             return InterruptResumeVerification(allow_resume=True, confidence=1.0, reason="structured_attachment")
@@ -4057,7 +4196,16 @@ class ApiRuntime:
         )
         if self._skill_input_text_generator is None:
             return InterruptResumeVerification(allow_resume=True, confidence=decision.confidence, reason="verifier_disabled_fallback_to_heuristic_understanding")
-        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        raw_response = await self._call_skill_input_text_generator(
+            prompt,
+            metadata=dict(llm_metadata or _INTERRUPT_TURN_LLM_METADATA),
+            reasoning_context=self._interrupt_reasoning_context(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                stage="interrupt_resume_verification",
+            ),
+        )
         parsed = self._parse_interrupt_resume_verification(raw_response)
         if parsed is not None:
             return parsed
@@ -4181,6 +4329,7 @@ class ApiRuntime:
         collection: SlotCollection,
         user_text: str,
         decision: InterruptTurnDecision,
+        llm_metadata: Mapping[str, Any] | None = None,
     ) -> str:
         prompt = json.dumps(
             {
@@ -4208,7 +4357,16 @@ class ApiRuntime:
             sort_keys=True,
             default=str,
         )
-        raw_response = await self._call_skill_input_text_generator(prompt, metadata=_INTERRUPT_TURN_LLM_METADATA)
+        raw_response = await self._call_skill_input_text_generator(
+            prompt,
+            metadata=dict(llm_metadata or _INTERRUPT_TURN_LLM_METADATA),
+            reasoning_context=self._interrupt_reasoning_context(
+                task=task,
+                interrupt=interrupt,
+                collection=collection,
+                stage="interrupt_clarification_answer",
+            ),
+        )
         answer = self._parse_clarification_answer(raw_response)
         if answer:
             return answer
@@ -4250,6 +4408,51 @@ class ApiRuntime:
             return ""
 
     @staticmethod
+    def _interrupt_reasoning_context(
+        *,
+        task: Task,
+        stage: str,
+        interrupt: Interrupt | None = None,
+        collection: SlotCollection | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "event_type": "interrupt.reasoning_delta",
+            "task_id": task.task_id,
+            "conversation_id": task.conversation_id,
+            "node_id": (
+                interrupt.node_id
+                if interrupt is not None
+                else collection.node_id
+                if collection is not None
+                else None
+            ),
+            "stage": stage,
+            "response_role": "interrupt",
+            "interrupt_id": interrupt.interrupt_id if interrupt is not None else None,
+            "slot_collection_id": collection.collection_id if collection is not None else None,
+            "capability_id": collection.capability_id if collection is not None else None,
+            "skill_name": interrupt.source_agent if interrupt is not None else None,
+            "reason_code": interrupt.reason_code if interrupt is not None else None,
+        }
+
+    @staticmethod
+    def _slot_collection_reasoning_context(
+        *,
+        collection: SlotCollection,
+        stage: str,
+    ) -> dict[str, Any]:
+        return {
+            "event_type": "interrupt.reasoning_delta",
+            "task_id": collection.task_id,
+            "conversation_id": collection.conversation_id,
+            "node_id": collection.node_id,
+            "stage": stage,
+            "response_role": "interrupt",
+            "slot_collection_id": collection.collection_id,
+            "capability_id": collection.capability_id,
+        }
+
+    @staticmethod
     def _slot_collection_prompt_payload(collection: SlotCollection) -> dict[str, object]:
         return {
             "collection_id": collection.collection_id,
@@ -4267,11 +4470,25 @@ class ApiRuntime:
             "last_question": collection.last_question,
         }
 
+    @staticmethod
+    def _slot_answer_planner_hint(part: InterruptOpenTurnPart | None) -> dict[str, object]:
+        if part is None:
+            return {}
+        return {
+            "source": "interrupt_open_turn_planner",
+            "part_id": part.part_id,
+            "target_slots": list(part.target_slots),
+            "reason": part.reason,
+            "confidence": part.confidence,
+            "uses_uploads": part.uses_uploads,
+        }
+
     async def _apply_v2_slot_answer(
         self,
         *,
         collection: SlotCollection,
         interrupt: Interrupt,
+        planner_part: InterruptOpenTurnPart | None = None,
         raw_answer: dict[str, object],
         client_request_id: str,
     ) -> SlotCollection:
@@ -4328,18 +4545,28 @@ class ApiRuntime:
                 validating,
                 current_user_answer=answer_text,
                 accepted_answer_summaries=accepted_answer_summaries,
+                planner_hint=self._slot_answer_planner_hint(planner_part),
             )
             if history_recall
             else build_normal_extraction_prompt(
                 validating,
                 current_user_answer=answer_text,
                 artifact_summaries=artifact_summaries,
+                planner_hint=self._slot_answer_planner_hint(planner_part),
             )
         )
         raw_response = ""
         if self._skill_input_text_generator is not None:
             try:
-                generated = self._skill_input_text_generator(prompt)
+                llm_metadata = await self._task_accepted_llm_metadata(collection.task_id)
+                generated = self._skill_input_text_generator(
+                    prompt,
+                    metadata=llm_metadata,
+                    reasoning_context=self._slot_collection_reasoning_context(
+                        collection=validating,
+                        stage="slot_extraction",
+                    ),
+                )
                 if inspect.isawaitable(generated):
                     generated = await generated
                 raw_response = str(generated or "")
@@ -4354,6 +4581,8 @@ class ApiRuntime:
             artifact_summaries=artifact_summaries,
             accepted_answer_summaries=accepted_answer_summaries,
             history_recall=history_recall,
+            planner_target_slots=planner_part.target_slots if planner_part is not None else (),
+            planner_reason=planner_part.reason if planner_part is not None else None,
         )
         extraction = merge_slot_extraction_results(extraction, backend_extraction, collection=validating)
         if not extraction.resolved:
@@ -4361,6 +4590,7 @@ class ApiRuntime:
                 validating,
                 schema,
                 raw_answer=raw_answer,
+                planner_part=planner_part,
             )
         next_collection, event = apply_extraction_result_to_collection(
             validating,
@@ -4751,12 +4981,15 @@ class ApiRuntime:
         schema,
         *,
         raw_answer: Mapping[str, object],
+        planner_part: InterruptOpenTurnPart | None = None,
     ) -> dict[str, dict[str, object]]:
         extraction = build_backend_slot_extraction(
             collection,
             schema,
             current_user_answer=self._v2_answer_text(raw_answer),
             current_upload_ids=self._v2_answer_upload_ids(raw_answer),
+            planner_target_slots=planner_part.target_slots if planner_part is not None else (),
+            planner_reason=planner_part.reason if planner_part is not None else None,
         )
         return {
             field: {
@@ -4773,6 +5006,7 @@ class ApiRuntime:
         schema,
         *,
         raw_answer: Mapping[str, object],
+        planner_part: InterruptOpenTurnPart | None = None,
     ) -> SlotExtractionResult:
         candidates = {
             field: SlotExtractionCandidate(
@@ -4781,7 +5015,12 @@ class ApiRuntime:
                 value=dict(candidate["value"]) if isinstance(candidate.get("value"), Mapping) else candidate.get("value"),
                 source=str(candidate.get("source") or "current_answer"),
             )
-            for field, candidate in self._fallback_v2_slot_candidates(collection, schema, raw_answer=raw_answer).items()
+            for field, candidate in self._fallback_v2_slot_candidates(
+                collection,
+                schema,
+                raw_answer=raw_answer,
+                planner_part=planner_part,
+            ).items()
         }
         return SlotExtractionResult(resolved=candidates)
 
@@ -5924,6 +6163,7 @@ def build_api_runtime(
         skill_input_text_generator=skill_input_text_generator,
         main_agent_llm_runtime=main_agent_llm_runtime,
         enable_skill_input_llm=enable_skill_input_llm,
+        reasoning_event_publisher=publish_transient_event,
     )
     skill_output_artifact_manager = SkillOutputArtifactManager(
         storage=storage,
@@ -5975,6 +6215,7 @@ def build_api_runtime(
         enable_conversation_memory=enable_conversation_memory,
         resolution_generator=conversation_memory_resolution_generator,
         enable_resolution_llm=enable_conversation_memory_resolution_llm,
+        reasoning_event_publisher=publish_transient_event,
         model_edition_config=_resolve_model_edition_config(
             main_agent_llm_config=main_agent_llm_config,
             planner_llm_config=planner_llm_config,
@@ -6595,19 +6836,68 @@ def _resolve_skill_input_text_generator(
     skill_input_text_generator: SkillInputTextGenerator | None,
     main_agent_llm_runtime: SharedLLMRuntime,
     enable_skill_input_llm: bool,
+    reasoning_event_publisher: Callable[[EventRecord], Any] | None,
 ) -> SkillInputTextGenerator | None:
     if skill_input_text_generator is not None:
         return skill_input_text_generator
     if not enable_skill_input_llm:
         return None
 
+    call_ordinal = 0
+
     async def generate(prompt: str, **kwargs: Any) -> str:
+        nonlocal call_ordinal
+        call_ordinal += 1
+        call_id = call_ordinal
         options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
+        reasoning_context = kwargs.get("reasoning_context")
+        reasoning_ordinal = 0
+
+        async def publish_reasoning(delta: str) -> None:
+            nonlocal reasoning_ordinal
+            if reasoning_event_publisher is None or not isinstance(reasoning_context, Mapping):
+                return
+            if not delta:
+                return
+            task_id = _reasoning_context_text(reasoning_context, "task_id")
+            conversation_id = _reasoning_context_text(reasoning_context, "conversation_id")
+            if not task_id or not conversation_id:
+                return
+            reasoning_ordinal += 1
+            event_type = _reasoning_context_text(reasoning_context, "event_type") or "interrupt.reasoning_delta"
+            stage = _reasoning_context_text(reasoning_context, "stage") or "skill_input"
+            node_id = _reasoning_context_text(reasoning_context, "node_id")
+            maybe_result = reasoning_event_publisher(
+                EventRecord(
+                    event_id=f"{task_id}:{event_type}:{stage}:{call_id}:{reasoning_ordinal}",
+                    conversation_id=conversation_id,
+                    task_id=task_id,
+                    node_id=node_id,
+                    event_type=event_type,
+                    payload={
+                        **_reasoning_context_payload(reasoning_context),
+                        "delta": delta,
+                        "ordinal": reasoning_ordinal,
+                        "stage": stage,
+                        "call_id": call_id,
+                        "response_role": _reasoning_context_text(reasoning_context, "response_role") or "interrupt",
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
+
         return await main_agent_llm_runtime.generate_text(
             prompt,
             thinking=options.thinking,
             reasoning_effort=options.reasoning_effort,
             model_edition=options.model_edition,
+            on_reasoning_delta=(
+                publish_reasoning
+                if reasoning_event_publisher is not None and isinstance(reasoning_context, Mapping)
+                else None
+            ),
         )
 
     return generate
@@ -6621,6 +6911,7 @@ def _resolve_conversation_memory_builder(
     enable_conversation_memory: bool,
     resolution_generator: ResolutionGenerator | None,
     enable_resolution_llm: bool,
+    reasoning_event_publisher: Callable[[EventRecord], Any] | None,
     model_edition_config: Mapping[str, Any] | None = None,
 ) -> ConversationMemoryBuilder | None:
     if conversation_memory_builder is not None:
@@ -6639,11 +6930,45 @@ def _resolve_conversation_memory_builder(
 
     async def generate_resolution(prompt: str, **kwargs: Any) -> str:
         options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
+        request = kwargs.get("request")
+        reasoning_ordinal = 0
+
+        async def publish_reasoning(delta: str) -> None:
+            nonlocal reasoning_ordinal
+            if reasoning_event_publisher is None or not isinstance(request, OrchestrationRequest):
+                return
+            if not delta:
+                return
+            reasoning_ordinal += 1
+            maybe_result = reasoning_event_publisher(
+                EventRecord(
+                    event_id=f"{request.task_id}:memory.reasoning_delta:resolution:{reasoning_ordinal}",
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    node_id="conversation.memory",
+                    event_type="memory.reasoning_delta",
+                    payload={
+                        "delta": delta,
+                        "ordinal": reasoning_ordinal,
+                        "stage": "conversation_memory_resolution",
+                        "response_role": "memory",
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
+
         return await main_agent_llm_runtime.generate_text(
             prompt,
             thinking=options.thinking,
             reasoning_effort=options.reasoning_effort,
             model_edition=options.model_edition,
+            on_reasoning_delta=(
+                publish_reasoning
+                if reasoning_event_publisher is not None and isinstance(request, OrchestrationRequest)
+                else None
+            ),
         )
 
     def resolve_memory_config(request: OrchestrationRequest) -> ConversationMemoryConfig:
@@ -6671,6 +6996,20 @@ def _metadata_from_llm_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(explicit_metadata, Mapping):
         metadata.update(explicit_metadata)
     return metadata
+
+
+def _reasoning_context_text(context: Mapping[str, Any], key: str) -> str:
+    value = context.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _reasoning_context_payload(context: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in ("interrupt_id", "slot_collection_id", "capability_id", "skill_name", "reason_code"):
+        value = context.get(key)
+        if isinstance(value, str) and value.strip():
+            payload[key] = value.strip()
+    return payload
 
 
 def _coerce_nonnegative_int(value: Any) -> int | None:
@@ -6974,7 +7313,6 @@ def _resolve_planner_text_generator(
         return planner_text_generator
     if not enable_llm_planner:
         return None
-    del reasoning_event_publisher  # Planner is a background LLM branch; do not surface reasoning_content.
 
     call_ordinal = 0
 
@@ -7006,11 +7344,45 @@ def _resolve_planner_text_generator(
 
         metadata = dict(request.metadata) if request is not None else {}
         options = resolve_llm_request_options(metadata, fallback_reasoning_effort=planner_reasoning_effort)
+        reasoning_ordinal = 0
+
+        async def publish_planner_reasoning(delta: str) -> None:
+            nonlocal reasoning_ordinal
+            if request is None or reasoning_event_publisher is None:
+                return
+            if not delta:
+                return
+            reasoning_ordinal += 1
+            maybe_result = reasoning_event_publisher(
+                EventRecord(
+                    event_id=f"{request.task_id}:planner.{stage}.reasoning:{call_id}:{reasoning_ordinal}",
+                    conversation_id=request.conversation_id,
+                    task_id=request.task_id,
+                    node_id="main_agent.orchestrator",
+                    event_type="planner.reasoning_delta",
+                    payload={
+                        "delta": delta,
+                        "ordinal": reasoning_ordinal,
+                        "stage": stage,
+                        "call_id": call_id,
+                        "response_role": "planner",
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
+
         return await main_agent_llm_runtime.generate_text(
             prompt,
             thinking=options.thinking,
             reasoning_effort=options.reasoning_effort,
             model_edition=options.model_edition,
+            on_reasoning_delta=(
+                publish_planner_reasoning
+                if reasoning_event_publisher is not None and request is not None
+                else None
+            ),
         )
 
     return generate

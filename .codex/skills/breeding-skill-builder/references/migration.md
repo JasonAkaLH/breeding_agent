@@ -20,12 +20,12 @@
 
 1. Preserve a copy of the old file for reference via `git show HEAD:skill/<name>/SKILL.md` when needed.
 2. Rewrite `SKILL.md` frontmatter to only `name` and a rich `description`.
-3. Convert old body into an agent-facing runbook:
+3. Convert old body into an agent-facing runbook, and write descriptive/explanatory prose in Chinese except necessary parameter names, filenames, paths, identifiers, API terms, enum values, and domain-standard terms:
    - keep welcome text, workflow selection, input meanings, output strategy, interpretation rules, and boundaries;
    - remove executable command examples, script paths, handler names, internal config, service names, and file-system details unless they are user-visible artifacts.
 4. Create `skill.contract.yaml` from old capability/execution/scripts/output fields.
 5. Create one or more `schemas/*.input.yaml` from old parameters, splitting modes with different required fields.
-6. Move long public usage/detail sections into `references/*.md` and add resource navigation to `SKILL.md`.
+6. Move long public usage/detail sections into `references/*.md` and add resource navigation to `SKILL.md`. Keep platform/runtime/service-boundary details out of prompt-facing references unless they are genuinely user-safe and needed by `main_agent`.
 7. Run grep gate against project `SKILL.md` files:
 
 ```bash
@@ -40,4 +40,6 @@ rg -n "capability_id:|public_usage:|^scripts:|^parameters:|^execution:|auto_run|
 - Copying machine schemas into `SKILL.md`: explain user-visible fields only.
 - Letting references hide everything: `SKILL.md` must say when to read each reference.
 - Restoring v1 fields because old tests expected them: update tests to v2 contract expectations.
-- Exposing `scripts/`, `runtime/`, `schemas/`, `native/`, `config.yaml`, tokens, DSNs, or local paths to prompt-facing resources.
+- Exposing `scripts/`, `runtime/`, `schemas/`, `native/`, `config.yaml`, handler names, service selection rules, deployment endpoints, tokens, DSNs, or local paths to prompt-facing resources.
+- Using old template keys such as `fields:` or `sources:` instead of current backend `inputs:` plus `source.allowed`.
+- Declaring file outputs with `files:` instead of current backend `artifacts:`.

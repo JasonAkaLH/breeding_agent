@@ -97,16 +97,20 @@ def build_public_skill_profile(
     raw_display_name = (descriptor.display_name if descriptor else "") or str(manifest.metadata.get("display_name") or "").strip()
     display_name = _public_text(raw_display_name, fallback=name)
     raw_description = (descriptor.description if descriptor else "") or manifest.description
+    public_usage = _sanitize_public_value(manifest.metadata.get("public_usage"))
+    if not isinstance(public_usage, Mapping):
+        public_usage = {}
+    parameters = _public_parameters(manifest.metadata.get("parameters"))
     return PublicSkillProfile(
         capability_id=capability_id,
         name=name,
         display_name=display_name,
         description=_public_text(raw_description),
         triggers=_public_text_tuple(manifest.triggers),
-        parameters=(),
+        parameters=parameters,
         inputs={},
         outputs={},
-        public_usage={},
+        public_usage=dict(public_usage),
     )
 
 
@@ -122,6 +126,22 @@ def _public_text_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(sanitized, list | tuple):
         return ()
     return tuple(str(item).strip() for item in sanitized if isinstance(item, str) and str(item).strip())
+
+
+def _public_parameters(value: Any) -> tuple[dict[str, Any], ...]:
+    sanitized = _sanitize_public_value(value)
+    if not isinstance(sanitized, Mapping):
+        return ()
+    parameters: list[dict[str, Any]] = []
+    for name, spec in sanitized.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if isinstance(spec, Mapping):
+            item = {"name": name.strip(), **dict(spec)}
+        else:
+            item = {"name": name.strip(), "description": spec}
+        parameters.append(item)
+    return tuple(parameters)
 
 
 def _sanitize_public_value(value: Any) -> Any:

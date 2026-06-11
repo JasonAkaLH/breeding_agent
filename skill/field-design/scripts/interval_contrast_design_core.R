@@ -63,6 +63,7 @@ interval_contrast_core <- function(ped_list, ck_params, ncols, nrows = NULL,
   ped_list$hyb_check <- enc2utf8(as.character(ped_list$hyb_check))
   ped_list$set <- enc2utf8(as.character(ped_list$set))
   ck_params$ped_id <- enc2utf8(as.character(ck_params$ped_id))
+  if ("set" %in% names(ck_params)) ck_params$set <- enc2utf8(as.character(ck_params$set))
   ck_params$start_pos <- as.integer(ck_params$start_pos)
   ck_params$interval <- as.integer(ck_params$interval)
 
@@ -74,7 +75,13 @@ interval_contrast_core <- function(ped_list, ck_params, ncols, nrows = NULL,
   if (nrow(check_data) == 0L) stop("Interval design requires at least one CK row (hyb_check != 0).", call. = FALSE)
   if (test_count == 0L) stop("Interval design requires at least one test row (hyb_check = 0).", call. = FALSE)
 
+  if ("set" %in% names(ck_params)) {
+    ck_params <- ck_params[ck_params$set == ped_list$set[[1]], , drop = FALSE]
+  }
   ck_params <- ck_params[match(check_data$ped_id, ck_params$ped_id), , drop = FALSE]
+  if (nrow(ck_params) != nrow(check_data) || any(is.na(ck_params$ped_id))) {
+    stop(sprintf("Missing interval parameters for one or more CKs in set %s.", ped_list$set[[1]]), call. = FALSE)
+  }
   check_lookup <- setNames(as.character(check_data$hyb_check), as.character(check_data$ped_id))
 
   plot_id_counter <- as.integer(plot_id_start)
@@ -149,7 +156,11 @@ run_interval_contrast <- function(data, ck_params, ncols, nrows = NULL,
     set_label <- sets[[set_index]]
     set_data <- data[data$set == set_label, , drop = FALSE]
     set_checks <- set_data[set_data$hyb_check != "0", , drop = FALSE]
-    set_ck_params <- ck_params[ck_params$ped_id %in% set_checks$ped_id, , drop = FALSE]
+    if ("set" %in% names(ck_params)) {
+      set_ck_params <- ck_params[ck_params$set == set_label & ck_params$ped_id %in% set_checks$ped_id, , drop = FALSE]
+    } else {
+      set_ck_params <- ck_params[ck_params$ped_id %in% set_checks$ped_id, , drop = FALSE]
+    }
     set_seed <- if (is.null(seed)) NULL else seed + set_index * 1000L
 
     set_out <- interval_contrast_core(

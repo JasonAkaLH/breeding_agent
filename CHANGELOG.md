@@ -8,6 +8,22 @@
 
 ## [Unreleased]
 
+### 2026-06-11
+
+- 项目级 Skill v2 迁移与新增能力已归档：field-design、field-analysis、rice-genie 收敛到 v2 bundle 结构与统一 schema/reference 资源边界，新增 pop-gene 与 seed-navi Skill bundle；后端补齐 Skill runtime、slot collection、upload/file artifact 与 public profile 适配，前端同步任务事件与下载展示契约，相关 Skill 构建指南、API 文档和设计文档已同步更新。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+- Docker 镜像 `0.1.17` 已按当前工作树重打并推送：backend `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.17` 与 frontend `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.17` 均为 `linux/amd64` manifest，远端 digest 已验证。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+- 主代理文件下载最终回答引导已收敛：当 Skill 产物存在平台 `output_files.download_url` 时，最终回答正文不再直接输出、Markdown 包装或复制 `/api/v1/artifacts/.../download` 裸链，只提示用户使用前端下载卡片或下方下载按钮；继续禁止 `sandbox:/mnt/data`、本地路径和 `outputs/...` 伪下载入口，避免正文链接因缺少 Bearer token 打开后返回 `Authentication required`。API 更新日志同步按客户端可见的端点、参数、响应和行为变化精简 2026-06-09 条目，移除实现细节叙述。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
+### 2026-06-09
+
+- v2 Skill interrupt / slot_collection 交互链路已按实际 API 行为对齐：`/api/v1/conversations/chat-messages` 可承接 open v2 slot interrupt 的普通回复，运行时会区分参数答案与 Skill 澄清问题，保留 Skill 上下文用于追问、后续 resume 与 ready 修订；slot 状态从临时 interrupt JSON 收敛到持久 SlotCollection / SlotEvent，补齐 SQLite/PostgreSQL repository、DTO/OpenAPI/API 文档、OCR 与 field-design schema 对齐、前端 interrupt composer 状态锚定，以及后端/API/前端/集成回归。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+- 可见 assistant 内容恢复与发布包边界已收敛：interrupt prompt 等前端可见 assistant 内容会写入 message history，刷新或历史恢复时不再依赖临时 interrupt 状态 blob；测试脚本、fixtures、Rust/runtime 测试资产与 smoke/validator 脚本改为本地-only，加入 Git/Docker ignore 并从远端追踪中移除，避免测试资产进入 Docker 镜像或远端仓库发布面。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+- API 文档与 API 更新日志展示已加固：静态 API 文档继续由 `/openapi.json` 对齐 DTO/schema，新增 bounded scrollback 区域展示长 changelog，避免文档页被完整日志撑开；`docs/api/API更新日志.md` 正文移除相对时间措辞，日期仅保留在章节标题中，便于长期阅读与生成式引用。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
+### 2026-06-08
+
+- v2-only Slot 状态机设计已完成并加固：新增并复审 `docs/superpowers/specs/2026-06-08-v2-slot-state-machine-design.md`，明确 SlotCollection / SlotEvent 是参数补槽、恢复、并发控制与审计的权威状态源，Interrupt.required_fields 只携带前端安全引用/摘要；设计决策收敛到既有 interrupt answer endpoint、原子 slot transition、后端内部 SlotEvent 范围和 field-design schema 清理路径，拒绝继续用 v1 manifest.parameters 或 interrupt JSON 作为权威状态。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
 - Skill Contract v2-only PRD 完成 document-perfectization 复审：收敛 04 与 07 对旧 auto-run 隔离/删除的职责边界，明确 04 只保证 v2 public profile / soft binding 不触发旧路径、07 负责删除或 fail-closed 旧注册/执行生产路径；补齐项目级 Skill 迁移目标文件全路径，并将测试/验收表述统一为 v2 口径。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Skill Contract 渐进式披露 PRD 已改为 v2-only clean cutover：删除旧 adapter、旧 fallback 与旧版分阶段保留设计，明确无 `skill.contract.yaml` 的 Skill 不注册、不执行、不进入 capability 列表；阶段 01 改为 SkillContract 解析与注册，阶段 07 改为文档/API/测试与旧路径删除，并同步 README、PRD 索引和主代理框架索引。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - Skill Contract 渐进式披露拆分 PRD 完成 document-perfectization 复审：为 00 总纲补齐跨阶段非功能要求，为 01-07 阶段 PRD 增加现有代码/文档锚点、selector allowlist、ResourceService 限额与结构化失败、main-agent 隐式执行负向约束、slot_collection v2 向前兼容形态、项目级 Skill 迁移顺序，以及文档/API/旧路径删除 grep 门禁；修正测试路径和阶段 06/07 文档归属重复。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。

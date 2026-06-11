@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
 import random
 import re
@@ -680,11 +681,243 @@ def key_trait_report(data: dict, selected_samples: Optional[Sequence[str]] = Non
     return "\n".join(lines)
 
 
-def write_output(text: str, output: Optional[Path]) -> None:
+def inline_markdown_to_html(text: str) -> str:
+    escaped = html_lib.escape(str(text))
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    return escaped
+
+
+def parse_markdown_table(lines: Sequence[str], start: int) -> tuple[str, int] | None:
+    if start + 1 >= len(lines):
+        return None
+    header = lines[start].strip()
+    separator = lines[start + 1].strip()
+    if not (header.startswith("|") and header.endswith("|") and separator.startswith("|")):
+        return None
+    separator_cells = [cell.strip() for cell in separator.strip("|").split("|")]
+    if not separator_cells or not all(re.match(r"^:?-{3,}:?$", cell) for cell in separator_cells):
+        return None
+
+    def split_row(row: str) -> List[str]:
+        return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+    headers = split_row(header)
+    index = start + 2
+    body_rows: List[List[str]] = []
+    while index < len(lines):
+        row = lines[index].strip()
+        if not (row.startswith("|") and row.endswith("|")):
+            break
+        body_rows.append(split_row(row))
+        index += 1
+
+    html_lines = ["<div class=\"table-wrap\"><table>", "<thead><tr>"]
+    for cell in headers:
+        html_lines.append(f"<th>{inline_markdown_to_html(cell)}</th>")
+    html_lines.extend(["</tr></thead>", "<tbody>"])
+    for row in body_rows:
+        html_lines.append("<tr>")
+        for cell in row:
+            html_lines.append(f"<td>{inline_markdown_to_html(cell)}</td>")
+        html_lines.append("</tr>")
+    html_lines.extend(["</tbody>", "</table></div>"])
+    return "\n".join(html_lines), index
+
+
+def markdown_to_html_body(markdown: str) -> str:
+    lines = markdown.splitlines()
+    result: List[str] = []
+    paragraph: List[str] = []
+    in_list = False
+    in_quote = False
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            text = " ".join(item.strip() for item in paragraph if item.strip())
+            result.append(f"<p>{inline_markdown_to_html(text)}</p>")
+            paragraph = []
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            result.append("</ul>")
+            in_list = False
+
+    def close_quote() -> None:
+        nonlocal in_quote
+        if in_quote:
+            result.append("</blockquote>")
+            in_quote = False
+
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        stripped = raw.strip()
+        if not stripped:
+            flush_paragraph()
+            close_list()
+            close_quote()
+            index += 1
+            continue
+
+        table = parse_markdown_table(lines, index)
+        if table is not None:
+            flush_paragraph()
+            close_list()
+            close_quote()
+            table_html, index = table
+            result.append(table_html)
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading:
+            flush_paragraph()
+            close_list()
+            close_quote()
+            level = min(len(heading.group(1)), 4)
+            result.append(f"<h{level}>{inline_markdown_to_html(heading.group(2))}</h{level}>")
+            index += 1
+            continue
+
+        if stripped.startswith("- "):
+            flush_paragraph()
+            close_quote()
+            if not in_list:
+                result.append("<ul>")
+                in_list = True
+            result.append(f"<li>{inline_markdown_to_html(stripped[2:])}</li>")
+            index += 1
+            continue
+
+        if stripped.startswith(">"):
+            flush_paragraph()
+            close_list()
+            if not in_quote:
+                result.append("<blockquote>")
+                in_quote = True
+            result.append(f"<p>{inline_markdown_to_html(stripped.lstrip('>').strip())}</p>")
+            index += 1
+            continue
+
+        close_list()
+        close_quote()
+        paragraph.append(stripped)
+        index += 1
+
+    flush_paragraph()
+    close_list()
+    close_quote()
+    return "\n".join(result)
+
+
+def report_title_from_markdown(markdown: str) -> str:
+    for line in markdown.splitlines():
+        match = re.match(r"^#{1,6}\s+(.+)$", line.strip())
+        if match:
+            return re.sub(r"\*\*(.+?)\*\*", r"\1", match.group(1)).strip()
+    return "RiceGenie Report"
+
+
+def render_html_report(markdown: str) -> str:
+    title = html_lib.escape(report_title_from_markdown(markdown))
+    body = markdown_to_html_body(markdown)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f7f8f4;
+      --panel: #ffffff;
+      --ink: #20312a;
+      --muted: #637167;
+      --line: #dbe4d8;
+      --accent: #2f7d50;
+      --accent-soft: #e8f3eb;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Arial, sans-serif;
+      line-height: 1.72;
+    }}
+    main {{
+      width: min(1080px, calc(100% - 32px));
+      margin: 32px auto 48px;
+      padding: 36px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 18px 45px rgba(32, 49, 42, 0.08);
+    }}
+    h1, h2, h3, h4 {{
+      color: #173b29;
+      line-height: 1.3;
+      margin: 1.25em 0 0.55em;
+    }}
+    h1, h2 {{ border-bottom: 1px solid var(--line); padding-bottom: 0.35em; }}
+    h1:first-child, h2:first-child {{ margin-top: 0; }}
+    p {{ margin: 0.65em 0; }}
+    strong {{ color: #174c31; }}
+    ul {{ margin: 0.55em 0 0.9em; padding-left: 1.35em; }}
+    li {{ margin: 0.35em 0; }}
+    blockquote {{
+      margin: 1.2em 0 0;
+      padding: 0.8em 1em;
+      background: var(--accent-soft);
+      border-left: 4px solid var(--accent);
+      color: #2f4a3a;
+    }}
+    .table-wrap {{
+      overflow-x: auto;
+      margin: 1em 0 1.25em;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 640px;
+      font-size: 14px;
+    }}
+    th, td {{
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      background: #eef5ef;
+      color: #183f2a;
+      font-weight: 700;
+    }}
+    tr:last-child td {{ border-bottom: 0; }}
+    @media (max-width: 720px) {{
+      main {{ width: calc(100% - 20px); margin: 10px auto 24px; padding: 18px; }}
+      table {{ min-width: 560px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+{body}
+  </main>
+</body>
+</html>"""
+
+
+def write_output(text: str, output: Optional[Path], output_format: str) -> None:
+    rendered = render_html_report(text) if output_format == "html" else text
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(text + "\n", encoding="utf-8-sig")
-    print(text)
+        output.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -704,7 +937,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--sample", help="Material/sample name. If omitted for non-report sample modes, pick one randomly.")
     parser.add_argument("--samples", help="Comma/space-separated material names for a combined key-trait report.")
     parser.add_argument("--seed", type=int, help="Random seed for reproducible sample choice.")
-    parser.add_argument("--output", type=Path, help="Optional Markdown output path.")
+    parser.add_argument("--output", type=Path, help="Optional report output path.")
+    parser.add_argument("--format", choices=["markdown", "html"], default="markdown", help="Output report format.")
     args = parser.parse_args(argv)
 
     data = load_result(args.input)
@@ -726,7 +960,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.mode == "key-trait-narrative":
             text = key_trait_narrative(data, sample)
 
-    write_output(text, args.output)
+    write_output(text, args.output, args.format)
     return 0
 
 

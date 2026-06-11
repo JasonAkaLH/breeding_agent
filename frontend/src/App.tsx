@@ -1208,7 +1208,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       role: 'assistant',
       content: '',
       mode: interrupt.mode,
-      reasoningRequested: false,
+      reasoningRequested: deepThinking,
       activityText: resumeProgressText,
     };
     setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
@@ -1228,6 +1228,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         conversationId: targetConversationId,
         content,
         mode: interrupt.mode,
+        modelEdition: modelEdition ?? undefined,
+        deepThinking,
+        reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
         clientMessageId: userMessage.id,
         metadata: interruptSubmitMetadata(interrupt, uploads, selectedSheets),
       });
@@ -1742,7 +1745,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     <Space direction="vertical" size="middle" className="composer-menu">
       <Button
         block
-        aria-label="选择 JSON、CSV、VCF、图片或 PDF 文件"
+        aria-label="选择 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件"
         onClick={() => uploadInputRef.current?.click()}
         disabled={!canUploadInCurrentComposer || uploadingFile}
         loading={uploadingFile}
@@ -1898,6 +1901,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                         <Tag key={upload.upload_id} className="upload-file-tag">
                           {upload.filename}
                           {upload.file_type === 'spreadsheet' ? ' · Excel' : ''}
+                          {upload.file_type === 'text' ? ' · TXT' : ''}
                           {upload.file_type === 'vcf' ? ' · VCF' : ''}
                           {upload.preview.source_encoding ? ` · ${upload.preview.source_encoding}` : ''}
                           {typeof upload.preview.row_count === 'number' ? ` · ${upload.preview.row_count} 行` : ''}
@@ -2031,9 +2035,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   <input
                     ref={uploadInputRef}
                     className="file-input-hidden"
-                    aria-label="上传 JSON、CSV、Excel、VCF、图片或 PDF 文件"
+                    aria-label="上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件"
                     type="file"
-                    accept=".json,.csv,.xlsx,.xls,.vcf,.vcf.gz,.png,.jpg,.jpeg,.pdf,application/json,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg,application/pdf"
+                    accept=".json,.csv,.xlsx,.xls,.txt,.vcf,.vcf.gz,.png,.jpg,.jpeg,.pdf,application/json,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,image/png,image/jpeg,application/pdf"
                     disabled={!canUploadInCurrentComposer || uploadingFile}
                     onChange={(event) => void handleUploadFile(event.target.files?.[0])}
                   />

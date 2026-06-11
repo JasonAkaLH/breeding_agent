@@ -594,7 +594,7 @@ Excel 上传的 public response `filename` 保留原始文件名；执行专用 
 2. `resolve_uploads_for_message()` 对 CSV 返回规范化 `skill_artifacts[].content`。
 3. `resolve_uploads_for_message()` 对未选择 sheet 的 Excel 不返回可执行 `content`，并暴露 pending sheet selection metadata。
 4. 提交引用多 sheet Excel 的消息时生成 open interrupt。
-5. `POST /api/v1/tasks/interrupts/answer` 选择 sheet 后继续执行同一 task。
+5. 通过 `POST /api/v1/conversations/chat-messages` 携带 `metadata.interrupt_id` 与 `metadata.upload_sheet_selections` 选择 sheet 后继续执行同一 task。
 6. 上传越权、删除、列表行为不变。
 7. 多个未选择 Excel upload 可一次 interrupt 收集全部选择；任一选择无效时不执行 Skill。
 8. 主代理 prompt、conversation memory 候选、普通 audit 与 SSE 事件中不出现 `skill_artifacts[].content` 或原始行数据。
