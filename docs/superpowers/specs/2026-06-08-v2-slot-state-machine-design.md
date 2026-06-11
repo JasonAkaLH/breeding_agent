@@ -944,7 +944,7 @@ Delivery is complete only when all of the following are true:
 
 ### Resolved planning decisions
 
-- Answer API: use the existing interrupt answer endpoint with a discriminated v2 answer DTO.
+- Interrupt turn API: use `POST /api/v1/conversations/chat-messages` with `metadata.interrupt_id`; the server normalizes the user content and upload metadata into the internal v2 answer DTO.
 - Slot transactionality: SlotCollection mutation and SlotEvent append are atomic; EventRecord mirroring is a post-commit projection.
 - PostgreSQL schema path: add SQLAlchemy runtime rows and rely on the existing PostgreSQL fresh-cutover schema generator/reconciler instead of inventing a parallel migration convention.
 - Slot timeline API: out of scope for this delivery.

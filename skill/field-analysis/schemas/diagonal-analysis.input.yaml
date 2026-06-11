@@ -1,7 +1,0 @@
-schema_id: diagonal_analysis
-title: 对角线增广分析
-inputs:
-  design: {type: string, required: true, const: diagonal, aliases: [diagonal, 对角线]}
-
-  field_data: {type: artifact, required: true, source: {allowed: [artifact]}, aliases: [田间数据, 表型数据, field_data]}
-  run_id: {type: string, required: false}

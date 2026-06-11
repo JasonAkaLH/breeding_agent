@@ -1,6 +1,6 @@
 # Docker 启动命令
 
-按顺序逐行执行以下命令即可拉取并启动 backend `0.1.14` 与 frontend `0.1.14` 版本镜像。
+按顺序逐行执行以下命令即可拉取并启动 backend `0.1.17` 与 frontend `0.1.17` 版本镜像。
 
 ```bash
 docker network create breeding-agent-net >/dev/null 2>&1 || true
@@ -19,11 +19,11 @@ docker volume create breeding-agent-runtime
 ```
 
 ```bash
-docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.14
+docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.17
 ```
 
 ```bash
-docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.14
+docker pull registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.17
 ```
 
 ```bash
@@ -44,11 +44,11 @@ docker inspect postgres-longrun --format '{{json ((index .NetworkSettings.Networ
 ```
 
 ```bash
-docker run -d --name breeding-agent-backend --network breeding-agent-net --network-alias backend -p 51888:8000 -e PYTHONPATH=/app -e PYTHONUNBUFFERED=1 -e MAF_RUST_CORE_MODE=off -e MAF_RUST_LIFECYCLE_MODE=off -e MAF_RUST_ARTIFACT_STORE_MODE=off -e MAF_RUST_AUTH_CORE_MODE=off -e MAF_RUST_DATA_ACCESS_MODE=off -e MAF_RUST_AUDIT_SANITIZER_MODE=off -e MAF_RUST_SKILL_RUNTIME_MODE=off -v breeding-agent-runtime:/app/runtime registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.14
+docker run -d --name breeding-agent-backend --network breeding-agent-net --network-alias backend -p 51888:8000 -e PYTHONPATH=/app -e PYTHONUNBUFFERED=1 -e MAF_RUST_CORE_MODE=off -e MAF_RUST_LIFECYCLE_MODE=off -e MAF_RUST_ARTIFACT_STORE_MODE=off -e MAF_RUST_AUTH_CORE_MODE=off -e MAF_RUST_DATA_ACCESS_MODE=off -e MAF_RUST_AUDIT_SANITIZER_MODE=off -e MAF_RUST_SKILL_RUNTIME_MODE=off -v breeding-agent-runtime:/app/runtime registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend:0.1.17
 ```
 
 ```bash
-docker run -d --name breeding-agent-frontend --network breeding-agent-net -p 51999:80 registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.14
+docker run -d --name breeding-agent-frontend --network breeding-agent-net -p 51999:80 registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend:0.1.17
 ```
 
 

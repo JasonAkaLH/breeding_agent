@@ -455,6 +455,7 @@ class SkillExecutor(ExecutorPort):
                 resolved_payload=script_result.resolution.payload if script_result.resolution is not None else {},
                 sources=script_result.resolution.sources if script_result.resolution is not None else {},
                 question_text_generator=self._skill_input_text_generator,
+                runtime_output_payload=output_payload,
             )
             return CapabilityExecutionResult(
                 capability_id=request.capability_id,
@@ -768,6 +769,7 @@ class SkillExecutor(ExecutorPort):
                 entrypoint=execution.handler or execution.handler_module or "platform_service",
                 missing=missing,
                 question_text_generator=self._skill_input_text_generator,
+                runtime_output_payload=output_payload,
             )
             if handler_interrupt is not None:
                 missing_fields = tuple(

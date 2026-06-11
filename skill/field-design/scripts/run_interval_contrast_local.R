@@ -104,11 +104,13 @@ read_materials <- function(input_path) {
   if (!any(data$hyb_check != "0")) stop("Interval design requires at least one CK row (hyb_check != 0).", call. = FALSE)
   if (!any(data$hyb_check == "0")) stop("Interval design requires at least one test row (hyb_check = 0).", call. = FALSE)
 
-  ck_ids <- data$ped_id[data$hyb_check != "0"]
-  duplicated_ck <- unique(ck_ids[duplicated(ck_ids)])
-  if (length(duplicated_ck) > 0L) {
+  ck_rows <- data[data$hyb_check != "0", c("ped_id", "set"), drop = FALSE]
+  ck_keys <- paste(ck_rows$set, ck_rows$ped_id, sep = "\r")
+  duplicated_ck <- unique(ck_rows[duplicated(ck_keys), , drop = FALSE])
+  if (nrow(duplicated_ck) > 0L) {
+    duplicated_labels <- paste0(duplicated_ck$set, ":", duplicated_ck$ped_id)
     stop(
-      sprintf("CK ped_id must be globally unique for interval design. Duplicated CK(s): %s", paste(duplicated_ck, collapse = ", ")),
+      sprintf("CK ped_id must be unique within each set for interval design. Duplicated CK(s): %s", paste(duplicated_labels, collapse = ", ")),
       call. = FALSE
     )
   }
@@ -201,7 +203,7 @@ main <- function() {
     seed <- if (is.null(opts[["seed"]])) sample.int(900000L, 1L) + 10000L else as_int(opts[["seed"]], "seed")
 
     ck_spec_table <- parse_ck_spec(opts[["ck-spec"]], ck_table)
-    ck_params <- ck_spec_table[, c("ped_id", "start_pos", "interval"), drop = FALSE]
+    ck_params <- ck_spec_table[, c("ped_id", "set", "start_pos", "interval"), drop = FALSE]
     payload <- run_interval_contrast(
       data = data,
       ck_params = ck_params,

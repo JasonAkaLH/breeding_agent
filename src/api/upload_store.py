@@ -10,6 +10,7 @@ from uuid import uuid4
 from src.integrations.rust_safety_contract import normalize_storage_key, resource_limit, sha256_hex
 
 from .table_upload_normalizer import (
+    TEXT_ENCODINGS,
     detect_table_file_type,
     normalize_selected_spreadsheet_sheet,
     normalize_table_upload,
@@ -17,8 +18,8 @@ from .table_upload_normalizer import (
 from .upload_errors import UploadValidationError
 
 
-UploadFileType = Literal["json", "csv", "spreadsheet", "image", "pdf", "vcf"]
-SUPPORTED_UPLOAD_DESCRIPTION = "JSON, CSV, Excel, PNG, JPG/JPEG, PDF, VCF, and VCF.GZ"
+UploadFileType = Literal["json", "csv", "spreadsheet", "text", "image", "pdf", "vcf"]
+SUPPORTED_UPLOAD_DESCRIPTION = "JSON, CSV, Excel, TXT, PNG, JPG/JPEG, PDF, VCF, and VCF.GZ"
 
 SUPPORTED_UPLOAD_EXTENSIONS: dict[str, UploadFileType] = {
     ".json": "json",
@@ -26,6 +27,7 @@ SUPPORTED_UPLOAD_EXTENSIONS: dict[str, UploadFileType] = {
     ".xlsx": "spreadsheet",
     ".xls": "spreadsheet",
     ".vcf": "vcf",
+    ".txt": "text",
     ".png": "image",
     ".jpg": "image",
     ".jpeg": "image",
@@ -38,6 +40,7 @@ SUPPORTED_UPLOAD_CONTENT_TYPES: dict[str, UploadFileType] = {
     "application/csv": "csv",
     "application/vnd.ms-excel": "csv",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "spreadsheet",
+    "text/plain": "text",
     "image/png": "image",
     "image/jpeg": "image",
     "application/pdf": "pdf",
@@ -195,6 +198,14 @@ class InMemoryUploadStore:
             normalized_content_filename = normalized.normalized_filename
             requires_sheet_selection = normalized.requires_sheet_selection
             selected_sheet = normalized.selected_sheet
+        elif file_type == "text":
+            if len(content) > self.max_preview_bytes:
+                raise UploadValidationError(f"Uploaded file exceeds preview limit of {self.max_preview_bytes} bytes")
+            decoded_text, source_encoding = _decode_plain_text_upload(content)
+            content_text = decoded_text
+            normalized_content_type = "text/plain"
+            normalized_content_filename = normalized_filename
+            preview = _build_text_preview(decoded_text, source_encoding=source_encoding, size_bytes=len(content))
         else:
             content_text = None
             preview = _build_binary_preview(file_type, len(content))
@@ -302,6 +313,30 @@ def _detect_file_type_from_filename(filename: str) -> UploadFileType | None:
     if lower_name.endswith(".vcf.gz"):
         return "vcf"
     return SUPPORTED_UPLOAD_EXTENSIONS.get(Path(filename).suffix.lower())
+
+
+def _decode_plain_text_upload(content: bytes) -> tuple[str, str]:
+    for encoding in TEXT_ENCODINGS:
+        try:
+            return content.decode(encoding, errors="strict"), encoding
+        except UnicodeDecodeError:
+            continue
+    raise UploadValidationError("Unable to detect text encoding; please save as UTF-8 TXT and upload again")
+
+
+def _build_text_preview(text: str, *, source_encoding: str, size_bytes: int) -> dict[str, Any]:
+    line_count = 0 if text == "" else len(text.splitlines())
+    return {
+        "row_count": line_count,
+        "columns": [],
+        "shape": "text",
+        "file_type": "text",
+        "size_bytes": size_bytes,
+        "source_encoding": source_encoding,
+        "char_count": len(text),
+        "line_count": line_count,
+        "normalized_content_type": "text/plain",
+    }
 
 
 def _build_binary_preview(file_type: Literal["image", "pdf", "vcf"], size_bytes: int) -> dict[str, Any]:

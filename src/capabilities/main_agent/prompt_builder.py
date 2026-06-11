@@ -65,11 +65,20 @@ MAIN_AGENT_SYSTEM_CONTRACT_LINES = (
 )
 MAIN_AGENT_FILE_DOWNLOAD_CONSTRAINT = (
     "# 文件和下载链接硬约束\n"
-    "只有当已执行的能力结果中存在 output_files，且其中包含以 /api/v1/artifacts/ 开头、以 /download 结尾的 download_url 时，"
-    "才可以说“文件已生成/可下载”，并且只能引用该平台 download_url 或提示前端下载卡片。\n"
+    "只有当已执行的能力结果中存在 output_files，且其中包含平台 artifact download_url 时，"
+    "才可以说“文件已生成/可下载”。最终回答正文不得直接输出、Markdown 包装或复制该 download_url；"
+    "只能提示用户使用前端下载卡片或下方下载按钮。\n"
     "如果 Skill 输出包含 ok=false、is_error=true、error、missing 或 output_file_diagnostics，且没有有效 output_files.download_url，"
     "必须说明文件未生成或需要补充的信息，不得声称文件已生成，不得编造文件内容、文件名或下载入口。\n"
-    "禁止输出 sandbox:/mnt/data、sandbox:、file://、/mnt/data、本地绝对路径或 outputs/... 作为下载链接；这些都不是本系统的可下载 artifact。"
+    "禁止输出 /api/v1/artifacts/.../download、sandbox:/mnt/data、sandbox:、file://、/mnt/data、本地绝对路径或 outputs/... 作为下载链接；"
+    "这些都不是最终回答正文中的可点击下载入口。"
+)
+MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT = (
+    "# Skill 文档事实约束\n"
+    "当回答使用了已匹配 Skill 的公开档案、SKILL.md、references、resource_context 或输入 schema 内容时，"
+    "必须严格按这些 Skill 文档中的字段名、格式、参数、示例和边界回答。"
+    "不得用通用领域常识替换文档口径，不得编造文档未提供的列名、示例、参数、文件、下载链接或执行结果。"
+    "如果文档没有说明某个细节，必须明确说“当前 Skill 文档未说明”，再给出可验证的下一步或建议用户补充信息。"
 )
 
 
@@ -105,6 +114,8 @@ def build_main_agent_prompt(
         parts.append(
             "\n# 已匹配 Skill 指令\n"
             "以下内容是已匹配 Skill 的公开能力档案；不得推断或暴露内部脚本、handler、runtime、路径或配置。\n"
+            + MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT
+            + "\n"
             + json.dumps(public_profiles, ensure_ascii=False, indent=2, default=str)
         )
         if tool_input_schemas:

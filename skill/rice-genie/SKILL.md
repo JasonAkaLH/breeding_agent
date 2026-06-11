@@ -1,35 +1,61 @@
 ---
 name: rice-genie
 description: >-
-  分析水稻 VCF/VCF.GZ 或既有 gene_check JSON，匹配固定 320-QTN reference，统计优良变异并生成水稻基因型体检/QTN 解读报告。适用于水稻基因型体检、rice QTN gene check、优良变异统计、多样本对比、样本深度解读、trait interpretation、favorable variant table、VCF 到育种建议等请求；也适用于解释 gene_check 报告、样本列表、QTN 检出率和证据边界。
+  基于固定水稻 QTN 参考库解读水稻 VCF 或已有 gene-check 结果。适用于水稻
+  基因型体检、VCF 解读、QTN 匹配、有利变异、性状信号和面向育种的水稻
+  基因型报告。
 ---
 
-# RiceGenie（水稻体检智能体）
+# 水稻体检智能体
 
-## 总纲
+本 Skill 用于解读用户提供的水稻变异检测结果，匹配固定 QTN 参考记录，并生成证据边界清楚
+的水稻基因型体检报告。
 
-RiceGenie 将用户提供的水稻 VCF/VCF.GZ 或既有 gene_check JSON 与固定 320-QTN reference 进行比对，并生成有证据边界的 genotype interpretation。
+## 启动协议
 
-不要把 genotype interpretation 表述为有保证的田间表现；它是基于当前 QTN reference 的证据限定解读。平台执行事实源由 `skill.contract.yaml` 和当前 selected input schema 决定；用户可见输入、报告结构和解读规则必须优先从 references 读取。
+用户调用但未提供可用输入文件时，索要水稻 `.vcf`、`.vcf.gz` 或已有 gene-check JSON
+结果。若输入为多样本 VCF 且用户只关心特定材料，再询问 `sample` 或 `samples`。
 
-## 工作流
+裸调用时，中文答复只包含 RiceGenie 问候和 VCF 文件路径/上传请求。
 
-1. 缺少输入时只问用户上传 VCF/VCF.GZ 或提供既有 gene_check JSON。
-2. 用户提供新的 VCF/VCF.GZ 时，进入 QTN matching 与报告生成流程。
-3. 用户提供既有 gene_check JSON 时，把它作为 single source of truth 解读。
-4. 平台执行层返回结构化事实和 Markdown artifact 后，生成面向客户的结构化水稻基因型体检报告。
-5. 对 follow-up questions 只依据当前 320-QTN 事实回答；不受支持的推断要说明证据边界。
+## 输入补齐
 
-## 资源导航
+用户询问支持文件、样本选择方式，或上传文件无法处理时，读取 `references/input-guide.md`。
 
-- `references/usage.md`：启动协议、总体流程、输入、输出和使用示例。
-- `references/vcf-input.md`：VCF/VCF.GZ 输入和样本处理说明。
-- `references/gene-check-json.md`：既有 gene_check JSON 的使用口径。
-- `references/qtn-report.md`：报告结构、trait 解读、favorable variant 统计和证据边界。
+支持输入：
+
+- 单样本或多样本水稻 VCF。
+- gzip 压缩水稻 VCF。
+- 同一流程生成的 gene-check JSON 结果。
+
+可选用户参数：
+
+- `sample`：多样本文件中指定一个材料/样本。
+- `samples`：用逗号、分号或空白分隔的多个材料/样本。
+- `run_id`：可选运行标签。
+
+## 报告策略
+
+撰写最终用户解读前读取 `references/report-style.md`，尤其是多样本报告和性状优先级场景。
+
+默认报告行为：
+
+- 首次用户解读使用 key-trait report 结构。
+- 多样本结果中，概览覆盖全部样本；除非用户指定样本，否则最多深入解读前 3 个样本。
+- 所有判断必须绑定当前 QTN 匹配事实。
+- 使用“提示”“预期”“具有潜力”“可作为参考”等证据边界措辞。
+- 除非用户要求 QTN/gene 明细，不默认输出长表。
+
+## 后续追问
+
+追问只基于当前 gene-check 事实回答。用户点名某个材料时，提供该材料的完整解读，而不是
+泛泛摘要。若当前事实不支持用户要求的结论，要明确说明，并把回答限制在已支持性状和已
+检测变异范围内。
+
+展示有利变异明细时，用紧凑表格列出 QTN/gene、trait、phenotype、genotype type、
+favorable label 和 review note。长表按样本和性状分组。
 
 ## 边界
 
-- 不编造 gene、QTN、phenotype、favorable count 或田间表现。
-- 不把完整 gene_check JSON 贴给用户；优先用结构化摘要和目标字段解释。
-- 不主动暴露内部文件路径、脚本路径、handler、service、token、配置或本机绝对路径。
-- 不把 sample-summary 当作首次客户最终报告；首次报告必须结构化、丰富且证据限定。
+不要承诺田间表现或商业结果。除非用户明确要求调试细节，不要暴露内部数据库细节、脚本路径、
+运行命令、本地绝对路径、schema、内部 JSON、临时目录或调试产物。

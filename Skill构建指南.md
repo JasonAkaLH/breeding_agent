@@ -255,6 +255,29 @@ fields:
 
 执行型 Skill 缺少 schema 必需字段时会创建 open interrupt。v2 缺参 payload 使用 `schema_version=2`，并包含 `selected_schema_id`、`selected_entrypoint`、`invalid`、`resource_hints` 等执行恢复上下文。客户端只提交用户答案和上传选择；不得伪造内部 resume 字段、节点 ID 或用户身份。
 
+运行期已经拿到“可展示候选信息”但仍缺用户选择时，Skill 可以在 stdout / platform handler 返回结构化 `missing_input`，让后端把候选说明和表格直接展示到 interrupt 追问里：
+
+```json
+{
+  "ok": false,
+  "error": {"type": "missing_input", "message": "请选择候选项。"},
+  "missing": ["choice"],
+  "answer": "识别到 2 个候选项。请根据下表补充 choice。",
+  "columns": ["编号", "名称"],
+  "rows": [
+    {"编号": 1, "名称": "候选A"},
+    {"编号": 2, "名称": "候选B"}
+  ]
+}
+```
+
+规则：
+
+- `missing` 必须是当前 interrupt 正在等待的字段，后端只接受相同或子集字段，避免串错补槽上下文。
+- `answer` 是用户可见追问正文；`columns`/`rows` 会追加为 Markdown 表格。若 `answer` 已含 Markdown 表格，后端不会重复生成表格。
+- 展示会做行列/长度上限与敏感词隐藏；不要把原始 artifact 内容、token、cookie、password、DB URL 等放进候选展示。
+- 这只是执行结果到 interrupt question 的泛化展示通道，不改变外部 API 的输入参数、answer 提交格式或 resume 语义。
+
 ## 8. 平台服务型 Skill
 
 `platform_service` 用于把项目内受控业务服务包装成公开 `skill.*` capability。handler 与 service allowlist 由 API runtime 注册；外部调用方仍只能看到 Skill capability。

@@ -1,13 +1,147 @@
 schema_id: rcbd
-title: 随机区组设计
+version: 1.0.0
+title: RCBD design input
+description: 随机区组试验设计输入，要求提供材料清单和区组数/重复数。
+activation:
+  aliases:
+    - rcbd
+    - RCBD
+    - 随机区组
+    - 随机完全区组
+    - 完全随机区组
 inputs:
-  design: {type: string, required: true, const: rcbd, aliases: [rcbd, 随机区组]}
-
-  material_data: {type: artifact, required: true, source: {allowed: [artifact]}, aliases: [材料清单, material_data]}
-  blocks: {type: integer, required: false, aliases: [blocks, 区组数, 重复数, 重复], validation: {min: 1, max: 100}}
-  ncols: {type: integer, required: false, aliases: [ncols, 列数, 田块列数], validation: {min: 1, max: 1000}}
-  ck_ratio: {type: string, required: false, default: A}
-  planter: {type: string, required: false, default: serpentine}
-  randomize: {type: string, required: false, default: 'true'}
-  seed: {type: integer, required: false}
-  run_id: {type: string, required: false}
+  material_data:
+    type: artifact
+    required: false
+    title: 材料清单
+    question: 请上传或提供材料清单文件，推荐列名为 ped_id、hyb_check、set。
+    source:
+      allowed:
+        - artifact
+        - upload
+        - task_attachment
+        - upload_ledger
+        - metadata
+    aliases:
+      - material_data
+      - material_file
+      - input_file
+      - 材料清单
+      - 材料表
+    validation:
+      file_extensions: [.csv, .xls, .xlsx]
+  input_data:
+    type: string
+    required: false
+    title: 粘贴的材料表
+    question: 如果没有文件，也可以直接粘贴 CSV 格式材料表。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases:
+      - input_data
+      - pasted_material_data
+      - pasted_data
+      - 材料表
+  design:
+    type: string
+    required: true
+    title: 设计类型
+    question: 设计类型已选择为 RCBD。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    const: rcbd
+    enum: [rcbd]
+    aliases: [design, design_type, 设计类型, 试验设计]
+    patterns:
+      - '(?i)\b(rcbd|randomi[sz]ed complete block)\b'
+      - '随机(?:完全)?区组|完全随机区组'
+  blocks:
+    type: integer
+    required: true
+    title: 区组数/重复数
+    question: 请提供 RCBD 的区组数/重复数，例如 3 个重复。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [blocks, reps, replications, 区组数, 区组, 重复数, 重复]
+    patterns:
+      - '(?:blocks?|reps?|replications?|区组数|区组|重复数|重复)\s*[:：=]?\s*(\d+)'
+      - '(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)'
+    validation:
+      min: 1
+      max: 20
+  planter:
+    type: string
+    required: false
+    title: 播种路径
+    question: 播种路径可选 serpentine 或 cartesian，默认 serpentine。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: serpentine
+    enum: [serpentine, cartesian]
+    aliases: [planter, planting_path, 播种路径, 走向]
+    patterns:
+      - '(?i)(serpentine|cartesian)'
+      - '蛇形|往返'
+      - '笛卡尔|逐行'
+  seed:
+    type: integer
+    required: false
+    title: 随机种子
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [seed, random_seed, 随机种子]
+    patterns:
+      - '(?:seed|random_seed|随机种子)\s*[:：=]?\s*(\d+)'
+    validation:
+      min: 1
+  run_id:
+    type: string
+    required: false
+    title: 运行名称
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [run_id, run-id, 运行名称, 任务名]
+constraints:
+  - any_of: [material_data, input_data]

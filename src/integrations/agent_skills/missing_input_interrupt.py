@@ -66,6 +66,10 @@ _SENSITIVE_SLOT_KEYS = {
     "secret",
     "token",
 }
+_RUNTIME_DISPLAY_MAX_COLUMNS = 12
+_RUNTIME_DISPLAY_MAX_ROWS = 20
+_RUNTIME_DISPLAY_MAX_CELL_CHARS = 200
+_RUNTIME_DISPLAY_MAX_QUESTION_CHARS = 12_000
 
 
 def missing_input_fields_from_payload(output_payload: Mapping[str, Any]) -> tuple[str, ...]:
@@ -74,6 +78,118 @@ def missing_input_fields_from_payload(output_payload: Mapping[str, Any]) -> tupl
     if error_type != "missing_input":
         return ()
     return _clean_missing_fields(output_payload.get("missing"))
+
+
+def runtime_missing_input_question_from_payload(
+    output_payload: Mapping[str, Any],
+    *,
+    expected_missing: Iterable[str] = (),
+) -> str:
+    if not isinstance(output_payload, Mapping):
+        return ""
+    output_missing = missing_input_fields_from_payload(output_payload)
+    if not output_missing:
+        return ""
+    expected = set(_clean_missing_fields(expected_missing))
+    if expected:
+        output_set = set(output_missing)
+        if not output_set or not output_set.issubset(expected):
+            return ""
+    question = _runtime_missing_input_text(output_payload)
+    if not question:
+        return ""
+    table = ""
+    if not _contains_markdown_table(question):
+        table = _runtime_missing_input_markdown_table(output_payload.get("columns"), output_payload.get("rows"))
+    if table:
+        question = f"{question}\n\n{table}"
+    if len(question) > _RUNTIME_DISPLAY_MAX_QUESTION_CHARS:
+        question = question[:_RUNTIME_DISPLAY_MAX_QUESTION_CHARS].rstrip() + "\n\n（展示内容已截断。）"
+    return question
+
+
+def _runtime_missing_input_text(output_payload: Mapping[str, Any]) -> str:
+    for key in ("answer", "response_text", "summary"):
+        value = output_payload.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if text and not _looks_sensitive(text):
+            return text
+    return ""
+
+
+def _runtime_missing_input_markdown_table(columns: Any, rows: Any) -> str:
+    if not isinstance(columns, list | tuple) or not isinstance(rows, list | tuple):
+        return ""
+    cleaned_columns = [str(column).strip() for column in columns if str(column).strip()]
+    if not cleaned_columns or not rows:
+        return ""
+    truncated_columns = len(cleaned_columns) > _RUNTIME_DISPLAY_MAX_COLUMNS
+    display_columns = cleaned_columns[:_RUNTIME_DISPLAY_MAX_COLUMNS]
+    truncated_rows = len(rows) > _RUNTIME_DISPLAY_MAX_ROWS
+    display_rows = rows[:_RUNTIME_DISPLAY_MAX_ROWS]
+    lines = [
+        "| " + " | ".join(_markdown_cell(column) for column in display_columns) + " |",
+        "| " + " | ".join("---" for _ in display_columns) + " |",
+    ]
+    for row in display_rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(_runtime_table_cell(row, column, index), sensitive_key=column)
+                for index, column in enumerate(display_columns)
+            )
+            + " |"
+        )
+    notes = []
+    if truncated_rows:
+        notes.append(f"仅展示前 {_RUNTIME_DISPLAY_MAX_ROWS} 行")
+    if truncated_columns:
+        notes.append(f"仅展示前 {_RUNTIME_DISPLAY_MAX_COLUMNS} 列")
+    if notes:
+        lines.append("")
+        lines.append("（" + "，".join(notes) + "。）")
+    return "\n".join(lines)
+
+
+def _runtime_table_cell(row: Any, column: str, index: int) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(column, "")
+    if isinstance(row, list | tuple):
+        return row[index] if index < len(row) else ""
+    return ""
+
+
+def _markdown_cell(value: Any, *, sensitive_key: str = "") -> str:
+    if value is None:
+        return ""
+    if sensitive_key and _looks_sensitive(sensitive_key):
+        return "[已隐藏]"
+    if isinstance(value, Mapping | list | tuple):
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except TypeError:
+            text = str(value)
+    else:
+        text = str(value)
+    text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").strip()
+    if _looks_sensitive(text):
+        return "[已隐藏]"
+    if len(text) > _RUNTIME_DISPLAY_MAX_CELL_CHARS:
+        text = text[:_RUNTIME_DISPLAY_MAX_CELL_CHARS].rstrip() + "…"
+    return text.replace("|", "\\|")
+
+
+def _contains_markdown_table(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines()]
+    for first, second in zip(lines, lines[1:]):
+        if "|" not in first or "|" not in second:
+            continue
+        separator_cells = [cell.strip() for cell in second.strip("|").split("|")]
+        if separator_cells and all(cell and set(cell) <= {"-", ":"} and "-" in cell for cell in separator_cells):
+            return True
+    return False
 
 
 def build_missing_input_interrupt(
@@ -132,27 +248,47 @@ async def build_missing_input_interrupt_with_question(
     resolved_payload: Mapping[str, Any] | None = None,
     sources: Mapping[str, Any] | None = None,
     question_text_generator: Any | None = None,
+    runtime_output_payload: Mapping[str, Any] | None = None,
 ) -> Interrupt | None:
+    missing_fields = _clean_missing_fields(missing)
     interrupt = build_missing_input_interrupt(
         request=request,
         manifest=manifest,
         skill_name=skill_name,
         entrypoint=entrypoint,
-        missing=missing,
+        missing=missing_fields,
         resolved_payload=resolved_payload,
         sources=sources,
     )
-    if interrupt is None or question_text_generator is None:
+    if interrupt is None:
+        return None
+    runtime_question = runtime_missing_input_question_from_payload(runtime_output_payload or {}, expected_missing=missing_fields)
+    if runtime_question:
+        slot_collection = dict(interrupt.required_fields[SLOT_COLLECTION_FIELD])
+        slot_collection.update(
+            {
+                "last_question": runtime_question,
+                "question_source": "runtime_missing_input",
+                "question_style": "runtime_markdown",
+            }
+        )
+        required_fields = dict(interrupt.required_fields)
+        required_fields[SLOT_COLLECTION_FIELD] = slot_collection
+        return replace(interrupt, question=runtime_question, required_fields=required_fields)
+    if question_text_generator is None:
+        return interrupt
+    slot_collection = interrupt.required_fields[SLOT_COLLECTION_FIELD]
+    if _should_preserve_v2_schema_question(slot_collection):
         return interrupt
     question_payload = await generate_slot_question(
         manifest=manifest,
-        slot_collection=interrupt.required_fields[SLOT_COLLECTION_FIELD],
+        slot_collection=slot_collection,
         text_generator=question_text_generator,
         metadata=llm_option_metadata(request.metadata),
     )
     if question_payload is None:
         return interrupt
-    slot_collection = dict(interrupt.required_fields[SLOT_COLLECTION_FIELD])
+    slot_collection = dict(slot_collection)
     slot_collection.update(
         {
             "last_question": question_payload["question"],
@@ -398,13 +534,17 @@ def _build_v2_slot_collection(
             status = "missing" if name in missing_fields else ("resolved" if value is not None else "optional")
             slot: dict[str, Any] = {
                 "name": name,
-                "label": field.description or _FIELD_LABELS.get(name, name),
+                "label": field.title or field.description or _FIELD_LABELS.get(name, name),
                 "type": field.type,
                 "required_now": bool(field.required or field.required_when),
                 "status": status,
                 "source": {"allowed": list(field.source.allowed)},
                 "aliases": list(field.aliases),
             }
+            if field.description:
+                slot["description"] = field.description
+            if field.question:
+                slot["question"] = field.question
             if field.const is not None:
                 slot["const"] = field.const
             if field.enum:
@@ -452,6 +592,7 @@ def _build_v2_slot_collection(
         invalid=invalid,
         kind=kind,
     )
+    question_source = "schema_question" if _has_all_v2_missing_schema_questions(slots, missing_fields) else "schema_snapshot"
     return {
         "schema_version": SLOT_COLLECTION_V2_SCHEMA_VERSION,
         "collection_id": collection_id,
@@ -478,7 +619,7 @@ def _build_v2_slot_collection(
         "validation_errors": {str(item.get("field")): str(item.get("reason")) for item in invalid if isinstance(item, Mapping) and item.get("field")},
         "resource_hints": _v2_resource_hints(manifest, missing_fields),
         "last_question": question,
-        "question_source": "schema_snapshot",
+        "question_source": question_source,
     }
 
 
@@ -489,6 +630,46 @@ def _resolved_payload_value(payload: Mapping[str, Any], name: str) -> Any:
     if isinstance(metadata, Mapping) and name in metadata:
         return metadata[name]
     return None
+
+
+def _should_preserve_v2_schema_question(slot_collection: Mapping[str, Any]) -> bool:
+    if slot_collection.get("schema_version") != SLOT_COLLECTION_V2_SCHEMA_VERSION:
+        return False
+    return _has_all_v2_missing_schema_questions(
+        slot_collection.get("slots"),
+        _clean_missing_fields(slot_collection.get("missing")),
+    )
+
+
+def _has_all_v2_missing_schema_questions(slots: Any, missing_fields: tuple[str, ...]) -> bool:
+    if not missing_fields:
+        return False
+    return len(_v2_missing_schema_questions(slots, missing_fields)) == len(missing_fields)
+
+
+def _v2_missing_schema_questions(slots: Any, missing_fields: tuple[str, ...]) -> list[str]:
+    if not isinstance(slots, Mapping):
+        return []
+    questions: list[str] = []
+    for field in missing_fields:
+        raw_slot = slots.get(field)
+        if not isinstance(raw_slot, Mapping):
+            continue
+        question = _safe_source_text(raw_slot.get("question"))
+        if question:
+            questions.append(question)
+    return questions
+
+
+def _join_questions(questions: Iterable[str]) -> str:
+    cleaned = [
+        question.strip().rstrip("。！？!?")
+        for question in questions
+        if question and question.strip()
+    ]
+    if not cleaned:
+        return "请补充缺失参数。"
+    return "；".join(cleaned) + "。"
 
 
 def _v2_slot_question(
@@ -507,16 +688,25 @@ def _v2_slot_question(
         return f"请确认要使用哪一种设计类型：{choices}。" if choices else "请确认要使用哪一种输入模式。"
     inputs = schema_snapshot.get("inputs") if isinstance(schema_snapshot, Mapping) else {}
     labels = []
+    questions = []
     for field in missing_fields:
         field_snapshot = inputs.get(field) if isinstance(inputs, Mapping) else None
         if isinstance(field_snapshot, Mapping):
-            labels.append(str(field_snapshot.get("description") or field_snapshot.get("name") or field))
+            question = _safe_source_text(field_snapshot.get("question"))
+            if question:
+                questions.append(question)
+            else:
+                labels.append(str(field_snapshot.get("title") or field_snapshot.get("description") or field_snapshot.get("name") or field))
         else:
             labels.append(_FIELD_LABELS.get(field, field))
     if invalid:
         invalid_labels = [str(item.get("field")) for item in invalid if item.get("field")]
         if invalid_labels:
             return f"刚才的 {', '.join(invalid_labels)} 无法通过校验，请重新补充：{ '、'.join(labels) }。"
+    if questions and not labels:
+        return _join_questions(questions)
+    if questions:
+        return _join_questions((*questions, f"请补充：{'、'.join(labels)}"))
     return f"请补充：{'、'.join(labels)}。" if labels else "请补充缺失参数。"
 
 
@@ -713,7 +903,7 @@ def _metadata_has_field_attempt(metadata: Mapping[str, Any], name: str, spec: Sk
 
 def _slot_question_prompt(*, manifest: SkillManifest, slot_collection: Mapping[str, Any]) -> str:
     safe_slots = []
-    for raw_slot in slot_collection.get("slots") or ():
+    for raw_slot in _iter_slot_payloads(slot_collection.get("slots")):
         if not isinstance(raw_slot, Mapping):
             continue
         safe_slots.append(
@@ -721,11 +911,14 @@ def _slot_question_prompt(*, manifest: SkillManifest, slot_collection: Mapping[s
                 key: raw_slot.get(key)
                 for key in (
                     "name",
+                    "title",
                     "label",
                     "type",
                     "required",
+                    "required_now",
                     "status",
                     "description",
+                    "question",
                     "aliases",
                     "examples",
                     "validation",
@@ -757,6 +950,21 @@ def _slot_question_prompt(*, manifest: SkillManifest, slot_collection: Mapping[s
         "\n输入如下：\n"
         f"{json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)}"
     )
+
+
+def _iter_slot_payloads(slots: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(slots, Mapping):
+        for name, raw_slot in slots.items():
+            if not isinstance(raw_slot, Mapping):
+                continue
+            slot = dict(raw_slot)
+            slot.setdefault("name", str(name))
+            yield slot
+        return
+    if isinstance(slots, Iterable) and not isinstance(slots, str | bytes):
+        for raw_slot in slots:
+            if isinstance(raw_slot, Mapping):
+                yield raw_slot
 
 
 def _load_json_object(text: str) -> Mapping[str, Any]:

@@ -1,11 +1,37 @@
 contract_version: '2'
 capability:
   id: skill.field_design
-  display_name: 田间试验设计
-  description: 基于 CSV/Excel 材料清单生成随机区组、对角线增广或间比法田间试验设计。
+  display_name: 试验设计智能体
+  description: 根据材料清单生成 RCBD、对角线增广或间比法田间试验设计，输出 fieldbook 和田间布局预览。
+  version: 1.0.0
 routing:
-  triggers: [field design, 田间设计, 田间试验设计, fieldbook, 田间布局, 随机区组, 对角线增广, 间比法]
-  examples: [/field-design 用这个 CSV 做 RCBD，3 个重复, /field-design 生成间比法设计 ck_spec=A,1,10]
+  triggers:
+    - 试验设计
+    - 田间试验设计
+    - 随机区组试验设计
+    - 随机完全区组试验设计
+    - RCBD设计
+    - RCBD
+    - 对角线增广设计
+    - 对角线设计
+    - diagonal augmented design
+    - 间比法试验设计
+    - 间比法设计
+    - fieldbook
+    - 田间记录本
+    - 播种顺序
+    - 小区布局
+    - field design
+    - randomized complete block design
+    - interval contrast design
+  intent_aliases:
+    - /field-design
+    - $field-design
+    - $mini-field-design
+  examples:
+    - /field-design 用这个 CSV 做 RCBD，3 个重复
+    - /field-design 做对角线增广设计，ncols=20
+    - /field-design 间比法设计，列数10，先识别 CK
 runtime:
   mode: python_subprocess
   answer_mode: requires_finalizer
@@ -16,19 +42,81 @@ entrypoints:
     output: design_output
     timeout_seconds: 300
 input_schemas:
-  rcbd: {path: schemas/rcbd.input.yaml, title: 随机区组设计, description: RCBD 不要求 ck_spec, aliases: [rcbd, RCBD, 随机区组, 随机完全区组], entrypoint: run}
-  diagonal: {path: schemas/diagonal.input.yaml, title: 对角线增广设计, aliases: [diagonal, Diagonal, 对角线, 对角线增广], entrypoint: run}
-  interval: {path: schemas/interval.input.yaml, title: 间比法设计, description: Interval 需要 ncols 和 ck_spec, aliases: [interval, Interval, 间比法, 间比], entrypoint: run}
-schema_selector: {strategy: deterministic_then_llm, selector_field: design, min_confidence: 0.8}
+  rcbd:
+    path: schemas/rcbd.input.yaml
+    title: RCBD design input
+    description: Material list and block count for randomized complete block design.
+    aliases:
+      - rcbd
+      - RCBD
+      - 随机区组
+      - 随机完全区组
+      - 完全随机区组
+      - randomized complete block
+  diagonal:
+    path: schemas/diagonal.input.yaml
+    title: Diagonal augmented design input
+    description: Material list and field column count for diagonal augmented design.
+    aliases:
+      - diagonal
+      - 对角线
+      - 对角线增广
+      - 对角线设计
+      - diagonal augmented
+  interval:
+    path: schemas/interval.input.yaml
+    title: Interval contrast design input
+    description: Material list, field column count, and CK placement parameters for interval contrast design.
+    aliases:
+      - interval
+      - 间比
+      - 间比法
+      - 间比法设计
+      - interval contrast
+schema_selector:
+  field: design
+  default: rcbd
+  choices:
+    rcbd:
+      schema: rcbd
+      patterns:
+        - '(?i)\b(rcbd|randomi[sz]ed complete block)\b'
+        - '随机(?:完全)?区组|完全随机区组'
+    diagonal:
+      schema: diagonal
+      patterns:
+        - '(?i)\b(diagonal|diagonal augmented)\b'
+        - '对角线|增广'
+    interval:
+      schema: interval
+      patterns:
+        - '(?i)\b(interval|interval contrast)\b'
+        - '间比|间比法'
 outputs:
   design_output:
-    required: [answer]
+    required:
+      - answer
     artifacts:
-      - {extensions: [.csv], mime_types: [text/csv]}
-      - {extensions: [.html], mime_types: [text/html]}
+      - extensions: [.csv]
+        mime_types: [text/csv]
+      - extensions: [.html]
+        mime_types: [text/html]
 resources:
-  usage: {path: references/usage.md, title: 用法说明, audience: [main_agent, slot_question]}
-  material_data: {path: references/material-data.md, title: 材料表字段, audience: [main_agent, slot_question]}
-  rcbd: {path: references/rcbd.md, title: 随机区组, audience: [main_agent, slot_question]}
-  diagonal: {path: references/diagonal.md, title: 对角线增广, audience: [main_agent, slot_question]}
-  interval: {path: references/interval.md, title: 间比法 CK 参数, audience: [main_agent, slot_question]}
+  material_format:
+    path: references/material-format.md
+    title: Material list format
+    description: User-visible material table columns and validation notes.
+    audience: [main_agent]
+  workflows:
+    path: references/workflows.md
+    title: Field design workflows
+    description: User-facing RCBD, Diagonal, and Interval workflow guidance.
+    audience: [main_agent]
+  service_boundary:
+    path: references/service-boundary.md
+    title: Service boundary
+    description: Runtime ownership and output responsibilities.
+    audience: [main_agent]
+resource_policy:
+  default_audience: [main_agent]
+  max_bytes: 12000

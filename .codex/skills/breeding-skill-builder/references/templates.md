@@ -11,9 +11,9 @@ description: >-
 
 # My Skill
 
-Use this Skill to ...
+用中文说明此 Skill 的用途。除必要的参数名、文件名、路径、代码标识符、API 术语、枚举值和领域标准术语外，描述性和解释性文字默认使用中文。
 
-Platform execution facts live in `skill.contract.yaml` and selected `schemas/*.input.yaml`; this file is the agent-facing runbook.
+平台执行事实源由 `skill.contract.yaml` 和 selected `schemas/*.input.yaml` 决定；本文只提供 agent-facing runbook。
 
 ## Start protocol
 
@@ -26,12 +26,13 @@ When the user invokes the skill without enough information, ask only for the min
 
 ## Inputs and slot filling
 
-Explain only user-visible fields. Missing executable fields are determined by selected schema.
+Explain only user-visible fields and the missing-info strategy. Missing executable fields are determined by the selected schema. Move long field tables and examples to references.
 
 ## Resources
 
-- `references/usage.md`: overall usage and examples.
-- `references/data-format.md`: input columns or accepted payloads.
+- `references/usage.md`: overall usage and examples; read when the user asks how to use this skill.
+- `references/data-format.md`: input columns or accepted payloads; read before explaining accepted data formats.
+- `references/report-style.md`: report sections and interpretation style; read before writing or explaining a long report.
 
 ## Output strategy
 
@@ -39,7 +40,7 @@ Describe the final user answer: summary, preview table, artifact links, caveats,
 
 ## Boundaries
 
-Do not expose scripts, handler keys, services, config, secrets, tokens, database URLs, local absolute paths, or internal runtime directories.
+Do not expose scripts, handler keys, service selection rules, deployment endpoints, config, secrets, tokens, database URLs, local absolute paths, schemas, or internal runtime directories.
 ```
 
 ## skill.contract.yaml template
@@ -49,7 +50,7 @@ contract_version: '2'
 capability:
   id: skill.my_skill
   display_name: My Skill
-  description: One user-facing sentence describing what this skill does.
+  description: 一句中文用户可见描述，说明此 Skill 能做什么。
   version: 1.0.0
 routing:
   triggers:
@@ -73,10 +74,18 @@ input_schemas:
     path: schemas/default.input.yaml
     title: Default input
     description: User-visible description of the executable input.
+    aliases:
+      - user-facing mode name
+      - 中文模式别名
 outputs:
   default_output:
     required:
       - answer
+    artifacts:
+      - extensions:
+          - .csv
+        mime_types:
+          - text/csv
 resources:
   usage:
     path: references/usage.md
@@ -133,42 +142,72 @@ resources:
 ```yaml
 id: default
 version: 1.0.0
-title: Default input
-description: What this schema executes.
+title: 默认输入
+description: 中文说明这个 schema 执行什么。
 activation:
   aliases:
     - user-facing mode name
-fields:
+inputs:
   input_file:
     type: artifact
     required: true
-    title: Input file
-    question: Please upload the input file.
-    sources:
-      - upload
+    title: 输入文件
+    question: 请上传输入文件。
+    source:
+      allowed:
+        - artifact
+        - task_attachment
+        - upload_ledger
   mode:
     type: string
     required: true
-    title: Mode
-    question: Which mode should I use?
-    sources:
-      - user_text
-      - metadata
-    validation:
-      enum:
-        - mode_a
-        - mode_b
+    title: 模式
+    question: 请说明要使用哪种模式。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - metadata
+    const: mode_a
+    enum:
+      - mode_a
+      - mode_b
   count:
     type: integer
     required: false
-    title: Count
-    question: Please provide the count.
-    sources:
-      - user_text
+    title: 数量
+    question: 请提供数量。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+    aliases:
+      - 数量
+      - count
+    patterns:
+      - '(?:数量|count)\s*[:：=]?\s*(\d+)'
+      - '(\d+)\s*(?:个|次)?(?:数量|count)'
     validation:
       min: 1
       max: 100
 ```
+
+## Hardcoded field guidance
+
+当前后端只读取固定字段，不会从说明文字推断平台契约。创建或修复 Skill 时必须显式硬编码：
+
+- `skill.contract.yaml`: `capability.id`, `routing.triggers`, `entrypoints.*.path`, `entrypoints.*.input_schema`, `entrypoints.*.output`, `input_schemas.*.path`, `input_schemas.*.aliases`, `outputs.*.required`, `outputs.*.artifacts`, `resources.*.path`。
+- `platform_service`: `runtime.handler`, `runtime.handler_module`, `runtime.handler_factory`, `runtime.services`, `runtime.trust_scope`。
+- `schemas/*.input.yaml`: payload field names, `source.allowed`, field-level `const`, field-level `enum` / `choices`, `default`, `aliases`, `patterns`, range/length validation, and `required_when` / `constraints`。
+- Script/handler code: read the same payload keys declared in schema and return exactly the keys/files declared in output contract.
+
+Do not rely only on `SKILL.md` prose, schema `activation.aliases`, or `validation.enum` for executable behavior.
 
 ## references/usage.md template
 
@@ -194,5 +233,5 @@ Explain user-visible output files and answer structure.
 
 ## Boundaries
 
-State user-visible limits without exposing internals.
+State user-visible limits without exposing internals, deployment endpoints, service selection rules, handler names, config, schemas, scripts, or local paths.
 ```

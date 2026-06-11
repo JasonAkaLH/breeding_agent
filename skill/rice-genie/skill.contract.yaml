@@ -1,16 +1,69 @@
 contract_version: '2'
-capability: {id: skill.rice_genie, display_name: RiceGenie 水稻体检, description: 分析水稻 VCF/VCF.GZ 或 gene_check JSON 并生成 QTN 报告。}
-routing: {triggers: [rice-genie, rice qtn gene check, 水稻体检, 水稻基因型体检, 基因型体检, 优良变异, QTN, qtn, VCF, vcf], examples: [/rice-genie 分析这个 VCF]}
-runtime: {mode: python_subprocess, answer_mode: requires_finalizer}
-entrypoints: {run: {path: scripts/run_rice_genie.py, input_schema: qtn_check, output: rice_output, timeout_seconds: 300}}
+capability:
+  id: skill.rice_genie
+  display_name: RiceGenie（水稻体检智能体）
+  description: 基于水稻 QTN 参考库解读 VCF 或已有 gene-check JSON，生成水稻基因型体检报告。
+  version: 1.0.0
+routing:
+  triggers:
+    - RiceGenie
+    - 水稻体检
+    - 水稻基因型体检
+    - 水稻基因型分析
+    - 水稻VCF
+    - VCF体检
+    - QTN匹配
+    - 水稻QTN
+    - 基因型体检报告
+    - rice genie
+    - rice vcf
+    - rice qtn
+    - gene check
+  intent_aliases:
+    - /rice-genie
+    - $rice-genie
+  examples:
+    - /rice-genie 分析这个水稻 VCF
+    - /rice-genie 解读样本 A 的 QTN 信号
+    - /rice-genie 根据 gene-check JSON 生成体检报告
+runtime:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+entrypoints:
+  run:
+    path: scripts/run_rice_genie.py
+    input_schema: rice_genie
+    output: rice_report_output
+    timeout_seconds: 300
 input_schemas:
-  qtn_check: {path: schemas/qtn-check.input.yaml, title: VCF QTN 检查, aliases: [vcf, VCF, vcf.gz, qtn], entrypoint: run}
-  report_from_gene_check: {path: schemas/report-from-gene-check.input.yaml, title: gene_check 报告, aliases: [gene_check, json, 基因检测结果], entrypoint: run}
-schema_selector: {strategy: deterministic_then_llm, selector_field: rice_input_type}
+  rice_genie:
+    path: schemas/rice-genie.input.yaml
+    title: Rice Genie input
+    description: Rice VCF, VCF.GZ, or existing gene-check JSON plus optional sample selection.
+    aliases:
+      - rice genie
+      - RiceGenie
+      - 水稻体检
+      - 水稻VCF
+      - QTN匹配
 outputs:
-  rice_output: {required: [answer], artifacts: [{extensions: [.md], mime_types: [text/markdown]}]}
+  rice_report_output:
+    required:
+      - answer
+    artifacts:
+      - extensions: [.html]
+        mime_types: [text/html]
 resources:
-  usage: {path: references/usage.md, title: 用法说明, audience: [main_agent, slot_question]}
-  vcf_input: {path: references/vcf-input.md, title: VCF 输入, audience: [main_agent, slot_question]}
-  gene_check_json: {path: references/gene-check-json.md, title: gene_check JSON, audience: [main_agent, slot_question]}
-  qtn_report: {path: references/qtn-report.md, title: QTN 报告结构, audience: [main_agent, slot_question]}
+  input_guide:
+    path: references/input-guide.md
+    title: Input guide
+    description: Accepted rice genotype input files and sample-selection behavior.
+    audience: [main_agent]
+  report_style:
+    path: references/report-style.md
+    title: Report style
+    description: User-facing report structure and evidence boundaries.
+    audience: [main_agent]
+resource_policy:
+  default_audience: [main_agent]
+  max_bytes: 12000

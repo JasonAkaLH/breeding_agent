@@ -6,21 +6,46 @@ import html.parser
 import json
 import os
 import re
-import shutil
 import struct
-import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from xml.etree import ElementTree as ET
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from render_field_design_layout import render_layout_html
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = Path(__file__).resolve().parent
 ALLOWED_DESIGNS = {"rcbd", "diagonal", "interval"}
 SUPPORTED_INPUT_EXTENSIONS = {".csv", ".xls", ".xlsx"}
 EXCEL_INPUT_EXTENSIONS = {".xls", ".xlsx"}
+DEFAULT_BREEDSTAT2_URL = "http://breedstat2:8000"
+LOCAL_BREEDSTAT2_URL = "http://127.0.0.1:8020"
+CONTAINER_BREEDSTAT2_URL = "http://breedstat2:8000"
+
+
+class BreedStat2FieldDesignError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        message: str,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        raw_body: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.endpoint = endpoint
+        self.message = message
+        self.status_code = status_code
+        self.error_code = error_code
+        self.raw_body = raw_body
 
 DISPLAY_COLUMN_LABELS = {
     "plots": "小区编号",
@@ -41,13 +66,37 @@ DESIGN_DISPLAY_COLUMN_LABELS = {
     "rcbd": {"r": "区组"},
     "interval": {"r": "重复"},
 }
-CHINESE_INTEGER_TOKEN = "零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟"
-INTEGER_PHRASE_TOKEN_RE = rf"(?:\d+|[{CHINESE_INTEGER_TOKEN}]+)"
-INTEGER_QUERY_TERMS = {
-    "blocks": ("blocks?", "区组数", "区组", "重复数", "重复", "reps?", "replications?"),
-    "ncols": ("ncols", "列数", "田块列数", "列", "columns?"),
-    "seed": ("seed", "随机种子"),
-}
+
+CHINESE_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5, "陆": 6, "柒": 7, "捌": 8, "玖": 9}
+CHINESE_UNITS = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
+
+
+def parse_positive_integer_text(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.search(r"[-−]\s*\d|\d+\.\d+", text):
+        return None
+    match = re.search(r"\d+", text)
+    if match:
+        number = int(match.group(0))
+        return number if number > 0 else None
+    chars = [char for char in text if char in CHINESE_DIGITS or char in CHINESE_UNITS]
+    if not chars:
+        return None
+    total = 0
+    current = 0
+    for char in chars:
+        if char in CHINESE_DIGITS:
+            current = CHINESE_DIGITS[char]
+            continue
+        unit = CHINESE_UNITS[char]
+        if current == 0:
+            current = 1
+        total += current * unit
+        current = 0
+    total += current
+    return total if total > 0 else None
 
 
 def emit(payload: Mapping[str, Any]) -> None:
@@ -67,23 +116,26 @@ def fail(answer: str, *, missing: list[str] | None = None, error_type: str = "fi
     return result
 
 
-def find_rscript() -> str:
-    for candidate in (
-        shutil.which("Rscript"),
-        "/usr/local/bin/Rscript",
-        "/opt/homebrew/bin/Rscript",
-        "/Library/Frameworks/R.framework/Resources/bin/Rscript",
-        "/usr/bin/Rscript",
-    ):
-        if candidate and Path(candidate).exists():
-            return str(candidate)
-    raise RuntimeError("Rscript is not available in the backend runtime")
-
-
 def safe_token(value: Any, default: str = "field_design") -> str:
     text = str(value or "").strip() or default
     text = re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")
     return text[:80] or default
+
+
+def breedstat2_base_url() -> str:
+    return (
+        os.environ.get("FIELD_DESIGN_BREEDSTAT2_URL")
+        or os.environ.get("BREEDSTAT2_URL")
+        or default_breedstat2_url()
+    ).rstrip("/")
+
+
+def default_breedstat2_url() -> str:
+    if Path("/.dockerenv").exists() or os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return CONTAINER_BREEDSTAT2_URL
+    if os.name == "nt":
+        return LOCAL_BREEDSTAT2_URL
+    return CONTAINER_BREEDSTAT2_URL
 
 
 def normalize_design(value: Any, query: str = "") -> str | None:
@@ -98,116 +150,31 @@ def normalize_design(value: Any, query: str = "") -> str | None:
     return text if text in ALLOWED_DESIGNS else None
 
 
-def parse_chinese_positive_int_token(token: str) -> int | None:
-    digit_map = {
-        "零": 0,
-        "〇": 0,
-        "一": 1,
-        "二": 2,
-        "两": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
-        "六": 6,
-        "七": 7,
-        "八": 8,
-        "九": 9,
-        "壹": 1,
-        "贰": 2,
-        "叁": 3,
-        "肆": 4,
-        "伍": 5,
-        "陆": 6,
-        "柒": 7,
-        "捌": 8,
-        "玖": 9,
-    }
-    unit_map = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
-    if not token or any(char not in digit_map and char not in unit_map and char not in {"万", "萬"} for char in token):
-        return None
-    if not any(char in unit_map or char in {"万", "萬"} for char in token):
-        parsed = int("".join(str(digit_map[char]) for char in token))
-        return parsed if parsed > 0 else None
-
-    total = 0
-    section = 0
-    number = 0
-    for char in token:
-        if char in digit_map:
-            number = digit_map[char]
-        elif char in unit_map:
-            if number == 0:
-                number = 1
-            section += number * unit_map[char]
-            number = 0
-        elif char in {"万", "萬"}:
-            section += number
-            if section == 0:
-                section = 1
-            total += section * 10000
-            section = 0
-            number = 0
-    parsed = total + section + number
-    return parsed if parsed > 0 else None
-
-
-def parse_positive_int(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if value > 0 else None
-    if isinstance(value, float):
-        if value.is_integer() and value > 0:
-            return int(value)
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if re.fullmatch(r"\+?\d+", text):
-        parsed = int(text.lstrip("+") or "0")
-        return parsed if parsed > 0 else None
-    if re.search(r"[-−]\s*\d", text) or re.search(r"\d+\s*\.\s*\d+", text):
-        return None
-    arabic = re.search(r"(?<![\d.])(\d+)(?![\d.])", text)
-    if arabic is not None:
-        parsed = int(arabic.group(1))
-        return parsed if parsed > 0 else None
-    chinese = re.search(rf"[{CHINESE_INTEGER_TOKEN}]+", text)
-    if chinese is None:
-        return None
-    return parse_chinese_positive_int_token(chinese.group(0))
-
-
-def match_positive_int_near_query_terms(key: str, query: str) -> int | None:
-    terms = INTEGER_QUERY_TERMS.get(key, (re.escape(key),))
-    escaped = "|".join(terms)
-    patterns = (
-        rf"(?:{escaped})\s*(?::|：|=|是|为|就是)?\s*({INTEGER_PHRASE_TOKEN_RE})\s*(?:个|次|遍|轮)?",
-        rf"({INTEGER_PHRASE_TOKEN_RE})\s*(?:个|次|遍|轮)?\s*(?:{escaped})",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, query, flags=re.IGNORECASE)
-        if match:
-            for group in match.groups():
-                parsed = parse_positive_int(group)
-                if parsed is not None:
-                    return parsed
-    return None
+def resolve_design(payload: Mapping[str, Any]) -> str | None:
+    query = str(payload.get("query") or "")
+    for key in ("design", "design_type", "_selected_schema_id", "selected_schema_id", "schema", "_schema"):
+        design = normalize_design(payload.get(key), "" if key.startswith("_") or "schema" in key else query)
+        if design:
+            return design
+    return normalize_design(None, query)
 
 
 def get_positive_int(payload: Mapping[str, Any], key: str, query_patterns: Iterable[str] = ()) -> int | None:
     raw = payload.get(key)
-    if raw is not None:
-        return parse_positive_int(raw)
+    if raw is not None and not isinstance(raw, bool):
+        value = parse_positive_integer_text(raw)
+        return value if value and value > 0 else None
     query = str(payload.get("query") or "")
     for pattern in query_patterns:
         match = re.search(pattern, query, flags=re.IGNORECASE)
         if match:
             for group in match.groups():
-                parsed = parse_positive_int(group)
-                if parsed is not None:
-                    return parsed
-    return match_positive_int_near_query_terms(key, query)
+                value = parse_positive_integer_text(group)
+                if value and value > 0:
+                    return value
+    if query_patterns:
+        return parse_positive_integer_text(query)
+    return None
 
 
 def get_bool(payload: Mapping[str, Any], key: str, default: bool) -> bool:
@@ -232,6 +199,312 @@ def get_string(payload: Mapping[str, Any], key: str, default: str | None = None)
         return default
     text = str(value).strip()
     return text or default
+
+
+def extract_interval_ck_spec(payload: Mapping[str, Any]) -> str | None:
+    explicit = get_string(payload, "ck_spec") or get_string(payload, "ck-spec")
+    if explicit:
+        return explicit
+    return None
+
+
+def normalize_table_header(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return re.sub(r"[\s_\-（）()：:]+", "", text)
+
+
+def find_table_column(headers: Iterable[str], aliases: Iterable[str]) -> str | None:
+    normalized = {normalize_table_header(header): header for header in headers}
+    for alias in aliases:
+        header = normalized.get(normalize_table_header(alias))
+        if header:
+            return header
+    return None
+
+
+def parse_positive_int_cell(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        match = re.fullmatch(r"\s*(\d+)\s*", text)
+        if not match:
+            return None
+        number = float(match.group(1))
+    if not number.is_integer() or number <= 0:
+        return None
+    return int(number)
+
+
+def read_table_records(path: Path, work_dir: Path) -> list[dict[str, str]]:
+    normalized = normalize_input_file(path, work_dir)
+    return read_csv_records(normalized)
+
+
+CK_NO_ALIASES = ("CK编号", "对照编号", "ck_no", "ckno", "ck", "check_no", "check编号")
+CK_PED_ID_ALIASES = ("材料编号", "ped_id", "品种编号", "材料名称")
+CK_SET_ALIASES = ("组别", "set", "group")
+CK_START_ALIASES = ("起始位置", "start_pos", "start", "first_position", "开始位置")
+CK_INTERVAL_ALIASES = ("间隔数量", "interval", "间隔", "spacing", "gap")
+
+
+def ck_parameter_columns(headers: Iterable[str]) -> dict[str, str | None]:
+    header_list = list(headers)
+    return {
+        "ck_no": find_table_column(header_list, CK_NO_ALIASES),
+        "ped_id": find_table_column(header_list, CK_PED_ID_ALIASES),
+        "set": find_table_column(header_list, CK_SET_ALIASES),
+        "start_pos": find_table_column(header_list, CK_START_ALIASES),
+        "interval": find_table_column(header_list, CK_INTERVAL_ALIASES),
+    }
+
+
+def is_ck_parameter_records(records: list[Mapping[str, Any]]) -> bool:
+    if not records:
+        return False
+    columns = ck_parameter_columns(records[0].keys())
+    return bool(columns["ck_no"] and columns["start_pos"] and columns["interval"])
+
+
+def is_ck_parameter_file(path: Path, work_dir: Path) -> bool:
+    try:
+        return is_ck_parameter_records(read_table_records(path, work_dir))
+    except Exception:
+        return False
+
+
+def interval_ck_spec_from_records(records: list[Mapping[str, Any]]) -> str | None:
+    if not records:
+        return None
+    columns = ck_parameter_columns(records[0].keys())
+    ck_no_column = columns["ck_no"]
+    start_column = columns["start_pos"]
+    interval_column = columns["interval"]
+    if not ck_no_column or not start_column or not interval_column:
+        return None
+    parts: list[str] = []
+    for row in records:
+        ck_no = parse_positive_int_cell(row.get(ck_no_column))
+        start_pos = parse_positive_int_cell(row.get(start_column))
+        interval = parse_positive_int_cell(row.get(interval_column))
+        if ck_no is None and start_pos is None and interval is None:
+            continue
+        if ck_no is None or start_pos is None or interval is None:
+            raw = ",".join(str(row.get(column) or "").strip() for column in (ck_no_column, start_column, interval_column))
+            parts.append(raw)
+        else:
+            parts.append(f"{ck_no},{start_pos},{interval}")
+    return "; ".join(parts) if parts else None
+
+
+def interval_ck_spec_from_file(path: Path, work_dir: Path) -> str | None:
+    return interval_ck_spec_from_records(read_table_records(path, work_dir))
+
+
+def resolve_interval_ck_spec(payload: Mapping[str, Any], work_dir: Path) -> str | None:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    for key in ("ck_spec_file", "ck_params_file", "ck_position_file", "对照位置约束表"):
+        raw = payload.get(key) or metadata.get(key)
+        if isinstance(raw, str) and raw.strip():
+            candidate = Path(raw).expanduser()
+            if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS:
+                spec = interval_ck_spec_from_file(candidate.resolve(), work_dir)
+                if spec:
+                    return spec
+    rows = payload.get("ck_spec_data") or payload.get("ck_params_data") or metadata.get("ck_spec_data")
+    if isinstance(rows, list | tuple) and all(isinstance(row, Mapping) for row in rows):
+        spec = interval_ck_spec_from_records([dict(row) for row in rows])
+        if spec:
+            return spec
+    artifacts = payload.get("uploaded_artifacts")
+    if isinstance(artifacts, list | tuple):
+        for index, item in enumerate(artifacts):
+            if not isinstance(item, Mapping):
+                continue
+            content = decode_artifact_content(item)
+            if content is None:
+                continue
+            path = work_dir / f"ck-params-{index}-{artifact_filename(item, 'ck-params.csv')}"
+            path.write_bytes(content)
+            if not is_ck_parameter_file(path, work_dir):
+                continue
+            spec = interval_ck_spec_from_file(path, work_dir)
+            if spec:
+                return spec
+    return None
+
+
+def interval_ck_spec_numbers(ck_spec: str) -> tuple[set[int], list[int], list[str]]:
+    seen: set[int] = set()
+    duplicated: list[int] = []
+    invalid_items: list[str] = []
+    for item in str(ck_spec or "").split(";"):
+        text = item.strip()
+        if not text:
+            continue
+        parts = [part.strip() for part in text.split(",")]
+        if len(parts) != 3:
+            invalid_items.append(text)
+            continue
+        try:
+            ck_no, start_pos, interval = (int(part) for part in parts)
+        except ValueError:
+            invalid_items.append(text)
+            continue
+        if ck_no <= 0 or start_pos <= 0 or interval <= 0:
+            invalid_items.append(text)
+            continue
+        if ck_no in seen:
+            duplicated.append(ck_no)
+        seen.add(ck_no)
+    return seen, duplicated, invalid_items
+
+
+def ck_table_numbers(ck_table: list[Any]) -> set[int]:
+    numbers: set[int] = set()
+    for index, item in enumerate(ck_table, start=1):
+        if isinstance(item, Mapping):
+            raw = item.get("ck_no", index)
+        else:
+            raw = index
+        try:
+            ck_no = int(str(raw).strip())
+        except ValueError:
+            ck_no = index
+        if ck_no > 0:
+            numbers.add(ck_no)
+    return numbers
+
+
+def interval_ck_example(ck_table: list[Any], limit: int = 4) -> str:
+    example_parts = []
+    for index, item in enumerate(ck_table[:limit], start=1):
+        ck_no = item.get("ck_no", index) if isinstance(item, Mapping) else index
+        start_pos = 1 if index % 2 == 1 else 5
+        example_parts.append(f"{ck_no},{start_pos},9")
+    return "; ".join(example_parts) if example_parts else "1,1,9"
+
+
+def write_interval_ck_template(path: Path, ck_table: list[Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns, rows = interval_ck_template_preview_rows(ck_table, limit=None)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def interval_ck_template_preview_rows(
+    ck_table: list[Any],
+    *,
+    limit: int | None = 30,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    columns = ["CK编号", "材料编号", "组别", "起始位置", "间隔数量"]
+    rows: list[dict[str, Any]] = []
+    source = ck_table if limit is None else ck_table[:limit]
+    for index, item in enumerate(source, start=1):
+        if isinstance(item, Mapping):
+            ck_no = item.get("ck_no", index)
+            ped_id = item.get("ped_id", "")
+            set_name = item.get("set", "")
+        else:
+            ck_no = index
+            ped_id = ""
+            set_name = ""
+        rows.append(
+            {
+                "CK编号": ck_no,
+                "材料编号": ped_id,
+                "组别": set_name,
+                "起始位置": "",
+                "间隔数量": "",
+            }
+        )
+    return columns, rows
+
+
+def needs_interval_ck_parameters_response(
+    ck_table: list[Any],
+    *,
+    output_dir: Path,
+    run_id: str,
+    provided_ck_spec: str | None = None,
+    missing_ck_nos: list[int] | None = None,
+    invalid_items: list[str] | None = None,
+    duplicated_ck_nos: list[int] | None = None,
+    unknown_ck_nos: list[int] | None = None,
+) -> dict[str, Any]:
+    template_csv = output_dir / f"field-design-interval-{run_id}-ck-position-template.csv"
+    write_interval_ck_template(template_csv, ck_table)
+    detail_parts: list[str] = []
+    if provided_ck_spec:
+        detail_parts.append("已收到上传的对照位置参数清单，但内容还不完整。")
+    if missing_ck_nos:
+        detail_parts.append(f"还缺少这些 CK 的对照位置约束：{', '.join(str(item) for item in missing_ck_nos)}。")
+    if unknown_ck_nos:
+        detail_parts.append(f"以下对照编号不在 CK 清单中：{', '.join(str(item) for item in unknown_ck_nos)}。")
+    if duplicated_ck_nos:
+        detail_parts.append(f"以下对照编号被重复填写：{', '.join(str(item) for item in duplicated_ck_nos)}。")
+    if invalid_items:
+        detail_parts.append(f"以下条目格式不正确：{'; '.join(invalid_items)}。")
+    detail = ("\n\n" + "\n".join(detail_parts)) if detail_parts else ""
+    display_ck_columns, display_ck_rows = interval_ck_template_preview_rows(ck_table)
+    table = markdown_table(display_ck_columns, display_ck_rows)
+    table_note = ""
+    if len(ck_table) > len(display_ck_rows):
+        table_note = f"\n\n对话中先展示前 {len(display_ck_rows)} 行，完整清单请使用下方 CSV 模板。"
+    answer = (
+        f"已识别到 {len(ck_table)} 个 CK。请下载并填写“对照位置参数清单”，然后把补好的 CSV 或 Excel 上传回来。"
+        "这份清单用于填写间比法的对照位置约束，不是品种规格。\n\n"
+        "清单中已有 CK编号、材料编号、组别；请只补充两列：起始位置、间隔数量。\n"
+        "字段含义：起始位置=该 CK 第一次出现的位置；间隔数量=两次插入该 CK 之间间隔的测试材料数量。"
+        f"{detail}\n\n"
+        f"需要补充的清单：\n{table}{table_note}\n\n"
+        "请不要直接手写一串对照参数；对照较多时容易漏填或错位，以上传补好的清单为准。"
+    )
+    missing_labels = {"ck_spec": "对照位置约束"}
+    missing_questions = {
+        "ck_spec": (
+            "请下载对照位置参数清单，补充“起始位置”和“间隔数量”两列后上传 CSV 或 Excel。"
+        )
+    }
+    return fail(
+        answer,
+        missing=["ck_spec"],
+        error_type="needs_ck_parameters",
+        status="needs_ck_parameters",
+        design="interval",
+        missing_labels=missing_labels,
+        missing_questions=missing_questions,
+        missing_details={
+            "ck_spec": {
+                "label": "对照位置约束",
+                "description": "间比法设计中的 CK 对照位置约束，不是品种规格。",
+                "format": "上传包含 CK编号、起始位置、间隔数量 的 CSV 或 Excel 清单",
+                "template": f"outputs/{template_csv.name}",
+            }
+        },
+        output_files=[
+            build_output_file(
+                template_csv,
+                mime_type="text/csv",
+                label="对照位置参数清单模板",
+                summary="请补充起始位置和间隔数量两列后上传，用于继续间比法设计。",
+            )
+        ],
+        provided_ck_spec=provided_ck_spec,
+        missing_ck_nos=missing_ck_nos or [],
+        invalid_ck_spec_items=invalid_items or [],
+        duplicated_ck_nos=duplicated_ck_nos or [],
+        unknown_ck_nos=unknown_ck_nos or [],
+        ck_table=ck_table,
+        columns=display_ck_columns,
+        rows=display_ck_rows,
+    )
 
 
 def artifact_filename(artifact: Mapping[str, Any], default: str = "materials.csv") -> str:
@@ -268,6 +541,8 @@ def write_input_from_artifact(payload: Mapping[str, Any], work_dir: Path) -> Pat
             continue
         path = work_dir / artifact_filename(item)
         path.write_bytes(content)
+        if is_ck_parameter_file(path, work_dir):
+            continue
         return path
     return None
 
@@ -763,11 +1038,23 @@ def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path) -> Pat
     metadata = payload.get("metadata")
     if not isinstance(metadata, Mapping):
         metadata = {}
-    material_data = metadata.get("material_data") or metadata.get("input_data") or payload.get("material_data")
+    material_data = (
+        metadata.get("material_data")
+        or metadata.get("input_data")
+        or metadata.get("input_file")
+        or metadata.get("file_path")
+        or payload.get("material_data")
+        or payload.get("input_data")
+        or payload.get("pasted_material_data")
+        or payload.get("pasted_data")
+    )
     if material_data is None:
         return None
     path = work_dir / "materials.csv"
     if isinstance(material_data, str):
+        candidate = Path(material_data).expanduser()
+        if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS:
+            return normalize_input_file(candidate.resolve(), work_dir)
         path.write_text(material_data, encoding="utf-8")
         return path
     if isinstance(material_data, list | tuple) and all(isinstance(row, Mapping) for row in material_data):
@@ -804,16 +1091,87 @@ def resolve_input_file(payload: Mapping[str, Any], work_dir: Path) -> Path | Non
     return None
 
 
-def run_command(command: list[str], *, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-        env={"PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+def read_csv_records(path: Path) -> list[dict[str, str]]:
+    raw = path.read_bytes()
+    text = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample)
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.DictReader(text.splitlines(), dialect=dialect)
+    return [{str(k or ""): str(v or "") for k, v in row.items()} for row in reader]
+
+
+def extract_breedstat2_error_message(status_code: int | None, detail: str) -> tuple[str, str | None]:
+    text = (detail or "").strip()
+    if text:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, Mapping):
+            error = data.get("error")
+            code = data.get("error_code")
+            if isinstance(error, Mapping):
+                message = str(error.get("message") or error.get("code") or "").strip()
+                code = code or error.get("code")
+            else:
+                message = str(data.get("message") or data.get("error") or "").strip()
+            if message:
+                return message, str(code) if code else None
+    if text:
+        return text[:1200], None
+    if status_code is not None:
+        return f"breedstat2 returned HTTP {status_code}", None
+    return "breedstat2 request failed", None
+
+
+def post_json(endpoint: str, payload: Mapping[str, Any], timeout: int = 300) -> dict[str, Any]:
+    url = f"{breedstat2_base_url()}{endpoint}"
+    body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
     )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            content = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        message, error_code = extract_breedstat2_error_message(exc.code, detail)
+        raise BreedStat2FieldDesignError(
+            endpoint=endpoint,
+            status_code=exc.code,
+            message=message,
+            error_code=error_code,
+            raw_body=detail[:1200],
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise BreedStat2FieldDesignError(
+            endpoint=endpoint,
+            message=f"Cannot connect to breedstat2 at {url}: {exc}",
+            error_code="field_design_service_unavailable",
+        ) from exc
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise RuntimeError("breedstat2 response must be a JSON object.")
+    if data.get("ok") is False:
+        message = api_error_message(data)
+        error = data.get("error")
+        error_code = str(error.get("code")) if isinstance(error, Mapping) and error.get("code") else None
+        raise BreedStat2FieldDesignError(endpoint=endpoint, message=message, error_code=error_code, raw_body=content[:1200])
+    return data
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -823,16 +1181,163 @@ def read_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def error_from_process(process: subprocess.CompletedProcess[str], result_path: Path | None = None) -> str:
-    if result_path is not None and result_path.exists():
-        try:
-            data = read_json(result_path)
-            error = data.get("error")
-            if isinstance(error, Mapping) and error.get("message"):
-                return str(error.get("message"))
-        except Exception:
-            pass
-    return (process.stderr or process.stdout or f"process exited with {process.returncode}")[-1200:].strip()
+def api_error_message(result: Mapping[str, Any]) -> str:
+    error = result.get("error")
+    if isinstance(error, Mapping):
+        return str(error.get("message") or error.get("code") or "unknown error")
+    return "unknown error"
+
+
+def classify_field_design_error(message: str) -> dict[str, str]:
+    text = str(message or "")
+    if "500 - Internal server error" in text or '"error":"500' in text:
+        return {
+            "error_code": "field_design_unstructured_server_error",
+            "explanation": "试验设计服务返回了未结构化的内部错误，未提供具体业务原因；当前无法仅凭返回内容判断是材料表问题还是服务端实现问题。",
+            "suggestion": "请维护者查看 breedstat2 服务日志，或确认已部署包含 field-design 结构化错误处理和间比法多 set CK 修复的新镜像。",
+        }
+    if "Not enough space for constrained checks" in text:
+        return {
+            "error_code": "field_design_constraint_unsatisfied",
+            "explanation": "当前对照数量和布局约束过紧，已经没有足够位置满足对照摆放约束。",
+            "suggestion": "可以减少对照数量、增加田块空间，或放宽 check_position_constraint 后重试。",
+        }
+    if "Hybrid constraint solution not found" in text:
+        return {
+            "error_code": "field_design_constraint_unsatisfied",
+            "explanation": "当前设计无法同时满足测试材料的位置约束。",
+            "suggestion": "可以使用 test_position_constraint=false 放宽测试材料跨区组位置约束后重试。",
+        }
+    if "Check overlap detected" in text:
+        position = None
+        match = re.search(r"position\s+(\d+)", text)
+        if match:
+            position = match.group(1)
+        ck_names = ""
+        ck_match = re.search(r"CK\(s\):\s*(.+)$", text)
+        if ck_match:
+            ck_names = ck_match.group(1).strip()
+        location = f"位置 {position}" if position else "同一位置"
+        names_note = f"；发生重叠的 CK 包括：{ck_names}" if ck_names else ""
+        return {
+            "error_code": "field_design_constraint_unsatisfied",
+            "explanation": f"间比法 CK 放置参数发生冲突：多个 CK 被安排到{location}{names_note}。",
+            "suggestion": "请调整这些 CK 的起始位置或间隔数量，确保同一播种位置最多只插入一个 CK。",
+        }
+    if "Missing interval parameters for ck_no" in text:
+        missing = text.rsplit(":", 1)[-1].strip() if ":" in text else ""
+        suffix = f"缺少的对照编号为：{missing}。" if missing else "仍有 CK 没有提供参数。"
+        return {
+            "error_code": "field_design_missing_ck_parameters",
+            "explanation": f"间比法需要为每个 CK 都提供起始位置和间隔数量，{suffix}",
+            "suggestion": "请按“对照编号,起始位置,间隔数量”的格式补齐所有 CK，多个 CK 用分号分隔。",
+        }
+    if "Unknown ck_no in ck_spec" in text:
+        unknown = text.rsplit(":", 1)[-1].strip() if ":" in text else ""
+        suffix = f"未知编号为：{unknown}。" if unknown else "存在不在 CK 清单中的编号。"
+        return {
+            "error_code": "field_design_invalid_ck_parameters",
+            "explanation": f"提供的 CK 参数中包含无法识别的对照编号，{suffix}",
+            "suggestion": "请只使用系统识别出的 CK 编号，并按“对照编号,起始位置,间隔数量”填写。",
+        }
+    if "Duplicate ck_no in ck_spec" in text:
+        duplicated = text.rsplit(":", 1)[-1].strip() if ":" in text else ""
+        suffix = f"重复编号为：{duplicated}。" if duplicated else "有 CK 编号被填写了多次。"
+        return {
+            "error_code": "field_design_invalid_ck_parameters",
+            "explanation": f"同一个 CK 编号不能重复填写，{suffix}",
+            "suggestion": "请保留每个 CK 编号的一条参数记录。",
+        }
+    if "Invalid CK spec item" in text:
+        return {
+            "error_code": "field_design_invalid_ck_parameters",
+            "explanation": "CK 放置参数格式不正确。",
+            "suggestion": "请使用“对照编号,起始位置,间隔数量”的格式，例如：1,1,9; 2,5,9。",
+        }
+    if "CK ped_id must be unique within each set" in text:
+        duplicated = text.rsplit("Duplicated CK(s):", 1)[-1].strip() if "Duplicated CK(s):" in text else ""
+        suffix = f"重复项为：{duplicated}。" if duplicated else "同一组别内存在重复 CK。"
+        return {
+            "error_code": "field_design_invalid_input",
+            "explanation": f"间比法要求同一个组别 set 内 CK 材料编号不能重复，{suffix}",
+            "suggestion": "请检查材料表，保留每个 set 内唯一的 CK 材料编号。",
+        }
+    if "At least one row must have hyb_check = 2" in text:
+        return {
+            "error_code": "field_design_missing_diagonal_check",
+            "explanation": "对角线增广设计至少需要一个对角线对照材料。",
+            "suggestion": "请在材料表中至少把一个对照材料标记为 hyb_check=2。",
+        }
+    return {
+        "error_code": "field_design_api_failed",
+        "explanation": "breedstat2 未能完成当前试验设计。",
+        "suggestion": "请检查材料表、设计类型和参数是否满足该设计的输入要求。",
+    }
+
+
+def field_design_error_response(exc: BreedStat2FieldDesignError, *, design: str, retried: bool = False) -> dict[str, Any]:
+    classified = classify_field_design_error(exc.message)
+    retry_note = " 已自动尝试放宽测试材料位置约束，但仍未找到可行设计。" if retried else ""
+    if exc.error_code == "field_design_service_unavailable":
+        title = "试验设计服务暂时无法连接。"
+    elif classified["error_code"] == "field_design_api_failed":
+        title = "试验设计执行失败。"
+    else:
+        title = "试验设计约束无法满足。"
+    answer = (
+        f"{title}\n\n"
+        f"原因：{classified['explanation']}{retry_note}\n\n"
+        f"建议：{classified['suggestion']}\n\n"
+        f"breedstat2 返回信息：{exc.message}"
+    )
+    return fail(
+        answer,
+        error_type=classified["error_code"],
+        design=design,
+        endpoint=exc.endpoint,
+        status_code=exc.status_code,
+        suggestion=classified["suggestion"],
+        original_error=exc.message,
+    )
+
+
+def format_success_parameters(parameters: Mapping[str, Any]) -> str:
+    labels = {
+        "blocks": "区组数",
+        "ncols": "田块列数",
+        "requested_ck_ratio": "请求对照密度等级",
+        "used_ck_ratio": "实际对照密度等级",
+        "auto_upgraded": "是否自动升级密度等级",
+        "actual_check_percent": "实际对照比例",
+        "seed": "随机种子",
+        "randomize": "是否随机排列",
+    }
+    planter_labels = {
+        "serpentine": "蛇形排列",
+        "cartesian": "顺序排列",
+    }
+    ordered_keys = (
+        "blocks",
+        "ncols",
+        "requested_ck_ratio",
+        "used_ck_ratio",
+        "auto_upgraded",
+        "actual_check_percent",
+        "seed",
+        "planter",
+        "randomize",
+    )
+    parts: list[str] = []
+    for key in ordered_keys:
+        if key not in parameters:
+            continue
+        value = parameters[key]
+        if key == "planter":
+            value = planter_labels.get(str(value), str(value))
+            parts.append(f"排列方式：{value}")
+        else:
+            parts.append(f"{labels.get(key, key)}：{value}")
+    return "，".join(parts)
 
 
 def preview_rows(csv_path: Path, columns: list[str], limit: int = 10) -> tuple[list[str], list[dict[str, str]]]:
@@ -890,7 +1395,47 @@ def build_output_file(path: Path, *, mime_type: str, label: str, summary: str) -
     }
 
 
-def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir: Path, rscript: str, design: str) -> dict[str, Any]:
+def coerce_output_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        rows: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                rows.append({str(key): cell for key, cell in item.items()})
+        return rows
+    return []
+
+
+def extract_design_rows(result_payload: Mapping[str, Any], design: str) -> list[dict[str, Any]]:
+    rows = coerce_output_rows(result_payload.get("out_design"))
+    if rows:
+        return rows
+    if design == "rcbd" and isinstance(result_payload.get("results"), list) and result_payload["results"]:
+        first = result_payload["results"][0]
+        if isinstance(first, Mapping):
+            return coerce_output_rows(first.get("out_design"))
+    return []
+
+
+def write_fieldbook_csv(path: Path, rows: list[Mapping[str, Any]], preferred_columns: list[str]) -> None:
+    columns = [column for column in preferred_columns if any(column in row for row in rows)]
+    for row in rows:
+        for key in row:
+            text_key = str(key)
+            if text_key not in columns:
+                columns.append(text_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def run_breedstat2_design(endpoint: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    return post_json(endpoint, payload)
+
+
+def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir: Path, design: str) -> dict[str, Any]:
     run_id = safe_token(payload.get("run_id") or payload.get("run-id") or design, design)
     seed = get_positive_int(payload, "seed", (r"(?:seed|随机种子)\s*[:：=]?\s*(\d+)",)) or 20260512
     planter = get_string(payload, "planter", "serpentine") or "serpentine"
@@ -900,8 +1445,12 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
     result_json = output_dir / f"field-design-{design}-{run_id}-result.json"
     fieldbook_csv = output_dir / f"field-design-{design}-{run_id}-fieldbook.csv"
     layout_html = output_dir / f"field-design-{design}-{run_id}-layout.html"
+    records = read_csv_records(input_path)
+    if not records:
+        return fail("材料清单为空或无法读取表头。", error_type="empty_materials")
 
     if design == "rcbd":
+        relaxed_test_position_constraint = False
         blocks = get_positive_int(
             payload,
             "blocks",
@@ -912,161 +1461,150 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
         )
         if blocks is None:
             return fail("缺少 RCBD 必需参数 blocks/重复数。", missing=["blocks"], error_type="missing_input")
-        command = [
-            rscript,
-            str(SCRIPTS_DIR / "run_rcbd_local.R"),
-            "--input",
-            str(input_path),
-            "--blocks",
-            str(blocks),
-            "--planter",
-            planter,
-            "--seed",
-            str(seed),
-            "--output",
-            str(result_json),
-        ]
+        api_payload = {
+            "data": records,
+            "blocks": blocks,
+            "planter": planter,
+            "seed": seed,
+            "site_num": get_positive_int(payload, "site_num") or 1,
+            "site_random": get_bool(payload, "site_random", False),
+            "check_position_constraint": get_bool(payload, "check_position_constraint", True),
+            "test_position_constraint": get_bool(payload, "test_position_constraint", True),
+        }
+        try:
+            result_payload = run_breedstat2_design("/field-design/rcbd", api_payload)
+        except BreedStat2FieldDesignError as exc:
+            if (
+                "Hybrid constraint solution not found" in exc.message
+                and api_payload["test_position_constraint"] is True
+            ):
+                retry_payload = dict(api_payload)
+                retry_payload["test_position_constraint"] = False
+                try:
+                    result_payload = run_breedstat2_design("/field-design/rcbd", retry_payload)
+                except BreedStat2FieldDesignError as retry_exc:
+                    return field_design_error_response(retry_exc, design=design, retried=True)
+                relaxed_test_position_constraint = True
+                api_payload = retry_payload
+            else:
+                return field_design_error_response(exc, design=design)
         columns = ["plots", "r", "ped_id", "ranges", "pass", "set", "hyb_check", "hyb_type"]
         title = "Field Design RCBD Layout"
-        render_script = "render_rcbd_interval_layout_html.R"
-        extra_parameters = {"blocks": blocks}
+        extra_parameters = {
+            "blocks": blocks,
+            "test_position_constraint": api_payload["test_position_constraint"],
+            "check_position_constraint": api_payload["check_position_constraint"],
+        }
+        if relaxed_test_position_constraint:
+            extra_parameters["auto_relaxed_test_position_constraint"] = True
     elif design == "diagonal":
         ncols = get_positive_int(payload, "ncols", (r"(?:ncols|列数|田块列数)\s*[:：=]?\s*(\d+)", r"(\d+)\s*(?:列|columns?)"))
         if ncols is None:
             return fail("缺少 Diagonal 必需参数 ncols/田块列数。", missing=["ncols"], error_type="missing_input")
         ck_ratio = (get_string(payload, "ck_ratio") or get_string(payload, "ck-ratio") or "A").upper()
         randomize = get_bool(payload, "randomize", True)
-        command = [
-            rscript,
-            str(SCRIPTS_DIR / "run_diagonal_local.R"),
-            "--input",
-            str(input_path),
-            "--ncols",
-            str(ncols),
-            "--ck-ratio",
-            ck_ratio,
-            "--planter",
-            planter,
-            "--randomize",
-            "true" if randomize else "false",
-            "--seed",
-            str(seed),
-            "--output",
-            str(result_json),
-        ]
+        api_payload = {
+            "data": records,
+            "ncols": ncols,
+            "nrows": get_positive_int(payload, "nrows"),
+            "ck_ratio": ck_ratio,
+            "planter": planter,
+            "randomize": randomize,
+            "seed": seed,
+        }
+        try:
+            result_payload = run_breedstat2_design("/field-design/diagonal", api_payload)
+        except BreedStat2FieldDesignError as exc:
+            return field_design_error_response(exc, design=design)
         columns = ["plots", "ped_id", "hyb_type", "ranges", "pass", "set", "design_check"]
         title = "Field Design Diagonal Layout"
-        render_script = "render_diagonal_layout_html.R"
         extra_parameters = {"ncols": ncols, "requested_ck_ratio": ck_ratio, "randomize": randomize}
     else:
         ncols = get_positive_int(payload, "ncols", (r"(?:ncols|列数|田块列数)\s*[:：=]?\s*(\d+)", r"(\d+)\s*(?:列|columns?)"))
-        ck_spec = get_string(payload, "ck_spec") or get_string(payload, "ck-spec")
-        if not ck_spec:
-            list_path = output_dir / f"field-design-interval-{run_id}-ck-table.json"
-            list_proc = run_command(
-                [
-                    rscript,
-                    str(SCRIPTS_DIR / "run_interval_contrast_local.R"),
-                    "--input",
-                    str(input_path),
-                    "--list-checks",
-                    "true",
-                    "--output",
-                    str(list_path),
-                ]
-            )
-            if list_proc.returncode != 0:
-                return fail("间比法 CK 识别失败：" + error_from_process(list_proc, list_path), error_type="rscript_failed")
-            data = read_json(list_path)
-            ck_table = data.get("ck_table") if isinstance(data.get("ck_table"), list) else []
-            answer = "已识别 Interval/间比法 CK 材料。请补充每个 CK 的起始位置和间隔，格式：ck_no,start_pos,interval；多个 CK 用分号分隔。"
-            if ncols is None:
-                answer += " 同时请提供 ncols/田块列数。"
-            display_ck_columns, display_ck_rows = localize_table_columns(["ck_no", "ped_id", "set"], ck_table[:10])
+        if ncols is None:
             return fail(
-                answer,
-                missing=[item for item in ("ncols" if ncols is None else "", "ck_spec") if item],
+                "已收到材料清单，设计类型为间比法设计。还需要你补充田块列数 ncols，例如：列数10。",
+                missing=["ncols"],
                 error_type="missing_input",
-                status="needs_ck_parameters",
                 design="interval",
-                ck_table=ck_table,
-                columns=display_ck_columns,
-                rows=display_ck_rows,
+            )
+        ck_spec = resolve_interval_ck_spec(payload, output_dir)
+        try:
+            data = run_breedstat2_design("/field-design/interval/checks", {"data": records})
+        except BreedStat2FieldDesignError as exc:
+            return field_design_error_response(exc, design=design)
+        ck_table = data.get("ck_table") if isinstance(data.get("ck_table"), list) else []
+        if not ck_spec:
+            return needs_interval_ck_parameters_response(ck_table, output_dir=output_dir, run_id=run_id)
+        expected_ck_nos = ck_table_numbers(ck_table)
+        provided_ck_nos, duplicated_ck_nos, invalid_items = interval_ck_spec_numbers(ck_spec)
+        missing_ck_nos = sorted(expected_ck_nos - provided_ck_nos)
+        unknown_ck_nos = sorted(provided_ck_nos - expected_ck_nos)
+        if missing_ck_nos or unknown_ck_nos or duplicated_ck_nos or invalid_items:
+            return needs_interval_ck_parameters_response(
+                ck_table,
+                output_dir=output_dir,
+                run_id=run_id,
+                provided_ck_spec=ck_spec,
+                missing_ck_nos=missing_ck_nos,
+                invalid_items=invalid_items,
+                duplicated_ck_nos=duplicated_ck_nos,
+                unknown_ck_nos=unknown_ck_nos,
             )
         if ncols is None:
             return fail("缺少 Interval 必需参数 ncols/田块列数。", missing=["ncols"], error_type="missing_input")
         randomize = get_bool(payload, "randomize", True)
-        command = [
-            rscript,
-            str(SCRIPTS_DIR / "run_interval_contrast_local.R"),
-            "--input",
-            str(input_path),
-            "--ncols",
-            str(ncols),
-            "--ck-spec",
-            ck_spec,
-            "--planter",
-            planter,
-            "--randomize",
-            "true" if randomize else "false",
-            "--seed",
-            str(seed),
-            "--output",
-            str(result_json),
-        ]
+        api_payload = {
+            "data": records,
+            "ck_spec": ck_spec,
+            "ncols": ncols,
+            "nrows": get_positive_int(payload, "nrows"),
+            "planter": planter,
+            "randomize": randomize,
+            "seed": seed,
+        }
+        try:
+            result_payload = run_breedstat2_design("/field-design/interval", api_payload)
+        except BreedStat2FieldDesignError as exc:
+            return field_design_error_response(exc, design=design)
         columns = ["plots", "r", "ped_id", "ranges", "pass", "set", "hyb_check", "hyb_type"]
         title = "Field Design Interval Layout"
-        render_script = "render_rcbd_interval_layout_html.R"
         extra_parameters = {"ncols": ncols, "ck_spec": ck_spec, "randomize": randomize}
 
-    process = run_command(command)
-    if process.returncode != 0:
-        return fail("试验设计执行失败：" + error_from_process(process, result_json), error_type="rscript_failed")
-    result_payload = read_json(result_json)
     if result_payload.get("ok") is False:
-        error = result_payload.get("error") if isinstance(result_payload.get("error"), Mapping) else {}
-        return fail("试验设计执行失败：" + str(error.get("message") or "unknown error"), error_type="design_failed")
-
-    csv_process = run_command(
-        [
-            rscript,
-            str(SCRIPTS_DIR / "json_to_fieldbook_csv.R"),
-            "--input",
-            str(result_json),
-            "--design",
-            design,
-            "--output",
-            str(fieldbook_csv),
-        ]
-    )
-    if csv_process.returncode != 0:
-        return fail("Fieldbook CSV 导出失败：" + error_from_process(csv_process), error_type="csv_export_failed")
-
-    render_process = run_command(
-        [
-            rscript,
-            str(SCRIPTS_DIR / render_script),
-            "--input",
-            str(result_json),
-            "--output",
-            str(layout_html),
-            "--title",
-            title,
-        ]
-    )
-    if render_process.returncode != 0:
-        return fail("HTML 布局预览生成失败：" + error_from_process(render_process), error_type="html_render_failed")
+        return fail("试验设计执行失败：" + api_error_message(result_payload), error_type="api_failed")
+    result_json.write_text(json.dumps(result_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    design_rows = extract_design_rows(result_payload, design)
+    if not design_rows:
+        return fail("breedstat2 未返回可导出的 out_design。", error_type="missing_design_rows")
+    write_fieldbook_csv(fieldbook_csv, design_rows, columns)
 
     preview_columns, rows = preview_rows(fieldbook_csv, columns)
     display_columns, display_rows = localize_table_columns(preview_columns, rows, design=design)
     parameters = {"seed": seed, "planter": planter, **extra_parameters}
     if isinstance(result_payload.get("parameters"), Mapping):
         parameters.update(dict(result_payload["parameters"]))
+    quality_control = result_payload.get("quality_control") if isinstance(result_payload.get("quality_control"), Mapping) else {}
+    render_layout_html(
+        layout_html,
+        title=title,
+        rows=design_rows,
+        columns=columns,
+        design=design,
+        parameters=parameters,
+        quality_control=quality_control,
+    )
     answer_parts = [
         f"{design.upper()} 试验设计已完成。",
-        f"核心参数：" + "，".join(f"{k}={v}" for k, v in parameters.items() if k in {"blocks", "ncols", "requested_ck_ratio", "used_ck_ratio", "auto_upgraded", "actual_check_percent", "seed", "planter", "randomize"}),
+        f"核心参数：{format_success_parameters(parameters)}",
         "已生成完整 fieldbook CSV 和 HTML 布局预览。",
     ]
+    if parameters.get("auto_relaxed_test_position_constraint"):
+        answer_parts.append(
+            "提示：首次设计时位置约束过紧，系统已自动放宽测试材料的位置约束后完成设计。"
+            "这表示测试材料在不同区组中的物理位置不再强制完全错开；对照材料的位置约束仍保持开启，"
+            "材料数量、区组数和随机种子没有改变。"
+        )
     table = markdown_table(display_columns, display_rows)
     if table:
         answer_parts.append("前 10 行种植顺序预览：\n" + table)
@@ -1097,7 +1635,7 @@ def main() -> int:
         emit(fail("脚本输入必须是 JSON object。", error_type="invalid_stdin"))
         return 0
 
-    design = normalize_design(payload.get("design") or payload.get("design_type"), str(payload.get("query") or ""))
+    design = resolve_design(payload)
     output_dir = Path(os.environ.get("MAF_SKILL_OUTPUT_DIR") or "outputs").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1118,10 +1656,7 @@ def main() -> int:
             )
             return 0
         try:
-            rscript = find_rscript()
-            result = run_design_pipeline(payload, input_path, output_dir, rscript, design)
-        except subprocess.TimeoutExpired:
-            result = fail("试验设计执行超时。", error_type="timeout")
+            result = run_design_pipeline(payload, input_path, output_dir, design)
         except Exception as exc:  # noqa: BLE001 - script boundary returns structured JSON for all failures.
             result = fail(f"试验设计执行失败：{exc}", error_type="unhandled_error")
     emit(result)

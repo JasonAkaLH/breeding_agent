@@ -271,26 +271,30 @@ def build_normal_extraction_prompt(
     *,
     current_user_answer: str,
     artifact_summaries: tuple[Mapping[str, Any], ...] = (),
+    planner_hint: Mapping[str, Any] | None = None,
 ) -> str:
-    return _json_prompt(
-        {
-            "mode": "normal_extraction",
-            "instructions": [
-                "Return JSON only.",
-                "Resolve only fields declared in slot_collection.missing or slot_collection.invalid.",
-                "Preserve raw user text in raw_value/raw and put canonical value in value when possible.",
-                "Do not invent artifacts, file paths, schema fields, or internal execution details.",
-            ],
-            "current_user_answer": current_user_answer,
-            "artifact_summaries": [dict(item) for item in artifact_summaries],
-            "slot_collection": _collection_prompt_snapshot(collection),
-            "output_schema": {
-                "resolved": {"field_name": {"raw_value": "original text", "value": "canonical candidate", "source": "current_answer"}},
-                "missing": ["field_name"],
-                "invalid": [{"field": "field_name", "reason": "short_code"}],
-            },
-        }
-    )
+    payload: dict[str, Any] = {
+        "mode": "normal_extraction",
+        "instructions": [
+            "Return JSON only.",
+            "Resolve only fields declared in slot_collection.missing or slot_collection.invalid.",
+            "Use planner_hint.target_slots and planner_hint.reason only as mapping hints for the current answer.",
+            "Preserve raw user text in raw_value/raw and put canonical value in value when possible.",
+            "Do not invent artifacts, file paths, schema fields, or internal execution details.",
+        ],
+        "current_user_answer": current_user_answer,
+        "artifact_summaries": [dict(item) for item in artifact_summaries],
+        "slot_collection": _collection_prompt_snapshot(collection),
+        "output_schema": {
+            "resolved": {"field_name": {"raw_value": "original text", "value": "canonical candidate", "source": "current_answer"}},
+            "missing": ["field_name"],
+            "invalid": [{"field": "field_name", "reason": "short_code"}],
+        },
+    }
+    hint = _planner_hint_prompt_payload(planner_hint)
+    if hint:
+        payload["planner_hint"] = hint
+    return _json_prompt(payload)
 
 
 def build_history_recall_prompt(
@@ -298,20 +302,24 @@ def build_history_recall_prompt(
     *,
     current_user_answer: str,
     accepted_answer_summaries: tuple[Mapping[str, Any], ...] = (),
+    planner_hint: Mapping[str, Any] | None = None,
 ) -> str:
-    return _json_prompt(
-        {
-            "mode": "history_recall_extraction",
-            "instructions": [
-                "Use only bounded user-origin accepted answer summaries.",
-                "Return JSON only in the same resolved/missing/invalid shape as normal extraction.",
-                "If history does not contain enough evidence, leave the field missing.",
-            ],
-            "current_user_answer": current_user_answer,
-            "accepted_answer_summaries": [dict(item) for item in accepted_answer_summaries],
-            "slot_collection": _collection_prompt_snapshot(collection),
-        }
-    )
+    payload: dict[str, Any] = {
+        "mode": "history_recall_extraction",
+        "instructions": [
+            "Use only bounded user-origin accepted answer summaries.",
+            "Use planner_hint.target_slots and planner_hint.reason only as mapping hints for the current answer.",
+            "Return JSON only in the same resolved/missing/invalid shape as normal extraction.",
+            "If history does not contain enough evidence, leave the field missing.",
+        ],
+        "current_user_answer": current_user_answer,
+        "accepted_answer_summaries": [dict(item) for item in accepted_answer_summaries],
+        "slot_collection": _collection_prompt_snapshot(collection),
+    }
+    hint = _planner_hint_prompt_payload(planner_hint)
+    if hint:
+        payload["planner_hint"] = hint
+    return _json_prompt(payload)
 
 
 def should_trigger_history_recall(text: str) -> bool:
@@ -396,10 +404,15 @@ def build_backend_slot_extraction(
     artifact_summaries: tuple[Mapping[str, Any], ...] = (),
     accepted_answer_summaries: tuple[Mapping[str, Any], ...] = (),
     history_recall: bool = False,
+    planner_target_slots: tuple[str, ...] = (),
+    planner_reason: str | None = None,
 ) -> SlotExtractionResult:
     allowed_fields = _allowed_extraction_fields(collection)
     resolved: dict[str, SlotExtractionCandidate] = {}
     diagnostics: list[str] = []
+    target_hint_fields = tuple(
+        dict.fromkeys(str(field).strip() for field in planner_target_slots if str(field).strip() in allowed_fields)
+    )
     artifact_fields = [
         field_name
         for field_name in allowed_fields
@@ -428,7 +441,17 @@ def build_backend_slot_extraction(
                     confidence=1.0,
                 )
             continue
+        allow_bare_scalar_from_hint = _allow_bare_scalar_from_planner_hint(
+            field_name=field_name,
+            allowed_fields=allowed_fields,
+            planner_target_slots=target_hint_fields,
+            planner_reason=planner_reason,
+        )
         value = _match_backend_scalar_field(field, current_user_answer)
+        used_planner_hint_scalar = False
+        if value is None and allow_bare_scalar_from_hint:
+            value = _match_backend_bare_scalar_field(field, str(current_user_answer or "").strip())
+            used_planner_hint_scalar = value is not None
         value_from_history = False
         if value is None and history_recall:
             value = _match_backend_scalar_from_history(field, accepted_answer_summaries)
@@ -438,9 +461,11 @@ def build_backend_slot_extraction(
                 field=field_name,
                 raw_value=current_user_answer if current_user_answer else value,
                 value=value,
-                source="history" if value_from_history else "current_answer",
+                source="history" if value_from_history else "planner_hint" if used_planner_hint_scalar else "current_answer",
                 confidence=1.0,
             )
+            if used_planner_hint_scalar:
+                diagnostics.append("backend_planner_hint_scalar_match")
     if artifact_upload_ids:
         diagnostics.append("backend_artifact_ledger_match")
     if resolved:
@@ -683,6 +708,35 @@ def _match_backend_scalar_field(field: SkillInputField, text: str) -> Any | None
     return None
 
 
+def _allow_bare_scalar_from_planner_hint(
+    *,
+    field_name: str,
+    allowed_fields: set[str],
+    planner_target_slots: tuple[str, ...],
+    planner_reason: str | None,
+) -> bool:
+    if planner_target_slots:
+        return len(planner_target_slots) == 1 and planner_target_slots[0] == field_name
+    return bool(planner_reason and len(allowed_fields) == 1 and field_name in allowed_fields)
+
+
+def _match_backend_bare_scalar_field(field: SkillInputField, stripped: str) -> Any | None:
+    if field.type in {"integer", "int"} and re.fullmatch(
+        r"[+-]?\d+|[零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟]+",
+        stripped,
+    ):
+        return _parse_positive_integer(stripped)
+    if field.type in {"number", "float"} and re.fullmatch(r"[+-]?\d+(?:\.\d+)?", stripped):
+        return _parse_number(stripped)
+    if field.type in {"boolean", "bool"}:
+        return _parse_bool(stripped)
+    if field.enum:
+        for enum_item in field.enum:
+            if stripped.lower() == str(enum_item).lower():
+                return enum_item
+    return None
+
+
 def _text_mentions_field_alias(field: SkillInputField, text: str) -> bool:
     text_lower = text.lower()
     aliases = tuple(dict.fromkeys((field.name, field.const, *field.aliases)))
@@ -747,12 +801,14 @@ def _field_snapshot(field: SkillInputField) -> dict[str, Any]:
     snapshot = {
         "name": field.name,
         "type": field.type,
+        "title": field.title,
         "required": field.required,
         "required_when": dict(field.required_when),
         "source": {"allowed": list(field.source.allowed)},
         "aliases": list(field.aliases),
         "patterns": list(field.patterns),
         "description": field.description,
+        "question": field.question,
         "reference_resource": field.reference_resource,
         "clarification": {
             "hint": field.clarification.hint,
@@ -776,6 +832,7 @@ def _field_from_snapshot(name: str, snapshot: Mapping[str, Any]) -> SkillInputFi
     return SkillInputField(
         name=name,
         type=str(snapshot.get("type") or "string"),
+        title=str(snapshot.get("title") or ""),
         required=bool(snapshot.get("required", False)),
         required_when=dict(snapshot.get("required_when") or {}) if isinstance(snapshot.get("required_when"), Mapping) else {},
         source=SkillInputSourcePolicy(allowed=_string_tuple(source.get("allowed") if isinstance(source, Mapping) else ())),
@@ -785,6 +842,7 @@ def _field_from_snapshot(name: str, snapshot: Mapping[str, Any]) -> SkillInputFi
         enum=_string_tuple(snapshot.get("enum")),
         const=snapshot.get("const"),
         description=str(snapshot.get("description") or ""),
+        question=str(snapshot.get("question") or ""),
         reference_resource=str(snapshot.get("reference_resource") or ""),
         clarification=SkillInputClarification(
             hint=str(clarification.get("hint") or ""),
@@ -881,6 +939,35 @@ def _collection_prompt_snapshot(collection: SlotCollection) -> dict[str, Any]:
         "slots": redact_prompt_safe(collection.slots),
         "schema_snapshot": redact_prompt_safe(collection.schema_snapshot),
     }
+
+
+def _planner_hint_prompt_payload(planner_hint: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(planner_hint, Mapping):
+        return {}
+    payload: dict[str, Any] = {}
+    target_slots = planner_hint.get("target_slots")
+    if isinstance(target_slots, str):
+        slots = (target_slots,)
+    elif isinstance(target_slots, list | tuple | set):
+        slots = tuple(target_slots)
+    else:
+        slots = ()
+    clean_slots = [str(item).strip() for item in slots if str(item).strip()]
+    if clean_slots:
+        payload["target_slots"] = clean_slots
+    for key in ("reason", "part_id", "source"):
+        value = str(planner_hint.get(key) or "").strip()
+        if value:
+            payload[key] = value
+    confidence = planner_hint.get("confidence")
+    if confidence is not None:
+        try:
+            payload["confidence"] = max(0.0, min(float(confidence), 1.0))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(planner_hint.get("uses_uploads"), bool):
+        payload["uses_uploads"] = bool(planner_hint["uses_uploads"])
+    return payload
 
 
 def _json_prompt(payload: Mapping[str, Any]) -> str:
