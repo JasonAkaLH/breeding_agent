@@ -1,0 +1,71 @@
+contract_version: '2'
+capability:
+  id: skill.seed_navi
+  display_name: Seed Navi 品种定位智能体
+  description: 分析玉米品种试验数据，识别目标品种在东北中晚熟区的环境适应性并生成中文解读。
+  version: 1.0.0
+routing:
+  triggers:
+    - Seed Navi
+    - 品种定位
+    - 环境适应性
+    - 品种环境适应性
+    - 玉米品种适应性
+    - 东北中晚熟
+    - 东北中晚熟区
+    - zhongwanshu
+    - seed navi
+    - variety adaptability
+  intent_aliases:
+    - /seed-navi
+    - $seed-navi
+  examples:
+    - /seed-navi 分析这个玉米品种试验表
+    - $seed-navi 目标品种是先玉335，对照 CK
+    - 用这个 Excel 做东北中晚熟区品种定位
+runtime:
+  mode: python_subprocess
+  answer_mode: direct
+entrypoints:
+  run:
+    path: scripts/run_seed_navi.py
+    input_schema: seed_navi
+    output: seed_navi_output
+    timeout_seconds: 900
+input_schemas:
+  seed_navi:
+    path: schemas/seed-navi.input.yaml
+    title: Seed Navi input
+    description: Maize variety trial file and optional target variety, control variety, region, and model parameters.
+    aliases:
+      - seed-navi
+      - Seed Navi
+      - 品种定位
+      - 环境适应性
+      - 玉米品种适应性
+outputs:
+  seed_navi_output:
+    required:
+      - answer
+    artifacts:
+      - extensions: [.html]
+        mime_types: [text/html]
+resources:
+  data_format:
+    path: references/data-format.md
+    title: Trial data format
+    description: User-visible trial file expectations and accepted formats.
+    audience: [main_agent]
+  workflow:
+    path: references/workflow.md
+    title: Seed Navi workflow
+    description: Progressive slot collection, BreedCore stages, and defaults.
+    audience: [main_agent]
+  output_policy:
+    path: references/output-policy.md
+    title: Output policy
+    description: Output ownership, session layout, and final interpretation structure.
+    audience: [main_agent]
+resource_policy:
+  default_audience: [main_agent]
+  max_bytes: 12000

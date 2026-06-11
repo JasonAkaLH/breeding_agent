@@ -1,0 +1,82 @@
+schema_id: field_analysis
+version: 1.0.0
+title: Field analysis input
+description: 田间表型宽表分析输入，支持 RCBD 和 Diagonal 设计。
+activation:
+  aliases:
+    - field analysis
+    - field trial analysis
+    - phenotype analysis
+    - 田间数据分析
+    - 表型数据分析
+    - RCBD 分析
+    - 对角线分析
+inputs:
+  field_data:
+    type: artifact
+    required: false
+    title: 田间表型数据文件
+    question: 请上传宽表格式 CSV 或 XLSX 田间数据文件。
+    source:
+      allowed:
+        - artifact
+        - upload
+        - task_attachment
+        - upload_ledger
+        - metadata
+    aliases: [field_data, phenotype_data, input_file, data_file, 田间数据, 表型数据]
+    validation:
+      file_extensions: [.csv, .xlsx]
+  pasted_field_data:
+    type: string
+    required: false
+    title: 粘贴的田间表型数据
+    question: 如果没有文件，也可以直接粘贴 CSV 格式宽表数据。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [pasted_field_data, input_data, pasted_data, 田间数据, 表型数据]
+  design:
+    type: string
+    required: true
+    title: 设计类型
+    question: 请说明设计类型是 rcbd 还是 diagonal。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    enum: [rcbd, diagonal]
+    aliases: [design, design_type, 设计类型, 试验设计, RCBD, diagonal, 对角线]
+    patterns:
+      - '(?i)\b(rcbd|randomi[sz]ed complete block)\b'
+      - '随机(?:完全)?区组|完全随机区组'
+      - '(?i)\bdiagonal\b'
+      - '对角线|增广'
+  run_id:
+    type: string
+    required: false
+    title: 运行名称
+    question: 如果想命名本次分析，可提供 run_id；不提供会自动命名。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [run_id, run-id, 运行名称, 任务名]
+constraints:
+  - any_of: [field_data, pasted_field_data]

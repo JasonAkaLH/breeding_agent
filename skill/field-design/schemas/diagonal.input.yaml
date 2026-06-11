@@ -1,31 +1,180 @@
 schema_id: diagonal
-title: 对角线增广设计
+version: 1.0.0
+title: Diagonal augmented design input
+description: 对角线增广试验设计输入，要求提供材料清单和田块列数 ncols。
+activation:
+  aliases:
+    - diagonal
+    - 对角线
+    - 对角线增广
+    - diagonal augmented
 inputs:
+  material_data:
+    type: artifact
+    required: false
+    title: 材料清单
+    question: 请上传或提供材料清单文件，推荐列名为 ped_id、hyb_check、set。
+    source:
+      allowed:
+        - artifact
+        - upload
+        - task_attachment
+        - upload_ledger
+        - metadata
+    aliases:
+      - material_data
+      - material_file
+      - input_file
+      - 材料清单
+      - 材料表
+    validation:
+      file_extensions: [.csv, .xls, .xlsx]
+  input_data:
+    type: string
+    required: false
+    title: 粘贴的材料表
+    question: 如果没有文件，也可以直接粘贴 CSV 格式材料表。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases:
+      - input_data
+      - pasted_material_data
+      - pasted_data
+      - 材料表
   design:
     type: string
     required: true
+    title: 设计类型
+    question: 设计类型已选择为 Diagonal。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
     const: diagonal
-    aliases: [diagonal, 对角线, 对角线增广]
-    description: 设计类型；本模式固定为对角线增广设计。
-    clarification: {hint: 可回答“对角线增广”或 “diagonal”。, examples: [对角线增广, diagonal]}
-
-  material_data:
-    type: artifact
-    required: true
-    source: {allowed: [artifact]}
-    aliases: [材料清单, material_data]
-    description: 试验材料清单文件，推荐列名 ped_id、hyb_check、set。
-    clarification: {hint: 请上传 CSV/Excel 材料清单。, examples: [上传 materials.csv]}
-  blocks: {type: integer, required: false, aliases: [blocks, 区组数, 重复数, 重复], validation: {min: 1, max: 100}}
+    enum: [diagonal]
+    aliases: [design, design_type, 设计类型, 试验设计]
+    patterns:
+      - '(?i)\b(diagonal|diagonal augmented)\b'
+      - '对角线|增广'
   ncols:
     type: integer
     required: true
-    aliases: [ncols, 列数, 田块列数]
-    description: 田块每行列数，用于固定对角线增广布局宽度。
-    clarification: {hint: 请提供正整数列数，例如“12列”。, examples: [12列, ncols=12]}
-    validation: {min: 1, max: 1000}
-  ck_ratio: {type: string, required: false, default: A}
-  planter: {type: string, required: false, default: serpentine}
-  randomize: {type: string, required: false, default: 'true'}
-  seed: {type: integer, required: false}
-  run_id: {type: string, required: false}
+    title: 田块列数
+    question: 请提供田块列数 ncols，例如 ncols=20 或列数20。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [ncols, columns, field_columns, 列数, 田块列数]
+    patterns:
+      - '(?:ncols|columns?|列数|田块列数)\s*[:：=]?\s*(\d+)'
+      - '(\d+)\s*(?:列|columns?)'
+    validation:
+      min: 1
+  ck_ratio:
+    type: string
+    required: false
+    title: 对照比例等级
+    question: 对照比例等级可选 A、B、C，默认 A。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: A
+    enum: [A, B, C]
+    aliases: [ck_ratio, ck-ratio, check_ratio, 对照比例]
+    patterns:
+      - '(?:ck_ratio|ck-ratio|check_ratio|对照比例)\s*[:：=]?\s*([ABCabc])'
+  planter:
+    type: string
+    required: false
+    title: 播种路径
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: serpentine
+    enum: [serpentine, cartesian]
+    aliases: [planter, planting_path, 播种路径, 走向]
+    patterns:
+      - '(?i)(serpentine|cartesian)'
+      - '蛇形|往返'
+      - '笛卡尔|逐行'
+  randomize:
+    type: boolean
+    required: false
+    title: 是否随机化
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: true
+    aliases: [randomize, randomise, 随机化, 打乱]
+    patterns:
+      - '(?:randomi[sz]e|随机化|打乱)\s*[:：=]?\s*(true|false|yes|no|是|否)'
+  seed:
+    type: integer
+    required: false
+    title: 随机种子
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [seed, random_seed, 随机种子]
+    patterns:
+      - '(?:seed|random_seed|随机种子)\s*[:：=]?\s*(\d+)'
+    validation:
+      min: 1
+  run_id:
+    type: string
+    required: false
+    title: 运行名称
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [run_id, run-id, 运行名称, 任务名]
+constraints:
+  - any_of: [material_data, input_data]

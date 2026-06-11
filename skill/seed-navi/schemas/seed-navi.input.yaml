@@ -1,0 +1,200 @@
+schema_id: seed_navi
+version: 1.0.0
+title: Seed Navi input
+description: 玉米品种试验数据的环境适应性分析输入。
+activation:
+  aliases:
+    - seed-navi
+    - Seed Navi
+    - 品种定位
+    - 环境适应性
+    - 玉米品种适应性
+inputs:
+  trial_file:
+    type: artifact
+    required: false
+    title: 品种试验数据文件
+    question: 请上传玉米品种试验 Excel 或 CSV 文件。
+    source:
+      allowed:
+        - artifact
+        - upload
+        - task_attachment
+        - upload_ledger
+        - metadata
+    aliases: [trial_file, input_file, field_trial, data_file, 试验数据, 品种试验表]
+    validation:
+      file_extensions: [.xlsx, .xls, .csv]
+  file_path:
+    type: string
+    required: false
+    title: 品种试验数据路径
+    question: 也可以提供本地 Excel 或 CSV 文件路径。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [file_path, path, input_path, 文件路径]
+  target_variety:
+    type: string
+    required: false
+    title: 目标品种
+    question: 请提供需要分析的目标品种名称或代号。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [target_variety, target, variety, 目标品种, 待分析品种, 品种]
+    patterns:
+      - '(?:目标品种|待分析品种|分析品种|品种|target_variety|target|variety)\s*(?:是|为|:|：|=)?\s*([^\s，,。；;]+)'
+  control_variety:
+    type: string
+    required: false
+    title: 对照品种
+    question: 请提供对照品种名称；默认 CK。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: CK
+    aliases: [control_variety, check, ck, control, 对照品种, 对照, CK]
+    patterns:
+      - '(?:control_variety|control|check|ck|对照品种|对照|CK)\s*(?:是|为|:|：|=)?\s*([^\s，,。；;]+)'
+  region:
+    type: string
+    required: false
+    title: 生态区
+    question: 当前支持东北中晚熟区，规范值为 zhongwanshu。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: zhongwanshu
+    enum: [zhongwanshu]
+    aliases: [region, ecological_region, eco_region, 生态区, 区域]
+    patterns:
+      - '(?i)\bzhongwanshu\b'
+      - '东北中晚熟区|中晚熟区'
+  run_id:
+    type: string
+    required: false
+    title: 运行名称
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [run_id, run-id, 运行名称, 任务名]
+  top_n:
+    type: integer
+    required: false
+    title: 候选品种数量
+    question: 没指定目标品种时展示候选品种数量，默认 20。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 20
+    aliases: [top_n, top, 候选数量, 展示数量]
+    patterns:
+      - '(?:top_n|top|候选数量|展示数量)\s*[:：=]?\s*(\d+)'
+      - '展示\s*(\d+)\s*个候选'
+    validation:
+      min: 1
+      max: 200
+  quantile:
+    type: number
+    required: false
+    title: 分位数阈值
+    question: 适应性筛选分位数阈值，默认 0.6。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 0.6
+    aliases: [quantile, 分位数, 阈值]
+    patterns:
+      - '(?:quantile|分位数|阈值)\s*[:：=]?\s*(0(?:\.\d+)?|1(?:\.0+)?)'
+    validation:
+      min: 0
+      max: 1
+  distance_limit_km:
+    type: number
+    required: false
+    title: 距离上限
+    question: 环境相似站点距离上限，单位 km，默认 50。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 50.0
+    aliases: [distance_limit_km, distance_limit, 距离上限, 距离]
+    patterns:
+      - '(?:distance_limit_km|distance_limit|距离上限|距离)\s*[:：=]?\s*(\d+(?:\.\d+)?)'
+      - '(\d+(?:\.\d+)?)\s*(?:km|公里)'
+    validation:
+      min: 0
+      max: 1000
+  year_window:
+    type: integer
+    required: false
+    title: 年份窗口
+    question: 近年数据窗口，默认 5 年。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 5
+    aliases: [year_window, years, 年份窗口, 近几年]
+    patterns:
+      - '(?:year_window|年份窗口|近几年)\s*[:：=]?\s*(\d+)'
+      - '近\s*(\d+)\s*年'
+    validation:
+      min: 1
+      max: 30
+constraints:
+  - any_of: [trial_file, file_path]

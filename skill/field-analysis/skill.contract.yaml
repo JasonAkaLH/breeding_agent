@@ -1,15 +1,99 @@
 contract_version: '2'
-capability: {id: skill.field_analysis, display_name: 田间数据分析, description: 分析随机区组或对角线增广田间表型数据并生成报告。}
-routing: {triggers: [field-analysis, field trial analysis, phenotype, LSD, lsd, 田间分析, 田间数据分析, 表型分析, 随机区组分析, 对角线增广分析], examples: [/field-analysis 分析这个 RCBD 表型数据]}
-runtime: {mode: python_subprocess, answer_mode: requires_finalizer}
-entrypoints: {run: {path: scripts/run_field_analysis.py, input_schema: rcbd_analysis, output: analysis_output, timeout_seconds: 300}}
+capability:
+  id: skill.field_analysis
+  display_name: 田间数据分析智能体
+  description: 分析 RCBD 或对角线增广设计的宽表田间表型数据，生成章节化分析报告和用户阅读版 HTML。
+  version: 1.0.0
+routing:
+  triggers:
+    - 田间数据分析
+    - 田间表型数据分析
+    - 表型数据分析
+    - 品种试验数据分析
+    - 小区试验数据分析
+    - RCBD 分析
+    - RCBD 表型分析
+    - 随机区组分析
+    - 随机完全区组分析
+    - 对角线增广分析
+    - 对角线分析
+    - Diagonal field analysis
+    - LSD 分组
+    - LSD grouping
+    - check 对比
+    - 对照比较
+    - ANOVA
+    - 空间诊断
+    - 稳定性分析
+    - field analysis
+    - field trial analysis
+    - phenotype analysis
+  intent_aliases:
+    - /field-analysis
+    - $field-analysis
+  examples:
+    - /field-analysis 分析这个 RCBD 宽表，做完整报告和 LSD 分组
+    - /field-analysis 这是 diagonal 设计，生成表型分析报告
+    - 帮我看这个田间数据里哪些材料表现最好
+runtime:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+entrypoints:
+  run:
+    path: scripts/run_field_analysis.py
+    input_schema: field_analysis
+    output: analysis_output
+    timeout_seconds: 300
 input_schemas:
-  rcbd_analysis: {path: schemas/rcbd-analysis.input.yaml, title: RCBD 分析, aliases: [rcbd, 随机区组], entrypoint: run}
-  diagonal_analysis: {path: schemas/diagonal-analysis.input.yaml, title: 对角线增广分析, aliases: [diagonal, 对角线], entrypoint: run}
-schema_selector: {strategy: deterministic_then_llm, selector_field: design}
+  field_analysis:
+    path: schemas/field-analysis.input.yaml
+    title: Field analysis input
+    description: Wide field phenotype table and design type.
+    aliases:
+      - field analysis
+      - phenotype analysis
+      - 田间数据分析
+      - 表型数据分析
+      - RCBD 分析
+      - diagonal 分析
 outputs:
-  analysis_output: {required: [answer], artifacts: [{extensions: [.json], mime_types: [application/json]}]}
+  analysis_output:
+    required:
+      - answer
+      - result_facts
+    artifacts:
+      - extensions: [.html]
+        mime_types: [text/html]
+      - extensions: [.json]
+        mime_types: [application/json]
+    structured_fields:
+      - design
+      - run_id
+      - mode
+      - report_json
+      - summary_json
+      - session_json
+      - chapter_statuses
+      - available_traits
+      - trait_preflight
+      - result_facts
+      - structured_content
 resources:
-  usage: {path: references/usage.md, title: 用法说明, audience: [main_agent, slot_question]}
-  field_data: {path: references/field-data.md, title: 田间数据字段, audience: [main_agent, slot_question]}
-  report_structure: {path: references/report-structure.md, title: 报告结构, audience: [main_agent, slot_question]}
+  data_format:
+    path: references/data-format.md
+    title: Field data format
+    description: User-visible input data columns and trait table rules.
+    audience: [main_agent]
+  report_guide:
+    path: references/report-guide.md
+    title: Report guide
+    description: Report sections, finalizer response contract, and follow-up mapping.
+    audience: [main_agent]
+  service_boundary:
+    path: references/service-boundary.md
+    title: Service boundary
+    description: Runtime ownership and output responsibilities.
+    audience: [main_agent]
+resource_policy:
+  default_audience: [main_agent]
+  max_bytes: 12000

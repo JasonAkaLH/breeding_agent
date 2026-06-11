@@ -31,6 +31,11 @@ export interface TaskEventState {
   skillStatuses: SkillStatusLine[];
   assistantText: string;
   reasoningText: string;
+  memoryReasoningText: string;
+  plannerReasoningText: string;
+  interruptReasoningText: string;
+  skillReasoningText: string;
+  answerReasoningText: string;
   errorMessage: string | null;
   seenEventIds: string[];
 }
@@ -45,6 +50,11 @@ export function createInitialTaskEventState(): TaskEventState {
     skillStatuses: [],
     assistantText: '',
     reasoningText: '',
+    memoryReasoningText: '',
+    plannerReasoningText: '',
+    interruptReasoningText: '',
+    skillReasoningText: '',
+    answerReasoningText: '',
     errorMessage: null,
     seenEventIds: [],
   };
@@ -165,7 +175,98 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     }
     case 'main_agent.reasoning_delta': {
       const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
-      return { ...withEvent, phase: 'streaming', statusText: '正在思考并生成答案', currentActivityText: null, reasoningText: `${state.reasoningText}${delta}`, errorMessage: null };
+      const answerReasoningText = `${state.answerReasoningText}${delta}`;
+      return {
+        ...withEvent,
+        phase: 'streaming',
+        statusText: '正在思考并生成答案',
+        currentActivityText: null,
+        answerReasoningText,
+        reasoningText: composeReasoningText({
+          memory: state.memoryReasoningText,
+          planner: state.plannerReasoningText,
+          interrupt: state.interruptReasoningText,
+          skill: state.skillReasoningText,
+          answer: answerReasoningText,
+        }),
+        errorMessage: null,
+      };
+    }
+    case 'planner.reasoning_delta': {
+      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
+      const plannerReasoningText = `${state.plannerReasoningText}${delta}`;
+      return {
+        ...withEvent,
+        phase: 'streaming',
+        statusText: '正在规划并思考',
+        currentActivityText: null,
+        plannerReasoningText,
+        reasoningText: composeReasoningText({
+          memory: state.memoryReasoningText,
+          planner: plannerReasoningText,
+          interrupt: state.interruptReasoningText,
+          skill: state.skillReasoningText,
+          answer: state.answerReasoningText,
+        }),
+        errorMessage: null,
+      };
+    }
+    case 'memory.reasoning_delta': {
+      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
+      const memoryReasoningText = `${state.memoryReasoningText}${delta}`;
+      return {
+        ...withEvent,
+        phase: 'streaming',
+        statusText: '正在整理记忆并思考',
+        currentActivityText: null,
+        memoryReasoningText,
+        reasoningText: composeReasoningText({
+          memory: memoryReasoningText,
+          planner: state.plannerReasoningText,
+          interrupt: state.interruptReasoningText,
+          skill: state.skillReasoningText,
+          answer: state.answerReasoningText,
+        }),
+        errorMessage: null,
+      };
+    }
+    case 'interrupt.reasoning_delta': {
+      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
+      const interruptReasoningText = `${state.interruptReasoningText}${delta}`;
+      return {
+        ...withEvent,
+        phase: 'streaming',
+        statusText: '正在理解补充信息',
+        currentActivityText: null,
+        interruptReasoningText,
+        reasoningText: composeReasoningText({
+          memory: state.memoryReasoningText,
+          planner: state.plannerReasoningText,
+          interrupt: interruptReasoningText,
+          skill: state.skillReasoningText,
+          answer: state.answerReasoningText,
+        }),
+        errorMessage: null,
+      };
+    }
+    case 'soft_skill.reasoning_delta': {
+      const delta = typeof event.payload.delta === 'string' ? event.payload.delta : '';
+      const skillReasoningText = `${state.skillReasoningText}${delta}`;
+      return {
+        ...withEvent,
+        phase: 'streaming',
+        statusText: '正在判断 Skill 并思考',
+        currentActivityText: null,
+        skillReasoningText,
+        reasoningText: composeReasoningText({
+          memory: state.memoryReasoningText,
+          planner: state.plannerReasoningText,
+          interrupt: state.interruptReasoningText,
+          skill: skillReasoningText,
+          answer: state.answerReasoningText,
+        }),
+        errorMessage: null,
+      };
     }
     case 'main_agent.output_final':
       if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
@@ -233,6 +334,28 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     default:
       return state;
   }
+}
+
+function composeReasoningText(parts: {
+  memory: string;
+  planner: string;
+  interrupt: string;
+  skill: string;
+  answer: string;
+}): string {
+  if (!parts.memory && !parts.planner && !parts.interrupt && !parts.skill) {
+    return parts.answer;
+  }
+  return [
+    ['记忆思考', parts.memory],
+    ['规划思考', parts.planner],
+    ['补参思考', parts.interrupt],
+    ['Skill思考', parts.skill],
+    ['回答思考', parts.answer],
+  ]
+    .filter(([, text]) => text)
+    .map(([label, text]) => `### ${label}\n${text}`)
+    .join('\n\n');
 }
 
 function markNodeResumeProgress(

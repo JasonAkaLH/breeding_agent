@@ -165,6 +165,10 @@ class UploadPreviewResponse(BaseModel):
     column_normalization_count: int | None = None
     column_normalizations_truncated: bool | None = None
     normalized_content_type: str | None = None
+    char_count: int | None = None
+    line_count: int | None = None
+    size_bytes: int | None = None
+    file_type: str | None = None
     requires_sheet_selection: bool | None = None
     selected_sheet: str | None = None
     excel_sheets: list[dict[str, Any]] = Field(default_factory=list)
@@ -343,43 +347,6 @@ class InterruptResponse(BaseModel):
 class TaskInterruptsResponse(BaseModel):
     task_id: str
     interrupts: list[InterruptResponse]
-
-
-class AnswerInterruptRequest(StrictRequestModel):
-    task_id: str
-    interrupt_id: str
-    answer_payload: dict[str, Any] = Field(default_factory=dict)
-    client_request_id: str | None = None
-    answer: dict[str, Any] | None = None
-
-    @field_validator("answer_payload")
-    @classmethod
-    def reject_identity_answer_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
-        return _reject_reserved_identity_fields(value, field_name="answer_payload")
-
-    @field_validator("answer")
-    @classmethod
-    def reject_identity_answer(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        if value is None:
-            return None
-        return _reject_reserved_identity_fields(value, field_name="answer")
-
-    def runtime_answer_payload(self) -> dict[str, Any]:
-        payload = dict(self.answer_payload)
-        if self.client_request_id is not None:
-            payload["client_request_id"] = self.client_request_id
-        if self.answer is not None:
-            payload["answer"] = dict(self.answer)
-        return payload
-
-
-class AnswerInterruptResponse(BaseModel):
-    interrupt_id: str
-    status: str
-    node_id: str
-    answer_payload: dict[str, Any]
-    action: str | None = None
-    assistant_message: str | None = None
 
 
 class CapabilityResponse(BaseModel):

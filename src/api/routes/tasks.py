@@ -17,8 +17,6 @@ from src.storage.artifact_files import is_active_skill_output_file, parse_file_s
 from ..artifact_responses import artifact_response, should_return_task_artifact
 from ..auth import get_optional_owned_conversation, require_authenticated_user, require_task_owner
 from ..dto import (
-    AnswerInterruptRequest,
-    AnswerInterruptResponse,
     CancelTaskRequest,
     CancelTaskResponse,
     InterruptResponse,
@@ -32,7 +30,6 @@ from ..dto import (
 )
 from ..runtime import ApiRuntime
 from ..sse import encode_sse_event
-from ..upload_errors import UploadValidationError
 
 router = APIRouter()
 SSE_AUTH_REVALIDATION_INTERVAL_SECONDS = 15.0
@@ -267,29 +264,6 @@ async def list_task_interrupts(task_id: str, request: Request) -> TaskInterrupts
         task_id=task_id,
         interrupts=[InterruptResponse(**interrupt) for interrupt in interrupts],
     )
-
-
-@router.post(
-    "/api/v1/tasks/interrupts/answer",
-    response_model=AnswerInterruptResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def answer_task_interrupt(
-    body: AnswerInterruptRequest,
-    request: Request,
-) -> AnswerInterruptResponse:
-    runtime = _runtime(request)
-    user = await require_authenticated_user(request)
-    task_id = body.task_id
-    interrupt_id = body.interrupt_id
-    await require_task_owner(runtime, task_id, user)
-    try:
-        result = await runtime.answer_interrupt(task_id, interrupt_id, body.runtime_answer_payload())
-    except UploadValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return AnswerInterruptResponse(**result)
 
 
 @router.get("/api/v1/tasks/{task_id}/graph", response_model=TaskGraphResponse)
