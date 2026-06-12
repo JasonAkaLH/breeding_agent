@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 2026-06-12
+
+- Skill v2 回归测试口径已清理：本地旧 v1-only SkillExecutor/API fixture、旧本地 R runner 成功路径和旧 RiceGenie Markdown 输出断言不再作为当前发布门禁；保留的 Skill v2 contract/resource/input/dynamic reload/API 子集已收敛到当前 bundle 契约，并补齐 field-analysis / rice-genie 匹配触发词与 field-design schema alias。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
 ### 2026-06-11
 
 - 项目级 Skill v2 迁移与新增能力已归档：field-design、field-analysis、rice-genie 收敛到 v2 bundle 结构与统一 schema/reference 资源边界，新增 pop-gene 与 seed-navi Skill bundle；后端补齐 Skill runtime、slot collection、upload/file artifact 与 public profile 适配，前端同步任务事件与下载展示契约，相关 Skill 构建指南、API 文档和设计文档已同步更新。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
