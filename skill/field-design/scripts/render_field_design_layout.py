@@ -695,3 +695,371 @@ renderDetail();
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(html, encoding="utf-8")
+
+
+def render_multi_site_layout_html(
+    path: Path,
+    *,
+    title: str,
+    site_results: list[Mapping[str, Any]],
+    columns: list[str],
+    design: str,
+    parameters: Mapping[str, Any] | None = None,
+) -> None:
+    sites: list[dict[str, Any]] = []
+    for index, site in enumerate(site_results, start=1):
+        site_name = str(site.get("site") or f"site{index}")
+        rows = [normalize_row(row) for row in site.get("rows", []) if isinstance(row, Mapping)]
+        rows.sort(key=lambda row: (to_int(row.get("ranges")), to_int(row.get("pass")), to_int(row.get("plots"))))
+        site_parameters = dict(parameters or {})
+        if isinstance(site.get("parameters"), Mapping):
+            site_parameters.update(dict(site["parameters"]))
+        quality_control = site.get("quality_control") if isinstance(site.get("quality_control"), Mapping) else {}
+        sites.append(
+            {
+                "site": site_name,
+                "seed": site.get("seed"),
+                "rows": rows,
+                "meta": build_meta(rows=rows, design=design, parameters=site_parameters, quality_control=quality_control),
+            }
+        )
+    title_text = title.replace("Field Design", "田间试验设计").replace("Layout", "布局图")
+    sites_json = json.dumps(sites, ensure_ascii=False, separators=(",", ":"))
+    design_json = json.dumps(design)
+    is_diagonal = design == "diagonal"
+    has_repeat_filter = design in {"rcbd", "interval"}
+    type_ck_label = "Diagonal check" if is_diagonal else "对照"
+    type_hyb_label = "Test" if is_diagonal else "测试材料"
+    body_class = "diagonal-layout" if is_diagonal else "block-layout"
+    repeat_filter = '<label>重复/区组<select id="blockFilter"></select></label>' if has_repeat_filter else ""
+    html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html_escape(title_text)}</title>
+<style>
+:root {{
+  color-scheme: light;
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --line: #d9dde5;
+  --text: #1f2933;
+  --muted: #64748b;
+  --check: #f4b84a;
+  --active: #355c9a;
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}}
+.diagonal-layout {{ --bg: #f5f7f4; --active: #285f50; }}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  font-family: "Aptos", "Segoe UI", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}}
+header {{
+  padding: 18px 22px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}}
+h1 {{ margin: 0; font-size: 22px; line-height: 1.2; font-weight: 650; }}
+.site-tabs {{
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 22px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}}
+.site-tab {{
+  border: 1px solid #c8ced8;
+  background: #f8fafc;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 14px;
+}}
+.site-tab.active {{
+  background: var(--active);
+  border-color: var(--active);
+  color: #fff;
+}}
+.meta {{
+  margin-top: 8px;
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 13px;
+}}
+.toolbar {{
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  padding: 14px 22px;
+  background: #eef2f6;
+  border-bottom: 1px solid var(--line);
+}}
+label {{ display: grid; gap: 4px; font-size: 12px; color: var(--muted); }}
+select, input {{
+  height: 34px;
+  border: 1px solid #c8ced8;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 14px;
+}}
+main {{ display: grid; grid-template-columns: minmax(0, 1fr) 290px; min-height: calc(100vh - 170px); }}
+.layout-wrap {{ overflow: auto; padding: 16px 18px 24px; }}
+.grid {{
+  display: grid;
+  row-gap: 5px;
+  column-gap: 34px;
+  align-items: stretch;
+  width: fit-content;
+  min-width: min(100%, 900px);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(31,41,51,0.04) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(31,41,51,0.04) 1px, transparent 1px),
+    #fbfcfd;
+  background-size: 24px 24px;
+  box-shadow: var(--shadow);
+}}
+.cell {{
+  width: clamp(46px, calc((100vw - 430px) / var(--cols)), 84px);
+  aspect-ratio: 1.16 / 1;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 4px;
+  cursor: pointer;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 2px;
+  transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}}
+.cell.hidden {{ opacity: 0.12; filter: grayscale(0.8); }}
+.cell.ck {{
+  background: linear-gradient(180deg, var(--ck-light, #ffe08a), var(--ck-color, #f4b84a));
+  border-color: var(--ck-border, #d89522);
+}}
+.cell.hyb {{
+  background: linear-gradient(180deg, var(--set-light, #dcebff), var(--set-color, #78aee8));
+  border-color: var(--set-border, #4f87c4);
+}}
+.cell:hover {{ transform: translateY(-1px); box-shadow: 0 6px 16px rgba(15, 23, 42, 0.18); z-index: 5; }}
+.cell.selected {{ outline: 3px solid var(--active); outline-offset: 1px; }}
+.trt {{ align-self: start; font-size: clamp(10px, 1.1vw, 13px); font-weight: 700; overflow-wrap: anywhere; line-height: 1.05; }}
+.coord {{ display: flex; justify-content: space-between; gap: 6px; font-size: 10px; color: rgba(31,41,51,0.74); }}
+aside {{ border-left: 1px solid var(--line); background: var(--panel); padding: 18px; }}
+.detail-title {{ font-size: 15px; font-weight: 700; margin-bottom: 12px; }}
+.detail-row {{ display: flex; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid #edf0f4; font-size: 13px; }}
+.detail-row span:first-child {{ color: var(--muted); }}
+.legend {{ display: flex; gap: 10px; margin-top: 18px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }}
+.swatch {{ width: 14px; height: 14px; border-radius: 3px; display: inline-block; vertical-align: -2px; margin-right: 5px; }}
+.swatch.ck {{ background: var(--check); }}
+.swatch.hyb {{ background: linear-gradient(90deg, #78aee8, #7bbf8e, #c59be8); }}
+@media (max-width: 900px) {{
+  .toolbar {{ grid-template-columns: repeat(2, minmax(120px, 1fr)); }}
+  main {{ grid-template-columns: 1fr; }}
+  aside {{ border-left: 0; border-top: 1px solid var(--line); }}
+}}
+</style>
+</head>
+<body class="{body_class}">
+<header>
+  <h1>{html_escape(title_text)}</h1>
+  <div class="meta" id="meta"></div>
+</header>
+<nav class="site-tabs" id="siteTabs" aria-label="试验地点"></nav>
+<section class="toolbar">
+  <label>Set<select id="setFilter"></select></label>
+  {repeat_filter}
+  <label>类型<select id="typeFilter"><option value="all">全部</option><option value="ck">{type_ck_label}</option><option value="hyb">{type_hyb_label}</option></select></label>
+  <label>搜索<input id="searchBox" type="search" placeholder="ped_id / plot"></label>
+</section>
+<main>
+  <section class="layout-wrap"><div class="grid" id="grid"></div></section>
+  <aside>
+    <div class="detail-title">Plot Detail</div>
+    <div id="detail"></div>
+    <div class="legend">
+      <span><i class="swatch ck"></i>{type_ck_label}</span>
+      <span><i class="swatch hyb"></i>测试材料按 set 着色</span>
+    </div>
+  </aside>
+</main>
+<script>
+const sites = {sites_json};
+const design = {design_json};
+const hasRepeatFilter = {str(has_repeat_filter).lower()};
+const byId = id => document.getElementById(id);
+const setPalette = [
+  {{ color: "#78aee8", light: "#dcebff", border: "#4f87c4" }},
+  {{ color: "#7bbf8e", light: "#def4e4", border: "#4f9463" }},
+  {{ color: "#c59be8", light: "#f0e4fb", border: "#8a61ba" }},
+  {{ color: "#e58f7d", light: "#fde3dc", border: "#b76454" }},
+  {{ color: "#d2b45f", light: "#f7edc8", border: "#9f8332" }},
+  {{ color: "#78bfc7", light: "#d9f2f4", border: "#4f8f96" }}
+];
+const ckPalette = [
+  {{ color: "#f4b84a", light: "#ffe08a", border: "#d89522" }},
+  {{ color: "#e7a936", light: "#ffd776", border: "#c98218" }},
+  {{ color: "#f0c35d", light: "#ffecac", border: "#cc9a2b" }}
+];
+let siteIndex = 0;
+let selected = null;
+
+function site() {{ return sites[siteIndex] || sites[0] || {{ rows: [], meta: {{ parameters: {{}} }} }}; }}
+function rows() {{ return site().rows || []; }}
+function compact(value) {{ return value === undefined || value === null || value === "" ? "NA" : value; }}
+function fillSelect(select, values, allLabel) {{
+  if (!select) return;
+  select.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = allLabel;
+  select.appendChild(all);
+  values.forEach(value => {{
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = String(value);
+    select.appendChild(option);
+  }});
+}}
+function currentSets() {{ return [...new Set(rows().map(d => d.set).filter(Boolean))].sort(); }}
+function currentBlocks() {{ return [...new Set(rows().map(d => d.r).filter(Boolean))].sort((a, b) => a - b); }}
+function currentMaxPass() {{ return Math.max(...rows().map(d => Number(d.pass) || 0), 1); }}
+function currentMaxRange() {{ return Math.max(...rows().map(d => Number(d.ranges) || 0), 1); }}
+function palettes() {{
+  const sets = currentSets();
+  const cks = [...new Set(rows().filter(d => d.hyb_type === "ck").map(d => d.ped_id))].sort();
+  return {{
+    setColors: Object.fromEntries(sets.map((set, index) => [set, setPalette[index % setPalette.length]])),
+    ckColors: Object.fromEntries(cks.map((name, index) => [name, ckPalette[index % ckPalette.length]]))
+  }};
+}}
+function renderTabs() {{
+  byId("siteTabs").innerHTML = sites.map((item, index) => `<button class="site-tab ${{index === siteIndex ? "active" : ""}}" data-index="${{index}}">${{item.site}}</button>`).join("");
+  byId("siteTabs").querySelectorAll("button").forEach(button => button.addEventListener("click", () => {{
+    siteIndex = Number(button.dataset.index) || 0;
+    selected = rows()[0] || null;
+    resetFilters();
+    renderAll();
+  }}));
+}}
+function resetFilters() {{
+  fillSelect(byId("setFilter"), currentSets(), "全部");
+  if (hasRepeatFilter) fillSelect(byId("blockFilter"), currentBlocks(), "全部");
+  byId("typeFilter").value = "all";
+  byId("searchBox").value = "";
+}}
+function renderMeta() {{
+  const s = site();
+  const meta = s.meta || {{}};
+  const p = meta.parameters || {{}};
+  const planterLabel = p.planter === "cartesian" ? "顺序排列" : "蛇形排列";
+  const items = [
+    `地点 ${{s.site}}`,
+    `设计 ${{design.toUpperCase()}}`,
+    `排列方式 ${{planterLabel}}`,
+    `随机种子 ${{compact(s.seed || p.seed)}}`,
+    `小区 ${{meta.rows || rows().length}}`,
+    `Set ${{currentSets().join(", ") || "NA"}}`,
+    `行 ${{(meta.ranges || [0,0])[0]}}-${{(meta.ranges || [0,0])[1]}}`,
+    `列 ${{(meta.passes || [0,0])[0]}}-${{(meta.passes || [0,0])[1]}}`
+  ];
+  const blocks = currentBlocks();
+  if (blocks.length) items.splice(5, 0, `重复/区组 ${{blocks.join(", ")}}`);
+  byId("meta").innerHTML = items.map(x => `<span>${{x}}</span>`).join("");
+}}
+function rowAt(range, pass) {{ return rows().find(row => Number(row.ranges) === range && Number(row.pass) === pass); }}
+function isVisible(d) {{
+  if (!d) return false;
+  const setValue = byId("setFilter").value;
+  const blockValue = hasRepeatFilter && byId("blockFilter") ? byId("blockFilter").value : "all";
+  const typeValue = byId("typeFilter").value;
+  const search = byId("searchBox").value.trim().toLowerCase();
+  if (setValue !== "all" && d.set !== setValue) return false;
+  if (blockValue !== "all" && String(d.r) !== blockValue) return false;
+  if (typeValue !== "all" && d.hyb_type !== typeValue) return false;
+  if (search && !`${{d.ped_id}} ${{d.plots}} ${{d.set}}`.toLowerCase().includes(search)) return false;
+  return true;
+}}
+function renderGrid() {{
+  const grid = byId("grid");
+  const maxPass = currentMaxPass();
+  const maxRange = currentMaxRange();
+  const colors = palettes();
+  grid.style.setProperty("--cols", maxPass);
+  grid.style.gridTemplateColumns = `repeat(${{maxPass}}, minmax(46px, 1fr))`;
+  grid.innerHTML = "";
+  for (let range = 1; range <= maxRange; range++) {{
+    for (let pass = 1; pass <= maxPass; pass++) {{
+      const d = rowAt(range, pass);
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.className = "cell";
+      if (!d) {{
+        cell.classList.add("hidden");
+        cell.disabled = true;
+        grid.appendChild(cell);
+        continue;
+      }}
+      cell.classList.add(d.hyb_type === "ck" ? "ck" : "hyb");
+      if (d.hyb_type === "ck") {{
+        const color = colors.ckColors[d.ped_id] || ckPalette[0];
+        cell.style.setProperty("--ck-color", color.color);
+        cell.style.setProperty("--ck-light", color.light);
+        cell.style.setProperty("--ck-border", color.border);
+      }} else {{
+        const color = colors.setColors[d.set] || setPalette[0];
+        cell.style.setProperty("--set-color", color.color);
+        cell.style.setProperty("--set-light", color.light);
+        cell.style.setProperty("--set-border", color.border);
+      }}
+      if (!isVisible(d)) cell.classList.add("hidden");
+      if (selected && selected.plots === d.plots) cell.classList.add("selected");
+      const repeatText = hasRepeatFilter ? `${{d.set}}/${{d.r || ""}}` : `${{d.set}}`;
+      cell.innerHTML = `<div class="trt">${{d.ped_id}}</div><div></div><div class="coord"><span>R${{d.ranges}} P${{d.pass}}</span><span>${{repeatText}}</span></div>`;
+      cell.addEventListener("click", () => {{ selected = d; renderGrid(); renderDetail(); }});
+      grid.appendChild(cell);
+    }}
+  }}
+}}
+function renderDetail() {{
+  const d = selected;
+  if (!d) {{ byId("detail").innerHTML = ""; return; }}
+  byId("detail").innerHTML = [
+    ["site", site().site],
+    ["plot", d.plots],
+    ["ped_id", d.ped_id],
+    ["set", d.set],
+    ["repeat", d.r || "NA"],
+    ["range", d.ranges],
+    ["pass", d.pass],
+    ["type", d.hyb_type],
+    ["check", d.hyb_check || d.design_check || "NA"]
+  ].map(([k, v]) => `<div class="detail-row"><span>${{k}}</span><strong>${{compact(v)}}</strong></div>`).join("");
+}}
+function renderAll() {{ renderTabs(); renderMeta(); renderGrid(); renderDetail(); }}
+["setFilter", "blockFilter", "typeFilter", "searchBox"].forEach(id => {{
+  const element = byId(id);
+  if (element) element.addEventListener("input", () => {{ renderGrid(); renderDetail(); }});
+}});
+selected = rows()[0] || null;
+resetFilters();
+renderAll();
+</script>
+</body>
+</html>
+"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")

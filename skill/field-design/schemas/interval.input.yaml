@@ -135,6 +135,31 @@ inputs:
       - CK参数表
     validation:
       file_extensions: [.csv, .xls, .xlsx]
+  site_num:
+    type: integer
+    required: false
+    title: 试验地点数
+    question: 如果需要多个试点/试验地点，请提供地点数；默认 1 个地点。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    default: 1
+    aliases: [site_num, site_count, sites, 试点数, 试点, 试验地点数, 地点数, 地点]
+    patterns:
+      - '(?:site_num|site_count|sites?|试点数|试验地点数|地点数|地点|试点)\s*[:：=]?\s*(\d+)'
+      - '(\d+)\s*(?:个|处)?(?:试点|试验地点|地点|site|sites)'
+      - '做\s*(\d+)\s*(?:次|套|个试点|个地点)'
+      - '生成\s*(\d+)\s*套'
+      - '(\d+)\s*套(?:不一样|不同|独立)?'
+    validation:
+      min: 1
+      max: 50
   planter:
     type: string
     required: false

@@ -18,7 +18,7 @@ from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from render_field_design_layout import render_layout_html
+from render_field_design_layout import render_layout_html, render_multi_site_layout_html
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -60,6 +60,7 @@ DISPLAY_COLUMN_LABELS = {
     "ck_no": "CK编号",
     "start_pos": "起始位置",
     "interval": "间隔数量",
+    "site": "试验地点",
 }
 
 DESIGN_DISPLAY_COLUMN_LABELS = {
@@ -67,36 +68,7 @@ DESIGN_DISPLAY_COLUMN_LABELS = {
     "interval": {"r": "重复"},
 }
 
-CHINESE_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5, "陆": 6, "柒": 7, "捌": 8, "玖": 9}
-CHINESE_UNITS = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
-
-
-def parse_positive_integer_text(value: Any) -> int | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if re.search(r"[-−]\s*\d|\d+\.\d+", text):
-        return None
-    match = re.search(r"\d+", text)
-    if match:
-        number = int(match.group(0))
-        return number if number > 0 else None
-    chars = [char for char in text if char in CHINESE_DIGITS or char in CHINESE_UNITS]
-    if not chars:
-        return None
-    total = 0
-    current = 0
-    for char in chars:
-        if char in CHINESE_DIGITS:
-            current = CHINESE_DIGITS[char]
-            continue
-        unit = CHINESE_UNITS[char]
-        if current == 0:
-            current = 1
-        total += current * unit
-        current = 0
-    total += current
-    return total if total > 0 else None
+INTERNAL_ROW_FIELDS = {"set_index", "set_ncols"}
 
 
 def emit(payload: Mapping[str, Any]) -> None:
@@ -159,22 +131,95 @@ def resolve_design(payload: Mapping[str, Any]) -> str | None:
     return normalize_design(None, query)
 
 
+def payload_text(payload: Mapping[str, Any]) -> str:
+    values: list[str] = []
+    for key in ("query", "current_user_message", "resolved_user_message", "recent_user_message", "text", "user_text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    return " ".join(values)
+
+
 def get_positive_int(payload: Mapping[str, Any], key: str, query_patterns: Iterable[str] = ()) -> int | None:
     raw = payload.get(key)
     if raw is not None and not isinstance(raw, bool):
-        value = parse_positive_integer_text(raw)
-        return value if value and value > 0 else None
-    query = str(payload.get("query") or "")
+        try:
+            value = int(str(raw).strip())
+            return value if value > 0 else None
+        except ValueError:
+            return None
+    query = payload_text(payload)
     for pattern in query_patterns:
         match = re.search(pattern, query, flags=re.IGNORECASE)
         if match:
-            for group in match.groups():
-                value = parse_positive_integer_text(group)
-                if value and value > 0:
-                    return value
-    if query_patterns:
-        return parse_positive_integer_text(query)
+            try:
+                value = int(next(group for group in match.groups() if group))
+                return value if value > 0 else None
+            except (StopIteration, ValueError):
+                continue
     return None
+
+
+def get_positive_int_from_text(payload: Mapping[str, Any], query_patterns: Iterable[str]) -> int | None:
+    query = payload_text(payload)
+    for pattern in query_patterns:
+        match = re.search(pattern, query, flags=re.IGNORECASE)
+        if match:
+            try:
+                value = int(next(group for group in match.groups() if group))
+                return value if value > 0 else None
+            except (StopIteration, ValueError):
+                continue
+    return None
+
+
+def resolve_site_num(payload: Mapping[str, Any]) -> int:
+    site_num = get_positive_int(payload, "site_num", SITE_COUNT_PATTERNS)
+    if site_num is None:
+        for key in ("sites", "site_count", "地点数", "试点数"):
+            site_num = get_positive_int(payload, key)
+            if site_num is not None:
+                break
+    if site_num is None:
+        return 1
+    return min(site_num, 50)
+
+
+RCBD_BLOCK_PATTERNS = (
+    r"(?:blocks?|区组数|区组|重复数|重复|reps?|replications?)\s*[:：=]?\s*(\d+)",
+    r"(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)",
+)
+
+SITE_COUNT_PATTERNS = (
+    r"(?:site_num|site_count|sites?|试点数|试验地点数|地点数|地点|试点)\s*[:：=]?\s*(\d+)",
+    r"(\d+)\s*(?:个|处)?(?:试点|试验地点|地点|site|sites)",
+    r"做\s*(\d+)\s*(?:次|套|个试点|个地点)",
+    r"生成\s*(\d+)\s*套",
+    r"(\d+)\s*套(?:不一样|不同|独立)?",
+)
+
+
+def resolve_rcbd_blocks(payload: Mapping[str, Any], site_num: int) -> int | None:
+    text_blocks = get_positive_int_from_text(payload, RCBD_BLOCK_PATTERNS)
+    if text_blocks is not None:
+        return text_blocks
+
+    raw = payload.get("blocks")
+    if raw is None:
+        raw = payload.get("reps") or payload.get("replications") or payload.get("重复数") or payload.get("区组数")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        raw_blocks = int(str(raw).strip())
+    except ValueError:
+        return None
+    if raw_blocks <= 0:
+        return None
+
+    text_site_num = get_positive_int_from_text(payload, SITE_COUNT_PATTERNS)
+    if site_num > 1 and raw_blocks == site_num and text_site_num == site_num:
+        return None
+    return raw_blocks
 
 
 def get_bool(payload: Mapping[str, Any], key: str, default: bool) -> bool:
@@ -1305,6 +1350,7 @@ def format_success_parameters(parameters: Mapping[str, Any]) -> str:
     labels = {
         "blocks": "区组数",
         "ncols": "田块列数",
+        "site_num": "试验地点数",
         "requested_ck_ratio": "请求对照密度等级",
         "used_ck_ratio": "实际对照密度等级",
         "auto_upgraded": "是否自动升级密度等级",
@@ -1319,6 +1365,7 @@ def format_success_parameters(parameters: Mapping[str, Any]) -> str:
     ordered_keys = (
         "blocks",
         "ncols",
+        "site_num",
         "requested_ck_ratio",
         "used_ck_ratio",
         "auto_upgraded",
@@ -1385,6 +1432,26 @@ def localize_table_columns(
     return display_columns, display_rows
 
 
+def localize_rows_for_columns(
+    columns: list[str],
+    rows: list[Mapping[str, Any]],
+    *,
+    design: str | None = None,
+    limit: int | None = None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    source_rows = rows if limit is None else rows[:limit]
+    display_columns = [display_column_label(column, design) for column in columns]
+    display_rows: list[dict[str, Any]] = []
+    for row in source_rows:
+        display_rows.append(
+            {
+                display_column: row.get(source_column, "")
+                for source_column, display_column in zip(columns, display_columns, strict=True)
+            }
+        )
+    return display_columns, display_rows
+
+
 def build_output_file(path: Path, *, mime_type: str, label: str, summary: str) -> dict[str, str]:
     return {
         "path": f"outputs/{path.name}",
@@ -1403,6 +1470,10 @@ def coerce_output_rows(value: Any) -> list[dict[str, Any]]:
                 rows.append({str(key): cell for key, cell in item.items()})
         return rows
     return []
+
+
+def public_design_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): value for key, value in row.items() if str(key) not in INTERNAL_ROW_FIELDS}
 
 
 def extract_design_rows(result_payload: Mapping[str, Any], design: str) -> list[dict[str, Any]]:
@@ -1431,6 +1502,156 @@ def write_fieldbook_csv(path: Path, rows: list[Mapping[str, Any]], preferred_col
             writer.writerow({column: row.get(column, "") for column in columns})
 
 
+def fieldbook_columns(rows: list[Mapping[str, Any]], preferred_columns: list[str]) -> list[str]:
+    columns = [column for column in preferred_columns if any(column in row for row in rows)]
+    for row in rows:
+        for key in row:
+            text_key = str(key)
+            if text_key not in columns:
+                columns.append(text_key)
+    return columns
+
+
+def excel_column_name(index: int) -> str:
+    name = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def excel_cell_xml(value: Any, ref: str) -> str:
+    if value is None:
+        value = ""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f'<c r="{ref}"><v>{html_escape_xml(value)}</v></c>'
+    text = str(value)
+    return f'<c r="{ref}" t="inlineStr"><is><t>{html_escape_xml(text)}</t></is></c>'
+
+
+def html_escape_xml(value: Any) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def safe_sheet_name(value: str, fallback: str) -> str:
+    text = re.sub(r"[\[\]:*?/\\]", "_", str(value or "").strip()) or fallback
+    return text[:31] or fallback
+
+
+def worksheet_xml(rows: list[Mapping[str, Any]], columns: list[str]) -> str:
+    all_rows: list[list[Any]] = [columns]
+    all_rows.extend([[row.get(column, "") for column in columns] for row in rows])
+    row_xml: list[str] = []
+    for row_index, row in enumerate(all_rows, start=1):
+        cells = [
+            excel_cell_xml(value, f"{excel_column_name(column_index)}{row_index}")
+            for column_index, value in enumerate(row, start=1)
+        ]
+        row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    dimension = f"A1:{excel_column_name(max(1, len(columns)))}{max(1, len(all_rows))}"
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<dimension ref="{dimension}"/>'
+        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        f'<sheetData>{"".join(row_xml)}</sheetData>'
+        '</worksheet>'
+    )
+
+
+def write_multisite_fieldbook_xlsx(
+    path: Path,
+    site_results: list[Mapping[str, Any]],
+    preferred_columns: list[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sheet_names: list[str] = []
+    used_names: set[str] = set()
+    for index, site in enumerate(site_results, start=1):
+        name = safe_sheet_name(str(site.get("site") or f"site{index}"), f"site{index}")
+        base = name
+        suffix = 1
+        while name.lower() in used_names:
+            suffix += 1
+            name = safe_sheet_name(f"{base[:28]}_{suffix}", f"site{index}")
+        used_names.add(name.lower())
+        sheet_names.append(name)
+    workbook_sheets = []
+    workbook_rels = []
+    content_types = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+    ]
+    worksheet_entries: list[tuple[str, str]] = []
+    for index, site in enumerate(site_results, start=1):
+        rows = [dict(row) for row in site.get("rows", []) if isinstance(row, Mapping)]
+        columns = fieldbook_columns(rows, preferred_columns)
+        worksheet_entries.append((f"xl/worksheets/sheet{index}.xml", worksheet_xml(rows, columns)))
+        sheet_id = f"rId{index}"
+        workbook_sheets.append(
+            f'<sheet name="{html_escape_xml(sheet_names[index - 1])}" sheetId="{index}" r:id="{sheet_id}"/>'
+        )
+        workbook_rels.append(
+            f'<Relationship Id="{sheet_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{index}.xml"/>'
+        )
+        content_types.append(
+            f'<Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        )
+    styles_rel_id = f"rId{len(site_results) + 1}"
+    workbook_rels.append(
+        f'<Relationship Id="{styles_rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    )
+    content_types.append("</Types>")
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets>{"".join(workbook_sheets)}</sheets>'
+        '</workbook>'
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'{"".join(workbook_rels)}'
+        '</Relationships>'
+    )
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Aptos"/></font></fonts>'
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        '</styleSheet>'
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "".join(content_types))
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/styles.xml", styles_xml)
+        for worksheet_path, xml in worksheet_entries:
+            archive.writestr(worksheet_path, xml)
+
+
 def run_breedstat2_design(endpoint: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     return post_json(endpoint, payload)
 
@@ -1442,61 +1663,54 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
     if planter not in {"serpentine", "cartesian"}:
         return fail("planter 必须是 serpentine 或 cartesian。", error_type="invalid_parameter")
 
+    site_num = resolve_site_num(payload)
     result_json = output_dir / f"field-design-{design}-{run_id}-result.json"
     fieldbook_csv = output_dir / f"field-design-{design}-{run_id}-fieldbook.csv"
+    fieldbook_xlsx = output_dir / f"field-design-{design}-{run_id}-fieldbook.xlsx"
     layout_html = output_dir / f"field-design-{design}-{run_id}-layout.html"
     records = read_csv_records(input_path)
     if not records:
         return fail("材料清单为空或无法读取表头。", error_type="empty_materials")
 
     if design == "rcbd":
-        relaxed_test_position_constraint = False
-        blocks = get_positive_int(
-            payload,
-            "blocks",
-            (
-                r"(?:blocks?|区组数|区组|重复数|重复|reps?|replications?)\s*[:：=]?\s*(\d+)",
-                r"(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)",
-            ),
-        )
+        blocks = resolve_rcbd_blocks(payload, site_num)
         if blocks is None:
             return fail("缺少 RCBD 必需参数 blocks/重复数。", missing=["blocks"], error_type="missing_input")
-        api_payload = {
-            "data": records,
-            "blocks": blocks,
-            "planter": planter,
-            "seed": seed,
-            "site_num": get_positive_int(payload, "site_num") or 1,
-            "site_random": get_bool(payload, "site_random", False),
-            "check_position_constraint": get_bool(payload, "check_position_constraint", True),
-            "test_position_constraint": get_bool(payload, "test_position_constraint", True),
-        }
-        try:
-            result_payload = run_breedstat2_design("/field-design/rcbd", api_payload)
-        except BreedStat2FieldDesignError as exc:
-            if (
-                "Hybrid constraint solution not found" in exc.message
-                and api_payload["test_position_constraint"] is True
-            ):
-                retry_payload = dict(api_payload)
-                retry_payload["test_position_constraint"] = False
-                try:
-                    result_payload = run_breedstat2_design("/field-design/rcbd", retry_payload)
-                except BreedStat2FieldDesignError as retry_exc:
-                    return field_design_error_response(retry_exc, design=design, retried=True)
-                relaxed_test_position_constraint = True
-                api_payload = retry_payload
-            else:
-                return field_design_error_response(exc, design=design)
         columns = ["plots", "r", "ped_id", "ranges", "pass", "set", "hyb_check", "hyb_type"]
         title = "Field Design RCBD Layout"
         extra_parameters = {
             "blocks": blocks,
-            "test_position_constraint": api_payload["test_position_constraint"],
-            "check_position_constraint": api_payload["check_position_constraint"],
+            "test_position_constraint": get_bool(payload, "test_position_constraint", True),
+            "check_position_constraint": get_bool(payload, "check_position_constraint", True),
         }
-        if relaxed_test_position_constraint:
-            extra_parameters["auto_relaxed_test_position_constraint"] = True
+
+        def run_one_site(site_seed: int) -> tuple[dict[str, Any], dict[str, Any], bool]:
+            api_payload = {
+                "data": records,
+                "blocks": blocks,
+                "planter": planter,
+                "seed": site_seed,
+                "site_num": 1,
+                "site_random": False,
+                "check_position_constraint": extra_parameters["check_position_constraint"],
+                "test_position_constraint": extra_parameters["test_position_constraint"],
+            }
+            relaxed = False
+            try:
+                result = run_breedstat2_design("/field-design/rcbd", api_payload)
+            except BreedStat2FieldDesignError as exc:
+                if "Hybrid constraint solution not found" in exc.message and api_payload["test_position_constraint"] is True:
+                    retry_payload = dict(api_payload)
+                    retry_payload["test_position_constraint"] = False
+                    try:
+                        result = run_breedstat2_design("/field-design/rcbd", retry_payload)
+                    except BreedStat2FieldDesignError as retry_exc:
+                        raise retry_exc
+                    api_payload = retry_payload
+                    relaxed = True
+                else:
+                    raise exc
+            return result, api_payload, relaxed
     elif design == "diagonal":
         ncols = get_positive_int(payload, "ncols", (r"(?:ncols|列数|田块列数)\s*[:：=]?\s*(\d+)", r"(\d+)\s*(?:列|columns?)"))
         if ncols is None:
@@ -1510,15 +1724,15 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
             "ck_ratio": ck_ratio,
             "planter": planter,
             "randomize": randomize,
-            "seed": seed,
         }
-        try:
-            result_payload = run_breedstat2_design("/field-design/diagonal", api_payload)
-        except BreedStat2FieldDesignError as exc:
-            return field_design_error_response(exc, design=design)
         columns = ["plots", "ped_id", "hyb_type", "ranges", "pass", "set", "design_check"]
         title = "Field Design Diagonal Layout"
         extra_parameters = {"ncols": ncols, "requested_ck_ratio": ck_ratio, "randomize": randomize}
+
+        def run_one_site(site_seed: int) -> tuple[dict[str, Any], dict[str, Any], bool]:
+            site_payload = dict(api_payload)
+            site_payload["seed"] = site_seed
+            return run_breedstat2_design("/field-design/diagonal", site_payload), site_payload, False
     else:
         ncols = get_positive_int(payload, "ncols", (r"(?:ncols|列数|田块列数)\s*[:：=]?\s*(\d+)", r"(\d+)\s*(?:列|columns?)"))
         if ncols is None:
@@ -1561,44 +1775,126 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
             "nrows": get_positive_int(payload, "nrows"),
             "planter": planter,
             "randomize": randomize,
-            "seed": seed,
         }
-        try:
-            result_payload = run_breedstat2_design("/field-design/interval", api_payload)
-        except BreedStat2FieldDesignError as exc:
-            return field_design_error_response(exc, design=design)
         columns = ["plots", "r", "ped_id", "ranges", "pass", "set", "hyb_check", "hyb_type"]
         title = "Field Design Interval Layout"
         extra_parameters = {"ncols": ncols, "ck_spec": ck_spec, "randomize": randomize}
 
-    if result_payload.get("ok") is False:
-        return fail("试验设计执行失败：" + api_error_message(result_payload), error_type="api_failed")
-    result_json.write_text(json.dumps(result_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    design_rows = extract_design_rows(result_payload, design)
-    if not design_rows:
-        return fail("breedstat2 未返回可导出的 out_design。", error_type="missing_design_rows")
-    write_fieldbook_csv(fieldbook_csv, design_rows, columns)
+        def run_one_site(site_seed: int) -> tuple[dict[str, Any], dict[str, Any], bool]:
+            site_payload = dict(api_payload)
+            site_payload["seed"] = site_seed
+            return run_breedstat2_design("/field-design/interval", site_payload), site_payload, False
 
-    preview_columns, rows = preview_rows(fieldbook_csv, columns)
+    site_results: list[dict[str, Any]] = []
+    all_design_rows: list[dict[str, Any]] = []
+    result_payloads: list[dict[str, Any]] = []
+    relaxed_any = False
+    for site_index in range(site_num):
+        site_name = f"site{site_index + 1}"
+        site_seed = seed + site_index
+        try:
+            result_payload, api_payload, relaxed = run_one_site(site_seed)
+        except BreedStat2FieldDesignError as exc:
+            return field_design_error_response(exc, design=design, retried=relaxed_any)
+        if result_payload.get("ok") is False:
+            return fail(f"{site_name} 试验设计执行失败：" + api_error_message(result_payload), error_type="api_failed")
+        design_rows = extract_design_rows(result_payload, design)
+        if not design_rows:
+            return fail(f"{site_name} 的 breedstat2 未返回可导出的 out_design。", error_type="missing_design_rows")
+        site_rows: list[dict[str, Any]] = []
+        for row in design_rows:
+            site_row = public_design_row(row)
+            if site_num > 1:
+                site_row["site"] = site_name
+            site_rows.append(site_row)
+        result_parameters = dict(result_payload.get("parameters")) if isinstance(result_payload.get("parameters"), Mapping) else {}
+        parameters_for_site = {"seed": site_seed, "planter": planter, **extra_parameters, **result_parameters}
+        if relaxed:
+            parameters_for_site["test_position_constraint"] = False
+            parameters_for_site["auto_relaxed_test_position_constraint"] = True
+            relaxed_any = True
+        quality_control = result_payload.get("quality_control") if isinstance(result_payload.get("quality_control"), Mapping) else {}
+        site_results.append(
+            {
+                "site": site_name,
+                "seed": site_seed,
+                "rows": site_rows,
+                "parameters": parameters_for_site,
+                "quality_control": quality_control,
+            }
+        )
+        all_design_rows.extend(site_rows)
+        result_payloads.append(
+            {
+                "site": site_name,
+                "seed": site_seed,
+                "api_payload": {key: value for key, value in api_payload.items() if key != "data"},
+                "result": result_payload,
+            }
+        )
+
+    result_json.write_text(json.dumps({"design": design, "sites": result_payloads}, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_columns = (["site"] + columns) if site_num > 1 else columns
+    write_fieldbook_csv(fieldbook_csv, all_design_rows, output_columns)
+    if site_num > 1:
+        write_multisite_fieldbook_xlsx(fieldbook_xlsx, site_results, columns)
+
+    preview_source_csv = fieldbook_csv
+    preview_source_columns = output_columns
+    if site_num > 1:
+        site1_preview_csv = output_dir / f"field-design-{design}-{run_id}-site1-preview.csv"
+        write_fieldbook_csv(site1_preview_csv, site_results[0]["rows"], columns)
+        preview_source_csv = site1_preview_csv
+        preview_source_columns = columns
+    preview_columns, rows = preview_rows(preview_source_csv, preview_source_columns)
     display_columns, display_rows = localize_table_columns(preview_columns, rows, design=design)
-    parameters = {"seed": seed, "planter": planter, **extra_parameters}
-    if isinstance(result_payload.get("parameters"), Mapping):
-        parameters.update(dict(result_payload["parameters"]))
-    quality_control = result_payload.get("quality_control") if isinstance(result_payload.get("quality_control"), Mapping) else {}
-    render_layout_html(
-        layout_html,
-        title=title,
-        rows=design_rows,
-        columns=columns,
-        design=design,
-        parameters=parameters,
-        quality_control=quality_control,
-    )
+    site_tables: list[dict[str, Any]] = []
+    if site_num > 1:
+        for site in site_results:
+            table_columns, table_rows = localize_rows_for_columns(columns, site["rows"], design=design, limit=10)
+            site_tables.append(
+                {
+                    "site": site["site"],
+                    "seed": site["seed"],
+                    "columns": table_columns,
+                    "rows": table_rows,
+                    "row_count": len(site["rows"]),
+                    "sheet": site["site"],
+                }
+            )
+    parameters = dict(site_results[0]["parameters"])
+    parameters["site_num"] = site_num
+    parameters["site_seeds"] = [site["seed"] for site in site_results]
+    if relaxed_any:
+        parameters["auto_relaxed_test_position_constraint"] = True
+        parameters["test_position_constraint"] = False
+    if site_num > 1:
+        render_multi_site_layout_html(
+            layout_html,
+            title=title,
+            site_results=site_results,
+            columns=columns,
+            design=design,
+            parameters=parameters,
+        )
+    else:
+        render_layout_html(
+            layout_html,
+            title=title,
+            rows=all_design_rows,
+            columns=columns,
+            design=design,
+            parameters=parameters,
+            quality_control=site_results[0].get("quality_control", {}),
+        )
     answer_parts = [
-        f"{design.upper()} 试验设计已完成。",
+        f"{design.upper()} 试验设计已完成。" if site_num == 1 else f"{design.upper()} 试验设计已完成，已生成 {site_num} 个试验地点。",
         f"核心参数：{format_success_parameters(parameters)}",
-        "已生成完整 fieldbook CSV 和 HTML 布局预览。",
+        "已生成完整 fieldbook CSV 和 HTML 布局预览。" if site_num == 1 else "已生成多 sheet Excel fieldbook 和可切换试验地点的 HTML 布局预览；Excel 中每个 sheet 对应一个试验地点。",
     ]
+    if site_num > 1:
+        seed_text = "，".join(f"{site['site']}={site['seed']}" for site in site_results)
+        answer_parts.append(f"多试点说明：这里的试点按试验地点处理，每个地点使用不同随机种子独立生成；种子为 {seed_text}。下方表格只预览 site1，HTML 布局图可切换查看各地点。")
     if parameters.get("auto_relaxed_test_position_constraint"):
         answer_parts.append(
             "提示：首次设计时位置约束过紧，系统已自动放宽测试材料的位置约束后完成设计。"
@@ -1607,7 +1903,25 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
         )
     table = markdown_table(display_columns, display_rows)
     if table:
-        answer_parts.append("前 10 行种植顺序预览：\n" + table)
+        preview_title = "site1 前 10 行种植顺序预览：" if site_num > 1 else "前 10 行种植顺序预览："
+        answer_parts.append(preview_title + "\n" + table)
+
+    output_files = (
+        [
+            build_output_file(
+                fieldbook_xlsx,
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                label="多试点 fieldbook Excel",
+                summary="每个 sheet 对应一个试验地点。",
+            ),
+            build_output_file(layout_html, mime_type="text/html", label="HTML 布局预览", summary="田间布局可视化预览，可按试验地点切换。"),
+        ]
+        if site_num > 1
+        else [
+            build_output_file(fieldbook_csv, mime_type="text/csv", label="完整 fieldbook CSV", summary="完整种植顺序 fieldbook。"),
+            build_output_file(layout_html, mime_type="text/html", label="HTML 布局预览", summary="田间布局可视化预览。"),
+        ]
+    )
 
     return {
         "ok": True,
@@ -1618,10 +1932,10 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
         "columns": display_columns,
         "rows": display_rows,
         "row_count_preview": len(display_rows),
-        "output_files": [
-            build_output_file(fieldbook_csv, mime_type="text/csv", label="完整 fieldbook CSV", summary="完整种植顺序 fieldbook。"),
-            build_output_file(layout_html, mime_type="text/html", label="HTML 布局预览", summary="田间布局可视化预览。"),
-        ],
+        "sites": [{"site": site["site"], "seed": site["seed"], "row_count": len(site["rows"])} for site in site_results],
+        "site_tables": site_tables,
+        "fieldbook_format": "xlsx_sheets_by_site" if site_num > 1 else "csv_single_site",
+        "output_files": output_files,
     }
 
 

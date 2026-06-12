@@ -55,6 +55,10 @@ description: >-
   这类田块列数时，必须把上一轮材料清单与本轮 `ncols` 合并后运行 Skill，让运行时返回
   `status=needs_ck_parameters` 和 CK 表。不要改问“方案模板”“品种、重复、区组”等泛化设计字段。
 
+用户说“多个试点”“多个地点”“做几次”“几套不一样的结果”时，`试点` 必须理解为试验地点 `site`，
+不是材料清单里的 `set`。使用 `site_num` 表示地点数；每个地点沿用同一份材料清单和同一套设计参数，
+但使用不同随机种子独立生成设计。默认地点名为 `site1`, `site2`, `site3`。
+
 间比法 CK 追问使用“对照位置约束”作为用户可见字段名。模板清单包含这些中文字段：
 
 - `对照编号`：来自识别出的 CK 表。
@@ -77,6 +81,10 @@ description: >-
 2. 只展示前 10 行播种顺序预览表。
 3. 提供完整 fieldbook CSV 和 HTML 布局预览。
 4. 常规答复不展示内部 JSON、执行命令或调试信息。
+
+如果 `site_num > 1`，还必须说明已生成多个试验地点，每个地点用不同随机种子独立随机化；正式 fieldbook
+必须是多 sheet Excel，每个 sheet 一个 site。对话里的种植顺序表只预览 `site1`，HTML 布局预览应提供 site
+标签切换以查看各地点。
 
 只有在排查运行边界或解释职责分工时，才读取 `references/service-boundary.md`。
 
@@ -101,7 +109,8 @@ CK 表。
 
 - 设计类型和关键参数。
 - 前 10 行播种顺序预览。
-- 完整 fieldbook CSV。
+- 单试点设计提供完整 fieldbook CSV。
+- 多试点设计提供完整 fieldbook Excel，每个 sheet 对应一个试验地点；不要把所有 site 拼成一张用户可见总表。
 - HTML 布局预览。
 - 必要的设计说明，例如 Diagonal 对照比例升级或 Interval CK 放置约束。
 

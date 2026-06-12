@@ -21,6 +21,8 @@ routing:
     - 田间记录本
     - 播种顺序
     - 小区布局
+    - 多试点试验设计
+    - 多地点试验设计
     - field design
     - randomized complete block design
     - interval contrast design
@@ -30,6 +32,7 @@ routing:
     - $mini-field-design
   examples:
     - /field-design 用这个 CSV 做 RCBD，3 个重复
+    - /field-design 用这个 CSV 做 RCBD，3 个重复，5 个试点
     - /field-design 做对角线增广设计，ncols=20
     - /field-design 间比法设计，列数10，先识别 CK
 runtime:
@@ -99,6 +102,8 @@ outputs:
     artifacts:
       - extensions: [.csv]
         mime_types: [text/csv]
+      - extensions: [.xlsx]
+        mime_types: [application/vnd.openxmlformats-officedocument.spreadsheetml.sheet]
       - extensions: [.html]
         mime_types: [text/html]
 resources:
