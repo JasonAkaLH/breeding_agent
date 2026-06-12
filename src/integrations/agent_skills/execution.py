@@ -676,10 +676,32 @@ def _resolve_v2_structured_schema_fields(schema: SkillInputSchema, payload: Mapp
             continue
         if field.type in {"artifact", "file", "data"}:
             if artifact_count > 0:
-                resolved[name] = {"available": True, "count": artifact_count}
+                artifact_value: dict[str, Any] = {"available": True, "count": artifact_count}
+                source_artifacts = artifacts if isinstance(artifacts, list | tuple) else context.artifact_summaries
+                filenames = _artifact_context_filenames(source_artifacts)
+                if filenames:
+                    artifact_value["filenames"] = list(filenames)
+                    if len(filenames) == 1:
+                        artifact_value["filename"] = filenames[0]
+                resolved[name] = artifact_value
                 sources[name] = SkillInputSource(source="artifact", confidence="high")
             continue
     return resolved, sources
+
+
+def _artifact_context_filenames(items: object) -> tuple[str, ...]:
+    if not isinstance(items, list | tuple):
+        return ()
+    names: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        for key in ("filename", "normalized_filename", "original_filename", "name"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                names.append(Path(value.replace("\\", "/")).name)
+                break
+    return tuple(dict.fromkeys(name for name in names if name))
 
 
 async def _resolve_v2_schema_fields_with_llm(

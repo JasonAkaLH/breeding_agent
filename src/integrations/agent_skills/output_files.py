@@ -4,6 +4,7 @@ import mimetypes
 import posixpath
 import re
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -94,7 +95,7 @@ def collect_skill_output_files(
         )
 
     root = Path(outputs_dir).resolve()
-    manifest_extensions, manifest_mime_types = _manifest_file_constraints(manifest)
+    manifest_extensions, manifest_mime_types, manifest_mimes_by_extension = _manifest_file_constraints(manifest)
     files: list[CollectedSkillOutputFile] = []
     rejections: list[SkillOutputFileRejection] = []
     seen_archive_names: set[str] = set()
@@ -124,25 +125,30 @@ def collect_skill_output_files(
         if source.stat().st_nlink > 1:
             rejections.append(SkillOutputFileRejection(path=raw_path, reason="hardlink_not_allowed", message="output file hardlink is not allowed"))
             continue
-        extension = source.suffix.lower()
-        if extension not in _ALLOWED_SOURCE_EXTENSIONS:
+        base_extension = _matching_extension(source.name, _ALLOWED_SOURCE_EXTENSIONS)
+        manifest_extension = _matching_extension(source.name, manifest_extensions) if manifest_extensions is not None else None
+        extension = base_extension or manifest_extension
+        if extension is None:
             rejections.append(SkillOutputFileRejection(path=raw_path, reason="extension_not_allowed", message="output file extension is not allowed"))
             continue
-        if manifest_extensions is not None and extension not in manifest_extensions:
+        if manifest_extensions is not None and manifest_extension is None:
             rejections.append(SkillOutputFileRejection(path=raw_path, reason="manifest_extension_not_allowed", message="output file extension is not allowed by skill manifest"))
             continue
         declared_mime = _optional_string(item.get("mime_type"))
         declared_mime = declared_mime.lower() if declared_mime is not None else None
-        guessed_mime = _guess_mime_type(source.name)
-        allowed_mimes = _ALLOWED_MIME_BY_EXTENSION.get(extension, set())
-        if declared_mime is not None and declared_mime not in allowed_mimes:
-            rejections.append(SkillOutputFileRejection(path=raw_path, reason="mime_mismatch", message="output file MIME does not match extension"))
-            continue
-        if guessed_mime not in allowed_mimes:
-            rejections.append(SkillOutputFileRejection(path=raw_path, reason="mime_not_allowed", message="output file MIME is not allowed"))
-            continue
-        effective_mime = declared_mime or guessed_mime
-        if manifest_mime_types is not None and effective_mime not in manifest_mime_types and guessed_mime not in manifest_mime_types:
+        allowed_mimes = _allowed_mimes_for_extension(extension, manifest_mimes_by_extension)
+        if declared_mime is not None:
+            if declared_mime not in allowed_mimes:
+                rejections.append(SkillOutputFileRejection(path=raw_path, reason="mime_mismatch", message="output file MIME does not match extension"))
+                continue
+            effective_mime = declared_mime
+        else:
+            guessed_mime = _guess_mime_type(source.name)
+            if guessed_mime not in allowed_mimes:
+                rejections.append(SkillOutputFileRejection(path=raw_path, reason="mime_not_allowed", message="output file MIME is not allowed"))
+                continue
+            effective_mime = guessed_mime
+        if manifest_mime_types is not None and effective_mime not in manifest_mime_types:
             rejections.append(SkillOutputFileRejection(path=raw_path, reason="manifest_mime_not_allowed", message="output file MIME is not allowed by skill manifest"))
             continue
         archive_name = _safe_archive_name(normalized)
@@ -205,10 +211,30 @@ def _has_symlink_component(root: Path, relative_under_outputs: PurePosixPath) ->
 
 
 def _guess_mime_type(filename: str) -> str:
-    extension = Path(filename).suffix.lower()
+    extension = _matching_extension(filename, _ALLOWED_MIME_BY_EXTENSION.keys())
     if extension in _DEFAULT_MIME_BY_EXTENSION:
         return _DEFAULT_MIME_BY_EXTENSION[extension]
+    allowed_mimes = _ALLOWED_MIME_BY_EXTENSION.get(extension or "", set())
+    if len(allowed_mimes) == 1:
+        return next(iter(sorted(allowed_mimes)))
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+def _matching_extension(filename: str, allowed_extensions: Iterable[str] | None) -> str | None:
+    if not allowed_extensions:
+        return None
+    lower = filename.lower()
+    matches = [extension for extension in allowed_extensions if lower.endswith(extension)]
+    if not matches:
+        return None
+    return max(matches, key=len)
+
+
+def _allowed_mimes_for_extension(extension: str, manifest_mimes_by_extension: Mapping[str, set[str]]) -> set[str]:
+    base_mimes = _ALLOWED_MIME_BY_EXTENSION.get(extension)
+    if base_mimes:
+        return set(base_mimes)
+    return set(manifest_mimes_by_extension.get(extension, set()))
 
 
 def _optional_string(value: Any) -> str | None:
@@ -218,20 +244,47 @@ def _optional_string(value: Any) -> str | None:
     return text or None
 
 
-def _manifest_file_constraints(manifest: SkillManifest | None) -> tuple[set[str] | None, set[str] | None]:
+def _manifest_file_constraints(manifest: SkillManifest | None) -> tuple[set[str] | None, set[str] | None, dict[str, set[str]]]:
     if manifest is None:
-        return None, None
-    files = manifest.outputs.schema.get("files")
-    if not isinstance(files, list | tuple):
-        return None, None
+        return None, None, {}
     extensions: set[str] = set()
     mime_types: set[str] = set()
-    for item in files:
+    mimes_by_extension: dict[str, set[str]] = {}
+
+    legacy_files = manifest.outputs.schema.get("files")
+    if isinstance(legacy_files, list | tuple):
+        _collect_file_constraints(legacy_files, extensions=extensions, mime_types=mime_types, mimes_by_extension=mimes_by_extension)
+
+    contract = getattr(manifest, "contract", None)
+    outputs = getattr(contract, "outputs", {}) if contract is not None else {}
+    if isinstance(outputs, Mapping):
+        for output in outputs.values():
+            artifacts = getattr(output, "artifacts", ())
+            if isinstance(artifacts, list | tuple):
+                _collect_file_constraints(artifacts, extensions=extensions, mime_types=mime_types, mimes_by_extension=mimes_by_extension)
+
+    return (extensions or None), (mime_types or None), mimes_by_extension
+
+
+def _collect_file_constraints(
+    items: list | tuple,
+    *,
+    extensions: set[str],
+    mime_types: set[str],
+    mimes_by_extension: dict[str, set[str]],
+) -> None:
+    for item in items:
         if not isinstance(item, Mapping):
             continue
-        for ext in string_tuple(item.get("extensions") or item.get("extension")):
-            normalized = ext.lower()
-            extensions.add(normalized if normalized.startswith(".") else f".{normalized}")
-        for mime in string_tuple(item.get("mime_types") or item.get("mime_type")):
-            mime_types.add(mime.lower())
-    return (extensions or None), (mime_types or None)
+        item_extensions = {_normalize_extension(ext) for ext in string_tuple(item.get("extensions") or item.get("extension"))}
+        item_mime_types = {mime.lower() for mime in string_tuple(item.get("mime_types") or item.get("mime_type"))}
+        extensions.update(item_extensions)
+        mime_types.update(item_mime_types)
+        for extension in item_extensions:
+            if item_mime_types:
+                mimes_by_extension.setdefault(extension, set()).update(item_mime_types)
+
+
+def _normalize_extension(value: str) -> str:
+    normalized = value.lower()
+    return normalized if normalized.startswith(".") else f".{normalized}"

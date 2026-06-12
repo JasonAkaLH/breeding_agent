@@ -22,6 +22,7 @@ class SkillInputSourcePolicy:
 @dataclass(slots=True, frozen=True)
 class SkillInputValidationRule:
     regex: str = ""
+    file_extensions: tuple[str, ...] = ()
     min: float | None = None
     max: float | None = None
     min_length: int | None = None
@@ -214,6 +215,11 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
         ),
         validation=SkillInputValidationRule(
             regex=str(validation.get("regex") or "").strip() if isinstance(validation, Mapping) else "",
+            file_extensions=_normalize_extensions(
+                (validation.get("file_extensions") or validation.get("file_extension"))
+                if isinstance(validation, Mapping)
+                else (),
+            ),
             min=_float_or_none(validation.get("min") if isinstance(validation, Mapping) else None),
             max=_float_or_none(validation.get("max") if isinstance(validation, Mapping) else None),
             min_length=_int_or_none(validation.get("min_length") if isinstance(validation, Mapping) else None),
@@ -242,6 +248,10 @@ def _validate_field_value(field: SkillInputField, value: Any, *, source: str) ->
                 return SkillInputValidationIssue(field.name, "regex", rule.message or "Value does not match regex.")
         except re.error:
             return SkillInputValidationIssue(field.name, "regex_invalid", "Validation regex is invalid.")
+    if field.type in _ARTIFACT_TYPES and rule.file_extensions:
+        filename_issue = _validate_artifact_file_extension(field, value, rule.file_extensions)
+        if filename_issue is not None:
+            return filename_issue
     if isinstance(coerced, int | float):
         if rule.min is not None and coerced < rule.min:
             return SkillInputValidationIssue(field.name, "min", rule.message or "Value is below minimum.")
@@ -295,6 +305,56 @@ def _required_when_matches(required_when: Mapping[str, Any], payload: Mapping[st
 
 def _present(payload: Mapping[str, Any], field: str) -> bool:
     return field in payload and payload[field] not in (None, "")
+
+
+def _validate_artifact_file_extension(
+    field: SkillInputField,
+    value: Any,
+    allowed_extensions: tuple[str, ...],
+) -> SkillInputValidationIssue | None:
+    filenames = _artifact_filenames(value)
+    if not filenames:
+        # Older runtime-owned artifact placeholders only prove that an artifact is
+        # available.  Keep those placeholders compatible; concrete artifact
+        # metadata with filenames is validated strictly below.
+        return None
+    if any(_filename_matches_extension(filename, allowed_extensions) for filename in filenames):
+        return None
+    allowed = ", ".join(allowed_extensions)
+    return SkillInputValidationIssue(field.name, "file_extension", f"Artifact filename extension must be one of: {allowed}.")
+
+
+def _artifact_filenames(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        text = value.strip()
+        return (Path(text).name,) if text else ()
+    if not isinstance(value, Mapping):
+        return ()
+    names: list[str] = []
+    for key in ("filename", "normalized_filename", "original_filename", "name"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            names.append(candidate.strip())
+    raw_filenames = value.get("filenames")
+    if isinstance(raw_filenames, list | tuple):
+        names.extend(str(item).strip() for item in raw_filenames if str(item).strip())
+    safe_names = (Path(name.replace("\\", "/")).name for name in names if name.strip())
+    return tuple(dict.fromkeys(safe_names))
+
+
+def _filename_matches_extension(filename: str, allowed_extensions: tuple[str, ...]) -> bool:
+    lower = filename.lower()
+    return any(lower.endswith(extension) for extension in allowed_extensions)
+
+
+def _normalize_extensions(value: Any) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for item in _string_tuple(value):
+        ext = item.lower()
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        normalized.append(ext)
+    return tuple(dict.fromkeys(normalized))
 
 
 def _coerce_for_validation(field: SkillInputField, value: Any) -> Any | None:
