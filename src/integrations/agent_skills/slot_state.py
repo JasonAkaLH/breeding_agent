@@ -65,32 +65,6 @@ _HISTORY_RECALL_PATTERNS = (
     re.compile(r"(不是|不都|已经).*(告诉|说过|给过|发过|上传过)", re.IGNORECASE),
     re.compile(r"(as\s+i\s+said|as\s+mentioned|i\s+already\s+(told|gave|sent|uploaded))", re.IGNORECASE),
 )
-_CHINESE_DIGITS = {
-    "零": 0,
-    "〇": 0,
-    "一": 1,
-    "二": 2,
-    "两": 2,
-    "三": 3,
-    "四": 4,
-    "五": 5,
-    "六": 6,
-    "七": 7,
-    "八": 8,
-    "九": 9,
-    "壹": 1,
-    "贰": 2,
-    "叁": 3,
-    "肆": 4,
-    "伍": 5,
-    "陆": 6,
-    "柒": 7,
-    "捌": 8,
-    "玖": 9,
-}
-_CHINESE_UNITS = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
-
-
 class SlotStateTransitionError(ValueError):
     pass
 
@@ -1028,10 +1002,7 @@ def _parse_positive_integer(value: Any) -> int | None:
     arabic = re.search(r"(?<![\d.])([+-]?\d+)(?![\d.])", text)
     if arabic is not None:
         return int(arabic.group(1))
-    chinese = re.search(r"[零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟]+", text)
-    if chinese is None:
-        return None
-    return _parse_chinese_integer(chinese.group(0))
+    return None
 
 
 def _parse_number(value: Any) -> float | None:
@@ -1054,29 +1025,6 @@ def _parse_bool(value: Any) -> bool | None:
     if text in {"false", "0", "no", "n", "否", "不要", "不随机"}:
         return False
     return None
-
-
-def _parse_chinese_integer(text: str) -> int | None:
-    if not text:
-        return None
-    if not any(char in _CHINESE_UNITS or char in {"万", "萬"} for char in text):
-        digits = [str(_CHINESE_DIGITS[char]) for char in text if char in _CHINESE_DIGITS]
-        return int("".join(digits)) if digits else None
-    total = 0
-    section = 0
-    number = 0
-    for char in text:
-        if char in _CHINESE_DIGITS:
-            number = _CHINESE_DIGITS[char]
-        elif char in _CHINESE_UNITS:
-            section += (number or 1) * _CHINESE_UNITS[char]
-            number = 0
-        elif char in {"万", "萬"}:
-            section += number
-            total += (section or 1) * 10000
-            section = 0
-            number = 0
-    return total + section + number
 
 
 def _validation_issues_to_json(issues: tuple[SkillInputValidationIssue, ...]) -> tuple[Mapping[str, Any], ...]:
