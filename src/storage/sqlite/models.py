@@ -32,6 +32,38 @@ class ConversationRow(SQLiteBase):
     delete_phase: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+
+
+class ConversationFileResourceRow(SQLiteBase):
+    __tablename__ = "conversation_file_resource"
+    __table_args__ = (
+        Index("idx_conversation_file_conversation_status_created", "conversation_id", "status", "created_at"),
+        Index("idx_conversation_file_username_conversation", "username", "conversation_id"),
+        Index("idx_conversation_file_storage_key", "storage_key"),
+    )
+
+    file_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    file_type: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    preview: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    description_status: Mapped[str] = mapped_column(Text, nullable=False)
+    description_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalized_content_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requires_sheet_selection: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("0"))
+    selected_sheet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class ConversationMemorySummaryRow(SQLiteBase):
     __tablename__ = "conversation_memory_summary"
     __table_args__ = (

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 
 from ..auth import require_authenticated_user
 from ..dto import (
@@ -33,6 +33,8 @@ def _upload_response(record) -> UploadFileResponse:
         size_bytes=record.size_bytes,
         sha256=record.sha256,
         expires_at=record.expires_at,
+        status=getattr(record, "status", None),
+        description_status=getattr(record, "description_status", None),
         preview=UploadPreviewResponse(**record.preview),
     )
 
@@ -69,17 +71,31 @@ async def _reject_unexpected_upload_form_fields(request: Request) -> None:
     )
 
 
-@router.get("/api/v1/conversations/{conversation_id}/uploads", response_model=UploadListResponse)
-async def list_conversation_uploads(conversation_id: str, request: Request) -> UploadListResponse:
+@router.get("/api/v1/conversations/{conversation_id}/uploads", response_model=UploadListResponse, response_model_exclude_none=True)
+async def list_conversation_uploads(
+    conversation_id: str,
+    request: Request,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    cursor: str | None = Query(default=None),
+    include_deleted: bool = Query(default=False),
+) -> UploadListResponse:
     runtime = _runtime(request)
     user = await require_authenticated_user(request)
     try:
-        records = await runtime.list_uploads(conversation_id, user.username)
+        records = await runtime.list_uploads(
+            conversation_id,
+            user.username,
+            include_deleted=include_deleted,
+            limit=limit,
+            cursor=cursor,
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown conversation: {conversation_id}") from exc
+    next_cursor = records[-1].upload_id if limit is not None and len(records) == limit else None
     return UploadListResponse(
         conversation_id=conversation_id,
         uploads=[_upload_response(record) for record in records],
+        next_cursor=next_cursor,
     )
 
 

@@ -64,6 +64,31 @@ class ConversationMemorySummary:
     updated_at: datetime | None = None
 
 
+
+
+@dataclass(slots=True, frozen=True)
+class ConversationFileResource:
+    file_id: str
+    conversation_id: str
+    username: str
+    original_filename: str
+    content_type: str
+    file_type: str
+    size_bytes: int
+    sha256: str
+    storage_key: str
+    preview: JsonMapping = field(default_factory=dict)
+    description_status: str = "pending"
+    description_summary: str | None = None
+    description_ref: str | None = None
+    status: str = "active"
+    normalized_filename: str | None = None
+    normalized_content_type: str | None = None
+    requires_sheet_selection: bool = False
+    selected_sheet: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
 @dataclass(slots=True, frozen=True)
 class AuthUserToken:
     username: str

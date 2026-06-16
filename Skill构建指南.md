@@ -178,21 +178,29 @@ activation:
   aliases:
     - rcbd
     - 随机完全区组
-fields:
+inputs:
   material_data:
     type: artifact
     required: true
     title: 材料数据
     question: 请上传或指定材料表。
-    sources:
-      - upload
+    source:
+      allowed:
+        - artifact
+        - task_attachment
+        - upload_ledger
   blocks:
     type: integer
     required: true
     title: 重复次数
     question: 请提供重复次数，例如 3 个重复。
-    sources:
-      - user_text
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
     validation:
       min: 1
       max: 20
@@ -201,11 +209,45 @@ fields:
 规则：
 
 - 每个 schema 只覆盖一个业务模式；不要让一个字段表同时承载多个互斥模式。
-- 字段来源必须显式声明，例如 `user_text`、`upload`、`metadata`、`const`。
+- 字段来源必须用 `source.allowed` 显式声明，例如 `query`、`current_user_message`、`resolved_user_message`、`artifact`、`task_attachment`、`upload_ledger`、`metadata`。
 - artifact 字段只引用平台上传/产物摘要；不得让 LLM 生成 artifact 内容或本地路径。
 - 缺参 interrupt 使用 schema 里的 `question`、`title`、`required` 和校验规则生成，恢复时会保留 `selected_schema_id`。
 
-## 6. ResourceService 按需读取边界
+
+## 6. 文件输入契约：manifest / mount_path 优先
+
+新版 `python_subprocess` Skill 处理上传文件时，应优先读取平台注入的真实文件挂载，而不是把文件内容内联进 payload 作为主方案。
+
+脚本入口 payload 会包含顶层字段：
+
+```json
+{
+  "resource_manifest_path": "/tmp/skill-run/resource_manifest.json",
+  "conversation_index_path": "/tmp/skill-run/resource_index.md",
+  "input_dir": "/tmp/skill-run/input"
+}
+```
+
+`resource_manifest.json` 的 `files[]` 中包含每个本次执行选中文件的 `mount_path`。脚本应打开该路径读取文件本体：
+
+```python
+import json
+from pathlib import Path
+
+manifest_path = payload.get("resource_manifest_path")
+manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+for file_info in manifest.get("files", []):
+    data = Path(file_info["mount_path"]).read_bytes()
+```
+
+规则：
+
+- `mount_path` 是本次 Skill run 临时 workspace 内的受控副本，不是持久存储路径。
+- Prompt-facing `SKILL.md` / `references/*.md` 不得暴露持久路径、`storage_key`、本机绝对路径或内部 runtime 目录。
+- `uploaded_artifacts[].content` / `content_base64` 只作为旧 Skill 兼容层；新 Skill 不应把它们当主接口。
+- 不要让 LLM 生成、猜测或拼接本地路径；文件路径只能来自平台注入的 manifest / `mount_path`。
+
+## 7. ResourceService 按需读取边界
 
 `SkillResourceService` 只允许读取 contract 声明或 bundle 内允许的资源，并按 audience 执行策略：
 
@@ -216,7 +258,7 @@ fields:
 
 因此，写 Skill 时应把“用户可见说明、字段口径、示例”放在 `references/`，把实现代码和内部配置留在执行目录。
 
-## 7. 外部 API 调用方式
+## 8. 外部 API 调用方式
 
 ### 7.1 自然语言规划
 

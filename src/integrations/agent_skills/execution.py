@@ -49,7 +49,7 @@ _SAFE_ARTIFACT_KEYS = frozenset({
     "selected_sheet",
     "requires_sheet_selection",
 })
-_SCRIPT_ARTIFACT_KEYS = frozenset((*_SAFE_ARTIFACT_KEYS, "content", "content_base64", "encoding"))
+_SCRIPT_ARTIFACT_KEYS = frozenset((*_SAFE_ARTIFACT_KEYS, "content", "content_base64", "encoding", "storage_key", "conversation_id"))
 _BLOCKED_METADATA_KEYS = frozenset(
     {
         "conversation_memory",
@@ -1073,7 +1073,7 @@ def build_skill_script_artifact_context(
     access to raw upload bytes.
     """
 
-    raw_items = metadata.get("skill_artifacts")
+    raw_items = metadata.get("skill_artifacts") or metadata.get("uploaded_artifacts") or metadata.get("artifacts")
     sanitized = _sanitize_artifact_items(raw_items, allowed_keys=_SCRIPT_ARTIFACT_KEYS)
     if sanitized:
         return sanitized

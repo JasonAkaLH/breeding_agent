@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
 import { CopyOutlined, ExclamationCircleFilled, ReloadOutlined } from '@ant-design/icons';
-import { Alert, Button, Card, ConfigProvider, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
+import { Alert, Button, Card, ConfigProvider, Drawer, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
@@ -225,6 +225,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
   const [selectedSkillCommand, setSelectedSkillCommand] = useState<SlashCommand | null>(null);
   const [pendingUploads, setPendingUploads] = useState<UploadFileResponse[]>([]);
+  const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [draggingUpload, setDraggingUpload] = useState(false);
   const [deletingUploadIds, setDeletingUploadIds] = useState<Set<string>>(() => new Set());
@@ -1899,34 +1900,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                 aria-label="悬浮发送栏"
               >
                 <Space direction="vertical" size="small" className="composer-space">
-                  {pendingUploads.length > 0 ? (
-                    <Space size={[8, 8]} wrap aria-label="暂存区文件列表" className="composer-attachments">
-                      {pendingUploads.map((upload) => (
-                        <Tag key={upload.upload_id} className="upload-file-tag">
-                          {upload.filename}
-                          {upload.file_type === 'spreadsheet' ? ' · Excel' : ''}
-                          {upload.file_type === 'text' ? ' · TXT' : ''}
-                          {upload.file_type === 'vcf' ? ' · VCF' : ''}
-                          {upload.preview.source_encoding ? ` · ${upload.preview.source_encoding}` : ''}
-                          {typeof upload.preview.row_count === 'number' ? ` · ${upload.preview.row_count} 行` : ''}
-                          {upload.preview.columns.length > 0 ? ` · ${upload.preview.columns.slice(0, 3).join('/')}` : ''}
-                          {upload.preview.requires_sheet_selection ? ' · 需选择 sheet' : ''}
-                          {upload.preview.columns_truncated || upload.preview.excel_sheets_truncated ? ' · 已裁剪摘要' : ''}
-                          <Button
-                            type="link"
-                            danger
-                            size="small"
-                            aria-label={`删除文件 ${upload.filename}`}
-                            loading={deletingUploadIds.has(upload.upload_id)}
-                            disabled={active}
-                            onClick={() => void handleDeleteUpload(upload)}
-                          >
-                            删除
-                          </Button>
-                        </Tag>
-                      ))}
-                    </Space>
-                  ) : null}
                   {selectedSkillCommand ? (
                     <div className="selected-skill-command" role="status" aria-label="已选择 Skill">
                       <span>将使用 <strong>{selectedSkillCommand.command}</strong> {selectedSkillCommand.displayName}</span>
@@ -2048,6 +2021,56 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                 </Space>
               </Card>
             </div>
+            <Button
+              type="primary"
+              className="conversation-files-fab"
+              aria-label={`打开当前对话文件面板，当前 ${pendingUploads.length} 个文件`}
+              onClick={() => setFileDrawerOpen(true)}
+              loading={uploadingFile}
+            >
+              <span aria-hidden="true">📎</span>
+              <span>文件</span>
+              {pendingUploads.length > 0 ? <span className="conversation-files-fab-count">{pendingUploads.length}</span> : null}
+            </Button>
+            <Drawer
+              title="当前对话文件"
+              placement="right"
+              open={fileDrawerOpen}
+              onClose={() => setFileDrawerOpen(false)}
+              width={360}
+              className="conversation-files-drawer"
+              rootClassName="conversation-files-drawer-root"
+            >
+              <Space direction="vertical" size="middle" className="conversation-files-drawer-content">
+                <Button
+                  block
+                  aria-label="选择 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件"
+                  onClick={() => uploadInputRef.current?.click()}
+                  disabled={!canUploadInCurrentComposer || uploadingFile}
+                  loading={uploadingFile}
+                >
+                  上传文件
+                </Button>
+                {pendingUploads.length > 0 ? (
+                  <Space direction="vertical" size="small" className="conversation-file-list" aria-label="当前对话文件列表">
+                    {pendingUploads.map((upload) => (
+                      <ConversationFileCard
+                        key={upload.upload_id}
+                        upload={upload}
+                        deleting={deletingUploadIds.has(upload.upload_id)}
+                        disabled={active}
+                        onDelete={() => void handleDeleteUpload(upload)}
+                      />
+                    ))}
+                  </Space>
+                ) : (
+                  <div className="conversation-files-empty">
+                    <Typography.Text type="secondary">当前对话还没有上传文件。</Typography.Text>
+                    <Typography.Text type="secondary">上传后，文件会保存在本地并可供本对话里的 Skill 使用。</Typography.Text>
+                  </div>
+                )}
+              </Space>
+            </Drawer>
           </section>
         </main>
       </Layout>
@@ -2281,6 +2304,98 @@ function interruptSubmitMetadata(interrupt: PendingInterrupt, uploads: UploadFil
 function uploadAnswerDisplayText(uploads: UploadFileResponse[]): string {
   if (uploads.length === 0) return '';
   return `已上传文件：${uploads.map((upload) => upload.filename).join('、')}`;
+}
+
+function uploadFileTypeLabel(upload: UploadFileResponse): string {
+  switch (upload.file_type) {
+    case 'spreadsheet':
+      return 'Excel';
+    case 'text':
+      return 'TXT';
+    case 'vcf':
+      return 'VCF';
+    case 'image':
+      return '图片';
+    case 'pdf':
+      return 'PDF';
+    case 'json':
+      return 'JSON';
+    case 'csv':
+      return 'CSV';
+    default:
+      return upload.file_type || '文件';
+  }
+}
+
+function uploadFileSummaryParts(upload: UploadFileResponse): string[] {
+  const preview = upload.preview;
+  const columns = preview.columns ?? [];
+  const parts = [uploadFileTypeLabel(upload)];
+  if (preview.source_encoding) parts.push(preview.source_encoding);
+  if (typeof preview.row_count === 'number') parts.push(`${preview.row_count} 行`);
+  if (columns.length > 0) parts.push(columns.slice(0, 3).join('/'));
+  if (preview.requires_sheet_selection) parts.push('需选择 sheet');
+  if (preview.columns_truncated || preview.excel_sheets_truncated) parts.push('已裁剪摘要');
+  return parts;
+}
+
+function formatFileSize(sizeBytes: number): string {
+  if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return '未知大小';
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function ConversationFileCard({
+  upload,
+  deleting,
+  disabled,
+  onDelete,
+}: {
+  upload: UploadFileResponse;
+  deleting: boolean;
+  disabled: boolean;
+  onDelete: () => void;
+}) {
+  const summaryParts = uploadFileSummaryParts(upload);
+  const columns = upload.preview.columns ?? [];
+
+  return (
+    <div className="conversation-file-card">
+      <div className="conversation-file-card-header">
+        <div className="conversation-file-card-title">
+          <Typography.Text strong ellipsis={{ tooltip: upload.filename }} className="conversation-file-name">
+            {upload.filename}
+          </Typography.Text>
+          <Typography.Text type="secondary" className="conversation-file-meta">
+            {summaryParts.join(' · ')}
+          </Typography.Text>
+        </div>
+        <Tag color="green" className="conversation-file-ready-tag">Skill 可用</Tag>
+      </div>
+      {columns.length > 3 ? (
+        <Typography.Text type="secondary" className="conversation-file-extra">
+          另有 {columns.length - 3} 个字段可在 Skill 中读取
+        </Typography.Text>
+      ) : null}
+      <div className="conversation-file-actions">
+        <Typography.Text type="secondary" className="conversation-file-size">
+          {formatFileSize(upload.size_bytes)}
+        </Typography.Text>
+        <Button
+          danger
+          type="text"
+          size="small"
+          loading={deleting}
+          disabled={disabled || deleting}
+          aria-label={`删除文件 ${upload.filename}`}
+          onClick={onDelete}
+        >
+          删除
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function sheetSelectionDisplayText(field: SheetSelectionField | null, selections: Record<string, string>): string {

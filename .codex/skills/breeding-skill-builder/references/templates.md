@@ -198,6 +198,51 @@ inputs:
       max: 100
 ```
 
+
+## Python subprocess file input template
+
+New file-processing Skills should prefer mounted files from the runtime manifest. `uploaded_artifacts[].content` and `content_base64` remain compatibility fields for old Skills only.
+
+```python
+import json
+import sys
+from pathlib import Path
+
+
+def load_payload() -> dict:
+    return json.load(sys.stdin)
+
+
+def iter_mounted_files(payload: dict):
+    manifest_path = payload.get("resource_manifest_path")
+    if not manifest_path:
+        return []
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    return manifest.get("files", [])
+
+
+def main() -> None:
+    payload = load_payload()
+    files = iter_mounted_files(payload)
+    if not files:
+        raise SystemExit("No mounted input files were provided")
+    first = files[0]
+    input_path = Path(first["mount_path"])
+    data = input_path.read_bytes()
+    print(json.dumps({"answer": f"Read {len(data)} bytes from {first.get('filename')}"}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Rules:
+
+- Use `payload["resource_manifest_path"]` and `manifest["files"][].mount_path` as the primary file contract.
+- `mount_path` points to the per-run temporary workspace, not persistent storage.
+- Do not expose or document persistent storage keys/paths in prompt-facing references.
+- Keep fallback reads from `uploaded_artifacts[].content` / `content_base64` only when maintaining old Skills.
+
 ## Hardcoded field guidance
 
 当前后端只读取固定字段，不会从说明文字推断平台契约。创建或修复 Skill 时必须显式硬编码：

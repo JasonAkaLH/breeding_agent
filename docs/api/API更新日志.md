@@ -1,5 +1,25 @@
 # API 更新日志
 
+## 2026-06-16
+
+### 更新摘要
+
+对话上传文件已从临时上传升级为 conversation-scoped 本地文件资源。客户端现有上传、列表、删除和消息提交方式保持兼容；新增字段均可忽略。Skill 运行时会通过后端受控 workspace 挂载文件，客户端不接触本地真实路径。
+
+### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+
+- 上传接口仍使用 `multipart/form-data` 的 `conversation_id` 与 `file` 字段；保留原响应字段。
+- 上传成功后服务端会把原始文件保存到本地 conversation 文件目录，并维护该 conversation 的文件索引 `index.md`。
+- `UploadFileResponse` 新增可选 `status` 与 `description_status`；旧客户端可忽略。
+- 文件列表支持可选 `limit`、`cursor`、`include_deleted` 查询参数；默认仍只返回 active 文件。
+- 删除单个 upload 时，服务端会标记 DB 状态并物理删除对应本地文件资源目录；删除响应仍为 `{ upload_id, deleted }`。
+- 客户端仍通过消息 `metadata.upload_ids` 引用文件；不要提交或依赖服务端本地路径。
+
+### Skill 文件输入提示
+
+- 新 Skill 应通过运行时 payload 中的 `resource_manifest_path` 读取 `files[].mount_path`，由脚本操作 workspace 中的真实文件副本。
+- `uploaded_artifacts[].content` / `content_base64` 仍保留用于旧 Skill 兼容，但不再是新 Skill 文件输入的主接口。
+
 ## 2026-06-09
 
 ### 更新摘要

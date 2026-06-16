@@ -489,9 +489,9 @@ v1 明确不支持站内 sandbox 预览，因此不新增 preview API、不在�
 
 ### 11.1 与上传文件
 
-上传文件是用户输入，生命周期由 upload store 管理；Skill 输出文件是系统产物，生命周期由 artifact store 管理。两者都必须按 account / conversation / task 隔离，但不能混用存储和 API。
+上传文件是用户输入，当前生命周期由 conversation file resource / upload store 兼容层管理；Skill 输出文件是系统产物，生命周期由 artifact store 管理。两者都必须按 account / conversation / task 隔离，但不能混用存储和 API。
 
-v1 不重新定义用户上传文件机制；本 PRD 的“同一缓存作用域只保留 1 个当前文件”仅约束 Skill 输出文件。输入侧沿用已确定的上传文件缓存与传参规则。
+本 PRD 的“同一缓存作用域只保留 1 个当前文件”仅约束 Skill 输出文件。输入侧文件机制以 `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` 为准：上传文件保存为 conversation-scoped 本地资源，Skill 运行时通过 workspace manifest / mount path 读取真实文件，旧 `uploaded_artifacts` 字段只作为兼容层。
 
 ### 11.2 与 conversation memory
 

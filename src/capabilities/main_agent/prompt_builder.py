@@ -8,7 +8,7 @@ from src.integrations.agent_skills import SkillMatch, build_public_skill_profile
 from src.orchestration.answer_roles import RESPONSE_ROLE_FINAL, RESPONSE_ROLE_INTERMEDIATE
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 
-_SENSITIVE_ARTIFACT_KEYS = {"content", "raw", "text", "storage_ref", "path", "file_path", "local_path"}
+_SENSITIVE_ARTIFACT_KEYS = {"content", "content_base64", "raw", "text", "storage_ref", "storage_key", "path", "file_path", "local_path", "mount_path", "resource_manifest_path", "conversation_index_path", "input_dir"}
 _SENSITIVE_PROMPT_KEY_PARTS = (
     "entrypoint",
     "handler",

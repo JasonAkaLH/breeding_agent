@@ -22,7 +22,7 @@
 
 ## 2. 背景
 
-当前上传链路中，`InMemoryUploadStore.save()` 对 CSV / JSON 文本文件只执行 `content.decode("utf-8")`，CSV 预览直接使用 `csv.DictReader` 的 `fieldnames`。因此 Excel 或其他工具导出的 CSV 只要带有 BOM、引号包装或非 UTF-8 编码，就可能出现表头无法被 Skill 识别的问题。
+本专题立项时，上传链路中 `InMemoryUploadStore.save()` 对 CSV / JSON 文本文件只执行 `content.decode("utf-8")`，CSV 预览直接使用 `csv.DictReader` 的 `fieldnames`。因此 Excel 或其他工具导出的 CSV 只要带有 BOM、引号包装或非 UTF-8 编码，就可能出现表头无法被 Skill 识别的问题。
 
 典型失败形态：
 
@@ -91,7 +91,7 @@ Skill 期望：ped_id、hyb_check、set
 4. 不合并多个 Excel sheet。
 5. 不让 LLM 推断表头映射或 sheet 选择。
 6. 不执行 Excel 宏、不刷新公式、不访问外部链接。
-7. 不在本 PRD 中实现持久化上传文件存储；仍沿用当前 upload store 生命周期，除非后续另有 artifact/upload 存储专题。
+7. 不在本 PRD 中实现持久化上传文件存储；该职责已由后续 `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` 接管，本专题只保留表格解析、预览、sheet 选择和 prompt-safe 摘要规则。
 8. 不把完整文件内容写入 audit、SSE 或主代理 prompt。
 
 ## 5. 术语

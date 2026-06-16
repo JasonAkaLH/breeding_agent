@@ -660,6 +660,7 @@ def _match_backend_scalar_field(field: SkillInputField, text: str) -> Any | None
         if field.type in {"integer", "int"}:
             patterns = (
                 rf"(?:{re.escape(alias_text)})\s*[:：=]?\s*([+-]?\d+|[零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟]+)",
+                rf"(?:{re.escape(alias_text)})\s*(?:设为|设置为|改为|改成|变为|为|是)\s*([+-]?\d+|[零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟]+)",
                 rf"([+-]?\d+|[零〇一二两三四五六七八九十百千万萬壹贰叁肆伍陆柒捌玖拾佰仟]+)\s*(?:个|次|列)?\s*(?:{re.escape(alias_text)})",
             )
         elif field.type in {"number", "float"}:
