@@ -115,7 +115,6 @@ native/target/
 /frontend/src/**/*.spec.ts
 /frontend/src/**/*.spec.tsx
 /frontend/src/test/
-/native/**/tests/
 /skill/**/tests/
 /mcp_test.json
 /scripts/smoke_*.py
