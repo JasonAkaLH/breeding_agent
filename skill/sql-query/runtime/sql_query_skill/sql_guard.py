@@ -20,9 +20,9 @@ from .helpers import (
     find_dependency_output,
     load_yaml,
     make_artifact,
-    normalize_text,
     skill_root,
 )
+from .sql_ast import SQLAstError, analyze_sql, is_readonly_query
 
 
 class SQLQuerySQLGuardCapability(CapabilityContract):
@@ -31,9 +31,7 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
     description = "校验生成 SQL 是否严格只读且符合当前路由策略。"
 
     def __init__(self, *, routing_rules_path: str | None = None, guard_rules_path: str | None = None) -> None:
-        routing_path = routing_rules_path or str(skill_root() / "configs/routing_rules.yaml")
         guard_path = guard_rules_path or str(skill_root() / "configs/sql_guard_rules.yaml")
-        self._routing_rules = load_yaml(routing_path)
         self._guard_rules = load_yaml(guard_path)
         self._rule_set = self._guard_rules["rule_sets"][0]
 
@@ -41,11 +39,35 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
         upstream = find_dependency_output(request, ("sql", "route_id"))
         sql = str(upstream["sql"])
         normalized = self._normalize_sql(sql)
-        allowed_tables = set(
-            upstream.get("selected_tables")
-            or upstream.get("allowed_tables")
-            or self._route_allowed_tables(str(upstream["route_id"]))
-        )
+        allowed_tables = {str(table) for table in list(upstream.get("selected_tables") or [])}
+        if not allowed_tables:
+            guard_error = self._guard_error(
+                "selected_tables_required",
+                "SQL guard requires schema_resolution selected_tables.",
+                retriable=False,
+            )
+            event = self._make_event(
+                request,
+                event_type=SQL_QUERY_AUDIT_GUARD_BLOCKED_EVENT,
+                payload={
+                    "capability_id": self.capability_id,
+                    "stage": "sql_guard",
+                    "code": guard_error.code,
+                    "message": guard_error.message,
+                    "block_reason": guard_error.code,
+                    "route_context": {
+                        "route_id": upstream.get("route_id"),
+                        "schema_profile_id": upstream.get("schema_profile_id"),
+                    },
+                },
+            )
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                error=guard_error,
+                events=(event,),
+            )
         guard_error = self._validate_sql(normalized, allowed_tables=allowed_tables)
         if guard_error is not None:
             event = self._make_event(
@@ -76,6 +98,18 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
             "route_id": upstream["route_id"],
             "schema_profile_id": upstream.get("schema_profile_id"),
             "sql": normalized,
+            "allowed_tables": list(upstream.get("allowed_tables", [])),
+            "selected_tables": list(upstream.get("selected_tables", [])),
+            "tables_used": list(upstream.get("tables_used", [])),
+            "source_scope": upstream.get("source_scope"),
+            "user_question": upstream.get("user_question"),
+            "original_user_query": upstream.get("original_user_query") or upstream.get("user_question"),
+            "resolved_user_query": upstream.get("resolved_user_query") or upstream.get("user_question"),
+            "parent_question": upstream.get("parent_question"),
+            "subtask_label": upstream.get("subtask_label"),
+            "generation_source": upstream.get("generation_source"),
+            "fallback_used": upstream.get("fallback_used"),
+            "fallback_reason": upstream.get("fallback_reason"),
             "guard_pass_token": guard_pass_token,
             "guard_report": {"status": "passed", "rule_set_id": self._rule_set["rule_set_id"]},
         }
@@ -129,7 +163,14 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
             if re.search(pattern, normalized_sql):
                 return self._guard_error("write_pattern_detected", f"Blocked SQL regex detected: {pattern}", retriable=False)
 
-        table_names = set(self._extract_tables(lowered))
+        try:
+            analysis = analyze_sql(normalized_sql)
+        except SQLAstError as exc:
+            return self._guard_error("sql_parse_failed", f"SQL parse failed: {exc}", retriable=False)
+        if not is_readonly_query(analysis):
+            return self._guard_error("statement_root_denied", f"SQL root statement {analysis.statement_kind!r} is not allowed.", retriable=False)
+
+        table_names = {table.lower() for table in analysis.tables}
         for table in table_names:
             if "." in table:
                 schema_name, table_name = table.split(".", 1)
@@ -142,15 +183,6 @@ class SQLQuerySQLGuardCapability(CapabilityContract):
                 return self._guard_error("table_not_in_route_whitelist", f"Table {candidate_table} is not allowed for this route.", retriable=False)
 
         return None
-
-    def _extract_tables(self, lowered_sql: str) -> list[str]:
-        return re.findall(r"(?:from|join)\s+([a-zA-Z0-9_\.]+)", lowered_sql)
-
-    def _route_allowed_tables(self, route_id: str) -> list[str]:
-        for route in self._routing_rules.get("routes", []):
-            if route.get("route_id") == route_id:
-                return [str(table).lower() for table in route.get("allowed_tables", [])]
-        return []
 
     def _make_guard_pass_token(self, normalized_sql: str, route_id: str) -> str:
         digest = hashlib.sha256(f"{route_id}:{normalized_sql}".encode("utf-8")).hexdigest()[:16]

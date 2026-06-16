@@ -20,11 +20,13 @@ def build_sql_generation_prompt_payload(
     guard_constraints: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     database_schema = _database_schema(context)
+    query_context = _query_context(context)
     return {
         "task_meta": {
             "stage": "sql_generate",
             **dict(task_meta or {}),
         },
+        "query_context": query_context,
         "route_context": {
             "route_id": context.get("route_id"),
             "schema_profile_id": context.get("schema_profile_id"),
@@ -42,6 +44,8 @@ def build_sql_generation_prompt_payload(
             "context_summary": context.get("context_summary"),
             "database_schema": database_schema,
         },
+        "entity_resolution": _entity_resolution_context(context),
+        "query_constraints": _query_constraints_context(context),
         "guard_constraints": {
             "readonly_only": True,
             "single_statement_only": True,
@@ -85,7 +89,7 @@ def build_sql_generation_prompt_payload(
                 "prefer_columns": ["year", "approval_num", "crop_name", "variety_name", "applicant", "breeder", "suitable_area"],
             },
         },
-        "user_question": context.get("user_question"),
+        "user_question": query_context.get("resolved_user_query") or query_context.get("original_user_query"),
         "output_contract": {
             "format": "仅 SQL",
             "llm_output": "只输出 SQL 查询语句，不输出 JSON、Markdown 或解释。",
@@ -128,6 +132,9 @@ def build_sql_repair_prompt(
     )
     schema_context = dict(payload.get("schema_context", {}))
     route_context = dict(payload.get("route_context", {}))
+    query_context = dict(payload.get("query_context", {}))
+    entity_resolution = json.dumps(payload.get("entity_resolution") or {}, ensure_ascii=False, indent=2, default=str)
+    query_constraints_block = _format_query_constraints(payload.get("query_constraints"))
     failed_sql = str(repair_context.get("failed_sql") or "")
     error_code = str(repair_context.get("error_code") or "")
     error_message = str(repair_context.get("error_message") or "")
@@ -135,7 +142,9 @@ def build_sql_repair_prompt(
     attempt = repair_context.get("attempt")
     max_attempts = repair_context.get("max_attempts")
     return f"""
-    修正一个SQL查询来回答这个问题：{payload.get("user_question") or ""}
+    修正一个SQL查询来回答这个问题：{query_context.get("resolved_user_query") or payload.get("user_question") or ""}
+    原始用户问题：{query_context.get("original_user_query") or payload.get("user_question") or ""}
+    当前解析后的问题：{query_context.get("resolved_user_query") or payload.get("user_question") or ""}
     当前阶段：sql_repair
     当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
     修复尝试：{attempt}/{max_attempts}
@@ -155,6 +164,13 @@ def build_sql_repair_prompt(
     {failed_sql}
     ```
 
+    ## 上游 entity/table resolution 结果
+    ```json
+    {entity_resolution}
+    ```
+
+    {query_constraints_block}
+
     ## 修复要求
     - 只能使用上方数据库结构里的表和字段。
     - 不能改变 route_id 或 schema_profile_id。
@@ -162,6 +178,8 @@ def build_sql_repair_prompt(
     - 禁止写操作、DDL、多语句、跨库访问、系统 schema、INTO OUTFILE、FOR UPDATE、LOCK。
     - 不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT。
     - 如果按品种名称 / variety_name 过滤，必须使用 LIKE 包含关系。
+    - 如果 match_summary 中存在 primary、secondary 或 peer 字段，修复后的 SQL 必须继续包含这些字段的 LIKE 过滤，并保留 matched_field / match_tier 来源标记。
+    - 修复后的 SQL 必须覆盖上方所有 required_constraints；branch_union 必须保留独立 UNION ALL 分支和 matched_field / match_tier。
 
     **注意！！你只需要输出修复后的SQL语句，不要输出 JSON、Markdown 或解释！！！**
     修复后的SQL：
@@ -173,9 +191,15 @@ def _build_varieties_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
     query = str(payload.get("user_question") or "")
     schema_context = dict(payload.get("schema_context", {}))
     route_context = dict(payload.get("route_context", {}))
+    query_context = dict(payload.get("query_context", {}))
     database_schema = str(schema_context.get("database_schema") or "")
+    selected_tables = [str(table) for table in list(schema_context.get("selected_tables") or [])]
+    entity_resolution = json.dumps(payload.get("entity_resolution") or {}, ensure_ascii=False, indent=2, default=str)
+    query_constraints_block = _format_query_constraints(payload.get("query_constraints"))
     return f"""
     生成一个SQL查询来回答这个问题：{query}
+    原始用户问题：{query_context.get("original_user_query") or query}
+    当前解析后的问题：{query_context.get("resolved_user_query") or query}
     当前阶段：sql_generate
     当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
     
@@ -195,6 +219,18 @@ def _build_varieties_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
      {_CROP_TABLE_MAPPING_TEXT}
     - **注意！！如果用户的问题里没有明确作物，且当前注入了多个品种表，你可以在这些已注入的品种表范围内查询。**
     - **注意！！在多表查询或者跨表查询时，应当注意每个表的字段总数以及字段名是不一样的，注意生成SQL语句时的逻辑。**
+    - 当前可查询表范围：{", ".join(selected_tables) if selected_tables else "见 database_schema"}。
+    - 上游 entity/table resolution 结果如下；这是字段过滤和来源标记的权威上下文，不得扩大表范围：
+    ```json
+    {entity_resolution}
+    ```
+    {query_constraints_block}
+    - 如果 `match_summary.primary` 存在，WHERE 必须包含对应 primary 字段的 LIKE 过滤。
+    - 如果 `match_summary.secondary` 存在，WHERE 必须同时包含对应 secondary 字段的 LIKE 过滤，并把结果作为附带命中保留下来。
+    - 如果 `match_summary.peer` 存在，WHERE 必须覆盖 peer 中列出的字段。
+    - entity-aware 查询应优先用 `UNION ALL` 分支投影字符串常量 `matched_field` 和 `match_tier`，避免 OR 查询丢失命中字段来源。
+    - 如果本次查询实际使用了多个审定品种表，SELECT 投影必须包含来源字段：`source_table`（表名）和 `source_crop`（作物），可用字符串常量实现，例如 SELECT 'rice_varieties' AS source_table, 'rice' AS source_crop, ... UNION ALL SELECT 'corn_varieties' AS source_table, 'corn' AS source_crop, ...
+    - 如果本次只使用一个审定品种表，优先也带上来源字段；至少最终查询结果必须能让系统判断来源表。
     - **注意！！你需要输出字段的注释作为列名，而不是字段名！！！**
     - 只能生成单条只读 SELECT 或 WITH...SELECT SQL，禁止生成写操作、DDL、多语句或跨库访问。
     - 不要自动添加 LIMIT；只有用户明确要求前 N 条、限制条数或分页时才生成 LIMIT。
@@ -216,10 +252,14 @@ def _build_gene_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
     query = str(payload.get("user_question") or "")
     schema_context = dict(payload.get("schema_context", {}))
     route_context = dict(payload.get("route_context", {}))
+    query_context = dict(payload.get("query_context", {}))
     database_schema = str(schema_context.get("database_schema") or "")
     join_hints = _format_join_hints(schema_context.get("join_hints"))
+    query_constraints_block = _format_query_constraints(payload.get("query_constraints"))
     return f"""
     生成一个SQL查询来回答这个问题：{query}
+    原始用户问题：{query_context.get("original_user_query") or query}
+    当前解析后的问题：{query_context.get("resolved_user_query") or query}
     当前阶段：sql_generate
     当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
     
@@ -237,6 +277,8 @@ def _build_gene_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
     - 多表查询时，你需要根据表的连接关系，生成SQL查询语句。
     - SELECT 投影字段、WHERE 过滤字段和排序字段由你根据数据库结构中的字段注释自行选择。
     
+    {query_constraints_block}
+
     ## 限制
     请注意，以下SQL查询语句中，表名和字段名都是小写的，请注意大小写。
     请注意，查询rice_comp时，同样的variety_name可能有多条记录，当你输出时，需要带有variety_name和的variety_id值。
@@ -258,10 +300,14 @@ def _build_general_sql_generation_prompt(payload: Mapping[str, Any]) -> str:
     query = str(payload.get("user_question") or "")
     schema_context = dict(payload.get("schema_context", {}))
     route_context = dict(payload.get("route_context", {}))
+    query_context = dict(payload.get("query_context", {}))
     database_schema = str(schema_context.get("database_schema") or "")
     join_hints = _format_join_hints(schema_context.get("join_hints"))
+    query_constraints_block = _format_query_constraints(payload.get("query_constraints"))
     return f"""
     生成一个SQL查询来回答这个问题：{query}
+    原始用户问题：{query_context.get("original_user_query") or query}
+    当前解析后的问题：{query_context.get("resolved_user_query") or query}
     当前阶段：sql_generate
     当前SQLQuery路由：{route_context.get("route_id")}；schema_profile：{route_context.get("schema_profile_id")}
     
@@ -293,6 +339,80 @@ def _database_schema(context: Mapping[str, Any]) -> str:
     if explicit:
         return str(explicit).strip()
     return _render_schema_from_column_details(context)
+
+
+def _query_constraints_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    raw = context.get("query_constraints")
+    if not isinstance(raw, Mapping):
+        return {}
+    return json_ready(dict(raw))
+
+
+def _format_query_constraints(query_constraints: Any) -> str:
+    if not isinstance(query_constraints, Mapping) or not query_constraints.get("required_constraints"):
+        return ""
+    lines = ["## 必须满足的查询约束"]
+    summary = str(query_constraints.get("constraint_summary") or "").strip()
+    if summary:
+        lines.append(f"约束摘要：{summary}")
+    for item in list(query_constraints.get("required_constraints") or []):
+        if not isinstance(item, Mapping):
+            continue
+        identifier = item.get("id") or "constraint"
+        field = item.get("field")
+        operator = item.get("operator")
+        value = item.get("value")
+        scope = item.get("scope")
+        source = item.get("source_span")
+        tier = item.get("match_tier")
+        tier_text = f"，match_tier={tier}" if tier else ""
+        lines.append(f"- {identifier}: {field} {operator} {value}，scope={scope}{tier_text}，来源：{source}")
+    groups = [group for group in list(query_constraints.get("constraint_groups") or []) if isinstance(group, Mapping)]
+    if groups:
+        lines.append("约束组：")
+        for group in groups:
+            lines.append(
+                f"- {group.get('id')}: mode={group.get('mode')} members={list(group.get('members') or [])}; "
+                "branch_union 必须使用独立 UNION ALL 分支，并投影 matched_field / match_tier。"
+            )
+    lines.append("要求：SQL WHERE / HAVING / ORDER / LIMIT 必须覆盖所有 required_constraints；query_level 的 ORDER BY / LIMIT 必须作用在最终结果层。")
+    return "\n    ".join(lines)
+
+
+def _query_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    user_question = context.get("user_question")
+    original = context.get("original_user_query") or user_question
+    resolved = context.get("resolved_user_query") or user_question
+    return {
+        "original_user_query": original,
+        "resolved_user_query": resolved,
+        "user_question": user_question,
+        "parent_question": context.get("parent_question"),
+        "subtask_label": context.get("subtask_label"),
+    }
+
+
+def _entity_resolution_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "entities",
+        "probe_summary",
+        "match_summary",
+        "matched_fields",
+        "match_tiers",
+        "search_effort_summary",
+    )
+    result = {key: json_ready(context.get(key)) for key in keys if context.get(key) not in (None, [], {})}
+    if isinstance(result.get("probe_summary"), Mapping):
+        probe = dict(result["probe_summary"])
+        # Keep LLM context compact and avoid leaking probe sample rows into prompts.
+        table_hits = []
+        for hit in list(probe.get("table_hits") or []):
+            if isinstance(hit, Mapping):
+                table_hits.append({key: value for key, value in dict(hit).items() if key != "sample_rows"})
+        probe["table_hits"] = table_hits
+        probe.pop("attempts", None)
+        result["probe_summary"] = probe
+    return result
 
 
 def _render_schema_from_column_details(context: Mapping[str, Any]) -> str:
@@ -377,14 +497,23 @@ def build_result_filtering_prompt_payload(
     )
     question = dict(question_context or {})
     sql = execute_context.get("sql") or question.get("sql")
+    query_context = _query_context({**question, **dict(execute_context)})
     return {
         "task_meta": {"stage": "result_filtering"},
+        "query_context": query_context,
         "question_context": {
             "user_question": question.get("user_question"),
+            "original_user_query": query_context.get("original_user_query"),
+            "resolved_user_query": query_context.get("resolved_user_query"),
+            "parent_question": query_context.get("parent_question"),
+            "subtask_label": query_context.get("subtask_label"),
             "route_id": question.get("route_id"),
             "schema_profile_id": question.get("schema_profile_id"),
             "sql": sql,
             "generation_source": question.get("generation_source"),
+            "selected_tables": list(question.get("selected_tables") or execute_context.get("selected_tables") or []),
+            "tables_used": list(question.get("tables_used") or execute_context.get("tables_used") or []),
+            "source_scope": question.get("source_scope") or execute_context.get("source_scope"),
         },
         "result_context": {
             "columns": list(execute_context.get("columns", [])),
@@ -401,7 +530,7 @@ def build_result_filtering_prompt_payload(
             "keep_all_matching_rows": True,
             "remove_clearly_unrelated_rows": True,
             "numbered_variety_exactness": "当用户明确查询带数字编号的单个品种（例如 龙粳18）时，只保留品种名规范化后等于该编号或该编号+“号”的行；不得保留继续追加数字/字母/后缀的其他品种（例如 龙粳1836、龙粳1823 不是 龙粳18）。",
-            "organization_entity_alias_policy": "当 SQL 在 applicant、breeder、transgenic_owner 等企业/主体字段中用 LIKE 查询企业简称或主体关键词（例如 隆平高科、大北农）时，包含该简称的完整公司名、子公司名、关联育种/申请主体都应视为匹配；不得因为不是精确公司全称而删除。",
+            "organization_entity_alias_policy": "当 SQL 在 applicant、breeder 等企业/主体字段中用 LIKE 查询企业简称或主体关键词（例如 隆平高科、大北农）时，包含该简称的完整公司名、子公司名、关联育种/申请主体都应视为匹配；不得因为不是精确公司全称而删除。",
             "conservative_when_uncertain": "如果某行只是简称、别名、缺字或多字但仍可能对应用户需求，可以保留；如果名称明显不是同一品种或实体，应移除。",
             "empty_result_allowed": True,
         },
@@ -429,7 +558,7 @@ def build_result_filtering_prompt(
         "不要总结，不要改写 SQL，不要要求补查数据库，不要根据字段名或常识编造候选集中不存在的行。\n"
         "特别注意：当用户查询的是带数字编号的单个品种（如“龙粳18”），只保留“龙粳18”和“龙粳18号”这类规范化等值名称；"
         "“龙粳1836”“龙粳1823”“龙粳1851”等是在编号后继续追加数字的其他品种，必须排除。\n"
-        "企业简称/主体关键词匹配规则：如果 SQL 在 applicant、breeder、transgenic_owner 等字段中用 LIKE 查询“隆平高科”“大北农”等企业简称，"
+        "企业简称/主体关键词匹配规则：如果 SQL 在 applicant、breeder 等字段中用 LIKE 查询“隆平高科”“大北农”等企业简称，"
         "候选行的完整公司名、子公司名、关联申请者或育种者字段只要包含该简称，就应保留；不要因为候选值不是精确公司全称而排除。\n"
         "如果某行名称明显不是用户要查的品种/实体，把它从 keep_row_indexes 中排除；如果名称只是简称、别名、缺字或多字但仍可能对应，可以保留。\n"
         "输出必须是 JSON，不要输出 Markdown；必须返回 keep_row_indexes，值只能是 candidate_rows 中已有 row_index 的数组。\n"

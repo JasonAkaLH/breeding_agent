@@ -9,6 +9,7 @@ from typing import Any
 
 from .intent_route import SQLQueryIntentRouteCapability
 from .result_filtering import SQLQueryResultFilteringCapability
+from .schema_resolution import SQLQuerySchemaResolutionCapability
 from .schema_context_prepare import SQLQuerySchemaContextPrepareCapability
 from .sql_execute_readonly import SQLQuerySQLExecuteReadonlyCapability
 from .sql_generate import SQLQuerySQLGenerateCapability
@@ -29,7 +30,7 @@ from .helpers import (
 )
 
 
-SQL_REPAIR_MAX_ATTEMPTS = 1
+SQL_REPAIR_MAX_ATTEMPTS = 5
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,6 +73,7 @@ class SQLQueryEngine:
 
     _STAGES = (
         ("intent_route", "正在理解查询意图"),
+        ("schema_resolution", "正在确定查询表范围"),
         ("schema_context_prepare", "正在准备数据库查询"),
         ("sql_generate", "正在生成安全查询语句"),
         ("sql_guard", "正在检查查询安全边界"),
@@ -91,6 +93,7 @@ class SQLQueryEngine:
         self._progress_event_recorder = progress_event_recorder
         self._capabilities = {
             "intent_route": SQLQueryIntentRouteCapability(semantic_text_generator=llm_text_generator),
+            "schema_resolution": SQLQuerySchemaResolutionCapability(adapter=mysql_adapter),
             "schema_context_prepare": SQLQuerySchemaContextPrepareCapability(),
             "sql_generate": SQLQuerySQLGenerateCapability(generator=sql_generator, llm_text_generator=llm_text_generator),
             "sql_guard": SQLQuerySQLGuardCapability(),
@@ -107,7 +110,7 @@ class SQLQueryEngine:
         repair_state: dict[str, Any] = {"attempted": False, "attempts": 0}
 
         previous_stage_node_id: str | None = None
-        for stage, label in self._STAGES[:2]:
+        for stage, label in self._STAGES[:3]:
             stage_result = await self._run_stage(
                 request,
                 stage=stage,
@@ -125,10 +128,12 @@ class SQLQueryEngine:
         schema_stage_node_id = previous_stage_node_id
         execute_stage_node_id: str | None = None
         pending_repair_context: dict[str, Any] | None = None
-        attempt = 0
+        repair_iteration = 0
+        local_repair_attempted = False
+        remote_repair_attempts = 0
         while True:
-            suffix = f":repair{attempt}" if attempt else ""
-            is_repair = attempt > 0
+            suffix = f":repair{repair_iteration}" if repair_iteration else ""
+            is_repair = repair_iteration > 0
             if is_repair:
                 repair_progress = self._progress_event(request, stage="sql_repair", label="正在修正查询语句")
                 await self._record_or_append_progress(repair_progress, events)
@@ -162,6 +167,36 @@ class SQLQueryEngine:
                     error=error,
                 )
             if generate_result.terminal is not None:
+                if (
+                    not is_repair
+                    and generate_result.error is not None
+                    and not local_repair_attempted
+                    and self._is_repairable_local_error(generate_result.error)
+                ):
+                    local_repair_attempted = True
+                    repair_iteration += 1
+                    repair_state = {
+                        "attempted": True,
+                        "attempts": repair_iteration,
+                        "local_attempts": 1,
+                        "remote_attempts": remote_repair_attempts,
+                        "repaired_from_stage": "sql_generate",
+                        "last_error_code": generate_result.error.code,
+                    }
+                    pending_repair_context = self._make_repair_context(
+                        failed_output=generate_result.output_payload or last_output,
+                        error=generate_result.error,
+                        attempt=repair_iteration,
+                        default_failed_stage="sql_generate",
+                    )
+                    self._append_repair_event(
+                        request,
+                        events,
+                        event_type=SQL_QUERY_AUDIT_REPAIR_ATTEMPTED_EVENT,
+                        repair_context=pending_repair_context,
+                        final_error=generate_result.error,
+                    )
+                    continue
                 if is_repair:
                     error = generate_result.error or self._repair_generation_error(
                         pending_repair_context, reason="repair_generation_failed"
@@ -197,6 +232,35 @@ class SQLQueryEngine:
             )
             last_output = guard_result.output_payload
             if guard_result.error is not None:
+                if (
+                    not is_repair
+                    and not local_repair_attempted
+                    and self._is_repairable_local_error(guard_result.error)
+                ):
+                    local_repair_attempted = True
+                    repair_iteration += 1
+                    repair_state = {
+                        "attempted": True,
+                        "attempts": repair_iteration,
+                        "local_attempts": 1,
+                        "remote_attempts": remote_repair_attempts,
+                        "repaired_from_stage": "sql_guard",
+                        "last_error_code": guard_result.error.code,
+                    }
+                    pending_repair_context = self._make_repair_context(
+                        failed_output=generate_result.output_payload or last_output,
+                        error=guard_result.error,
+                        attempt=repair_iteration,
+                        default_failed_stage="sql_guard",
+                    )
+                    self._append_repair_event(
+                        request,
+                        events,
+                        event_type=SQL_QUERY_AUDIT_REPAIR_ATTEMPTED_EVENT,
+                        repair_context=pending_repair_context,
+                        final_error=guard_result.error,
+                    )
+                    continue
                 if is_repair:
                     self._append_repair_event(
                         request,
@@ -226,7 +290,7 @@ class SQLQueryEngine:
             last_output = execute_result.output_payload
             execute_stage_node_id = execute_result.stage_node_id
             if execute_result.error is not None:
-                if is_repair or attempt >= SQL_REPAIR_MAX_ATTEMPTS or not self._is_repairable_sql_error(execute_result.error):
+                if remote_repair_attempts >= SQL_REPAIR_MAX_ATTEMPTS or not self._is_repairable_sql_error(execute_result.error):
                     if is_repair:
                         self._append_repair_event(
                             request,
@@ -244,17 +308,20 @@ class SQLQueryEngine:
                         events=tuple(events),
                         error=execute_result.error,
                     )
-                attempt += 1
+                remote_repair_attempts += 1
+                repair_iteration += 1
                 repair_state = {
                     "attempted": True,
-                    "attempts": attempt,
+                    "attempts": repair_iteration,
+                    "local_attempts": 1 if local_repair_attempted else 0,
+                    "remote_attempts": remote_repair_attempts,
                     "repaired_from_stage": "sql_execute_readonly",
                     "last_error_code": execute_result.error.code,
                 }
                 pending_repair_context = self._make_repair_context(
                     failed_output=guard_result.output_payload or generate_result.output_payload,
                     error=execute_result.error,
-                    attempt=attempt,
+                    attempt=remote_repair_attempts,
                 )
                 self._append_repair_event(
                     request,
@@ -395,17 +462,27 @@ class SQLQueryEngine:
         return bool(error.metadata.get("repairable_sql_error"))
 
     @staticmethod
+    def _is_repairable_local_error(error: CapabilityExecutionError) -> bool:
+        if bool(error.metadata.get("repairable_sql_error")):
+            return True
+        return error.code in {
+            "sql_generation_validation_failed",
+            "empty_sql",
+        }
+
+    @staticmethod
     def _make_repair_context(
         *,
         failed_output: Mapping[str, Any],
         error: CapabilityExecutionError,
         attempt: int,
+        default_failed_stage: str = "sql_execute_readonly",
     ) -> dict[str, Any]:
         failed_sql = str(failed_output.get("sql") or "")
         metadata = dict(error.metadata or {})
         return {
             "failed_sql": failed_sql,
-            "failed_stage": metadata.get("failed_stage") or "sql_execute_readonly",
+            "failed_stage": metadata.get("failed_stage") or default_failed_stage,
             "error_code": error.code,
             "error_message": metadata.get("db_error_message") or error.message,
             "sql_fingerprint": metadata.get("sql_fingerprint") or sql_fingerprint(failed_sql),
@@ -413,6 +490,10 @@ class SQLQueryEngine:
             "max_attempts": SQL_REPAIR_MAX_ATTEMPTS,
             "route_id": failed_output.get("route_id"),
             "schema_profile_id": failed_output.get("schema_profile_id"),
+            "selected_tables": list(failed_output.get("selected_tables", [])),
+            "original_user_query": failed_output.get("original_user_query") or failed_output.get("user_question"),
+            "resolved_user_query": failed_output.get("resolved_user_query") or failed_output.get("user_question"),
+            "schema_ddl": failed_output.get("schema_ddl"),
         }
 
     def _append_repair_event(

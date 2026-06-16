@@ -1,6 +1,43 @@
 contract_version: '2'
-capability: {id: skill.sql_query, display_name: SQL 只读查询, description: 通过受控 MySQL 只读库回答品种、审定、基因型、表型和业务资料查询。}
-routing: {triggers: [sql-query, 数据库查询, 品种查询, 审定查询], examples: [/sql-query 查询某品种审定信息]}
+capability:
+  id: skill.sql_query
+  display_name: SQL 只读查询
+  description: 通过受控 MySQL 只读库回答品种、审定、基因型、表型和业务资料查询。
+routing:
+  triggers:
+  - 查询品种
+  - 查询审定品种
+  - 查询基因型
+  - 审定信息
+  - 基因型
+  - 表型数据
+  - 审定品种库
+  - 品种审定库
+  - 审定品种
+  - 审定
+  - 品种审定
+  - 品种审定公告
+  - 申请审定
+  - 品种信息
+  - 品种详情
+  - 品种资料
+  - 基因型数据库
+  - 基因
+  - 基因组
+  - 基因型分析
+  - 基因型测序
+  - 基因型测序数据
+  - QTN
+  - 变异
+  - 变异位点
+  - 粳稻
+  - 籼稻
+  - 粳籼稻
+  - 籼粳稻
+  - 粳型
+  - 籼型
+  examples:
+  - /sql-query 查询某品种审定信息
 runtime:
   mode: platform_service
   trust_scope: project
@@ -8,22 +45,55 @@ runtime:
   handler_module: runtime/sql_query_skill/platform_handler.py
   handler_factory: build_handler
   answer_mode: requires_finalizer
-  services: [mysql_readonly, llm.non_stream, artifact_writer, progress_events]
+  services:
+  - mysql_readonly
+  - llm.non_stream
+  - artifact_writer
+  - progress_events
 entrypoints:
   query:
     runtime: platform_service
     handler: skill.sql_query.platform_handler
     handler_module: runtime/sql_query_skill/platform_handler.py
     handler_factory: build_handler
-    services: [mysql_readonly, llm.non_stream, artifact_writer, progress_events]
+    services:
+    - mysql_readonly
+    - llm.non_stream
+    - artifact_writer
+    - progress_events
     answer_mode: requires_finalizer
     input_schema: readonly_query
     output: query_output
 input_schemas:
-  readonly_query: {path: schemas/readonly-query.input.yaml, title: 只读查询, aliases: [sql-query, 数据库查询, 查询], entrypoint: query}
+  readonly_query:
+    path: schemas/readonly-query.input.yaml
+    title: 只读查询
+    aliases:
+    - sql-query
+    - 数据库查询
+    - 查询
+    entrypoint: query
 outputs:
-  query_output: {required: [summary, filtered_query_result]}
+  query_output:
+    required:
+    - summary
+    - filtered_query_result
 resources:
-  usage: {path: references/usage.md, title: 用法说明, audience: [main_agent, slot_question]}
-  query_examples: {path: references/query-examples.md, title: 查询示例, audience: [main_agent, slot_question]}
-  data_boundaries: {path: references/data-boundaries.md, title: 数据边界, audience: [main_agent, slot_question]}
+  usage:
+    path: references/usage.md
+    title: 用法说明
+    audience:
+    - main_agent
+    - slot_question
+  query_examples:
+    path: references/query-examples.md
+    title: 查询示例
+    audience:
+    - main_agent
+    - slot_question
+  data_boundaries:
+    path: references/data-boundaries.md
+    title: 数据边界
+    audience:
+    - main_agent
+    - slot_question

@@ -23,17 +23,14 @@ _VARIETY_LIKE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _ORGANIZATION_LIKE_PATTERN = re.compile(
-    r"(?:`?[A-Za-z_][\w]*`?\.)?`?(?:applicant|breeder|transgenic_owner)`?\s+LIKE\s+['\"]%([^%'\";]+)%['\"]",
+    r"(?:`?[A-Za-z_][\w]*`?\.)?`?(?:applicant|breeder)`?\s+LIKE\s+['\"]%([^%'\";]+)%['\"]",
     flags=re.IGNORECASE,
 )
 _ORGANIZATION_ROW_KEYS = frozenset({
     "applicant",
     "breeder",
-    "transgenic_owner",
     "申请者",
     "育种者",
-    "转基因所有者",
-    "转基因权属",
 })
 
 _TOKEN_BUDGET_TOO_SMALL_MESSAGE = "查询结果内容过长，当前无法整理成可靠总结。请缩小查询范围后重试。"
@@ -69,6 +66,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             request,
             ("user_question", "route_id", "schema_profile_id"),
         )
+        source_context = {**dict(upstream), **dict(question_context)}
         raw_rows = self._normalize_rows(upstream.get("rows", []))
         raw_source_row_count = self._int_or_default(
             upstream.get("source_row_count"),
@@ -123,6 +121,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 truncated=True,
                 route_id=question_context.get("route_id") or upstream.get("route_id"),
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
+                source_context=source_context,
                 filter_reason=_TOKEN_BUDGET_TOO_SMALL_MESSAGE,
                 domain_filter_applied=False,
                 domain_filter_reason=None,
@@ -147,6 +146,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 truncated=truncated,
                 route_id=question_context.get("route_id") or upstream.get("route_id"),
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
+                source_context=source_context,
                 filter_reason=domain_filter_reason or ("未配置 LLM 筛选器，保留 SQL 查询返回的候选表格。" if source_row_count else "查询未返回候选行。"),
                 domain_filter_applied=domain_filter_applied,
                 domain_filter_reason=combined_domain_filter_reason,
@@ -184,6 +184,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 truncated=truncated,
                 route_id=question_context.get("route_id") or upstream.get("route_id"),
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
+                source_context=source_context,
                 domain_filter_applied=domain_filter_applied,
                 domain_filter_reason=combined_domain_filter_reason,
                 token_trim=token_trim,
@@ -204,6 +205,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
                 truncated=truncated,
                 route_id=question_context.get("route_id") or upstream.get("route_id"),
                 schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
+                source_context=source_context,
                 domain_filter_applied=domain_filter_applied,
                 domain_filter_reason=combined_domain_filter_reason,
                 token_trim=token_trim,
@@ -242,6 +244,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             truncated=truncated,
             route_id=question_context.get("route_id") or upstream.get("route_id"),
             schema_profile_id=question_context.get("schema_profile_id") or upstream.get("schema_profile_id"),
+            source_context=source_context,
             filter_reason=combined_domain_filter_reason or self._string_or_none(llm_payload.get("filter_reason")),
             domain_filter_applied=domain_filter_applied,
             domain_filter_reason=combined_domain_filter_reason,
@@ -265,6 +268,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
         truncated: bool,
         route_id: Any = None,
         schema_profile_id: Any = None,
+        source_context: Mapping[str, Any] | None = None,
         filter_reason: str | None = None,
         domain_filter_applied: bool = False,
         domain_filter_reason: str | None = None,
@@ -272,6 +276,14 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
         events=(),
     ) -> CapabilityExecutionResult:
         filtered_row_count = len(rows)
+        source_payload = self._source_payload(
+            rows=rows,
+            source_context=source_context or {},
+            route_id=route_id,
+            filtered_row_count=filtered_row_count,
+            source_row_count=source_row_count,
+            filter_reason=filter_reason,
+        )
         token_trim_payload = self._token_trim_payload(
             token_trim or self._no_token_trim(rows),
             fallback_row_count=source_preview_row_count,
@@ -295,6 +307,8 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             "fallback_reason": fallback_reason,
             "route_id": route_id,
             "schema_profile_id": schema_profile_id,
+            **source_payload,
+            "summary": source_payload["summary"],
             "satisfaction": self._satisfaction_payload(
                 filtered_row_count=filtered_row_count,
                 source_row_count=source_row_count,
@@ -346,6 +360,211 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             "replan_recommended": True,
         }
 
+    @classmethod
+    def _source_payload(
+        cls,
+        *,
+        rows: list[dict[str, Any]],
+        source_context: Mapping[str, Any],
+        route_id: Any,
+        filtered_row_count: int,
+        source_row_count: int,
+        filter_reason: str | None,
+    ) -> dict[str, Any]:
+        row_tables = cls._source_values_from_rows(rows, keys={"source_table", "来源表"})
+        context_tables = cls._string_list(source_context.get("tables_used")) or cls._string_list(source_context.get("selected_tables"))
+        tables_used = row_tables or context_tables
+        source_scope = source_context.get("source_scope") if isinstance(source_context.get("source_scope"), Mapping) else {}
+        row_crops = cls._source_values_from_rows(rows, keys={"source_crop", "crop_name", "作物", "作物名称"})
+        context_crops = cls._string_list((source_scope or {}).get("approval_crops"))
+        source_crops = row_crops or context_crops
+        table_label = cls._table_label(tables_used)
+        crop_label = "、".join(cls._crop_display(crop) for crop in source_crops) if source_crops else ""
+        match_summary = source_context.get("match_summary") if isinstance(source_context.get("match_summary"), Mapping) else {}
+        row_matched_fields = cls._source_values_from_rows(rows, keys={"matched_field", "命中字段"})
+        context_matched_fields = cls._string_list(source_context.get("matched_fields")) or cls._fields_from_match_summary(match_summary)
+        matched_fields = cls._merge_string_lists(row_matched_fields, context_matched_fields)
+        row_match_tiers = cls._source_values_from_rows(rows, keys={"match_tier", "命中等级"})
+        context_match_tiers = cls._string_list((source_scope or {}).get("match_tiers")) or cls._tiers_from_match_summary(match_summary)
+        match_tiers = cls._merge_string_lists(row_match_tiers, context_match_tiers)
+        match_field_summary = cls._match_field_summary(
+            matched_fields=matched_fields,
+            match_tiers=match_tiers,
+            match_summary=match_summary,
+        )
+        if table_label and crop_label:
+            source_summary = f"数据来源：{table_label}（{crop_label}）。"
+        elif table_label:
+            source_summary = f"数据来源：{table_label}。"
+        else:
+            source_summary = "数据来源：当前 SQLQuery 已解析的数据表范围。"
+        if match_field_summary:
+            source_summary = source_summary.rstrip("。") + f"；{match_field_summary}。"
+        query_constraints = source_context.get("query_constraints") if isinstance(source_context.get("query_constraints"), Mapping) else {}
+        constraint_coverage_summary = (
+            source_context.get("constraint_coverage_summary")
+            if isinstance(source_context.get("constraint_coverage_summary"), Mapping)
+            else {}
+        )
+        constraint_summary = str((query_constraints or {}).get("constraint_summary") or (constraint_coverage_summary or {}).get("summary") or "").strip()
+        if constraint_summary:
+            source_summary = source_summary.rstrip("。") + f"；查询约束：{constraint_summary}。"
+
+        no_result_explanation = None
+        if filtered_row_count <= 0:
+            search_effort = str(source_context.get("search_effort_summary") or "").strip()
+            if source_row_count <= 0:
+                no_result_explanation = (
+                    f"{search_effort}，但没有返回匹配记录。"
+                    if search_effort
+                    else f"已在{table_label or '当前解析的数据表范围'}中执行查询，但没有返回匹配记录。"
+                )
+            else:
+                effort = filter_reason or "系统已对 SQL 返回的候选行做相关性筛选"
+                no_result_explanation = f"已在{table_label or '当前解析的数据表范围'}中查询并获得候选结果；{effort}，最终没有保留匹配记录。"
+
+        if filtered_row_count > 0:
+            summary = f"查询已完成，共返回 {filtered_row_count} 行结果；{source_summary}"
+        else:
+            summary = f"查询已完成，但没有返回匹配结果；{no_result_explanation or source_summary}"
+
+        return {
+            "tables_used": tables_used,
+            "selected_tables": cls._string_list(source_context.get("selected_tables")),
+            "source_scope": {
+                **dict(source_scope or {}),
+                "tables_used": tables_used,
+                "approval_crops": source_crops,
+                "matched_fields": matched_fields,
+                "match_tiers": match_tiers,
+            },
+            "match_summary": dict(match_summary or {}),
+            "matched_fields": matched_fields,
+            "match_tiers": match_tiers,
+            "search_effort_summary": source_context.get("search_effort_summary"),
+            "query_constraints": dict(query_constraints or {}),
+            "constraint_coverage_summary": dict(constraint_coverage_summary or {}),
+            "source_summary": source_summary,
+            "no_result_explanation": no_result_explanation,
+            "summary": summary,
+        }
+
+    @staticmethod
+    def _source_values_from_rows(rows: list[dict[str, Any]], *, keys: set[str]) -> list[str]:
+        values: list[str] = []
+        normalized_keys = {key.lower() for key in keys}
+        for row in rows:
+            for raw_key, raw_value in row.items():
+                key = str(raw_key or "").strip().strip("`").lower()
+                suffix = key.rsplit(".", 1)[-1]
+                if key not in normalized_keys and suffix not in normalized_keys:
+                    continue
+                value = str(raw_value or "").strip()
+                if value and value not in values:
+                    values.append(value)
+        return values
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list | tuple):
+            return []
+        result: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _merge_string_lists(*values: list[str]) -> list[str]:
+        result: list[str] = []
+        for items in values:
+            for item in items:
+                text = str(item or "").strip()
+                if text and text not in result:
+                    result.append(text)
+        return result
+
+    @classmethod
+    def _table_label(cls, tables: list[str]) -> str:
+        return "、".join(f"`{table}`" for table in tables)
+
+    @staticmethod
+    def _crop_display(crop: str) -> str:
+        return {
+            "corn": "玉米",
+            "rice": "水稻",
+            "cotton": "棉花",
+            "wheat": "小麦",
+            "soybean": "大豆",
+            "玉米": "玉米",
+            "水稻": "水稻",
+            "棉花": "棉花",
+            "小麦": "小麦",
+            "大豆": "大豆",
+        }.get(str(crop), str(crop))
+
+    @staticmethod
+    def _fields_from_match_summary(match_summary: Any) -> list[str]:
+        if not isinstance(match_summary, Mapping):
+            return []
+        result: list[str] = []
+        for tier in ("primary", "secondary", "peer"):
+            for item in list(match_summary.get(tier) or []):
+                if not isinstance(item, Mapping):
+                    continue
+                field = str(item.get("field") or "").strip()
+                if field and field not in result:
+                    result.append(field)
+        return result
+
+    @staticmethod
+    def _tiers_from_match_summary(match_summary: Any) -> list[str]:
+        if not isinstance(match_summary, Mapping):
+            return []
+        return [tier for tier in ("primary", "secondary", "peer") if match_summary.get(tier)]
+
+    @classmethod
+    def _match_field_summary(
+        cls,
+        *,
+        matched_fields: list[str],
+        match_tiers: list[str],
+        match_summary: Any,
+    ) -> str:
+        if isinstance(match_summary, Mapping) and any(match_summary.get(tier) for tier in ("primary", "secondary", "peer")):
+            parts: list[str] = []
+            labels = {"primary": "主要命中", "secondary": "附带命中", "peer": "同级命中"}
+            for tier in ("primary", "secondary", "peer"):
+                fields = []
+                for item in list(match_summary.get(tier) or []):
+                    if not isinstance(item, Mapping):
+                        continue
+                    field = str(item.get("field") or "").strip()
+                    if field and field not in fields:
+                        fields.append(field)
+                if fields:
+                    parts.append(f"{labels[tier]}字段：{'、'.join(cls._field_display(field) for field in fields)}")
+            if parts:
+                return "；".join(parts)
+        if matched_fields:
+            suffix = ""
+            if match_tiers:
+                suffix = f"（{ '、'.join(match_tiers) }）"
+            return f"命中字段：{'、'.join(cls._field_display(field) for field in matched_fields)}{suffix}"
+        return ""
+
+    @staticmethod
+    def _field_display(field: str) -> str:
+        return {
+            "variety_name": "品种名",
+            "applicant": "申请者",
+            "breeder": "育种者",
+            "approval_num": "审定编号",
+        }.get(str(field), str(field))
+
     def _fallback_result(
         self,
         request: CapabilityExecutionRequest,
@@ -361,6 +580,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
         truncated: bool,
         route_id: Any = None,
         schema_profile_id: Any = None,
+        source_context: Mapping[str, Any] | None = None,
         domain_filter_applied: bool = False,
         domain_filter_reason: str | None = None,
         token_trim: _TokenTrimResult | None = None,
@@ -395,6 +615,7 @@ class SQLQueryResultFilteringCapability(CapabilityContract):
             truncated=truncated,
             route_id=route_id,
             schema_profile_id=schema_profile_id,
+            source_context=source_context,
             filter_reason=domain_filter_reason or "LLM 筛选失败，保守保留 SQL 查询返回的候选表格。",
             domain_filter_applied=domain_filter_applied,
             domain_filter_reason=domain_filter_reason,
