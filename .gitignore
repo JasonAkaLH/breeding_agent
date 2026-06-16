@@ -106,15 +106,4 @@ native/target/
 /本周工作周报.md
 
 # Local test scratch files/scripts kept out of commits
-/frontend/src/*.test.ts
-/frontend/src/*.test.tsx
-/frontend/src/*.spec.ts
-/frontend/src/*.spec.tsx
-/frontend/src/**/*.test.ts
-/frontend/src/**/*.test.tsx
-/frontend/src/**/*.spec.ts
-/frontend/src/**/*.spec.tsx
-/frontend/src/test/
-/skill/**/tests/
 /mcp_test.json
-/scripts/smoke_*.py
