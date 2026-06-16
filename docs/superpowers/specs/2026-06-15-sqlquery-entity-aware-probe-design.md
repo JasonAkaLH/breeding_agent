@@ -1,11 +1,11 @@
 # SQLQuery Entity-aware Probe Design
 
 Date: 2026-06-15
-Status: User-approved design; awaiting user review before implementation planning.
+Status: User-approved design; document-perfectization reviewed; ready for implementation planning.
 
 ## Problem Statement
 
-SQLQuery 已经把审定品种库的表选择收敛到 `schema_resolution`，但当前无物种场景中的 probe 仍默认把抽出的名称当作 `variety_name`。这会误处理公司、机构、育种者、申请者、转化体所有者或审定编号等查询。例如“某公司所有审定品种”不应只在品种名中查找公司名，而应先判断这个名称在 query 中扮演的 entity 角色，再按对应字段探测五个审定品种表。
+SQLQuery 已经把审定品种库的表选择收敛到 `schema_resolution`，但当前无物种场景中的 probe 仍默认把抽出的名称当作 `variety_name`。这会误处理公司、机构、育种者、申请者或审定编号等查询。例如“某公司所有审定品种”不应只在品种名中查找公司名，而应先判断这个名称在 query 中扮演的 entity 角色，再按对应字段探测五个审定品种表。
 
 本设计在既有 SQLQuery LLM schema/table resolution 基础上加入 entity-aware probe：LLM/规则先抽取名称和实体意图，runtime 再用确定性的字段映射和 probe 模板查找命中表、命中字段与命中等级。SQL 生成阶段仍只能使用 resolution 输出的 `selected_tables`，不得自行扩大表范围。
 
@@ -24,10 +24,11 @@ SQLQuery 已经把审定品种库的表选择收敛到 `schema_resolution`，但
 
 - 不允许 LLM 直接拼接 probe SQL。
 - 不开放写操作、DDL、多语句、系统库、跨库访问或管理类 SQL。
-- 不要求把所有审定表字段都纳入 entity probe；首版只覆盖稳定、跨五表一致的名称/编号字段。
+- 不要求把所有审定表字段都纳入 entity probe；本设计只覆盖稳定、跨五表一致的名称/编号字段。
 - 不新增外部依赖或数据库连接方式。
 - 不把内部 probe SQL、完整 prompt、handler、service、数据库连接信息或错误栈暴露给用户。
 - 不改变基因型数据库的固定 4 表策略。
+- `transgenic_owner` 明确排除在默认 entity probe 之外；用户明确查询“转化体所有者”时，不自动映射到申请者或育种者，而是用自然语言说明当前 SQLQuery entity probe 不支持该字段。
 
 ## Decisions Confirmed by User
 
@@ -47,7 +48,7 @@ SQLQuery 已经把审定品种库的表选择收敛到 `schema_resolution`，但
 | `prompt_builders.py` | SQL 生成 prompt 纳入 entity/probe metadata，要求 SQL where 条件优先使用命中字段。 |
 | `sql_generate.py` | fallback SQL 与 LLM validation 需要支持主字段/副字段字段条件和来源字段投影。 |
 | `result_filtering.py` | 输出 `source_summary` 时包含表、作物、命中字段和命中等级。 |
-| `main_agent.prompt_builder` | 已有泛化 allowlist 若不足，补充通用 `matched_fields` / `match_summary`，不写 SQLQuery 专属 final prompt。 |
+| `main_agent.prompt_builder` | 只补充通用 sanitizer allowlist：`source_summary`、`match_summary`、`matched_fields`、`search_effort_summary`；不写 SQLQuery 专属 final prompt。 |
 | Frontend | 沿用自然语言 missing_input；无需新增 interrupt 卡片。 |
 | Tests | 新增 entity-aware probe、主/附命中、无命中澄清、最终来源说明相关测试。 |
 
@@ -85,8 +86,6 @@ SQLQuery 已经把审定品种库的表选择收敛到 `schema_resolution`，但
 - `organization`
 - `person`
 - `approval_number`
-- `region`
-- `year`
 - `other`
 
 `field_intent` values:
@@ -105,7 +104,22 @@ SQLQuery 已经把审定品种库的表选择收敛到 `schema_resolution`，但
 - `breeder`
 - `approval_num`
 
-`transgenic_owner` is intentionally deferred from the default probe set because not every company/person query should imply transgenic ownership. It can be added later as an explicit field intent if product usage proves it necessary.
+`region` and `year` must not be emitted as entity-aware probe entity types. Region and year constraints remain ordinary SQL generation filters after table resolution, for example suitable-area fields or `year`.
+
+`transgenic_owner` is intentionally excluded from this design. It must not participate in default entity probe and must not be inferred from company/person/organization queries.
+
+### Legacy Compatibility
+
+`entities[]` is the normalized authority for downstream `schema_resolution`. Legacy fields remain accepted only as inputs to normalization:
+
+| Legacy signal | Normalized entity |
+| --- | --- |
+| Valid `entities[]` present | Use normalized `entities[]`; ignore conflicting legacy hints. |
+| `variety_name_candidates` present, no valid `entities[]` | Convert each candidate to `entity_type=variety`, `field_intent=variety_name`, `primary_fields=["variety_name"]`. |
+| Legacy `entity_type=company` | Normalize to `entity_type=organization`. |
+| Legacy `entity_type=other` plus a cleaned candidate name | Convert to `field_intent=unknown`, `primary_fields=[]`, `secondary_fields=[]`; runtime maps it to peer core fields. |
+
+After normalization, later stages read only the normalized `entities[]`; raw legacy fields are kept only for debugging artifacts and fallback traceability.
 
 ## Runtime Field Mapping
 
@@ -120,7 +134,14 @@ Runtime remains authoritative. LLM suggestions are normalized through determinis
 | Company/person/organization without explicit field | `applicant OR breeder` | both `peer` |
 | Unknown extracted name | `variety_name OR applicant OR breeder` | all `peer` |
 
-If multiple entities are extracted, runtime probes up to 3 cleaned entities in stable order. Each entity can use its own field set. Dangerous characters are stripped before literal construction. Probe SQL remains template-generated and still passes SQL guard before execution.
+If multiple entities are extracted, runtime probes up to 3 cleaned entities in stable order. Each entity can use its own field set after runtime normalization. Dangerous characters are stripped before literal construction. Probe SQL remains template-generated and still passes SQL guard before execution.
+
+Hard allowlist rules are mandatory because SQL identifiers cannot be parameterized:
+
+- Probe table names must come only from the five approval variety table mappings.
+- Probe field names must come only from `variety_name`, `applicant`, `breeder`, or `approval_num`.
+- Match tiers must come only from `primary`, `secondary`, or `peer`.
+- LLM-provided `primary_fields` / `secondary_fields` are hints only; runtime must normalize them through the allowlist before any SQL template construction.
 
 ## Probe SQL Shape
 
@@ -173,7 +194,7 @@ Return natural-language missing input / no-hit clarification. The message must s
 
 ### No crop + no entity + broad query
 
-If LLM/deterministic understanding marks `cross_crop_allowed=true`, select all five approval tables as before.
+If LLM/deterministic understanding marks `cross_crop_allowed=true`, select all five approval tables as before. This branch is allowed only when the query has no cleaned name/number-like entity. If a query contains a cleaned suspected name or approval number but LLM did not classify it confidently, runtime must use the unknown-entity probe over `variety_name`, `applicant`, and `breeder` instead of bypassing to broad cross-crop selection.
 
 ## Resolution Output Contract
 
@@ -222,17 +243,20 @@ Rules:
 
 1. SQL must only use `selected_tables`.
 2. If `match_summary.primary` exists, SQL must include primary field filters.
-3. If secondary hits exist, SQL may include secondary field filters and should preserve source fields for final answer grouping.
-4. Cross-table approval SQL must continue projecting `source_table` and `source_crop`.
-5. Entity-aware approval SQL should also project a deterministic source marker when possible:
+3. If secondary hits exist, SQL must include secondary field filters and must preserve source fields for final answer grouping.
+4. If no primary hit exists but secondary hits exist, SQL still queries the secondary hit tables and the final answer must say there was no primary hit but there were attached/secondary hits.
+5. Cross-table approval SQL must continue projecting `source_table` and `source_crop`.
+6. Entity-aware approval SQL should also project a deterministic source marker when possible:
    - `matched_field`
    - `match_tier`
    - or equivalent output derived from the field branch.
-6. If a result row can come from multiple field branches, prefer `UNION ALL` branches with explicit literal `matched_field` and `match_tier` rather than an ambiguous OR-only query.
+7. If a result row can come from multiple field branches, prefer `UNION ALL` branches with explicit literal `matched_field` and `match_tier` rather than an ambiguous OR-only query.
 
 ## Final Answer Requirements
 
-The main answer should be based on sanitized skill output, not SQL internals. It must mention:
+The main answer should be based on sanitized skill output, not SQL internals. SQLQuery must provide these generic, sanitized output fields when available: `source_summary`, `match_summary`, `matched_fields`, and `search_effort_summary`. The main-agent prompt must not be customized for SQLQuery; only the generic sanitizer allowlist may be extended.
+
+The final answer must mention:
 
 - which crop tables were queried,
 - which fields matched,
@@ -246,7 +270,7 @@ Example style:
 
 ## Error Handling and Safety
 
-- Probe SQL must be built by runtime templates and pass SQL guard.
+- Probe SQL must be built by runtime templates and pass SQL guard. Table names, field names, and match tiers must come from hardcoded runtime allowlists, never directly from LLM text.
 - Probe failures should not expose DB errors to the user; public message stays vague.
 - No-hit clarification is not a system error and should be natural-language missing input.
 - If LLM entity output is invalid, run one understanding repair; if still invalid, fall back to deterministic entity heuristics when safe, otherwise ask for clarification.
@@ -279,6 +303,19 @@ Example style:
 - Natural-language no-hit / clarification message is shown as normal assistant text, not an interrupt card.
 - User can still answer follow-up clarification through the normal composer.
 
+## Acceptance Criteria
+
+| Scenario | Expected behavior | Evidence to verify |
+| --- | --- | --- |
+| “隆平高科申请的审定品种” with no crop | Runtime probes applicant as primary and breeder as secondary across five approval tables; all hit tables are selected. | `match_summary.primary` contains applicant hits; `match_summary.secondary` contains breeder hits when present; final answer separates 主要命中 / 附带命中. |
+| “某育种者育成的品种” with no crop | Runtime probes breeder as primary and applicant as secondary; secondary hits are not dropped. | SQL includes both primary and secondary filters when both hit; final answer reports primary/secondary tiers. |
+| “某公司所有审定品种” with no explicit field | Runtime probes applicant and breeder as peer fields; multiple crop table hits are queried automatically. | `selected_tables` equals all hit approval tables; no crop-selection interrupt is produced. |
+| Name-like entity with uncertain type | Runtime probes `variety_name`, `applicant`, and `breeder` as peer fields rather than falling through to broad query. | `probe_summary.searched_fields` contains those three fields; `resolution_reason` reflects entity probe. |
+| Region/year-only broad query | Region/year is handled as SQL filter context after table selection, not as entity-aware probe entity type. | `entities[]` does not contain `region` or `year`; generated SQL uses relevant filter columns when schema supports them. |
+| No probe hit | User receives natural-language no-hit / missing-input text that lists searched fields and the five crop tables. | Output includes `search_effort_summary`; user-facing text does not expose SQL, guard, DB error, retry count, or stack trace. |
+| Final answer after successful query | Answer mentions source crop tables, matched fields, and primary/secondary/peer grouping when applicable. | Sanitized dependency output exposes `source_summary`, `match_summary`, `matched_fields`, or `search_effort_summary`; main-agent prompt has no SQLQuery-specific final-answer rule. |
+| Frontend clarification/no-hit | Message appears as normal assistant text, not an interrupt card. | Frontend test confirms missing-input presentation uses natural language composer flow. |
+
 ## Rollout Notes
 
-This should be implemented as a scoped extension to the existing SQLQuery resolution pipeline. It should not reintroduce `SchemaContextBuilder` table selection fallback and should not customize main-agent final prompt for SQLQuery only. Any new output fields exposed to final answer should be added through generic sanitizer allowlist names such as `match_summary`, `matched_fields`, or `source_summary`.
+This should be implemented as a scoped extension to the existing SQLQuery resolution pipeline. It should not reintroduce `SchemaContextBuilder` table selection fallback and should not customize main-agent final prompt for SQLQuery only. Any new output fields exposed to final answer must be added through generic sanitizer allowlist names such as `match_summary`, `matched_fields`, `search_effort_summary`, or `source_summary`. No database schema migration or new external service is required.

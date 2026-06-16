@@ -66,6 +66,7 @@ interface PendingInterrupt {
   question: string;
   requiredFields: Record<string, unknown>;
   mode: ChatMode;
+  naturalLanguage?: boolean;
 }
 
 interface SheetSelectionField {
@@ -1262,6 +1263,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
               question: openInterrupt.question,
               requiredFields: openInterrupt.required_fields,
               mode: interrupt.mode,
+              naturalLanguage: isNaturalLanguageInterrupt(openInterrupt.required_fields),
             };
           }
         } catch {
@@ -1435,11 +1437,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         question: openInterrupt.question,
         requiredFields: openInterrupt.required_fields,
         mode: interruptionMode,
+        naturalLanguage: isNaturalLanguageInterrupt(openInterrupt.required_fields),
       };
       setPendingInterrupt(pending);
       updateAssistantMessage(assistantId, {
-        content: '',
-        interruptPrompt: pending,
+        content: pending.naturalLanguage ? pending.question : '',
+        interruptPrompt: pending.naturalLanguage ? undefined : pending,
         mode: interruptionMode,
         artifactDisplays: undefined,
         finalContentLoaded: undefined,
@@ -1669,7 +1672,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }));
       if (currentAssistantId && previousPendingInterrupt) {
         updateAssistantMessage(currentAssistantId, {
-          interruptPrompt: previousPendingInterrupt,
+          content: previousPendingInterrupt.naturalLanguage ? previousPendingInterrupt.question : undefined,
+          interruptPrompt: previousPendingInterrupt.naturalLanguage ? undefined : previousPendingInterrupt,
           activityText: undefined,
           activityStatus: undefined,
         });
@@ -2303,6 +2307,12 @@ function isInterruptKeepOpenResponse(response: { action?: string | null; answer_
 
 function InterruptQuestionText({ interrupt }: { interrupt: PendingInterrupt }) {
   return <MarkdownText content={interrupt.question} />;
+}
+
+function isNaturalLanguageInterrupt(requiredFields: Record<string, unknown>): boolean {
+  const resolution = requiredFields._sql_query_resolution;
+  if (!resolution || typeof resolution !== 'object') return false;
+  return (resolution as { presentation?: unknown }).presentation === 'natural_language';
 }
 
 function InterruptComposerStatus({ onCancel, cancelling }: { onCancel: () => void; cancelling: boolean }) {

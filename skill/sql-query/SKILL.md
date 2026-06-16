@@ -10,7 +10,7 @@ description: >-
 
 使用此 Skill 通过项目级受控平台服务回答品种、审定、基因型、表型和业务数据库类只读查询问题。
 
-平台执行事实源由 `skill.contract.yaml` 决定。SQL guard、schema context、handler、service allowlist 和连接配置属于平台内部实现，不进入主代理 prompt，也不向用户暴露。用户可见查询口径、示例和安全边界必须优先从 references 读取。
+平台执行事实源由 `skill.contract.yaml` 决定。内部执行配置和连接信息不进入主代理 prompt，也不向用户暴露。用户可见查询口径、示例和安全边界必须优先从 references 读取。
 
 ## 工作流
 
@@ -30,6 +30,6 @@ description: >-
 ## 边界
 
 - 只读：不执行写入、删除、更新、DDL、权限变更、多语句 SQL 或高风险管理操作。
-- 不暴露数据库连接信息、账号、密码、LLM key、完整 prompt、handler、service、内部配置或本机路径。
-- 不把本 Skill 转成普通脚本执行，也不让普通脚本直接绑定数据库、内部 LLM、secret 或完整环境变量。
+- 不暴露数据库连接信息、账号、密码、LLM key、完整 prompt、内部配置或本机路径。
+- 不把本 Skill 转成普通脚本执行，也不让普通脚本直接绑定数据库、secret 或完整环境变量。
 - 缺少关键查询实体时返回可控澄清，不编造 SQL 或业务数据。

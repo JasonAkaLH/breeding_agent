@@ -20,9 +20,21 @@ from .helpers import (
     make_artifact,
     make_audit_event,
     normalize_text,
+    sql_fingerprint,
 )
 from .llm_utils import LLMOutputError, TextGenerator, call_text_generator, parse_json_object, string_list
 from .prompt_builders import build_sql_generation_prompt, build_sql_repair_prompt
+from .sql_ast import (
+    SQLAstAnalysis,
+    SQLAstBranch,
+    SQLAstError,
+    analyze_sql,
+    branch_has_constraint,
+    branch_has_count,
+    branch_projection_literal,
+    final_has_limit,
+    final_has_order,
+)
 
 _APPROVAL_DETAIL_COLUMNS = (
     "year",
@@ -49,6 +61,12 @@ _APPROVAL_LIST_COLUMNS = (
     "suitable_area",
 )
 
+_TABLE_ALIAS_PATTERN = (
+    r"\b(?:from|join)\s+`?([A-Za-z_][\w]*)`?"
+    r"(?:\s+(?:as\s+)?`?(?!on\b|where\b|join\b|left\b|right\b|inner\b|outer\b|limit\b|group\b|order\b)"
+    r"([A-Za-z_][\w]*)`?)?"
+)
+
 class SQLQuerySQLGenerateCapability(CapabilityContract):
     capability_id = SQL_QUERY_PUBLIC_CAPABILITY_ID
     version = "1"
@@ -65,7 +83,25 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
 
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
         context = find_dependency_output(request, ("selected_tables", "selected_columns", "user_question"))
+        if not list(context.get("selected_tables") or []):
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                error=CapabilityExecutionError(
+                    code="selected_tables_required",
+                    message="SQL generation requires schema_resolution selected_tables.",
+                    retriable=False,
+                    metadata={
+                        "failed_stage": "sql_generate",
+                        "table_scope_authority": "schema_resolution",
+                    },
+                ),
+            )
         repair_context = _repair_context_from_request(request)
+        clarification = _query_constraint_clarification(context)
+        if clarification is not None:
+            return self._constraint_clarify_result(request, context, clarification)
         if self._llm_text_generator is None:
             return self._fallback_result(
                 request,
@@ -95,6 +131,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 repair_context=repair_context,
             )
 
+        llm_payload: dict[str, Any] | None = None
         try:
             try:
                 llm_payload = parse_json_object(raw_output)
@@ -123,6 +160,18 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 return self._reject_result(request, context, llm_payload)
             raise LLMOutputError("validation_failed", f"Unsupported LLM mode: {mode!r}")
         except LLMOutputError as exc:
+            if (
+                repair_context is None
+                and self._should_defer_validation_to_engine(request, exc)
+            ):
+                return self._local_validation_failed_result(
+                    request,
+                    context,
+                    reason=exc.reason,
+                    diagnostic=str(exc),
+                    raw_output=raw_output,
+                    llm_payload=llm_payload,
+                )
             return self._fallback_result(
                 request,
                 context,
@@ -140,6 +189,19 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "selected_tables": list(context.get("selected_tables", [])),
             "selected_columns": dict(context.get("selected_columns", {})),
             "user_question": context.get("user_question"),
+            "original_user_query": context.get("original_user_query") or context.get("user_question"),
+            "resolved_user_query": context.get("resolved_user_query") or context.get("user_question"),
+            "parent_question": context.get("parent_question"),
+            "subtask_label": context.get("subtask_label"),
+            "schema_ddl": context.get("schema_ddl") or context.get("database_schema"),
+            "entities": list(context.get("entities", [])),
+            "probe_summary": context.get("probe_summary"),
+            "match_summary": context.get("match_summary"),
+            "matched_fields": list(context.get("matched_fields", [])),
+            "match_tiers": list(context.get("match_tiers", [])),
+            "search_effort_summary": context.get("search_effort_summary"),
+            "query_constraints": context.get("query_constraints"),
+            "constraint_coverage_summary": context.get("constraint_coverage_summary"),
         }
 
     def _answer_result(
@@ -154,28 +216,33 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         sql = str(llm_payload.get("sql") or "").strip()
         if not sql:
             raise LLMOutputError("validation_failed", "LLM answer mode requires non-empty sql.")
+        ast_analysis = _analyze_generated_sql(sql) if ";" not in sql else None
 
         tables_used = string_list(llm_payload.get("tables_used"))
-        allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
         selected_tables = {str(table) for table in context.get("selected_tables", [])}
-        allowed_scope = selected_tables or allowed_tables
         if not tables_used:
             raise LLMOutputError("validation_failed", "LLM answer mode requires tables_used.")
-        if allowed_scope and not set(tables_used).issubset(allowed_scope):
-            raise LLMOutputError("validation_failed", "LLM tables_used must be a subset of allowed tables.")
+        if not selected_tables:
+            raise LLMOutputError("validation_failed", "SQL generation requires schema_resolution selected_tables.")
+        if not set(tables_used).issubset(selected_tables):
+            raise LLMOutputError("validation_failed", "LLM tables_used must be a subset of selected_tables.")
 
         columns_used = string_list(llm_payload.get("columns_used"))
         if not columns_used:
             raise LLMOutputError("validation_failed", "LLM answer mode requires columns_used.")
         self._validate_columns_used(context, columns_used)
-        self._validate_sql_column_references(context, sql, tables_used=tables_used)
+        self._validate_sql_column_references(context, sql, tables_used=tables_used, ast_analysis=ast_analysis)
         self._validate_variety_name_matching_policy(sql)
+        self._validate_source_projection_policy(context, sql, tables_used=tables_used)
+        self._validate_entity_filter_policy(context, sql, ast_analysis=ast_analysis)
+        constraint_coverage_summary = self._validate_constraint_coverage(context, sql, tables_used=tables_used, ast_analysis=ast_analysis)
         column_types_used = self._validate_column_types_used(context, llm_payload.get("column_types_used"), columns_used)
 
         output = {
             **self._base_output(context),
             "sql": sql,
             "tables_used": tables_used,
+            "source_scope": _source_scope_from_tables(tables_used, context=context),
             "columns_used": columns_used,
             "column_types_used": column_types_used,
             "join_hints_used": string_list(llm_payload.get("join_hints_used")),
@@ -184,6 +251,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "llm_output_format": str(llm_payload.get("_output_format") or "json"),
             "fallback_used": False,
             "fallback_reason": None,
+            "constraint_coverage_summary": constraint_coverage_summary,
         }
         if repair_context:
             output["sql_repair_attempt"] = int(repair_context.get("attempt") or 1)
@@ -217,6 +285,58 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             node_id=request.node_id,
             output_payload=output,
             artifacts=(artifact,),
+            events=(event,),
+        )
+
+    def _local_validation_failed_result(
+        self,
+        request: CapabilityExecutionRequest,
+        context: dict[str, Any],
+        *,
+        reason: str,
+        diagnostic: str,
+        raw_output: str,
+        llm_payload: Mapping[str, Any] | None,
+    ) -> CapabilityExecutionResult:
+        failed_sql = self._best_effort_failed_sql(raw_output, llm_payload)
+        output = {
+            **self._base_output(context),
+            "sql": failed_sql,
+            "generation_source": "llm",
+            "llm_mode": reason,
+            "fallback_used": False,
+            "fallback_reason": None,
+            "validation_error": reason,
+        }
+        event = make_audit_event(
+            request,
+            event_type=SQL_QUERY_AUDIT_LLM_CALL_EVENT,
+            payload={
+                "capability_id": self.capability_id,
+                "stage": "sql_generate",
+                "status": "validation_failed",
+                "llm_mode": reason,
+                "fallback_used": False,
+                "prompt_recorded": False,
+                "diagnostic": diagnostic[:300],
+            },
+        )
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload=output,
+            error=CapabilityExecutionError(
+                code="sql_generation_validation_failed",
+                message="Generated SQL did not pass local validation.",
+                retriable=False,
+                metadata={
+                    "failed_stage": "sql_generate",
+                    "repairable_sql_error": True,
+                    "validation_reason": reason,
+                    "sql_fingerprint": sql_fingerprint(failed_sql),
+                },
+            ),
             events=(event,),
         )
 
@@ -289,6 +409,13 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "generation_source": "llm",
             "fallback_used": False,
             "fallback_reason": None,
+            "ok": False,
+            "status": "missing_input",
+            "needs_user_input": True,
+            "answer": question,
+            "response_text": question,
+            "error": {"type": "missing_input", "message": question},
+            "presentation": "natural_language",
             "missing_info": llm_payload.get("missing_info"),
             "clarifying_question": question,
         }
@@ -317,7 +444,78 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 source_message_id=f"{request.node_id}:llm-clarification",
                 question=question,
                 reason_code="llm_clarification_required",
-                required_fields={"missing_info": llm_payload.get("missing_info")},
+                required_fields={
+                    "missing_info": llm_payload.get("missing_info"),
+                    "_sql_query_resolution": {
+                        "domain_kind": "sql_query",
+                        "presentation": "natural_language",
+                        "reason_code": "llm_clarification_required",
+                    },
+                },
+            ),
+            events=(event,),
+        )
+
+    def _constraint_clarify_result(
+        self,
+        request: CapabilityExecutionRequest,
+        context: dict[str, Any],
+        clarification: Mapping[str, Any],
+    ) -> CapabilityExecutionResult:
+        question = str(clarification.get("question") or "").strip() or "请补充查询条件后再试。"
+        missing = [str(item) for item in list(clarification.get("missing") or []) if str(item).strip()]
+        output = {
+            **self._base_output(context),
+            "llm_mode": "constraint_clarify",
+            "generation_source": "deterministic",
+            "fallback_used": False,
+            "fallback_reason": None,
+            "ok": False,
+            "status": "missing_input",
+            "needs_user_input": True,
+            "answer": question,
+            "response_text": question,
+            "error": {"type": "missing_input", "message": question},
+            "missing": missing,
+            "presentation": "natural_language",
+            "clarifying_question": question,
+            "clarification_reason": clarification.get("reason"),
+        }
+        event = make_audit_event(
+            request,
+            event_type=SQL_QUERY_AUDIT_LLM_CALL_EVENT,
+            payload={
+                "capability_id": self.capability_id,
+                "stage": "sql_generate",
+                "status": "constraint_clarify",
+                "llm_mode": "constraint_clarify",
+                "fallback_used": False,
+                "prompt_recorded": False,
+                "reason": clarification.get("reason"),
+            },
+        )
+        required_fields = {name: {} for name in missing}
+        required_fields["_sql_query_resolution"] = {
+            "domain_kind": "sql_query",
+            "presentation": "natural_language",
+            "reason_code": "query_constraint_clarification_required",
+            "clarification_reason": clarification.get("reason"),
+        }
+        return CapabilityExecutionResult(
+            capability_id=request.capability_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            output_payload=output,
+            interrupt=Interrupt(
+                interrupt_id=f"{request.node_id}:constraint-clarify",
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                source_agent=self.capability_id,
+                source_message_id=f"{request.node_id}:constraint-clarification",
+                question=question,
+                reason_code="query_constraint_clarification_required",
+                required_fields=required_fields,
             ),
             events=(event,),
         )
@@ -378,21 +576,52 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         repair_context: Mapping[str, Any] | None = None,
     ) -> CapabilityExecutionResult:
         sql = self._fallback_generator(context)
-        output = {
-            **self._base_output(context),
-            "sql": sql,
-            "tables_used": list(context.get("selected_tables", [])),
-            "columns_used": [
+        fallback_validation_error: CapabilityExecutionError | None = None
+        constraint_coverage_summary: dict[str, Any] | None = None
+        try:
+            ast_analysis = _analyze_generated_sql(sql) if ";" not in sql else None
+            tables_used = self._infer_tables_used_from_sql(context, sql, ast_analysis=ast_analysis)
+            columns_used = self._infer_columns_used_from_sql(context, sql, tables_used=tables_used, ast_analysis=ast_analysis)
+            self._validate_columns_used(context, columns_used)
+            self._validate_sql_column_references(context, sql, tables_used=tables_used, ast_analysis=ast_analysis)
+            self._validate_variety_name_matching_policy(sql)
+            self._validate_source_projection_policy(context, sql, tables_used=tables_used)
+            self._validate_entity_filter_policy(context, sql, ast_analysis=ast_analysis)
+            constraint_coverage_summary = self._validate_constraint_coverage(context, sql, tables_used=tables_used, ast_analysis=ast_analysis)
+            column_types_used = self._validate_column_types_used(context, None, columns_used)
+        except LLMOutputError as exc:
+            tables_used = list(context.get("selected_tables", []))
+            columns_used = [
                 f"{table}.{column}"
                 for table, columns in dict(context.get("selected_columns", {})).items()
                 for column in list(columns)
-            ],
-            "column_types_used": self._column_types_for_selected_columns(context),
+            ]
+            column_types_used = self._column_types_for_selected_columns(context)
+            if re.match(r"^\s*(select|with)\b", sql, flags=re.I):
+                fallback_validation_error = CapabilityExecutionError(
+                    code="sql_fallback_validation_failed",
+                    message="Fallback SQL did not pass local validation.",
+                    retriable=False,
+                    metadata={
+                        "failed_stage": "sql_generate",
+                        "repairable_sql_error": False,
+                        "validation_reason": exc.reason,
+                        "sql_fingerprint": sql_fingerprint(sql),
+                    },
+                )
+        output = {
+            **self._base_output(context),
+            "sql": sql,
+            "tables_used": tables_used,
+            "source_scope": _source_scope_from_tables(tables_used, context=context),
+            "columns_used": columns_used,
+            "column_types_used": column_types_used,
             "join_hints_used": [],
             "generation_source": "fallback",
             "llm_mode": llm_mode,
             "fallback_used": True,
             "fallback_reason": fallback_reason,
+            "constraint_coverage_summary": constraint_coverage_summary,
         }
         if repair_context:
             output["sql_repair_attempt"] = int(repair_context.get("attempt") or 1)
@@ -426,13 +655,15 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             output_payload=output,
             artifacts=(artifact,),
             events=(event,),
+            error=fallback_validation_error,
         )
 
 
     def _raw_sql_payload_from_output(self, raw_output: str, context: dict[str, Any]) -> dict[str, Any]:
         sql = self._extract_sql_from_text(raw_output)
-        tables_used = self._infer_tables_used_from_sql(context, sql)
-        columns_used = self._infer_columns_used_from_sql(context, sql, tables_used=tables_used)
+        ast_analysis = _analyze_generated_sql(sql) if ";" not in sql else None
+        tables_used = self._infer_tables_used_from_sql(context, sql, ast_analysis=ast_analysis)
+        columns_used = self._infer_columns_used_from_sql(context, sql, tables_used=tables_used, ast_analysis=ast_analysis)
         return {
             "mode": "answer",
             "route_id": context.get("route_id"),
@@ -464,20 +695,17 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             raise LLMOutputError("parse_failed", "LLM output is neither JSON nor a raw SELECT SQL statement.")
         return value
 
-    def _infer_tables_used_from_sql(self, context: dict[str, Any], sql: str) -> list[str]:
+    def _infer_tables_used_from_sql(self, context: dict[str, Any], sql: str, *, ast_analysis: SQLAstAnalysis | None = None) -> list[str]:
         selected_tables = {str(table) for table in context.get("selected_tables", [])}
-        allowed_tables = {str(table) for table in context.get("allowed_tables", [])}
-        allowed_scope = selected_tables or allowed_tables
+        if not selected_tables:
+            raise LLMOutputError("validation_failed", "Raw SQL validation requires schema_resolution selected_tables.")
         tables_used: list[str] = []
-        for table, _alias in re.findall(
-            r"\b(?:from|join)\s+`?([A-Za-z_][\w]*)`?(?:\s+(?:as\s+)?`?([A-Za-z_][\w]*)`?)?",
-            sql,
-            flags=re.I,
-        ):
+        ast_tables = list(ast_analysis.tables) if ast_analysis is not None else []
+        raw_tables = ast_tables or [table for table, _alias in re.findall(_TABLE_ALIAS_PATTERN, sql, flags=re.I)]
+        for table in raw_tables:
             normalized_table = str(table)
-            if allowed_scope and normalized_table not in allowed_scope:
-                tables_used.append(normalized_table)
-                continue
+            if normalized_table not in selected_tables:
+                raise LLMOutputError("validation_failed", f"Raw SQL references table outside selected_tables: {normalized_table}")
             if normalized_table not in tables_used:
                 tables_used.append(normalized_table)
         if not tables_used:
@@ -490,6 +718,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         sql: str,
         *,
         tables_used: list[str],
+        ast_analysis: SQLAstAnalysis | None = None,
     ) -> list[str]:
         allowed = self._allowed_columns_by_table(context)
         table_aliases = self._extract_table_aliases(sql)
@@ -500,15 +729,28 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             if table in allowed and column in allowed[table] and canonical not in columns_used:
                 columns_used.append(canonical)
 
-        for qualifier, column in re.findall(r"\b`?([A-Za-z_][\w]*)`?\.`?([A-Za-z_][\w]*)`?\b", sql):
-            append(table_aliases.get(qualifier, qualifier), column)
-
         used_scope = {str(table) for table in tables_used}
         scoped_allowed = {table: columns for table, columns in allowed.items() if table in used_scope}
-        for column in self._extract_unqualified_column_references(sql, table_aliases):
-            table, resolved_column = self._resolve_column_reference(column, scoped_allowed)
-            if table is not None and resolved_column is not None:
-                append(table, resolved_column)
+        if ast_analysis is not None:
+            for branch in ast_analysis.branches:
+                branch_scope = {table for table in branch.tables if table in used_scope} or used_scope
+                branch_allowed = {table: columns for table, columns in allowed.items() if table in branch_scope}
+                for ast_column in branch.columns:
+                    qualifier = ast_column.table
+                    if qualifier:
+                        append(branch.alias_to_table.get(qualifier, qualifier), ast_column.name)
+                    else:
+                        table, resolved_column = self._resolve_column_reference(ast_column.name, branch_allowed)
+                        if table is not None and resolved_column is not None:
+                            append(table, resolved_column)
+        else:
+            for qualifier, column in re.findall(r"\b`?([A-Za-z_][\w]*)`?\.`?([A-Za-z_][\w]*)`?\b", sql):
+                append(table_aliases.get(qualifier, qualifier), column)
+
+            for column in self._extract_unqualified_column_references(sql, table_aliases):
+                table, resolved_column = self._resolve_column_reference(column, scoped_allowed)
+                if table is not None and resolved_column is not None:
+                    append(table, resolved_column)
 
         if not columns_used and re.search(r"\*", sql):
             selected_columns = dict(context.get("selected_columns", {}))
@@ -607,10 +849,31 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             return matches[0]
         return None, None
 
-    def _validate_sql_column_references(self, context: dict[str, Any], sql: str, *, tables_used: list[str]) -> None:
+    def _validate_sql_column_references(
+        self,
+        context: dict[str, Any],
+        sql: str,
+        *,
+        tables_used: list[str],
+        ast_analysis: SQLAstAnalysis | None = None,
+    ) -> None:
         allowed_all = self._allowed_columns_by_table(context)
         used_scope = {str(table) for table in tables_used}
         allowed = {table: columns for table, columns in allowed_all.items() if not used_scope or table in used_scope}
+        if ast_analysis is not None:
+            for branch in ast_analysis.branches:
+                branch_scope = {table for table in branch.tables if table in used_scope} or used_scope
+                branch_allowed = {table: columns for table, columns in allowed.items() if table in branch_scope}
+                for column_ref in branch.columns:
+                    qualifier = column_ref.table
+                    if qualifier:
+                        table = branch.alias_to_table.get(qualifier, qualifier)
+                        if table not in branch_allowed or column_ref.name not in branch_allowed.get(table, set()):
+                            raise LLMOutputError("validation_failed", f"SQL references column outside selected schema: {qualifier}.{column_ref.name}")
+                    elif self._resolve_column_reference(column_ref.name, branch_allowed) == (None, None):
+                        raise LLMOutputError("validation_failed", f"SQL references column outside selected schema: {column_ref.name}")
+            return
+
         table_aliases = self._extract_table_aliases(sql)
         for qualifier, column in re.findall(r"\b`?([A-Za-z_][\w]*)`?\.`?([A-Za-z_][\w]*)`?\b", sql):
             table = table_aliases.get(qualifier, qualifier)
@@ -623,11 +886,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
 
     def _extract_table_aliases(self, sql: str) -> dict[str, str]:
         aliases: dict[str, str] = {}
-        for table, alias in re.findall(
-            r"\b(?:from|join)\s+`?([A-Za-z_][\w]*)`?(?:\s+(?:as\s+)?`?([A-Za-z_][\w]*)`?)?",
-            sql,
-            flags=re.I,
-        ):
+        for table, alias in re.findall(_TABLE_ALIAS_PATTERN, sql, flags=re.I):
             aliases[table] = table
             if alias and alias.lower() not in {"on", "where", "join", "left", "right", "inner", "limit", "group", "order"}:
                 aliases[alias] = table
@@ -642,6 +901,7 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             "select", "from", "join", "left", "right", "inner", "outer", "on", "where", "and", "or",
             "limit", "order", "group", "by", "as", "like", "in", "is", "null", "not", "with", "distinct",
             "count", "sum", "avg", "min", "max", "case", "when", "then", "else", "end", "desc", "asc",
+            "union", "all",
         }
         return {
             token.strip("`")
@@ -669,32 +929,52 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
             return self._generate_approval_variety_sql(context)
 
         base_table = selected_tables[0]
+        sql = f"FROM {base_table}"
+        joined_tables = {base_table}
+        pending_hints = [dict(hint) for hint in join_hints if isinstance(hint, Mapping)]
+        while pending_hints:
+            progressed = False
+            remaining_hints: list[dict[str, Any]] = []
+            for hint in pending_hints:
+                left_table = str(hint.get("left_table") or "")
+                right_table = str(hint.get("right_table") or "")
+                if not left_table or not right_table:
+                    continue
+                if left_table in joined_tables and right_table not in joined_tables and right_table in selected_tables:
+                    sql += (
+                        f" JOIN {right_table} ON "
+                        f"{left_table}.{hint['left_column']} = {right_table}.{hint['right_column']}"
+                    )
+                    joined_tables.add(right_table)
+                    progressed = True
+                    continue
+                if right_table in joined_tables and left_table not in joined_tables and left_table in selected_tables:
+                    sql += (
+                        f" JOIN {left_table} ON "
+                        f"{left_table}.{hint['left_column']} = {right_table}.{hint['right_column']}"
+                    )
+                    joined_tables.add(left_table)
+                    progressed = True
+                    continue
+                if left_table not in joined_tables or right_table not in joined_tables:
+                    remaining_hints.append(hint)
+            if not progressed:
+                break
+            pending_hints = remaining_hints
+
         projected_columns: list[str] = []
-        for table in selected_tables[:2]:
+        for table in selected_tables:
+            if table not in joined_tables:
+                continue
             for column in selected_columns.get(table, [])[:2]:
-                if len(selected_tables) > 1:
-                    projected_columns.append(f"{table}.{column}")
-                else:
-                    projected_columns.append(column)
+                projected_columns.append(f"{table}.{column}" if len(joined_tables) > 1 else str(column))
         if not projected_columns:
             projected_columns = ["*"]
 
         if any(keyword in user_question for keyword in ("多少", "数量", "count", "几条")):
             projected_columns = ["COUNT(*) AS total"]
 
-        sql = f"SELECT {', '.join(projected_columns)} FROM {base_table}"
-        joined_tables = {base_table}
-        for hint in join_hints:
-            right_table = hint["right_table"]
-            if right_table in joined_tables:
-                continue
-            if right_table not in selected_tables:
-                continue
-            sql += (
-                f" JOIN {right_table} ON "
-                f"{hint['left_table']}.{hint['left_column']} = {hint['right_table']}.{hint['right_column']}"
-            )
-            joined_tables.add(right_table)
+        sql = f"SELECT {', '.join(projected_columns)} {sql}"
 
         term = self._extract_variety_search_term(user_question)
         safe_term = self._safe_search_literal(term) if term else None
@@ -714,9 +994,32 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         if not selected_tables:
             return "SELECT COUNT(*) AS total FROM rice_varieties"
 
+        entity_specs = _entity_filter_specs(context, selected_tables=selected_tables)
+        if entity_specs:
+            sql = self._generate_entity_approval_variety_sql(
+                selected_tables=selected_tables,
+                selected_columns=selected_columns,
+                user_question=user_question,
+                normalized_question=normalized_question,
+                entity_specs=entity_specs,
+                context=context,
+            )
+            return self._apply_query_level_constraints(sql, context)
+
+        if len(selected_tables) > 1:
+            sql = self._generate_cross_approval_variety_sql(
+                selected_tables=selected_tables,
+                selected_columns=selected_columns,
+                user_question=user_question,
+                normalized_question=normalized_question,
+                context=context,
+            )
+            return self._apply_query_level_constraints(sql, context)
+
         base_table = selected_tables[0]
         if any(keyword in normalized_question for keyword in ("多少", "数量", "count", "几条")):
-            return f"SELECT COUNT(*) AS total FROM {base_table}"
+            where = self._where_from_constraint_fragments(context, base_table)
+            return self._apply_query_level_constraints(f"SELECT COUNT(*) AS total FROM {base_table}{where}", context)
 
         detail_requested = any(
             keyword in normalized_question
@@ -733,8 +1036,145 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         term = self._extract_variety_search_term(user_question)
         safe_term = self._safe_search_literal(term) if term else None
         where = self._where_search_term(safe_term, (f"{base_table}.variety_name",))
+        where = self._append_constraint_fragments(where, self._global_filter_fragments(context, base_table, exclude_fields={"variety_name"} if safe_term else set()))
         projection = ", ".join(f"{base_table}.{column}" for column in projected) if projected != ["*"] else "*"
-        return f"SELECT {projection} FROM {base_table}{where}"
+        if projected == ["*"]:
+            sql = f"SELECT {_sql_literal(base_table)} AS source_table, {_sql_literal(_crop_for_approval_table(base_table) or '')} AS source_crop, {base_table}.* FROM {base_table}{where}"
+        else:
+            sql = (
+                f"SELECT {_sql_literal(base_table)} AS source_table, "
+                f"{_sql_literal(_crop_for_approval_table(base_table) or '')} AS source_crop, "
+                f"{projection} FROM {base_table}{where}"
+            )
+        return self._apply_query_level_constraints(sql, context)
+
+    def _generate_cross_approval_variety_sql(
+        self,
+        *,
+        selected_tables: list[str],
+        selected_columns: Mapping[str, Any],
+        user_question: str,
+        normalized_question: str,
+        context: Mapping[str, Any] | None = None,
+    ) -> str:
+        common_columns = self._common_approval_projection_columns(selected_tables, selected_columns)
+        if any(keyword in normalized_question for keyword in ("多少", "数量", "count", "几条")):
+            parts = [
+                f"SELECT {_sql_literal(table)} AS source_table, {_sql_literal(_crop_for_approval_table(table) or '')} AS source_crop, COUNT(*) AS total FROM {table}{self._where_from_constraint_fragments(context or {}, table)}"
+                for table in selected_tables
+            ]
+            return " UNION ALL ".join(parts)
+
+        term = self._extract_variety_search_term(user_question)
+        safe_term = self._safe_search_literal(term) if term else None
+        parts: list[str] = []
+        for table in selected_tables:
+            available = {str(column) for column in list(selected_columns.get(table, []))}
+            projected = [column for column in common_columns if column in available]
+            if not projected:
+                projected = [str(column) for column in list(selected_columns.get(table, []))[:5]]
+            projection = ", ".join(f"{table}.{column}" for column in projected) if projected else "*"
+            where = self._where_search_term(safe_term, (f"{table}.variety_name",)) if "variety_name" in available else ""
+            where = self._append_constraint_fragments(where, self._global_filter_fragments(context or {}, table, exclude_fields={"variety_name"} if safe_term else set()))
+            if projection == "*":
+                select_projection = (
+                    f"{_sql_literal(table)} AS source_table, "
+                    f"{_sql_literal(_crop_for_approval_table(table) or '')} AS source_crop, "
+                    f"{table}.*"
+                )
+            else:
+                select_projection = (
+                    f"{_sql_literal(table)} AS source_table, "
+                    f"{_sql_literal(_crop_for_approval_table(table) or '')} AS source_crop, "
+                    f"{projection}"
+                )
+            parts.append(f"SELECT {select_projection} FROM {table}{where}")
+        return " UNION ALL ".join(parts)
+
+    def _generate_entity_approval_variety_sql(
+        self,
+        *,
+        selected_tables: list[str],
+        selected_columns: Mapping[str, Any],
+        user_question: str,
+        normalized_question: str,
+        entity_specs: list[dict[str, str]],
+        context: Mapping[str, Any] | None = None,
+    ) -> str:
+        count_mode = any(keyword in normalized_question for keyword in ("多少", "数量", "count", "几条"))
+        detail_requested = any(
+            keyword in normalized_question
+            for keyword in ("详细", "详情", "所有信息", "全部信息", "完整", "具体", "介绍", "信息")
+        )
+        common_columns = self._common_approval_projection_columns(selected_tables, selected_columns) if len(selected_tables) > 1 else []
+        parts: list[str] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for spec in entity_specs:
+            table = spec["table"]
+            field = spec["field"]
+            tier = spec["tier"]
+            entity_text = spec["entity_text"]
+            if table not in selected_tables:
+                continue
+            available = {str(column) for column in list(selected_columns.get(table, []))}
+            if field not in available:
+                continue
+            safe_term = self._safe_search_literal(entity_text)
+            if not safe_term:
+                continue
+            key = (table, field, tier, safe_term)
+            if key in seen:
+                continue
+            seen.add(key)
+            source_projection = (
+                f"{_sql_literal(table)} AS source_table, "
+                f"{_sql_literal(_crop_for_approval_table(table) or '')} AS source_crop, "
+                f"{_sql_literal(field)} AS matched_field, "
+                f"{_sql_literal(tier)} AS match_tier"
+            )
+            if count_mode:
+                projection = f"{source_projection}, COUNT(*) AS total"
+            else:
+                if common_columns:
+                    projected = [column for column in common_columns if column in available]
+                else:
+                    preferred = _APPROVAL_DETAIL_COLUMNS if detail_requested else _APPROVAL_LIST_COLUMNS
+                    projected = [column for column in preferred if column in available]
+                if not projected:
+                    projected = [str(column) for column in list(selected_columns.get(table, []))[:5]]
+                projection_columns = ", ".join(f"{table}.{column}" for column in projected) if projected else f"{table}.*"
+                projection = f"{source_projection}, {projection_columns}"
+            where = self._append_constraint_fragments(
+                f" WHERE {table}.{field} LIKE '%{safe_term}%'",
+                self._global_filter_fragments(context or {}, table, exclude_fields={field}),
+            )
+            parts.append(f"SELECT {projection} FROM {table}{where}")
+        if parts:
+            return " UNION ALL ".join(parts)
+        return self._generate_cross_approval_variety_sql(
+            selected_tables=selected_tables,
+            selected_columns=selected_columns,
+            user_question=user_question,
+            normalized_question=normalized_question,
+            context=context,
+        )
+
+    def _common_approval_projection_columns(
+        self,
+        selected_tables: list[str],
+        selected_columns: Mapping[str, Any],
+    ) -> list[str]:
+        common: set[str] | None = None
+        for table in selected_tables:
+            columns = {str(column) for column in list(selected_columns.get(table, []))}
+            common = columns if common is None else common & columns
+        available_common = common or set()
+        preferred = [
+            column
+            for column in _APPROVAL_LIST_COLUMNS
+            if column in available_common
+        ]
+        return preferred or sorted(available_common)[:6]
 
     def _extract_variety_search_term(self, user_question: str) -> str | None:
         normalized = str(user_question or "").replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
@@ -810,6 +1250,197 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
         clauses = [f"{column} LIKE '%{safe_term}%'" for column in columns]
         return " WHERE " + " OR ".join(clauses)
 
+    def _validate_constraint_coverage(
+        self,
+        context: dict[str, Any],
+        sql: str,
+        *,
+        tables_used: list[str],
+        ast_analysis: SQLAstAnalysis | None = None,
+    ) -> dict[str, Any]:
+        query_constraints = context.get("query_constraints")
+        if not isinstance(query_constraints, Mapping):
+            return {"covered": True, "checked_constraints": 0, "summary": "no query constraints"}
+        required = [item for item in list(query_constraints.get("required_constraints") or []) if isinstance(item, Mapping)]
+        groups = [group for group in list(query_constraints.get("constraint_groups") or []) if isinstance(group, Mapping)]
+        if not required and not groups:
+            return {"covered": True, "checked_constraints": 0, "summary": "no required query constraints"}
+
+        branches = _split_union_all_branches(sql) or [sql]
+        if ast_analysis is None:
+            checked = 0
+            for item in required:
+                scope = str(item.get("scope") or "global_filter")
+                operator = str(item.get("operator") or "").upper()
+                if scope == "global_filter":
+                    for branch in branches:
+                        table = _first_branch_table(branch, tables_used)
+                        if not table or not self._constraint_applies_to_table(item, table):
+                            continue
+                        checked += 1
+                        if not _branch_covers_constraint(branch, item, table=table):
+                            raise LLMOutputError("validation_failed", f"SQL does not cover required constraint: {item.get('id')}")
+                elif scope == "aggregate" and operator == "COUNT":
+                    checked += 1
+                    if not re.search(r"\bcount\s*\(\s*\*\s*\)", sql, flags=re.I):
+                        raise LLMOutputError("validation_failed", f"SQL does not cover COUNT constraint: {item.get('id')}")
+                elif scope == "query_level":
+                    checked += 1
+                    if not _sql_covers_query_level_constraint(sql, item):
+                        raise LLMOutputError("validation_failed", f"SQL does not cover query-level constraint: {item.get('id')}")
+                elif scope == "branch_filter":
+                    if not any(_branch_covers_constraint(branch, item, table=_first_branch_table(branch, tables_used) or "") for branch in branches):
+                        raise LLMOutputError("validation_failed", f"SQL does not cover branch constraint: {item.get('id')}")
+                    checked += 1
+
+            by_id = {str(item.get("id")): item for item in required}
+            for group in groups:
+                if str(group.get("mode")) != "branch_union":
+                    continue
+                members = [by_id.get(member) for member in list(group.get("members") or [])]
+                members = [member for member in members if isinstance(member, Mapping)]
+                if len(members) < 2:
+                    continue
+                if not re.search(r"\bunion\s+all\b", sql, flags=re.I):
+                    raise LLMOutputError("validation_failed", f"branch_union group requires UNION ALL: {group.get('id')}")
+                for member in members:
+                    checked += 1
+                    if not any(_branch_covers_group_member(branch, member, tables_used=tables_used) for branch in branches):
+                        raise LLMOutputError("validation_failed", f"branch_union member is not traceable: {member.get('id')}")
+
+            return {
+                "covered": True,
+                "checked_constraints": checked,
+                "summary": query_constraints.get("constraint_summary") or "required constraints covered",
+            }
+
+        ast_branches = list(ast_analysis.branches)
+        checked = 0
+        for item in required:
+            scope = str(item.get("scope") or "global_filter")
+            operator = str(item.get("operator") or "").upper()
+            if scope == "global_filter":
+                for branch in ast_branches:
+                    table = _first_ast_branch_table(branch, tables_used)
+                    if not table or not self._constraint_applies_to_table(item, table):
+                        continue
+                    checked += 1
+                    field = _constraint_field_for_table(item, table)
+                    if not branch_has_constraint(branch, field=field, operator=operator, value=item.get("value"), table=table):
+                        raise LLMOutputError("validation_failed", f"SQL does not cover required constraint: {item.get('id')}")
+            elif scope == "aggregate" and operator == "COUNT":
+                checked += 1
+                if not any(branch_has_count(branch) for branch in ast_branches):
+                    raise LLMOutputError("validation_failed", f"SQL does not cover COUNT constraint: {item.get('id')}")
+            elif scope == "query_level":
+                checked += 1
+                if not _ast_covers_query_level_constraint(ast_analysis, item):
+                    raise LLMOutputError("validation_failed", f"SQL does not cover query-level constraint: {item.get('id')}")
+            elif scope == "branch_filter":
+                # Branch groups are checked below; standalone branch filters are accepted when any traceable branch covers them.
+                if not any(_ast_branch_covers_constraint(branch, item, tables_used=tables_used) for branch in ast_branches):
+                    raise LLMOutputError("validation_failed", f"SQL does not cover branch constraint: {item.get('id')}")
+                checked += 1
+
+        by_id = {str(item.get("id")): item for item in required}
+        for group in groups:
+            if str(group.get("mode")) != "branch_union":
+                continue
+            members = [by_id.get(member) for member in list(group.get("members") or [])]
+            members = [member for member in members if isinstance(member, Mapping)]
+            if len(members) < 2:
+                continue
+            if not ast_analysis.is_union_all:
+                raise LLMOutputError("validation_failed", f"branch_union group requires UNION ALL: {group.get('id')}")
+            for member in members:
+                checked += 1
+                if not any(_ast_branch_covers_group_member(branch, member, tables_used=tables_used) for branch in ast_branches):
+                    raise LLMOutputError("validation_failed", f"branch_union member is not traceable: {member.get('id')}")
+
+        return {
+            "covered": True,
+            "checked_constraints": checked,
+            "summary": query_constraints.get("constraint_summary") or "required constraints covered",
+        }
+
+    def _constraint_applies_to_table(self, item: Mapping[str, Any], table: str) -> bool:
+        tables = [str(value) for value in list(item.get("tables") or [])]
+        return not tables or table in tables
+
+    def _global_filter_fragments(self, context: Mapping[str, Any], table: str, *, exclude_fields: set[str] | None = None) -> list[str]:
+        exclude_fields = exclude_fields or set()
+        query_constraints = context.get("query_constraints") if isinstance(context, Mapping) else None
+        if not isinstance(query_constraints, Mapping):
+            return []
+        fragments: list[str] = []
+        for item in list(query_constraints.get("required_constraints") or []):
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("scope") or "") != "global_filter":
+                continue
+            if not self._constraint_applies_to_table(item, table):
+                continue
+            field = _constraint_field_for_table(item, table)
+            if not field or field in exclude_fields:
+                continue
+            fragment = _constraint_to_sql_fragment(item, table=table, field=field)
+            if fragment and fragment not in fragments:
+                fragments.append(fragment)
+        return fragments
+
+    def _where_from_constraint_fragments(self, context: Mapping[str, Any], table: str) -> str:
+        fragments = self._global_filter_fragments(context, table)
+        return " WHERE " + " AND ".join(fragments) if fragments else ""
+
+    def _append_constraint_fragments(self, where: str, fragments: list[str]) -> str:
+        if not fragments:
+            return where
+        if where.strip():
+            clause = where.strip()
+            if clause.lower().startswith("where "):
+                clause = clause[6:]
+            return " WHERE (" + clause + ") AND " + " AND ".join(fragments)
+        return " WHERE " + " AND ".join(fragments)
+
+    def _apply_query_level_constraints(self, sql: str, context: Mapping[str, Any]) -> str:
+        query_constraints = context.get("query_constraints") if isinstance(context, Mapping) else None
+        if not isinstance(query_constraints, Mapping):
+            return sql
+        order_clause = ""
+        limit_clause = ""
+        has_count = False
+        for item in list(query_constraints.get("required_constraints") or []):
+            if not isinstance(item, Mapping):
+                continue
+            operator = str(item.get("operator") or "").upper()
+            if str(item.get("scope") or "") == "aggregate" and operator == "COUNT":
+                has_count = True
+            if str(item.get("scope") or "") != "query_level":
+                continue
+            if operator == "ORDER_BY" and str(item.get("field") or "") == "year":
+                direction = "DESC"
+                value = item.get("value")
+                if isinstance(value, Mapping) and str(value.get("direction") or "").upper() in {"ASC", "DESC"}:
+                    direction = str(value.get("direction")).upper()
+                order_clause = f" ORDER BY year {direction}"
+            elif operator == "LIMIT":
+                try:
+                    limit = int(item.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                if limit > 0:
+                    limit_clause = f" LIMIT {limit}"
+        if has_count or (not order_clause and not limit_clause):
+            return sql
+        if re.search(r"\bunion\s+all\b", sql, flags=re.I):
+            return f"SELECT * FROM ({sql}) AS constrained_results{order_clause}{limit_clause}"
+        result = sql
+        if order_clause and not re.search(r"\border\s+by\b", result, flags=re.I):
+            result += order_clause
+        if limit_clause and not re.search(r"\blimit\s+\d+", result, flags=re.I):
+            result += limit_clause
+        return result
+
     def _validate_variety_name_matching_policy(self, sql: str) -> None:
         left_strict_equal = r"(?:`?[A-Za-z_][\w]*`?\.)?`?variety_name`?\s*=\s*(?:'[^']*'|\"[^\"]*\"|`?[A-Za-z_][\w]*`?(?:\.`?[A-Za-z_][\w]*`?)?)"
         right_strict_equal = r"(?:'[^']*'|\"[^\"]*\")\s*=\s*(?:`?[A-Za-z_][\w]*`?\.)?`?variety_name`?"
@@ -818,6 +1449,350 @@ class SQLQuerySQLGenerateCapability(CapabilityContract):
                 "validation_failed",
                 "SQL must use LIKE instead of strict equality when filtering variety_name.",
             )
+
+    def _validate_source_projection_policy(self, context: dict[str, Any], sql: str, *, tables_used: list[str]) -> None:
+        if context.get("route_id") != "approval_variety_db":
+            return
+        if len({str(table) for table in tables_used if str(table).endswith("_varieties")}) <= 1:
+            return
+        if not re.search(r"\bsource_table\b", sql, flags=re.I) or not re.search(r"\bsource_crop\b", sql, flags=re.I):
+            raise LLMOutputError(
+                "validation_failed",
+                "Cross-table approval variety SQL must project source_table and source_crop.",
+            )
+
+    def _validate_entity_filter_policy(self, context: dict[str, Any], sql: str, *, ast_analysis: SQLAstAnalysis | None = None) -> None:
+        if context.get("route_id") != "approval_variety_db":
+            return
+        specs = _entity_filter_specs(context)
+        if not specs:
+            return
+        if ast_analysis is not None:
+            for spec in specs:
+                if not any(_ast_branch_matches_entity_spec(branch, spec) for branch in ast_analysis.branches):
+                    raise LLMOutputError(
+                        "validation_failed",
+                        f"Entity-aware approval SQL must preserve branch source marker for {spec['field']}:{spec['tier']}.",
+                    )
+            if len(specs) > 1 and not ast_analysis.is_union_all:
+                raise LLMOutputError(
+                    "validation_failed",
+                    "Entity-aware approval SQL with multiple matched fields must use UNION ALL branches.",
+                )
+            return
+        for spec in specs:
+            field = re.escape(spec["field"])
+            if not re.search(rf"\b`?{field}`?\b\s+like\b", sql, flags=re.I):
+                raise LLMOutputError(
+                    "validation_failed",
+                    f"Entity-aware approval SQL must include LIKE filter for {spec['field']}.",
+                )
+        if not re.search(r"\bmatched_field\b", sql, flags=re.I) or not re.search(r"\bmatch_tier\b", sql, flags=re.I):
+            raise LLMOutputError(
+                "validation_failed",
+                "Entity-aware approval SQL must project matched_field and match_tier.",
+            )
+        if len(specs) > 1 and not re.search(r"\bunion\s+all\b", sql, flags=re.I):
+            raise LLMOutputError(
+                "validation_failed",
+                "Entity-aware approval SQL with multiple matched fields must use UNION ALL branches.",
+            )
+        branches = _split_union_all_branches(sql)
+        for spec in specs:
+            if not any(_branch_matches_entity_spec(branch, spec) for branch in branches):
+                raise LLMOutputError(
+                    "validation_failed",
+                    f"Entity-aware approval SQL must preserve branch source marker for {spec['field']}:{spec['tier']}.",
+                )
+
+    @staticmethod
+    def _should_defer_validation_to_engine(request: CapabilityExecutionRequest, exc: LLMOutputError) -> bool:
+        if exc.reason != "validation_failed":
+            return False
+        return request.metadata.get("component") == "sql_generate" or bool(request.metadata.get("sqlquery_engine_repair_enabled"))
+
+    def _best_effort_failed_sql(self, raw_output: str, llm_payload: Mapping[str, Any] | None) -> str:
+        if isinstance(llm_payload, Mapping):
+            sql = str(llm_payload.get("sql") or "").strip()
+            if sql:
+                return sql.rstrip(";").strip()
+        try:
+            return self._extract_sql_from_text(raw_output)
+        except LLMOutputError:
+            return ""
+
+
+_APPROVAL_TABLE_TO_CROP = {
+    "corn_varieties": "corn",
+    "rice_varieties": "rice",
+    "cotton_varieties": "cotton",
+    "wheat_varieties": "wheat",
+    "soybean_varieties": "soybean",
+}
+
+
+def _crop_for_approval_table(table: str) -> str | None:
+    return _APPROVAL_TABLE_TO_CROP.get(str(table))
+
+
+def _source_scope_from_tables(tables: list[str], *, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    normalized = [str(table) for table in tables]
+    payload = {
+        "tables_used": normalized,
+        "approval_crops": [
+            crop
+            for table in normalized
+            for crop in [_crop_for_approval_table(table)]
+            if crop
+        ],
+    }
+    if context is not None:
+        if context.get("matched_fields"):
+            payload["matched_fields"] = list(context.get("matched_fields") or [])
+        if context.get("match_tiers"):
+            payload["match_tiers"] = list(context.get("match_tiers") or [])
+    return payload
+
+
+def _entity_filter_specs(context: Mapping[str, Any], *, selected_tables: list[str] | None = None) -> list[dict[str, str]]:
+    selected = {str(table) for table in (selected_tables or list(context.get("selected_tables", [])))}
+    specs: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+
+    def add(*, table: str, field: str, tier: str, entity_text: str) -> None:
+        if not table or not field or not entity_text:
+            return
+        if selected and table not in selected:
+            return
+        if field not in {"variety_name", "applicant", "breeder", "approval_num"}:
+            return
+        key = (table, field, tier, entity_text)
+        if key in seen:
+            return
+        specs.append({"table": table, "field": field, "tier": tier, "entity_text": entity_text})
+        seen.add(key)
+
+    match_summary = context.get("match_summary")
+    if isinstance(match_summary, Mapping):
+        for tier in ("primary", "secondary", "peer"):
+            raw_entries = match_summary.get(tier)
+            if not isinstance(raw_entries, list | tuple):
+                continue
+            for entry in raw_entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                add(
+                    table=str(entry.get("table") or ""),
+                    field=str(entry.get("field") or ""),
+                    tier=tier,
+                    entity_text=str(entry.get("entity_text") or entry.get("text") or "").strip(),
+                )
+
+    query_constraints = context.get("query_constraints")
+    if isinstance(query_constraints, Mapping):
+        for item in list(query_constraints.get("required_constraints") or []):
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("scope") or "") != "branch_filter":
+                continue
+            field = str(item.get("field") or "")
+            value = str(item.get("value") or "").strip()
+            tier = str(item.get("match_tier") or "peer")
+            for table in list(item.get("tables") or selected):
+                add(table=str(table), field=field, tier=tier, entity_text=value)
+    return specs
+
+
+def _split_union_all_branches(sql: str) -> list[str]:
+    return [branch.strip() for branch in re.split(r"\bunion\s+all\b", sql, flags=re.I) if branch.strip()]
+
+
+def _branch_matches_entity_spec(branch: str, spec: Mapping[str, str]) -> bool:
+    table = re.escape(str(spec.get("table") or ""))
+    field = re.escape(str(spec.get("field") or ""))
+    tier = re.escape(str(spec.get("tier") or ""))
+    if not table or not field or not tier:
+        return False
+    has_table = bool(re.search(rf"\bfrom\s+`?{table}`?\b", branch, flags=re.I))
+    has_field_marker = bool(re.search(rf"[\'\"]{field}[\'\"]\s+as\s+`?matched_field`?", branch, flags=re.I))
+    has_tier_marker = bool(re.search(rf"[\'\"]{tier}[\'\"]\s+as\s+`?match_tier`?", branch, flags=re.I))
+    has_field_filter = bool(
+        re.search(
+            rf"(?:`?{table}`?\.)?`?{field}`?\s+like\b",
+            branch,
+            flags=re.I,
+        )
+    )
+    return has_table and has_field_marker and has_tier_marker and has_field_filter
+
+
+def _first_branch_table(branch: str, tables_used: list[str]) -> str | None:
+    aliases = re.findall(_TABLE_ALIAS_PATTERN, branch, flags=re.I)
+    used = {str(table) for table in tables_used}
+    for table, _alias in aliases:
+        if not used or table in used:
+            return str(table)
+    for table in tables_used:
+        if re.search(rf"\b`?{re.escape(str(table))}`?\b", branch, flags=re.I):
+            return str(table)
+    return None
+
+
+def _constraint_field_for_table(item: Mapping[str, Any], table: str) -> str:
+    field_by_table = item.get("field_by_table")
+    if isinstance(field_by_table, Mapping) and field_by_table.get(table):
+        return str(field_by_table[table])
+    return str(item.get("field") or "")
+
+
+def _constraint_to_sql_fragment(item: Mapping[str, Any], *, table: str, field: str) -> str:
+    operator = str(item.get("operator") or "").upper()
+    column = f"{table}.{field}" if field and field != "*" else field
+    value = item.get("value")
+    if operator == "=":
+        return f"{column} = {_sql_value(value)}"
+    if operator == ">=":
+        return f"{column} >= {_sql_value(value)}"
+    if operator == "<=":
+        return f"{column} <= {_sql_value(value)}"
+    if operator == "BETWEEN" and isinstance(value, list | tuple) and len(value) == 2:
+        return f"{column} BETWEEN {_sql_value(value[0])} AND {_sql_value(value[1])}"
+    if operator == "LIKE":
+        safe = str(value or "").replace("'", "''")
+        return f"{column} LIKE '%{safe}%'"
+    return ""
+
+
+def _sql_value(value: Any) -> str:
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return str(value)
+    return _sql_literal(str(value))
+
+
+def _branch_covers_constraint(branch: str, item: Mapping[str, Any], *, table: str) -> bool:
+    field = _constraint_field_for_table(item, table)
+    if not field:
+        return False
+    operator = str(item.get("operator") or "").upper()
+    value = item.get("value")
+    column_pattern = rf"(?:`?{re.escape(table)}`?\.)?`?{re.escape(field)}`?"
+    if operator == "=":
+        return bool(re.search(column_pattern + rf"\s*=\s*{re.escape(str(value))}\b", branch, flags=re.I))
+    if operator in {">=", "<="}:
+        return bool(re.search(column_pattern + rf"\s*{re.escape(operator)}\s*{re.escape(str(value))}\b", branch, flags=re.I))
+    if operator == "BETWEEN" and isinstance(value, list | tuple) and len(value) == 2:
+        return bool(re.search(column_pattern + rf"\s+between\s+{re.escape(str(value[0]))}\s+and\s+{re.escape(str(value[1]))}\b", branch, flags=re.I))
+    if operator == "LIKE":
+        needle = re.escape(str(value))
+        return bool(re.search(column_pattern + rf"\s+like\s+[\'\"]%[^\'\"]*{needle}[^\'\"]*%[\'\"]", branch, flags=re.I))
+    return False
+
+
+def _branch_covers_group_member(branch: str, item: Mapping[str, Any], *, tables_used: list[str]) -> bool:
+    table = _first_branch_table(branch, tables_used)
+    if not table or not _branch_covers_constraint(branch, item, table=table):
+        return False
+    field = re.escape(str(item.get("field") or ""))
+    tier = re.escape(str(item.get("match_tier") or ""))
+    if not field or not tier:
+        return False
+    has_field_marker = bool(re.search(rf"[\'\"]{field}[\'\"]\s+as\s+`?matched_field`?", branch, flags=re.I))
+    has_tier_marker = bool(re.search(rf"[\'\"]{tier}[\'\"]\s+as\s+`?match_tier`?", branch, flags=re.I))
+    return has_field_marker and has_tier_marker
+
+
+def _analyze_generated_sql(sql: str) -> SQLAstAnalysis:
+    try:
+        return analyze_sql(sql)
+    except SQLAstError as exc:
+        raise LLMOutputError("validation_failed", f"SQL parse failed: {exc}") from exc
+
+
+def _first_ast_branch_table(branch: SQLAstBranch, tables_used: list[str]) -> str | None:
+    used = {str(table) for table in tables_used}
+    for table in branch.tables:
+        if not used or table in used:
+            return table
+    return None
+
+
+def _ast_branch_covers_constraint(branch: SQLAstBranch, item: Mapping[str, Any], *, tables_used: list[str]) -> bool:
+    table = _first_ast_branch_table(branch, tables_used)
+    if not table:
+        return False
+    field = _constraint_field_for_table(item, table)
+    if not field:
+        return False
+    return branch_has_constraint(
+        branch,
+        field=field,
+        operator=str(item.get("operator") or ""),
+        value=item.get("value"),
+        table=table,
+    )
+
+
+def _ast_branch_covers_group_member(branch: SQLAstBranch, item: Mapping[str, Any], *, tables_used: list[str]) -> bool:
+    if not _ast_branch_covers_constraint(branch, item, tables_used=tables_used):
+        return False
+    field = str(item.get("field") or "")
+    tier = str(item.get("match_tier") or "")
+    return branch_projection_literal(branch, "matched_field") == field and branch_projection_literal(branch, "match_tier") == tier
+
+
+def _ast_branch_matches_entity_spec(branch: SQLAstBranch, spec: Mapping[str, str]) -> bool:
+    table = str(spec.get("table") or "")
+    field = str(spec.get("field") or "")
+    tier = str(spec.get("tier") or "")
+    value = str(spec.get("entity_text") or "")
+    if not table or not field or not tier or not value:
+        return False
+    if not branch_has_constraint(branch, field=field, operator="LIKE", value=value, table=table):
+        return False
+    return branch_projection_literal(branch, "matched_field") == field and branch_projection_literal(branch, "match_tier") == tier
+
+
+def _ast_covers_query_level_constraint(analysis: SQLAstAnalysis, item: Mapping[str, Any]) -> bool:
+    operator = str(item.get("operator") or "").upper()
+    if operator == "ORDER_BY":
+        field = str(item.get("field") or "")
+        direction = "DESC"
+        value = item.get("value")
+        if isinstance(value, Mapping) and str(value.get("direction") or "").upper() in {"ASC", "DESC"}:
+            direction = str(value.get("direction")).upper()
+        return final_has_order(analysis, field=field, direction=direction)
+    if operator == "LIMIT":
+        try:
+            limit = int(item.get("value"))
+        except (TypeError, ValueError):
+            return False
+        return final_has_limit(analysis, limit)
+    return True
+
+
+def _sql_covers_query_level_constraint(sql: str, item: Mapping[str, Any]) -> bool:
+    operator = str(item.get("operator") or "").upper()
+    last_union = max((match.start() for match in re.finditer(r"\bunion\s+all\b", sql, flags=re.I)), default=-1)
+    if operator == "ORDER_BY":
+        field = re.escape(str(item.get("field") or ""))
+        direction = "DESC"
+        value = item.get("value")
+        if isinstance(value, Mapping) and str(value.get("direction") or "").upper() in {"ASC", "DESC"}:
+            direction = str(value.get("direction")).upper()
+        match = re.search(rf"\border\s+by\s+(?:`?[A-Za-z_][\w]*`?\.)?`?{field}`?\s+{direction.lower()}\b", sql, flags=re.I)
+        return bool(match and match.start() > last_union)
+    if operator == "LIMIT":
+        try:
+            limit = int(item.get("value"))
+        except (TypeError, ValueError):
+            return False
+        match = re.search(rf"\blimit\s+{limit}\b", sql, flags=re.I)
+        return bool(match and match.start() > last_union)
+    return True
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def _repair_context_from_request(request: CapabilityExecutionRequest) -> Mapping[str, Any] | None:
@@ -828,3 +1803,11 @@ def _repair_context_from_request(request: CapabilityExecutionRequest) -> Mapping
     if isinstance(value, Mapping):
         return value
     return None
+
+
+def _query_constraint_clarification(context: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    query_constraints = context.get("query_constraints")
+    if not isinstance(query_constraints, Mapping):
+        return None
+    clarification = query_constraints.get("clarification_needed")
+    return clarification if isinstance(clarification, Mapping) and clarification else None

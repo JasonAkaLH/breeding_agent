@@ -57,18 +57,25 @@ class MySQLReadonlyAdapter:
     def deadline_ms(self) -> int:
         return self._deadline_ms
 
-    async def execute_readonly(self, sql: str, *, guard_pass_token: str | None) -> ReadonlyQueryResult:
+    async def execute_readonly(
+        self,
+        sql: str,
+        *,
+        guard_pass_token: str | None,
+        row_retention: str = "tail",
+    ) -> ReadonlyQueryResult:
         if not guard_pass_token:
             raise PermissionError("guard_pass_token is required before readonly SQL execution.")
         ensure_readonly_sql(sql)
+        retention = row_retention if row_retention in {"head", "tail"} else "tail"
         attempt = 0
         while True:
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(self._execute_sync, sql),
+                    asyncio.to_thread(self._execute_sync, sql, retention),
                     timeout=self._deadline_ms / 1000,
                 )
-                result = _soft_trim_row_limit(result)
+                result = _soft_trim_row_limit(result, row_retention=retention)
                 _ensure_result_limits(result)
                 return result
             except TimeoutError as exc:
@@ -88,7 +95,7 @@ class MySQLReadonlyAdapter:
         if engine is not None:
             engine.dispose()
 
-    def _execute_sync(self, sql: str) -> ReadonlyQueryResult:
+    def _execute_sync(self, sql: str, row_retention: str = "tail") -> ReadonlyQueryResult:
         if self._runner is not None:
             return self._runner(sql)
 
@@ -97,10 +104,12 @@ class MySQLReadonlyAdapter:
             result = connection.execute(text(sql))
             columns = tuple(result.keys())
             row_limit = resource_limit("db_row_limit")
-            retained_rows: deque[dict[str, Any]] = deque(maxlen=row_limit)
+            retained_rows: deque[dict[str, Any]] = deque(maxlen=row_limit if row_retention == "tail" else None)
             source_row_count = 0
             for row in result:
                 source_row_count += 1
+                if row_retention == "head" and len(retained_rows) >= row_limit:
+                    continue
                 retained_rows.append(dict(row._mapping))
             rows = tuple(retained_rows)
         return ReadonlyQueryResult(
@@ -147,7 +156,7 @@ def _ensure_result_limits(result: ReadonlyQueryResult) -> None:
     )
 
 
-def _soft_trim_row_limit(result: ReadonlyQueryResult) -> ReadonlyQueryResult:
+def _soft_trim_row_limit(result: ReadonlyQueryResult, *, row_retention: str = "tail") -> ReadonlyQueryResult:
     row_limit = resource_limit("db_row_limit")
     rows = tuple(result.rows)
     source_row_count = getattr(result, "source_row_count", None)
@@ -157,7 +166,7 @@ def _soft_trim_row_limit(result: ReadonlyQueryResult) -> ReadonlyQueryResult:
     row_limit_trimmed = bool(getattr(result, "row_limit_trimmed", False))
     retained_rows = rows
     if len(rows) > row_limit:
-        retained_rows = rows[-row_limit:]
+        retained_rows = rows[:row_limit] if row_retention == "head" else rows[-row_limit:]
         row_limit_trimmed = True
     elif source_row_count > len(rows):
         row_limit_trimmed = True
