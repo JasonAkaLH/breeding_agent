@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": "init-2025-11-25",
+  "result": {
+    "protocolVersion": "2025-11-25",
+    "capabilities": {
+      "tools": {
+        "listChanged": true
+      }
+    },
+    "serverInfo": {
+      "name": "fake-mcp-server",
+      "version": "fixture"
+    }
+  }
+}

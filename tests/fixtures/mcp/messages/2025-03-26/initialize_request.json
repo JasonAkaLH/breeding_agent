@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": "init-2025-03-26",
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-03-26",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "breeding_agent",
+      "version": "1"
+    }
+  }
+}

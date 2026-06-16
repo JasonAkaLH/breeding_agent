@@ -1,0 +1,307 @@
+{
+  "schema_version": "maf.mcp.client_compatibility_conformance_matrix.v1",
+  "supported_mcp_spec_versions": [
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25"
+  ],
+  "expected_transport_families": {
+    "2024-11-05": "legacy_http_sse",
+    "2025-03-26": "streamable_http",
+    "2025-06-18": "streamable_http",
+    "2025-11-25": "streamable_http"
+  },
+  "required_version_result_fields": [
+    "initialize",
+    "transport_family",
+    "transport",
+    "tools_list",
+    "tools_call",
+    "batch_rejected",
+    "raw_id_redaction_passed",
+    "safe_diagnostics_passed"
+  ],
+  "forbidden_evidence_fields": [
+    "authorization",
+    "endpoint",
+    "last_event_id",
+    "progress_token",
+    "raw_endpoint",
+    "raw_last_event_id",
+    "raw_progress_token",
+    "raw_session_id",
+    "raw_tool_output",
+    "session_id",
+    "token",
+    "tool_output"
+  ],
+  "items": [
+    {
+      "id": "MCP-CONF-CLIENT-2024-TRANSPORT",
+      "phase": "client_compatibility",
+      "versions": [
+        "2024-11-05"
+      ],
+      "requirement": "2024-11-05 client conformance uses legacy HTTP+SSE transport evidence for initialize, tools/list, tools/call, batch rejection, raw id redaction, and safe diagnostics."
+    },
+    {
+      "id": "MCP-CONF-CLIENT-2024-PERSISTENT-SSE",
+      "phase": "client_compatibility",
+      "versions": [
+        "2024-11-05"
+      ],
+      "requirement": "2024-11-05 legacy HTTP+SSE client conformance covers persistent SSE reader, endpoint event POST URI discovery, original SSE message response id correlation, notification 204/no-body success, timeout pending cleanup, and close cleanup."
+    },
+    {
+      "id": "MCP-CONF-CLIENT-2025-TRANSPORT",
+      "phase": "client_compatibility",
+      "versions": [
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25"
+      ],
+      "requirement": "2025+ client conformance uses Streamable HTTP transport evidence for initialize, tools/list, tools/call, batch rejection, raw id redaction, and safe diagnostics."
+    },
+    {
+      "id": "MCP-CONF-BATCH-REJECTION",
+      "phase": 0,
+      "requirement": "JSON-RPC data layer messages are object-only; batch arrays fail closed for every supported client protocol version."
+    },
+    {
+      "id": "MCP-CONF-SAFE-DIAGNOSTICS",
+      "phase": 0,
+      "requirement": "Conformance evidence may include safe diagnostic summaries only and must not store raw endpoint, session id, Last-Event-ID, progressToken, token, or tool output."
+    },
+    {
+      "id": "MCP-CONF-001",
+      "phase": 0,
+      "requirement": "POST request, notification, and response fixtures exist; notification/response accepts HTTP 202 no body."
+    },
+    {
+      "id": "MCP-CONF-002",
+      "phase": 0,
+      "requirement": "SSE fixtures cover multi-line data, empty priming event, comment, heartbeat, id, retry, malformed and oversized events."
+    },
+    {
+      "id": "MCP-CONF-003",
+      "phase": 0,
+      "requirement": "Session 404 reinitialize and GET/DELETE 405 compatibility paths are fixture-covered."
+    },
+    {
+      "id": "MCP-CONF-004",
+      "phase": 0,
+      "requirement": "Task fixtures cover taskSupport missing as forbidden, related-task metadata, progress token type and monotonicity for the latest-feature long-task track."
+    },
+    {
+      "id": "MCP-CONF-005",
+      "phase": 0,
+      "requirement": "Frontend event schema contains only safe fields and raw ids/secrets/endpoints are forbidden by redaction snapshots."
+    }
+  ],
+  "transport_scope": "remote_http_only_until_stdio_sandbox_passes",
+  "stdio_sandbox_conformance_passed": false,
+  "adapter_conformance": {
+    "2024-11-05": {
+      "legacy_http_sse": {
+        "python_legacy": {
+          "initialize": true,
+          "initialized": true,
+          "tools_list": true,
+          "tools_call": true,
+          "redaction": true,
+          "plaintext_http_audit": true,
+          "redirect_origin_safety": true,
+          "payload_size_limit": true,
+          "persistent_sse_response": true,
+          "request_id_correlation": true,
+          "evidence_refs": [
+            "tests/integrations/mcp/test_legacy_http_sse_persistent_reader.py::LegacyHTTPSSEPersistentReaderTests::test_client_completes_initialize_list_and_call_from_original_sse_stream",
+            "tests/integrations/mcp/test_legacy_http_sse_persistent_reader.py::LegacyHTTPSSEPersistentReaderTests::test_post_timeout_raises_stable_legacy_post_failed_error"
+          ]
+        },
+        "official_rust_sdk": {
+          "initialize": false,
+          "initialized": false,
+          "tools_list": false,
+          "tools_call": false,
+          "redaction": false,
+          "plaintext_http_audit": false,
+          "redirect_origin_safety": false,
+          "payload_size_limit": false,
+          "persistent_sse_response": false,
+          "request_id_correlation": false,
+          "shadow_compare": "skipped",
+          "enforce_allowed": false,
+          "operational_status": "unsupported_transport",
+          "gap_reason": "rmcp 1.7.0 is linked only with Streamable HTTP client transport; 2024-11-05 legacy HTTP+SSE remains covered by python_legacy visible path until an official SDK legacy transport is introduced.",
+          "evidence_refs": [
+            "native/crates/maf_mcp_runtime/src/lib.rs::official_rust_sdk_streamable_http_rejects_2024_legacy_protocol",
+            "tests/integrations/mcp/test_official_rust_sdk_shadow_compare.py::OfficialRustSDKShadowCompareTest::test_shadow_compare_accepts_2024_skipped_and_2025_status_evidence"
+          ]
+        }
+      }
+    },
+    "2025-03-26": {
+      "streamable_http": {
+        "python_legacy": {
+          "initialize": true,
+          "initialized": true,
+          "tools_list": true,
+          "tools_call": true,
+          "redaction": true,
+          "plaintext_http_audit": true,
+          "redirect_origin_safety": true,
+          "payload_size_limit": true,
+          "object_response": true,
+          "sse_response": true,
+          "evidence_refs": [
+            "tests/integrations/mcp/test_streamable_http_versions.py::StreamableHTTPVersionTests::test_client_uses_negotiated_protocol_header_and_session_for_all_2025_versions",
+            "tests/integrations/mcp/test_streamable_http_versions.py::StreamableHTTPVersionTests::test_sse_response_id_mismatch_fails_closed"
+          ]
+        },
+        "official_rust_sdk": {
+          "initialize": true,
+          "initialized": true,
+          "tools_list": true,
+          "tools_call": true,
+          "redaction": true,
+          "plaintext_http_audit": true,
+          "redirect_origin_safety": true,
+          "payload_size_limit": true,
+          "object_response": true,
+          "sse_response": false,
+          "shadow_compare": "matched",
+          "enforce_allowed": false,
+          "operational_status": "partial_shadow_verified",
+          "evidence_refs": [
+            "native/crates/maf_mcp_runtime/src/lib.rs::official_rust_sdk_adapter_executes_streamable_http_list_call_and_close",
+            "tests/integrations/mcp/test_official_rust_sdk_shadow_compare.py::OfficialRustSDKShadowCompareTest::test_shadow_compare_accepts_2024_skipped_and_2025_status_evidence"
+          ],
+          "sse_response_gap_reason": "Repo-local official Rust SDK evidence covers Streamable HTTP JSON object responses; SSE response remains covered by the python_legacy visible path until an rmcp-backed SSE response fixture is added."
+        }
+      }
+    },
+    "2025-06-18": {
+      "streamable_http": {
+        "python_legacy": {
+          "initialize": true,
+          "initialized": true,
+          "tools_list": true,
+          "tools_call": true,
+          "redaction": true,
+          "plaintext_http_audit": true,
+          "redirect_origin_safety": true,
+          "payload_size_limit": true,
+          "object_response": true,
+          "sse_response": true,
+          "evidence_refs": [
+            "tests/integrations/mcp/test_streamable_http_versions.py::StreamableHTTPVersionTests::test_client_uses_negotiated_protocol_header_and_session_for_all_2025_versions",
+            "tests/integrations/mcp/test_streamable_http_versions.py::StreamableHTTPVersionTests::test_sse_response_id_mismatch_fails_closed"
+          ]
+        },
+        "official_rust_sdk": {
+          "initialize": true,
+          "initialized": true,
+          "tools_list": true,
+          "tools_call": true,
+          "redaction": true,
+          "plaintext_http_audit": true,
+          "redirect_origin_safety": true,
+          "payload_size_limit": true,
+          "object_response": true,
+          "sse_response": false,
+          "shadow_compare": "matched",
+          "enforce_allowed": false,
+          "operational_status": "partial_shadow_verified",
+          "evidence_refs": [
+            "native/crates/maf_mcp_runtime/src/lib.rs::official_rust_sdk_adapter_executes_streamable_http_list_call_and_close",
+            "tests/integrations/mcp/test_official_rust_sdk_shadow_compare.py::OfficialRustSDKShadowCompareTest::test_shadow_compare_accepts_2024_skipped_and_2025_status_evidence"
+          ],
+          "sse_response_gap_reason": "Repo-local official Rust SDK evidence covers Streamable HTTP JSON object responses; SSE response remains covered by the python_legacy visible path until an rmcp-backed SSE response fixture is added."
+        }
+      }
+    },
+    "2025-11-25": {
+      "streamable_http": {
+        "python_legacy": {
+          "initialize": true,
+          "initialized": true,
+          "tools_list": true,
+          "tools_call": true,
+          "redaction": true,
+          "plaintext_http_audit": true,
+          "redirect_origin_safety": true,
+          "payload_size_limit": true,
+          "object_response": true,
+          "sse_response": true,
+          "evidence_refs": [
+            "tests/integrations/mcp/test_streamable_http_versions.py::StreamableHTTPVersionTests::test_client_uses_negotiated_protocol_header_and_session_for_all_2025_versions",
+            "tests/integrations/mcp/test_streamable_http_versions.py::StreamableHTTPVersionTests::test_sse_response_id_mismatch_fails_closed"
+          ]
+        },
+        "official_rust_sdk": {
+          "initialize": true,
+          "initialized": true,
+          "tools_list": true,
+          "tools_call": true,
+          "redaction": true,
+          "plaintext_http_audit": true,
+          "redirect_origin_safety": true,
+          "payload_size_limit": true,
+          "object_response": true,
+          "sse_response": false,
+          "shadow_compare": "matched",
+          "enforce_allowed": false,
+          "operational_status": "partial_shadow_verified",
+          "evidence_refs": [
+            "native/crates/maf_mcp_runtime/src/lib.rs::official_rust_sdk_adapter_executes_streamable_http_list_call_and_close",
+            "tests/integrations/mcp/test_official_rust_sdk_shadow_compare.py::OfficialRustSDKShadowCompareTest::test_shadow_compare_accepts_2024_skipped_and_2025_status_evidence"
+          ],
+          "sse_response_gap_reason": "Repo-local official Rust SDK evidence covers Streamable HTTP JSON object responses; SSE response remains covered by the python_legacy visible path until an rmcp-backed SSE response fixture is added."
+        }
+      }
+    }
+  },
+  "enforce_allowlist": {
+    "schema_version": "maf.mcp.adapter_enforce_allowlist.v1",
+    "allowed_combinations": [
+      {
+        "server_scope": "fixture_remote_http",
+        "protocol_version": "2024-11-05",
+        "transport_family": "legacy_http_sse",
+        "adapter": "official_rust_sdk",
+        "shadow_compare_status": "skipped",
+        "enforce_allowed": false,
+        "rollback_path": "python_legacy_adapter"
+      },
+      {
+        "server_scope": "fixture_remote_http",
+        "protocol_version": "2025-03-26",
+        "transport_family": "streamable_http",
+        "adapter": "official_rust_sdk",
+        "shadow_compare_status": "matched",
+        "enforce_allowed": false,
+        "rollback_path": "python_legacy_adapter"
+      },
+      {
+        "server_scope": "fixture_remote_http",
+        "protocol_version": "2025-06-18",
+        "transport_family": "streamable_http",
+        "adapter": "official_rust_sdk",
+        "shadow_compare_status": "matched",
+        "enforce_allowed": false,
+        "rollback_path": "python_legacy_adapter"
+      },
+      {
+        "server_scope": "fixture_remote_http",
+        "protocol_version": "2025-11-25",
+        "transport_family": "streamable_http",
+        "adapter": "official_rust_sdk",
+        "shadow_compare_status": "matched",
+        "enforce_allowed": false,
+        "rollback_path": "python_legacy_adapter"
+      }
+    ]
+  }
+}
