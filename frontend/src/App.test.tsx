@@ -82,6 +82,13 @@ async function renderAuthed(ui: ReactElement) {
   await screen.findByText('小奥Agent');
 }
 
+async function openConversationFilesDrawer(expectedFileCount?: number) {
+  if (typeof expectedFileCount === 'number') {
+    await screen.findByRole('button', { name: new RegExp(`当前 ${expectedFileCount} 个文件`) });
+  }
+  fireEvent.click(screen.getByRole('button', { name: /打开当前对话文件面板/ }));
+}
+
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
   return {
     event_id,
@@ -1752,6 +1759,7 @@ describe('App', () => {
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
+    await openConversationFilesDrawer(1);
     await screen.findByText(/materials.csv/);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '/mini-breedstat-rcbd 用这个文件做3个区组RCBD' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -1805,6 +1813,7 @@ describe('App', () => {
     });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
+    await openConversationFilesDrawer(1);
     await screen.findByText(/existing.csv/);
     fireEvent.click(screen.getByRole('button', { name: '删除文件 existing.csv' }));
 
@@ -1819,6 +1828,7 @@ describe('App', () => {
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
+    await openConversationFilesDrawer(1);
     await screen.findByText(/materials.csv/);
     await screen.findByText(/1 行/);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做3个区组RCBD' } });
@@ -1838,6 +1848,7 @@ describe('App', () => {
     const file = new File(['vcf-bytes'], 'sample.vcf.gz', { type: 'application/gzip' });
     fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
+    await openConversationFilesDrawer(1);
     await screen.findByText(/sample.vcf.gz/);
     await screen.findByText(/VCF/);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析这个水稻 VCF' } });
@@ -1866,6 +1877,7 @@ describe('App', () => {
     });
 
     await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledWith(expect.any(String), file));
+    await openConversationFilesDrawer(1);
     expect(await screen.findByText(/dragged.csv/)).toBeInTheDocument();
     expect(uploadDropZone).not.toHaveClass('chat-floating-stack-dragging');
   });
@@ -2510,6 +2522,7 @@ describe('App', () => {
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(uploadInput, { target: { files: [file] } });
 
+    await openConversationFilesDrawer(1);
     await screen.findByText(/materials.csv/);
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 

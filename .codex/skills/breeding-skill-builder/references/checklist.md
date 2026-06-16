@@ -39,6 +39,9 @@
 - [ ] Field source policies use `source.allowed`, not unsupported `sources`.
 - [ ] Natural-language scalar fields include resolver-readable sources (`query`, `current_user_message`, `resolved_user_message`, `recent_user_message`, or `text`) when LLM/regex extraction is expected; they do not rely only on `user_text`.
 - [ ] Artifact fields come from trusted upload/artifact sources, not generated local paths.
+- [ ] New python_subprocess file-processing Skills read `payload["resource_manifest_path"]` and `manifest["files"][].mount_path` as the primary file input contract.
+- [ ] `uploaded_artifacts[].content` / `content_base64` are used only as explicit legacy compatibility fallback.
+- [ ] Prompt-facing docs and references do not expose persistent storage paths, `storage_key`, or runtime-internal workspace assumptions.
 - [ ] Selected-schema fixed values use field-level `const` when a mode implies the value.
 - [ ] Enums/choices are field-level `enum` or `choices`, not only `validation.enum`.
 - [ ] Important scalar fields hardcode `aliases` and `patterns` for common Chinese/English phrasing.

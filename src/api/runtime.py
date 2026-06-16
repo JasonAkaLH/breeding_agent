@@ -8,7 +8,7 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
@@ -37,6 +37,7 @@ from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executo
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
 from src.core.models import (
     Conversation,
+    ConversationFileResource,
     EventRecord,
     Interrupt,
     InterruptAnswer,
@@ -137,6 +138,7 @@ from src.storage.postgres import PostgreSQLStorage, bootstrap_postgres_database,
 from src.auth.postgres_invalidation_bus import PostgresAuthInvalidationBus
 from src.state.runtime_factory import StatePlatformBackend, build_state_platform_runtime_config
 from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
+from src.storage.conversation_files import ConversationFileIndexWriter, LocalConversationFileStore
 
 from .conversation_titles import (
     ConversationTitleGenerator,
@@ -148,8 +150,8 @@ from .conversation_titles import (
 )
 from .dto import SubmitMessageRequest
 from .sse import InMemoryEventBroker, is_frontend_event
-from .table_upload_normalizer import normalize_selected_spreadsheet_sheet
-from .upload_store import InMemoryUploadStore, UploadedFileRecord, UploadValidationError
+from .table_upload_normalizer import normalize_selected_spreadsheet_sheet, normalize_table_upload
+from .upload_store import InMemoryUploadStore, UploadedFileRecord, UploadValidationError, _decode_plain_text_upload
 
 
 UNFINISHED_TASK_STATUSES = {
@@ -316,6 +318,7 @@ class ApiRuntime:
         upload_store: InMemoryUploadStore | None = None,
         conversation_memory_builder: ConversationMemoryBuilder | None = None,
         artifact_file_store: LocalArtifactFileStore | None = None,
+        conversation_file_store: LocalConversationFileStore | None = None,
         audit_sink: JsonlAuditSink | None = None,
         skill_runtime_state: SkillRuntimeState | None = None,
         skill_input_text_generator: SkillInputTextGenerator | None = None,
@@ -345,6 +348,8 @@ class ApiRuntime:
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
         self.artifact_file_store = artifact_file_store or LocalArtifactFileStore(Path("runtime/artifacts"))
+        self.conversation_file_store = conversation_file_store or LocalConversationFileStore(Path("runtime/conversation_files"))
+        self._conversation_file_index_writer = ConversationFileIndexWriter(self.conversation_file_store)
         self._audit_sink = audit_sink
         self._skill_runtime_state = skill_runtime_state
         self._skill_input_text_generator = skill_input_text_generator
@@ -1046,12 +1051,48 @@ class ApiRuntime:
     ) -> UploadedFileRecord:
         existing_conversation = await self.ensure_upload_allowed(conversation_id, username)
         now = self._utcnow_naive()
+        try:
+            self.conversation_file_store.conversation_dir(conversation_id)
+        except ValueError as exc:
+            raise UploadValidationError("conversation_id failed file storage safety validation") from exc
         record = self.upload_store.save(
             username=username,
             conversation_id=conversation_id,
             filename=filename,
             content_type=content_type,
             content=content,
+        )
+        try:
+            stored = self.conversation_file_store.save_original(
+                conversation_id=conversation_id,
+                upload_id=record.upload_id,
+                content=record.content_bytes,
+            )
+            description_status, description_summary, description_ref = self._initial_file_description(record)
+        except ValueError as exc:
+            self.upload_store.delete(upload_id=record.upload_id, username=username, conversation_id=conversation_id)
+            raise UploadValidationError("Uploaded file failed file storage safety validation") from exc
+        resource = ConversationFileResource(
+            file_id=record.upload_id,
+            conversation_id=conversation_id,
+            username=username,
+            original_filename=record.filename,
+            content_type=record.content_type,
+            file_type=record.file_type,
+            size_bytes=stored.size_bytes,
+            sha256=stored.sha256,
+            storage_key=stored.storage_key,
+            preview=dict(record.preview),
+            description_status=description_status,
+            description_summary=description_summary,
+            description_ref=description_ref,
+            status="active",
+            normalized_filename=record.normalized_filename,
+            normalized_content_type=record.normalized_content_type,
+            requires_sheet_selection=record.requires_sheet_selection,
+            selected_sheet=record.selected_sheet,
+            created_at=record.created_at,
+            updated_at=now,
         )
         if existing_conversation is None:
             await self.storage.save_conversation(
@@ -1061,6 +1102,19 @@ class ApiRuntime:
                     created_at=now,
                     updated_at=now,
                 )
+            )
+        await self.storage.save_conversation_file_resource(resource)
+        await self._rewrite_conversation_file_index(conversation_id, username)
+        if self._audit_sink is not None:
+            await self._audit_sink.record(
+                "conversation_file.upload_persisted",
+                {
+                    "upload_id": record.upload_id,
+                    "file_type": record.file_type,
+                    "size_bytes": record.size_bytes,
+                    "description_status": description_status,
+                },
+                conversation_id=conversation_id,
             )
         return record
 
@@ -1072,13 +1126,28 @@ class ApiRuntime:
             raise PermissionError(f"Conversation is not available: {conversation_id}")
         return existing_conversation
 
-    async def list_uploads(self, conversation_id: str, username: str) -> list[UploadedFileRecord]:
+    async def list_uploads(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        include_deleted: bool = False,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> list[UploadedFileRecord]:
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if existing_conversation is not None and existing_conversation.username != username:
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
         if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
             raise PermissionError(f"Conversation is not available: {conversation_id}")
-        return self.upload_store.list_for_conversation(username=username, conversation_id=conversation_id)
+        resources = await self.storage.list_conversation_file_resources(
+            conversation_id,
+            username,
+            include_deleted=include_deleted,
+            limit=limit,
+            cursor=cursor,
+        )
+        return [self._upload_record_from_resource(resource, content_bytes=b"") for resource in resources]
 
     async def delete_upload(self, conversation_id: str, username: str, upload_id: str) -> bool:
         existing_conversation = await self.storage.get_conversation(conversation_id)
@@ -1086,7 +1155,35 @@ class ApiRuntime:
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
         if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
             raise PermissionError(f"Conversation is not available: {conversation_id}")
-        return self.upload_store.delete(upload_id=upload_id, username=username, conversation_id=conversation_id)
+        deleted = await self.storage.mark_conversation_file_resource_deleted(
+            conversation_id,
+            username,
+            upload_id,
+            updated_at=self._utcnow_naive(),
+        )
+        if deleted is None:
+            return False
+        try:
+            self.conversation_file_store.delete_resource_dir(
+                conversation_id=deleted.conversation_id,
+                upload_id=deleted.file_id,
+            )
+        except Exception as exc:
+            if self._audit_sink is not None:
+                await self._audit_sink.record(
+                    "conversation_file.upload_directory_cleanup_failed",
+                    {"upload_id": upload_id, "error_type": exc.__class__.__name__},
+                    conversation_id=conversation_id,
+                )
+            raise
+        await self._rewrite_conversation_file_index(conversation_id, username)
+        if self._audit_sink is not None:
+            await self._audit_sink.record(
+                "conversation_file.delete_marked",
+                {"upload_id": upload_id, "local_files_deleted": True},
+                conversation_id=conversation_id,
+            )
+        return True
 
     async def resolve_uploads_for_message(
         self,
@@ -1111,22 +1208,30 @@ class ApiRuntime:
             upload_id_text = str(upload_id).strip()
             if not upload_id_text:
                 continue
-            try:
-                record = self.upload_store.get_for_message(
-                    upload_id=upload_id_text,
-                    username=username,
-                    conversation_id=conversation_id,
-                )
-            except UploadValidationError:
+            resource = await self.storage.get_conversation_file_resource(conversation_id, username, upload_id_text)
+            if resource is None:
+                existing_resource = await self.storage.get_conversation_file_resource_by_id(upload_id_text)
+                if existing_resource is not None:
+                    raise PermissionError(f"Upload does not belong to conversation: {upload_id_text}")
+                missing_upload_ids.append(upload_id_text)
+                continue
+            if resource.status == "deleted":
                 missing_upload_ids.append(upload_id_text)
                 continue
             selected_sheet = sheet_selections.get(upload_id_text)
+            record = self._upload_record_from_resource(
+                resource,
+                content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+            )
             uploaded_artifacts.append(record.to_summary())
             if record.requires_sheet_selection and not selected_sheet:
                 pending_sheet_selections.append(record.sheet_selection_payload())
                 skill_artifacts.append(record.to_summary())
                 continue
-            skill_artifacts.append(record.to_skill_artifact(selected_sheet=selected_sheet))
+            skill_artifact = record.to_skill_artifact(selected_sheet=selected_sheet)
+            skill_artifact["storage_key"] = resource.storage_key
+            skill_artifact["conversation_id"] = resource.conversation_id
+            skill_artifacts.append(skill_artifact)
         return {
             "uploaded_artifacts": uploaded_artifacts,
             "skill_artifacts": skill_artifacts,
@@ -2188,6 +2293,16 @@ class ApiRuntime:
             metadata = parse_file_storage_ref(artifact.storage_ref)
             if is_active_skill_output_file(metadata):
                 self.artifact_file_store.delete(str(metadata.get("storage_key")))
+        try:
+            self.conversation_file_store.delete_conversation_dir(conversation_id)
+        except Exception as exc:
+            if self._audit_sink is not None:
+                await self._audit_sink.record(
+                    "conversation_file.directory_cleanup_failed",
+                    {"error_type": exc.__class__.__name__},
+                    conversation_id=conversation_id,
+                )
+            raise
 
     async def rename_conversation(self, conversation_id: str, title: str, *, username: str | None = None) -> Conversation:
         normalized_title = validate_conversation_title(title)
@@ -2957,16 +3072,22 @@ class ApiRuntime:
                 for item in (target_slots_raw if isinstance(target_slots_raw, list | tuple) else ())
                 if str(item).strip()
             )
+            part_text = str(raw_part.get("text") or "").strip()
+            execution_confirmation = bool(raw_part.get("execution_confirmation"))
+            execution_confirmation_confidence = cls._confidence(raw_part.get("execution_confirmation_confidence"))
+            if kind == "schema_switch" and cls._schema_switch_text_confirms_execution(part_text):
+                execution_confirmation = True
+                execution_confirmation_confidence = max(execution_confirmation_confidence, 1.0)
             parts.append(
                 InterruptOpenTurnPart(
                     part_id=str(raw_part.get("part_id") or f"part-{idx}").strip() or f"part-{idx}",
                     kind=kind,
-                    text=str(raw_part.get("text") or "").strip(),
+                    text=part_text,
                     target_slots=target_slots,
                     target_schema_id=str(raw_part.get("target_schema_id") or "").strip() or None,
                     reuse_decision=reuse_decision,
-                    execution_confirmation=bool(raw_part.get("execution_confirmation")),
-                    execution_confirmation_confidence=cls._confidence(raw_part.get("execution_confirmation_confidence")),
+                    execution_confirmation=execution_confirmation,
+                    execution_confirmation_confidence=execution_confirmation_confidence,
                     uses_uploads=bool(raw_part.get("uses_uploads")),
                     confidence=cls._confidence(raw_part.get("confidence")),
                     reason=str(raw_part.get("reason") or "").strip(),
@@ -2982,6 +3103,28 @@ class ApiRuntime:
             confidence=cls._confidence(parsed.get("confidence")),
             reason=str(parsed.get("reason") or "").strip(),
         )
+
+    @staticmethod
+    def _schema_switch_text_confirms_execution(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        negative_markers = ("不执行", "先不执行", "暂不执行", "不要执行", "别执行", "不运行", "不要运行", "don't run", "do not run")
+        if any(marker in normalized for marker in negative_markers):
+            return False
+        positive_markers = (
+            "立即执行",
+            "马上执行",
+            "直接执行",
+            "并执行",
+            "继续执行",
+            "确认执行",
+            "开始执行",
+            "运行",
+            "run it",
+            "execute",
+        )
+        return any(marker in normalized for marker in positive_markers)
 
     @staticmethod
     def _confidence(value: object) -> float:
@@ -3576,6 +3719,29 @@ class ApiRuntime:
             )
         return candidates
 
+    async def _schema_switch_text_extraction(
+        self,
+        *,
+        task: Task,
+        collection: SlotCollection,
+        schema,
+        part: InterruptOpenTurnPart,
+        raw_answer: Mapping[str, object],
+    ) -> SlotExtractionResult:
+        text = part.text or self._v2_answer_text(raw_answer)
+        if not text and not self._v2_answer_upload_ids(raw_answer):
+            return SlotExtractionResult(resolved={}, diagnostics=())
+        artifact_summaries = tuple(await self._task_input_attachment_prompt_summaries(task.task_id))
+        return build_backend_slot_extraction(
+            collection,
+            schema,
+            current_user_answer=text,
+            current_upload_ids=self._v2_answer_upload_ids(raw_answer),
+            artifact_summaries=artifact_summaries,
+            planner_target_slots=part.target_slots,
+            planner_reason=part.reason,
+        )
+
     async def _process_v2_schema_switch_part(
         self,
         *,
@@ -3665,6 +3831,13 @@ class ApiRuntime:
             )
             if next_collection.status == "waiting_for_user":
                 next_collection = replace(next_collection, last_question=self._slot_question_from_collection(next_collection))
+        text_extraction = await self._schema_switch_text_extraction(
+            task=task,
+            collection=next_collection,
+            schema=schema,
+            part=part,
+            raw_answer=raw_answer,
+        )
         if part.reuse_decision == "reuse":
             candidates: dict[str, SlotExtractionCandidate] = dict(const_candidates)
             for field, value in copyable_resolved.items():
@@ -3676,11 +3849,12 @@ class ApiRuntime:
                     source="slot_collection",
                     confidence=1.0,
                 )
+            candidates.update(text_extraction.resolved)
             validating = replace(next_collection, status="validating")
             next_collection, event = apply_extraction_result_to_collection(
                 validating,
                 schema,
-                SlotExtractionResult(resolved=candidates, diagnostics=("schema_switch_reuse",)),
+                SlotExtractionResult(resolved=candidates, diagnostics=("schema_switch_reuse", *text_extraction.diagnostics)),
                 now=self._utcnow_naive(),
             )
             if next_collection.status == "waiting_for_user":
@@ -5107,14 +5281,22 @@ class ApiRuntime:
         sheet_selections = self._normalize_upload_sheet_selections(upload_sheet_selections)
         saved: list[TaskInputAttachment] = []
         for upload_id in self._normalize_upload_ids(upload_ids):
-            record = self.upload_store.get_for_message(
-                upload_id=upload_id,
-                username=username,
-                conversation_id=task.conversation_id,
+            resource = await self.storage.get_conversation_file_resource(task.conversation_id, username, upload_id)
+            if resource is None:
+                existing_resource = await self.storage.get_conversation_file_resource_by_id(upload_id)
+                if existing_resource is not None:
+                    raise PermissionError(f"Upload does not belong to conversation: {upload_id}")
+                raise UploadValidationError(f"Unknown or expired upload_id: {upload_id}")
+            if resource.status == "deleted":
+                raise UploadValidationError(f"Unknown or expired upload_id: {upload_id}")
+            record = self._upload_record_from_resource(
+                resource,
+                content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
             )
             attachment = self._attachment_from_upload_record(
                 task=task,
                 record=record,
+                resource=resource,
                 source_kind=source_kind,
                 source_message_id=source_message_id,
                 interrupt_answer_id=interrupt_answer_id,
@@ -5152,20 +5334,26 @@ class ApiRuntime:
                         interrupt_answer_id=interrupt_answer_id,
                     )
                 continue
-            try:
-                record = self.upload_store.get_for_message(
-                    upload_id=upload_id,
-                    username=username,
-                    conversation_id=task.conversation_id,
-                )
-            except UploadValidationError:
+            resource = await self.storage.get_conversation_file_resource(task.conversation_id, username, upload_id)
+            if resource is None:
+                existing_resource = await self.storage.get_conversation_file_resource_by_id(upload_id)
+                if existing_resource is not None:
+                    raise PermissionError(f"Upload does not belong to conversation: {upload_id}")
                 missing_upload_ids.append(upload_id)
                 continue
+            if resource.status == "deleted":
+                missing_upload_ids.append(upload_id)
+                continue
+            record = self._upload_record_from_resource(
+                resource,
+                content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+            )
             if record.requires_sheet_selection and not selected_sheet:
                 raise UploadValidationError("Spreadsheet sheet selection is required before resuming the task")
             attachment = self._attachment_from_upload_record(
                 task=task,
                 record=record,
+                resource=resource,
                 source_kind=source_kind,
                 source_message_id=source_message_id,
                 interrupt_answer_id=interrupt_answer_id,
@@ -5179,6 +5367,7 @@ class ApiRuntime:
         *,
         task: Task,
         record: UploadedFileRecord,
+        resource: ConversationFileResource | None = None,
         source_kind: str,
         source_message_id: str | None,
         interrupt_answer_id: str | None,
@@ -5186,6 +5375,9 @@ class ApiRuntime:
     ) -> TaskInputAttachment:
         now = self._utcnow_naive()
         skill_artifact = record.to_skill_artifact(selected_sheet=selected_sheet)
+        if resource is not None:
+            skill_artifact["storage_key"] = resource.storage_key
+            skill_artifact["conversation_id"] = resource.conversation_id
         prompt_artifact = self._prompt_artifact_from_skill_artifact(skill_artifact)
         return TaskInputAttachment(
             attachment_id=self._task_input_attachment_id(task.task_id, record.upload_id),
@@ -5202,7 +5394,7 @@ class ApiRuntime:
             sha256=record.sha256,
             prompt_artifact=prompt_artifact,
             skill_artifact=skill_artifact,
-            source_payload=self._source_payload_from_upload_record(record),
+            source_payload=self._source_payload_from_upload_record(record, resource=resource),
             selected_sheet=selected_sheet or record.selected_sheet,
             created_at=record.created_at,
             updated_at=now,
@@ -5218,17 +5410,21 @@ class ApiRuntime:
         if attachment.file_type != "spreadsheet":
             return attachment
         source_payload = dict(attachment.source_payload)
-        raw_base64 = source_payload.get("content_base64")
-        if not isinstance(raw_base64, str) or not raw_base64:
-            raise UploadValidationError(
-                f"Task-bound spreadsheet upload is missing stored content for interrupt resume: {attachment.source_upload_id}"
-            )
-        try:
-            content = base64.b64decode(raw_base64.encode("ascii"), validate=True)
-        except Exception as exc:
-            raise UploadValidationError(
-                f"Task-bound spreadsheet upload content is invalid for interrupt resume: {attachment.source_upload_id}"
-            ) from exc
+        storage_key = source_payload.get("storage_key")
+        if isinstance(storage_key, str) and storage_key:
+            content = self.conversation_file_store.read_bytes(storage_key)
+        else:
+            raw_base64 = source_payload.get("content_base64")
+            if not isinstance(raw_base64, str) or not raw_base64:
+                raise UploadValidationError(
+                    f"Task-bound spreadsheet upload is missing stored content for interrupt resume: {attachment.source_upload_id}"
+                )
+            try:
+                content = base64.b64decode(raw_base64.encode("ascii"), validate=True)
+            except Exception as exc:
+                raise UploadValidationError(
+                    f"Task-bound spreadsheet upload content is invalid for interrupt resume: {attachment.source_upload_id}"
+                ) from exc
         normalized = normalize_selected_spreadsheet_sheet(
             filename=attachment.filename,
             content_type=attachment.content_type,
@@ -5291,13 +5487,127 @@ class ApiRuntime:
     @staticmethod
     def _prompt_artifact_from_skill_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
         prompt_artifact = dict(artifact)
-        for raw_key in ("content", "content_base64", "encoding"):
+        for raw_key in (
+            "content",
+            "content_base64",
+            "encoding",
+            "storage_key",
+            "mount_path",
+            "resource_manifest_path",
+            "conversation_index_path",
+            "input_dir",
+        ):
             prompt_artifact.pop(raw_key, None)
         return prompt_artifact
 
+    def _initial_file_description(self, record: UploadedFileRecord) -> tuple[str, str | None, str | None]:
+        if record.file_type == "image":
+            return "not_required", None, None
+        summary = self._build_file_description_summary(record)
+        description_ref = self.conversation_file_store.write_description(
+            conversation_id=record.conversation_id,
+            upload_id=record.upload_id,
+            description={
+                "version": 1,
+                "upload_id": record.upload_id,
+                "filename": record.filename,
+                "file_type": record.file_type,
+                "status": "ready",
+                "summary": summary,
+                "preview": dict(record.preview),
+            },
+        )
+        return "ready", summary, description_ref
+
     @staticmethod
-    def _source_payload_from_upload_record(record: UploadedFileRecord) -> dict[str, Any]:
-        return {
+    def _build_file_description_summary(record: UploadedFileRecord) -> str:
+        preview = dict(record.preview or {})
+        if record.file_type in {"csv", "json", "spreadsheet"}:
+            columns = preview.get("columns") or preview.get("original_columns") or []
+            column_text = ", ".join(str(column) for column in columns[:20]) if isinstance(columns, list) else ""
+            row_count = preview.get("row_count")
+            if record.file_type == "spreadsheet" and preview.get("excel_sheets"):
+                sheets = [
+                    str(item.get("sheet_name"))
+                    for item in preview.get("excel_sheets", [])
+                    if isinstance(item, Mapping) and item.get("sheet_name")
+                ]
+                return f"这是一份电子表格文件，包含 sheets: {', '.join(sheets[:20]) or '未知'}。" + (f" 当前预览列包括: {column_text}。" if column_text else "")
+            return f"这是一份结构化数据文件，行数约为 {row_count if row_count is not None else '未知'}，列包括: {column_text or '未知'}。"
+        if record.file_type == "text":
+            sample = (record.content_text or "").strip().replace("\n", " ")[:500]
+            return f"这是一份文本文件，包含 {preview.get('line_count', '未知')} 行、{preview.get('char_count', '未知')} 个字符。开头内容摘要: {sample}"
+        if record.file_type == "pdf":
+            return "这是一份 PDF 文件；当前阶段记录基础文件元数据，后续可通过受控文本抽取或 OCR adapter 生成更详细结构描述。"
+        if record.file_type == "vcf":
+            return "这是一份 VCF/VCF.GZ 变异数据文件；脚本可读取原始文件进行样本、header 和 variant 解析。"
+        return "这是一份可供 Skill 脚本处理的上传文件。"
+
+    async def _rewrite_conversation_file_index(self, conversation_id: str, username: str) -> None:
+        resources = await self.storage.list_conversation_file_resources(conversation_id, username, include_deleted=True)
+        self._conversation_file_index_writer.write_index(conversation_id=conversation_id, resources=resources)
+
+    def _upload_record_from_resource(
+        self,
+        resource: ConversationFileResource,
+        *,
+        content_bytes: bytes,
+        selected_sheet: str | None = None,
+    ) -> UploadedFileRecord:
+        content_text: str | None = None
+        normalized_content_type = resource.normalized_content_type
+        normalized_filename = resource.normalized_filename
+        requires_sheet_selection = resource.requires_sheet_selection
+        selected_sheet_text = selected_sheet or resource.selected_sheet
+        preview = dict(resource.preview)
+        if content_bytes:
+            if resource.file_type in {"json", "csv", "spreadsheet"}:
+                normalized = normalize_table_upload(
+                    filename=resource.original_filename,
+                    content_type=resource.content_type,
+                    content=content_bytes,
+                )
+                content_text = normalized.normalized_content_text
+                normalized_content_type = normalized.normalized_content_type
+                normalized_filename = normalized.normalized_filename
+                requires_sheet_selection = normalized.requires_sheet_selection
+                selected_sheet_text = normalized.selected_sheet or selected_sheet_text
+                preview = dict(normalized.preview)
+            elif resource.file_type == "text":
+                decoded_text, _source_encoding = _decode_plain_text_upload(content_bytes)
+                content_text = decoded_text
+                normalized_content_type = "text/plain"
+                normalized_filename = resource.original_filename
+        created_at = resource.created_at or self._utcnow_naive()
+        return UploadedFileRecord(
+            upload_id=resource.file_id,
+            username=resource.username,
+            conversation_id=resource.conversation_id,
+            filename=resource.original_filename,
+            content_type=resource.content_type,
+            file_type=resource.file_type,
+            size_bytes=resource.size_bytes,
+            sha256=resource.sha256,
+            content_bytes=content_bytes,
+            content_text=content_text,
+            preview=preview,
+            created_at=created_at,
+            expires_at=created_at + timedelta(days=3650),
+            normalized_content_type=normalized_content_type,
+            normalized_filename=normalized_filename,
+            requires_sheet_selection=requires_sheet_selection,
+            selected_sheet=selected_sheet_text,
+            status=resource.status,
+            description_status=resource.description_status,
+        )
+
+    @staticmethod
+    def _source_payload_from_upload_record(
+        record: UploadedFileRecord,
+        *,
+        resource: ConversationFileResource | None = None,
+    ) -> dict[str, Any]:
+        payload = {
             "encoding": "base64",
             "content_base64": base64.b64encode(record.content_bytes).decode("ascii"),
             "filename": record.filename,
@@ -5306,6 +5616,15 @@ class ApiRuntime:
             "normalized_filename": record.normalized_filename,
             "normalized_content_type": record.normalized_content_type,
         }
+        if resource is not None:
+            payload.update(
+                {
+                    "conversation_file_id": resource.file_id,
+                    "storage_key": resource.storage_key,
+                    "description_status": resource.description_status,
+                }
+            )
+        return payload
 
     @staticmethod
     def _normalize_upload_ids(upload_ids: Any) -> tuple[str, ...]:
@@ -5997,6 +6316,7 @@ def build_api_runtime(
     conversation_memory_resolution_generator: ResolutionGenerator | None = None,
     enable_conversation_memory_resolution_llm: bool = True,
     artifact_store_path: str | Path | None = None,
+    conversation_file_store_path: str | Path | None = None,
     runtime_sidecar_client: Any | None = None,
     skill_sandbox_client: Any | None = None,
 ) -> ApiRuntime:
@@ -6060,6 +6380,9 @@ def build_api_runtime(
             postgres_auth_invalidation_bus.check_permission()
             postgres_auth_invalidation_bus.reconcile_once()
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
+        conversation_file_store = LocalConversationFileStore(
+            conversation_file_store_path or (Path(database_path).parent / "conversation_files")
+        )
     else:
         engine = create_sqlite_engine(database_path)
         bootstrap_sqlite_database(engine)
@@ -6069,6 +6392,9 @@ def build_api_runtime(
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
         )
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
+        conversation_file_store = LocalConversationFileStore(
+            conversation_file_store_path or (Path(database_path).parent / "conversation_files")
+        )
     username_token_service = UsernameTokenService(
         storage,
         now_fn=ApiRuntime._utcnow_naive,
@@ -6177,6 +6503,7 @@ def build_api_runtime(
         rust_sandbox_client=resolved_skill_sandbox_client,
         rust_sandbox_mode=os.environ.get("MAF_RUST_SKILL_RUNTIME_MODE", "off"),
         rust_sandbox_root=os.environ.get("MAF_SKILL_SANDBOX_ROOT") or None,
+        conversation_file_store=conversation_file_store,
     )
     resolved_main_agent_stream_generator, main_agent_stream_metadata = _resolve_main_agent_stream_binding(
         main_agent_stream_generator=main_agent_stream_generator,
@@ -6359,6 +6686,7 @@ def build_api_runtime(
         upload_store=upload_store,
         conversation_memory_builder=resolved_conversation_memory_builder,
         artifact_file_store=artifact_file_store,
+        conversation_file_store=conversation_file_store,
         audit_sink=audit_sink,
         skill_runtime_state=skill_runtime_state,
         skill_input_text_generator=resolved_skill_input_text_generator,

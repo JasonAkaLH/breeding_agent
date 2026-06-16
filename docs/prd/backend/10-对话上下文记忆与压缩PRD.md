@@ -120,7 +120,7 @@ Conversation memory 默认不得通过 `request.metadata` 原样透传给 Skill 
 
 Conversation memory 必须使用独立的 `ConversationMemorySafeAllowlist`，不得直接复用 `main_agent.respond` 的 dependency context allowlist。memory allowlist 默认禁止 `rows`、`candidate_rows`、`storage_ref`、`sql`、`schema_ddl`、`guard_token` 等高成本或敏感字段；如确需保留表格信息，只能保留 capped preview 的统计性摘要，例如 `row_count`、`preview_row_count`、`columns` 的受限列表、`highlights`、`caveats`，且必须记录 `truncated=true`。
 
-v1 conversation memory 只记住历史轮次中“用户曾上传过文件及其脱敏摘要 / `upload_id` / 文件名 / preview 等安全 metadata”，不保证跨轮可重新读取原始文件内容。若用户后续追问“继续用刚才那个文件”，系统可基于记忆提示曾有相关上传摘要；只有当上传记录仍在 `InMemoryUploadStore` 中且当前用户 / conversation 校验通过时，才可继续通过显式 upload reference 使用原始内容；若上传已过期或被删除，应要求用户重新上传。完整文件内容不得写入 conversation memory 或摘要快照。
+v1 conversation memory 只记住历史轮次中“用户曾上传过文件及其脱敏摘要 / `upload_id` / 文件名 / preview 等安全 metadata”，不保存完整文件内容。跨轮重新使用文件的事实源是 `conversation_file_resource` 与本地 conversation 文件目录，而不是 memory 摘要本身；若用户后续追问“继续用刚才那个文件”，系统可基于记忆或 `index.md` 提示相关上传摘要，但只有当该文件仍属于当前用户 / conversation 且状态为 active 时，才可继续通过显式 upload reference 或唯一解析后的文件选择进入 Skill workspace；若文件已删除或无法唯一解析，应要求用户重新选择或重新上传。
 
 禁止读取或注入：
 - 数据查询 Skill 原始 SQL、guard token、schema DDL、完整 rows、完整 candidate rows；
@@ -273,7 +273,7 @@ v1 不新增前端必需 API。现有：
 8. 同一 `task_id` 的 assistant history message 与最终 TEXT artifact 不会重复进入 memory context。
 9. Conversation memory 使用独立 `ConversationMemorySafeAllowlist`，不会把 `rows`、`candidate_rows`、`storage_ref`、SQL、schema DDL、guard token、完整 prompt、API key 或 base_url 注入长期记忆。
 10. Conversation memory 不会通过 `request.metadata` 原样透传给 Skill 自动脚本；Skill script 只接收当前轮 query、显式上传 artifact 和既有脚本输入契约。
-11. 跨轮上传文件引用只保留脱敏摘要 / `upload_id` / 文件名 / preview 等安全 metadata；完整文件内容不进入 conversation memory 或摘要快照。上传过期或删除后，系统不会从记忆恢复原始内容，而应要求用户重新上传。
+11. 跨轮上传文件引用只保留脱敏摘要 / `upload_id` / 文件名 / preview 等安全 metadata；完整文件内容不进入 conversation memory 或摘要快照。文件原文只能从当前 conversation 的 active file resource 进入 Skill workspace；已删除、越权或无法唯一解析时，系统不会从记忆恢复原始内容，而应要求用户重新选择或重新上传。
 12. `trim_max_tokens` 只作为本轮上下文工程总 token 上限来源，实际 memory 可用预算会扣除 system prompt、当前问题、上传摘要、上游能力结果、Skill 上下文和模型输出预留空间。
 13. Level 1 压缩会移除 capability 业务中间产物，仅保留安全摘要，不泄漏 SQL、guard token、schema DDL、完整 rows 或完整 candidate rows。
 14. Level 2 压缩会保留最近原文消息，并把更早历史生成摘要；摘要不得引入未出现过的新事实。

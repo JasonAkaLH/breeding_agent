@@ -60,6 +60,25 @@ class SkillArtifactContextTest(unittest.TestCase):
 
         self.assertEqual(context, fallback)
 
+    def test_script_artifact_context_preserves_legacy_raw_uploaded_artifacts(self) -> None:
+        context = build_skill_script_artifact_context(
+            {
+                "uploaded_artifacts": [
+                    {
+                        "upload_id": "upl-1",
+                        "filename": "materials.csv",
+                        "content": "plot_id,hyb_check,set\n1,A,A\n",
+                        "content_base64": "cGxvdF9pZA==",
+                        "preview": {"row_count": 1},
+                    }
+                ]
+            },
+            fallback_artifact_context=(),
+        )
+
+        self.assertEqual(context[0]["content"], "plot_id,hyb_check,set\n1,A,A\n")
+        self.assertEqual(context[0]["content_base64"], "cGxvdF9pZA==")
+
     def test_safe_metadata_strips_raw_artifact_content(self) -> None:
         metadata = {
             "uploaded_artifacts": [
@@ -83,6 +102,36 @@ class SkillArtifactContextTest(unittest.TestCase):
         self.assertNotIn("content", safe["uploaded_artifacts"][0])
         self.assertNotIn("content", safe["skill_artifacts"][0])
         self.assertEqual(safe["skill_artifacts"][0]["filename"], "materials.csv")
+
+    def test_mount_and_storage_paths_are_script_only(self) -> None:
+        metadata = {
+            "uploaded_artifacts": [
+                {
+                    "upload_id": "upl-1",
+                    "filename": "materials.csv",
+                    "mount_path": "/tmp/skill-run/input/upl-1__materials.csv",
+                    "storage_key": "conv-1/upl-1/original",
+                }
+            ],
+            "skill_artifacts": [
+                {
+                    "upload_id": "upl-1",
+                    "filename": "materials.csv",
+                    "storage_key": "conv-1/upl-1/original",
+                    "conversation_id": "conv-1",
+                }
+            ],
+        }
+
+        safe_context = build_skill_artifact_context(metadata)
+        script_context = build_skill_script_artifact_context(metadata)
+        safe_metadata = build_skill_safe_metadata(metadata)
+
+        self.assertNotIn("mount_path", safe_context[0])
+        self.assertNotIn("storage_key", safe_context[0])
+        self.assertEqual(script_context[0]["storage_key"], "conv-1/upl-1/original")
+        self.assertNotIn("storage_key", safe_metadata["uploaded_artifacts"][0])
+        self.assertNotIn("storage_key", safe_metadata["skill_artifacts"][0])
 
 
 if __name__ == "__main__":

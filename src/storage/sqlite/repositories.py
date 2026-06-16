@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
@@ -22,6 +22,7 @@ from src.core.models import (
     Checkpoint,
     Conversation,
     ConversationMemorySummary,
+    ConversationFileResource,
     EventRecord,
     Interrupt,
     InterruptAnswer,
@@ -56,6 +57,7 @@ from .models import (
     CheckpointRow,
     ConversationRow,
     ConversationMemorySummaryRow,
+    ConversationFileResourceRow,
     EventRecordRow,
     InterruptAnswerRow,
     InterruptRow,
@@ -88,6 +90,31 @@ def _row_to_conversation(row: ConversationRow) -> Conversation:
         delete_error_code=row.delete_error_code,
         delete_error_summary=row.delete_error_summary,
         delete_phase=row.delete_phase,
+    )
+
+
+def _row_to_conversation_file_resource(row: ConversationFileResourceRow) -> ConversationFileResource:
+    return ConversationFileResource(
+        file_id=row.file_id,
+        conversation_id=row.conversation_id,
+        username=row.username,
+        original_filename=row.original_filename,
+        content_type=row.content_type,
+        file_type=row.file_type,
+        size_bytes=int(row.size_bytes or 0),
+        sha256=row.sha256,
+        storage_key=row.storage_key,
+        preview=dict(row.preview or {}),
+        description_status=row.description_status,
+        description_summary=row.description_summary,
+        description_ref=row.description_ref,
+        status=row.status,
+        normalized_filename=row.normalized_filename,
+        normalized_content_type=row.normalized_content_type,
+        requires_sheet_selection=bool(row.requires_sheet_selection),
+        selected_sheet=row.selected_sheet,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -974,6 +1001,7 @@ class SQLiteStateRepository:
             slot_event_conditions.append(SlotEventRow.collection_id.in_(slot_collection_ids))
 
         deleted_counts: dict[str, int] = {
+            "conversation_file_resource": 0,
             "conversation_memory_summary": 0,
             "conversation_pending_skill_context": 0,
             "mailbox_delivery": 0,
@@ -1018,6 +1046,10 @@ class SQLiteStateRepository:
             _delete("task_edge", delete(TaskEdgeRow).where(TaskEdgeRow.task_id.in_(task_ids)))
             _delete("task_node", delete(TaskNodeRow).where(TaskNodeRow.task_id.in_(task_ids)))
         _delete(
+            "conversation_file_resource",
+            delete(ConversationFileResourceRow).where(ConversationFileResourceRow.conversation_id == conversation_id),
+        )
+        _delete(
             "conversation_memory_summary",
             delete(ConversationMemorySummaryRow).where(ConversationMemorySummaryRow.conversation_id == conversation_id),
         )
@@ -1033,6 +1065,103 @@ class SQLiteStateRepository:
 
     def delete_conversation_physical(self, conversation_id: str) -> dict[str, int]:
         return self.delete_conversation(conversation_id)
+
+    def save_conversation_file_resource(self, resource: ConversationFileResource) -> ConversationFileResource:
+        row = ConversationFileResourceRow(
+            file_id=resource.file_id,
+            conversation_id=resource.conversation_id,
+            username=resource.username,
+            original_filename=resource.original_filename,
+            content_type=resource.content_type,
+            file_type=resource.file_type,
+            size_bytes=resource.size_bytes,
+            sha256=resource.sha256,
+            storage_key=resource.storage_key,
+            preview=dict(resource.preview),
+            description_status=resource.description_status,
+            description_summary=resource.description_summary,
+            description_ref=resource.description_ref,
+            status=resource.status,
+            normalized_filename=resource.normalized_filename,
+            normalized_content_type=resource.normalized_content_type,
+            requires_sheet_selection=resource.requires_sheet_selection,
+            selected_sheet=resource.selected_sheet,
+            created_at=resource.created_at,
+            updated_at=resource.updated_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_conversation_file_resource(merged)
+
+    def get_conversation_file_resource(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+    ) -> ConversationFileResource | None:
+        row = self._session.get(ConversationFileResourceRow, file_id)
+        if row is None or row.conversation_id != conversation_id or row.username != username:
+            return None
+        return _row_to_conversation_file_resource(row)
+
+    def get_conversation_file_resource_by_id(self, file_id: str) -> ConversationFileResource | None:
+        row = self._session.get(ConversationFileResourceRow, file_id)
+        return None if row is None else _row_to_conversation_file_resource(row)
+
+    def list_conversation_file_resources(
+        self,
+        conversation_id: str,
+        username: str | None = None,
+        *,
+        include_deleted: bool = False,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> list[ConversationFileResource]:
+        statement = select(ConversationFileResourceRow).where(ConversationFileResourceRow.conversation_id == conversation_id)
+        if username is not None:
+            statement = statement.where(ConversationFileResourceRow.username == username)
+        if not include_deleted:
+            statement = statement.where(ConversationFileResourceRow.status != "deleted")
+        if cursor:
+            cursor_statement = select(ConversationFileResourceRow).where(
+                ConversationFileResourceRow.conversation_id == conversation_id,
+                ConversationFileResourceRow.file_id == cursor,
+            )
+            if username is not None:
+                cursor_statement = cursor_statement.where(ConversationFileResourceRow.username == username)
+            cursor_row = self._session.scalars(cursor_statement).first()
+            if cursor_row is None:
+                return []
+            statement = statement.where(
+                or_(
+                    ConversationFileResourceRow.created_at > cursor_row.created_at,
+                    and_(
+                        ConversationFileResourceRow.created_at == cursor_row.created_at,
+                        ConversationFileResourceRow.file_id > cursor_row.file_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(ConversationFileResourceRow.created_at, ConversationFileResourceRow.file_id)
+        if limit is not None and limit > 0:
+            statement = statement.limit(limit)
+        rows = self._session.scalars(statement).all()
+        return [_row_to_conversation_file_resource(row) for row in rows]
+
+    def mark_conversation_file_resource_deleted(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+        *,
+        updated_at: datetime,
+    ) -> ConversationFileResource | None:
+        row = self._session.get(ConversationFileResourceRow, file_id)
+        if row is None or row.conversation_id != conversation_id or row.username != username:
+            return None
+        row.status = "deleted"
+        row.updated_at = updated_at
+        self._session.flush()
+        return _row_to_conversation_file_resource(row)
 
     def save_message(self, message: Message) -> Message:
         row = MessageRow(
@@ -1839,6 +1968,56 @@ class SQLiteStorage(StoragePort):
 
     async def delete_conversation_physical(self, conversation_id: str) -> dict[str, int]:
         return await self._run(lambda state, collab: state.delete_conversation_physical(conversation_id))
+
+    async def save_conversation_file_resource(self, resource: ConversationFileResource) -> ConversationFileResource:
+        return await self._run(lambda state, collab: state.save_conversation_file_resource(resource))
+
+    async def get_conversation_file_resource(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+    ) -> ConversationFileResource | None:
+        return await self._run(lambda state, collab: state.get_conversation_file_resource(conversation_id, username, file_id))
+
+    async def get_conversation_file_resource_by_id(self, file_id: str) -> ConversationFileResource | None:
+        return await self._run(lambda state, collab: state.get_conversation_file_resource_by_id(file_id))
+
+    async def list_conversation_file_resources(
+        self,
+        conversation_id: str,
+        username: str | None = None,
+        *,
+        include_deleted: bool = False,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> list[ConversationFileResource]:
+        return await self._run(
+            lambda state, collab: state.list_conversation_file_resources(
+                conversation_id,
+                username,
+                include_deleted=include_deleted,
+                limit=limit,
+                cursor=cursor,
+            )
+        )
+
+    async def mark_conversation_file_resource_deleted(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+        *,
+        updated_at: datetime,
+    ) -> ConversationFileResource | None:
+        return await self._run(
+            lambda state, collab: state.mark_conversation_file_resource_deleted(
+                conversation_id,
+                username,
+                file_id,
+                updated_at=updated_at,
+            )
+        )
 
     async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary:
         return await self._run(lambda state, collab: state.save_conversation_memory_summary(summary))

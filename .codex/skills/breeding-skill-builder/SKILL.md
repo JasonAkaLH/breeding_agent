@@ -27,9 +27,10 @@ skill/<skill-name>/
 4. Put executable input contracts in `schemas/*.input.yaml`; required fields are scoped to the selected schema.
 5. Put detailed user-visible explanations in `references/*.md`, and list when to read them from `SKILL.md`.
 6. Use `SkillResourceService` boundaries: prompt-facing resources must not expose scripts, runtime, schemas, native code, config, secrets, tokens, credentials, `.env`, `.git`, or absolute/local paths.
-7. External callers never submit `capability_id=skill.*` directly. Slash/API skill selection goes through `main_agent.respond + metadata.soft_skill_binding`.
-8. Write descriptive and explanatory prose in Chinese by default. Keep only necessary parameter names, filenames, paths, code identifiers, API terms, enum values, and domain-standard terms in their original language.
-9. Hardcode every platform-read field that the runtime will not infer: capability id, routing triggers, entrypoint names/paths, input schema refs, schema aliases, selected-schema constants, source policies, enum/default/range/pattern rules, output artifact extensions/MIME types, resources, and platform-service handlers/services.
+7. For file inputs in new or migrated python_subprocess Skills, prefer the runtime file resource contract: read `payload["resource_manifest_path"]`, then open `manifest["files"][].mount_path`. Treat `uploaded_artifacts[].content` / `content_base64` as legacy compatibility only.
+8. External callers never submit `capability_id=skill.*` directly. Slash/API skill selection goes through `main_agent.respond + metadata.soft_skill_binding`.
+9. Write descriptive and explanatory prose in Chinese by default. Keep only necessary parameter names, filenames, paths, code identifiers, API terms, enum values, and domain-standard terms in their original language.
+10. Hardcode every platform-read field that the runtime will not infer: capability id, routing triggers, entrypoint names/paths, input schema refs, schema aliases, selected-schema constants, source policies, enum/default/range/pattern rules, output artifact extensions/MIME types, resources, and platform-service handlers/services.
 
 ## Workflow
 
@@ -107,7 +108,7 @@ Each schema file must use the current backend shape: top-level `schema_id` (or
 `id`) and `inputs`, with each field using `source.allowed` for accepted sources.
 Each field should describe type, title/question or clarification,
 required/required_when, aliases/patterns, and validation. Artifact fields must
-come from trusted upload/artifact sources, not LLM-generated file paths. Do not
+come from trusted upload/artifact sources, not LLM-generated file paths. Runtime scripts should consume the mounted files supplied by `resource_manifest_path` / `files[].mount_path`, not ask the LLM to invent local paths. Do not
 use unsupported `fields:` or `sources:` keys in new project skills.
 
 Hardcode schema internals the resolver depends on:

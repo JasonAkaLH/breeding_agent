@@ -571,6 +571,35 @@ class UploadsAPITest(APITestCase):
         )
         self.assertEqual(plain_gz.status_code, 400)
 
+
+    async def test_image_upload_is_persistent_without_description(self) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-image-index"},
+            files={"file": ("leaf.png", png_bytes, "image/png")},
+        )
+
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+        resource = await self.runtime.storage.get_conversation_file_resource("conv-image-index", "acc-1", upload_id)
+        self.assertEqual(resource.description_status, "not_required")
+        index_text = (self.runtime.conversation_file_store.root_dir / "conv-image-index" / "index.md").read_text(encoding="utf-8")
+        self.assertIn("图片文件不自动生成描述", index_text)
+
+    async def test_upload_rejects_conversation_ids_that_cannot_be_safely_stored(self) -> None:
+        conversation_id = "conv-" + ("x" * 300)
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": conversation_id},
+            files={"file": ("materials.csv", "ped_id\nA\n", "text/csv")},
+        )
+
+        self.assertEqual(upload.status_code, 400)
+        self.assertIn("conversation_id failed file storage safety validation", upload.json()["detail"])
+        self.assertIsNone(await self.runtime.storage.get_conversation(conversation_id))
+
     async def test_list_and_delete_uploads_for_conversation(self) -> None:
         first = await self.client.post(
             "/api/v1/conversations/uploads",
@@ -591,6 +620,21 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(payload["conversation_id"], "conv-files")
         self.assertEqual([item["filename"] for item in payload["uploads"]], ["first.csv", "second.json"])
         self.assertNotIn("content", payload["uploads"][0])
+        first_upload_id = first.json()["upload_id"]
+        first_resource_dir = self.runtime.conversation_file_store.root_dir / "conv-files" / first_upload_id
+        stored_original = first_resource_dir / "original"
+        stored_description = first_resource_dir / "description.json"
+        index_path = self.runtime.conversation_file_store.root_dir / "conv-files" / "index.md"
+        self.assertEqual(stored_original.read_text(encoding="utf-8"), "ped_id,design_check\nA,0\n")
+        self.assertTrue(stored_description.exists())
+        self.assertIn(f"{first_upload_id} — first.csv", index_path.read_text(encoding="utf-8"))
+        stored_resource = await self.runtime.storage.get_conversation_file_resource("conv-files", "acc-1", first_upload_id)
+        self.assertIsNotNone(stored_resource)
+        self.assertEqual(stored_resource.description_status, "ready")
+
+        paged = await self.client.get("/api/v1/conversations/conv-files/uploads?limit=1")
+        self.assertEqual(len(paged.json()["uploads"]), 1)
+        self.assertEqual(paged.json()["next_cursor"], first_upload_id)
 
         deleted = await self.client.request(
             "DELETE",
@@ -599,9 +643,14 @@ class UploadsAPITest(APITestCase):
         )
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(deleted.json()["deleted"], True)
+        self.assertFalse(first_resource_dir.exists())
 
         listed_after_delete = await self.client.get("/api/v1/conversations/conv-files/uploads")
         self.assertEqual([item["filename"] for item in listed_after_delete.json()["uploads"]], ["second.json"])
+        listed_with_deleted = await self.client.get("/api/v1/conversations/conv-files/uploads?include_deleted=true")
+        deleted_items = [item for item in listed_with_deleted.json()["uploads"] if item["upload_id"] == first_upload_id]
+        self.assertEqual(deleted_items[0]["status"], "deleted")
+        self.assertIn("文件本体已物理删除", index_path.read_text(encoding="utf-8"))
 
         resolved = await self.runtime.resolve_uploads_for_message(
             "conv-files", "acc-1", [first.json()["upload_id"]]

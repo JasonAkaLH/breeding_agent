@@ -185,12 +185,15 @@ class UploadFileResponse(BaseModel):
     size_bytes: int
     sha256: str
     expires_at: datetime
+    status: str | None = None
+    description_status: str | None = None
     preview: UploadPreviewResponse
 
 
 class UploadListResponse(BaseModel):
     conversation_id: str
     uploads: list[UploadFileResponse]
+    next_cursor: str | None = None
 
 
 class DeleteUploadResponse(BaseModel):

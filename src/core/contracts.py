@@ -11,6 +11,7 @@ from .models import (
     Checkpoint,
     Conversation,
     ConversationMemorySummary,
+    ConversationFileResource,
     EventRecord,
     Interrupt,
     InterruptAnswer,
@@ -153,6 +154,36 @@ class StoragePort(Protocol):
     async def delete_conversation(self, conversation_id: str) -> dict[str, int]: ...
 
     async def delete_conversation_physical(self, conversation_id: str) -> dict[str, int]: ...
+
+    async def save_conversation_file_resource(self, resource: ConversationFileResource) -> ConversationFileResource: ...
+
+    async def get_conversation_file_resource(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+    ) -> ConversationFileResource | None: ...
+
+    async def get_conversation_file_resource_by_id(self, file_id: str) -> ConversationFileResource | None: ...
+
+    async def list_conversation_file_resources(
+        self,
+        conversation_id: str,
+        username: str | None = None,
+        *,
+        include_deleted: bool = False,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> list[ConversationFileResource]: ...
+
+    async def mark_conversation_file_resource_deleted(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+        *,
+        updated_at: datetime,
+    ) -> ConversationFileResource | None: ...
 
     async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary: ...
 

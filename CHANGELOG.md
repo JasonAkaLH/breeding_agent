@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 2026-06-16
+
+- 对话文件本地资源系统已落地并补齐文档口径：上传文件会保存为 conversation-scoped 本地资源并维护 `index.md`，Skill 运行时通过 `resource_manifest.json` / `files[].mount_path` 读取 workspace 文件副本；单文件删除会物理删除本地资源目录，对话删除会清理对应文件目录。前端文件 UI 收敛为右下角“文件”按钮 + 右侧文件面板，不再占用发送框上方空间；相关 PRD、API 更新日志、前端 PRD 索引、对话记忆和 Skill 输出文件文档已同步。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
 ### 2026-06-12
 
 - Skill v2 回归测试口径已清理：本地旧 v1-only SkillExecutor/API fixture、旧本地 R runner 成功路径和旧 RiceGenie Markdown 输出断言不再作为当前发布门禁；保留的 Skill v2 contract/resource/input/dynamic reload/API 子集已收敛到当前 bundle 契约，并补齐 field-analysis / rice-genie 匹配触发词与 field-design schema alias。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。

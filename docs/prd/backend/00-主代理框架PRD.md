@@ -88,6 +88,7 @@
 | MCP 长任务与流式 SSE | `docs/prd/backend/17-MCP长任务流式SSEPRD.md` | 将 MCP Runtime 从单条 SSE 兼容升级为完整长任务流式 SSE、断线恢复、progress、task status、取消与 API/SSE 事件桥接 |
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
 | 表格上传编码兼容与表头规范化分步实施 | `docs/prd/backend/table-upload-normalization/README.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt、prompt-safe 摘要上限与 Skill artifact 规范化输入 |
+| 对话文件本地资源文件系统 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件本地持久化、`index.md` 文件索引、Skill workspace manifest / mount_path 与删除清理语义 |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
 | 大语言模型提示词信封分步实施 | `docs/prd/backend/prompt-envelope/README.md` | 将 prompt 组装拆成测试基线、核心模型、主代理迁移、记忆候选、工具信息分层、多调用场景档案、消息原生运行时、供应商缓存八个可独立验收阶段 |
@@ -195,7 +196,16 @@
 - 该能力不得修改 `skill/**`，不得把完整文件内容写入 prompt、SSE、对话记忆或普通 audit；prompt-safe 上传摘要必须有列数、sheet 数和清洗映射上限。
 - 该专题已拆为 `docs/prd/backend/table-upload-normalization/` 下的父总纲与阶段 PRD，实施时必须按阶段门禁推进。
 
-### 5.13 Rust 化 Runtime 决策
+### 5.13 对话文件本地资源决策
+
+- 用户上传文件不是 RAG 输入，而是 conversation-scoped 本地文件资源；Skill 脚本应读取 workspace 中的真实文件副本。
+- DB 中的 `conversation_file_resource` 是权限、状态、分页和重建索引的事实源；每个 conversation 目录下的 `index.md` 是面向人和模型的物化投影。
+- 上传 API、列表 API、删除 API 和 `metadata.upload_ids` 保持向后兼容；响应只允许增加旧前端可忽略字段。
+- 新 Skill 优先读取 `resource_manifest_path` 与 `files[].mount_path`；旧 Skill 的 `uploaded_artifacts[].content` / `content_base64` 只作为兼容层保留。
+- 单文件删除必须标记 DB `deleted` 并物理删除对应本地资源目录；conversation 删除必须清理该 conversation 文件目录。
+- 图片文件上传阶段不自动生成描述或 OCR；PDF 后续可接受控文本抽取 / OCR adapter，但失败不得阻塞文件作为 Skill 输入。
+
+### 5.14 Rust 化 Runtime 决策
 
 - 主体框架 Rust 化不应为任何具体业务 Skill 重新引入 native capability、专属 route、专属 executor 或前端协议。
 - `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust sidecar / kernel。
@@ -247,6 +257,7 @@
 - MCP 长任务与流式 SSE PRD：`docs/prd/backend/17-MCP长任务流式SSEPRD.md`
 - 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
 - 表格上传编码兼容与表头规范化 PRD：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
+- 对话文件本地资源文件系统 PRD：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`
 - MCP Runtime 联合改造 Phase PRD：`docs/prd/MCP/README.md`

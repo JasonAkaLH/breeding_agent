@@ -136,6 +136,7 @@ class PostgreSQLStorage(SQLiteStorage):
 
     def _delete_conversation_physical_sync(self, conversation_id: str) -> dict[str, int]:
         deleted_counts: dict[str, int] = {
+            "conversation_file_resource": 0,
             "conversation_memory_summary": 0,
             "conversation_pending_skill_context": 0,
             "mailbox_delivery": 0,
@@ -270,6 +271,10 @@ class PostgreSQLStorage(SQLiteStorage):
                 WHERE n.task_id = t.task_id
                   AND t.conversation_id = :conversation_id
                 """,
+            ),
+            (
+                "conversation_file_resource",
+                "DELETE FROM conversation_file_resource WHERE conversation_id = :conversation_id",
             ),
             (
                 "conversation_memory_summary",

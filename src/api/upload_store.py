@@ -70,6 +70,8 @@ class UploadedFileRecord:
     normalized_filename: str | None = None
     requires_sheet_selection: bool = False
     selected_sheet: str | None = None
+    status: str = "active"
+    description_status: str | None = None
 
     def to_summary(self) -> dict[str, Any]:
         summary = {

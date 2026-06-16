@@ -16,6 +16,18 @@
 | `execution` | `skill.contract.yaml runtime` and platform service fields. |
 | useful body workflow | Keep in `SKILL.md` body after removing internal paths/config and platform execution details. |
 
+
+## File input migration
+
+Old Skills may keep reading `uploaded_artifacts[].content` or `content_base64` during the compatibility window. New and migrated file-processing Skills should switch to:
+
+1. read `payload["resource_manifest_path"]`;
+2. parse `resource_manifest.json`;
+3. iterate `manifest["files"]`;
+4. open each file through `files[].mount_path`.
+
+Do not migrate by asking the LLM to produce a local path. `mount_path` is supplied by the platform and points to a temporary per-run workspace copy. Persistent storage paths and `storage_key` are internal and must not appear in prompt-facing docs.
+
 ## Migration steps
 
 1. Preserve a copy of the old file for reference via `git show HEAD:skill/<name>/SKILL.md` when needed.
