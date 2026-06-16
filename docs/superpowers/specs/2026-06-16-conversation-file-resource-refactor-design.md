@@ -1,6 +1,7 @@
 # Conversation 文件资源重构设计
 
 日期：2026-06-16
+状态：Reviewed — approved for implementation planning
 
 ## 背景
 
@@ -20,6 +21,7 @@
 - 图片文件不自动生成 LLM 描述，也不在上传阶段自动 OCR。
 - PDF 可以生成描述，可复用 OCR 或文本抽取能力。
 - 现有 Skill 不能被一次性打断；旧 `content` / `content_base64` 输入必须兼容。
+- 产品语义上每个 conversation 的文件数量不限；工程上必须用分页、磁盘配额、单次 Skill 挂载预算和任务超时控制资源消耗。
 - 新版设计必须同步更新 `breeding-skill-builder`，让后续新建/迁移 Skill 遵守文件资源契约。
 
 ## 目标架构
@@ -36,9 +38,24 @@
 
 当前的临时 upload 语义升级为 conversation-scoped file resource。`upload_id` 对前端仍是上传 ID，对后端则同时作为对话文件资源 ID。
 
+## 文件选择与挂载规则
+
+同一 conversation 中的 active 文件都属于该对话的可用文件池，但并非每次 Skill 执行都必须挂载所有文件。第一阶段采用以下规则：
+
+1. 主代理 prompt 可以看到当前 conversation 的文件索引摘要，用于理解“之前上传过哪些文件”。
+2. Skill run 只挂载本次执行需要的文件：
+   - 当前消息显式提交的 `metadata.upload_ids`；
+   - interrupt/resume 已绑定到 task input ledger 的文件；
+   - 用户在自然语言中明确提到、且主代理/slot resolver 能从 `index.md` 或文件列表唯一解析出的文件。
+3. 当当前对话只有一个 active 文件，且 Skill schema 需要 artifact/file/data 输入时，可以默认选中该文件。
+4. 当存在多个候选文件且用户没有明确选择时，必须触发缺参追问，让用户选择文件，不能静默挂载全部文件。
+5. 后端可以在未来增加显式文件选择 UI，但第一阶段不改变前端 API；选择结果仍通过既有 `upload_ids` / interrupt answer 语义进入后端。
+
+该规则保证“对话里之前上传过的文件可复用”，同时避免把大量无关文件挂载进每次 Skill run。
+
 ## 文件存储布局
 
-本地文件保存采用 conversation 直观目录，不按 hash 分层：
+本地文件保存采用 conversation 直观目录，不按 hash 分层。目录名必须使用安全化后的内部 storage component，而不是直接拼接未校验的用户输入：
 
 ```text
 runtime/conversation_files/
@@ -54,9 +71,11 @@ runtime/conversation_files/
 说明：
 
 - `original` 保存原始 bytes。
+- `<conversation_id>` 和 `<upload_id>` 进入路径前必须经过 `sanitize_storage_component` 或等价校验；展示/API 仍使用原始 ID。
 - 原始文件名只进入 DB / index，不参与真实文件名，避免路径注入和重名冲突。
 - `sha256` 仍计算并记录，用于完整性校验，不用于目录分层。
 - 删除整个 conversation 时可以清理对应目录。
+- 所有持久 storage key 必须是后端内部 key，不允许包含绝对路径、`..`、空路径段或未规范化分隔符。
 
 ## 数据模型
 
@@ -81,7 +100,7 @@ conversation_file_resource
 - updated_at
 ```
 
-DB 是结构化事实源，文件系统保存原始文件和可选缓存。真实路径不进前端响应，也不直接暴露给主代理 prompt。
+DB 是结构化事实源，文件系统保存原始文件和可选缓存。真实路径不进前端响应，也不直接暴露给主代理 prompt。SQLite 和 PostgreSQL schema/repository 必须保持同等能力；任一后端缺失 conversation file resource 表、索引或 repository 方法都不能视为完成。
 
 ## Conversation `index.md`
 
@@ -121,6 +140,8 @@ updated_at: 2026-06-16T...
 - `index.md` 由后端从 DB / description 生成。
 - Skill 运行时复制为 workspace 内的 `resource_index.md`，不暴露真实持久目录。
 - 不把 `index.md` 作为唯一真源。
+- `index.md` 更新必须先写临时文件，再 atomic replace；写入失败只影响物化索引，不回滚 DB 上传记录。
+- 后端应提供可重建路径：从 DB 记录和 per-file description 重新生成 `index.md`，用于修复并发写失败或人工清理后的索引缺失。
 
 图片文件在 `index.md` 中仍登记，但描述固定为：
 
@@ -148,6 +169,8 @@ updated_at: 2026-06-16T...
 - 图片上传阶段不自动 OCR。
 - 用户需要识别图片文字时，由对话流程调用 OCR Skill。
 - PDF 描述生成可以复用 OCR 或文本抽取能力，但失败不阻塞 PDF 作为文件资源使用。
+- PDF description pipeline 不应递归调用用户可见的 public OCR Skill 流程；应复用受控 OCR adapter、脚本或后续抽象出的内部服务。
+- description pipeline 的 OCR 中间结果只用于 `description.json` / `ocr.md` / `index.md`，不会自动生成用户可见 OCR artifact。
 - OCR 输出仍作为 Skill 结果 artifact，不作为图片上传文件的默认 description。
 
 ## Skill 运行时工作区
@@ -173,6 +196,12 @@ skill-run-xxxx/
 5. 注入环境变量和 payload 字段。
 
 推荐第一阶段使用复制，不用软链接，避免脚本修改 input 影响原始文件，并兼容未来 sandbox。
+
+运行模式要求：
+
+- legacy Python subprocess 模式在现有 `skill-run-*` 临时目录内创建 `input/`、`outputs/`、`resource_manifest.json` 和 `resource_index.md`。
+- Rust sandbox enforce 模式也必须生成同样文件结构，但 workspace 必须位于 `MAF_SKILL_SANDBOX_ROOT` 下，且传给 sandbox 的 `cwd_under_public_root` 只能指向该受控 workspace。
+- 两种模式给脚本看到的 payload/env 契约必须一致；不能出现 legacy 可用、enforce 不可用的 manifest 字段。
 
 ## Resource manifest
 
@@ -204,7 +233,7 @@ skill-run-xxxx/
 }
 ```
 
-真实持久路径不进入 manifest；`mount_path` 只指向临时 workspace。
+真实持久路径不进入 manifest；`mount_path` 只指向临时 workspace。`version` 是 manifest schema version，后续新增字段必须保持向后兼容；删除或重命名字段需要新 version 和迁移说明。
 
 ## Skill payload 双轨兼容
 
@@ -259,22 +288,26 @@ skill-run-xxxx/
 
 ## 删除语义
 
-第一阶段建议：
+第一阶段固定语义：
 
-- 用户删除上传：从 conversation 文件列表移除或标记 `deleted`。
+- 用户删除上传：DB 标记 `status = deleted`。
+- `GET /uploads` 默认只返回 active 文件；未来可增加 `include_deleted=true` 供管理/调试使用。
 - 已经被任务使用过的文件不影响已完成任务记录。
-- 物理文件优先软删除或延迟清理，避免正在运行的 Skill 被删除打断。
-- 删除 conversation 时清理对应 conversation 文件目录。
+- 物理文件延迟清理，不在删除 API 同步删除，避免正在运行的 Skill 被删文件打断。
+- 已创建的 Skill workspace 是临时副本，删除 conversation file resource 不影响正在运行的 workspace。
+- 删除 conversation 时清理对应 conversation 文件目录，并记录清理失败诊断。
 
 ## 分阶段迁移
 
 ### Phase 1：持久文件资源层
 
 - 新增后端 conversation file store / index 服务。
+- 新增 SQLite 和 PostgreSQL schema/repository，并补齐 migration/bootstrap/parity 测试。
 - 上传后落盘。
 - 写 DB 记录。
 - 更新 `index.md`。
 - 保留现有 upload API response shape。
+- `GET /uploads` 首期保持旧响应；为数量不限预留可选 `limit`、`cursor`、`include_deleted` query params，旧前端不传时行为不变。
 - 保留 `content` / `content_base64` 兼容字段。
 
 ### Phase 2：Skill workspace manifest
@@ -292,6 +325,15 @@ skill-run-xxxx/
 - PDF 可接 OCR / 文本抽取。
 - 图片标记 `description_status = not_required`。
 - 失败不阻塞文件使用。
+
+### Non-functional requirements
+
+- 单文件大小继续受上传上限控制；持久化后不得绕过现有 upload validation。
+- 每次 Skill run 必须有挂载预算：最大文件数、总输入字节、复制超时和脚本执行超时；超预算时应触发缺参/错误提示，而不是静默挂载全部文件。
+- conversation 文件列表必须支持分页或 cursor，避免“数量不限”导致响应过大。
+- 关键动作写审计事件或诊断：上传落盘、index 更新失败、description 失败、workspace 构建失败、删除标记、物理清理失败。
+- description 失败、index 写失败、OCR 失败都不得阻塞文件作为 Skill 输入使用。
+- rollback 策略：若持久文件资源层异常，上传 API 应 fail closed，不应回退到丢失持久性的内存-only 新上传；已存在旧内存上传兼容测试可以保留在迁移期。
 
 ### Phase 4：Skill 逐步迁移
 
@@ -359,6 +401,7 @@ skill-run-xxxx/
 
 - `GET /uploads` 旧字段不变。
 - 新字段可选且可被旧前端忽略。
+- 支持可选分页参数 `limit` / `cursor`，不传时保持旧前端兼容行为。
 - 删除后列表和状态符合设计。
 
 ### Skill 执行
@@ -367,6 +410,13 @@ skill-run-xxxx/
 - 新测试 Skill 能从 `uploaded_artifacts[].mount_path` 打开文件。
 - 旧测试 Skill 不改代码仍能读取 `content` / `content_base64`。
 - Skill 修改 workspace input 文件不影响原始文件。
+
+### 数据库与迁移
+
+- SQLite bootstrap 创建 conversation file resource 表和必要索引。
+- PostgreSQL runtime schema manifest / DDL 包含同等表、列和索引。
+- SQLite 与 PostgreSQL repository 均支持 save/list/delete-mark conversation files。
+- migration 对已有 `task_input_attachment` 中的 base64 兼容字段保持可读，不做破坏性清理。
 
 ### Interrupt / resume
 
@@ -398,4 +448,5 @@ skill-run-xxxx/
 7. 图片不生成描述。
 8. PDF 可以生成描述。
 9. 上传文件跨 interrupt / resume 可用。
-10. `breeding-skill-builder` 和 `Skill构建指南.md` 已按新版约定更新。
+10. SQLite 与 PostgreSQL schema/repository parity 已验证。
+11. `breeding-skill-builder` 和 `Skill构建指南.md` 已按新版约定更新。
