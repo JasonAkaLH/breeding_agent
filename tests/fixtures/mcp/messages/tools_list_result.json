@@ -1,0 +1,32 @@
+{
+  "jsonrpc": "2.0",
+  "id": "list-1",
+  "result": {
+    "tools": [
+      {
+        "name": "search_customer",
+        "description": "server-side description must not be exposed directly",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "keyword": {
+              "type": "string"
+            }
+          },
+          "required": ["keyword"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        "execution": {
+          "taskSupport": "optional"
+        }
+      }
+    ]
+  }
+}

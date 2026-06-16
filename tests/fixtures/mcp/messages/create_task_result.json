@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": "call-1",
+  "result": {
+    "taskId": "raw-mcp-task-1",
+    "status": {
+      "state": "working",
+      "message": "queued"
+    },
+    "pollInterval": 1000,
+    "_meta": {
+      "io.modelcontextprotocol/related-task": {
+        "taskId": "raw-mcp-task-1"
+      }
+    }
+  }
+}

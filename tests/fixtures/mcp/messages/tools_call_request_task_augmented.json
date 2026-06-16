@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": "call-1",
+  "method": "tools/call",
+  "params": {
+    "name": "search_customer",
+    "arguments": {
+      "keyword": "龙粳"
+    },
+    "task": {
+      "ttl": 60000
+    },
+    "_meta": {
+      "progressToken": "progress-call-1"
+    }
+  }
+}
