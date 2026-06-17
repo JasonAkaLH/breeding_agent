@@ -14,8 +14,6 @@ from pathlib import Path
 from typing import Any, Mapping
 from xml.etree import ElementTree as ET
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 from render_field_analysis_html import render_report_file
 from trait_preflight import build_trait_preflight, prepare_records_for_numeric_backend
 
@@ -25,7 +23,115 @@ DEFAULT_BREEDSTAT2_URL = "http://breedstat2:8000"
 LOCAL_BREEDSTAT2_URL = "http://127.0.0.1:8020"
 CONTAINER_BREEDSTAT2_URL = "http://breedstat2:8000"
 WIDE_FIXED_COLUMNS = ("loc_id", "rep_num", "ranges", "pass", "entry_id", "ped_id", "check_type")
+SPATIAL_OPTIONAL_COLUMNS = {"ranges", "pass"}
+DIAGONAL_OPTIONAL_COLUMNS = {"rep_num", "ranges", "pass"}
 ALLOWED_DESIGNS = {"rcbd", "diagonal"}
+FIELD_COLUMN_ALIASES = {
+    "loc_id": (
+        "loc_id",
+        "loc",
+        "location",
+        "location_id",
+        "site",
+        "site_id",
+        "env",
+        "environment",
+        "environment_id",
+        "试点",
+        "试点编号",
+        "地点",
+        "地点编号",
+        "环境",
+        "环境编号",
+        "试验地点",
+    ),
+    "rep_num": (
+        "rep_num",
+        "rep",
+        "repeat",
+        "replicate",
+        "replication",
+        "block",
+        "block_id",
+        "r",
+        "区组/重复",
+        "重复",
+        "重复编号",
+        "区组",
+        "区组编号",
+    ),
+    "ranges": (
+        "ranges",
+        "range",
+        "row",
+        "row_no",
+        "row_id",
+        "field_row",
+        "排号",
+        "田间排号",
+        "行号",
+        "垄号",
+    ),
+    "pass": (
+        "pass",
+        "col",
+        "column",
+        "column_no",
+        "col_id",
+        "field_col",
+        "列号",
+        "田间列号",
+    ),
+    "entry_id": (
+        "entry_id",
+        "entry",
+        "entry_no",
+        "plot",
+        "plots",
+        "plot_id",
+        "serial",
+        "serial_no",
+        "流水号",
+        "小区号",
+        "小区编号",
+        "小区",
+        "条目编号",
+        "条目",
+    ),
+    "ped_id": (
+        "ped_id",
+        "pedigree",
+        "material",
+        "material_id",
+        "genotype",
+        "variety",
+        "hybrid",
+        "name",
+        "材料名称/代号",
+        "材料名称",
+        "材料代号",
+        "材料编号",
+        "材料",
+        "品种名称",
+        "品种",
+        "组合名称",
+        "名称",
+    ),
+    "check_type": (
+        "check_type",
+        "check",
+        "control",
+        "ck",
+        "is_check",
+        "hyb_check",
+        "design_check",
+        "是否对照",
+        "对照",
+        "对照标记",
+        "对照类型",
+        "ck",
+    ),
+}
 
 
 def json_response(payload: Mapping[str, Any]) -> None:
@@ -62,27 +168,136 @@ def default_breedstat2_url() -> str:
     return CONTAINER_BREEDSTAT2_URL
 
 
-def _utf8_locale(value: str | None) -> str:
-    text = str(value or "").strip()
-    normalized = text.upper().replace("_", "-")
-    if "UTF-8" in normalized or "UTF8" in normalized:
-        return text
-    return "C.UTF-8"
-
-
-def _rscript_env() -> dict[str, str]:
-    return {
-        "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        "LANG": _utf8_locale(os.environ.get("LANG")),
-        "LC_ALL": _utf8_locale(os.environ.get("LC_ALL") or os.environ.get("LANG")),
-        "LC_CTYPE": _utf8_locale(os.environ.get("LC_CTYPE") or os.environ.get("LC_ALL") or os.environ.get("LANG")),
-    }
-
-
 def safe_run_id(value: Any) -> str:
     text = str(value or "").strip() or "field_analysis"
     text = re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")
     return text[:80] or "field_analysis"
+
+
+def normalize_column_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("（", "(").replace("）", ")")
+    text = re.sub(r"[\-_./\\:：#]+", "", text)
+    text = re.sub(r"\([^)]*\)", "", text)
+    return text
+
+
+def field_column_alias_lookup() -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for canonical, aliases in FIELD_COLUMN_ALIASES.items():
+        lookup[normalize_column_key(canonical)] = canonical
+        for alias in aliases:
+            lookup[normalize_column_key(alias)] = canonical
+    return lookup
+
+
+FIELD_COLUMN_ALIAS_LOOKUP = field_column_alias_lookup()
+
+
+def required_column_label(column: str) -> str:
+    labels = {
+        "loc_id": "试点",
+        "rep_num": "区组/重复",
+        "ranges": "排号",
+        "pass": "列号",
+        "entry_id": "流水号",
+        "ped_id": "材料名称/代号",
+        "check_type": "是否对照",
+    }
+    return labels.get(column, column)
+
+
+def field_input_warnings(*, design: str | None, missing_optional_columns: list[str]) -> list[str]:
+    warnings: list[str] = []
+    optional = set(missing_optional_columns)
+    if {"ranges", "pass"} & optional:
+        missing_text = "、".join(required_column_label(column) for column in ("ranges", "pass") if column in optional)
+        prefix = "对角线设计默认按 1 个重复处理；" if design == "diagonal" else ""
+        warnings.append(
+            f"{prefix}本次未提供{missing_text}，可完成常规表型分析。"
+            "如果需要做田间空间校正或空间诊断，请补充排号和列号。"
+        )
+    return warnings
+
+
+def column_mapping_summary(column_mapping: Mapping[str, str], *, limit: int = 8) -> str:
+    if not column_mapping:
+        return ""
+    pairs = [
+        f"{source}->{target}"
+        for source, target in column_mapping.items()
+        if str(source).strip() and str(target).strip() and source != target
+    ]
+    if not pairs:
+        return ""
+    shown = "、".join(pairs[:limit])
+    if len(pairs) > limit:
+        shown += f" 等 {len(pairs)} 项"
+    return f"已自动识别并归一化列名：{shown}。"
+
+
+def normalize_field_records(
+    records: list[Mapping[str, Any]],
+    *,
+    design: str | None = None,
+) -> tuple[list[dict[str, str]], dict[str, str], list[str], list[str], list[str]]:
+    if not records:
+        return [], {}, list(WIDE_FIXED_COLUMNS), [], []
+
+    source_fields = fieldnames_from_records(records)
+    used_targets: set[str] = set()
+    duplicate_metadata_sources: set[str] = set()
+    rename_map: dict[str, str] = {}
+    for source in source_fields:
+        canonical = FIELD_COLUMN_ALIAS_LOOKUP.get(normalize_column_key(source))
+        if canonical and canonical not in used_targets:
+            rename_map[source] = canonical
+            used_targets.add(canonical)
+        elif canonical:
+            rename_map[source] = canonical
+            duplicate_metadata_sources.add(source)
+        else:
+            rename_map[source] = source
+
+    trait_fields = [
+        source
+        for source in source_fields
+        if source not in duplicate_metadata_sources and rename_map.get(source) not in WIDE_FIXED_COLUMNS
+    ]
+    originally_missing = [column for column in WIDE_FIXED_COLUMNS if column not in used_targets]
+    missing = list(originally_missing)
+    defaulted_columns: list[str] = []
+    if design == "diagonal":
+        if "rep_num" in missing:
+            used_targets.add("rep_num")
+            defaulted_columns.append("rep_num")
+    missing = [
+        column
+        for column in missing
+        if column not in SPATIAL_OPTIONAL_COLUMNS and not (design == "diagonal" and column == "rep_num")
+    ]
+    optional_missing = [column for column in originally_missing if column in SPATIAL_OPTIONAL_COLUMNS]
+
+    ordered_fields = [column for column in WIDE_FIXED_COLUMNS if column in used_targets] + [
+        rename_map[source] for source in trait_fields
+    ]
+
+    normalized: list[dict[str, str]] = []
+    for row in records:
+        out: dict[str, str] = {}
+        for source in source_fields:
+            target = rename_map[source]
+            if target in out:
+                continue
+            value = row.get(source, "")
+            out[target] = "" if value is None else str(value)
+        if design == "diagonal" and "rep_num" in defaulted_columns:
+            out["rep_num"] = "1"
+        normalized.append({column: out.get(column, "") for column in ordered_fields})
+
+    applied = {source: target for source, target in rename_map.items() if source != target}
+    return normalized, applied, missing, optional_missing, defaulted_columns
 
 
 def resolve_design(payload: Mapping[str, Any]) -> str | None:
@@ -149,6 +364,32 @@ def write_input_from_artifact(payload: Mapping[str, Any], work_dir: Path) -> Pat
     return None
 
 
+def input_from_resource_manifest(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
+    raw = payload.get("resource_manifest_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    manifest_path = Path(raw).expanduser()
+    if not manifest_path.exists() or not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    files = manifest.get("files") if isinstance(manifest, Mapping) else None
+    if not isinstance(files, list):
+        return None
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        mount_path = item.get("mount_path")
+        if not isinstance(mount_path, str) or not mount_path.strip():
+            continue
+        candidate = Path(mount_path).expanduser()
+        if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS:
+            return normalize_input_file(candidate.resolve(), work_dir)
+    return None
+
+
 def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
     metadata = payload.get("metadata")
     if not isinstance(metadata, Mapping):
@@ -167,7 +408,7 @@ def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path) -> Pat
         return path
     if isinstance(input_data, list | tuple) and all(isinstance(row, Mapping) for row in input_data):
         rows = [dict(row) for row in input_data]
-        fieldnames = list(WIDE_FIXED_COLUMNS)
+        fieldnames: list[str] = []
         for row in rows:
             for key in row:
                 if key not in fieldnames:
@@ -181,6 +422,9 @@ def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path) -> Pat
 
 
 def resolve_input_file(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
+    manifest_input = input_from_resource_manifest(payload, work_dir)
+    if manifest_input is not None:
+        return manifest_input
     uploaded = write_input_from_artifact(payload, work_dir)
     if uploaded is not None:
         return uploaded
@@ -875,6 +1119,11 @@ def build_answer(*, design: str, run_id: str, report: Mapping[str, Any]) -> str:
     preflight_counts = preflight.get("counts") if isinstance(preflight.get("counts"), Mapping) else {}
     trait_text = "、".join(available_traits(report, limit=6)) or "未读取到性状列表"
     metadata = report.get("metadata") if isinstance(report.get("metadata"), Mapping) else {}
+    input_warnings = [str(item) for item in metadata.get("input_warnings") or [] if str(item).strip()]
+    column_mapping_note = column_mapping_summary(metadata.get("column_mapping") if isinstance(metadata.get("column_mapping"), Mapping) else {})
+    input_notes = [column_mapping_note, *input_warnings]
+    input_notes = [note for note in input_notes if note]
+    warning_text = ("\n\n输入提示：" + " ".join(input_notes)) if input_notes else ""
     analysis_profile = str(metadata.get("analysis_profile") or "full_report")
     if analysis_profile == "trait_preflight_only":
         lead = (
@@ -896,7 +1145,7 @@ def build_answer(*, design: str, run_id: str, report: Mapping[str, Any]) -> str:
         f"进入完整数值分析 {value_text(preflight_counts.get('numeric_traits'), digits=0)} 个，"
         f"分类描述 {value_text(preflight_counts.get('categorical_traits'), digits=0)} 个，"
         f"跳过 {value_text(preflight_counts.get('skipped_traits'), digits=0)} 个。"
-        "分类性状只解释类别分布，空列、常量列和不满足要求的性状要明确列出原因。\n\n"
+        f"分类性状只解释类别分布，空列、常量列和不满足要求的性状要明确列出原因。{warning_text}\n\n"
         "推荐展示格式：先给一个概览表，再给性状预检与分流摘要，再给主要数值性状材料排名表，然后解释 ANOVA/LSD/check 对比和 BLUP 的可用结论，"
         "最后列出 HTML 报告和可继续追问方向。若某项事实缺失或章节失败，请明确说该项未在 JSON 中提供。"
     )
@@ -938,6 +1187,39 @@ def build_structured_content(*, design: str, run_id: str, report: Mapping[str, A
             "missing_fact_policy": "如果 JSON 中没有 p 值、分组、check 均值、BLUP 或稳定性结果，明确说明该项未提供或章节未完成；BLUP 不做兜底推断；分类、空列和常量性状不得冒充完整模型分析。",
         },
     }
+
+
+def attach_input_context_to_report(
+    report: Mapping[str, Any],
+    *,
+    column_mapping: Mapping[str, str],
+    input_warnings: list[str],
+    optional_missing_columns: list[str],
+    defaulted_columns: list[str],
+) -> dict[str, Any]:
+    enriched = dict(report)
+    metadata = dict(enriched.get("metadata")) if isinstance(enriched.get("metadata"), Mapping) else {}
+    if column_mapping:
+        metadata["column_mapping"] = dict(column_mapping)
+    if input_warnings:
+        metadata["input_warnings"] = input_warnings
+    if optional_missing_columns:
+        metadata["optional_missing_columns"] = optional_missing_columns
+    if defaulted_columns:
+        metadata["defaulted_columns"] = defaulted_columns
+    enriched["metadata"] = metadata
+    preflight = dict(enriched.get("trait_preflight")) if isinstance(enriched.get("trait_preflight"), Mapping) else {}
+    if column_mapping:
+        preflight["column_mapping"] = dict(column_mapping)
+    if input_warnings:
+        preflight["input_warnings"] = input_warnings
+    if optional_missing_columns:
+        preflight["optional_missing_columns"] = optional_missing_columns
+    if defaulted_columns:
+        preflight["defaulted_columns"] = defaulted_columns
+    if preflight:
+        enriched["trait_preflight"] = preflight
+    return enriched
 
 
 def write_session_files(
@@ -1176,7 +1458,27 @@ def main() -> int:
             return 0
 
         try:
-            input_records = read_csv_records(input_path)
+            raw_input_records = read_csv_records(input_path)
+            input_records, column_mapping, missing_columns, optional_missing_columns, defaulted_columns = normalize_field_records(
+                raw_input_records,
+                design=str(design),
+            )
+            input_warnings = field_input_warnings(
+                design=str(design),
+                missing_optional_columns=optional_missing_columns,
+            )
+            if missing_columns:
+                missing_text = "、".join(
+                    f"{required_column_label(column)}({column})" for column in missing_columns
+                )
+                json_response(
+                    failure(
+                        "田间数据缺少必需列：" + missing_text + "。请提供这些列，列名可以使用中文或英文。",
+                        missing=missing_columns,
+                        error_type="missing_required_columns",
+                    )
+                )
+                return 0
             input_fields = fieldnames_from_records(input_records)
             preflight = build_trait_preflight(input_records, input_fields)
             numeric_records = prepare_records_for_numeric_backend(input_records, preflight)
@@ -1197,6 +1499,13 @@ def main() -> int:
                 api_result = run_breedstat2_report(records=numeric_records, design=str(design), run_id=run_id)
                 report = extract_api_report(api_result)
                 report = attach_preflight_to_report(report, preflight)
+            report = attach_input_context_to_report(
+                report,
+                column_mapping=column_mapping,
+                input_warnings=input_warnings,
+                optional_missing_columns=optional_missing_columns,
+                defaulted_columns=defaulted_columns,
+            )
             report_file, summary_file, _ = write_session_files(
                 api_result=api_result,
                 report=report,
@@ -1333,7 +1642,8 @@ def first_sheet_name(zf: zipfile.ZipFile) -> str:
     for rel in rels.findall("rel:Relationship", ns):
         if rel.attrib.get("Id") == rel_id:
             target = rel.attrib.get("Target", "")
-            return "xl/" + target.lstrip("/")
+            target = target.lstrip("/")
+            return target if target.startswith("xl/") else "xl/" + target
     raise RuntimeError("Excel workbook first sheet relationship not found.")
 
 

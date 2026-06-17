@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from xml.etree import ElementTree as ET
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 from render_field_design_layout import render_layout_html, render_multi_site_layout_html
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
@@ -48,23 +46,25 @@ class BreedStat2FieldDesignError(RuntimeError):
         self.raw_body = raw_body
 
 DISPLAY_COLUMN_LABELS = {
-    "plots": "小区编号",
+    "plots": "流水号",
     "r": "区组/重复",
-    "ped_id": "材料编号",
-    "ranges": "行号",
+    "ped_id": "材料名称/代号",
+    "ranges": "排号",
     "pass": "列号",
-    "set": "组别",
-    "hyb_check": "对照标记",
+    "set": "组别/分组",
+    "hyb_check": "是否对照",
     "hyb_type": "材料类型",
     "design_check": "设计对照标记",
     "ck_no": "CK编号",
     "start_pos": "起始位置",
     "interval": "间隔数量",
-    "site": "试验地点",
+    "site": "试点",
 }
 
+USER_HIDDEN_OUTPUT_COLUMNS = {"hyb_type"}
+
 DESIGN_DISPLAY_COLUMN_LABELS = {
-    "rcbd": {"r": "区组"},
+    "rcbd": {"r": "区组/重复"},
     "interval": {"r": "重复"},
 }
 
@@ -91,6 +91,13 @@ def fail(answer: str, *, missing: list[str] | None = None, error_type: str = "fi
 def safe_token(value: Any, default: str = "field_design") -> str:
     text = str(value or "").strip() or default
     text = re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")
+    return text[:80] or default
+
+
+def safe_filename_token(value: Any, default: str = "field-design") -> str:
+    text = str(value or "").strip() or default
+    text = re.sub(r"[<>:\"/\\|?*\x00-\x1f]+", "-", text)
+    text = re.sub(r"\s+", "-", text).strip(" .-_")
     return text[:80] or default
 
 
@@ -140,6 +147,105 @@ def payload_text(payload: Mapping[str, Any]) -> str:
     return " ".join(values)
 
 
+def clean_design_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\.(?:csv|xlsx?|xls)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:请|帮我|麻烦|用|把|按|给|为|做|生成|创建|设计|进行|完成|出)\s*", "", text)
+    text = re.sub(r"(?:做|生成|创建|进行|完成|出)$", "", text)
+    text = re.sub(r"(?:的)?(?:RCBD|随机(?:完全)?区组|完全随机区组|对角线(?:增广)?|间比法?|diagonal(?: augmented)?|interval(?: contrast)?)(?:试验)?(?:设计)?$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:试验|设计|方案|任务|项目)?(?:名称|标识|标签|编号)\s*[:：=]\s*", "", text)
+    text = re.sub(r"(?:材料清单|材料表|清单|文件|表格|csv|excel|xlsx?|xls)$", "", text, flags=re.IGNORECASE)
+    text = text.strip(" \t\r\n，,。.;；:：'\"“”‘’[]()（）{}")
+    if re.search(r"(?:这个|该|本次).*(?:csv|excel|xlsx?|xls|文件|表格|材料|清单)", text, flags=re.IGNORECASE):
+        return ""
+    if not text or re.fullmatch(r"(?:这个|该|本次|材料|清单|文件|表格|csv|excel|xlsx?|xls)", text, flags=re.IGNORECASE):
+        return ""
+    return safe_filename_token(text, "")
+
+
+def explicit_design_label(payload: Mapping[str, Any]) -> str:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    keys = (
+        "design_label",
+        "design_name",
+        "trial_label",
+        "trial_name",
+        "project_label",
+        "project_name",
+        "output_label",
+        "run_label",
+        "region",
+        "area",
+        "设计标识",
+        "设计名称",
+        "试验名称",
+        "项目名称",
+        "输出标识",
+        "区域",
+    )
+    for key in keys:
+        label = clean_design_label(payload.get(key) or metadata.get(key))
+        if label:
+            return label
+    return ""
+
+
+def design_label_from_text(payload: Mapping[str, Any]) -> str:
+    text = payload_text(payload)
+    if not text:
+        return ""
+    patterns = (
+        r"(?:设计标识|设计名称|试验名称|项目名称|输出标识|任务名|运行名称|region|area|design_label|project_name)\s*[:：=]\s*([A-Za-z0-9_.\-\u4e00-\u9fff]{2,40})",
+        r"(?:做|生成|创建|进行|完成|出|设计|为|给|按)\s*([A-Za-z0-9_.\-\u4e00-\u9fff]{2,40}?)(?:的)?(?:RCBD|随机(?:完全)?区组|完全随机区组|对角线(?:增广)?|间比法?|diagonal(?: augmented)?|interval(?: contrast)?)",
+        r"([A-Za-z0-9_.\-\u4e00-\u9fff]{2,40}?)(?:的)?(?:RCBD|随机(?:完全)?区组|完全随机区组|对角线(?:增广)?|间比法?|diagonal(?: augmented)?|interval(?: contrast)?)(?:试验)?(?:设计)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        label = clean_design_label(match.group(1))
+        if label:
+            return label
+    return ""
+
+
+def design_label_from_input(payload: Mapping[str, Any], input_path: Path) -> str:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    filename_keys = (
+        "material_filename",
+        "material_file_name",
+        "input_filename",
+        "input_file_name",
+        "original_filename",
+        "filename",
+        "file_name",
+    )
+    for key in filename_keys:
+        label = clean_design_label(payload.get(key) or metadata.get(key))
+        if label:
+            return label
+    return clean_design_label(input_path.stem)
+
+
+def resolve_design_label(payload: Mapping[str, Any], input_path: Path, design: str) -> str:
+    label = explicit_design_label(payload) or design_label_from_text(payload) or design_label_from_input(payload, input_path)
+    return label or design
+
+
+def build_output_stem(design: str, design_label: str, run_id: str) -> str:
+    parts = ["field-design", safe_filename_token(design_label, design), design]
+    run_token = safe_filename_token(run_id, "")
+    if run_token and run_token.lower() not in {design.lower(), parts[1].lower()}:
+        parts.append(run_token)
+    return "-".join(parts)
+
+
 def get_positive_int(payload: Mapping[str, Any], key: str, query_patterns: Iterable[str] = ()) -> int | None:
     raw = payload.get(key)
     if raw is not None and not isinstance(raw, bool):
@@ -185,6 +291,26 @@ def resolve_site_num(payload: Mapping[str, Any]) -> int:
     return min(site_num, 50)
 
 
+def split_site_names(value: Any) -> list[str]:
+    if isinstance(value, list | tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        return []
+    text = value.strip().strip("[]()（）")
+    if not text:
+        return []
+    names = re.split(r"[、,，;；\n\r\t]+", text)
+    return [name.strip().strip("'\"“”‘’") for name in names if name.strip()]
+
+
+def resolve_site_names(payload: Mapping[str, Any], site_num: int) -> list[str]:
+    for key in ("site_names", "site_labels", "site_name_list", "试点名称", "试验地点名称", "地点名称"):
+        names = split_site_names(payload.get(key))
+        if names:
+            return names[:site_num]
+    return []
+
+
 RCBD_BLOCK_PATTERNS = (
     r"(?:blocks?|区组数|区组|重复数|重复|reps?|replications?)\s*[:：=]?\s*(\d+)",
     r"(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)",
@@ -220,6 +346,10 @@ def resolve_rcbd_blocks(payload: Mapping[str, Any], site_num: int) -> int | None
     if site_num > 1 and raw_blocks == site_num and text_site_num == site_num:
         return None
     return raw_blocks
+
+
+def resolve_rcbd_blocks_or_default(payload: Mapping[str, Any], site_num: int) -> int:
+    return resolve_rcbd_blocks(payload, site_num) or 3
 
 
 def get_bool(payload: Mapping[str, Any], key: str, default: bool) -> bool:
@@ -293,6 +423,59 @@ CK_PED_ID_ALIASES = ("材料编号", "ped_id", "品种编号", "材料名称")
 CK_SET_ALIASES = ("组别", "set", "group")
 CK_START_ALIASES = ("起始位置", "start_pos", "start", "first_position", "开始位置")
 CK_INTERVAL_ALIASES = ("间隔数量", "interval", "间隔", "spacing", "gap")
+
+
+RCBD_PED_ID_ALIASES = (
+    "ped_id",
+    "pedid",
+    "material",
+    "material_id",
+    "material_name",
+    "materials",
+    "variety",
+    "variety_name",
+    "cultivar",
+    "cultivar_name",
+    "genotype",
+    "accession",
+    "name",
+    "名称",
+    "材料",
+    "材料名",
+    "材料名称",
+    "材料编号",
+    "品种",
+    "品种名",
+    "品种名称",
+    "品种编号",
+    "品系",
+    "品系名称",
+)
+RCBD_HYB_CHECK_ALIASES = ("hyb_check", "hybcheck", "check", "is_check", "ck", "对照", "是否对照", "对照标记")
+RCBD_SET_ALIASES = ("set", "group", "组别", "分组", "材料组")
+NORMALIZED_RCBD_PED_ID_ALIASES = {normalize_table_header(alias) for alias in RCBD_PED_ID_ALIASES}
+MATERIAL_PED_ID_ALIASES = RCBD_PED_ID_ALIASES
+MATERIAL_CHECK_ALIASES = RCBD_HYB_CHECK_ALIASES + (
+    "type",
+    "material_type",
+    "hyb_type",
+    "design_check",
+    "材料类型",
+    "品种类型",
+    "类型",
+    "是否CK",
+    "CK标记",
+)
+MATERIAL_SET_ALIASES = RCBD_SET_ALIASES + ("set_id", "trial_set", "试验组", "组", "群组")
+NORMALIZED_MATERIAL_PED_ID_ALIASES = {normalize_table_header(alias) for alias in MATERIAL_PED_ID_ALIASES}
+RCBD_TEXT_KEYS = (
+    "query",
+    "current_user_message",
+    "resolved_user_message",
+    "recent_user_message",
+    "text",
+    "user_text",
+)
 
 
 def ck_parameter_columns(headers: Iterable[str]) -> dict[str, str | None]:
@@ -477,13 +660,15 @@ def needs_interval_ck_parameters_response(
     *,
     output_dir: Path,
     run_id: str,
+    output_stem: str | None = None,
     provided_ck_spec: str | None = None,
     missing_ck_nos: list[int] | None = None,
     invalid_items: list[str] | None = None,
     duplicated_ck_nos: list[int] | None = None,
     unknown_ck_nos: list[int] | None = None,
 ) -> dict[str, Any]:
-    template_csv = output_dir / f"field-design-interval-{run_id}-ck-position-template.csv"
+    stem = output_stem or f"field-design-interval-{run_id}"
+    template_csv = output_dir / f"{stem}-ck-position-template.csv"
     write_interval_ck_template(template_csv, ck_table)
     detail_parts: list[str] = []
     if provided_ck_spec:
@@ -589,6 +774,35 @@ def write_input_from_artifact(payload: Mapping[str, Any], work_dir: Path) -> Pat
         if is_ck_parameter_file(path, work_dir):
             continue
         return path
+    return None
+
+
+def input_from_resource_manifest(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
+    raw = payload.get("resource_manifest_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    manifest_path = Path(raw).expanduser()
+    if not manifest_path.exists() or not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    files = manifest.get("files") if isinstance(manifest, Mapping) else None
+    if not isinstance(files, list):
+        return None
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        mount_path = item.get("mount_path")
+        if not isinstance(mount_path, str) or not mount_path.strip():
+            continue
+        candidate = Path(mount_path).expanduser()
+        if not candidate.exists() or not candidate.is_file() or candidate.suffix.lower() not in SUPPORTED_INPUT_EXTENSIONS:
+            continue
+        if is_ck_parameter_file(candidate, work_dir):
+            continue
+        return candidate.resolve()
     return None
 
 
@@ -1079,10 +1293,365 @@ def normalize_input_file(path: Path, work_dir: Path) -> Path:
     return path
 
 
-def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
+RCBD_CONSTRAINT_DESCRIPTION = (
+    "位置约束说明：本次随机区组设计在随机排列时同时考虑**对照品种**和**测试材料**的田间位置。"
+    "**对照品种**尽量不放在每个区组的第一个或最后一个小区，同一区组内的对照也尽量不连在一起。"
+    "同一分组下的对照会错开列位，不会安排在相同的田间列上。"
+    "**测试材料**在不同区组或相邻排中会尽量错开列位，避免同一材料总是落在相同的田间列上，以降低田间位置效应对比较的影响。"
+)
+
+
+
+def normalize_rcbd_material_name(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    text = text.strip("'\"")
+    return text
+
+
+def normalize_rcbd_hyb_check(value: Any, default: str = "0") -> str:
+    text = normalize_rcbd_material_name(value)
+    if not text:
+        return default
+    normalized = text.lower()
+    if normalized in {"是", "对照", "ck", "check", "true", "t", "yes", "y"}:
+        return "1"
+    if normalized in {"否", "非对照", "不是", "false", "f", "no", "n"}:
+        return "0"
+    return text
+
+
+def material_check_flag(value: Any) -> bool:
+    text = normalize_rcbd_material_name(value)
+    if not text:
+        return False
+    normalized = normalize_table_header(text)
+    lowered = text.lower()
+    if normalized in {
+        normalize_table_header(item)
+        for item in (
+            "是",
+            "对照",
+            "对照品种",
+            "对照材料",
+            "ck",
+            "check",
+            "diagonalcheck",
+            "设计对照",
+            "true",
+            "t",
+            "yes",
+            "y",
+            "1",
+            "2",
+        )
+    }:
+        return True
+    if normalized in {
+        normalize_table_header(item)
+        for item in ("否", "非对照", "不是", "测试", "测试材料", "普通材料", "hyb", "hybrid", "false", "f", "no", "n", "0")
+    }:
+        return False
+    try:
+        return float(lowered) != 0
+    except ValueError:
+        return False
+
+
+def design_hyb_check_value(
+    design: str | None,
+    value: Any,
+    *,
+    column_name: str | None = None,
+    default: str = "0",
+) -> str:
+    text = normalize_rcbd_material_name(value)
+    if not text:
+        return default
+    normalized_column = normalize_table_header(column_name or "")
+    if normalized_column in {"hybcheck", "designcheck"}:
+        return text
+    if re.fullmatch(r"\d+(?:\.0+)?", text):
+        number = int(float(text))
+        if number == 0:
+            return "0"
+        if design == "diagonal":
+            return "2" if number in {1, 2} else str(number)
+        return "1"
+    return "2" if design == "diagonal" and material_check_flag(text) else ("1" if material_check_flag(text) else "0")
+
+
+def expand_rcbd_material_range(text: str) -> list[str]:
+    match = re.fullmatch(r"\s*([A-Za-z_]*?)(\d+)\s*(?:-|~|\u2013+|\u2014+|\u81f3|\u5230)\s*([A-Za-z_]*?)(\d+)\s*", text)
+    if not match:
+        return []
+    prefix1, start_text, prefix2, end_text = match.groups()
+    if prefix2 and prefix1.lower() != prefix2.lower():
+        return []
+    prefix = prefix1 or prefix2
+    start = int(start_text)
+    end = int(end_text)
+    if start <= 0 or end < start or end - start > 1000:
+        return []
+    width = max(len(start_text), len(end_text))
+    return [f"{prefix}{index:0{width}d}" for index in range(start, end + 1)]
+
+
+def split_rcbd_material_names(value: Any) -> list[str]:
+    if value is None or isinstance(value, bool):
+        return []
+    if isinstance(value, Mapping):
+        return []
+    if isinstance(value, list | tuple):
+        names: list[str] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                continue
+            names.extend(split_rcbd_material_names(item))
+        return names
+    text = str(value).strip()
+    if not text:
+        return []
+    text = re.sub(
+        r"(?i)^(?:materials?|material_names?|ped_ids?|ped_id|varieties|variety|names?)\s*[:\uff1a=]\s*",
+        "",
+        text,
+    )
+    text = re.sub(r"^(?:\u6750\u6599\u6e05\u5355|\u6750\u6599\u540d\u5355|\u6750\u6599\u540d\u79f0|\u6750\u6599|\u54c1\u79cd\u6e05\u5355|\u54c1\u79cd\u540d\u5355|\u54c1\u79cd\u540d\u79f0|\u54c1\u79cd)\s*[:\uff1a=]\s*", "", text)
+    text = re.sub(
+        r"^.*?(?:\u6750\u6599\u6e05\u5355|\u6750\u6599\u540d\u5355|\u6750\u6599\u540d\u79f0|\u6750\u6599|\u54c1\u79cd\u6e05\u5355|\u54c1\u79cd\u540d\u5355|\u54c1\u79cd\u540d\u79f0|\u54c1\u79cd)\s*(?:\u6709|\u5305\u62ec|\u5305\u542b|\u4e3a|\u662f)\s*",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"(?i)^.*?(?:materials?|material_names?|ped_ids?|ped_id|varieties|variety|names?)\s*(?:are|include|including|:|=)\s*",
+        "",
+        text,
+    )
+    text = text.strip().strip("[](){}")
+    names: list[str] = []
+    for part in re.split(r"[\n\r,\uff0c;\uff1b\u3001\u548c\u4e0e\u53ca\t]+", text):
+        name = normalize_rcbd_material_name(part)
+        if not name:
+            continue
+        expanded = expand_rcbd_material_range(name)
+        names.extend(expanded or [name])
+    return names
+
+
+def rcbd_payload_text_values(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in RCBD_TEXT_KEYS:
+        for source in (payload, metadata):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+    return values
+
+
+def rcbd_extract_named_list_from_text(text: str, keywords: str) -> list[str]:
+    matches = re.findall(
+        rf"(?:{keywords})\s*(?:\u662f|\u4e3a|\u6709|\u5305\u62ec|\u5305\u542b|:|\uff1a|=)\s*(.+?)(?=\uff0c\s*(?:\u6709?\d*\u4e2a?(?:\u8bd5\u70b9|\u5730\u70b9|\u533a\u7ec4|\u91cd\u590d)|\u5bf9\u7167|\u8bd5\u70b9|\u5730\u70b9|\u533a\u7ec4|\u91cd\u590d)|,\s*(?:checks?|sites?|blocks?|reps?)|\u3002|;|\uff1b|\n|\r|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    names: list[str] = []
+    for match in matches:
+        names.extend(split_rcbd_material_names(match))
+    return names
+
+
+def rcbd_extract_material_names_from_text(text: str) -> list[str]:
+    return rcbd_extract_named_list_from_text(
+        text,
+        r"\u8bd5\u9a8c\u6750\u6599|\u6d4b\u8bd5\u6750\u6599|\u6750\u6599\u6e05\u5355|\u6750\u6599\u540d\u5355|\u6750\u6599\u540d\u79f0|\u6750\u6599|\u54c1\u79cd\u6e05\u5355|\u54c1\u79cd\u540d\u5355|\u54c1\u79cd\u540d\u79f0|\u54c1\u79cd|materials?|material_names?|ped_ids?|varieties",
+    )
+
+
+def rcbd_extract_check_names_from_text(text: str) -> list[str]:
+    return rcbd_extract_named_list_from_text(
+        text,
+        r"\u5bf9\u7167\u54c1\u79cd|\u5bf9\u7167\u6750\u6599|\u5bf9\u7167\u6e05\u5355|\u5bf9\u7167\u540d\u5355|\u5bf9\u7167|CK|checks?|check_names?|check_materials?",
+    )
+
+
+def unique_rcbd_names(names: Iterable[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in names:
+        name = normalize_rcbd_material_name(item)
+        if not name:
+            continue
+        if re.search(r"\u6750\u6599|\u8bd5\u70b9|\u5730\u70b9|\u533a\u7ec4|\u91cd\u590d|\u8bbe\u8ba1|\u65b9\u6848", name):
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return result
+
+
+def rcbd_material_name_values(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[str]:
+    keys = (
+        "material_names",
+        "material_name_list",
+        "ped_ids",
+        "ped_id_list",
+        "materials",
+        "varieties",
+        "\u54c1\u79cd\u6e05\u5355",
+        "\u54c1\u79cd\u540d\u5355",
+        "\u6750\u6599\u6e05\u5355",
+        "\u6750\u6599\u540d\u5355",
+    )
+    names: list[str] = []
+    for key in keys:
+        names.extend(split_rcbd_material_names(payload.get(key)))
+        names.extend(split_rcbd_material_names(metadata.get(key)))
+    for item in rcbd_payload_text_values(payload, metadata):
+        names.extend(rcbd_extract_material_names_from_text(item))
+    return unique_rcbd_names(names)
+
+
+def rcbd_check_name_values(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[str]:
+    keys = (
+        "check_names",
+        "check_name_list",
+        "check_materials",
+        "checks",
+        "ck_names",
+        "ck_materials",
+        "\u5bf9\u7167\u54c1\u79cd",
+        "\u5bf9\u7167\u6750\u6599",
+        "\u5bf9\u7167\u6e05\u5355",
+        "\u5bf9\u7167\u540d\u5355",
+    )
+    names: list[str] = []
+    for key in keys:
+        names.extend(split_rcbd_material_names(payload.get(key)))
+        names.extend(split_rcbd_material_names(metadata.get(key)))
+    for item in rcbd_payload_text_values(payload, metadata):
+        names.extend(rcbd_extract_check_names_from_text(item))
+    return unique_rcbd_names(names)
+
+def looks_like_single_column_name_list(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if len(lines) >= 2 and normalize_table_header(lines[0]) in NORMALIZED_MATERIAL_PED_ID_ALIASES:
+        return False
+    if len(lines) >= 2 and all(not re.search(r"[,，;\t]", line) for line in lines):
+        return True
+    names = split_rcbd_material_names(stripped)
+    if len(names) < 2:
+        return False
+    return not re.search(r"\b(hyb_check|set|plot_id|design_check)\b", stripped, flags=re.IGNORECASE)
+
+
+def write_rcbd_ped_id_csv(path: Path, names: Iterable[Any], check_names: Iterable[Any] = ()) -> bool:
+    cleaned = unique_rcbd_names(names)
+    checks = unique_rcbd_names(check_names)
+    cleaned_keys = {name.casefold() for name in cleaned}
+    for check_name in checks:
+        if check_name.casefold() not in cleaned_keys:
+            cleaned.append(check_name)
+            cleaned_keys.add(check_name.casefold())
+    check_keys = {name.casefold() for name in checks}
+    if not cleaned:
+        return False
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["ped_id", "hyb_check", "set"])
+        writer.writeheader()
+        for name in cleaned:
+            writer.writerow({"ped_id": name, "hyb_check": "1" if name.casefold() in check_keys else "0", "set": "1"})
+    return True
+
+
+def rcbd_material_columns(headers: Iterable[str]) -> dict[str, str | None]:
+    header_list = list(headers)
+    return {
+        "ped_id": find_table_column(header_list, MATERIAL_PED_ID_ALIASES),
+        "hyb_check": find_table_column(header_list, MATERIAL_CHECK_ALIASES),
+        "set": find_table_column(header_list, MATERIAL_SET_ALIASES),
+    }
+
+
+def normalize_design_material_records(records: list[Mapping[str, Any]], design: str | None = None) -> list[dict[str, str]] | None:
+    if not records:
+        return None
+    columns = rcbd_material_columns(records[0].keys())
+    ped_id_column = columns["ped_id"]
+    if ped_id_column is None:
+        non_empty_headers = [
+            str(header)
+            for header in records[0].keys()
+            if str(header).strip() and any(str(row.get(header) or "").strip() for row in records)
+        ]
+        if len(non_empty_headers) == 1:
+            ped_id_column = non_empty_headers[0]
+    if ped_id_column is None:
+        return None
+
+    normalized: list[dict[str, str]] = []
+    hyb_check_column = columns["hyb_check"]
+    set_column = columns["set"]
+    for row in records:
+        ped_id = normalize_rcbd_material_name(row.get(ped_id_column))
+        if not ped_id:
+            continue
+        normalized.append(
+            {
+                "ped_id": ped_id,
+                "hyb_check": design_hyb_check_value(design, row.get(hyb_check_column), column_name=hyb_check_column) if hyb_check_column else "0",
+                "set": normalize_rcbd_material_name(row.get(set_column)) if set_column else "1",
+            }
+        )
+    return normalized or None
+
+
+def normalize_rcbd_material_records(records: list[Mapping[str, Any]]) -> list[dict[str, str]] | None:
+    return normalize_design_material_records(records, "rcbd")
+
+
+def write_normalized_design_input(path: Path, records: list[Mapping[str, Any]], design: str | None = None) -> Path | None:
+    normalized = normalize_design_material_records(records, design)
+    if normalized is None:
+        return None
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["ped_id", "hyb_check", "set"])
+        writer.writeheader()
+        writer.writerows(normalized)
+    return path
+
+
+def write_normalized_rcbd_input(path: Path, records: list[Mapping[str, Any]]) -> Path | None:
+    return write_normalized_design_input(path, records, "rcbd")
+
+
+def normalize_design_input_file(path: Path, work_dir: Path, design: str | None = None) -> Path:
+    records = read_csv_records(normalize_input_file(path, work_dir))
+    normalized_path = work_dir / f"{path.stem or 'materials'}-{design or 'materials'}.csv"
+    return write_normalized_design_input(normalized_path, records, design) or normalize_input_file(path, work_dir)
+
+
+def normalize_rcbd_input_file(path: Path, work_dir: Path) -> Path:
+    return normalize_design_input_file(path, work_dir, "rcbd")
+
+
+def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path, design: str | None = None) -> Path | None:
     metadata = payload.get("metadata")
     if not isinstance(metadata, Mapping):
         metadata = {}
+    if design == "rcbd":
+        material_names = rcbd_material_name_values(payload, metadata)
+        check_names = rcbd_check_name_values(payload, metadata)
+        if material_names or check_names:
+            path = work_dir / "rcbd-material-names.csv"
+            if write_rcbd_ped_id_csv(path, material_names, check_names):
+                return path
     material_data = (
         metadata.get("material_data")
         or metadata.get("input_data")
@@ -1099,11 +1668,18 @@ def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path) -> Pat
     if isinstance(material_data, str):
         candidate = Path(material_data).expanduser()
         if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS:
-            return normalize_input_file(candidate.resolve(), work_dir)
+            candidate_path = candidate.resolve()
+            return normalize_design_input_file(candidate_path, work_dir, design)
+        if design == "rcbd" and looks_like_single_column_name_list(material_data):
+            if write_rcbd_ped_id_csv(path, split_rcbd_material_names(material_data), rcbd_check_name_values(payload, metadata)):
+                return path
         path.write_text(material_data, encoding="utf-8")
-        return path
+        return normalize_design_input_file(path, work_dir, design)
     if isinstance(material_data, list | tuple) and all(isinstance(row, Mapping) for row in material_data):
         rows = [dict(row) for row in material_data]
+        normalized_path = write_normalized_design_input(path, rows, design)
+        if normalized_path is not None:
+            return normalized_path
         fieldnames: list[str] = []
         for preferred in ("ped_id", "plot_id", "hyb_check", "design_check", "set"):
             if any(preferred in row for row in rows):
@@ -1116,15 +1692,22 @@ def write_input_from_metadata(payload: Mapping[str, Any], work_dir: Path) -> Pat
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
-        return path
+        return normalize_design_input_file(path, work_dir, design)
+    if design == "rcbd":
+        names = split_rcbd_material_names(material_data)
+        if write_rcbd_ped_id_csv(path, names, rcbd_check_name_values(payload, metadata)):
+            return path
     return None
 
 
-def resolve_input_file(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
+def resolve_input_file(payload: Mapping[str, Any], work_dir: Path, design: str | None = None) -> Path | None:
+    manifest_input = input_from_resource_manifest(payload, work_dir)
+    if manifest_input is not None:
+        return normalize_design_input_file(manifest_input, work_dir, design)
     uploaded = write_input_from_artifact(payload, work_dir)
     if uploaded is not None:
-        return normalize_input_file(uploaded, work_dir)
-    metadata_input = write_input_from_metadata(payload, work_dir)
+        return normalize_design_input_file(uploaded, work_dir, design)
+    metadata_input = write_input_from_metadata(payload, work_dir, design)
     if metadata_input is not None:
         return metadata_input
     for key in ("input_file", "file_path", "path"):
@@ -1132,7 +1715,8 @@ def resolve_input_file(payload: Mapping[str, Any], work_dir: Path) -> Path | Non
         if isinstance(raw, str) and raw.strip():
             candidate = Path(raw).expanduser()
             if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS:
-                return normalize_input_file(candidate.resolve(), work_dir)
+                candidate_path = candidate.resolve()
+                return normalize_design_input_file(candidate_path, work_dir, design)
     return None
 
 
@@ -1348,6 +1932,7 @@ def field_design_error_response(exc: BreedStat2FieldDesignError, *, design: str,
 
 def format_success_parameters(parameters: Mapping[str, Any]) -> str:
     labels = {
+        "design_label": "设计标识",
         "blocks": "区组数",
         "ncols": "田块列数",
         "site_num": "试验地点数",
@@ -1363,6 +1948,7 @@ def format_success_parameters(parameters: Mapping[str, Any]) -> str:
         "cartesian": "顺序排列",
     }
     ordered_keys = (
+        "design_label",
         "blocks",
         "ncols",
         "site_num",
@@ -1414,6 +2000,10 @@ def display_column_label(column: str, design: str | None = None) -> str:
     return DISPLAY_COLUMN_LABELS.get(column, column)
 
 
+def display_column_labels(columns: list[str], design: str | None = None) -> list[str]:
+    return [display_column_label(column, design) for column in columns]
+
+
 def localize_table_columns(
     columns: list[str],
     rows: list[Mapping[str, Any]],
@@ -1452,6 +2042,10 @@ def localize_rows_for_columns(
     return display_columns, display_rows
 
 
+def visible_output_columns(columns: list[str]) -> list[str]:
+    return [column for column in columns if column not in USER_HIDDEN_OUTPUT_COLUMNS]
+
+
 def build_output_file(path: Path, *, mime_type: str, label: str, summary: str) -> dict[str, str]:
     return {
         "path": f"outputs/{path.name}",
@@ -1487,26 +2081,50 @@ def extract_design_rows(result_payload: Mapping[str, Any], design: str) -> list[
     return []
 
 
-def write_fieldbook_csv(path: Path, rows: list[Mapping[str, Any]], preferred_columns: list[str]) -> None:
-    columns = [column for column in preferred_columns if any(column in row for row in rows)]
+def write_fieldbook_csv(
+    path: Path,
+    rows: list[Mapping[str, Any]],
+    preferred_columns: list[str],
+    *,
+    design: str | None = None,
+) -> None:
+    columns = [
+        column
+        for column in preferred_columns
+        if column not in USER_HIDDEN_OUTPUT_COLUMNS and any(column in row for row in rows)
+    ]
     for row in rows:
         for key in row:
             text_key = str(key)
+            if text_key in USER_HIDDEN_OUTPUT_COLUMNS:
+                continue
             if text_key not in columns:
                 columns.append(text_key)
     path.parent.mkdir(parents=True, exist_ok=True)
+    display_columns = display_column_labels(columns, design)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer = csv.DictWriter(handle, fieldnames=display_columns)
         writer.writeheader()
         for row in rows:
-            writer.writerow({column: row.get(column, "") for column in columns})
+            writer.writerow(
+                {
+                    display_column: row.get(source_column, "")
+                    for source_column, display_column in zip(columns, display_columns, strict=True)
+                }
+            )
 
 
 def fieldbook_columns(rows: list[Mapping[str, Any]], preferred_columns: list[str]) -> list[str]:
-    columns = [column for column in preferred_columns if any(column in row for row in rows)]
+    columns = [
+        column
+        for column in preferred_columns
+        if column not in USER_HIDDEN_OUTPUT_COLUMNS and any(column in row for row in rows)
+    ]
     for row in rows:
         for key in row:
             text_key = str(key)
+            if text_key in USER_HIDDEN_OUTPUT_COLUMNS:
+                continue
             if text_key not in columns:
                 columns.append(text_key)
     return columns
@@ -1544,8 +2162,8 @@ def safe_sheet_name(value: str, fallback: str) -> str:
     return text[:31] or fallback
 
 
-def worksheet_xml(rows: list[Mapping[str, Any]], columns: list[str]) -> str:
-    all_rows: list[list[Any]] = [columns]
+def worksheet_xml(rows: list[Mapping[str, Any]], columns: list[str], *, design: str | None = None) -> str:
+    all_rows: list[list[Any]] = [display_column_labels(columns, design)]
     all_rows.extend([[row.get(column, "") for column in columns] for row in rows])
     row_xml: list[str] = []
     for row_index, row in enumerate(all_rows, start=1):
@@ -1570,6 +2188,8 @@ def write_multisite_fieldbook_xlsx(
     path: Path,
     site_results: list[Mapping[str, Any]],
     preferred_columns: list[str],
+    *,
+    design: str | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sheet_names: list[str] = []
@@ -1597,7 +2217,7 @@ def write_multisite_fieldbook_xlsx(
     for index, site in enumerate(site_results, start=1):
         rows = [dict(row) for row in site.get("rows", []) if isinstance(row, Mapping)]
         columns = fieldbook_columns(rows, preferred_columns)
-        worksheet_entries.append((f"xl/worksheets/sheet{index}.xml", worksheet_xml(rows, columns)))
+        worksheet_entries.append((f"xl/worksheets/sheet{index}.xml", worksheet_xml(rows, columns, design=design)))
         sheet_id = f"rId{index}"
         workbook_sheets.append(
             f'<sheet name="{html_escape_xml(sheet_names[index - 1])}" sheetId="{index}" r:id="{sheet_id}"/>'
@@ -1658,24 +2278,25 @@ def run_breedstat2_design(endpoint: str, payload: Mapping[str, Any]) -> dict[str
 
 def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir: Path, design: str) -> dict[str, Any]:
     run_id = safe_token(payload.get("run_id") or payload.get("run-id") or design, design)
+    design_label = resolve_design_label(payload, input_path, design)
+    output_stem = build_output_stem(design, design_label, run_id)
     seed = get_positive_int(payload, "seed", (r"(?:seed|随机种子)\s*[:：=]?\s*(\d+)",)) or 20260512
     planter = get_string(payload, "planter", "serpentine") or "serpentine"
     if planter not in {"serpentine", "cartesian"}:
         return fail("planter 必须是 serpentine 或 cartesian。", error_type="invalid_parameter")
 
     site_num = resolve_site_num(payload)
-    result_json = output_dir / f"field-design-{design}-{run_id}-result.json"
-    fieldbook_csv = output_dir / f"field-design-{design}-{run_id}-fieldbook.csv"
-    fieldbook_xlsx = output_dir / f"field-design-{design}-{run_id}-fieldbook.xlsx"
-    layout_html = output_dir / f"field-design-{design}-{run_id}-layout.html"
+    site_names = resolve_site_names(payload, site_num)
+    result_json = output_dir / f"{output_stem}-result.json"
+    fieldbook_csv = output_dir / f"{output_stem}-fieldbook.csv"
+    fieldbook_xlsx = output_dir / f"{output_stem}-fieldbook.xlsx"
+    layout_html = output_dir / f"{output_stem}-layout.html"
     records = read_csv_records(input_path)
     if not records:
         return fail("材料清单为空或无法读取表头。", error_type="empty_materials")
 
     if design == "rcbd":
-        blocks = resolve_rcbd_blocks(payload, site_num)
-        if blocks is None:
-            return fail("缺少 RCBD 必需参数 blocks/重复数。", missing=["blocks"], error_type="missing_input")
+        blocks = resolve_rcbd_blocks_or_default(payload, site_num)
         columns = ["plots", "r", "ped_id", "ranges", "pass", "set", "hyb_check", "hyb_type"]
         title = "Field Design RCBD Layout"
         extra_parameters = {
@@ -1749,7 +2370,7 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
             return field_design_error_response(exc, design=design)
         ck_table = data.get("ck_table") if isinstance(data.get("ck_table"), list) else []
         if not ck_spec:
-            return needs_interval_ck_parameters_response(ck_table, output_dir=output_dir, run_id=run_id)
+            return needs_interval_ck_parameters_response(ck_table, output_dir=output_dir, run_id=run_id, output_stem=output_stem)
         expected_ck_nos = ck_table_numbers(ck_table)
         provided_ck_nos, duplicated_ck_nos, invalid_items = interval_ck_spec_numbers(ck_spec)
         missing_ck_nos = sorted(expected_ck_nos - provided_ck_nos)
@@ -1759,6 +2380,7 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
                 ck_table,
                 output_dir=output_dir,
                 run_id=run_id,
+                output_stem=output_stem,
                 provided_ck_spec=ck_spec,
                 missing_ck_nos=missing_ck_nos,
                 invalid_items=invalid_items,
@@ -1790,7 +2412,7 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
     result_payloads: list[dict[str, Any]] = []
     relaxed_any = False
     for site_index in range(site_num):
-        site_name = f"site{site_index + 1}"
+        site_name = site_names[site_index] if site_index < len(site_names) else f"site{site_index + 1}"
         site_seed = seed + site_index
         try:
             result_payload, api_payload, relaxed = run_one_site(site_seed)
@@ -1834,24 +2456,25 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
         )
 
     result_json.write_text(json.dumps({"design": design, "sites": result_payloads}, ensure_ascii=False, indent=2), encoding="utf-8")
-    output_columns = (["site"] + columns) if site_num > 1 else columns
-    write_fieldbook_csv(fieldbook_csv, all_design_rows, output_columns)
+    user_columns = visible_output_columns(columns)
+    output_columns = (["site"] + user_columns) if site_num > 1 else user_columns
+    write_fieldbook_csv(fieldbook_csv, all_design_rows, output_columns, design=design)
     if site_num > 1:
-        write_multisite_fieldbook_xlsx(fieldbook_xlsx, site_results, columns)
+        write_multisite_fieldbook_xlsx(fieldbook_xlsx, site_results, user_columns, design=design)
 
     preview_source_csv = fieldbook_csv
-    preview_source_columns = output_columns
+    preview_source_columns = display_column_labels(output_columns, design)
     if site_num > 1:
-        site1_preview_csv = output_dir / f"field-design-{design}-{run_id}-site1-preview.csv"
-        write_fieldbook_csv(site1_preview_csv, site_results[0]["rows"], columns)
+        site1_preview_csv = output_dir / f"{output_stem}-site1-preview.csv"
+        write_fieldbook_csv(site1_preview_csv, site_results[0]["rows"], user_columns, design=design)
         preview_source_csv = site1_preview_csv
-        preview_source_columns = columns
+        preview_source_columns = display_column_labels(user_columns, design)
     preview_columns, rows = preview_rows(preview_source_csv, preview_source_columns)
-    display_columns, display_rows = localize_table_columns(preview_columns, rows, design=design)
+    display_columns, display_rows = preview_columns, rows
     site_tables: list[dict[str, Any]] = []
     if site_num > 1:
         for site in site_results:
-            table_columns, table_rows = localize_rows_for_columns(columns, site["rows"], design=design, limit=10)
+            table_columns, table_rows = localize_rows_for_columns(user_columns, site["rows"], design=design, limit=10)
             site_tables.append(
                 {
                     "site": site["site"],
@@ -1863,6 +2486,7 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
                 }
             )
     parameters = dict(site_results[0]["parameters"])
+    parameters["design_label"] = design_label
     parameters["site_num"] = site_num
     parameters["site_seeds"] = [site["seed"] for site in site_results]
     if relaxed_any:
@@ -1892,6 +2516,8 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
         f"核心参数：{format_success_parameters(parameters)}",
         "已生成完整 fieldbook CSV 和 HTML 布局预览。" if site_num == 1 else "已生成多 sheet Excel fieldbook 和可切换试验地点的 HTML 布局预览；Excel 中每个 sheet 对应一个试验地点。",
     ]
+    if design == "rcbd":
+        answer_parts.append(RCBD_CONSTRAINT_DESCRIPTION)
     if site_num > 1:
         seed_text = "，".join(f"{site['site']}={site['seed']}" for site in site_results)
         answer_parts.append(f"多试点说明：这里的试点按试验地点处理，每个地点使用不同随机种子独立生成；种子为 {seed_text}。下方表格只预览 site1，HTML 布局图可切换查看各地点。")
@@ -1927,6 +2553,8 @@ def run_design_pipeline(payload: Mapping[str, Any], input_path: Path, output_dir
         "ok": True,
         "answer": "\n\n".join(part for part in answer_parts if part),
         "design": design,
+        "design_label": design_label,
+        "output_stem": output_stem,
         "run_id": run_id,
         "parameters": parameters,
         "columns": display_columns,
@@ -1954,7 +2582,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="field-design-input-") as tmp:
-        input_path = resolve_input_file(payload, Path(tmp))
+        input_path = resolve_input_file(payload, Path(tmp), design)
         missing: list[str] = []
         if input_path is None:
             missing.append("material_data")

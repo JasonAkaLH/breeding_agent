@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Boolean, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, Index, Integer, Text, UniqueConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import DateTimeText, JSONText, SQLiteBase
@@ -58,7 +58,7 @@ class ConversationFileResourceRow(SQLiteBase):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
     normalized_content_type: Mapped[str | None] = mapped_column(Text, nullable=True)
-    requires_sheet_selection: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("0"))
+    requires_sheet_selection: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     selected_sheet: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
