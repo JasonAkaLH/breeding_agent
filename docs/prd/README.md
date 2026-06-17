@@ -13,7 +13,8 @@
 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件的本地持久化、`index.md` 物化索引、Skill workspace manifest 与删除清理语义 | MVP 已落地；后续补 LLM/OCR 描述流水线 |
 | `docs/prd/backend/skill-contract-progressive-disclosure/` | Skill Contract v2-only 渐进式披露、显式 skill.* 执行、input schema、ResourceService 与 v1 manifest 路径删除 | v2-only 复审完成；待实施 |
 | `docs/prd/MCP/` | MCP Runtime 长任务流式 SSE、Rust sidecar 联合改造 Phase PRD、MCP Client 四版本兼容 PRD，以及官方 SDK 引入轨道 | Phase 拆分已冻结；client 四版本兼容与官方 SDK PRD 已新增 |
-| `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | 已开始，v1 业务对话台 PRD 草案 |
+| `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | v1 业务对话台与发送时上传文件专题已落地 |
+| `docs/prd/frontend/deferred-message-upload/` | 对话台文件选择/拖拽后的浏览器草稿暂存、发送时上传与现有 conversation file resource API 衔接 | 已实施，待最终合并 |
 
 ## 后端 PRD 入口
 
@@ -50,7 +51,9 @@
 
 前端 v1 PRD 入口是：`docs/prd/frontend/00-前端业务对话台PRD.md`。
 
-当前前端 v1 严格基于已实现后端 API，定位为内部业务用户对话台；对话文件上传已升级为右侧文件面板体验。后续如补充调试台、权限、历史中心或更完整文件预览，应新增或拆分专题 PRD。
+发送时上传文件专题入口是：`docs/prd/frontend/deferred-message-upload/01-deferred-message-upload-prd.md`，测试规格见同目录 `test-spec-deferred-message-upload.md`。
+
+当前前端 v1 严格基于已实现后端 API，定位为内部业务用户对话台；对话文件上传已升级为草稿附件 + 已保存文件面板体验，文件选择/拖拽先作为发送框上方的浏览器草稿附件，随消息发送时再调用既有上传 API，发送后才进入右侧文件面板。后续如补充调试台、权限、历史中心或更完整文件预览，应新增或拆分专题 PRD。
 
 ## 文档维护口径
 

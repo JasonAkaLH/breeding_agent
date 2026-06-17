@@ -7,6 +7,7 @@
 | 文档 | 范围 | 状态 |
 |---|---|---|
 | `00-前端业务对话台PRD.md` | 基于当前后端能力的 v1 业务用户对话台：主代理 streaming、数据查询 Skill 表格预览、任务状态、取消与 artifacts 展示 | 草案 |
+| `deferred-message-upload/01-deferred-message-upload-prd.md` | 对话台文件先作为浏览器草稿附件，发送消息时再调用现有上传 API 并绑定 `metadata.upload_ids` | 已实施，待最终合并 |
 
 ## 当前 v1 产品决策摘要
 
@@ -14,7 +15,7 @@
 - v1 严格基于当前已实现 API，不要求后端新增接口作为前置条件。
 - 默认发送 `capability_id=null`，由后端自动规划；数据库/品种/审定/基因型类问题由主代理自动调用 数据查询 Skill 后整合回答，不再要求用户手动选择模式。
 - 数据查询 Skill 默认把表格结果交给主代理整合回答，前端展示主代理回答 + 简表预览，不默认展示 SQL / schema / guard / 审计细节。
-- v1 不做用户/权限系统、不做研发/运维调试台；对话文件上传已作为业务对话台能力落地，当前入口为右下角“文件”按钮 + 右侧文件面板。
+- v1 不做用户/权限系统、不做研发/运维调试台；对话文件上传已作为业务对话台能力落地：草稿附件在发送框上方展示，发送后保存的对话文件从右下角“文件”按钮 + 右侧文件面板管理。
 
 ## 建议阅读顺序
 
@@ -25,3 +26,4 @@
 5. `docs/prd/backend/20-对话文件本地资源文件系统PRD.md`
 6. 具体可移除数据类 Skill 的前端结果展示契约（由对应 Skill bundle 自带 docs 维护）
 7. `docs/prd/frontend/slash-skill-command/README.md`：前端 slash Skill command MVP 与 pending Skill context continuation PRD set。
+8. `docs/prd/frontend/deferred-message-upload/01-deferred-message-upload-prd.md`：发送时上传文件 PRD；测试规格见同目录 `test-spec-deferred-message-upload.md`。

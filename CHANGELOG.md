@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 2026-06-17
+
+- 前端对话文件上传改为发送时上传：上传按钮和拖拽只在浏览器内创建显示于发送框上方的可删除草稿附件，右侧文件面板只展示发送后已保存资源；发送普通消息或可上传 interrupt answer 时才调用既有 conversation uploads API 并通过 `metadata.upload_ids` 绑定；上传失败不创建幽灵消息，提交失败会 best-effort 回滚并在回滚失败时刷新已保存资源列表。同步新增 `docs/prd/frontend/deferred-message-upload/` PRD 与测试规格、前端/PRD 索引，并补齐前端回归、后端上传/存储回归与构建验证。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
 ### 2026-06-16
 
 - 对话文件本地资源系统已落地并补齐文档口径：上传文件会保存为 conversation-scoped 本地资源并维护 `index.md`，Skill 运行时通过 `resource_manifest.json` / `files[].mount_path` 读取 workspace 文件副本；单文件删除会物理删除本地资源目录，对话删除会清理对应文件目录。前端文件 UI 收敛为右下角“文件”按钮 + 右侧文件面板，不再占用发送框上方空间；相关 PRD、API 更新日志、前端 PRD 索引、对话记忆和 Skill 输出文件文档已同步。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
