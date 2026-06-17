@@ -84,9 +84,13 @@ async function renderAuthed(ui: ReactElement) {
 
 async function openConversationFilesDrawer(expectedFileCount?: number) {
   if (typeof expectedFileCount === 'number') {
-    await screen.findByRole('button', { name: new RegExp(`当前 ${expectedFileCount} 个文件`) });
+    await screen.findByRole('button', { name: new RegExp(`当前 ${expectedFileCount} 个已保存文件`) });
   }
   fireEvent.click(screen.getByRole('button', { name: /打开当前对话文件面板/ }));
+}
+
+function getConversationFilesDrawer() {
+  return screen.getByRole('dialog', { name: '当前对话文件' });
 }
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -1759,8 +1763,12 @@ describe('App', () => {
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
-    await openConversationFilesDrawer(1);
     await screen.findByText(/materials.csv/);
+    await screen.findByText(/待发送/);
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/materials.csv/)).not.toBeInTheDocument();
+    expect(await screen.findByText(/当前还没有已保存文件/)).toBeInTheDocument();
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '/mini-breedstat-rcbd 用这个文件做3个区组RCBD' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -1821,16 +1829,71 @@ describe('App', () => {
     await waitFor(() => expect(screen.queryByText(/existing.csv/)).not.toBeInTheDocument());
   });
 
-  it('uploads a CSV file and submits its upload id with the next message', async () => {
+  it('deletes a draft attachment locally without calling backend delete', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const file = new File(['ped_id,design_check\nA,0\n'], 'draft.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+
+    await screen.findByText(/draft.csv/);
+    await screen.findByText(/待发送/);
+    fireEvent.click(screen.getByRole('button', { name: '删除文件 draft.csv' }));
+
+    expect(api.deleteConversationUpload).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText(/draft.csv/)).not.toBeInTheDocument());
+  });
+
+  it('clears draft attachments when switching conversations without backend side effects', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history',
+          username: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '历史问题',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-history', role: 'user', content: '以前的问题', task_id: 'task-history', stream_status: null, created_at: null },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const file = new File(['ped_id,design_check\nA,0\n'], 'switch-draft.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    await screen.findByText(/switch-draft.csv/);
+    await screen.findByRole('button', { name: /当前 0 个已保存文件/ });
+
+    fireEvent.click(await screen.findByRole('button', { name: '历史问题' }));
+
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
+    await screen.findByRole('button', { name: /当前 0 个已保存文件/ });
+    expect(screen.queryByText(/switch-draft.csv/)).not.toBeInTheDocument();
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
+    expect(api.deleteConversationUpload).not.toHaveBeenCalled();
+  });
+
+  it('keeps a CSV file as a draft and uploads it only when submitting the next message', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
-    await openConversationFilesDrawer(1);
     await screen.findByText(/materials.csv/);
-    await screen.findByText(/1 行/);
+    await screen.findByText(/待发送/);
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/materials.csv/)).not.toBeInTheDocument();
+    expect(await screen.findByText(/当前还没有已保存文件/)).toBeInTheDocument();
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
+    fireEvent.click(document.querySelector('.ant-drawer-close') as HTMLElement);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做3个区组RCBD' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -1838,7 +1901,10 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       metadata: { upload_ids: ['upl-1'] },
     })));
-    expect(screen.getByText(/materials.csv/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/待发送/)).not.toBeInTheDocument());
+    await openConversationFilesDrawer(1);
+    expect(await screen.findByText(/materials.csv/)).toBeInTheDocument();
+    expect(await screen.findByText(/Skill 可用/)).toBeInTheDocument();
   });
 
   it('uploads a VCF.GZ file and submits its upload id with the next message', async () => {
@@ -1848,9 +1914,12 @@ describe('App', () => {
     const file = new File(['vcf-bytes'], 'sample.vcf.gz', { type: 'application/gzip' });
     fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
-    await openConversationFilesDrawer(1);
     await screen.findByText(/sample.vcf.gz/);
     await screen.findByText(/VCF/);
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/sample.vcf.gz/)).not.toBeInTheDocument();
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
+    fireEvent.click(document.querySelector('.ant-drawer-close') as HTMLElement);
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析这个水稻 VCF' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -1860,7 +1929,7 @@ describe('App', () => {
     })));
   });
 
-  it('uploads a CSV file by drag and drop', async () => {
+  it('attaches a CSV file by drag and drop without uploading immediately', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
@@ -1876,10 +1945,110 @@ describe('App', () => {
       dataTransfer: { files: [file] },
     });
 
-    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledWith(expect.any(String), file));
-    await openConversationFilesDrawer(1);
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
     expect(await screen.findByText(/dragged.csv/)).toBeInTheDocument();
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/dragged.csv/)).not.toBeInTheDocument();
     expect(uploadDropZone).not.toHaveClass('chat-floating-stack-dragging');
+  });
+
+  it('does not create a chat bubble when draft upload fails before submit', async () => {
+    const api = makeApi({
+      uploadConversationFile: vi.fn(async () => {
+        throw new Error('upload failed');
+      }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const file = new File(['ped_id,design_check\nA,0\n'], 'broken.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做分析' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalled());
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    expect(document.querySelector('.message-user')).toBeNull();
+    expect(screen.queryByText('提交中')).not.toBeInTheDocument();
+    expect(await screen.findByText(/broken.csv/)).toBeInTheDocument();
+    expect(await screen.findByText(/待重试/)).toBeInTheDocument();
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/broken.csv/)).not.toBeInTheDocument();
+  });
+
+  it('rolls back already uploaded draft files when a later draft upload fails', async () => {
+    const firstUpload = {
+      upload_id: 'upl-first',
+      conversation_id: 'conv-test',
+      filename: 'first.csv',
+      content_type: 'text/csv',
+      file_type: 'csv' as const,
+      size_bytes: 24,
+      sha256: 'hash-first',
+      expires_at: '2026-05-07T10:00:00',
+      preview: { row_count: 1, columns: ['ped_id'], shape: 'table' },
+    };
+    const api = makeApi({
+      uploadConversationFile: vi.fn()
+        .mockResolvedValueOnce(firstUpload)
+        .mockRejectedValueOnce(new Error('second upload failed')),
+      deleteConversationUpload: vi.fn(async (_conversationId, uploadId) => ({ upload_id: uploadId, deleted: true })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const firstFile = new File(['ped_id\nA\n'], 'first.csv', { type: 'text/csv' });
+    const secondFile = new File(['ped_id\nB\n'], 'second.csv', { type: 'text/csv' });
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件');
+    fireEvent.change(uploadInput, { target: { files: [firstFile] } });
+    fireEvent.change(uploadInput, { target: { files: [secondFile] } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析这两个文件' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalledTimes(2));
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.deleteConversationUpload).toHaveBeenCalledWith(expect.any(String), 'upl-first'));
+    expect(await screen.findByText(/first.csv/)).toBeInTheDocument();
+    expect(await screen.findByText(/second.csv/)).toBeInTheDocument();
+    expect(await screen.findByText(/待重试/)).toBeInTheDocument();
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/first.csv/)).not.toBeInTheDocument();
+    expect(within(getConversationFilesDrawer()).queryByText(/second.csv/)).not.toBeInTheDocument();
+  });
+
+  it('refreshes saved resources when submit fails and rollback delete fails', async () => {
+    const residualUpload = {
+      upload_id: 'upl-1',
+      conversation_id: 'conv-test',
+      filename: 'residual.csv',
+      content_type: 'text/csv',
+      file_type: 'csv' as const,
+      size_bytes: 24,
+      sha256: 'hash',
+      expires_at: '2026-05-07T10:00:00',
+      preview: { row_count: 1, columns: ['ped_id'], shape: 'table' },
+    };
+    const api = makeApi({
+      listConversationUploads: vi.fn()
+        .mockResolvedValueOnce({ conversation_id: 'conv-test', uploads: [] })
+        .mockResolvedValue({ conversation_id: 'conv-test', uploads: [residualUpload] }),
+      submitMessage: vi.fn(async () => {
+        throw new Error('submit failed');
+      }),
+      deleteConversationUpload: vi.fn(async () => {
+        throw new Error('delete failed');
+      }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const file = new File(['ped_id,design_check\nA,0\n'], 'residual.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做分析' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.deleteConversationUpload).toHaveBeenCalledWith(expect.any(String), 'upl-1'));
+    await waitFor(() => expect(api.listConversationUploads).toHaveBeenCalledTimes(2));
+    await openConversationFilesDrawer(1);
+    expect(await screen.findByText(/residual.csv/)).toBeInTheDocument();
+    expect(await screen.findByText(/Skill 可用/)).toBeInTheDocument();
   });
 
   it('submits deep thinking flag from the composer function menu', async () => {
@@ -2476,6 +2645,64 @@ describe('App', () => {
     expect(api.cancelTask).not.toHaveBeenCalled();
   });
 
+  it('keeps an upload-accepting interrupt open when draft upload fails', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:skill_field_design', capability_id: 'skill.field_design', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => waitingGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:skill_field_design',
+          question: '试验设计智能体 还缺少：试验材料 CSV/JSON 文件。请上传对应文件后继续。',
+          reason_code: 'missing_material_data',
+          required_fields: { material_data: { type: 'artifact', accepts_upload: true, description: '请上传试验材料文件。' } },
+          status: 'open',
+        }],
+      })),
+      uploadConversationFile: vi.fn(async () => {
+        throw new Error('interrupt upload failed');
+      }),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [
+          event('task.accepted', {}, 'accepted-before-artifact-interrupt'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-artifact-interrupt', 'task-1:skill_field_design'),
+        ],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '生成随机区组设计' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByText(/试验设计智能体 还缺少/)).toBeInTheDocument();
+    vi.mocked(api.submitMessage).mockClear();
+    const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'interrupt-broken.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalled());
+    expect(api.submitMessage).not.toHaveBeenCalled();
+    expect(screen.getByText(/试验设计智能体 还缺少/)).toBeInTheDocument();
+    expect(screen.queryByText('（已上传文件）')).not.toBeInTheDocument();
+    expect(screen.queryByText('补充信息已提交，正在继续任务')).not.toBeInTheDocument();
+    expect(await screen.findByText(/interrupt-broken.csv/)).toBeInTheDocument();
+    expect(await screen.findByText(/待重试/)).toBeInTheDocument();
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/interrupt-broken.csv/)).not.toBeInTheDocument();
+  });
+
   it('allows uploading a file while answering an artifact interrupt', async () => {
     const waitingGraph = {
       task_id: 'task-1',
@@ -2522,8 +2749,11 @@ describe('App', () => {
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(uploadInput, { target: { files: [file] } });
 
-    await openConversationFilesDrawer(1);
     await screen.findByText(/materials.csv/);
+    await screen.findByText(/待发送/);
+    await openConversationFilesDrawer(0);
+    expect(within(getConversationFilesDrawer()).queryByText(/materials.csv/)).not.toBeInTheDocument();
+    fireEvent.click(document.querySelector('.ant-drawer-close') as HTMLElement);
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({

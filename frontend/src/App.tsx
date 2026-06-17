@@ -94,6 +94,23 @@ interface TransientNotice {
   type: 'success' | 'warning';
 }
 
+type DraftAttachmentStatus = 'draft' | 'uploading' | 'failed';
+
+interface DraftAttachment {
+  localId: string;
+  file: File;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  status: DraftAttachmentStatus;
+  errorMessage?: string;
+}
+
+interface UploadedDraftAttachment {
+  draft: DraftAttachment;
+  upload: UploadFileResponse;
+}
+
 const COMPOSER_READY_PHASES = new Set(['idle', 'completed', 'failed', 'cancelled']);
 const CANCELLATION_OR_TERMINAL_PHASES = new Set(['cancelling', 'completed', 'failed', 'cancelled']);
 const INTERACTIVE_FOCUS_SELECTOR = [
@@ -224,6 +241,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
   const [selectedSkillCommand, setSelectedSkillCommand] = useState<SlashCommand | null>(null);
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [pendingUploads, setPendingUploads] = useState<UploadFileResponse[]>([]);
   const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -814,6 +832,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setActiveConversationId(nextConversationId);
     setModelEdition(defaultModelEdition);
     setMessages([]);
+    setDraftAttachments([]);
     setPendingUploads([]);
     clearCurrentTaskRuntime({ closeSubscription: true });
   }
@@ -830,6 +849,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setActiveConversationId('');
     setMessages([]);
     setConversationHistory([]);
+    setDraftAttachments([]);
     setPendingUploads([]);
     updateCurrentTaskId(null);
     updateCurrentAssistantId(null);
@@ -853,6 +873,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setMessages([]);
     setInput('');
     setModelEdition(defaultModelEdition);
+    setDraftAttachments([]);
     setPendingUploads([]);
     updateCurrentTaskId(null);
     updateCurrentAssistantId(null);
@@ -878,6 +899,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     clearCurrentTaskRuntime({ closeSubscription: true });
     if (nextConversationId !== conversationId) {
       initializedWorkspaceConversationIdRef.current = null;
+      setDraftAttachments([]);
+      setPendingUploads([]);
       setActiveConversationId(nextConversationId);
       return;
     }
@@ -957,7 +980,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const directSlashParse = useMemo(() => parseDirectSlashCommand(input, skillCommands), [input, skillCommands]);
   const slashInputBlocked = !selectedSkillCommand && (directSlashParse.kind === 'not_found' || directSlashParse.kind === 'conflict');
   const pendingInterruptAcceptsUpload = pendingInterrupt !== null && interruptAcceptsUpload(pendingInterrupt);
-  const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && pendingUploads.length > 0;
+  const savedFileCount = pendingUploads.length;
+  const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && draftAttachments.length > 0;
   const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
   const canSubmitComposer = !slashInputBlocked && (
     Boolean(input.trim())
@@ -1056,6 +1080,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       await handleInterruptAnswer(content, pendingInterrupt);
       return;
     }
+    const draftSnapshot = draftAttachments.slice();
+    let uploadedDrafts: UploadedDraftAttachment[] = [];
+    try {
+      uploadedDrafts = await uploadDraftAttachments(targetConversationId, draftSnapshot);
+    } catch {
+      return;
+    }
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     initializedWorkspaceConversationIdRef.current = targetConversationId;
@@ -1085,19 +1116,22 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
         capabilityId: forcedCapabilityId,
         metadata: {
-          ...(pendingUploads.length > 0 ? { upload_ids: pendingUploads.map((upload) => upload.upload_id) } : {}),
+          ...(uploadedDrafts.length > 0 ? { upload_ids: uploadedDrafts.map((item) => item.upload.upload_id) } : {}),
           ...forcedMetadata,
         },
       });
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(accepted.task_id, mode);
       updateCurrentTaskId(accepted.task_id);
+      markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
       setSelectedSkillCommand(null);
       setSlashMenuOpen(false);
       subscribeToTask(accepted.task_id, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
       localTaskRuntimeActiveRef.current = false;
       const message = friendlyError(error);
+      const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
+      resetDraftAttachmentStatus(draftSnapshot);
       if (forcedCommand) {
         setSelectedSkillCommand(null);
         setSlashMenuOpen(false);
@@ -1106,7 +1140,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           .catch(() => undefined);
       }
       setTaskState((state) => markTaskFailed(state, message));
-      showTransientNotice(forcedCommand ? `${message} Skill 列表可能已更新，请重新选择。` : message);
+      const rollbackMessage = rollbackFailed ? ' 部分文件已保存到当前对话，可在文件面板删除。' : '';
+      showTransientNotice(forcedCommand ? `${message}${rollbackMessage} Skill 列表可能已更新，请重新选择。` : `${message}${rollbackMessage}`);
     }
   }
 
@@ -1116,20 +1151,101 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     return composingInputRef.current || reactEvent.isComposing === true || nativeEvent.isComposing === true || nativeEvent.keyCode === 229;
   }
 
-  async function handleUploadFile(file: File | undefined) {
+  function handleAttachFile(file: File | undefined) {
     if (!authUser || !conversationId || !file || !canUploadInCurrentComposer || uploadingFile) return;
     clearTransientNotice();
+    setDraftAttachments((current) => [
+      ...current,
+      {
+        localId: makeClientId('draft-file'),
+        file,
+        filename: file.name || 'upload',
+        contentType: file.type || 'application/octet-stream',
+        sizeBytes: file.size,
+        status: 'draft',
+      },
+    ]);
+    setFileDrawerOpen(false);
+    if (uploadInputRef.current) {
+      uploadInputRef.current.value = '';
+    }
+  }
+
+  function handleDeleteDraftAttachment(attachment: DraftAttachment) {
+    setDraftAttachments((current) => current.filter((item) => item.localId !== attachment.localId));
+  }
+
+  async function rollbackUploadedDraftAttachments(
+    targetConversationId: string,
+    uploadedDrafts: UploadedDraftAttachment[],
+  ): Promise<boolean> {
+    if (uploadedDrafts.length === 0) return false;
+    const failedDraftIds = new Set<string>();
+    for (const item of uploadedDrafts) {
+      try {
+        await api.deleteConversationUpload(targetConversationId, item.upload.upload_id);
+      } catch {
+        failedDraftIds.add(item.draft.localId);
+      }
+    }
+    if (failedDraftIds.size > 0) {
+      setDraftAttachments((current) => current.filter((item) => !failedDraftIds.has(item.localId)));
+      await refreshConversationUploads(targetConversationId);
+      return true;
+    }
+    return false;
+  }
+
+  function resetDraftAttachmentStatus(attachments: DraftAttachment[]) {
+    if (attachments.length === 0) return;
+    const attachmentIds = new Set(attachments.map((attachment) => attachment.localId));
+    setDraftAttachments((current) => current.map((attachment) => (
+      attachmentIds.has(attachment.localId)
+        ? { ...attachment, status: 'draft', errorMessage: undefined }
+        : attachment
+    )));
+  }
+
+  function markDraftAttachmentsSent(attachments: DraftAttachment[], uploadedDrafts: UploadedDraftAttachment[]) {
+    if (attachments.length === 0) return;
+    const sentDraftIds = new Set(attachments.map((attachment) => attachment.localId));
+    setDraftAttachments((current) => current.filter((attachment) => !sentDraftIds.has(attachment.localId)));
+    setPendingUploads((current) => mergeUploadsById(current, uploadedDrafts.map((item) => item.upload)));
+  }
+
+  async function uploadDraftAttachments(targetConversationId: string, attachments: DraftAttachment[]): Promise<UploadedDraftAttachment[]> {
+    if (attachments.length === 0) return [];
+    const attachmentIds = new Set(attachments.map((attachment) => attachment.localId));
     setUploadingFile(true);
+    setDraftAttachments((current) => current.map((attachment) => (
+      attachmentIds.has(attachment.localId)
+        ? { ...attachment, status: 'uploading', errorMessage: undefined }
+        : attachment
+    )));
+    const uploadedDrafts: UploadedDraftAttachment[] = [];
     try {
-      const uploaded = await api.uploadConversationFile(conversationId, file);
-      setPendingUploads((current) => [...current, uploaded]);
-    } catch (error) {
-      showTransientNotice(friendlyError(error));
+      for (const attachment of attachments) {
+        try {
+          const upload = await api.uploadConversationFile(targetConversationId, attachment.file);
+          uploadedDrafts.push({ draft: attachment, upload });
+        } catch (error) {
+          const message = friendlyError(error);
+          setDraftAttachments((current) => current.map((item) => {
+            if (item.localId === attachment.localId) {
+              return { ...item, status: 'failed', errorMessage: message };
+            }
+            return attachmentIds.has(item.localId) ? { ...item, status: 'draft' } : item;
+          }));
+          const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
+          showTransientNotice(rollbackFailed
+            ? `${message} 部分文件已保存到当前对话，可在文件面板删除。`
+            : message);
+          throw error;
+        }
+      }
+      return uploadedDrafts;
     } finally {
       setUploadingFile(false);
-      if (uploadInputRef.current) {
-        uploadInputRef.current.value = '';
-      }
     }
   }
 
@@ -1192,14 +1308,21 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     event.preventDefault();
     setDraggingUpload(false);
     if (!canAcceptDraggedUpload()) return;
-    void handleUploadFile(event.dataTransfer.files?.[0]);
+    handleAttachFile(event.dataTransfer.files?.[0]);
   }
 
   async function handleInterruptAnswer(content: string, interrupt: PendingInterrupt) {
-    const uploads = interruptAcceptsUpload(interrupt) ? pendingUploads.slice() : [];
     const sheetField = interruptSheetSelectionField(interrupt);
     const selectedSheets = sheetField ? selectedSheetPayload(sheetField, content) : {};
     const targetConversationId = conversationIdRef.current;
+    const draftSnapshot = interruptAcceptsUpload(interrupt) ? draftAttachments.slice() : [];
+    let uploadedDrafts: UploadedDraftAttachment[] = [];
+    try {
+      uploadedDrafts = await uploadDraftAttachments(targetConversationId, draftSnapshot);
+    } catch {
+      return;
+    }
+    const uploads = uploadedDrafts.map((item) => item.upload);
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     const resumeProgressText = '补充信息已提交，正在继续任务';
@@ -1273,18 +1396,26 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         setPendingInterrupt(refreshedInterrupt);
         updateCurrentTaskId(keepOpenTaskId);
         taskPresentationModesRef.current.set(keepOpenTaskId, interrupt.mode);
+        if (draftSnapshot.length > 0) {
+          const sentDraftIds = new Set(draftSnapshot.map((attachment) => attachment.localId));
+          setDraftAttachments((current) => current.filter((attachment) => !sentDraftIds.has(attachment.localId)));
+          setPendingUploads((current) => mergeUploadsById(current, uploadedDrafts.map((item) => item.upload)));
+        }
         return;
       }
       const resumedTaskId = response.task_id || interrupt.taskId;
       taskPresentationModesRef.current.set(resumedTaskId, interrupt.mode);
-      setPendingUploads([]);
+      markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
       setPendingInterrupt(null);
       updateCurrentTaskId(resumedTaskId);
       subscribeToTask(resumedTaskId, assistantMessage.id, generation, targetConversationId);
     } catch (error) {
       localTaskRuntimeActiveRef.current = false;
-      setTaskState((state) => markTaskFailed(state, friendlyError(error)));
-      showTransientNotice(friendlyError(error));
+      const message = friendlyError(error);
+      const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
+      resetDraftAttachmentStatus(draftSnapshot);
+      setTaskState((state) => markTaskFailed(state, message));
+      showTransientNotice(rollbackFailed ? `${message} 部分文件已保存到当前对话，可在文件面板删除。` : message);
     }
   }
 
@@ -1892,7 +2023,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
               onDrop={handleUploadDrop}
             >
               <div className="chat-upload-drop-hint" aria-hidden={!draggingUpload}>
-                释放文件以上传到当前对话
+                释放文件以附加到下一条消息
               </div>
               <Card
                 className={`composer-card floating-composer${draggingUpload ? ' floating-composer-dragging' : ''}`}
@@ -1921,6 +2052,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       emptyMessage={slashMenuEmptyMessage}
                       onSelect={selectSlashCommand}
                     />
+                  ) : null}
+                  {draftAttachments.length > 0 ? (
+                    <Space direction="vertical" size="small" className="composer-draft-attachment-list" aria-label="待发送附件列表">
+                      {draftAttachments.map((attachment) => (
+                        <DraftAttachmentCard
+                          key={attachment.localId}
+                          attachment={attachment}
+                          disabled={active || uploadingFile}
+                          onDelete={() => handleDeleteDraftAttachment(attachment)}
+                        />
+                      ))}
+                    </Space>
                   ) : null}
                   <div className={`composer-input-stack${pendingInterrupt ? ' composer-input-stack-interrupt' : ''}`}>
                     {pendingInterrupt ? <InterruptComposerStatus onCancel={handleCancel} cancelling={taskState.phase === 'cancelling'} /> : null}
@@ -2016,7 +2159,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                     type="file"
                     accept=".json,.csv,.xlsx,.xls,.txt,.vcf,.vcf.gz,.png,.jpg,.jpeg,.pdf,application/json,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,image/png,image/jpeg,application/pdf"
                     disabled={!canUploadInCurrentComposer || uploadingFile}
-                    onChange={(event) => void handleUploadFile(event.target.files?.[0])}
+                    onChange={(event) => handleAttachFile(event.target.files?.[0])}
                   />
                 </Space>
               </Card>
@@ -2024,13 +2167,13 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             <Button
               type="primary"
               className="conversation-files-fab"
-              aria-label={`打开当前对话文件面板，当前 ${pendingUploads.length} 个文件`}
+              aria-label={`打开当前对话文件面板，当前 ${savedFileCount} 个已保存文件`}
               onClick={() => setFileDrawerOpen(true)}
               loading={uploadingFile}
             >
               <span aria-hidden="true">📎</span>
               <span>文件</span>
-              {pendingUploads.length > 0 ? <span className="conversation-files-fab-count">{pendingUploads.length}</span> : null}
+              {savedFileCount > 0 ? <span className="conversation-files-fab-count">{savedFileCount}</span> : null}
             </Button>
             <Drawer
               title="当前对话文件"
@@ -2042,17 +2185,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
               rootClassName="conversation-files-drawer-root"
             >
               <Space direction="vertical" size="middle" className="conversation-files-drawer-content">
-                <Button
-                  block
-                  aria-label="选择 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件"
-                  onClick={() => uploadInputRef.current?.click()}
-                  disabled={!canUploadInCurrentComposer || uploadingFile}
-                  loading={uploadingFile}
-                >
-                  上传文件
-                </Button>
                 {pendingUploads.length > 0 ? (
-                  <Space direction="vertical" size="small" className="conversation-file-list" aria-label="当前对话文件列表">
+                  <Space direction="vertical" size="small" className="conversation-file-list" aria-label="已保存文件列表">
                     {pendingUploads.map((upload) => (
                       <ConversationFileCard
                         key={upload.upload_id}
@@ -2065,8 +2199,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   </Space>
                 ) : (
                   <div className="conversation-files-empty">
-                    <Typography.Text type="secondary">当前对话还没有上传文件。</Typography.Text>
-                    <Typography.Text type="secondary">上传后，文件会保存在本地并可供本对话里的 Skill 使用。</Typography.Text>
+                    <Typography.Text type="secondary">当前还没有已保存文件。</Typography.Text>
+                    <Typography.Text type="secondary">发送带附件的消息后，文件会保存到当前对话并供 Skill 使用。</Typography.Text>
                   </div>
                 )}
               </Space>
@@ -2344,6 +2478,86 @@ function formatFileSize(sizeBytes: number): string {
   if (sizeBytes < 1024) return `${sizeBytes} B`;
   if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
   return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function mergeUploadsById(current: UploadFileResponse[], additions: UploadFileResponse[]): UploadFileResponse[] {
+  if (additions.length === 0) return current;
+  const seen = new Set(current.map((upload) => upload.upload_id));
+  const merged = current.slice();
+  for (const upload of additions) {
+    if (seen.has(upload.upload_id)) continue;
+    seen.add(upload.upload_id);
+    merged.push(upload);
+  }
+  return merged;
+}
+
+function draftAttachmentTypeLabel(attachment: DraftAttachment): string {
+  const filename = attachment.filename.toLowerCase();
+  if (filename.endsWith('.vcf') || filename.endsWith('.vcf.gz')) return 'VCF';
+  if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) return 'Excel';
+  if (filename.endsWith('.json')) return 'JSON';
+  if (filename.endsWith('.csv')) return 'CSV';
+  if (filename.endsWith('.txt')) return 'TXT';
+  if (filename.endsWith('.pdf')) return 'PDF';
+  if (filename.endsWith('.png') || filename.endsWith('.jpg') || filename.endsWith('.jpeg')) return '图片';
+  return attachment.contentType || '文件';
+}
+
+function draftAttachmentStatusText(status: DraftAttachmentStatus): string {
+  switch (status) {
+    case 'uploading':
+      return '上传中';
+    case 'failed':
+      return '待重试';
+    default:
+      return '待发送';
+  }
+}
+
+function DraftAttachmentCard({
+  attachment,
+  disabled,
+  onDelete,
+}: {
+  attachment: DraftAttachment;
+  disabled: boolean;
+  onDelete: () => void;
+}) {
+  const summaryParts = [draftAttachmentTypeLabel(attachment), formatFileSize(attachment.sizeBytes)];
+  if (attachment.errorMessage) summaryParts.push(attachment.errorMessage);
+  const tagColor = attachment.status === 'failed' ? 'red' : attachment.status === 'uploading' ? 'blue' : 'orange';
+
+  return (
+    <div className="conversation-file-card">
+      <div className="conversation-file-card-header">
+        <div className="conversation-file-card-title">
+          <Typography.Text strong ellipsis={{ tooltip: attachment.filename }} className="conversation-file-name">
+            {attachment.filename}
+          </Typography.Text>
+          <Typography.Text type={attachment.status === 'failed' ? 'danger' : 'secondary'} className="conversation-file-meta">
+            {summaryParts.join(' · ')}
+          </Typography.Text>
+        </div>
+        <Tag color={tagColor} className="conversation-file-ready-tag">{draftAttachmentStatusText(attachment.status)}</Tag>
+      </div>
+      <div className="conversation-file-actions">
+        <Typography.Text type="secondary" className="conversation-file-size">
+          {formatFileSize(attachment.sizeBytes)}
+        </Typography.Text>
+        <Button
+          danger
+          type="text"
+          size="small"
+          disabled={disabled || attachment.status === 'uploading'}
+          aria-label={`删除文件 ${attachment.filename}`}
+          onClick={onDelete}
+        >
+          删除
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function ConversationFileCard({

@@ -1,5 +1,17 @@
 # API 更新日志
 
+## 2026-06-17
+
+### 更新摘要
+
+本次只调整前端文件附加体验和调用时机，API 契约不变：未新增 endpoint，未修改上传、列表、删除或消息提交接口的路径、method、必填参数、请求体结构和响应 schema。
+
+### 上传文件与消息提交
+
+- 外部系统仍可沿用既有接入方式：先调用 `POST /api/v1/conversations/uploads` 获取 `upload_id`，再在 `POST /api/v1/conversations/chat-messages` 的 `metadata.upload_ids` 中引用。
+- 新前端选择或拖拽文件后会先保存在浏览器草稿状态，用户发送消息时才调用同一个上传 API；这是客户端调用时机变化，不是服务端 API 变化。
+- 右侧文件面板只读取已经保存到后端的 conversation 文件资源，仍使用 `GET /api/v1/conversations/{conversation_id}/uploads` 和 `DELETE /api/v1/conversations/uploads`。
+
 ## 2026-06-16
 
 ### 更新摘要
@@ -31,19 +43,19 @@
 - 同一端点同时处理普通新消息和 open interrupt 下的继续输入：目标会话存在 open interrupt 时优先作为 interrupt turn 处理，不创建新 task；没有 open interrupt 时按普通新消息创建 task。
 - 回答 interrupt 时在 `metadata.interrupt_id` 指定目标 interrupt；只有一个 open interrupt 时可省略，存在多个 open interrupt 且未指定会返回 400。
 - 上传引用继续放在 `metadata.upload_ids`；多 sheet 选择继续放在 `metadata.upload_sheet_selections`。客户端不要提交业务字段形 payload（例如 `design=...`、`ncols=...`）或内部 resume 字段。
-- `client_message_id` 是本轮 interrupt turn 的幂等键；同一 key 重复提交会返回同一份处理摘要，不会重复恢复任务。
+- `client_message_id` 是本轮 interrupt turn 的幂等键；服务端响应中的 `answer_payload.client_request_id` 可用于前端/外部系统关联本次回答处理结果；同一 key 重复提交会返回同一份处理摘要，不会重复恢复任务。
 - `MessageAcceptedResponse.action` 用于区分结果：
   - `task_accepted`：创建新任务。
   - `interrupt_resumed`：补参已接受并恢复原 task。
   - `interrupt_clarification_answer`：只回答了用户的追问或澄清，interrupt 仍保持 open。
   - `interrupt_mixed_processed`：同一条消息同时包含补参和追问/引导。
   - `interrupt_schema_switched`：当前 Skill 内切换了 input schema。
-- 当响应包含 `assistant_message`、`answer_payload.will_resume=false` 或 `answer_payload.requires_confirmation=true` 时，客户端应继续展示 interrupt 输入态，并等待用户下一条回复。
+- 当响应包含 `assistant_message`、`answer_payload.will_resume=false` 或 `answer_payload.requires_confirmation=true` 时，客户端应继续展示 interrupt 输入态，并等待用户下一条回复；`will_resume=true` 表示补充信息已接受并恢复原任务。
 
 ### `/api/v1/tasks/interrupts`
 
 - interrupt 列表仍用于读取当前 open interrupt；新的回答入口统一使用 `POST /api/v1/conversations/chat-messages`。
-- v2 Skill 的 `Interrupt.required_fields` 只提供前端展示所需的 `_slot_collection_ref` 摘要；客户端不得修改、回传或把它当作可编辑参数表。
+- v2 Skill 的 `Interrupt.required_fields` 只提供前端展示所需的 `_slot_collection_ref` 摘要；其中 slot collection 以 `collection_id + revision` 标识当前补槽状态版本，客户端不得修改、回传或把它当作可编辑参数表。
 - `question` 是前端应展示给用户的追问文本；聊天历史保存用户原话，不应展示内部键值形式。
 
 ### `/api/v1/tasks/{task_id}/events`
@@ -53,12 +65,12 @@
 
 ### `/api/v1/conversations/{conversation_id}/messages`
 
-- `MessageResponse` 新增可选 `artifacts` 数组。读取历史消息时，assistant 消息可能带回可展示 artifact，用于恢复数据查询表格卡片、OCR 原文卡片和仍 active 的文件下载卡片。
+- `MessageResponse` 新增可选 `artifacts` 数组。读取历史消息时，assistant 消息可能带回可展示 artifact，用于 History Recall 场景恢复数据查询表格卡片、OCR 原文卡片和仍 active 的文件下载卡片。
 - 实时任务展示仍以 SSE 和 `/api/v1/tasks/{task_id}/artifacts` 为主；`messages[].artifacts` 主要用于刷新或切换历史会话后的展示恢复。
 
 ### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
 
-- 上传白名单新增 `.vcf` 与 `.vcf.gz`；响应 `file_type=vcf`。`.vcf.gz` 按复合扩展名识别，普通 `.gz` 不会仅因 `application/gzip` 被接受。
+- 上传白名单新增 `.vcf` 与 `.vcf.gz`；响应 `file_type=vcf`。文本类上传继续返回 `file_type=text` 并在 preview 中提供 `char_count` / `line_count`。`.vcf.gz` 按复合扩展名识别，普通 `.gz` 不会仅因 `application/gzip` 被接受。
 - VCF / VCF.GZ 按二进制文件处理，不做 CSV / JSON / Excel 预览解码；客户端只应依赖返回的文件元数据和后续 Skill 结果。
 
 ### `/api/v1/config/model-editions` 与新消息提交

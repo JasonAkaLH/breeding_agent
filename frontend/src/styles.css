@@ -765,6 +765,63 @@ body {
   width: 100%;
 }
 
+.composer-draft-attachment-list {
+  width: 100%;
+}
+
+.composer-draft-attachment-list .conversation-file-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: 0 8px 24px rgba(47, 64, 31, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(14px) saturate(1.18);
+  -webkit-backdrop-filter: blur(14px) saturate(1.18);
+}
+
+.composer-draft-attachment-list .conversation-file-card-header {
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+}
+
+.composer-draft-attachment-list .conversation-file-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composer-draft-attachment-list .conversation-file-name {
+  max-width: min(420px, 48vw);
+  font-size: 13px;
+}
+
+.composer-draft-attachment-list .conversation-file-meta,
+.composer-draft-attachment-list .conversation-file-size {
+  display: none;
+}
+
+.composer-draft-attachment-list .conversation-file-ready-tag {
+  line-height: 20px;
+  border-radius: 999px;
+}
+
+.composer-draft-attachment-list .conversation-file-actions {
+  margin-top: 0;
+}
+
+.composer-draft-attachment-list .conversation-file-actions .ant-btn {
+  height: 24px;
+  padding-inline: 8px;
+  border-radius: 999px;
+}
+
 .chat-floating-stack {
   position: fixed;
   right: auto;
