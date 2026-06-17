@@ -19,8 +19,6 @@ routing:
     - rice vcf
     - rice qtn
     - gene check
-    - 优良变异
-    - 优良变异解读
   intent_aliases:
     - /rice-genie
     - $rice-genie

@@ -132,10 +132,10 @@ interpret it as multiple trial sites:
 
 Use these preview columns when available:
 
-- RCBD: `plots`, `r`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`, `hyb_type`.
-- Diagonal: `plots`, `ped_id`, `hyb_type`, `ranges`, `pass`, `set`, `hyb_check`
+- RCBD: `plots`, `r`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`.
+- Diagonal: `plots`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`
   or `design_check`.
 - Interval: `plots`, `r`, `ped_id`, `ranges`, `pass`, `set`, `hyb_check`,
-  `hyb_type`.
+  when available.
 
 Do not show raw JSON by default.

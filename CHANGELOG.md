@@ -10,6 +10,7 @@
 
 ### 2026-06-17
 
+- Docker 镜像发布版本提升到 `0.1.18`：按当前 main 工作树重新构建并推送 backend / frontend 到 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.18`，用于发布本轮 Skill 更新（含新增 `skill/plant-dis/` 及田间分析、试验设计、RiceGenie、PopGene、SeedNavi 相关脚本 / contract 调整）；远端 manifest 已验证：backend `sha256:dd7559e695f7c60ec0a57654c1b13e1249db57e930852607ad2cd948a98797e4`，frontend `sha256:7778a91523f480a70d912e8e99783a03f5527b097725cff31150e45fa62bfd5b`。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - 前端对话文件上传改为发送时上传：上传按钮和拖拽只在浏览器内创建显示于发送框上方的可删除草稿附件，右侧文件面板只展示发送后已保存资源；发送普通消息或可上传 interrupt answer 时才调用既有 conversation uploads API 并通过 `metadata.upload_ids` 绑定；上传失败不创建幽灵消息，提交失败会 best-effort 回滚并在回滚失败时刷新已保存资源列表。同步新增 `docs/prd/frontend/deferred-message-upload/` PRD 与测试规格、前端/PRD 索引，并补齐前端回归、后端上传/存储回归与构建验证。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 
 ### 2026-06-16

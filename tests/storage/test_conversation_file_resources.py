@@ -7,10 +7,13 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import inspect
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import CreateTable
 
 from src.core.models import ConversationFileResource
 from src.storage.conversation_files import ConversationFileIndexWriter, LocalConversationFileStore
 from src.storage.sqlite import SQLiteStorage
+from src.storage.sqlite.models import ConversationFileResourceRow
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.storage.support import SQLiteStorageTestCase
 
@@ -22,6 +25,12 @@ class ConversationFileResourceRepositoryTest(SQLiteStorageTestCase):
         index_names = {index["name"] for index in inspector.get_indexes("conversation_file_resource")}
         self.assertIn("idx_conversation_file_conversation_status_created", index_names)
         self.assertIn("idx_conversation_file_username_conversation", index_names)
+
+    def test_postgresql_boolean_default_uses_false_literal(self) -> None:
+        ddl = str(CreateTable(ConversationFileResourceRow.__table__).compile(dialect=postgresql.dialect()))
+
+        self.assertIn("requires_sheet_selection BOOLEAN DEFAULT false NOT NULL", ddl)
+        self.assertNotIn("requires_sheet_selection BOOLEAN DEFAULT 0", ddl)
 
     def test_repository_round_trip_list_get_and_mark_deleted(self) -> None:
         resource = ConversationFileResource(

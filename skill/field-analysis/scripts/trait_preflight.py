@@ -6,8 +6,28 @@ from typing import Any, Mapping
 
 
 WIDE_FIXED_COLUMNS = ("loc_id", "rep_num", "ranges", "pass", "entry_id", "ped_id", "check_type")
-TEST_CHECK_MARKERS = {"", "0", "0.0", "test", "tester", "non-check", "non_check", "material", "entry", "测试", "测试材料", "试验材料", "非对照", "材料"}
-CHECK_MARKERS = {"1", "1.0", "ck", "check", "control", "yes", "true", "对照", "对照材料"}
+TEST_CHECK_MARKERS = {
+    "",
+    "0",
+    "0.0",
+    "test",
+    "tester",
+    "non-check",
+    "non_check",
+    "material",
+    "entry",
+    "no",
+    "false",
+    "否",
+    "不是",
+    "测试",
+    "测试材料",
+    "试验材料",
+    "非对照",
+    "非对照材料",
+    "材料",
+}
+CHECK_MARKERS = {"1", "1.0", "ck", "check", "control", "yes", "true", "是", "对照", "对照材料"}
 
 
 def _text(value: Any) -> str:

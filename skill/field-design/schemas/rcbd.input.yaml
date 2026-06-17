@@ -1,7 +1,7 @@
 schema_id: rcbd
 version: 1.0.0
 title: RCBD design input
-description: 随机区组试验设计输入，要求提供材料清单和区组数/重复数。
+description: 随机区组试验设计输入，要求提供材料清单；清单可使用中文或英文表头，区组数/重复数未指定时默认 3。
 activation:
   aliases:
     - rcbd
@@ -14,7 +14,7 @@ inputs:
     type: artifact
     required: false
     title: 材料清单
-    question: 请上传或提供材料清单文件，推荐列名为 ped_id、hyb_check、set。
+    question: 请上传或提供材料清单文件。表头和列顺序不固定，只需包含材料名称/代号；如果有对照和分组，也可提供是否对照、组别/分组等列。
     source:
       allowed:
         - artifact
@@ -34,7 +34,7 @@ inputs:
     type: string
     required: false
     title: 粘贴的材料表
-    question: 如果没有文件，也可以直接粘贴 CSV 格式材料表。
+    question: 如果没有文件，也可以直接粘贴材料名称清单或 CSV 格式材料表；表头可用材料、品种、ped_id、是否对照、组别等语义相近名称。
     source:
       allowed:
         - query
@@ -49,6 +49,62 @@ inputs:
       - pasted_material_data
       - pasted_data
       - 材料表
+  material_names:
+    type: string
+    required: false
+    title: RCBD 材料名称/代号清单
+    question: 可直接提供材料、品种或 ped_id 名称，用换行、英文逗号、中文逗号、顿号或分号分隔。RCBD 支持仅名称清单；缺少 hyb_check 和 set 时默认 hyb_check=0、set=1。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases:
+      - material_names
+      - material_name_list
+      - materials
+      - ped_ids
+      - ped_id_list
+      - varieties
+      - 材料名称
+      - 材料名单
+      - 材料清单
+      - 品种
+      - 品种名称
+      - 品种清单
+    patterns:
+      - '(?:material_names?|materials?|ped_ids?|varieties|材料名称|材料|品种名称|品种)\s*[:：=]\s*(.+)'
+  check_names:
+    type: string
+    required: false
+    title: RCBD 对照材料名称
+    question: 可选。提供对照或 check 材料名称，用换行、英文逗号、中文逗号、顿号或分号分隔；这些名称会作为 ped_id 行加入并标记为 hyb_check=1。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases:
+      - check_names
+      - check_name_list
+      - check_materials
+      - checks
+      - ck_names
+      - ck_materials
+      - 对照品种
+      - 对照材料
+      - 对照清单
+      - 对照名单
+    patterns:
+      - '(?:check_names?|check_materials?|checks?|ck_names?|ck_materials?|对照品种|对照材料|对照)\s*[:：=]\s*(.+)'
   design:
     type: string
     required: true
@@ -69,11 +125,43 @@ inputs:
     patterns:
       - '(?i)\b(rcbd|randomi[sz]ed complete block)\b'
       - '随机(?:完全)?区组|完全随机区组'
+  design_label:
+    type: string
+    required: false
+    title: 设计标识
+    question: 可选。用于输出文件命名和区分不同轮次设计，例如 黄淮海。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases:
+      - design_label
+      - design_name
+      - trial_label
+      - trial_name
+      - project_label
+      - project_name
+      - output_label
+      - region
+      - area
+      - 设计标识
+      - 设计名称
+      - 试验名称
+      - 项目名称
+      - 输出标识
+      - 区域
+    patterns:
+      - '(?:设计标识|设计名称|试验名称|项目名称|输出标识|区域|region|area|design_label|project_name)\s*[:：=]\s*([A-Za-z0-9_.\-\u4e00-\u9fff]{2,40})'
   blocks:
     type: integer
-    required: true
+    required: false
     title: 区组数/重复数
-    question: 请提供 RCBD 的区组数/重复数，例如 3 个重复。
+    question: 可选。RCBD 的区组数/重复数，未指定时默认 3 个重复。
     source:
       allowed:
         - query
@@ -84,6 +172,7 @@ inputs:
         - user_text
         - metadata
     aliases: [blocks, reps, replications, 区组数, 区组, 重复数, 重复]
+    default: 3
     patterns:
       - '(?:blocks?|reps?|replications?|区组数|区组|重复数|重复)\s*[:：=]?\s*(\d+)'
       - '(\d+)\s*(?:个|次)?(?:区组|重复|rep|reps|blocks?)'
@@ -115,6 +204,21 @@ inputs:
     validation:
       min: 1
       max: 50
+  site_names:
+    type: string
+    required: false
+    title: 试点名称
+    question: 如果需要指定试点名称，请按顺序提供名称，例如：公主岭市、榆树市、农安县。
+    source:
+      allowed:
+        - query
+        - current_user_message
+        - resolved_user_message
+        - recent_user_message
+        - text
+        - user_text
+        - metadata
+    aliases: [site_names, site_labels, site_name_list, 试点名称, 试验地点名称, 地点名称]
   planter:
     type: string
     required: false
@@ -169,4 +273,4 @@ inputs:
         - metadata
     aliases: [run_id, run-id, 运行名称, 任务名]
 constraints:
-  - any_of: [material_data, input_data]
+  - any_of: [material_data, input_data, material_names]

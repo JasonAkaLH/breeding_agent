@@ -458,7 +458,37 @@ def input_path_from_value(value: Any, work_dir: Path) -> Path | None:
     return None
 
 
+def input_from_resource_manifest(payload: Mapping[str, Any]) -> Path | None:
+    raw = payload.get("resource_manifest_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    manifest_path = Path(raw).expanduser()
+    if not manifest_path.exists() or not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    files = manifest.get("files") if isinstance(manifest, Mapping) else None
+    if not isinstance(files, list):
+        return None
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        mount_path = item.get("mount_path")
+        if not isinstance(mount_path, str) or not mount_path.strip():
+            continue
+        candidate = Path(mount_path).expanduser()
+        if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in SUPPORTED_EXTENSIONS:
+            return candidate.resolve()
+    return None
+
+
 def resolve_input_file(payload: Mapping[str, Any], work_dir: Path) -> Path | None:
+    manifest_input = input_from_resource_manifest(payload)
+    if manifest_input is not None:
+        return manifest_input
+
     artifacts = payload.get("uploaded_artifacts")
     if isinstance(artifacts, list | tuple):
         for item in artifacts:
