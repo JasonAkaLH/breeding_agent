@@ -11,6 +11,7 @@
 | `docs/prd/backend/prompt-envelope/` | 大语言模型提示词信封、动态上下文预算、KV Cache 友好组装与多大语言模型调用档案分步 PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/table-upload-normalization/` | 表格上传编码兼容、表头技术清洗、Excel sheet 选择与 prompt-safe 摘要上限分步 PRD | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件的本地持久化、`index.md` 物化索引、Skill workspace manifest 与删除清理语义 | MVP 已落地；后续补 LLM/OCR 描述流水线 |
+| `docs/prd/backend/21-聊天式会话文件智能选择PRD.md` | 基于用户 query、Skill 文件需求契约、文件元数据和 recent usage 的聊天式文件自动定位与 interrupt 消歧 | 设计已确认，待实施 |
 | `docs/prd/backend/skill-contract-progressive-disclosure/` | Skill Contract v2-only 渐进式披露、显式 skill.* 执行、input schema、ResourceService 与 v1 manifest 路径删除 | v2-only 复审完成；待实施 |
 | `docs/prd/MCP/` | MCP Runtime 长任务流式 SSE、Rust sidecar 联合改造 Phase PRD、MCP Client 四版本兼容 PRD，以及官方 SDK 引入轨道 | Phase 拆分已冻结；client 四版本兼容与官方 SDK PRD 已新增 |
 | `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | v1 业务对话台与发送时上传文件专题已落地 |
@@ -34,6 +35,7 @@
 - 表格上传编码兼容与表头规范化分步 PRD：`docs/prd/backend/table-upload-normalization/README.md`。
 - 表格上传编码兼容与表头规范化历史兼容入口：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
 - 对话文件本地资源文件系统 PRD：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`。
+- 聊天式会话文件智能选择 PRD：`docs/prd/backend/21-聊天式会话文件智能选择PRD.md`。
 - PostgreSQL State Platform 防死锁与写队列 Phase PRD：`docs/prd/backend/postgresql-state-platform/README.md`。
 - 大语言模型提示词信封分步 PRD：`docs/prd/backend/prompt-envelope/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`。
