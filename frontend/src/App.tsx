@@ -1968,8 +1968,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       <Layout className="app-shell app-chat-layout">
         <aside className="app-sidebar" aria-label="历史会话侧边栏">
           <div className="sidebar-brand">
-            <Typography.Title level={3} className="app-title">小奥Agent</Typography.Title>
-            <Typography.Text type="secondary">AI育种助手</Typography.Text>
+            <Typography.Title level={3} className="app-title">育种助手</Typography.Title>
+            <Typography.Text type="secondary">SeedPilot</Typography.Text>
           </div>
           <ConversationHistoryPanel
             conversations={conversationHistory}
@@ -2236,7 +2236,7 @@ function LoginPage({ api, onLogin }: { api: ApiClient; onLogin: (result: AuthTok
 
   return (
     <Layout className="app-shell auth-shell">
-      <Card className="login-card" title="登录小奥Agent">
+      <Card className="login-card" title="登录育种助手">
         <Space direction="vertical" size="middle" className="login-form">
           {error ? <Alert type="error" showIcon message={error} /> : null}
           <Input
@@ -2806,7 +2806,7 @@ function MessageBubble({
     && Boolean(message.content.trim());
   return (
     <div className={className}>
-      <div className="message-meta">{message.role === 'user' ? '你' : '主代理'}</div>
+      <div className="message-meta">{message.role === 'user' ? '你' : 'SeedPilot'}</div>
       {message.role === 'assistant' ? <SkillStatusLines statuses={message.skillStatuses} /> : null}
       <div className="message-body">
         {shouldShowReasoning ? (

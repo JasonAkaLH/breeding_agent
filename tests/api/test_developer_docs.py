@@ -19,7 +19,7 @@ class DeveloperDocsAPITest(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
-        self.assertIn("小奥 Agent API 文档", response.text)
+        self.assertIn("育种助手 API 文档", response.text)
         self.assertIn("Authorization: Bearer", response.text)
         self.assertIn("/api/v1/auth/login", response.text)
         self.assertIn("/api/v1/auth/logout", response.text)

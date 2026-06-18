@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### 2026-06-18
+
+- 产品命名统一为“育种助手 / SeedPilot”：主 Agent 身份提示词拆分为 `[身份设定]` 与 `[行为准则]`，前端登录页、侧边栏标题、助手消息标识、API 文档标题与运行时重编排/soft-skill 角色文案同步去除“小奥 Agent/主代理”外显称呼；侧边栏品牌副标题从“AI育种助手”改为英文名 `SeedPilot`，并以原开发环境 tag 重新构建/推送 `breeding-agent-frontend-dev:0.1.19`；`docker_cmd.md` 版本号不变。License Requirement：前端文案/提示词/镜像发布变更，无依赖/许可变更，未触发 cargo-deny 风险。
+- Docker 开发环境镜像发布为 `0.1.19`：已构建并推送 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.19` 与 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.19`，`docker_cmd.md` 开发环境启动命令同步改为 `0.1.19`；生产镜像版本仍保持 `0.1.18`。License Requirement：镜像发布/运维文档变更，无依赖/许可变更，未触发 cargo-deny 风险。
+- Docker 开发/生产启动命令修正网络隔离：前端 nginx 固定反代 Docker DNS `backend:8000`，因此开发前端不能与生产前端共用同一 Docker network；`docker_cmd.md` 已改为生产使用 `breeding-agent-net` + 生产后端别名 `backend`，开发使用独立 `breeding-agent-dev-net` + 开发后端别名 `backend`，同一 PostgreSQL 容器分别以 `postgres` 别名接入两个网络，避免开发前端 `31999` 串到生产后端 `biobin_db`。License Requirement：文档/运维命令变更，无依赖/许可变更，未触发 cargo-deny 风险。
+- 远端 PostgreSQL 开发库已独立为 `biobin_dev`：保留正式环境 `biobin_db`，按 `biobin_db` schema-only 初始化开发库结构，不复制生产数据；生产/开发后端 Docker 启动命令均显式传 `MAF_ENV`、`MAF_STATE_STORE_BACKEND` 与 `MAF_POSTGRES_STATE_DSN`，分别指向 `biobin_db` / `biobin_dev`，端口使用生产后端 `51888` / 前端 `51999`、开发后端 `31888` / 前端 `31999`，容器、宿主机端口、runtime volume 与 Docker network 均与生产环境分离。License Requirement：文档/运维配置变更，无依赖/许可变更，未触发 cargo-deny 风险。
+
 ### 2026-06-17
 
 - 文档导航新增 Future Work 索引：`docs/AGENTS.md` 新增已成文但未实施 / 未完成 PRD 列表，当前记录聊天式会话文件智能选择 PRD 与 Skill 运行闭环 Workbench 总纲 PRD；根目录 `AGENTS.md` 的 `docs/` 入口同步提示未完成 Future work 参考 `docs/AGENTS.md`，并在 `.gitignore` 为该文档索引保留跟踪例外。License Requirement：文档导航变更，无依赖/许可变更，未触发 cargo-deny 风险。
@@ -178,7 +185,7 @@
 - Authorization-only 内部登录态父计划与测试规格完成 document-perfectization 复审：在 `.omx/plans/prd-20260525-authorization-username-auth.md` 与 `.omx/plans/test-spec-20260525-authorization-username-auth.md` 中补充 CP-0 至 CP-5 可验证检查点、并行边界、阶段性 targeted test gate 与禁止用 Cookie/body username fallback 过门禁的规则；本轮仍未改运行时代码。
 - Authorization-only 内部登录态实施计划与测试规格已通过 `$plan` 落地：新增 `.omx/plans/prd-20260525-authorization-username-auth.md` 与 `.omx/plans/test-spec-20260525-authorization-username-auth.md`，明确 TDD 分层步骤、username owner 迁移、SSE token 当前性、前端 localStorage、文档更新、验证命令与 Team/Ultragoal 后续执行建议；本轮仍未改运行时代码。
 - Authorization-only 内部登录态设计完成 document-perfectization 审查：加固 `docs/superpowers/specs/2026-05-25-authorization-username-auth-design.md`，补齐当前状态证据、受影响系统、核心决策、NFR、下线旧认证接口、username 字段迁移、rollout/rollback、风险假设与验收矩阵；本轮仅文档审查，不改运行时代码。
-- 本周工作周报更新：重写根目录 `本周工作周报.md`，汇总 2026-05-18 至 2026-05-22 小奥 Agent 主项目与 `/Users/yinpeihai/Code_workspace/ocr_mcp` OCR MCP 项目的本周交付、验证和下周风险。
+- 本周工作周报更新：重写根目录 `本周工作周报.md`，汇总 2026-05-18 至 2026-05-22 育种助手 主项目与 `/Users/yinpeihai/Code_workspace/ocr_mcp` OCR MCP 项目的本周交付、验证和下周风险。
 - Docker 部署文档补充数据持久化说明：明确 `/app/runtime` 挂载到 Docker named volume `breeding-agent-runtime`，升级镜像/重建容器不删除 volume 即可保留 SQLite、audit 与 artifact 数据。
 - Docker 部署端口调整：backend 宿主机端口改为 `51888`，frontend 宿主机端口改为 `51999`，并同步 `docker_cmd.md`、Compose 与 README 说明。
 - Docker 远端部署命令补充：根目录部署命令文件调整为 `docker_cmd.md`，以 Markdown 文档分行列出 pull、network/volume、docker run、状态查看、日志与停止命令。
