@@ -2639,9 +2639,13 @@ function InterruptQuestionText({ interrupt }: { interrupt: PendingInterrupt }) {
 }
 
 function isNaturalLanguageInterrupt(requiredFields: Record<string, unknown>): boolean {
-  const resolution = requiredFields._sql_query_resolution;
-  if (!resolution || typeof resolution !== 'object') return false;
-  return (resolution as { presentation?: unknown }).presentation === 'natural_language';
+  return hasNaturalLanguagePresentation(requiredFields._sql_query_resolution)
+    || hasNaturalLanguagePresentation(requiredFields._file_selection);
+}
+
+function hasNaturalLanguagePresentation(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return (value as { presentation?: unknown }).presentation === 'natural_language';
 }
 
 function InterruptComposerStatus({ onCancel, cancelling }: { onCancel: () => void; cancelling: boolean }) {

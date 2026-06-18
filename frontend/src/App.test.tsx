@@ -2770,6 +2770,84 @@ describe('App', () => {
     })));
   });
 
+  it('renders file-selection ambiguity as natural-language interrupt with replacement upload enabled', async () => {
+    const waitingGraph = {
+      task_id: 'task-1',
+      nodes: [
+        { node_id: 'task-1:file_selection', capability_id: 'main_agent.respond', status: 'waiting_for_input', criticality: 'required', dependency_type: 'hard', assigned_instance_id: null, started_at: null, finished_at: null },
+      ],
+      edges: [],
+    };
+    const api = makeApi({
+      getTaskGraph: vi.fn(async () => waitingGraph),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'interrupt-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'task-1:file_selection',
+          question: '我找到了多个可能的数据文件：\n\n1. materials.csv（upl-a1b2，120 行）\n2. materials.csv（upl-c3d4，2000 行）\n\n你可以直接回复 upload_id，或说“用 120 行那个”。',
+          reason_code: 'file_selection_ambiguous',
+          required_fields: {
+            _file_selection: {
+              version: 1,
+              type: 'conversation_file_selection',
+              presentation: 'natural_language',
+              allow_multiple: false,
+            },
+            file_selection_answer: {
+              type: 'text',
+              description: '请说明要使用哪个文件。',
+            },
+            replacement_file: {
+              type: 'artifact',
+              required: false,
+              accepts_upload: true,
+              description: '如候选文件都不合适，可上传新文件并说明“用这个”。',
+            },
+          },
+          status: 'open',
+        }],
+      })),
+      submitMessage: vi.fn(async () => ({ conversation_id: 'conv-test', message_id: 'msg-file-select', task_id: 'task-1', status: 'accepted', action: 'interrupt_resumed', interrupt_id: 'interrupt-1' })),
+    });
+    await renderAuthed(<App
+      apiClient={api}
+      eventSourceFactory={makeSequencedEventSourceFactory([
+        [
+          event('task.accepted', {}, 'accepted-before-file-selection'),
+          event('node.waiting_for_input', { interrupt_id: 'interrupt-1' }, 'waiting-file-selection', 'task-1:file_selection'),
+        ],
+        [event('task.accepted', {}, 'accepted-after-file-selection')],
+      ])}
+      waitingInputCheckDelayMs={1}
+    />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '继续用刚才的数据' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
+    expect(await screen.findByText(/我找到了多个可能的数据文件/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/你可以直接回复 upload_id/)).toBeInTheDocument();
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
+    expect(uploadInput).not.toBeDisabled();
+
+    const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'replacement.csv', { type: 'text/csv' });
+    fireEvent.change(uploadInput, { target: { files: [file] } });
+    await screen.findByText(/replacement.csv/);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: expect.stringMatching(/^conv-/),
+      content: '用这个',
+      mode: 'chat',
+      clientMessageId: expect.stringMatching(/^user-/),
+      metadata: { interrupt_id: 'interrupt-1', upload_ids: ['upl-1'] },
+    })));
+  });
+
   it('renders sheet selection interrupt and submits upload_sheet_selections only', async () => {
     const waitingGraph = {
       task_id: 'task-1',
