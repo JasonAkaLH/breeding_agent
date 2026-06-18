@@ -79,7 +79,7 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
 
 async function renderAuthed(ui: ReactElement) {
   render(ui);
-  await screen.findByText('小奥Agent');
+  await screen.findByText('育种助手');
 }
 
 async function openConversationFilesDrawer(expectedFileCount?: number) {
@@ -197,13 +197,13 @@ describe('App', () => {
     });
     render(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
-    expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
+    expect(await screen.findByText('登录育种助手')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
     fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
 
     await waitFor(() => expect(api.login).toHaveBeenCalledWith({ username: 'alice' }));
     expect(localStorage.getItem('maf.frontend.access_token')).toBe('maf_tok_login');
-    expect(await screen.findByText('小奥Agent')).toBeInTheDocument();
+    expect(await screen.findByText('育种助手')).toBeInTheDocument();
     expect(screen.queryByText('user: alice')).not.toBeInTheDocument();
   });
 
@@ -229,6 +229,8 @@ describe('App', () => {
 
     expect(within(workspace).queryByText('业务对话')).not.toBeInTheDocument();
     expect(within(workspace).queryByLabelText('任务进程悬浮胶囊')).not.toBeInTheDocument();
+    expect(within(sidebar).getByText('SeedPilot')).toBeInTheDocument();
+    expect(within(sidebar).queryByText('AI育种助手')).not.toBeInTheDocument();
     expect(within(sidebar).getByText('历史会话')).toBeInTheDocument();
     const historyRefreshButton = within(sidebar).getByRole('button', { name: '刷新历史会话' });
     expect(historyRefreshButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '刷新历史会话');
@@ -386,7 +388,10 @@ describe('App', () => {
 
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith('conv-history'));
     expect(await screen.findByText('以前的问题')).toBeInTheDocument();
-    expect(await screen.findByText('以前的回答')).toBeInTheDocument();
+    const assistantAnswer = await screen.findByText('以前的回答');
+    expect(assistantAnswer).toBeInTheDocument();
+    const assistantBubble = assistantAnswer.closest('.message-assistant') as HTMLElement;
+    expect(within(assistantBubble).getByText('SeedPilot')).toBeInTheDocument();
   });
 
   it('shows an icon-only copy action below completed assistant replies and copies their text', async () => {
@@ -634,7 +639,7 @@ describe('App', () => {
 
     render(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
 
-    expect(await screen.findByText('登录小奥Agent')).toBeInTheDocument();
+    expect(await screen.findByText('登录育种助手')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('用户名'), { target: { value: 'alice' } });
     fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }));
 

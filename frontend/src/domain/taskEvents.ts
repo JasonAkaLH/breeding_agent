@@ -500,7 +500,7 @@ function nodeActivity(payload: Record<string, unknown>): { capabilityId: string;
 function capabilityLabel(capabilityId: string, payload: Record<string, unknown> = {}): string {
   const skillName = typeof payload.skill_name === 'string' ? payload.skill_name.trim() : '';
   if (skillName) return skillName;
-  if (capabilityId.startsWith('main_agent.')) return '主代理';
+  if (capabilityId.startsWith('main_agent.')) return 'SeedPilot';
   if (capabilityId.startsWith('skill.')) return capabilityId;
   return capabilityId || '能力';
 }

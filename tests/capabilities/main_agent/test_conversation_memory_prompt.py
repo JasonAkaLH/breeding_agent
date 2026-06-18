@@ -121,7 +121,10 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
             self,
             prompt,
             [
-                "你是小奥 Agent 的主代理。",
+                "[身份设定]",
+                "你是育种助手（SeedPilot），面向作物育种科研与生产场景的数据分析、试验设计、品种查询和文件处理助手。",
+                "[行为准则]",
+                "你需要直接回答用户问题；如果注入了 Skill 指令，优先遵循 Skill 的工作流和输出要求。",
                 "# 文件和下载链接硬约束",
                 "# 对话记忆上下文",
                 "# 上传文件上下文（已脱敏）",
@@ -210,6 +213,8 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
             rendered.prompt,
             [
                 "# 主代理稳定系统契约",
+                "[身份设定]",
+                "[行为准则]",
                 "# 文件和下载链接硬约束",
                 "# 对话记忆上下文",
                 "# 必需工具结果与 artifact 上下文",
@@ -291,6 +296,8 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
             rendered.prompt,
             [
                 "# 主代理稳定系统契约",
+                "[身份设定]",
+                "[行为准则]",
                 "# 文件和下载链接硬约束",
                 "# 已选择工具公开档案",
                 "# 工具输入 schema",

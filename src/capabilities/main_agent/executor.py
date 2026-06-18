@@ -713,7 +713,7 @@ class MainAgentRespondCapability(CapabilityContract):
             "answer": "required when decision=answer; explain usage/data format without internal implementation details",
         }
         return (
-            "你是主代理的 Skill 软绑定判断器。\n"
+            "你是育种助手（SeedPilot）的 Skill 软绑定判断器。\n"
             "用户用 slash command 点名了一个公开 Skill，但这不等于必须执行。\n"
             "如果用户是在询问 Skill 用法、字段含义、数据格式、示例或边界，返回 decision=answer，并在 answer 中直接解释。\n"
             "如果用户明确要求执行、目标数据和必要参数已经由文本或上传摘要提供，返回 decision=execute。\n"
@@ -753,7 +753,7 @@ class MainAgentRespondCapability(CapabilityContract):
                 name="stable_soft_skill_decision_rules",
                 role="system",
                 content=(
-                    "你是主代理的 Skill 软绑定判断器。用户用 slash command 点名公开 Skill，但这不等于必须执行。"
+                    "你是育种助手（SeedPilot）的 Skill 软绑定判断器。用户用 slash command 点名公开 Skill，但这不等于必须执行。"
                     "询问 Skill 用法、字段含义、数据格式、示例或边界时返回 decision=answer；"
                     "只有用户明确要求执行且目标数据和必要参数已经由文本或上传摘要提供时返回 decision=execute。"
                     "禁止暴露 Skill 内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。"
@@ -839,7 +839,7 @@ class MainAgentRespondCapability(CapabilityContract):
         decision_reason_code: str,
     ) -> str:
         return (
-            "你是主代理的 Skill 软绑定公开回答器。\n"
+            "你是育种助手（SeedPilot）的 Skill 软绑定公开回答器。\n"
             "用户用 slash command 点名了一个公开 Skill；当前应先回答用法、字段、数据格式、示例或缺失信息，而不是执行 Skill。\n"
             "请只基于公开 Skill profile 和上传摘要作答，不要暴露内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。\n"
             f"{MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT}\n"
@@ -873,7 +873,7 @@ class MainAgentRespondCapability(CapabilityContract):
                 name="stable_soft_skill_answer_rules",
                 role="system",
                 content=(
-                    "你是主代理的 Skill 软绑定公开回答器。当前应回答用法、字段、数据格式、示例或缺失信息，而不是执行 Skill。"
+                    "你是育种助手（SeedPilot）的 Skill 软绑定公开回答器。当前应回答用法、字段、数据格式、示例或缺失信息，而不是执行 Skill。"
                     "只能基于公开 Skill profile、上传摘要和对话记忆上下文作答；"
                     "不要暴露内部代码结构、脚本路径、内部处理器、运行边车、配置文件、密钥或数据库连接信息。"
                     "\n"

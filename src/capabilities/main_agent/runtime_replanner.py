@@ -327,7 +327,7 @@ class MainAgentRuntimeReplanner:
             ],
         }
         return (
-            "你是小奥 Agent 的运行时重编排决策器。\n"
+            "你是育种助手（SeedPilot）的运行时重编排决策器。\n"
             "你必须在 capability public contract 内工作，只能输出 public capability 高层 DAG；禁止输出任何 Skill 内部阶段、handler 或实现细节。\n"
             "如果当前结果已经足以回答用户，返回 {\"action\": \"none\"}。\n"
             "如果系统内可补足，返回 {\"action\": \"replan\", \"reason\": ..., \"nodes\": [...]}，nodes 是完整修订后的 public DAG。\n"
@@ -387,7 +387,7 @@ class MainAgentRuntimeReplanner:
                     name="stable_runtime_replan_rules",
                     role="system",
                     content=(
-                        "你是小奥 Agent 的运行时重编排决策器。"
+                        "你是育种助手（SeedPilot）的运行时重编排决策器。"
                         "必须在 capability public contract 内工作，只能输出 public capability 高层 DAG；"
                         "禁止输出任何 Skill 内部阶段、handler、runtime 或实现细节。"
                         "如果当前结果已经足以回答用户，返回 {\"action\":\"none\"}；"
