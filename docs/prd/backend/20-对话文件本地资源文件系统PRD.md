@@ -243,11 +243,11 @@ skill-run-xxxx/
 
 本次同步更新范围：
 
-- `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`
-- `.codex/skills/breeding-skill-builder/SKILL.md`
-- `.codex/skills/breeding-skill-builder/references/checklist.md`
-- `.codex/skills/breeding-skill-builder/references/migration.md`
-- `.codex/skills/breeding-skill-builder/references/templates.md`
+- `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`
+- `git@gitee.com:biobin/breeding-skill-builder.git` 的 `SKILL.md`
+- `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/checklist.md`
+- `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/migration.md`
+- `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/templates.md`
 
 ## 10. 删除与清理语义
 

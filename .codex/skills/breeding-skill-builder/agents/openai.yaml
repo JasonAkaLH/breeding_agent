@@ -1,4 +1,0 @@
-interface:
-  display_name: "Breeding Skill Builder"
-  short_description: "Build v2 backend Skill bundles for breeding_agent."
-  default_prompt: "Use $breeding-skill-builder to create or update a v2 backend Skill bundle for breeding_agent."

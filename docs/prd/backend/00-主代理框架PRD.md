@@ -223,7 +223,7 @@
 - 显式 `metadata.upload_ids` 仍优先；无显式 upload_ids 且触发文件需求时，selector 输出 `select_one` / `select_many` / `ambiguous` / `no_file_needed` / `no_usable_file` 结构化决策。
 - 多候选或低置信时复用现有 interrupt，使用 `file_selection_ambiguous` reason_code 和自然语言候选列表，不新增公开 API 或前端点选组件。
 - 候选与澄清必须包含文件名、`description_summary`、`upload_id`、上传时间；有 recent usage 时应展示最近使用情况。
-- 未来 Skill 文件需求必须由 contract/schema 的 `file_intent` / `file_selection` 或 `type: file/artifact/data` 等机器可读字段驱动，平台不得硬编码当前 Skill 名称；实施时必须同步更新 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`。
+- 未来 Skill 文件需求必须由 contract/schema 的 `file_intent` / `file_selection` 或 `type: file/artifact/data` 等机器可读字段驱动，平台不得硬编码当前 Skill 名称；实施时必须同步更新 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`。
 
 ### 5.16 Rust 化 Runtime 决策
 
@@ -231,7 +231,7 @@
 - `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust sidecar / kernel。
 - 优先 Rust 化确定性、安全敏感、并发敏感和可重放模块：`src/core/` contract、`src/lifecycle/` 状态机、`src/storage/` durable store、通用 Skill runtime trust gate、MCP protocol/runtime、artifact/upload/file safety。
 - LLM provider glue、FastAPI route、DTO、主代理 prompt 产品语义和前端 UI 不应整体 Rust 化；只在 sanitizer、token budget、大 payload 处理等热点处抽小 kernel。
-- Skill-owned Rust runtime 必须放在各自 Skill bundle 内部，并按 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md` 的 Rust 型 Skill runtime 限制适配框架 contract；框架不反向兼容某个 Skill 的任意 Rust 形态。
+- Skill-owned Rust runtime 必须放在各自 Skill bundle 内部，并按 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md` 的 Rust 型 Skill runtime 限制适配框架 contract；框架不反向兼容某个 Skill 的任意 Rust 形态。
 
 ## 6. 当前验收基线与归档证据
 

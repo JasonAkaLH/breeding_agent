@@ -12,7 +12,7 @@ skill/<skill-name>/
   references/*.md            # prompt-facing 按需资料
 ```
 
-约束与示例见仓库内 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`。
+约束与示例见独立 Skill 仓库 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`。
 
 说明：
 - 无 `skill.contract.yaml` 的 Skill 不注册、不执行、不进入 capability 列表。

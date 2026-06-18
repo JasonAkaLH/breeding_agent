@@ -2,7 +2,7 @@
 
 - **状态**：部分落地（`maf_skill_runtime` policy kernel/contract artifact 与 `native/proto/maf/skill/v1/` sandbox proto 基线已落地，Python manifest/execution facade 已消费 Rust-owned execution mode、默认执行模式、默认 answer_mode 与 x_runtime.rust metadata guard；`SkillSandboxService` Rust service kernel、`SkillSandboxGrpcService` tonic/prost binding 与 `maf-skill-sandbox` 二进制入口已开始承载 version / compatibility / readiness、client version range 校验、handler allowlist policy、loopback-only serve config、sandbox root 配置、相对 argv 执行、timeout、stdin 上限、stdout/stderr 并发有界 drain、`env_clear` 最小环境、Unix process-group cleanup、lingering descendant stdio bounded wait 与 path / symlink escape fail-closed；Python `SkillSandboxGrpcClient` 已可连接外部 Rust sandbox binary 并调用 `ValidatePolicy` / `ExecuteSandboxed` RPC，且已按 Rust contract 校验 client version range 并拒绝缺失/短头/截断/多余 h2c gRPC payload；`SkillPlatformHandlerRegistry` 在 `shadow` 下记录安全字段 / fingerprint / duration 组成的 Rust policy diff、在 `enforce` 下要求 Rust policy client 并 fail-closed 禁止 Python trust gate 放行，`SkillScriptRunner` enforce 下要求 Rust sandbox client 并 fail-closed 禁止 Python subprocess legacy fallback；Rust policy JSON bridge 与 Python 预构建 PyO3 module facade / contract gate 已落地并由 `MAF_SKILL_POLICY_PYO3_MODULE` 优先接入；`maf_skill_runtime_pyo3` PyO3 crate、`maturin` wheel build 与本地 import smoke、Ubuntu 22.04 x86_64 / Python 3.13 `manylinux_2_35` wheel CI 目标已落地；Skill Runtime artifact provenance / benchmark / shadow→enforce promotion / ops readiness / legacy decommission policy 已由 Rust contract 导出，并提供 Python fail-closed validator 作为进入 enforce 与下线 legacy 的证据门禁；Skill Sandbox binary 的 CI SBOM / provenance / manifest 上传口径、PRD04 evidence ledger / fail-closed 校验脚本与 `MAF_SKILL_SANDBOX_ARTIFACT_MANIFEST_PATH` / `MAF_SKILL_SANDBOX_ARTIFACT_ALLOWLIST_PATH` enforce artifact allowlist 门禁已接入；真实部署 release allowlist promotion、真实 benchmark / ops drill 证据、跨平台/容器级进程树清理强化、coverage/fuzz 长跑与 legacy 下线仍待完成）
 - **日期**：2026-05-14
-- **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` RUST-P0-005、RUST-P0-006、RUST-P1-004、8.2.3、9.4、9.7；`.codex/skills/breeding-skill-builder/references/Skill构建指南.md`
+- **来源基线**：`docs/prd/backend/16-Rust化Runtime模块评估PRD.md` RUST-P0-005、RUST-P0-006、RUST-P1-004、8.2.3、9.4、9.7；`git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`
 - **影响范围**：`src/integrations/agent_skills/`、`src/capabilities/skill_tool/`、Skill manifest、platform-service handler、Skill-owned `native/`
 
 ## 1. 问题陈述
@@ -108,7 +108,7 @@ Python SkillExecutor / Skill facade
 
 ## 7. Manifest 约定
 
-Rust metadata 示例必须与 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md` 保持一致：
+Rust metadata 示例必须与 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md` 保持一致：
 
 ```yaml
 x_runtime:

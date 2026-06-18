@@ -97,11 +97,6 @@ class SQLQuerySkillBundleOwnershipTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8", errors="ignore")
             if any(pattern in text for pattern in FORBIDDEN_DOC_SYSTEM_PATTERNS):
                 offenders.append(file_name)
-        for relative in (".codex/skills/breeding-skill-builder/references/Skill构建指南.md",):
-            path = REPO_ROOT / relative
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            if any(pattern in text for pattern in FORBIDDEN_DOC_SYSTEM_PATTERNS):
-                offenders.append(relative)
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8", errors="ignore")
         if any(pattern in changelog for pattern in FORBIDDEN_CHANGELOG_PATTERNS):
             offenders.append("CHANGELOG.md")

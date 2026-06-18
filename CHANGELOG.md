@@ -10,6 +10,7 @@
 
 ### 2026-06-18
 
+- 项目仓库取消跟踪 `.codex/skills/breeding-skill-builder/`：该 Skill 已改由独立仓库 `git@gitee.com:biobin/breeding-skill-builder.git` 承载，README、skill 目录说明与活动 PRD 引用同步改指独立仓库，避免 breeding_agent 远端继续保存误推送的 builder Skill 文件。License Requirement：文档/索引清理，无依赖/许可变更。
 - `Skill构建指南.md` 已作为 `breeding-skill-builder` 的 prompt-facing reference 恢复到 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`，并将 README、skill 目录说明与活动 PRD 引用补回到该新路径，避免根目录文档回流同时保留完整指南。License Requirement：文档/Skill reference 变更，无依赖/许可变更。
 - 根目录 `Skill构建指南.md` 已删除：当前项目级 Skill 构建约束与模板入口收敛到 `.codex/skills/breeding-skill-builder/`，同步更新 README、skill 目录说明、活动 PRD 引用与 sql-query ownership 测试，避免继续指向已删除指南。License Requirement：文档/测试引用清理，无依赖/许可变更。
 - 文件上传历史消息 PRD 已提升为正式后端 PRD 21：`docs/superpowers/specs/2026-06-18-file-upload-history-message-design.md` 迁入 `docs/prd/backend/21-文件上传历史消息PRD.md`，原聊天式会话文件智能选择与 Skill 运行闭环 Workbench 总纲顺延为 22/23，并同步 `docs/prd/README.md`、`docs/prd/backend/00-主代理框架PRD.md` 与 `docs/AGENTS.md` Future Work 索引。License Requirement：文档重排/索引变更，无依赖/许可变更。

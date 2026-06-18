@@ -169,4 +169,4 @@ Smoke 验收重点：
 
 ## 11. Skill 构建指南
 
-面向 OMX `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 本地 runtime 能力。
+面向 OMX `skill-creator` 与后端可加载 Skill 的具体构建约束，见 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`。该指南以当前实现为准，明确支持的 frontmatter 字段、触发匹配、prompt-only Skill、受控 Python auto-run 脚本、JSON IO、路径限制与本系统不支持的完整 本地 runtime 能力。
