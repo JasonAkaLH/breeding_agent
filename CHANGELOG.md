@@ -10,6 +10,7 @@
 
 ### 2026-06-18
 
+- 根目录 `Skill构建指南.md` 已删除：当前项目级 Skill 构建约束与模板入口收敛到 `.codex/skills/breeding-skill-builder/`，同步更新 README、skill 目录说明、活动 PRD 引用与 sql-query ownership 测试，避免继续指向已删除指南。License Requirement：文档/测试引用清理，无依赖/许可变更。
 - 文件上传历史消息 PRD 已提升为正式后端 PRD 21：`docs/superpowers/specs/2026-06-18-file-upload-history-message-design.md` 迁入 `docs/prd/backend/21-文件上传历史消息PRD.md`，原聊天式会话文件智能选择与 Skill 运行闭环 Workbench 总纲顺延为 22/23，并同步 `docs/prd/README.md`、`docs/prd/backend/00-主代理框架PRD.md` 与 `docs/AGENTS.md` Future Work 索引。License Requirement：文档重排/索引变更，无依赖/许可变更。
 - 会话文件上下文从 task 绑定改为 conversation 可访问：`ApiRuntime` 现在在每轮消息和 interrupt resume 前解析当前会话全部 active uploads，并把 prompt-safe `uploaded_artifacts` 与脚本用 `skill_artifacts` 注入执行 metadata；显式 `metadata.upload_ids` 只保留为本轮 provenance/task attachment，不再限制 Skill/主代理只能看本轮附件。多 sheet 选择会持久回写 conversation file resource，后续轮次无需重新选择；删除文件与跨会话 upload 继续 fail-closed。同步调整文件 selector：当会话已有 active 文件时不再额外阻塞选择，只有无 active 文件且确实需要文件时进入澄清。新增上传、pending Skill slot、file selector 回归与前端 typecheck/vitest 联调验证。License Requirement：代码/测试变更，无新增依赖/许可变更，未触发 cargo-deny 风险。
 - 聊天式会话文件智能选择补齐历史 Excel 原始文件名匹配：selector candidate 同时保留用户可见原始文件名与执行用归一化文件名，确定性选择和 interrupt 回复均可按 `.xlsx` 原名或“第一份/第二份”序号定位旧上传文件，避免历史会话引用命中 `upload.csv/20.csv` 后漏绑任务附件导致 Skill 读取空材料表；新增中文原始文件名与初始消息序号多候选回归。License Requirement：代码/测试变更，无新增依赖/许可变更，未触发 cargo-deny 风险。

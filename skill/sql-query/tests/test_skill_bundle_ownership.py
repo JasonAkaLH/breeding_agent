@@ -92,7 +92,7 @@ class SQLQuerySkillBundleOwnershipTest(unittest.TestCase):
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 if any(pattern in text for pattern in FORBIDDEN_DOC_SYSTEM_PATTERNS):
                     offenders.append(rel)
-        for file_name in ("README.md", "AGENTS.md", "Skill构建指南.md"):
+        for file_name in ("README.md", "AGENTS.md"):
             path = REPO_ROOT / file_name
             text = path.read_text(encoding="utf-8", errors="ignore")
             if any(pattern in text for pattern in FORBIDDEN_DOC_SYSTEM_PATTERNS):

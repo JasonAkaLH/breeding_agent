@@ -243,7 +243,7 @@ skill-run-xxxx/
 
 本次同步更新范围：
 
-- `Skill构建指南.md`
+- `.codex/skills/breeding-skill-builder/`
 - `.codex/skills/breeding-skill-builder/SKILL.md`
 - `.codex/skills/breeding-skill-builder/references/checklist.md`
 - `.codex/skills/breeding-skill-builder/references/migration.md`

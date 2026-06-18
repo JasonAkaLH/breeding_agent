@@ -8,11 +8,10 @@
 |---|---|
 | `AGENTS.md` | 仓库级 AI Agent 协作、编码、测试与文档约束。 |
 | `CHANGELOG.md` | 仓库级变更日志；开始任何分析、设计、编码或文档修改前应先阅读最近条目。 |
-| `Skill构建指南.md` | 项目级 Skill 构建、manifest、脚本执行与产物约束。 |
 | `requirements.txt` | `multi_agent` Conda 环境依赖快照。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/` 其他文件 | Capability 接入指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
-| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，具体构建约束见 `Skill构建指南.md`。 |
+| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，构建约束与模板由 `.codex/skills/breeding-skill-builder/` 维护。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |

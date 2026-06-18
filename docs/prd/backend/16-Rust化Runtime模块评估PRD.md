@@ -364,7 +364,7 @@ Rust workspace 目录命名已冻结：主体框架 Rust native workspace 使用
 - RUST-FR-063：Rust adapter 不得读取未授权 secret、完整环境变量、任意本地路径或未 allowlist 的平台服务。
 - RUST-FR-064：adapter 输出必须回到标准 Skill output / artifact / event / audit contract；不得自定义下载接口、事件通道或前端专属协议。
 - RUST-FR-065：PyO3、native binary、sidecar adapter 必须共享同一 Rust core 与 contract tests，不得复制业务逻辑。
-- RUST-FR-066：Skill manifest 中的 Rust metadata 必须遵循 `Skill构建指南.md` 的 `x_runtime.rust` 约定；adapter、contract_version 或构建产物未被 runtime allowlist 支持时必须 fail closed。
+- RUST-FR-066：Skill manifest 中的 Rust metadata 必须遵循 `.codex/skills/breeding-skill-builder/` 的 `x_runtime.rust` 约定；adapter、contract_version 或构建产物未被 runtime allowlist 支持时必须 fail closed。
 - RUST-FR-067：Skill 请求执行路径不得触发 `cargo build`、`cargo run`、依赖下载、动态链接任意本地路径或启动未注册 sidecar。
 
 

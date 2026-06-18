@@ -74,7 +74,7 @@ scripts/ 或 runtime/       # 实际执行实现
 
 | 证据 | 当前行为 |
 | --- | --- |
-| `Skill构建指南.md` | 当前把 `capability_id`、`public_usage`、`parameters`、`scripts`、`execution` 等都列为 `SKILL.md` frontmatter 字段。 |
+| `.codex/skills/breeding-skill-builder/` | 当前把 `capability_id`、`public_usage`、`parameters`、`scripts`、`execution` 等都列为 `SKILL.md` frontmatter 字段。 |
 | 系统 `skill-creator/SKILL.md` | 标准 Codex Skill 只要求 `name` / `description` frontmatter；正文用于 instructions/resources，强调 progressive disclosure。 |
 | `src/integrations/agent_skills/parser.py` | 只解析 `SKILL.md` frontmatter；`parameters` / `scripts` / `outputs` 来自顶部 YAML；正文路径索引不会被 runtime 自动读取。 |
 | `src/integrations/agent_skills/parameters.py` | `SkillParameterSpec.required` 当前是全局参数 required，不能表达按 schema 的 required_now。 |
@@ -147,7 +147,7 @@ scripts/ 或 runtime/       # 实际执行实现
 | 风险 | 控制 |
 | --- | --- |
 | clean cutover 后项目级 Skill 暂时不可用 | 06 要求 field-design、field-analysis、rice-genie、OCR、SQLQuery 全量迁移后才算专题完成。 |
-| 用户自定义旧 Skill 不再注册 | 07 在 `Skill构建指南.md` 和 API 文档明确 v2-only 规则，并提供 v2 模板。 |
+| 用户自定义旧 Skill 不再注册 | 07 在 `.codex/skills/breeding-skill-builder/` 和 API 文档明确 v2-only 规则，并提供 v2 模板。 |
 | schema selector 误选导致错补槽或错执行 | 02/05 要求 selected schema 持久化，低置信或 ambiguous 只补 schema selector，不执行 entrypoint。 |
 | 默认可读策略泄漏内部实现或 secret | 03 以硬黑名单、路径边界、audience policy、脱敏和审计 fail closed。 |
 | 主代理继续走隐式 auto-run | 04 先保证 v2 soft binding 不调用旧 auto-run；07 删除或禁用旧 auto-run 生产路径，执行请求必须进入 `skill.*` node。 |
