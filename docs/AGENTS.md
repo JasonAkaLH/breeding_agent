@@ -17,5 +17,6 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `prd/backend/21-聊天式会话文件智能选择PRD.md` | 设计已确认，待实施 | 实现平台级 `ConversationFileSelector`、`file_selection` / `file_intent` 契约扩展、interrupt 消歧和 `breeding-skill-builder` 同步。 |
-| `prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 总体设计稿，待拆分阶段实施 PRD | 拆分并实施 Workbench 内部 capability、固定 DAG MVP、确定性 runtime replanner 与 contract / policy 驱动策略。 |
+| `prd/backend/21-文件上传历史消息PRD.md` | 设计已确认，待实施 | 实现上传成功即写入 `file_upload` 历史消息、public system message allowlist、deleted 文件不可复用约束、`index.md` 强一致与前端历史卡片。 |
+| `prd/backend/22-聊天式会话文件智能选择PRD.md` | 设计已确认，待实施 | 实现平台级 `ConversationFileSelector`、`file_selection` / `file_intent` 契约扩展、interrupt 消歧和 `breeding-skill-builder` 同步。 |
+| `prd/backend/23-Skill运行闭环Workbench总纲PRD.md` | 总体设计稿，待拆分阶段实施 PRD | 拆分并实施 Workbench 内部 capability、固定 DAG MVP、确定性 runtime replanner 与 contract / policy 驱动策略。 |

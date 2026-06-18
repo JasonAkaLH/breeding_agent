@@ -1,7 +1,7 @@
-# File Upload History Message Design
+# 文件上传历史消息 PRD
 
 日期：2026-06-18
-状态：Reviewed — approved for implementation planning
+状态：设计已确认，待实施
 
 ## 背景
 
