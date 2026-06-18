@@ -13,6 +13,9 @@ AGENTS.md
 /config.yaml
 /mcp_server_config.json
 
+# Local deployment commands (may contain private DSNs/secrets)
+/docker_cmd.md
+
 # Skill runtime artifacts
 /skill/**/outputs/
 /skill/ocr/config.yaml
