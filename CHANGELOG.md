@@ -10,6 +10,7 @@
 
 ### 2026-06-18
 
+- 聊天式会话文件智能选择补齐历史 Excel 原始文件名匹配：selector candidate 同时保留用户可见原始文件名与执行用归一化文件名，确定性选择和 interrupt 回复均可按 `.xlsx` 原名或“第一份/第二份”序号定位旧上传文件，避免历史会话引用命中 `upload.csv/20.csv` 后漏绑任务附件导致 Skill 读取空材料表；新增中文原始文件名与初始消息序号多候选回归。License Requirement：代码/测试变更，无新增依赖/许可变更，未触发 cargo-deny 风险。
 - `docker_cmd.md` 已从 Git 跟踪移除并加入 `.gitignore`：后续本地 Docker 启动命令/DSN 不再推送到远端；远端文件将在本次提交推送后删除。License Requirement：Git 跟踪/忽略规则与文档变更，无依赖/许可变更。
 - 聊天式会话文件智能选择 PRD21 完成平台实现：新增 metadata-only `src/api/file_selection.py` 选择/消歧逻辑与 `file_selection_runtime.py` orchestration mixin，`ApiRuntime` 在无显式 `metadata.upload_ids` 时支持 disabled/shadow/enforce rollout、单文件高置信自动绑定、自然语言 `file_selection_ambiguous` interrupt、upload_id/序号/新上传恢复与既有 sheet-selection 链路；StoragePort/SQLite 增加会话级 task input attachment 聚合；Skill contract/schema 解析新增 `file_intent` / `file_selection` 并传播到 public profile/tool schema，selector candidate 仅暴露 metadata-only 结构字段、不进入文件正文/路径/storage_key，并同步 `breeding-skill-builder` 模板、清单和 `Skill构建指南.md`。联调验证覆盖 API 上传/消息/interrupt/resume/附件绑定、sheet-selection、Skill parser/resource/profile、前端自然语言 interrupt、typecheck/build。License Requirement：代码/测试/文档变更，无新增依赖/许可变更，未触发 cargo-deny 风险。
 - 聊天式会话文件智能选择 PRD 完成 document-perfectization 加固：明确无 active 文件时普通问答不触发 selector、但明确需要文件时进入 `no_usable_file/no_files_in_conversation` 澄清；补齐 `FileRequirementProfile` 归一化优先级、V1 enforce 默认只自动绑定高置信 `select_one` 且 `select_many` 先走澄清/后续灰度，并同步本地 ralplan 计划与测试规格的 required-file/no-active-files、profile resolution order、guarded multi-select 和 public API contract 验证口径。License Requirement：文档/计划变更，无依赖/许可变更，未触发 cargo-deny 风险。

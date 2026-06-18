@@ -57,6 +57,8 @@ class RecentFileUsage:
 class ConversationFileCandidate:
     upload_id: str
     filename: str
+    original_filename: str = ""
+    normalized_filename: str = ""
     content_type: str = ""
     file_type: str = ""
     size_bytes: int = 0
@@ -72,6 +74,8 @@ class ConversationFileCandidate:
         payload: dict[str, Any] = {
             "upload_id": self.upload_id,
             "filename": self.filename,
+            "original_filename": self.original_filename,
+            "normalized_filename": self.normalized_filename,
             "content_type": self.content_type,
             "file_type": self.file_type,
             "size_bytes": self.size_bytes,
@@ -185,7 +189,9 @@ def candidate_from_resource(
 ) -> ConversationFileCandidate:
     return ConversationFileCandidate(
         upload_id=resource.file_id,
-        filename=resource.normalized_filename or resource.original_filename,
+        filename=resource.original_filename or resource.normalized_filename or resource.file_id,
+        original_filename=resource.original_filename,
+        normalized_filename=resource.normalized_filename or "",
         content_type=resource.normalized_content_type or resource.content_type,
         file_type=resource.file_type,
         size_bytes=resource.size_bytes,
@@ -262,9 +268,12 @@ def deterministic_file_decision(
     exact = [candidate for candidate in candidates if candidate.upload_id.lower() in text_l]
     if len(exact) == 1:
         return FileSelectionDecision("select_one", (exact[0].upload_id,), 0.99, "explicit_upload_id")
-    name_hits = [candidate for candidate in candidates if candidate.filename and candidate.filename.lower() in text_l]
+    name_hits = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
     if len(name_hits) == 1:
         return FileSelectionDecision("select_one", (name_hits[0].upload_id,), 0.9, "filename_match")
+    ordinal = _ordinal_index(text)
+    if ordinal is not None and 0 <= ordinal < len(candidates):
+        return FileSelectionDecision("select_one", (candidates[ordinal].upload_id,), 0.88, "ordinal")
     if len(candidates) == 1 and (profile.required or query_mentions_file(text)):
         return FileSelectionDecision("select_one", (candidates[0].upload_id,), 0.82, "single_candidate")
     if "刚才" in text or "继续" in text:
@@ -315,6 +324,9 @@ class FileSelectionAnswerResolver:
         by_id = [candidate for candidate in candidates if candidate.upload_id.lower() in text_l]
         if len(by_id) == 1:
             return FileSelectionDecision("select_one", (by_id[0].upload_id,), 1.0, "explicit_upload_id")
+        by_name = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
+        if len(by_name) == 1:
+            return FileSelectionDecision("select_one", (by_name[0].upload_id,), 0.95, "filename_match")
         ordinal = _ordinal_index(text)
         if ordinal is not None and 0 <= ordinal < len(candidates):
             return FileSelectionDecision("select_one", (candidates[ordinal].upload_id,), 0.95, "ordinal")
@@ -352,6 +364,15 @@ def _ordinal_index(text: str) -> int | None:
         return int(raw) - 1
     mapping = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
     return mapping.get(raw, 0) - 1 if raw in mapping else None
+
+
+def _candidate_filename_aliases(candidate: ConversationFileCandidate) -> tuple[str, ...]:
+    aliases: list[str] = []
+    for value in (candidate.filename, candidate.original_filename, candidate.normalized_filename):
+        alias = str(value or "").strip().lower()
+        if alias and alias not in aliases:
+            aliases.append(alias)
+    return tuple(aliases)
 
 
 def _sanitize_preview(value: Mapping[str, Any]) -> dict[str, Any]:

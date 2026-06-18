@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import textwrap
+from io import BytesIO
+
+from openpyxl import Workbook
 
 from src.api.file_selection import FileRequirementProfile
 
@@ -93,6 +96,33 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["upload_id"]
 
+    async def _upload_xlsx(
+        self,
+        conversation_id: str,
+        filename: str,
+        rows: list[list[object]] | None = None,
+    ) -> str:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "materials"
+        for row in rows or [["材料名称", "是否对照", "组别"], ["A001", 0, 1]]:
+            sheet.append(row)
+        buffer = BytesIO()
+        workbook.save(buffer)
+        response = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": conversation_id},
+            files={
+                "file": (
+                    filename,
+                    buffer.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()["upload_id"]
+
     async def test_enforce_single_referenced_file_auto_binds_attachment(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce"
         conversation_id = "conv-file-auto"
@@ -116,6 +146,46 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertNotIn("storage_key", attachments[0].prompt_artifact)
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertIn("conversation_file.file_selector_auto_bound", [event.event_type for event in events])
+
+    async def test_referenced_original_spreadsheet_filename_auto_binds_previous_upload(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce"
+        conversation_id = "conv-file-original-name"
+        interval_upload_id = await self._upload_xlsx(conversation_id, "间比法双组材料清单.xlsx")
+        await self._upload_xlsx(conversation_id, "对角线增广列数20材料清单.xlsx")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="那你用“间比法双组材料清单.xlsx”给我做个间比法试验设计。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_upload_id, interval_upload_id)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+
+    async def test_initial_message_ordinal_reference_auto_binds_previous_upload(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce"
+        conversation_id = "conv-file-ordinal"
+        first_upload_id = await self._upload_xlsx(conversation_id, "对角线增广列数20材料清单.xlsx")
+        await self._upload_xlsx(conversation_id, "间比法双组材料清单.xlsx")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="那你用第一份文件帮我做一个对角线增广试验吧。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_upload_id, first_upload_id)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
 
     async def test_shadow_records_audit_but_does_not_bind_or_interrupt(self) -> None:
         self.runtime._conversation_file_selector_mode = "shadow"
