@@ -5,6 +5,7 @@ from .contract import (
     SkillContractDiagnostic,
     SkillContractParseError,
     SkillEntrypointContract,
+    SkillFileIntent,
     SkillInputSchemaRef,
     SkillOutputContract,
     SkillResourcePolicy,
@@ -43,6 +44,7 @@ from .input_resolution import (
 )
 from .input_schema import (
     SkillInputClarification,
+    SkillInputFileSelection,
     SkillInputField,
     SkillInputSchema,
     SkillInputSchemaParseError,
@@ -99,6 +101,7 @@ __all__ = [
     "SkillInputResolutionContext",
     "SkillInputResolutionResult",
     "SkillInputClarification",
+    "SkillInputFileSelection",
     "SkillInputField",
     "SkillInputSchema",
     "SkillInputSchemaParseError",
@@ -131,6 +134,7 @@ __all__ = [
     "SkillContractDiagnostic",
     "SkillContractParseError",
     "SkillEntrypointContract",
+    "SkillFileIntent",
     "SkillInputSchemaRef",
     "SkillOutputContract",
     "SkillResourcePolicy",

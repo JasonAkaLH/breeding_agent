@@ -112,6 +112,63 @@ class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
         self.assertNotIn("content", loaded[0].prompt_artifact)
         self.assertEqual(loaded[0].skill_artifact["content"], "ped_id\nA001\n")
 
+    def test_lists_task_input_attachments_for_conversation_by_recent_update(self) -> None:
+        older = TaskInputAttachment(
+            attachment_id="tia-task-1-upl-1",
+            task_id="task-1",
+            conversation_id="conv-1",
+            source_kind="message_upload",
+            source_upload_id="upl-1",
+            filename="old.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=10,
+            sha256="sha-old",
+            created_at=datetime(2026, 6, 3, 9, 0, 0),
+            updated_at=datetime(2026, 6, 3, 9, 1, 0),
+        )
+        newer = TaskInputAttachment(
+            attachment_id="tia-task-2-upl-2",
+            task_id="task-2",
+            conversation_id="conv-1",
+            source_kind="file_selector",
+            source_upload_id="upl-2",
+            filename="new.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=10,
+            sha256="sha-new",
+            created_at=datetime(2026, 6, 3, 10, 0, 0),
+            updated_at=datetime(2026, 6, 3, 10, 1, 0),
+        )
+        foreign = TaskInputAttachment(
+            attachment_id="tia-task-3-upl-3",
+            task_id="task-3",
+            conversation_id="conv-2",
+            source_kind="message_upload",
+            source_upload_id="upl-3",
+            filename="foreign.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=10,
+            sha256="sha-foreign",
+            created_at=datetime(2026, 6, 3, 11, 0, 0),
+            updated_at=datetime(2026, 6, 3, 11, 1, 0),
+        )
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            repo.save_task_input_attachment(older)
+            repo.save_task_input_attachment(newer)
+            repo.save_task_input_attachment(foreign)
+            session.commit()
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            loaded = repo.list_task_input_attachments_for_conversation("conv-1", limit=2)
+
+        self.assertEqual([item.attachment_id for item in loaded], ["tia-task-2-upl-2", "tia-task-1-upl-1"])
+
     def test_active_task_lookup_by_conversation(self) -> None:
         active = Task(task_id="task-active", conversation_id="conv-1", root_message_id="msg-1", status=TaskStatus.RUNNING)
         done = Task(task_id="task-done", conversation_id="conv-1", root_message_id="msg-2", status=TaskStatus.COMPLETED)

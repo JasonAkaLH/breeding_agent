@@ -129,6 +129,13 @@ runtime:
   mode: python_subprocess
   answer_mode: requires_finalizer
   timeout_seconds: 120
+file_intent:
+  requires_file: true
+  default_allow_multiple: false
+  supported_file_types:
+    - csv
+    - spreadsheet
+  description: 需要用户上传或会话内已有的材料数据文件。
 entrypoints:
   - id: run_default
     kind: python_subprocess
@@ -189,6 +196,20 @@ inputs:
         - artifact
         - task_attachment
         - upload_ledger
+    file_selection:
+      required: true
+      allow_multiple: false
+      supported_file_types:
+        - csv
+        - spreadsheet
+      expected_content:
+        - 材料数据表
+      helpful_columns:
+        - ped_id
+        - genotype
+        - design_check
+        - set
+      disambiguation_hint: 优先选择用户最近上传或最近用于本 Skill 的材料数据表。
   blocks:
     type: integer
     required: true
@@ -210,7 +231,9 @@ inputs:
 
 - 每个 schema 只覆盖一个业务模式；不要让一个字段表同时承载多个互斥模式。
 - 字段来源必须用 `source.allowed` 显式声明，例如 `query`、`current_user_message`、`resolved_user_message`、`artifact`、`task_attachment`、`upload_ledger`、`metadata`。
-- artifact 字段只引用平台上传/产物摘要；不得让 LLM 生成 artifact 内容或本地路径。
+- artifact/file/data 字段只引用平台上传/产物摘要；不得让 LLM 生成 artifact 内容或本地路径。
+- 文件类字段需要聊天式自动选文件时，应添加 `file_selection`，声明 `supported_file_types`、`allow_multiple`、`expected_content`、`helpful_columns` 和 `disambiguation_hint` 等可归一化信息。
+- 旧 Skill 未声明 `file_selection` 时，平台仍可通过 `type: file/artifact/data` 做基础文件需求推断；新 Skill 不应依赖这个 fallback。
 - 缺参 interrupt 使用 schema 里的 `question`、`title`、`required` 和校验规则生成，恢复时会保留 `selected_schema_id`。
 
 

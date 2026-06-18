@@ -28,9 +28,10 @@ skill/<skill-name>/
 5. Put detailed user-visible explanations in `references/*.md`, and list when to read them from `SKILL.md`.
 6. Use `SkillResourceService` boundaries: prompt-facing resources must not expose scripts, runtime, schemas, native code, config, secrets, tokens, credentials, `.env`, `.git`, or absolute/local paths.
 7. For file inputs in new or migrated python_subprocess Skills, prefer the runtime file resource contract: read `payload["resource_manifest_path"]`, then open `manifest["files"][].mount_path`. Treat `uploaded_artifacts[].content` / `content_base64` as legacy compatibility only.
-8. External callers never submit `capability_id=skill.*` directly. Slash/API skill selection goes through `main_agent.respond + metadata.soft_skill_binding`.
-9. Write descriptive and explanatory prose in Chinese by default. Keep only necessary parameter names, filenames, paths, code identifiers, API terms, enum values, and domain-standard terms in their original language.
-10. Hardcode every platform-read field that the runtime will not infer: capability id, routing triggers, entrypoint names/paths, input schema refs, schema aliases, selected-schema constants, source policies, enum/default/range/pattern rules, output artifact extensions/MIME types, resources, and platform-service handlers/services.
+8. File needs must be machine-readable: declare chat-session file selection needs with schema field `file_selection` and/or contract-level `file_intent`; never rely only on `SKILL.md` or reference prose for file requirements.
+9. External callers never submit `capability_id=skill.*` directly. Slash/API skill selection goes through `main_agent.respond + metadata.soft_skill_binding`.
+10. Write descriptive and explanatory prose in Chinese by default. Keep only necessary parameter names, filenames, paths, code identifiers, API terms, enum values, and domain-standard terms in their original language.
+11. Hardcode every platform-read field that the runtime will not infer: capability id, routing triggers, entrypoint names/paths, input schema refs, schema aliases, selected-schema constants, source policies, enum/default/range/pattern rules, output artifact extensions/MIME types, resources, and platform-service handlers/services.
 
 ## Workflow
 
@@ -87,6 +88,7 @@ Use the contract for platform facts:
 - `capability.id`, `display_name`, `description`, `version`
 - `routing.triggers`, `intent_aliases`, `examples`
 - `runtime.mode`, `answer_mode`, trust/service config when platform service
+- `file_intent` when the whole Skill normally requires uploaded/conversation files
 - `entrypoints`
 - `input_schemas` with bundle-relative paths and schema-level `aliases` for every mode phrase the selector must recognize
 - `schema_selector` when more than one schema can match; remember current selector behavior is driven by schema refs/aliases/titles/descriptions, not free-form prose
@@ -118,6 +120,7 @@ Hardcode schema internals the resolver depends on:
 - Put `enum` / `choices` at the field top level when validation depends on it; do not hide executable enums only under `validation.enum`.
 - For natural-language slot extraction, include resolver-readable sources such as `query`, `current_user_message`, `resolved_user_message`, `recent_user_message`, or `text`; do not use only `user_text` unless the runtime has explicit support for it.
 - For important scalar slots, hardcode `patterns` that match expected Chinese and English phrasing, especially numeric phrases like `3次重复`, `列数10`, `K=3`, or `maf=0.05`.
+- For file-like inputs (`type: file`, `artifact`, or `data`), add `file_selection` metadata when the selector needs accepted file types, multi-file policy, expected content, helpful columns, or disambiguation hints.
 - Keep field names aligned with script/handler payload keys (`material_data`, `blocks`, `ncols`, `analysis`, etc.); changing field names requires changing runtime code too.
 - Hardcode defaults such as `planter: serpentine`, `randomize: true`, `ck_ratio: A`, and range limits on the field, not only in explanatory text.
 

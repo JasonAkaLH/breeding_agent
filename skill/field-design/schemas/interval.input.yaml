@@ -64,7 +64,7 @@ inputs:
         - metadata
     const: interval
     enum: [interval]
-    aliases: [design, design_type, 设计类型, 试验设计]
+    aliases: [design, design_type, 设计类型, 试验设计, 间比法]
     patterns:
       - '(?i)\b(interval|interval contrast)\b'
       - '间比|间比法'

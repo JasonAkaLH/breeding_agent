@@ -56,6 +56,40 @@ resources:
         self.assertEqual(contract.outputs["demo_output"].required, ("response_text",))
         self.assertEqual(contract.resources["usage"].audience, ("main_agent", "slot_question"))
 
+    def test_parses_file_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = self._write_contract(
+                root,
+                """
+contract_version: '2'
+capability:
+  id: skill.demo
+  display_name: Demo Skill
+runtime:
+  mode: python_subprocess
+entrypoints:
+  run:
+    path: scripts/run.py
+    input_schema: demo
+file_intent:
+  requires_file: true
+  default_allow_multiple: true
+  supported_file_types: [csv, spreadsheet]
+  description: 需要材料数据文件。
+input_schemas:
+  demo:
+    path: schemas/demo.input.yaml
+""",
+            )
+
+            contract = parse_skill_contract_file(path)
+
+        self.assertTrue(contract.file_intent.requires_file)
+        self.assertTrue(contract.file_intent.default_allow_multiple)
+        self.assertEqual(contract.file_intent.supported_file_types, ("csv", "spreadsheet"))
+        self.assertEqual(contract.file_intent.description, "需要材料数据文件。")
+
     def test_parses_platform_service_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

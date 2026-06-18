@@ -78,6 +78,14 @@ class SkillSchemaSelectorContract:
 
 
 @dataclass(slots=True, frozen=True)
+class SkillFileIntent:
+    requires_file: bool = False
+    default_allow_multiple: bool = False
+    supported_file_types: tuple[str, ...] = ()
+    description: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class SkillOutputContract:
     output_id: str
     required: tuple[str, ...] = ()
@@ -113,6 +121,7 @@ class SkillContract:
     resources: Mapping[str, SkillResourceRef] = field(default_factory=dict)
     resource_policy: SkillResourcePolicy = SkillResourcePolicy()
     routing: SkillRoutingContract = SkillRoutingContract()
+    file_intent: SkillFileIntent = SkillFileIntent()
     source_path: Path = Path("skill.contract.yaml")
 
     @property
@@ -145,6 +154,7 @@ def parse_skill_contract_file(path: str | Path) -> SkillContract:
     resources = _parse_resources(raw.get("resources"), root, source_path)
     resource_policy = _parse_resource_policy(_mapping(raw.get("resource_policy")))
     routing = _parse_routing(_mapping(raw.get("routing")))
+    file_intent = _parse_file_intent(_mapping(raw.get("file_intent")), source_path)
     return SkillContract(
         contract_version=contract_version,
         capability=capability,
@@ -156,6 +166,7 @@ def parse_skill_contract_file(path: str | Path) -> SkillContract:
         resources=resources,
         resource_policy=resource_policy,
         routing=routing,
+        file_intent=file_intent,
         source_path=source_path,
     )
 
@@ -314,6 +325,18 @@ def _parse_schema_selector(value: Mapping[str, Any], source_path: Path) -> Skill
         strategy=strategy,
         selector_field=str(value.get("selector_field") or value.get("missing_field") or "").strip(),
         min_confidence=float(value.get("min_confidence") or 0.75),
+    )
+
+
+def _parse_file_intent(value: Mapping[str, Any], source_path: Path) -> SkillFileIntent:
+    del source_path
+    if not value:
+        return SkillFileIntent()
+    return SkillFileIntent(
+        requires_file=bool(value.get("requires_file") or value.get("required")),
+        default_allow_multiple=bool(value.get("default_allow_multiple") or value.get("allow_multiple")),
+        supported_file_types=_string_tuple(value.get("supported_file_types") or value.get("file_types")),
+        description=str(value.get("description") or "").strip(),
     )
 
 

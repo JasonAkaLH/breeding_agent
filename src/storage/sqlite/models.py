@@ -225,6 +225,7 @@ class TaskInputAttachmentRow(SQLiteBase):
     __table_args__ = (
         Index("idx_task_input_attachment_task_created", "task_id", "created_at"),
         Index("idx_task_input_attachment_conversation_task", "conversation_id", "task_id"),
+        Index("idx_task_input_attachment_conversation_recent", "conversation_id", "updated_at", "created_at", "attachment_id"),
         Index("idx_task_input_attachment_upload", "source_upload_id"),
     )
 

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 
+from src.capabilities.main_agent.prompt_builder import build_tool_input_schemas_from_profiles
 from src.integrations.agent_skills import SkillCatalog, build_public_skill_profile
 from src.integrations.agent_skills.skill_capabilities import build_skill_capability_registry
 
@@ -38,6 +38,10 @@ capability:
 routing:
   triggers: [演示]
   examples: [/demo 用这个 CSV 处理]
+file_intent:
+  requires_file: true
+  supported_file_types: [csv]
+  description: 需要材料表。
 runtime:
   mode: python_subprocess
   answer_mode: direct
@@ -64,6 +68,23 @@ resources:
 """,
             encoding="utf-8",
         )
+        (skill_dir / "schemas" / "demo.input.yaml").write_text(
+            """
+schema_id: demo_input
+inputs:
+  material_file:
+    type: artifact
+    required: true
+    description: 材料文件
+    file_selection:
+      required: true
+      expected_content: [材料表]
+      supported_file_types: [csv]
+      helpful_columns: [ped_id]
+      disambiguation_hint: 优先选择材料表。
+""",
+            encoding="utf-8",
+        )
         return skill_dir
 
     def test_v2_profile_uses_contract_resource_index_and_schema_summaries(self) -> None:
@@ -80,6 +101,11 @@ resources:
         self.assertEqual(profile["display_name"], "演示 Skill")
         self.assertEqual(profile["resource_index"][0]["resource_id"], "usage")
         self.assertEqual(profile["schema_summaries"][0]["schema_id"], "demo_input")
+        self.assertTrue(profile["file_intent"]["requires_file"])
+        self.assertEqual(profile["file_selection_summaries"][0]["field"], "material_file")
+        tool_schemas = build_tool_input_schemas_from_profiles([profile])
+        self.assertTrue(tool_schemas[0]["file_intent"]["requires_file"])
+        self.assertEqual(tool_schemas[0]["file_selection_summaries"][0]["field"], "material_file")
         self.assertIn("材料表", payload)
         for forbidden in ("scripts/run.py", "python_subprocess", "handler", "runtime", "config.yaml", "token", "secret", "path"):
             self.assertNotIn(forbidden, payload)

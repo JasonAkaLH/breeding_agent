@@ -37,6 +37,16 @@ class SkillInputClarification:
 
 
 @dataclass(slots=True, frozen=True)
+class SkillInputFileSelection:
+    required: bool = False
+    allow_multiple: bool = False
+    expected_content: tuple[str, ...] = ()
+    supported_file_types: tuple[str, ...] = ()
+    helpful_columns: tuple[str, ...] = ()
+    disambiguation_hint: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class SkillInputField:
     name: str
     type: str = "string"
@@ -54,6 +64,7 @@ class SkillInputField:
     reference_resource: str = ""
     clarification: SkillInputClarification = SkillInputClarification()
     validation: SkillInputValidationRule = SkillInputValidationRule()
+    file_selection: SkillInputFileSelection = SkillInputFileSelection()
     expose: bool = True
 
 
@@ -164,23 +175,23 @@ def validate_selected_schema_payload(
     sources = {str(k): str(v) for k, v in dict(candidate_sources or {}).items()}
     missing: list[str] = []
     invalid: list[SkillInputValidationIssue] = []
-    for name, field in schema.inputs.items():
+    for name, input_field in schema.inputs.items():
         present = name in payload and payload[name] not in (None, "")
         if not present:
-            if field.default is not None:
+            if input_field.default is not None:
                 continue
-            if field.required or _required_when_matches(field.required_when, payload):
+            if input_field.required or _required_when_matches(input_field.required_when, payload):
                 missing.append(name)
             continue
-        issue = _validate_field_value(field, payload[name], source=sources.get(name, "payload"))
+        issue = _validate_field_value(input_field, payload[name], source=sources.get(name, "payload"))
         if issue is not None:
             invalid.append(issue)
     invalid.extend(_validate_constraints(schema.constraints, payload))
     # Constraints can introduce missing requirements (e.g. any_of none present).
     constraint_missing = [issue.field for issue in invalid if issue.reason in {"any_of_missing", "one_of_missing", "dependency_missing"}]
-    for field in constraint_missing:
-        if field and field not in missing and field in schema.inputs:
-            missing.append(field)
+    for missing_field in constraint_missing:
+        if missing_field and missing_field not in missing and missing_field in schema.inputs:
+            missing.append(missing_field)
     return SkillInputValidationResult(schema_id=schema.schema_id, payload=payload, missing=tuple(dict.fromkeys(missing)), invalid=tuple(invalid))
 
 
@@ -194,6 +205,9 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
     source_allowed = source.get("allowed") if isinstance(source, Mapping) else source
     validation = value.get("validation") or {}
     clarification = value.get("clarification") or {}
+    file_selection = value.get("file_selection") or {}
+    if file_selection and not isinstance(file_selection, Mapping):
+        raise SkillInputSchemaParseError(f"Input field file_selection must be a mapping: {name}: {source_path}")
     return SkillInputField(
         name=name,
         type=field_type,
@@ -225,6 +239,20 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
             min_length=_int_or_none(validation.get("min_length") if isinstance(validation, Mapping) else None),
             max_length=_int_or_none(validation.get("max_length") if isinstance(validation, Mapping) else None),
             message=str(validation.get("message") or "").strip() if isinstance(validation, Mapping) else "",
+        ),
+        file_selection=SkillInputFileSelection(
+            required=bool(file_selection.get("required", value.get("required", False))) if isinstance(file_selection, Mapping) else False,
+            allow_multiple=bool(file_selection.get("allow_multiple", False)) if isinstance(file_selection, Mapping) else False,
+            expected_content=_string_tuple(file_selection.get("expected_content") if isinstance(file_selection, Mapping) else ()),
+            supported_file_types=_string_tuple(
+                (file_selection.get("supported_file_types") or file_selection.get("accepted_file_types"))
+                if isinstance(file_selection, Mapping)
+                else ()
+            ),
+            helpful_columns=_string_tuple(file_selection.get("helpful_columns") if isinstance(file_selection, Mapping) else ()),
+            disambiguation_hint=str(file_selection.get("disambiguation_hint") or "").strip()
+            if isinstance(file_selection, Mapping)
+            else "",
         ),
         expose=bool(value.get("expose", True)),
     )

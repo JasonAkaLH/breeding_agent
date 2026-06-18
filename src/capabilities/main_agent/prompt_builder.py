@@ -276,6 +276,8 @@ def build_tool_input_schemas_from_profiles(profiles: list[dict[str, Any]]) -> li
             "inputs": profile.get("inputs") or {},
             "outputs": profile.get("outputs") or {},
             "accepted_formats": public_usage.get("input_formats") if isinstance(public_usage, Mapping) else [],
+            "file_intent": profile.get("file_intent") or {},
+            "file_selection_summaries": profile.get("file_selection_summaries") or [],
             "missing_input_standard": (
                 "缺少 required=true 的参数或 inputs.required 字段时，只询问一个最关键的缺失输入；"
                 "不得编造用户未提供的文件、字段或下载链接。"

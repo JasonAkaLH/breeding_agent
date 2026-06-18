@@ -64,7 +64,7 @@ inputs:
         - metadata
     const: diagonal
     enum: [diagonal]
-    aliases: [design, design_type, 设计类型, 试验设计]
+    aliases: [design, design_type, 设计类型, 试验设计, 对角线增广]
     patterns:
       - '(?i)\b(diagonal|diagonal augmented)\b'
       - '对角线|增广'

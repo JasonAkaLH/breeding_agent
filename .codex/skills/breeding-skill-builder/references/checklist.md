@@ -30,6 +30,7 @@
 - [ ] File outputs are declared under `artifacts`, not unsupported `files`.
 - [ ] Output artifact extensions and MIME types are hardcoded for every emitted file type.
 - [ ] Resource policy has safe size limits and prompt-facing audiences only for safe references.
+- [ ] Skill-wide file needs, when present, are declared with `file_intent` and not only described in prose.
 
 ## Input schemas
 
@@ -38,7 +39,9 @@
 - [ ] Schemas use top-level `inputs`, not unsupported `fields`.
 - [ ] Field source policies use `source.allowed`, not unsupported `sources`.
 - [ ] Natural-language scalar fields include resolver-readable sources (`query`, `current_user_message`, `resolved_user_message`, `recent_user_message`, or `text`) when LLM/regex extraction is expected; they do not rely only on `user_text`.
-- [ ] Artifact fields come from trusted upload/artifact sources, not generated local paths.
+- [ ] Artifact/file/data fields come from trusted upload/artifact sources, not generated local paths.
+- [ ] File-like inputs that need chat-session file selection declare `file_selection` with supported file types, multi-file policy, expected content, helpful columns, or disambiguation hints as needed.
+- [ ] File requirements can be normalized into a `FileRequirementProfile` from `file_selection`, `file_intent`, or legacy `type: file/artifact/data` signals; they are not only in `SKILL.md` or references prose.
 - [ ] New python_subprocess file-processing Skills read `payload["resource_manifest_path"]` and `manifest["files"][].mount_path` as the primary file input contract.
 - [ ] `uploaded_artifacts[].content` / `content_base64` are used only as explicit legacy compatibility fallback.
 - [ ] Prompt-facing docs and references do not expose persistent storage paths, `storage_key`, or runtime-internal workspace assumptions.

@@ -1352,6 +1352,22 @@ class SQLiteStateRepository:
         ).all()
         return [_row_to_task_input_attachment(row) for row in rows]
 
+    def list_task_input_attachments_for_conversation(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[TaskInputAttachment]:
+        statement = (
+            select(TaskInputAttachmentRow)
+            .where(TaskInputAttachmentRow.conversation_id == conversation_id)
+            .order_by(TaskInputAttachmentRow.updated_at.desc(), TaskInputAttachmentRow.created_at.desc(), TaskInputAttachmentRow.attachment_id)
+        )
+        if limit is not None:
+            statement = statement.limit(max(0, int(limit)))
+        rows = self._session.scalars(statement).all()
+        return [_row_to_task_input_attachment(row) for row in rows]
+
 
 class SQLiteCollaborationRepository:
     def __init__(self, session: Session) -> None:
@@ -2306,6 +2322,14 @@ class SQLiteStorage(StoragePort):
 
     async def list_task_input_attachments_for_task(self, task_id: str) -> list[TaskInputAttachment]:
         return await self._run(lambda state, collab: state.list_task_input_attachments_for_task(task_id))
+
+    async def list_task_input_attachments_for_conversation(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[TaskInputAttachment]:
+        return await self._run(lambda state, collab: state.list_task_input_attachments_for_conversation(conversation_id, limit=limit))
 
     async def append_event(self, event: EventRecord) -> EventRecord:
         sidecar_client = self._runtime_sidecar_client_for(

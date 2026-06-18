@@ -63,6 +63,13 @@ routing:
 runtime:
   mode: python_subprocess
   answer_mode: requires_finalizer
+file_intent:
+  requires_file: true
+  default_allow_multiple: false
+  supported_file_types:
+    - csv
+    - spreadsheet
+  description: 需要用户上传或会话内已有的输入文件。
 entrypoints:
   run:
     path: scripts/run_my_skill.py
@@ -158,6 +165,18 @@ inputs:
         - artifact
         - task_attachment
         - upload_ledger
+    file_selection:
+      required: true
+      allow_multiple: false
+      supported_file_types:
+        - csv
+        - spreadsheet
+      expected_content:
+        - 输入数据表
+      helpful_columns:
+        - id
+        - value
+      disambiguation_hint: 优先选择用户最近上传或最近用于本 Skill 的输入数据表。
   mode:
     type: string
     required: true

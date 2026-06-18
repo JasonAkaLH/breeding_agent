@@ -49,6 +49,7 @@ from src.core.models import (
     TaskInputAttachment,
     TaskNode,
 )
+from src.api.file_selection_runtime import ConversationFileSelectionRuntimeMixin
 from src.integrations.audit_logger import JsonlAuditSink
 from src.integrations.agent_skills import (
     SkillCapabilityRegistry,
@@ -299,7 +300,7 @@ class _PendingSkillMissingInput:
     source_node_id: str | None = None
 
 
-class ApiRuntime:
+class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     def __init__(
         self,
         *,
@@ -366,11 +367,19 @@ class ApiRuntime:
         self._task_skill_bundle_revisions: dict[str, str] = {}
         self._task_mcp_bundle_revisions: dict[str, str] = {}
         self._task_sheet_selection_resume_metadata: dict[str, dict[str, Any]] = {}
+        self._task_file_selection_resume_metadata: dict[str, dict[str, Any]] = {}
         self._assistant_history_sync_failure_task_ids: set[str] = set()
         self._assistant_history_sync_failure_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
         self._mcp_refresh_lock = asyncio.Lock()
+        self._conversation_file_selector_mode = os.environ.get("MAF_CONVERSATION_FILE_SELECTOR_MODE", "disabled").strip().lower()
+        if self._conversation_file_selector_mode not in {"disabled", "shadow", "enforce"}:
+            self._conversation_file_selector_mode = "disabled"
+        self._conversation_file_selector_guarded_multi_select = os.environ.get(
+            "MAF_CONVERSATION_FILE_SELECTOR_GUARDED_MULTI_SELECT",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _utcnow_naive() -> datetime:
@@ -633,6 +642,16 @@ class ApiRuntime:
     ) -> dict[str, object]:
         upload_ids = self._chat_message_upload_ids(request.metadata)
         sheet_selections = self._chat_message_sheet_selections(request.metadata)
+        if interrupt.reason_code == "file_selection_ambiguous":
+            answer: dict[str, object] = {"text": request.content}
+            if upload_ids:
+                answer["upload_ids"] = list(upload_ids)
+            return {
+                "client_request_id": client_request_id,
+                "answer": answer,
+                "upload_ids": list(upload_ids),
+                "file_selection_answer": request.content,
+            }
         if slot_collection_ref_from_required_fields(interrupt.required_fields) is not None:
             answer: dict[str, object] = {"text": request.content}
             if upload_ids:
@@ -873,6 +892,13 @@ class ApiRuntime:
                 pending_sheet_selections=upload_context["pending_sheet_selections"],
             )
             return message, task
+        if not upload_ids and await self._maybe_handle_conversation_file_selection(
+            task=task,
+            username=authenticated_username,
+            request=request,
+            metadata=metadata,
+        ):
+            return message, task
 
         orchestration_request = OrchestrationRequest(
             task_id=task_id,
@@ -968,22 +994,83 @@ class ApiRuntime:
         descriptor = self.capability_registry.get(capability_id)
         if descriptor is None or not descriptor.public or not _is_skill_descriptor(descriptor):
             raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
+        contract = None
         if self._skill_runtime_state is not None:
             bundle = self._skill_runtime_state.active_bundle
             if capability_id not in bundle.skill_capabilities.skill_name_by_capability_id:
                 raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
             revision = bundle.revision
+            contract = bundle.contract_by_capability_id.get(capability_id)
         else:
             revision = ""
         command = self._metadata_text(raw.get("command")) or self._metadata_text(metadata.get("slash_command")) or ""
         normalized = {
             "capability_id": capability_id,
         }
+        if contract is not None:
+            normalized.update(self._soft_skill_file_selection_metadata(contract))
         if command:
             normalized["command"] = command
         if revision:
             normalized["skill_bundle_revision"] = revision
         return normalized
+
+    @staticmethod
+    def _soft_skill_file_selection_metadata(contract: Any) -> dict[str, Any]:
+        file_selection: dict[str, Any] = {}
+        file_intent = getattr(contract, "file_intent", None)
+        if file_intent is not None:
+            if getattr(file_intent, "requires_file", False):
+                file_selection["required"] = True
+            if getattr(file_intent, "default_allow_multiple", False):
+                file_selection["allow_multiple"] = True
+            if getattr(file_intent, "supported_file_types", ()):
+                file_selection["supported_file_types"] = list(file_intent.supported_file_types)
+            if getattr(file_intent, "description", ""):
+                file_selection.setdefault("expected_content", []).append(file_intent.description)
+        try:
+            schemas = load_input_schemas_for_contract(contract)
+        except Exception:
+            schemas = {}
+        expected: list[str] = list(file_selection.get("expected_content") or [])
+        supported: list[str] = list(file_selection.get("supported_file_types") or [])
+        helpful_columns: list[str] = []
+        hints: list[str] = []
+        for schema in schemas.values():
+            for input_field in schema.inputs.values():
+                field_selection = input_field.file_selection
+                is_file_field = input_field.type in {"artifact", "file", "data"}
+                has_selection_metadata = any((
+                    field_selection.required,
+                    field_selection.allow_multiple,
+                    field_selection.expected_content,
+                    field_selection.supported_file_types,
+                    field_selection.helpful_columns,
+                    field_selection.disambiguation_hint,
+                ))
+                if not (is_file_field or has_selection_metadata):
+                    continue
+                if input_field.required or field_selection.required:
+                    file_selection["required"] = True
+                if field_selection.allow_multiple:
+                    file_selection["allow_multiple"] = True
+                expected.extend(field_selection.expected_content)
+                if not field_selection.expected_content:
+                    expected.extend(item for item in (input_field.title, input_field.description) if item)
+                supported.extend(field_selection.supported_file_types)
+                supported.extend(input_field.validation.file_extensions)
+                helpful_columns.extend(field_selection.helpful_columns)
+                if field_selection.disambiguation_hint:
+                    hints.append(field_selection.disambiguation_hint)
+        if expected:
+            file_selection["expected_content"] = list(dict.fromkeys(str(item).strip() for item in expected if str(item).strip()))
+        if supported:
+            file_selection["supported_file_types"] = list(dict.fromkeys(str(item).strip() for item in supported if str(item).strip()))
+        if helpful_columns:
+            file_selection["helpful_columns"] = list(dict.fromkeys(str(item).strip() for item in helpful_columns if str(item).strip()))
+        if hints:
+            file_selection["disambiguation_hint"] = "；".join(dict.fromkeys(str(item).strip() for item in hints if str(item).strip()))
+        return {"file_selection": file_selection} if file_selection else {}
 
     def _record_direct_skill_execution_rejected(
         self,
@@ -1923,6 +2010,9 @@ class ApiRuntime:
         await self._cancel_active_slot_collections_for_task(task)
         if task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
             await self._cancel_existing_execution(task_id)
+            restored = await self._restore_cancelled_task_if_requested(task_id, task.conversation_id)
+            if restored is not None:
+                task = restored
         if task.status not in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
             self._locally_cancelled_task_ids.discard(task_id)
         await self._clear_conversation_current_task(task.conversation_id, task.task_id)
@@ -2351,6 +2441,14 @@ class ApiRuntime:
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
         if interrupt.reason_code == "sheet_selection_required":
             self._validate_sheet_selection_answer(interrupt, answer_payload)
+        if interrupt.reason_code == "file_selection_ambiguous":
+            return await self._answer_file_selection_interrupt(
+                task=task,
+                interrupt=interrupt,
+                answer_payload=answer_payload,
+                source_message_id=source_message_id,
+                request_metadata=request_metadata,
+            )
         if slot_collection_ref_from_required_fields(interrupt.required_fields) is not None:
             return await self._answer_v2_slot_interrupt(
                 task=task,
@@ -2415,7 +2513,6 @@ class ApiRuntime:
                 upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
             )
         resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
-        resume_metadata.update(await self._resume_llm_metadata(task, request_metadata))
         saved_interrupt = await self.interrupt_service.record_answer(answer)
 
         answer_message = Message(

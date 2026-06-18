@@ -247,6 +247,13 @@ class StoragePort(Protocol):
 
     async def list_task_input_attachments_for_task(self, task_id: str) -> list[TaskInputAttachment]: ...
 
+    async def list_task_input_attachments_for_conversation(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[TaskInputAttachment]: ...
+
     async def append_event(self, event: EventRecord) -> EventRecord: ...
 
     async def list_events_for_task(self, task_id: str) -> list[EventRecord]: ...
