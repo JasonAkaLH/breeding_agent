@@ -140,11 +140,13 @@ POST /api/v1/conversations/chat-messages
 
 ### 7.4 不触发场景
 
-- 当前会话没有 active 文件；
+- 当前会话没有 active 文件，且当前 query / Skill / interrupt 也没有明确文件需求；
 - 用户明确说“不用文件”；
 - 当前 query 是普通问答且无文件指代；
 - 本轮已有显式 `metadata.upload_ids`；
 - 当前能力明确不支持或不需要文件。
+
+若当前 query、Skill contract/schema 或 interrupt 明确需要文件，但当前会话没有 active 文件，则不是“普通不触发”场景；平台应进入 required-file 缺文件分支，使用 `decision=no_usable_file` 与 `reason_code=no_files_in_conversation` 生成用户可见澄清或缺文件提示，不得静默继续到需要文件的执行路径。
 
 ## 8. 核心数据结构
 
@@ -177,6 +179,15 @@ POST /api/v1/conversations/chat-messages
 ```
 
 生成来源：Skill contract/schema、当前 query、interrupt required fields、历史 continuation context。
+
+Profile 归一化优先级必须稳定，避免同一轮任务在不同实现路径中生成不同画像：
+
+1. **显式本轮绑定优先退出**：若本轮已有合法 `metadata.upload_ids`，不生成 selector profile，沿用现有显式绑定流程。
+2. **当前 interrupt 文件需求**：若正在回答文件类 interrupt，优先使用 interrupt `required_fields` / `_file_selection` 中保存的原始需求画像。
+3. **强制或软绑定 Skill**：若本轮已确定 `soft_skill_binding`、pending Skill continuation 或强制 capability，优先使用该 Skill 的 contract/schema。
+4. **候选 Skill / schema 信号**：若尚未确定 Skill，但路由候选或 schema selector 暴露文件类输入，则合并为候选文件需求画像，并保留 `source=skill_schema`。
+5. **用户 query / continuation 指代**：用当前用户文本和会话上下文补充 `user_file_reference`、`intent`、`context_notes` 和 continuation 信号。
+6. **平台默认**：仅在上游信号不足但平台流程明确等待文件时使用 `source=platform`，并必须记录触发原因。
 
 ### 8.2 ConversationFileCandidate
 
@@ -288,6 +299,8 @@ LLM 输出后必须服务端验证：
 3. `confidence` 必须在 0 到 1。
 4. `decision=select_one` 时必须恰好一个合法 id。
 5. `decision=select_many` 时必须多个合法 id，且 `FileRequirementProfile.allow_multiple=true` 或用户明确要求比较/合并多个文件；否则转 `ambiguous`。
+   - V1 enforce 默认只自动绑定高置信 `select_one`。
+   - `select_many` 在 V1 默认转入澄清确认，即使后处理判定合法；只有后续显式灰度开启 guarded multi-select 时，才可在 `allow_multiple=true` 或用户明确比较/合并多个文件的场景自动绑定。
 6. 低于置信阈值（建议 `< 0.75`）转 `ambiguous`。
 7. 候选集合未完整进入 selector 判断时，即使生成 shortlist，也不得自动绑定；只能进入澄清并说明会话内可用文件较多。
 8. JSON parse 失败、schema invalid、选择不存在文件时降级为 `ambiguous` 或 `no_usable_file`，并写入标准 reason_code。
@@ -527,6 +540,9 @@ src/api/file_selection.py
 8. 新上传优先：file-selection interrupt 回复中用户上传新文件并说“用这个”，恢复时绑定新上传文件。
 9. 显式 upload_ids 失败语义：不存在、过期、越权的 `metadata.upload_ids` 返回 HTTP 400，不创建 message/task，不转 selector。
 10. natural-language interrupt：`_file_selection.presentation` 可被前端按自然语言 interrupt 展示，且 `replacement_file` 启用现有上传入口。
+11. required-file/no-active-files：当前 query 或 Skill 明确需要文件但会话没有 active 文件时，返回 `no_usable_file` / `no_files_in_conversation` 澄清；普通问答且无 active 文件时不触发 selector。
+12. profile resolution order：interrupt、soft/pending Skill、候选 Skill/schema、query continuation 的优先级稳定，且显式 `metadata.upload_ids` 直接退出 selector。
+13. V1 select_many rollout：合法 `select_many` 在默认 enforce 下进入澄清确认，不自动绑定；后续 guarded multi-select 灰度必须有单独测试覆盖。
 
 ### 15.3 文档 / builder 验证
 
@@ -541,13 +557,14 @@ python -m pytest tests/integrations/agent_skills/test_project_skill_manifest_con
 python -m pytest tests/api/test_uploads.py
 python -m pytest tests/integrations/agent_skills/test_artifact_context.py
 python -m pytest tests/integrations/agent_skills/test_slot_state_machine.py
+python -m pytest tests/api/test_route_contract.py
 ```
 
 ## 16. Rollout 与回滚
 
 1. 默认可用 feature flag 控制，例如 `conversation_file_selector_enabled=false`。
 2. Shadow 阶段只记录 selector 决策，不改变绑定行为。
-3. Enforce 阶段仅对无显式 `upload_ids` 且高置信 `select_one` 生效。
+3. Enforce 阶段默认仅对无显式 `upload_ids` 且高置信 `select_one` 生效；`select_many` 默认进入自然语言澄清确认，后续若开启 guarded multi-select 灰度，必须满足 `allow_multiple=true` 或用户明确比较/合并多个文件，并通过独立测试。
 4. Ambiguous interrupt 先在内部场景放量，确认前端现有 interrupt 体验足够自然。
 5. 回滚时关闭 feature flag，恢复旧 `metadata.upload_ids` 显式绑定路径。
 

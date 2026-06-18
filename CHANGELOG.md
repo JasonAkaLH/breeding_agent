@@ -10,6 +10,7 @@
 
 ### 2026-06-18
 
+- 聊天式会话文件智能选择 PRD 完成 document-perfectization 加固：明确无 active 文件时普通问答不触发 selector、但明确需要文件时进入 `no_usable_file/no_files_in_conversation` 澄清；补齐 `FileRequirementProfile` 归一化优先级、V1 enforce 默认只自动绑定高置信 `select_one` 且 `select_many` 先走澄清/后续灰度，并同步本地 ralplan 计划与测试规格的 required-file/no-active-files、profile resolution order、guarded multi-select 和 public API contract 验证口径。License Requirement：文档/计划变更，无依赖/许可变更，未触发 cargo-deny 风险。
 - 产品命名统一为“育种助手 / SeedPilot”：主 Agent 身份提示词拆分为 `[身份设定]` 与 `[行为准则]`，前端登录页、侧边栏标题、助手消息标识、API 文档标题与运行时重编排/soft-skill 角色文案同步去除“小奥 Agent/主代理”外显称呼；侧边栏品牌副标题从“AI育种助手”改为英文名 `SeedPilot`，并以原开发环境 tag 重新构建/推送 `breeding-agent-frontend-dev:0.1.19`；`docker_cmd.md` 版本号不变。License Requirement：前端文案/提示词/镜像发布变更，无依赖/许可变更，未触发 cargo-deny 风险。
 - Docker 开发环境镜像发布为 `0.1.19`：已构建并推送 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.19` 与 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.19`，`docker_cmd.md` 开发环境启动命令同步改为 `0.1.19`；生产镜像版本仍保持 `0.1.18`。License Requirement：镜像发布/运维文档变更，无依赖/许可变更，未触发 cargo-deny 风险。
 - Docker 开发/生产启动命令修正网络隔离：前端 nginx 固定反代 Docker DNS `backend:8000`，因此开发前端不能与生产前端共用同一 Docker network；`docker_cmd.md` 已改为生产使用 `breeding-agent-net` + 生产后端别名 `backend`，开发使用独立 `breeding-agent-dev-net` + 开发后端别名 `backend`，同一 PostgreSQL 容器分别以 `postgres` 别名接入两个网络，避免开发前端 `31999` 串到生产后端 `biobin_db`。License Requirement：文档/运维命令变更，无依赖/许可变更，未触发 cargo-deny 风险。
