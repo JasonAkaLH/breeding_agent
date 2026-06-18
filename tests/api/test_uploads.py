@@ -357,6 +357,12 @@ class UploadsAPITest(APITestCase):
             metadata={"upload_sheet_selections": {upload_id: "Missing"}},
         )
         self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(await self.runtime.storage.list_interrupt_answers(open_interrupt["interrupt_id"]), [])
+        still_open = next(item for item in await self.runtime.list_interrupts(task_id) if item["interrupt_id"] == open_interrupt["interrupt_id"])
+        self.assertEqual(still_open["status"], "open")
+        node_after_invalid = await self.runtime.storage.get_task_node(open_interrupt["node_id"])
+        self.assertIsNotNone(node_after_invalid)
+        self.assertEqual(str(node_after_invalid.status), "waiting_for_input")
 
         # Re-open the scenario because the invalid answer is intentionally fail-closed.
         second = await self.submit_message(
@@ -371,12 +377,23 @@ class UploadsAPITest(APITestCase):
             conversation_id="conv-sheet-interrupt",
             interrupt_id=open_interrupt["interrupt_id"],
             content="选择 Beta",
-            metadata={"upload_sheet_selections": {upload_id: "Beta"}},
+            metadata={"sheet_selections": {upload_id: "Beta"}},
         )
         self.assertEqual(answer.status_code, 202, answer.text)
+        answer_payload = answer.json()
+        self.assertEqual(answer_payload["action"], "interrupt_resumed")
+        self.assertEqual(answer_payload["interrupt_id"], open_interrupt["interrupt_id"])
+        self.assertEqual(answer_payload["answer_payload"], {"upload_sheet_selections": {upload_id: "Beta"}})
+        self.assertNotIn("A001", json.dumps(answer_payload, ensure_ascii=False))
+        self.assertNotIn("B001", json.dumps(answer_payload, ensure_ascii=False))
         await self.runtime._await_existing_execution(task_id)
         terminal = await self.wait_for_terminal_task(task_id)
         self.assertEqual(terminal["status"], "completed")
+        saved_answers = await self.runtime.storage.list_interrupt_answers(open_interrupt["interrupt_id"])
+        self.assertEqual(len(saved_answers), 1)
+        self.assertEqual(saved_answers[0].answer_payload, {"upload_sheet_selections": {upload_id: "Beta"}})
+        self.assertNotIn("A001", json.dumps(saved_answers[0].answer_payload, ensure_ascii=False))
+        self.assertNotIn("B001", json.dumps(saved_answers[0].answer_payload, ensure_ascii=False))
 
     async def test_sheet_selection_resume_uses_task_bound_attachment_when_staged_upload_is_gone(self) -> None:
         workbook = Workbook()
