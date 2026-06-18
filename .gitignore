@@ -1,6 +1,7 @@
 # Local tooling
 AGENTS.md
 !/AGENTS.md
+!/docs/AGENTS.md
 .superpowers/
 .omx/
 .[c]odex/

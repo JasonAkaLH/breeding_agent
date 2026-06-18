@@ -18,7 +18,7 @@
 - `frontend/`：React + TypeScript + Vite 前端，对话台、API/SSE client、组件与前端测试。
 - `native/`：Rust workspace、runtime/kernel/sidecar/安全 facade 与相关 proto。
 - `tests/`：后端分层回归测试，目录大体对应 `src/` 的模块边界。
-- `docs/`：PRD、API 文档、runbook、设计记录与 checkpoint 文档。
+- `docs/`：PRD、API 文档、runbook、设计记录与 checkpoint 文档；未完成的 Future work 参考 `docs/AGENTS.md`。
 - `scripts/`、`docker/`：本地验证、维护脚本、Docker 与部署辅助入口。
 - `runtime/`：本地运行产物、日志、artifact 与调试 prompt；通常不作为业务源码入口。
 
