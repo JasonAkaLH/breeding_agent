@@ -762,6 +762,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
         )
         self._raise_missing_uploads(upload_context.get("missing_upload_ids"), context="message submission")
+        conversation_upload_context = await self.resolve_conversation_uploads_for_message(
+            conversation_id,
+            authenticated_username,
+            upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
+        )
         now = self._utcnow_naive()
         message_id = request.client_message_id or self._make_id("msg")
         task_id = self._make_id("task")
@@ -884,15 +889,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 source_message_id=message_id,
                 upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
             )
-            metadata.update(await self._task_input_attachment_metadata(task.task_id))
-        if upload_context.get("pending_sheet_selections"):
+        metadata.update(self._upload_context_metadata(conversation_upload_context))
+        if conversation_upload_context.get("pending_sheet_selections"):
             await self._open_sheet_selection_interrupt(
                 task=task,
                 metadata=metadata,
-                pending_sheet_selections=upload_context["pending_sheet_selections"],
+                pending_sheet_selections=conversation_upload_context["pending_sheet_selections"],
             )
             return message, task
-        if not upload_ids and await self._maybe_handle_conversation_file_selection(
+        if not conversation_upload_context.get("uploaded_artifacts") and not upload_ids and await self._maybe_handle_conversation_file_selection(
             task=task,
             username=authenticated_username,
             request=request,
@@ -1306,9 +1311,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 missing_upload_ids.append(upload_id_text)
                 continue
             selected_sheet = sheet_selections.get(upload_id_text)
+            if selected_sheet:
+                resource = await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
+            selected_sheet = selected_sheet or resource.selected_sheet
             record = self._upload_record_from_resource(
                 resource,
                 content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+                selected_sheet=selected_sheet,
             )
             uploaded_artifacts.append(record.to_summary())
             if record.requires_sheet_selection and not selected_sheet:
@@ -1325,6 +1334,61 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             "missing_upload_ids": missing_upload_ids,
             "pending_sheet_selections": pending_sheet_selections,
         }
+
+    async def resolve_conversation_uploads_for_message(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        upload_sheet_selections: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resources = await self.storage.list_conversation_file_resources(
+            conversation_id,
+            username,
+            include_deleted=False,
+        )
+        upload_ids = [resource.file_id for resource in resources if resource.status != "deleted"]
+        return await self.resolve_uploads_for_message(
+            conversation_id,
+            username,
+            upload_ids,
+            upload_sheet_selections=upload_sheet_selections,
+        )
+
+    @staticmethod
+    def _upload_context_metadata(upload_context: Mapping[str, Any]) -> dict[str, Any]:
+        uploaded_artifacts = [
+            dict(item)
+            for item in upload_context.get("uploaded_artifacts", [])
+            if isinstance(item, Mapping)
+        ]
+        skill_artifacts = [
+            dict(item)
+            for item in upload_context.get("skill_artifacts", [])
+            if isinstance(item, Mapping)
+        ]
+        metadata: dict[str, Any] = {}
+        if uploaded_artifacts:
+            metadata["uploaded_artifacts"] = uploaded_artifacts
+        if skill_artifacts:
+            metadata["skill_artifacts"] = skill_artifacts
+        return metadata
+
+    async def _conversation_file_context_metadata_for_task(
+        self,
+        task: Task,
+        *,
+        upload_sheet_selections: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        if conversation is None:
+            return {}
+        upload_context = await self.resolve_conversation_uploads_for_message(
+            task.conversation_id,
+            conversation.username,
+            upload_sheet_selections=upload_sheet_selections,
+        )
+        return self._upload_context_metadata(upload_context)
 
     @staticmethod
     def _raise_missing_uploads(missing_upload_ids: object, *, context: str) -> None:
@@ -2512,7 +2576,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 interrupt_answer_id=answer.interrupt_answer_id,
                 upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
             )
-        resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
+        resume_metadata.update(
+            await self._conversation_file_context_metadata_for_task(
+                task,
+                upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
+            )
+        )
         saved_interrupt = await self.interrupt_service.record_answer(answer)
 
         answer_message = Message(
@@ -4262,7 +4331,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             "slot_collection_revision": collection.revision,
             "resume_interrupted_node_id": interrupt.node_id,
         }
-        resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
+        resume_metadata.update(await self._conversation_file_context_metadata_for_task(task))
         resume_metadata.update(await self._resume_llm_metadata(task, request_metadata))
         resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupt.node_id)
         if resume_finalizer_node_id:
@@ -5187,7 +5256,51 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
     async def _task_input_attachment_prompt_summaries(self, task_id: str) -> list[dict[str, object]]:
         summaries: list[dict[str, object]] = []
-        for attachment in await self.storage.list_task_input_attachments_for_task(task_id):
+        attachments = await self.storage.list_task_input_attachments_for_task(task_id)
+        attachment_by_upload_id = {
+            str(attachment.source_upload_id): attachment
+            for attachment in attachments
+            if attachment.source_upload_id
+        }
+        task = await self.storage.get_task(task_id)
+        if task is not None:
+            conversation = await self.storage.get_conversation(task.conversation_id)
+            if conversation is not None:
+                upload_context = await self.resolve_conversation_uploads_for_message(
+                    task.conversation_id,
+                    conversation.username,
+                )
+                for artifact in upload_context.get("uploaded_artifacts", []):
+                    if not isinstance(artifact, Mapping):
+                        continue
+                    upload_id = str(artifact.get("upload_id") or "").strip()
+                    preview = artifact.get("preview") if isinstance(artifact.get("preview"), Mapping) else {}
+                    attachment = attachment_by_upload_id.get(upload_id)
+                    summaries.append(
+                        {
+                            "upload_id": upload_id,
+                            "filename": str(artifact.get("filename") or ""),
+                            "content_type": str(artifact.get("content_type") or ""),
+                            "file_type": str(artifact.get("file_type") or ""),
+                            "size_bytes": artifact.get("size_bytes"),
+                            "sha256": str(artifact.get("sha256") or ""),
+                            "selected_sheet": artifact.get("selected_sheet"),
+                            "columns": list(preview.get("columns") or ()) if isinstance(preview.get("columns"), list | tuple) else None,
+                            "row_count": preview.get("row_count"),
+                            "column_count": preview.get("column_count"),
+                            "source_kind": attachment.source_kind if attachment is not None else "conversation_file",
+                            "source_message_id": attachment.source_message_id if attachment is not None else None,
+                            "interrupt_answer_id": attachment.interrupt_answer_id if attachment is not None else None,
+                            "created_at": (
+                                attachment.created_at.isoformat()
+                                if attachment is not None and attachment.created_at is not None
+                                else artifact.get("created_at")
+                            ),
+                        }
+                    )
+                if summaries:
+                    return summaries
+        for attachment in attachments:
             prompt_artifact = attachment.prompt_artifact if isinstance(attachment.prompt_artifact, Mapping) else {}
             preview = prompt_artifact.get("preview") if isinstance(prompt_artifact.get("preview"), Mapping) else {}
             summaries.append(
@@ -5386,9 +5499,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 raise UploadValidationError(f"Unknown or expired upload_id: {upload_id}")
             if resource.status == "deleted":
                 raise UploadValidationError(f"Unknown or expired upload_id: {upload_id}")
+            selected_sheet = sheet_selections.get(upload_id)
+            if selected_sheet:
+                resource = await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
             record = self._upload_record_from_resource(
                 resource,
                 content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+                selected_sheet=selected_sheet,
             )
             attachment = self._attachment_from_upload_record(
                 task=task,
@@ -5397,7 +5514,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 source_kind=source_kind,
                 source_message_id=source_message_id,
                 interrupt_answer_id=interrupt_answer_id,
-                selected_sheet=sheet_selections.get(upload_id),
+                selected_sheet=selected_sheet,
             )
             saved.append(await self.storage.save_task_input_attachment(attachment))
         return tuple(saved)
@@ -5425,6 +5542,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             existing_attachment = existing.get(upload_id)
             if existing_attachment is not None:
                 if selected_sheet:
+                    resource = await self.storage.get_conversation_file_resource(task.conversation_id, username, upload_id)
+                    if resource is not None and resource.status != "deleted":
+                        await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
                     await self._update_task_input_attachment_sheet_selection(
                         existing_attachment,
                         selected_sheet=selected_sheet,
@@ -5441,9 +5561,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             if resource.status == "deleted":
                 missing_upload_ids.append(upload_id)
                 continue
+            if selected_sheet:
+                resource = await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
             record = self._upload_record_from_resource(
                 resource,
                 content_bytes=self.conversation_file_store.read_bytes(resource.storage_key),
+                selected_sheet=selected_sheet,
             )
             if record.requires_sheet_selection and not selected_sheet:
                 raise UploadValidationError("Spreadsheet sheet selection is required before resuming the task")
@@ -5644,6 +5767,37 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         resources = await self.storage.list_conversation_file_resources(conversation_id, username, include_deleted=True)
         self._conversation_file_index_writer.write_index(conversation_id=conversation_id, resources=resources)
 
+    async def _apply_conversation_file_sheet_selection(
+        self,
+        resource: ConversationFileResource,
+        selected_sheet: str,
+    ) -> ConversationFileResource:
+        sheet_name = str(selected_sheet or "").strip()
+        if not sheet_name:
+            return resource
+        if resource.file_type != "spreadsheet":
+            raise UploadValidationError(f"Sheet selection is only supported for spreadsheet uploads: {resource.file_id}")
+        if resource.selected_sheet == sheet_name and resource.requires_sheet_selection is False:
+            return resource
+        normalized = normalize_selected_spreadsheet_sheet(
+            filename=resource.original_filename,
+            content_type=resource.content_type,
+            content=self.conversation_file_store.read_bytes(resource.storage_key),
+            selected_sheet=sheet_name,
+        )
+        updated = replace(
+            resource,
+            preview=dict(normalized.preview),
+            normalized_filename=normalized.normalized_filename or resource.normalized_filename,
+            normalized_content_type=normalized.normalized_content_type or resource.normalized_content_type,
+            requires_sheet_selection=False,
+            selected_sheet=normalized.selected_sheet or sheet_name,
+            updated_at=self._utcnow_naive(),
+        )
+        saved = await self.storage.save_conversation_file_resource(updated)
+        await self._rewrite_conversation_file_index(saved.conversation_id, saved.username)
+        return saved
+
     def _upload_record_from_resource(
         self,
         resource: ConversationFileResource,
@@ -5663,6 +5817,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     filename=resource.original_filename,
                     content_type=resource.content_type,
                     content=content_bytes,
+                    selected_sheet=selected_sheet_text,
                 )
                 content_text = normalized.normalized_content_text
                 normalized_content_type = normalized.normalized_content_type

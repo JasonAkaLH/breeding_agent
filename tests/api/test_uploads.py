@@ -136,6 +136,141 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(script_artifact["content"], text_content)
         self.assertNotIn("content_base64", script_artifact)
 
+    async def test_submit_without_upload_ids_includes_all_active_conversation_uploads(self) -> None:
+        captured_prompts: list[str] = []
+
+        def main_agent_generator(prompt, **_kwargs):
+            captured_prompts.append(str(prompt))
+            return ["已收到。"]
+
+        await self.reconfigure_runtime(main_agent_stream_generator=main_agent_generator)
+        csv_upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-conversation-scope"},
+            files={"file": ("materials.csv", "ped_id,value\nA001,1\n", "text/csv")},
+        )
+        text_upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-conversation-scope"},
+            files={"file": ("notes.txt", "SECRET_NOTES\n", "text/plain")},
+        )
+        self.assertEqual(csv_upload.status_code, 201, csv_upload.text)
+        self.assertEqual(text_upload.status_code, 201, text_upload.text)
+
+        submitted = await self.submit_message(
+            conversation_id="conv-conversation-scope",
+            content="请读取当前会话里的所有文件并总结。",
+            capability_id=None,
+        )
+
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        task_id = submitted.json()["task_id"]
+        await self.wait_for_terminal_task(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(attachments, [])
+        self.assertTrue(captured_prompts)
+        prompt = "\n".join(captured_prompts)
+        self.assertIn("materials.csv", prompt)
+        self.assertIn("notes.txt", prompt)
+        self.assertNotIn("A001,1", prompt)
+        self.assertNotIn("SECRET_NOTES", prompt)
+        self.assertNotIn("content_base64", prompt)
+        self.assertNotIn("storage_key", prompt)
+
+        resolved = await self.runtime.resolve_conversation_uploads_for_message(
+            "conv-conversation-scope",
+            "acc-1",
+        )
+        self.assertEqual(
+            {artifact["upload_id"] for artifact in resolved["uploaded_artifacts"]},
+            {csv_upload.json()["upload_id"], text_upload.json()["upload_id"]},
+        )
+        self.assertEqual(len(resolved["skill_artifacts"]), 2)
+        self.assertTrue(any(artifact.get("content") == "ped_id,value\nA001,1\n" for artifact in resolved["skill_artifacts"]))
+        self.assertTrue(any(artifact.get("content") == "SECRET_NOTES\n" for artifact in resolved["skill_artifacts"]))
+
+    async def test_submit_with_new_upload_id_merges_prior_conversation_uploads(self) -> None:
+        captured_prompts: list[str] = []
+
+        def main_agent_generator(prompt, **_kwargs):
+            captured_prompts.append(str(prompt))
+            return ["已收到。"]
+
+        await self.reconfigure_runtime(main_agent_stream_generator=main_agent_generator)
+        prior = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-merge-scope"},
+            files={"file": ("prior.csv", "ped_id,value\nP001,1\n", "text/csv")},
+        )
+        draft = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-merge-scope"},
+            files={"file": ("draft.csv", "ped_id,value\nD001,2\n", "text/csv")},
+        )
+        self.assertEqual(prior.status_code, 201, prior.text)
+        self.assertEqual(draft.status_code, 201, draft.text)
+        draft_upload_id = draft.json()["upload_id"]
+
+        submitted = await self.submit_message(
+            conversation_id="conv-merge-scope",
+            content="这次用新上传的文件继续分析。",
+            capability_id=None,
+            metadata={"upload_ids": [draft_upload_id]},
+        )
+
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        task_id = submitted.json()["task_id"]
+        await self.wait_for_terminal_task(task_id)
+        self.assertTrue(captured_prompts)
+        prompt = "\n".join(captured_prompts)
+        self.assertIn("prior.csv", prompt)
+        self.assertIn("draft.csv", prompt)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual([attachment.source_upload_id for attachment in attachments], [draft_upload_id])
+        self.assertEqual(attachments[0].source_kind, "message_upload")
+        self.assertNotIn("content", attachments[0].prompt_artifact)
+        self.assertIn("content", attachments[0].skill_artifact)
+
+    async def test_conversation_file_context_excludes_deleted_and_foreign_uploads(self) -> None:
+        active = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-context-filter"},
+            files={"file": ("active.csv", "ped_id,value\nA001,1\n", "text/csv")},
+        )
+        deleted = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-context-filter"},
+            files={"file": ("deleted.csv", "ped_id,value\nD001,1\n", "text/csv")},
+        )
+        foreign = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-context-foreign"},
+            files={"file": ("foreign.csv", "ped_id,value\nF001,1\n", "text/csv")},
+        )
+        self.assertEqual(active.status_code, 201, active.text)
+        self.assertEqual(deleted.status_code, 201, deleted.text)
+        self.assertEqual(foreign.status_code, 201, foreign.text)
+        deleted_response = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": "conv-context-filter", "upload_id": deleted.json()["upload_id"]},
+        )
+        self.assertEqual(deleted_response.status_code, 200)
+
+        resolved = await self.runtime.resolve_conversation_uploads_for_message(
+            "conv-context-filter",
+            "acc-1",
+        )
+        self.assertEqual([artifact["filename"] for artifact in resolved["uploaded_artifacts"]], ["active.csv"])
+        self.assertEqual(resolved["missing_upload_ids"], [])
+
+        with self.assertRaises(PermissionError):
+            await self.runtime.resolve_uploads_for_message(
+                "conv-context-filter",
+                "acc-1",
+                [foreign.json()["upload_id"]],
+            )
+
     async def test_upload_csv_normalizes_header_noise_and_preserves_original_hash(self) -> None:
         csv_bytes = "\ufeff\"ped_id\",hyb_check,set\nA001,0,A\n".encode("utf-8")
 
@@ -394,6 +529,83 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(saved_answers[0].answer_payload, {"upload_sheet_selections": {upload_id: "Beta"}})
         self.assertNotIn("A001", json.dumps(saved_answers[0].answer_payload, ensure_ascii=False))
         self.assertNotIn("B001", json.dumps(saved_answers[0].answer_payload, ensure_ascii=False))
+        resource = await self.runtime.storage.get_conversation_file_resource("conv-sheet-interrupt", "acc-1", upload_id)
+        self.assertIsNotNone(resource)
+        self.assertEqual(resource.selected_sheet, "Beta")
+        self.assertFalse(resource.requires_sheet_selection)
+
+    async def test_submit_without_upload_ids_opens_sheet_selection_and_persists_conversation_sheet(self) -> None:
+        workbook = Workbook()
+        workbook.active.title = "Alpha"
+        workbook.active.append(["ped_id", "hyb_check"])
+        workbook.active.append(["A001", 0])
+        beta = workbook.create_sheet("Beta")
+        beta.append(["ped_id", "hyb_check"])
+        beta.append(["B001", 1])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-sheet-conversation-scope"},
+            files={"file": ("materials.xlsx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+
+        submitted = await self.submit_message(
+            conversation_id="conv-sheet-conversation-scope",
+            content="用当前会话的文件做设计",
+            capability_id=None,
+        )
+
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        task_id = submitted.json()["task_id"]
+        await self.wait_for_condition(lambda: self.runtime.storage.list_interrupts_for_task(task_id), timeout=3)
+        open_interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+        self.assertEqual(open_interrupt["reason_code"], "sheet_selection_required")
+        self.assertEqual(open_interrupt["required_fields"]["upload_sheet_selections"]["required_upload_ids"], [upload_id])
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id="conv-sheet-conversation-scope",
+            interrupt_id=open_interrupt["interrupt_id"],
+            content="选择 Beta",
+            metadata={"upload_sheet_selections": {upload_id: "Beta"}},
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        await self.runtime._await_existing_execution(task_id)
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        resource = await self.runtime.storage.get_conversation_file_resource(
+            "conv-sheet-conversation-scope",
+            "acc-1",
+            upload_id,
+        )
+        self.assertIsNotNone(resource)
+        self.assertEqual(resource.selected_sheet, "Beta")
+        self.assertFalse(resource.requires_sheet_selection)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_kind, "interrupt_answer_upload")
+        self.assertEqual(attachments[0].source_upload_id, upload_id)
+        self.assertEqual(attachments[0].selected_sheet, "Beta")
+        resolved = await self.runtime.resolve_conversation_uploads_for_message(
+            "conv-sheet-conversation-scope",
+            "acc-1",
+        )
+        self.assertEqual(resolved["pending_sheet_selections"], [])
+        self.assertIn("B001", resolved["skill_artifacts"][0]["content"])
+        self.assertNotIn("A001", resolved["skill_artifacts"][0]["content"])
+
+        second = await self.submit_message(
+            conversation_id="conv-sheet-conversation-scope",
+            content="继续用这个文件",
+            capability_id=None,
+        )
+        self.assertEqual(second.status_code, 202, second.text)
+        second_task_id = second.json()["task_id"]
+        await self.wait_for_terminal_task(second_task_id)
+        self.assertEqual(await self.runtime.storage.list_interrupts_for_task(second_task_id), [])
 
     async def test_sheet_selection_resume_uses_task_bound_attachment_when_staged_upload_is_gone(self) -> None:
         workbook = Workbook()
@@ -458,6 +670,10 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(attachments[0].interrupt_answer_id, saved_answers[0].interrupt_answer_id)
         self.assertIn("content", attachments[0].skill_artifact)
         self.assertNotIn("content", attachments[0].prompt_artifact)
+        resource = await self.runtime.storage.get_conversation_file_resource("conv-sheet-expired", "acc-1", upload_id)
+        self.assertIsNotNone(resource)
+        self.assertEqual(resource.selected_sheet, "Beta")
+        self.assertFalse(resource.requires_sheet_selection)
 
     async def test_vnd_ms_excel_without_excel_magic_stays_csv_compatible(self) -> None:
         upload = await self.client.post(

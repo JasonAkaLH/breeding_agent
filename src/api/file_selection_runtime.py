@@ -92,7 +92,7 @@ class ConversationFileSelectionRuntimeMixin:
             )
             if await self._has_open_interrupt(task.task_id):
                 return True
-            metadata.update(await self._task_input_attachment_metadata(task.task_id))
+            metadata.update(await self._conversation_file_context_metadata_for_task(task))
             await self._record_file_selection_audit_event(
                 task=task,
                 event_type="conversation_file.file_selector_auto_bound",
@@ -455,7 +455,7 @@ class ConversationFileSelectionRuntimeMixin:
             source_message_id=answer.source_message_id,
             interrupt_answer_id=answer.interrupt_answer_id,
         )
-        resume_metadata.update(await self._task_input_attachment_metadata(task.task_id))
+        resume_metadata.update(await self._conversation_file_context_metadata_for_task(task))
         saved_interrupt = await self.interrupt_service.record_answer(answer)
         await self.storage.save_message(
             Message(

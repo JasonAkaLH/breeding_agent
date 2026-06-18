@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import textwrap
 
-from src.core.enums import RoutingMode, TaskStatus
+from src.core.enums import RoutingMode
 from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_REF_FIELD
 from tests.api.support import APITestCase
 
@@ -392,6 +392,49 @@ entrypoints: {run: {path: scripts/fail.py}}
         self.assertNotIn("content", attachments[0].prompt_artifact)
         self.assertNotIn("content_base64", attachments[0].prompt_artifact)
         self.assertIn("content", attachments[0].skill_artifact)
+        event_payloads = json.dumps([event.payload for event in events], ensure_ascii=False, default=str)
+        self.assertNotIn("ped_id,hyb_check,set", event_payloads)
+
+    async def test_conversation_upload_resolves_artifact_slot_without_task_upload_ids(self) -> None:
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-conversation-upload-slot"},
+            files={"file": ("materials.csv", "ped_id,hyb_check,set\nCK,CK,A\nA001,Test,A\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+
+        response = await self.submit_message(
+            conversation_id="conv-conversation-upload-slot",
+            content="请做一个增广对角线设计方案",
+            capability_id="skill.material_ncols",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        ncols_interrupt = await self._wait_for_open_interrupt(task_id)
+        self.assertEqual(ncols_interrupt["reason_code"], "missing_ncols")
+        self.assertIn("ncols", self._interrupt_missing_fields(ncols_interrupt))
+        self.assertNotIn("material_data", self._interrupt_missing_fields(ncols_interrupt))
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id="conv-conversation-upload-slot",
+            interrupt_id=ncols_interrupt["interrupt_id"],
+            content="20个田块",
+        )
+        self.assertEqual(answer.status_code, 202, answer.text)
+        await self.runtime._await_existing_execution(task_id)
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        resolved_events = [event for event in events if event.event_type == "skill.input_resolved"]
+        self.assertTrue(
+            any(
+                "material_data" in event.payload.get("resolved_fields", ())
+                and "ncols" in event.payload.get("resolved_fields", ())
+                for event in resolved_events
+            )
+        )
         event_payloads = json.dumps([event.payload for event in events], ensure_ascii=False, default=str)
         self.assertNotIn("ped_id,hyb_check,set", event_payloads)
 
