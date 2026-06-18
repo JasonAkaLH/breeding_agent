@@ -11,7 +11,7 @@
 | `requirements.txt` | `multi_agent` Conda 环境依赖快照。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/` 其他文件 | Capability 接入指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
-| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，构建约束与模板由 `.codex/skills/breeding-skill-builder/` 维护。 |
+| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，构建约束与模板见 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`，模板/清单由同 bundle references 维护。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |

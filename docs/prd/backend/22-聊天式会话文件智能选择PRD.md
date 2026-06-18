@@ -80,7 +80,7 @@ selector 根据 `recent_usage` 判断“刚才那个数据”更可能是最近�
 - Skill contract / schema parser 与 `FileRequirementProfile` 归一化。
 - interrupt payload 构造、前端 natural-language interrupt 展示识别、interrupt answer 恢复路径。
 - 多 Sheet 表格的既有 sheet selection interrupt 衔接。
-- `.codex/skills/breeding-skill-builder/`。
+- `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`。
 - 测试：上传校验、selector 后处理、interrupt 消歧/恢复、sheet selection 衔接、Skill parser/builder。
 
 ### 5.3 非功能要求
@@ -453,7 +453,7 @@ file_intent:
 - `.codex/skills/breeding-skill-builder/SKILL.md`
 - `.codex/skills/breeding-skill-builder/references/templates.md`
 - `.codex/skills/breeding-skill-builder/references/checklist.md`
-- `.codex/skills/breeding-skill-builder/`
+- `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`
 
 更新要求：
 
@@ -587,7 +587,7 @@ python -m pytest tests/api/test_route_contract.py
 4. 所有最终绑定都复用现有 `resolve_uploads_for_message()` 和 task attachment 路径。
 5. 不新增公开 API；现有上传、消息、interrupt answer 客户端兼容。
 6. 新增或迁移 Skill 可通过 `file_selection` / `file_intent` 声明未来文件需求，selector 不硬编码 Skill 名。
-7. `.codex/skills/breeding-skill-builder/` 同步更新，未来 Skill 模板默认符合新平台流程。
+7. `.codex/skills/breeding-skill-builder/references/Skill构建指南.md` 同步更新，未来 Skill 模板默认符合新平台流程。
 8. 审计事件能解释 selector 触发、候选、选择、歧义、恢复和降级原因，且不记录完整 prompt、文件正文或敏感路径。
 9. 不存在、过期、越权的显式 `metadata.upload_ids` 保持既有 HTTP 400 fail-closed 语义，不被 selector 吞掉。
 10. 候选过多或候选集合未完整参与判断时不得自动绑定，必须进入澄清。

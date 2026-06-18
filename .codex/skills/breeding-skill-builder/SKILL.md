@@ -40,7 +40,7 @@ skill/<skill-name>/
 - **New skill**: create the full v2 bundle.
 - **Migration**: remove v1 platform fields from `SKILL.md`, create contract/schema/resources, and preserve useful old runbook content.
 - **Review/fix**: compare files against the v2 rules and repair the smallest broken surface.
-- **Docs/template work**: update this skill bundle's references/templates/checklist or reusable examples without changing runtime behavior unless asked.
+- **Docs/template work**: update `references/Skill构建指南.md`, templates/checklist, or reusable examples without changing runtime behavior unless asked.
 
 ### 2. Inspect existing local patterns first
 
@@ -48,7 +48,7 @@ Before editing, inspect related files:
 
 - Current project skills: `skill/*/SKILL.md`, `skill/*/skill.contract.yaml`, `skill/*/schemas/*.input.yaml`, `skill/*/references/*.md`.
 - Core implementation: `src/integrations/agent_skills/`, `src/capabilities/main_agent/`, `src/capabilities/skill_tool/`.
-- Canonical guide: this skill bundle, especially `references/templates.md` and `references/checklist.md`.
+- Canonical guide: `references/Skill构建指南.md`; supporting templates/checklist live in `references/templates.md` and `references/checklist.md`.
 - PRD source of truth when needed: `docs/prd/backend/skill-contract-progressive-disclosure/`.
 
 ### 3. Write or update `SKILL.md`
@@ -154,6 +154,7 @@ For runtime changes, add targeted integration/API tests and run relevant subsets
 
 ## References
 
+- `references/Skill构建指南.md`: full project v2 Skill construction guide and canonical rules.
 - `references/templates.md`: v2 file templates for `SKILL.md`, `skill.contract.yaml`, input schema, and references.
 - `references/checklist.md`: review and verification checklist.
 - `references/migration.md`: how to migrate old v1 `SKILL.md` content into v2 files.

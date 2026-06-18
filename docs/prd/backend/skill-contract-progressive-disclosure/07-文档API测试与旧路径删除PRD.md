@@ -10,7 +10,7 @@
 
 ### 1.1 In scope
 
-- 更新 `.codex/skills/breeding-skill-builder/`。
+- 更新 `.codex/skills/breeding-skill-builder/references/Skill构建指南.md`。
 - 更新静态 API 文档中的 Skill 调用、capability、interrupt/resource 说明。
 - 更新 PRD 索引与 README。
 - 形成 v2 Skill 模板或示例片段。
@@ -28,7 +28,7 @@
 
 | 锚点 | 当前事实 | 本阶段约束 |
 | --- | --- | --- |
-| `.codex/skills/breeding-skill-builder/` | 当前仍描述大 frontmatter manifest。 | 指南必须改成轻量 `SKILL.md` + contract + schemas + references 的 v2-only 结构。 |
+| `.codex/skills/breeding-skill-builder/references/Skill构建指南.md` | 当前仍描述大 frontmatter manifest。 | 指南必须改成轻量 `SKILL.md` + contract + schemas + references 的 v2-only 结构。 |
 | `docs/api/api-doc.html` 与开发者文档测试 | API 文档已有 endpoint 说明回归。 | 必须补充 capability、skill execution、interrupt/resume、resource read 的外部调用边界。 |
 | `tests/api/test_developer_docs.py` | 当前锁定 API 文档说明质量。 | v2 Skill contract/API 说明必须被文档回归覆盖。 |
 
@@ -36,7 +36,7 @@
 
 | ID | Requirement | 验收 |
 | --- | --- | --- |
-| C7-001 | `.codex/skills/breeding-skill-builder/` 只推荐 v2 结构。 | frontmatter 示例只含 name/description；平台契约全部在 `skill.contract.yaml`。 |
+| C7-001 | `.codex/skills/breeding-skill-builder/references/Skill构建指南.md` 只推荐 v2 结构。 | frontmatter 示例只含 name/description；平台契约全部在 `skill.contract.yaml`。 |
 | C7-002 | API 文档说明 direct skill execution、slash soft binding、natural language planning。 | 外部调用方知道不能直接硬提交 `skill.*`，而是提交用户消息/附件/interrupt answer。 |
 | C7-003 | 文档说明 ResourceService 按需读取边界。 | 主代理不能读取 scripts/runtime/schemas/config 原文。 |
 | C7-004 | 测试矩阵可重复执行。 | backend integration/API/e2e 命令列明。 |
