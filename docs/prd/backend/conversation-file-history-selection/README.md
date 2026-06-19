@@ -1,7 +1,7 @@
 # 对话文件历史与智能选择分步 PRD 索引
 
 - **日期**：2026-06-19
-- **状态**：阶段零、阶段一、阶段二已实施；阶段三至阶段五待实施
+- **状态**：阶段零、阶段一、阶段二、阶段三已实施；阶段四至阶段五待实施
 - **父兼容入口**：`docs/prd/backend/21-对话文件历史与智能选择PRD.md`
 - **关联 PRD**：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`、`docs/prd/backend/skill-contract-progressive-disclosure/README.md`、`docs/prd/backend/table-upload-normalization/README.md`
 - **总目标**：把 conversation-scoped 上传文件升级为可排序历史、可安全注入上下文、可按任务 provenance 绑定、可在低置信时聊天式澄清的统一文件上下文系统。

@@ -32,7 +32,7 @@ class PublicSkillProfile:
     resource_index: tuple[dict[str, Any], ...] = ()
     schema_summaries: tuple[dict[str, Any], ...] = ()
     routing_examples: tuple[str, ...] = ()
-    file_intent: dict[str, Any] | None = None
+    file_selection: dict[str, Any] | None = None
     file_selection_summaries: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -49,7 +49,7 @@ class PublicSkillProfile:
             "resource_index": list(self.resource_index),
             "schema_summaries": list(self.schema_summaries),
             "routing_examples": list(self.routing_examples),
-            "file_intent": self.file_intent or {},
+            "file_selection": self.file_selection or {},
             "file_selection_summaries": list(self.file_selection_summaries),
         }
 
@@ -65,7 +65,7 @@ def build_public_skill_profile(
         resolved_capability_id = contract.capability.id
         display_name = _public_text(contract.capability.display_name, fallback=manifest.name)
         description = _public_text(contract.capability.description or manifest.description)
-        file_intent = _public_file_intent(contract)
+        file_selection = _public_file_selection(contract)
         file_selection_summaries = _public_file_selection_summaries(contract)
         return PublicSkillProfile(
             capability_id=resolved_capability_id,
@@ -76,8 +76,8 @@ def build_public_skill_profile(
             parameters=(),
             inputs={
                 "schema_count": len(contract.input_schemas),
-                **({"file_intent": file_intent} if file_intent else {}),
-                **({"file_selection": list(file_selection_summaries)} if file_selection_summaries else {}),
+                **({"file_selection": file_selection} if file_selection else {}),
+                **({"file_selection_summaries": list(file_selection_summaries)} if file_selection_summaries else {}),
             },
             outputs={"output_contracts": sorted(contract.outputs)},
             public_usage={},
@@ -101,7 +101,7 @@ def build_public_skill_profile(
                 for ref in contract.input_schemas.values()
             ),
             routing_examples=_public_text_tuple(contract.routing.examples),
-            file_intent=file_intent,
+            file_selection=file_selection,
             file_selection_summaries=file_selection_summaries,
         )
 
@@ -127,15 +127,17 @@ def build_public_skill_profile(
     )
 
 
-def _public_file_intent(contract: Any) -> dict[str, Any]:
-    file_intent = getattr(contract, "file_intent", None)
-    if file_intent is None:
+def _public_file_selection(contract: Any) -> dict[str, Any]:
+    file_selection = getattr(contract, "file_selection", None)
+    if file_selection is None:
         return {}
     payload = {
-        "requires_file": bool(getattr(file_intent, "requires_file", False)),
-        "default_allow_multiple": bool(getattr(file_intent, "default_allow_multiple", False)),
-        "supported_file_types": list(_public_text_tuple(getattr(file_intent, "supported_file_types", ()))),
-        "description": _public_text(getattr(file_intent, "description", "")),
+        "required": bool(getattr(file_selection, "required", False)),
+        "allow_multiple": bool(getattr(file_selection, "allow_multiple", False)),
+        "expected_content": list(_public_text_tuple(getattr(file_selection, "expected_content", ()))),
+        "supported_file_types": list(_public_text_tuple(getattr(file_selection, "supported_file_types", ()))),
+        "helpful_columns": list(_public_text_tuple(getattr(file_selection, "helpful_columns", ()))),
+        "disambiguation_hint": _public_text(getattr(file_selection, "disambiguation_hint", "")),
     }
     return {key: value for key, value in payload.items() if value not in (False, "", [], {})}
 
@@ -149,7 +151,6 @@ def _public_file_selection_summaries(contract: Any) -> tuple[dict[str, Any], ...
     for schema in schemas.values():
         for input_field in schema.inputs.values():
             field_selection = input_field.file_selection
-            is_file_field = input_field.type in {"artifact", "file", "data"}
             has_selection_metadata = any((
                 field_selection.required,
                 field_selection.allow_multiple,
@@ -158,13 +159,13 @@ def _public_file_selection_summaries(contract: Any) -> tuple[dict[str, Any], ...
                 field_selection.helpful_columns,
                 field_selection.disambiguation_hint,
             ))
-            if not (is_file_field or has_selection_metadata):
+            if not has_selection_metadata:
                 continue
             summary = {
                 "schema_id": schema.schema_id,
                 "field": input_field.name,
                 "type": input_field.type,
-                "required": bool(input_field.required or field_selection.required),
+                "required": bool(field_selection.required),
                 "allow_multiple": bool(field_selection.allow_multiple),
                 "expected_content": list(_public_text_tuple(field_selection.expected_content)),
                 "supported_file_types": list(_public_text_tuple(field_selection.supported_file_types)),
@@ -177,6 +178,7 @@ def _public_file_selection_summaries(contract: Any) -> tuple[dict[str, Any], ...
                 summary["description"] = _public_text(input_field.description)
             summaries.append({key: value for key, value in summary.items() if value not in (False, "", [], {})})
     return tuple(summaries)
+
 
 def _public_text(value: Any, *, fallback: str = "") -> str:
     sanitized = _sanitize_public_value(value)

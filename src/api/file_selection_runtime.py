@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 from dataclasses import replace
 from typing import Any, Mapping
 
 from src.api.dto import SubmitMessageRequest
 from src.api.file_selection import (
     FileRequirementProfile,
+    FileRequirementProfileError,
     FileSelectionAnswerResolver,
     FileSelectionDecision,
     FileSelectionTriggerDetector,
@@ -23,6 +26,16 @@ from src.orchestration.models import OrchestrationRequest
 
 
 class ConversationFileSelectionRuntimeMixin:
+    _AUDIT_SENSITIVE_TEXT_RE = re.compile(
+        r"("
+        r"secret|token|password|passwd|credential|"
+        r"api[_-]?key|apikey|access[_-]?key|private[_-]?key|authorization|bearer|"
+        r"storage_key|mount_path|content_base64|content|path|"
+        r"/tmp/|/var/|/users/|[A-Za-z]:\\"
+        r")",
+        re.IGNORECASE,
+    )
+
     async def _maybe_handle_conversation_file_selection(
         self,
         *,
@@ -30,31 +43,44 @@ class ConversationFileSelectionRuntimeMixin:
         username: str,
         request: SubmitMessageRequest,
         metadata: dict[str, Any],
+        requested_capability_id: str | None = None,
+        continued_pending_context: Any | None = None,
+        explicit_upload_ids: tuple[str, ...] = (),
     ) -> bool:
         mode = self._conversation_file_selector_mode
         if mode == "disabled":
             return False
-        profile = self._file_requirement_profile_for_request(request)
+        profile = self._file_requirement_profile_for_request(
+            request,
+            metadata=metadata,
+            requested_capability_id=requested_capability_id,
+            continued_pending_context=continued_pending_context,
+        )
         resources = await self.storage.list_conversation_file_resources(task.conversation_id, username, include_deleted=False)
         trigger, trigger_reason = FileSelectionTriggerDetector().should_trigger(
             text=request.content,
             profile=profile,
-            has_explicit_uploads=False,
+            has_explicit_uploads=bool(explicit_upload_ids),
             active_file_count=len(resources),
         )
         if not trigger:
             return False
-        await self._record_file_selection_audit_event(
-            task=task,
-            event_type="conversation_file.file_selector_invoked",
-            payload={"mode": mode, "trigger_reason": trigger_reason, "candidate_count": len(resources)},
-        )
         attachments = await self.storage.list_task_input_attachments_for_conversation(task.conversation_id, limit=100)
         recent_usage = build_recent_usage(attachments)
         candidates = tuple(
             candidate_from_resource(resource, recent_usage=recent_usage.get(resource.file_id))
             for resource in resources
             if resource.status != "deleted"
+        )
+        await self._record_file_selection_audit_event(
+            task=task,
+            event_type="conversation_file.file_selector_invoked",
+            payload=self._file_selection_invoked_payload(
+                mode=mode,
+                trigger_reason=trigger_reason,
+                profile=profile,
+                candidates=candidates,
+            ),
         )
         decision = (
             FileSelectionDecision("no_usable_file", reason_code="no_files_in_conversation")
@@ -66,17 +92,28 @@ class ConversationFileSelectionRuntimeMixin:
                 metadata=metadata,
             )
         )
+        if self._is_invalid_selector_output_decision(decision):
+            await self._record_file_selection_audit_event(
+                task=task,
+                event_type="conversation_file.file_selector_invalid_output",
+                payload=self._file_selection_invalid_output_payload(
+                    mode=mode,
+                    trigger_reason=trigger_reason,
+                    profile=profile,
+                    candidates=candidates,
+                    decision=decision,
+                ),
+            )
         await self._record_file_selection_audit_event(
             task=task,
             event_type="conversation_file.file_selector_decision_recorded",
-            payload={
-                "mode": mode,
-                "decision": decision.decision,
-                "reason_code": decision.reason_code,
-                "confidence": decision.confidence,
-                "selected_upload_ids": list(decision.upload_ids),
-                "candidate_upload_ids": [candidate.upload_id for candidate in candidates],
-            },
+            payload=self._file_selection_decision_payload(
+                mode=mode,
+                trigger_reason=trigger_reason,
+                profile=profile,
+                candidates=candidates,
+                decision=decision,
+            ),
         )
         if mode == "shadow":
             return False
@@ -152,33 +189,218 @@ class ConversationFileSelectionRuntimeMixin:
         )
         if not raw:
             return decision
-        return parse_selector_decision(
+        parsed = parse_selector_decision(
             raw,
             candidates=candidates,
             profile=profile,
             allow_guarded_multi_select=self._conversation_file_selector_guarded_multi_select,
         )
+        if parsed.reason_code in {"empty_selector_output", "invalid_json", "invalid_shape", "unknown_decision", "unknown_upload_id", "cardinality_mismatch"}:
+            return FileSelectionDecision(
+                parsed.decision,
+                upload_ids=parsed.upload_ids,
+                confidence=parsed.confidence,
+                reason_code=parsed.reason_code,
+                question=parsed.question,
+                raw={"_selector_invalid_output": True},
+            )
+        return parsed
 
-    def _file_requirement_profile_for_request(self, request: SubmitMessageRequest) -> FileRequirementProfile:
-        for key in ("file_requirement_profile", "file_selection", "file_intent"):
-            value = request.metadata.get(key)
+    def _file_requirement_profile_for_request(
+        self,
+        request: SubmitMessageRequest,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        requested_capability_id: str | None = None,
+        continued_pending_context: Any | None = None,
+    ) -> FileRequirementProfile:
+        resolved_metadata = dict(metadata or request.metadata)
+        if "file_intent" in resolved_metadata:
+            raise FileRequirementProfileError("metadata.file_intent is not supported; use final file_selection fields")
+        for key in ("file_requirement_profile", "file_selection"):
+            value = resolved_metadata.get(key)
             if isinstance(value, Mapping):
-                profile = FileRequirementProfile.from_mapping(value, source=str(key))
-                if profile.required or profile.allow_multiple or profile.expected_content or profile.user_file_reference:
+                profile = FileRequirementProfile.from_mapping(value, source="metadata")
+                if profile.is_meaningful():
                     return profile
-        soft_binding = self._normalize_soft_skill_binding(request.metadata)
+        soft_binding = resolved_metadata.get("soft_skill_binding")
+        if soft_binding is None:
+            soft_binding = self._normalize_soft_skill_binding(request.metadata)
         if isinstance(soft_binding, Mapping):
-            for key in ("file_requirement_profile", "file_selection", "file_intent"):
+            if "file_intent" in soft_binding:
+                raise FileRequirementProfileError(
+                    "metadata.soft_skill_binding.file_intent is not supported; use final file_selection fields"
+                )
+            for key in ("file_requirement_profile", "file_selection"):
                 value = soft_binding.get(key)
                 if isinstance(value, Mapping):
-                    return FileRequirementProfile.from_mapping(value, source=f"soft_skill_binding.{key}")
+                    profile = FileRequirementProfile.from_mapping(value, source="soft_skill_binding")
+                    if profile.is_meaningful():
+                        return profile
+        pending_capability_id = self._metadata_text(getattr(continued_pending_context, "capability_id", ""))
+        for capability_id, source in (
+            (pending_capability_id, "skill_contract"),
+            (requested_capability_id, "skill_contract"),
+        ):
+            profile = self._file_requirement_profile_for_capability(capability_id, source=source)
+            if profile is not None and profile.is_meaningful():
+                return profile
         trigger, _ = FileSelectionTriggerDetector().should_trigger(
             text=request.content,
             profile=FileRequirementProfile(),
             has_explicit_uploads=False,
             active_file_count=1,
         )
-        return FileRequirementProfile(source="query", user_file_reference=request.content if trigger else "")
+        return FileRequirementProfile(source="user_query", user_file_reference=request.content if trigger else "")
+
+    def _file_requirement_profile_for_capability(self, capability_id: str | None, *, source: str) -> FileRequirementProfile | None:
+        capability_id = self._metadata_text(capability_id)
+        if not capability_id or not capability_id.startswith("skill.") or self._skill_runtime_state is None:
+            return None
+        contract = self._skill_runtime_state.active_bundle.contract_by_capability_id.get(capability_id)
+        if contract is None:
+            return None
+        metadata = self._soft_skill_file_selection_metadata(contract, source=source)
+        raw_profile = metadata.get("file_selection") if isinstance(metadata, Mapping) else None
+        if not isinstance(raw_profile, Mapping):
+            return None
+        profile = FileRequirementProfile.from_mapping(raw_profile, source=source)
+        contract_selection = getattr(contract, "file_selection", None)
+        contract_has_selection = bool(contract_selection and any((
+            getattr(contract_selection, "required", False),
+            getattr(contract_selection, "allow_multiple", False),
+            getattr(contract_selection, "expected_content", ()),
+            getattr(contract_selection, "supported_file_types", ()),
+            getattr(contract_selection, "helpful_columns", ()),
+            getattr(contract_selection, "disambiguation_hint", ""),
+        )))
+        if profile.source == "skill_contract" and not contract_has_selection:
+            return FileRequirementProfile(
+                source="input_schema",
+                required=profile.required,
+                allow_multiple=profile.allow_multiple,
+                expected_content=profile.expected_content,
+                supported_file_types=profile.supported_file_types,
+                helpful_columns=profile.helpful_columns,
+                disambiguation_hint=profile.disambiguation_hint,
+                user_file_reference=profile.user_file_reference,
+                context_notes=profile.context_notes,
+            )
+        return profile
+
+    def _file_selection_invoked_payload(
+        self,
+        *,
+        mode: str,
+        trigger_reason: str,
+        profile: FileRequirementProfile,
+        candidates: tuple[Any, ...],
+    ) -> dict[str, Any]:
+        candidate_summaries = self._candidate_audit_summaries(candidates)
+        return {
+            "mode": mode,
+            "trigger_reason": trigger_reason,
+            "requirement_profile": self._profile_audit_summary(profile),
+            "candidate_count": len(candidates),
+            "candidate_upload_ids": [candidate.upload_id for candidate in candidates],
+            "candidate_hash": self._candidate_audit_hash(candidate_summaries),
+            "candidates": candidate_summaries,
+        }
+
+    def _file_selection_decision_payload(
+        self,
+        *,
+        mode: str,
+        trigger_reason: str,
+        profile: FileRequirementProfile,
+        candidates: tuple[Any, ...],
+        decision: FileSelectionDecision,
+    ) -> dict[str, Any]:
+        candidate_summaries = self._candidate_audit_summaries(candidates)
+        return {
+            "mode": mode,
+            "trigger_reason": trigger_reason,
+            "requirement_profile": self._profile_audit_summary(profile),
+            "candidate_count": len(candidates),
+            "candidate_upload_ids": [candidate.upload_id for candidate in candidates],
+            "candidate_hash": self._candidate_audit_hash(candidate_summaries),
+            "decision": decision.decision,
+            "reason_code": decision.reason_code,
+            "confidence": decision.confidence,
+            "selected_upload_ids": list(decision.upload_ids),
+            "would_auto_bind": decision.decision in {"select_one", "select_many"},
+            "would_clarify": decision.decision in {"ambiguous", "no_usable_file"},
+        }
+
+    def _file_selection_invalid_output_payload(
+        self,
+        *,
+        mode: str,
+        trigger_reason: str,
+        profile: FileRequirementProfile,
+        candidates: tuple[Any, ...],
+        decision: FileSelectionDecision,
+    ) -> dict[str, Any]:
+        return {
+            "mode": mode,
+            "trigger_reason": trigger_reason,
+            "requirement_profile": self._profile_audit_summary(profile),
+            "candidate_count": len(candidates),
+            "candidate_upload_ids": [candidate.upload_id for candidate in candidates],
+            "decision": decision.decision,
+            "reason_code": decision.reason_code,
+            "confidence": decision.confidence,
+            "would_auto_bind": False,
+            "would_clarify": True,
+        }
+
+    @staticmethod
+    def _profile_audit_summary(profile: FileRequirementProfile) -> dict[str, Any]:
+        return {
+            "source": profile.source,
+            "required": profile.required,
+            "allow_multiple": profile.allow_multiple,
+            "expected_content": ConversationFileSelectionRuntimeMixin._safe_audit_text_tuple(profile.expected_content),
+            "supported_file_types": ConversationFileSelectionRuntimeMixin._safe_audit_text_tuple(profile.supported_file_types),
+            "helpful_columns": ConversationFileSelectionRuntimeMixin._safe_audit_text_tuple(profile.helpful_columns),
+            "disambiguation_hint": ConversationFileSelectionRuntimeMixin._safe_audit_text(profile.disambiguation_hint),
+            "has_user_file_reference": bool(profile.user_file_reference),
+            "context_notes": ConversationFileSelectionRuntimeMixin._safe_audit_text_tuple(profile.context_notes),
+        }
+
+    @staticmethod
+    def _safe_audit_text_tuple(values: tuple[str, ...]) -> list[str]:
+        safe: list[str] = []
+        for value in values:
+            text = ConversationFileSelectionRuntimeMixin._safe_audit_text(value)
+            if text:
+                safe.append(text)
+        return safe
+
+    @staticmethod
+    def _safe_audit_text(value: str) -> str:
+        text = str(value or "").strip()
+        if not text or ConversationFileSelectionRuntimeMixin._AUDIT_SENSITIVE_TEXT_RE.search(text):
+            return ""
+        return text[:120]
+
+    @staticmethod
+    def _candidate_audit_summaries(candidates: tuple[Any, ...]) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for candidate in candidates:
+            safe = dict(candidate.to_prompt_safe_dict())
+            safe.pop("description_summary", None)
+            summaries.append(safe)
+        return summaries
+
+    @staticmethod
+    def _candidate_audit_hash(candidate_summaries: list[dict[str, Any]]) -> str:
+        payload = json.dumps(candidate_summaries, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _is_invalid_selector_output_decision(decision: FileSelectionDecision) -> bool:
+        return isinstance(decision.raw, Mapping) and bool(decision.raw.get("_selector_invalid_output"))
 
     async def _bind_file_selection_uploads_or_open_sheet_selection(
         self,
@@ -344,7 +566,7 @@ class ConversationFileSelectionRuntimeMixin:
         )
         profile = FileRequirementProfile.from_mapping(
             file_selection_context.get("profile") if isinstance(file_selection_context.get("profile"), Mapping) else {},
-            source="file_selection_interrupt",
+            source="interrupt",
         )
         decision = FileSelectionAnswerResolver().resolve(
             answer_text,

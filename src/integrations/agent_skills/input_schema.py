@@ -104,6 +104,24 @@ class SkillInputValidationResult:
 _ALLOWED_TYPES = {"string", "integer", "int", "number", "float", "boolean", "bool", "object", "array", "artifact", "file", "data"}
 _ARTIFACT_TYPES = {"artifact", "file", "data"}
 _ARTIFACT_TRUSTED_SOURCES = {"payload", "slot_collection", "artifact", "task_attachment", "validated_artifact", "upload_ledger"}
+_FILE_SELECTION_FIELDS = {
+    "required",
+    "allow_multiple",
+    "expected_content",
+    "supported_file_types",
+    "helpful_columns",
+    "disambiguation_hint",
+}
+_LEGACY_FILE_REQUIREMENT_FIELDS = {
+    "file_intent",
+    "needs_file",
+    "intent",
+    "accepted_file_types",
+    "expected_inputs",
+    "requires_file",
+    "required_file",
+    "default_allow_multiple",
+}
 _LLM_TEXT_SOURCES = {
     "llm",
     "query",
@@ -125,6 +143,7 @@ def parse_input_schema_file(path: str | Path) -> SkillInputSchema:
         raise SkillInputSchemaParseError(f"Invalid input schema YAML: {source_path}: {exc}") from exc
     if not isinstance(raw, Mapping):
         raise SkillInputSchemaParseError(f"Input schema must be a mapping: {source_path}")
+    _reject_legacy_file_requirement_keys(raw, context="input schema", source_path=source_path)
     schema_version = str(raw.get("schema_version") or raw.get("version") or "1").strip()
     schema_id = str(raw.get("schema_id") or raw.get("id") or "").strip()
     if not schema_id:
@@ -134,6 +153,7 @@ def parse_input_schema_file(path: str | Path) -> SkillInputSchema:
         raise SkillInputSchemaParseError(f"Input schema inputs must be a mapping: {source_path}")
     inputs = {str(name): _parse_field(str(name), value, source_path) for name, value in inputs_raw.items() if str(name).strip()}
     constraints = raw.get("constraints") or ()
+    constraints_tuple: tuple[dict[str, Any], ...]
     if isinstance(constraints, Mapping):
         constraints_tuple = (dict(constraints),)
     elif isinstance(constraints, list | tuple):
@@ -198,6 +218,7 @@ def validate_selected_schema_payload(
 def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
     if not isinstance(value, Mapping):
         value = {}
+    _reject_legacy_file_requirement_keys(value, context=f"input field `{name}`", source_path=source_path)
     field_type = str(value.get("type") or "string").strip().lower() or "string"
     if field_type not in _ALLOWED_TYPES:
         raise SkillInputSchemaParseError(f"Unsupported input field type: {name}={field_type}: {source_path}")
@@ -208,6 +229,8 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
     file_selection = value.get("file_selection") or {}
     if file_selection and not isinstance(file_selection, Mapping):
         raise SkillInputSchemaParseError(f"Input field file_selection must be a mapping: {name}: {source_path}")
+    if isinstance(file_selection, Mapping):
+        _validate_file_selection_mapping(file_selection, context=f"input field `{name}` file_selection", source_path=source_path)
     return SkillInputField(
         name=name,
         type=field_type,
@@ -241,14 +264,10 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
             message=str(validation.get("message") or "").strip() if isinstance(validation, Mapping) else "",
         ),
         file_selection=SkillInputFileSelection(
-            required=bool(file_selection.get("required", value.get("required", False))) if isinstance(file_selection, Mapping) else False,
-            allow_multiple=bool(file_selection.get("allow_multiple", False)) if isinstance(file_selection, Mapping) else False,
+            required=_bool_selection_field(file_selection, "required", source_path) if isinstance(file_selection, Mapping) else False,
+            allow_multiple=_bool_selection_field(file_selection, "allow_multiple", source_path) if isinstance(file_selection, Mapping) else False,
             expected_content=_string_tuple(file_selection.get("expected_content") if isinstance(file_selection, Mapping) else ()),
-            supported_file_types=_string_tuple(
-                (file_selection.get("supported_file_types") or file_selection.get("accepted_file_types"))
-                if isinstance(file_selection, Mapping)
-                else ()
-            ),
+            supported_file_types=_string_tuple(file_selection.get("supported_file_types") if isinstance(file_selection, Mapping) else ()),
             helpful_columns=_string_tuple(file_selection.get("helpful_columns") if isinstance(file_selection, Mapping) else ()),
             disambiguation_hint=str(file_selection.get("disambiguation_hint") or "").strip()
             if isinstance(file_selection, Mapping)
@@ -256,6 +275,39 @@ def _parse_field(name: str, value: Any, source_path: Path) -> SkillInputField:
         ),
         expose=bool(value.get("expose", True)),
     )
+
+
+def _reject_legacy_file_requirement_keys(value: Mapping[str, Any], *, context: str, source_path: Path) -> None:
+    present = sorted(str(key) for key in value if str(key) in _LEGACY_FILE_REQUIREMENT_FIELDS)
+    if present:
+        raise SkillInputSchemaParseError(
+            f"{context} uses legacy file requirement fields {', '.join(present)}; use final file_selection fields: {source_path}"
+        )
+
+
+def _validate_file_selection_mapping(value: Mapping[str, Any], *, context: str, source_path: Path) -> None:
+    keys = {str(key) for key in value}
+    legacy = sorted(keys & _LEGACY_FILE_REQUIREMENT_FIELDS)
+    if legacy:
+        raise SkillInputSchemaParseError(
+            f"{context} uses legacy file requirement fields {', '.join(legacy)}; use final file_selection fields: {source_path}"
+        )
+    unknown = sorted(keys - _FILE_SELECTION_FIELDS)
+    if unknown:
+        raise SkillInputSchemaParseError(f"{context} has unsupported fields {', '.join(unknown)}: {source_path}")
+    for key in ("required", "allow_multiple"):
+        item = value.get(key)
+        if item not in (None, "") and not isinstance(item, bool):
+            raise SkillInputSchemaParseError(f"{context}.{key} must be boolean: {source_path}")
+
+
+def _bool_selection_field(value: Mapping[str, Any], key: str, source_path: Path) -> bool:
+    item = value.get(key)
+    if item in (None, ""):
+        return False
+    if isinstance(item, bool):
+        return item
+    raise SkillInputSchemaParseError(f"file_selection.{key} must be boolean: {source_path}")
 
 
 def _validate_field_value(field: SkillInputField, value: Any, *, source: str) -> SkillInputValidationIssue | None:

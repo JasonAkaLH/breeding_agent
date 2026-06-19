@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import textwrap
 
+from src.api.dto import SubmitMessageRequest
 from src.core.enums import RoutingMode
+from src.core.models import PendingSkillContext
 from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_REF_FIELD
 from tests.api.support import APITestCase
 
@@ -139,7 +141,18 @@ input_schemas:
             """schema_id: diagonal
 inputs:
   design: {type: string, required: true, const: diagonal, aliases: [增广对角线, 对角线设计]}
-  material_data: {type: artifact, required: true, source: {allowed: [artifact]}, aliases: [材料清单, material_data]}
+  material_data:
+    type: artifact
+    required: true
+    source: {allowed: [artifact]}
+    aliases: [材料清单, material_data]
+    file_selection:
+      required: true
+      allow_multiple: false
+      expected_content: [材料清单]
+      supported_file_types: [csv]
+      helpful_columns: [ped_id]
+      disambiguation_hint: 优先选择本会话最近用于设计任务的材料清单。
   ncols:
     type: integer
     required: true
@@ -584,6 +597,38 @@ entrypoints: {run: {path: scripts/fail.py}}
         self.assertEqual(terminal["status"], "completed")
         task = await self.runtime.storage.get_task(task_id)
         self.assertNotEqual(task.requested_capability_id, "skill.need_variety")
+
+    async def test_pending_skill_file_profile_uses_expanded_context_before_query_fallback(self) -> None:
+        request = SubmitMessageRequest(
+            conversation_id="conv-pending-file-profile",
+            content="继续用刚才那个文件。",
+            metadata={},
+        )
+        pending_context = PendingSkillContext(
+            context_id="ctx-file-profile",
+            conversation_id="conv-pending-file-profile",
+            username="acc-1",
+            capability_id="skill.material_ncols",
+            skill_name="material-ncols",
+            source_task_id="task-source",
+            source_message_id="msg-source",
+            original_user_message="做对角线设计",
+            missing_requirements=("material_data",),
+            assistant_message="请补充材料文件。",
+        )
+
+        profile = self.runtime._file_requirement_profile_for_request(
+            request,
+            metadata={},
+            requested_capability_id="skill.material_ncols",
+            continued_pending_context=pending_context,
+        )
+
+        self.assertEqual(profile.source, "input_schema")
+        self.assertTrue(profile.required)
+        self.assertEqual(profile.supported_file_types, ("csv",))
+        self.assertEqual(profile.expected_content, ("材料清单",))
+        self.assertIn("material_data", " ".join(profile.context_notes))
 
     async def test_interrupt_capable_path_does_not_create_pending_context(self) -> None:
         response = await self.client.post(

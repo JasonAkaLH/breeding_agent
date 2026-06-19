@@ -56,7 +56,7 @@ resources:
         self.assertEqual(contract.outputs["demo_output"].required, ("response_text",))
         self.assertEqual(contract.resources["usage"].audience, ("main_agent", "slot_question"))
 
-    def test_parses_file_intent(self) -> None:
+    def test_parses_final_file_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             path = self._write_contract(
@@ -72,11 +72,13 @@ entrypoints:
   run:
     path: scripts/run.py
     input_schema: demo
-file_intent:
-  requires_file: true
-  default_allow_multiple: true
+file_selection:
+  required: true
+  allow_multiple: true
+  expected_content: [材料表]
   supported_file_types: [csv, spreadsheet]
-  description: 需要材料数据文件。
+  helpful_columns: [ped_id]
+  disambiguation_hint: 优先选择材料表。
 input_schemas:
   demo:
     path: schemas/demo.input.yaml
@@ -85,10 +87,35 @@ input_schemas:
 
             contract = parse_skill_contract_file(path)
 
-        self.assertTrue(contract.file_intent.requires_file)
-        self.assertTrue(contract.file_intent.default_allow_multiple)
-        self.assertEqual(contract.file_intent.supported_file_types, ("csv", "spreadsheet"))
-        self.assertEqual(contract.file_intent.description, "需要材料数据文件。")
+        self.assertTrue(contract.file_selection.required)
+        self.assertTrue(contract.file_selection.allow_multiple)
+        self.assertEqual(contract.file_selection.expected_content, ("材料表",))
+        self.assertEqual(contract.file_selection.supported_file_types, ("csv", "spreadsheet"))
+        self.assertEqual(contract.file_selection.helpful_columns, ("ped_id",))
+        self.assertEqual(contract.file_selection.disambiguation_hint, "优先选择材料表。")
+
+    def test_rejects_legacy_file_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = self._write_contract(
+                root,
+                """
+contract_version: '2'
+capability:
+  id: skill.demo
+  display_name: Demo Skill
+runtime:
+  mode: python_subprocess
+entrypoints:
+  run:
+    path: scripts/run.py
+file_intent:
+  requires_file: true
+""",
+            )
+
+            with self.assertRaisesRegex(SkillContractParseError, "file_intent"):
+                parse_skill_contract_file(path)
 
     def test_parses_platform_service_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

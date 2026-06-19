@@ -38,10 +38,10 @@ capability:
 routing:
   triggers: [演示]
   examples: [/demo 用这个 CSV 处理]
-file_intent:
-  requires_file: true
+file_selection:
+  required: true
   supported_file_types: [csv]
-  description: 需要材料表。
+  expected_content: [材料表]
 runtime:
   mode: python_subprocess
   answer_mode: direct
@@ -101,11 +101,13 @@ inputs:
         self.assertEqual(profile["display_name"], "演示 Skill")
         self.assertEqual(profile["resource_index"][0]["resource_id"], "usage")
         self.assertEqual(profile["schema_summaries"][0]["schema_id"], "demo_input")
-        self.assertTrue(profile["file_intent"]["requires_file"])
+        self.assertTrue(profile["file_selection"]["required"])
         self.assertEqual(profile["file_selection_summaries"][0]["field"], "material_file")
         tool_schemas = build_tool_input_schemas_from_profiles([profile])
-        self.assertTrue(tool_schemas[0]["file_intent"]["requires_file"])
+        self.assertTrue(tool_schemas[0]["file_selection"]["required"])
         self.assertEqual(tool_schemas[0]["file_selection_summaries"][0]["field"], "material_file")
+        self.assertNotIn("file_intent", profile)
+        self.assertNotIn("file_intent", tool_schemas[0])
         self.assertIn("材料表", payload)
         for forbidden in ("scripts/run.py", "python_subprocess", "handler", "runtime", "config.yaml", "token", "secret", "path"):
             self.assertNotIn(forbidden, payload)

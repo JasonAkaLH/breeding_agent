@@ -7,7 +7,15 @@ from io import BytesIO
 
 from openpyxl import Workbook
 
-from src.api.file_selection import FileRequirementProfile, build_recent_usage, candidate_from_resource, deterministic_file_decision
+from src.api.file_selection import (
+    FileRequirementProfile,
+    FileRequirementProfileError,
+    FileSelectionAnswerResolver,
+    FileSelectionTriggerDetector,
+    build_recent_usage,
+    candidate_from_resource,
+    deterministic_file_decision,
+)
 from src.core.models import TaskInputAttachment
 
 from tests.api.support import APITestCase
@@ -45,10 +53,10 @@ class ConversationFileSelectionAPITest(APITestCase):
                   description: Requires a file.
                 routing:
                   triggers: [file required]
-                file_intent:
-                  requires_file: true
+                file_selection:
+                  required: true
+                  expected_content: [材料文件]
                   supported_file_types: [csv, txt]
-                  description: 需要材料文件。
                 runtime:
                   mode: python_subprocess
                 entrypoints:
@@ -202,9 +210,16 @@ class ConversationFileSelectionAPITest(APITestCase):
         await self.runtime._await_existing_execution(task_id)
         self.assertEqual(await self.runtime.storage.list_interrupts_for_task(task_id), [])
         self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
-        event_types = [event.event_type for event in await self.runtime.storage.list_events_for_task(task_id)]
-        self.assertNotIn("conversation_file.file_selector_invoked", event_types)
-        self.assertNotIn("conversation_file.file_selector_decision_recorded", event_types)
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        event_types = [event.event_type for event in events]
+        self.assertIn("conversation_file.file_selector_invoked", event_types)
+        self.assertIn("conversation_file.file_selector_decision_recorded", event_types)
+        decision = next(event for event in events if event.event_type == "conversation_file.file_selector_decision_recorded")
+        self.assertFalse(decision.payload["would_clarify"])
+        self.assertTrue(decision.payload["would_auto_bind"])
+        self.assertNotIn("user_message", json.dumps(decision.payload, ensure_ascii=False))
+        self.assertNotIn("content_base64", json.dumps(decision.payload, ensure_ascii=False))
+        self.assertNotIn("storage_key", json.dumps(decision.payload, ensure_ascii=False))
 
     async def test_multiple_active_files_are_available_without_selector_interrupt(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce"
@@ -228,10 +243,145 @@ class ConversationFileSelectionAPITest(APITestCase):
         resolved = await self.runtime.resolve_conversation_uploads_for_message(conversation_id, "acc-1")
         self.assertEqual(len(resolved["uploaded_artifacts"]), 2)
 
-    async def test_file_requirement_profile_accepts_accepted_file_types_alias(self) -> None:
-        profile = FileRequirementProfile.from_mapping({"required": True, "accepted_file_types": ["csv"]})
+    async def test_file_requirement_profile_rejects_legacy_aliases(self) -> None:
+        with self.assertRaisesRegex(FileRequirementProfileError, "accepted_file_types"):
+            FileRequirementProfile.from_mapping({"required": True, "accepted_file_types": ["csv"]})
 
+    async def test_request_metadata_allows_unrelated_intent_but_rejects_nested_legacy_fields(self) -> None:
+        profile = self.runtime._file_requirement_profile_for_request(
+            request=type("Request", (), {"metadata": {"intent": "qa"}, "content": "请解释概念"})(),
+            metadata={"intent": "qa"},
+        )
+        self.assertFalse(profile.is_meaningful())
+
+        with self.assertRaisesRegex(FileRequirementProfileError, "requires_file"):
+            self.runtime._file_requirement_profile_for_request(
+                request=type("Request", (), {"metadata": {"file_selection": {"requires_file": True}}, "content": "请处理文件"})(),
+                metadata={"file_selection": {"requires_file": True}},
+            )
+
+    async def test_file_requirement_profile_accepts_final_fields(self) -> None:
+        profile = FileRequirementProfile.from_mapping(
+            {
+                "source": "metadata",
+                "required": True,
+                "allow_multiple": False,
+                "expected_content": ["材料表"],
+                "supported_file_types": ["csv"],
+                "helpful_columns": ["ped_id"],
+                "disambiguation_hint": "优先材料表",
+                "context_notes": ["metadata declared final file_selection"],
+            }
+        )
+
+        self.assertTrue(profile.required)
         self.assertEqual(profile.supported_file_types, ("csv",))
+        self.assertEqual(profile.source, "metadata")
+
+    async def test_trigger_detector_ignores_ordinary_query_and_declines(self) -> None:
+        detector = FileSelectionTriggerDetector()
+
+        self.assertEqual(
+            detector.should_trigger(
+                text="请解释一下区组设计的基本概念。",
+                profile=FileRequirementProfile(),
+                has_explicit_uploads=False,
+                active_file_count=2,
+            ),
+            (False, "ordinary_query"),
+        )
+        self.assertEqual(
+            detector.should_trigger(
+                text="这次不用上传的文件，只回答概念。",
+                profile=FileRequirementProfile(required=True),
+                has_explicit_uploads=False,
+                active_file_count=2,
+            ),
+            (False, "explicit_or_declined"),
+        )
+
+    async def test_trigger_detector_continuation_requires_recent_usage_shadow(self) -> None:
+        trigger, reason = FileSelectionTriggerDetector().should_trigger(
+            text="继续用刚才那个数据。",
+            profile=FileRequirementProfile(),
+            has_explicit_uploads=False,
+            active_file_count=2,
+        )
+
+        self.assertTrue(trigger)
+        self.assertEqual(reason, "recent_usage_reference")
+
+    async def test_upload_id_token_requires_exact_generated_shape(self) -> None:
+        conversation_id = "conv-file-upload-id-token"
+        await self._upload_csv(conversation_id, "materials.csv")
+        resources = await self.runtime.storage.list_conversation_file_resources(
+            conversation_id,
+            "acc-1",
+            include_deleted=False,
+        )
+        candidates = tuple(candidate_from_resource(resource) for resource in resources)
+
+        embedded_existing = deterministic_file_decision(
+            text=f"请使用 xxx{candidates[0].upload_id}yyy 这个文件。",
+            profile=FileRequirementProfile(),
+            candidates=candidates,
+        )
+        self.assertNotEqual(embedded_existing.reason_code, "explicit_upload_id")
+        answer_embedded_existing = FileSelectionAnswerResolver().resolve(
+            f"xxx{candidates[0].upload_id}yyy",
+            candidates,
+        )
+        self.assertNotEqual(answer_embedded_existing.reason_code, "explicit_upload_id")
+
+        embedded = deterministic_file_decision(
+            text="请使用 xxxupl-abcdef123456yyy 这个文件。",
+            profile=FileRequirementProfile(),
+            candidates=candidates,
+        )
+        self.assertNotEqual(embedded.reason_code, "unknown_upload_id")
+
+        exact_unknown = deterministic_file_decision(
+            text="请使用 upl-abcdef123456 这个文件。",
+            profile=FileRequirementProfile(),
+            candidates=candidates,
+        )
+        self.assertEqual(exact_unknown.reason_code, "unknown_upload_id")
+
+        trigger, reason = FileSelectionTriggerDetector().should_trigger(
+            text="请使用 xxxupl-abcdef123456yyy 这个文件。",
+            profile=FileRequirementProfile(),
+            has_explicit_uploads=False,
+            active_file_count=1,
+        )
+        self.assertTrue(trigger)
+        self.assertEqual(reason, "query_reference")
+
+        trigger, reason = FileSelectionTriggerDetector().should_trigger(
+            text="请使用 upl-abcdef123456 这个文件。",
+            profile=FileRequirementProfile(),
+            has_explicit_uploads=False,
+            active_file_count=1,
+        )
+        self.assertTrue(trigger)
+        self.assertEqual(reason, "explicit_upload_id_reference")
+
+    async def test_explicit_upload_ids_skip_shadow_selector(self) -> None:
+        self.runtime._conversation_file_selector_mode = "shadow"
+        conversation_id = "conv-file-explicit-skip"
+        upload_id = await self._upload_csv(conversation_id, "materials.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请用显式文件做摘要。",
+            metadata={"upload_ids": [upload_id], "file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        event_types = [event.event_type for event in await self.runtime.storage.list_events_for_task(task_id)]
+        self.assertNotIn("conversation_file.file_selector_invoked", event_types)
 
     async def test_required_file_with_no_active_files_opens_missing_file_clarification(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce"
@@ -283,6 +433,79 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertNotIn("content_base64", prompt)
         self.assertNotIn("storage_key", prompt)
         self.assertNotIn("mount_path", prompt)
+
+    async def test_shadow_records_invalid_selector_output_without_raw_prompt(self) -> None:
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return "not-json SECRET_VALUE_SHOULD_NOT_BE_AUDITED"
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "shadow"
+        conversation_id = "conv-file-invalid-selector"
+        await self._upload_csv(conversation_id, "first.csv")
+        await self._upload_csv(conversation_id, "second.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请用上传的文件做摘要。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        invalid = next(event for event in events if event.event_type == "conversation_file.file_selector_invalid_output")
+        payload_text = json.dumps(invalid.payload, ensure_ascii=False)
+        self.assertEqual(invalid.payload["reason_code"], "invalid_json")
+        self.assertNotIn("SECRET_VALUE_SHOULD_NOT_BE_AUDITED", payload_text)
+        self.assertNotIn("user_message", payload_text)
+        self.assertNotIn("content_base64", payload_text)
+        self.assertNotIn("storage_key", payload_text)
+
+    async def test_shadow_audit_sanitizes_profile_free_text(self) -> None:
+        self.runtime._conversation_file_selector_mode = "shadow"
+        conversation_id = "conv-file-audit-profile-redaction"
+        await self._upload_csv(conversation_id, "materials.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请用上传的文件做摘要。",
+            metadata={
+                "file_requirement_profile": {
+                    "required": True,
+                    "disambiguation_hint": "storage_key=/tmp/private/secret.txt",
+                    "context_notes": [
+                        "token=abc123",
+                        "api_key=xyz",
+                        "Authorization: Bearer abc",
+                        "private_key=hidden",
+                        "safe note",
+                    ],
+                    "expected_content": ["content_base64=abc", "材料表"],
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        decision = next(
+            event
+            for event in await self.runtime.storage.list_events_for_task(task_id)
+            if event.event_type == "conversation_file.file_selector_decision_recorded"
+        )
+        payload_text = json.dumps(decision.payload, ensure_ascii=False)
+        self.assertIn("safe note", payload_text)
+        self.assertIn("材料表", payload_text)
+        self.assertNotIn("storage_key", payload_text)
+        self.assertNotIn("/tmp/private", payload_text)
+        self.assertNotIn("token=abc123", payload_text)
+        self.assertNotIn("api_key=xyz", payload_text)
+        self.assertNotIn("Authorization", payload_text)
+        self.assertNotIn("Bearer abc", payload_text)
+        self.assertNotIn("private_key=hidden", payload_text)
+        self.assertNotIn("content_base64=abc", payload_text)
 
     async def test_selector_candidates_exclude_deleted_resources(self) -> None:
         conversation_id = "conv-file-selector-deleted"

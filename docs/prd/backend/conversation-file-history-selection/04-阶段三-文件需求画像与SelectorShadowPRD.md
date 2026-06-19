@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21-Phase 3
 - **日期**：2026-06-19
-- **状态**：待实施
+- **状态**：已实施
 - **前置阶段**：阶段二会话文件上下文与 memory 安全
 - **目标模块**：`src/api/file_selection.py`、`src/api/file_selection_runtime.py`、Skill contract / input schema parser、`breeding-skill-builder` 文档模板
 
@@ -179,3 +179,13 @@ python -m pytest tests/api/test_pending_skill_context.py
 - selector 触发条件在 shadow 模式下可观测且不改变当前产品行为。
 - builder 文档和模板要求新 Skill 显式声明文件需求。
 - 后续 `enforce_narrow` 阶段可直接复用 profile、trigger 和 audit payload。
+
+
+## 9. 实施记录（2026-06-19）
+
+- **实现范围**：`FileRequirementProfile` 已收敛为 closed schema，仅接受最终字段和 `metadata/soft_skill_binding/skill_contract/input_schema/user_query/interrupt` 来源；metadata、Skill contract、input schema 与 soft binding 中的 `file_intent` / legacy alias 字段会 fail-closed，不再静默映射。
+- **Skill contract/schema**：`skill.contract.yaml` 支持顶层最终 `file_selection`；schema 字段级 `file_selection` 只接受 `required/allow_multiple/expected_content/supported_file_types/helpful_columns/disambiguation_hint`，不再从 `type: file/artifact/data`、field `required`、标题/描述或 `validation.file_extensions` 推断文件需求画像。
+- **Shadow selector**：`shadow` 模式会在 active conversation files 已注入的情况下继续记录 `conversation_file.file_selector_invoked`、`conversation_file.file_selector_decision_recorded` 和 malformed LLM 输出的 `conversation_file.file_selector_invalid_output`，但不绑定 task attachment、不打开 `file_selection_ambiguous` interrupt、不让 LLM selector 结果改变执行 metadata。
+- **安全审计**：audit payload 只包含 profile 摘要、candidate 安全元数据/hash、decision/confidence/reason 与 would flags；不记录 raw prompt、raw selector output、文件正文、`content_base64`、`storage_key`、本地路径、secret。
+- **builder 文档**：已更新本地 installed `.codex/skills/breeding-skill-builder/` 的 `SKILL.md`、`references/templates.md`、`references/checklist.md` 与 `references/Skill构建指南.md`，改为最终 `file_selection` 字段、legacy 字段拒绝、manifest / `mount_path` 主读取路径。该 `.codex/` 目录按仓库策略被 `.gitignore` 忽略，本阶段不 force-add；tracked `CHANGELOG.md` 记录该边界，独立 builder 仓库如需发布应另行同步。
+- **关键验证**：`tests/integrations/agent_skills/test_input_schema_parser.py`、`tests/integrations/agent_skills/test_skill_contract_parser.py`、`tests/integrations/agent_skills/test_public_skill_profile.py`、`tests/api/test_conversation_file_selection.py`、`tests/api/test_pending_skill_context.py`，以及 builder `quick_validate.py`。

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.integrations.agent_skills import parse_input_schema_file
+from src.integrations.agent_skills import SkillInputSchemaParseError, parse_input_schema_file
 
 
 class InputSchemaParserTest(unittest.TestCase):
@@ -71,3 +71,45 @@ inputs:
         self.assertEqual(field.file_selection.supported_file_types, ("csv", "spreadsheet"))
         self.assertEqual(field.file_selection.helpful_columns, ("ped_id", "hyb_check"))
         self.assertEqual(field.file_selection.disambiguation_hint, "优先选择材料清单。")
+
+    def test_rejects_legacy_file_selection_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "demo.input.yaml"
+            path.write_text(
+                """
+schema_id: demo
+inputs:
+  material_data:
+    type: artifact
+    required: true
+    file_selection:
+      required: true
+      accepted_file_types: [csv]
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(SkillInputSchemaParseError, "accepted_file_types"):
+                parse_input_schema_file(path)
+
+    def test_file_selection_required_does_not_fallback_to_field_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "demo.input.yaml"
+            path.write_text(
+                """
+schema_id: demo
+inputs:
+  material_data:
+    type: artifact
+    required: true
+    source: {allowed: [artifact]}
+    file_selection:
+      supported_file_types: [csv]
+""",
+                encoding="utf-8",
+            )
+
+            schema = parse_input_schema_file(path)
+
+        self.assertTrue(schema.inputs["material_data"].required)
+        self.assertFalse(schema.inputs["material_data"].file_selection.required)

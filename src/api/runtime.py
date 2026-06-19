@@ -887,6 +887,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if self._mcp_runtime_state is not None:
             metadata["mcp_bundle_revision"] = self._mcp_runtime_state.active_revision
         upload_ids = request.metadata.get("upload_ids") or ()
+        explicit_upload_ids = self._normalize_upload_ids(upload_ids)
         if upload_context["uploaded_artifacts"]:
             await self._bind_task_input_uploads(
                 task=task,
@@ -904,11 +905,18 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 pending_sheet_selections=conversation_upload_context["pending_sheet_selections"],
             )
             return message, task
-        if not conversation_upload_context.get("uploaded_artifacts") and not upload_ids and await self._maybe_handle_conversation_file_selection(
+        should_run_file_selector = not explicit_upload_ids and (
+            not conversation_upload_context.get("uploaded_artifacts")
+            or self._conversation_file_selector_mode == "shadow"
+        )
+        if should_run_file_selector and await self._maybe_handle_conversation_file_selection(
             task=task,
             username=authenticated_username,
             request=request,
             metadata=metadata,
+            requested_capability_id=requested_capability_id,
+            continued_pending_context=continued_pending_context,
+            explicit_upload_ids=explicit_upload_ids,
         ):
             return message, task
 
@@ -1028,30 +1036,43 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         return normalized
 
     @staticmethod
-    def _soft_skill_file_selection_metadata(contract: Any) -> dict[str, Any]:
+    def _soft_skill_file_selection_metadata(contract: Any, *, source: str = "soft_skill_binding") -> dict[str, Any]:
         file_selection: dict[str, Any] = {}
-        file_intent = getattr(contract, "file_intent", None)
-        if file_intent is not None:
-            if getattr(file_intent, "requires_file", False):
+        context_notes: list[str] = []
+        contract_selection = getattr(contract, "file_selection", None)
+        if contract_selection is not None:
+            if getattr(contract_selection, "required", False):
                 file_selection["required"] = True
-            if getattr(file_intent, "default_allow_multiple", False):
+            if getattr(contract_selection, "allow_multiple", False):
                 file_selection["allow_multiple"] = True
-            if getattr(file_intent, "supported_file_types", ()):
-                file_selection["supported_file_types"] = list(file_intent.supported_file_types)
-            if getattr(file_intent, "description", ""):
-                file_selection.setdefault("expected_content", []).append(file_intent.description)
+            if getattr(contract_selection, "expected_content", ()):
+                file_selection.setdefault("expected_content", []).extend(contract_selection.expected_content)
+            if getattr(contract_selection, "supported_file_types", ()):
+                file_selection.setdefault("supported_file_types", []).extend(contract_selection.supported_file_types)
+            if getattr(contract_selection, "helpful_columns", ()):
+                file_selection.setdefault("helpful_columns", []).extend(contract_selection.helpful_columns)
+            if getattr(contract_selection, "disambiguation_hint", ""):
+                file_selection["disambiguation_hint"] = contract_selection.disambiguation_hint
+            if any((
+                getattr(contract_selection, "required", False),
+                getattr(contract_selection, "allow_multiple", False),
+                getattr(contract_selection, "expected_content", ()),
+                getattr(contract_selection, "supported_file_types", ()),
+                getattr(contract_selection, "helpful_columns", ()),
+                getattr(contract_selection, "disambiguation_hint", ""),
+            )):
+                context_notes.append("Skill contract declares final file_selection.")
         try:
             schemas = load_input_schemas_for_contract(contract)
         except Exception:
             schemas = {}
         expected: list[str] = list(file_selection.get("expected_content") or [])
         supported: list[str] = list(file_selection.get("supported_file_types") or [])
-        helpful_columns: list[str] = []
-        hints: list[str] = []
+        helpful_columns: list[str] = list(file_selection.get("helpful_columns") or [])
+        hints: list[str] = [str(file_selection.get("disambiguation_hint") or "").strip()] if file_selection.get("disambiguation_hint") else []
         for schema in schemas.values():
             for input_field in schema.inputs.values():
                 field_selection = input_field.file_selection
-                is_file_field = input_field.type in {"artifact", "file", "data"}
                 has_selection_metadata = any((
                     field_selection.required,
                     field_selection.allow_multiple,
@@ -1060,20 +1081,18 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     field_selection.helpful_columns,
                     field_selection.disambiguation_hint,
                 ))
-                if not (is_file_field or has_selection_metadata):
+                if not has_selection_metadata:
                     continue
-                if input_field.required or field_selection.required:
+                if field_selection.required:
                     file_selection["required"] = True
                 if field_selection.allow_multiple:
                     file_selection["allow_multiple"] = True
                 expected.extend(field_selection.expected_content)
-                if not field_selection.expected_content:
-                    expected.extend(item for item in (input_field.title, input_field.description) if item)
                 supported.extend(field_selection.supported_file_types)
-                supported.extend(input_field.validation.file_extensions)
                 helpful_columns.extend(field_selection.helpful_columns)
                 if field_selection.disambiguation_hint:
                     hints.append(field_selection.disambiguation_hint)
+                context_notes.append(f"Input schema {schema.schema_id} field {input_field.name} declares final file_selection.")
         if expected:
             file_selection["expected_content"] = list(dict.fromkeys(str(item).strip() for item in expected if str(item).strip()))
         if supported:
@@ -1082,6 +1101,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             file_selection["helpful_columns"] = list(dict.fromkeys(str(item).strip() for item in helpful_columns if str(item).strip()))
         if hints:
             file_selection["disambiguation_hint"] = "；".join(dict.fromkeys(str(item).strip() for item in hints if str(item).strip()))
+        if context_notes:
+            file_selection["context_notes"] = list(dict.fromkeys(context_notes))
+        if file_selection:
+            file_selection["source"] = source
         return {"file_selection": file_selection} if file_selection else {}
 
     def _record_direct_skill_execution_rejected(

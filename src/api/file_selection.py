@@ -9,9 +9,42 @@ from typing import Any, Mapping, Sequence
 from src.core.models import ConversationFileResource, TaskInputAttachment
 
 
+class FileRequirementProfileError(ValueError):
+    pass
+
+
+_PROFILE_SOURCES = {"metadata", "soft_skill_binding", "skill_contract", "input_schema", "user_query", "interrupt"}
+_PROFILE_FIELDS = {
+    "source",
+    "required",
+    "allow_multiple",
+    "expected_content",
+    "supported_file_types",
+    "helpful_columns",
+    "disambiguation_hint",
+    "user_file_reference",
+    "context_notes",
+}
+_LEGACY_PROFILE_FIELDS = {
+    "needs_file",
+    "intent",
+    "accepted_file_types",
+    "expected_inputs",
+    "requires_file",
+    "required_file",
+    "default_allow_multiple",
+    "file_intent",
+    "accepted_types",
+    "file_types",
+    "description",
+    "reference",
+    "notes",
+}
+
+
 @dataclass(slots=True, frozen=True)
 class FileRequirementProfile:
-    source: str = "query"
+    source: str = "user_query"
     required: bool = False
     allow_multiple: bool = False
     expected_content: tuple[str, ...] = ()
@@ -22,25 +55,41 @@ class FileRequirementProfile:
     context_notes: tuple[str, ...] = ()
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any] | None, *, source: str = "schema") -> "FileRequirementProfile":
+    def from_mapping(cls, value: Mapping[str, Any] | None, *, source: str = "input_schema") -> "FileRequirementProfile":
         raw = dict(value or {})
+        keys = {str(key) for key in raw}
+        legacy = sorted(keys & _LEGACY_PROFILE_FIELDS)
+        if legacy:
+            raise FileRequirementProfileError(f"Legacy file requirement fields are not supported: {', '.join(legacy)}")
+        unknown = sorted(keys - _PROFILE_FIELDS)
+        if unknown:
+            raise FileRequirementProfileError(f"Unknown file requirement fields: {', '.join(unknown)}")
+        profile_source = str(raw.get("source") or source).strip() or source
+        if profile_source not in _PROFILE_SOURCES:
+            raise FileRequirementProfileError(f"Unsupported file requirement source: {profile_source}")
         return cls(
-            source=str(raw.get("source") or source).strip() or source,
-            required=bool(raw.get("required") or raw.get("requires_file") or raw.get("required_file")),
-            allow_multiple=bool(raw.get("allow_multiple") or raw.get("default_allow_multiple")),
-            expected_content=_string_tuple(raw.get("expected_content") or raw.get("description") or ()),
-            supported_file_types=_string_tuple(
-                raw.get("supported_file_types")
-                or raw.get("accepted_file_types")
-                or raw.get("accepted_types")
-                or raw.get("file_types")
-                or ()
-            ),
+            source=profile_source,
+            required=_bool_field(raw, "required"),
+            allow_multiple=_bool_field(raw, "allow_multiple"),
+            expected_content=_string_tuple(raw.get("expected_content") or ()),
+            supported_file_types=_string_tuple(raw.get("supported_file_types") or ()),
             helpful_columns=_string_tuple(raw.get("helpful_columns") or ()),
             disambiguation_hint=str(raw.get("disambiguation_hint") or "").strip(),
-            user_file_reference=str(raw.get("user_file_reference") or raw.get("reference") or "").strip(),
-            context_notes=_string_tuple(raw.get("context_notes") or raw.get("notes") or ()),
+            user_file_reference=str(raw.get("user_file_reference") or "").strip(),
+            context_notes=_string_tuple(raw.get("context_notes") or ()),
         )
+
+    def is_meaningful(self) -> bool:
+        return any((
+            self.required,
+            self.allow_multiple,
+            self.expected_content,
+            self.supported_file_types,
+            self.helpful_columns,
+            self.disambiguation_hint,
+            self.user_file_reference,
+            self.context_notes,
+        ))
 
 
 @dataclass(slots=True, frozen=True)
@@ -112,13 +161,13 @@ class FileSelectionDecision:
 
 
 _FILE_REFERENCE_RE = re.compile(
-    r"(上传|文件|表格|数据|csv|xlsx?|excel|材料|刚才|之前|继续用|这个|那个|行数|列名|sheet|upload[_ -]?id)",
+    r"(上传|文件|表格|数据|csv|xlsx?|excel|材料表|刚才.{0,12}(文件|表|数据)|之前.{0,12}(文件|表|数据)|继续用.{0,12}(文件|表|数据)|第\s*[一二三四五六七八九十\d]+\s*(份|个).{0,4}(文件|表|数据)|upload[_ -]?id)",
     re.IGNORECASE,
 )
 _NO_FILE_RE = re.compile(r"(不用|不需要|不要).{0,6}(文件|数据|表|上传)")
 _ROW_COUNT_RE = re.compile(r"(\d+)\s*(?:行|rows?)", re.IGNORECASE)
 _ORDINAL_RE = re.compile(r"第\s*([一二三四五六七八九十\d]+)\s*(?:个|份|张|个文件|份文件)?")
-_UPLOAD_ID_RE = re.compile(r"\bupl-[0-9a-f]{12}\b", re.IGNORECASE)
+_UPLOAD_ID_RE = re.compile(r"(?<![A-Za-z0-9_-])upl-[0-9a-fA-F]{12}(?![A-Za-z0-9_-])")
 _SECRET_KEY_RE = re.compile(r"(secret|token|password|storage_key|mount_path|content_base64|content|path)", re.IGNORECASE)
 
 
@@ -127,7 +176,9 @@ def query_declines_files(text: str) -> bool:
 
 
 def query_mentions_file(text: str) -> bool:
-    return bool(_FILE_REFERENCE_RE.search(text or "")) and not query_declines_files(text)
+    if query_declines_files(text):
+        return False
+    return bool(_UPLOAD_ID_RE.search(text or "") or _FILE_REFERENCE_RE.search(text or ""))
 
 
 class FileSelectionTriggerDetector:
@@ -145,9 +196,14 @@ class FileSelectionTriggerDetector:
             if active_file_count <= 0:
                 return True, "no_files_in_conversation"
             return True, "required_profile"
+        if _UPLOAD_ID_RE.search(text or ""):
+            return True, "explicit_upload_id_reference"
         if active_file_count <= 0:
             return False, "no_active_files"
-        if query_mentions_file(text) or profile.user_file_reference:
+        text_l = (text or "").lower()
+        if "刚才" in text or "继续" in text or "recent" in text_l:
+            return True, "recent_usage_reference"
+        if profile.user_file_reference or query_mentions_file(text):
             return True, "query_reference"
         return False, "ordinary_query"
 
@@ -266,10 +322,11 @@ def deterministic_file_decision(
     if query_declines_files(text):
         return FileSelectionDecision("no_file_needed", reason_code="user_declined_file")
     text_l = (text or "").lower()
-    exact = [candidate for candidate in candidates if candidate.upload_id.lower() in text_l]
+    referenced_upload_ids = _upload_id_references(text_l)
+    exact = [candidate for candidate in candidates if candidate.upload_id.lower() in referenced_upload_ids]
     if len(exact) == 1:
         return FileSelectionDecision("select_one", (exact[0].upload_id,), 0.99, "explicit_upload_id")
-    if _unknown_upload_id_references(text_l, candidates):
+    if _unknown_upload_id_references(text_l, candidates, referenced_upload_ids=referenced_upload_ids):
         return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
     name_hits = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
     if len(name_hits) == 1:
@@ -324,10 +381,11 @@ class FileSelectionAnswerResolver:
         if query_declines_files(text):
             return FileSelectionDecision("no_file_needed", confidence=1.0, reason_code="user_declined_file")
         text_l = (text or "").lower()
-        by_id = [candidate for candidate in candidates if candidate.upload_id.lower() in text_l]
+        referenced_upload_ids = _upload_id_references(text_l)
+        by_id = [candidate for candidate in candidates if candidate.upload_id.lower() in referenced_upload_ids]
         if len(by_id) == 1:
             return FileSelectionDecision("select_one", (by_id[0].upload_id,), 1.0, "explicit_upload_id")
-        if _unknown_upload_id_references(text_l, candidates):
+        if _unknown_upload_id_references(text_l, candidates, referenced_upload_ids=referenced_upload_ids):
             return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
         by_name = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
         if len(by_name) == 1:
@@ -380,8 +438,17 @@ def _candidate_filename_aliases(candidate: ConversationFileCandidate) -> tuple[s
     return tuple(aliases)
 
 
-def _unknown_upload_id_references(text_l: str, candidates: Sequence[ConversationFileCandidate]) -> bool:
-    referenced = {match.group(0).lower() for match in _UPLOAD_ID_RE.finditer(text_l or "")}
+def _upload_id_references(text_l: str) -> set[str]:
+    return {match.group(0).lower() for match in _UPLOAD_ID_RE.finditer(text_l or "")}
+
+
+def _unknown_upload_id_references(
+    text_l: str,
+    candidates: Sequence[ConversationFileCandidate],
+    *,
+    referenced_upload_ids: set[str] | None = None,
+) -> bool:
+    referenced = referenced_upload_ids if referenced_upload_ids is not None else _upload_id_references(text_l)
     if not referenced:
         return False
     candidate_ids = {candidate.upload_id.lower() for candidate in candidates}
@@ -422,6 +489,15 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if isinstance(value, list | tuple | set):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return (str(value).strip(),) if str(value).strip() else ()
+
+
+def _bool_field(raw: Mapping[str, Any], key: str) -> bool:
+    value = raw.get(key)
+    if value in (None, ""):
+        return False
+    if isinstance(value, bool):
+        return value
+    raise FileRequirementProfileError(f"File requirement field `{key}` must be boolean")
 
 
 def _float(value: Any) -> float:
