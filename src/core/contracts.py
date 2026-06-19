@@ -12,6 +12,7 @@ from .models import (
     Conversation,
     ConversationMemorySummary,
     ConversationFileResource,
+    ConversationFileIndexRepairMarker,
     EventRecord,
     FileUploadMessageProjection,
     Interrupt,
@@ -185,6 +186,77 @@ class StoragePort(Protocol):
         *,
         updated_at: datetime,
     ) -> ConversationFileResource | None: ...
+
+    async def save_conversation_file_resource_with_upload_message(
+        self,
+        resource: ConversationFileResource,
+        projection: FileUploadMessageProjection,
+        *,
+        now: datetime,
+    ) -> ConversationFileResource: ...
+
+    async def mark_conversation_file_resource_and_upload_message_deleted(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+        *,
+        updated_at: datetime,
+    ) -> ConversationFileResource | None: ...
+
+    async def compensate_failed_conversation_file_upload(
+        self,
+        conversation_id: str,
+        username: str,
+        upload_id: str,
+        *,
+        reason_code: str,
+        now: datetime,
+    ) -> Mapping[str, Any]: ...
+
+    async def record_conversation_file_index_repair_required(
+        self,
+        conversation_id: str,
+        *,
+        reason_code: str,
+        affected_upload_ids: Iterable[str] = (),
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker: ...
+
+    async def get_conversation_file_index_repair_marker(
+        self,
+        conversation_id: str,
+    ) -> ConversationFileIndexRepairMarker | None: ...
+
+    async def list_due_conversation_file_index_repairs(
+        self,
+        *,
+        now: datetime,
+        limit: int | None = None,
+    ) -> list[ConversationFileIndexRepairMarker]: ...
+
+    async def mark_conversation_file_index_repairing(
+        self,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker | None: ...
+
+    async def mark_conversation_file_index_repair_resolved(
+        self,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker | None: ...
+
+    async def mark_conversation_file_index_repair_failed(
+        self,
+        conversation_id: str,
+        *,
+        reason_code: str,
+        now: datetime,
+        retryable: bool = True,
+    ) -> ConversationFileIndexRepairMarker | None: ...
 
     async def save_conversation_memory_summary(self, summary: ConversationMemorySummary) -> ConversationMemorySummary: ...
 

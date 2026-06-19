@@ -1,7 +1,7 @@
 {
   "component": "maf_core_types",
   "contract_version": "core.v1",
-  "schema_hash": "maf_core_types_core_v1_schema_20260619_auth_generation_message_public_history",
+  "schema_hash": "maf_core_types_core_v1_schema_20260619_auth_generation_message_public_history_file_index_repair_marker",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
   "supported_features": [
     "core_contract_artifact",
@@ -510,6 +510,18 @@
       "content",
       "metadata",
       "created_at"
+    ],
+    "ConversationFileIndexRepairMarker": [
+      "conversation_id",
+      "repair_kind",
+      "status",
+      "reason_code",
+      "affected_upload_ids",
+      "attempt_count",
+      "next_retry_at",
+      "created_at",
+      "updated_at",
+      "resolved_at"
     ]
   },
   "error_codes": [

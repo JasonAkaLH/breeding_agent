@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21-Phase 1
 - **日期**：2026-06-19
-- **状态**：待实施
+- **状态**：已实施（2026-06-19，本阶段 commit 见本轮 Phase 1 提交）
 - **前置阶段**：阶段零数据模型与 Repository 基线
 - **目标模块**：upload API、conversation file resource repository、history API、frontend message history / file card
 

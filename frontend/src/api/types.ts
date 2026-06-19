@@ -97,6 +97,8 @@ export interface UploadFileResponse {
   size_bytes: number;
   sha256: string;
   expires_at: string;
+  status?: string | null;
+  description_status?: string | null;
   preview: UploadPreviewResponse;
 }
 

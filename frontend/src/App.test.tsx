@@ -394,6 +394,106 @@ describe('App', () => {
     expect(within(assistantBubble).getByText('SeedPilot')).toBeInTheDocument();
   });
 
+  it('renders file_upload history as safe cards and hides internal system messages', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-history-files',
+          username: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '文件历史',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-history-files',
+        messages: [
+          {
+            message_id: 'file_upload:upl-pending',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'MALICIOUS_RAW_CONTENT storage_key=/tmp/secret content_base64=abc',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'file_upload',
+            metadata: {
+              upload_id: 'upl-pending',
+              filename: 'pending.csv',
+              description_status: 'pending',
+              file_status: 'active',
+              storage_key: '/tmp/secret/pending.csv',
+              content_base64: 'abc',
+            },
+          },
+          {
+            message_id: 'file_upload:upl-failed',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'SHOULD_NOT_RENDER',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'file_upload',
+            metadata: {
+              upload_id: 'upl-failed',
+              filename: 'failed.csv',
+              description_status: 'failed',
+              file_status: 'active',
+            },
+          },
+          {
+            message_id: 'file_upload:upl-deleted',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'DELETED_RAW_CONTENT',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'file_upload',
+            metadata: {
+              upload_id: 'upl-deleted',
+              filename: 'deleted.csv',
+              description_status: 'ready',
+              description_summary: 'deleted summary should not matter',
+              file_status: 'deleted',
+            },
+          },
+          {
+            message_id: 'sys-internal',
+            conversation_id: 'conv-history-files',
+            role: 'system',
+            content: 'INTERNAL_SECRET_MESSAGE',
+            task_id: null,
+            stream_status: 'complete',
+            created_at: null,
+            message_type: 'internal_note',
+            metadata: {},
+          },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '文件历史' }));
+
+    expect(await screen.findByText('pending.csv')).toBeInTheDocument();
+    expect(screen.getByText('文件摘要生成中')).toBeInTheDocument();
+    expect(screen.getByText('failed.csv')).toBeInTheDocument();
+    expect(screen.getByText('摘要不可用')).toBeInTheDocument();
+    expect(screen.getByText('deleted.csv')).toBeInTheDocument();
+    expect(screen.getByText('文件已删除 / 不可再用于任务')).toBeInTheDocument();
+    expect(screen.getByText('upload_id: upl-pending')).toBeInTheDocument();
+    expect(screen.queryByText(/MALICIOUS_RAW_CONTENT/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SHOULD_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/INTERNAL_SECRET_MESSAGE/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/storage_key/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/content_base64/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
+  });
+
   it('shows an icon-only copy action below completed assistant replies and copies their text', async () => {
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     const writeText = vi.fn(async () => undefined);
@@ -1762,7 +1862,28 @@ describe('App', () => {
   });
 
   it('submits uploaded files and slash soft-binding metadata together', async () => {
-    const api = makeApi();
+    const api = makeApi({
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        messages: [{
+          message_id: 'file_upload:upl-1',
+          conversation_id: 'conv-test',
+          role: 'system',
+          content: 'raw uploaded content should not render',
+          task_id: null,
+          stream_status: 'complete',
+          created_at: null,
+          message_type: 'file_upload',
+          metadata: {
+            upload_id: 'upl-1',
+            filename: 'materials.csv',
+            description_status: 'ready',
+            description_summary: 'Materials summary',
+            file_status: 'active',
+          },
+        }],
+      })),
+    });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
@@ -1787,6 +1908,8 @@ describe('App', () => {
         soft_skill_binding: { capability_id: 'skill.mini_breedstat_rcbd', command: '/mini-breedstat-rcbd' },
       }),
     })));
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
+    expect(await screen.findByText('Materials summary')).toBeInTheDocument();
   });
 
   it('does not submit while IME composition is confirming text with Enter', async () => {
@@ -1823,6 +1946,25 @@ describe('App', () => {
         }],
       })),
       deleteConversationUpload: vi.fn(async () => ({ upload_id: 'upl-existing', deleted: true })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        messages: [{
+          message_id: 'file_upload:upl-existing',
+          conversation_id: 'conv-test',
+          role: 'system',
+          content: 'raw deleted content should not render',
+          task_id: null,
+          stream_status: 'complete',
+          created_at: null,
+          message_type: 'file_upload',
+          metadata: {
+            upload_id: 'upl-existing',
+            filename: 'existing.csv',
+            description_status: 'ready',
+            file_status: 'deleted',
+          },
+        }],
+      })),
     });
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
@@ -1831,7 +1973,9 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: '删除文件 existing.csv' }));
 
     await waitFor(() => expect(api.deleteConversationUpload).toHaveBeenCalledWith(expect.any(String), 'upl-existing'));
-    await waitFor(() => expect(screen.queryByText(/existing.csv/)).not.toBeInTheDocument());
+    await waitFor(() => expect(within(getConversationFilesDrawer()).queryByText(/existing.csv/)).not.toBeInTheDocument());
+    await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
+    expect(await screen.findByText('文件已删除 / 不可再用于任务')).toBeInTheDocument();
   });
 
   it('deletes a draft attachment locally without calling backend delete', async () => {

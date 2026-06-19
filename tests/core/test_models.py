@@ -20,6 +20,7 @@ from src.core.models import (
     Artifact,
     Checkpoint,
     Conversation,
+    ConversationFileIndexRepairMarker,
     EventRecord,
     FileUploadMessageProjection,
     Interrupt,
@@ -96,6 +97,23 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "content",
                 "metadata",
                 "created_at",
+            ],
+        )
+
+    def test_conversation_file_index_repair_marker_fields_match_prd(self) -> None:
+        self.assert_dataclass_contract(
+            ConversationFileIndexRepairMarker,
+            [
+                "conversation_id",
+                "repair_kind",
+                "status",
+                "reason_code",
+                "affected_upload_ids",
+                "attempt_count",
+                "next_retry_at",
+                "created_at",
+                "updated_at",
+                "resolved_at",
             ],
         )
 

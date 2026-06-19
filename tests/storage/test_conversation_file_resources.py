@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import inspect, select
@@ -36,12 +36,156 @@ class ConversationFileResourceRepositoryTest(SQLiteStorageTestCase):
             ).all()
         return [dict(row.payload or {}) for row in rows]
 
+    def _resource(self, file_id: str = "upl-1", *, conversation_id: str = "conv-1") -> ConversationFileResource:
+        return ConversationFileResource(
+            file_id=file_id,
+            conversation_id=conversation_id,
+            username="alice",
+            original_filename="materials.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=12,
+            sha256=f"sha-{file_id}",
+            storage_key=f"{conversation_id}/{file_id}/original",
+            preview={"row_count": 1, "columns": ["ped_id"]},
+            description_status="ready",
+            description_summary="CSV material file",
+            status="active",
+            created_at=datetime(2026, 6, 16, 7, 0, 0),
+            updated_at=datetime(2026, 6, 16, 7, 1, 0),
+        )
+
     def test_bootstrap_creates_conversation_file_resource_table_and_indexes(self) -> None:
         inspector = inspect(self.engine)
         self.assertIn("conversation_file_resource", set(inspector.get_table_names()))
         index_names = {index["name"] for index in inspector.get_indexes("conversation_file_resource")}
         self.assertIn("idx_conversation_file_conversation_status_created", index_names)
         self.assertIn("idx_conversation_file_username_conversation", index_names)
+        self.assertIn("conversation_file_index_repair_marker", set(inspector.get_table_names()))
+        marker_index_names = {index["name"] for index in inspector.get_indexes("conversation_file_index_repair_marker")}
+        self.assertIn("idx_conversation_file_index_repair_status_retry", marker_index_names)
+
+    def test_repair_marker_round_trip_merge_due_and_lifecycle(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        first_at = datetime(2026, 6, 16, 7, 0, 0)
+        second_at = datetime(2026, 6, 16, 7, 0, 10)
+
+        first = asyncio.run(
+            storage.record_conversation_file_index_repair_required(
+                "conv-repair",
+                reason_code="upload_index_write_failed",
+                affected_upload_ids=("upl-a",),
+                now=first_at,
+            )
+        )
+        second = asyncio.run(
+            storage.record_conversation_file_index_repair_required(
+                "conv-repair",
+                reason_code="delete_index_write_failed",
+                affected_upload_ids=("upl-a", "upl-b"),
+                now=second_at,
+            )
+        )
+        loaded = asyncio.run(storage.get_conversation_file_index_repair_marker("conv-repair"))
+        due_before_retry = asyncio.run(
+            storage.list_due_conversation_file_index_repairs(now=first_at + timedelta(seconds=1))
+        )
+        due_after_retry = asyncio.run(
+            storage.list_due_conversation_file_index_repairs(now=second.next_retry_at, limit=1)
+        )
+        repairing = asyncio.run(
+            storage.mark_conversation_file_index_repairing("conv-repair", now=second_at + timedelta(seconds=1))
+        )
+        failed = asyncio.run(
+            storage.mark_conversation_file_index_repair_failed(
+                "conv-repair",
+                reason_code="index_repair_failed",
+                now=second_at + timedelta(seconds=2),
+            )
+        )
+        resolved = asyncio.run(
+            storage.mark_conversation_file_index_repair_resolved(
+                "conv-repair",
+                now=second_at + timedelta(seconds=3),
+            )
+        )
+        asyncio.run(
+            storage.record_conversation_file_index_repair_required(
+                "conv-nonretryable",
+                reason_code="conversation_missing",
+                affected_upload_ids=(),
+                now=first_at,
+            )
+        )
+        nonretryable_failed = asyncio.run(
+            storage.mark_conversation_file_index_repair_failed(
+                "conv-nonretryable",
+                reason_code="conversation_missing",
+                now=first_at + timedelta(seconds=1),
+                retryable=False,
+            )
+        )
+        due_after_nonretryable = asyncio.run(
+            storage.list_due_conversation_file_index_repairs(now=first_at + timedelta(days=1))
+        )
+
+        self.assertEqual(first.status, "pending")
+        self.assertEqual(first.attempt_count, 1)
+        self.assertEqual(first.next_retry_at, first_at + timedelta(seconds=5))
+        self.assertEqual(second.created_at, first_at)
+        self.assertEqual(second.attempt_count, 2)
+        self.assertEqual(second.reason_code, "delete_index_write_failed")
+        self.assertEqual(second.affected_upload_ids, ("upl-a", "upl-b"))
+        self.assertEqual(loaded, second)
+        self.assertEqual(due_before_retry, [])
+        self.assertEqual([marker.conversation_id for marker in due_after_retry], ["conv-repair"])
+        self.assertEqual(repairing.status, "repairing")
+        self.assertEqual(repairing.attempt_count, 3)
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.reason_code, "index_repair_failed")
+        self.assertEqual(failed.next_retry_at, second_at + timedelta(seconds=122))
+        self.assertEqual(resolved.status, "resolved")
+        self.assertIsNone(resolved.next_retry_at)
+        self.assertEqual(resolved.resolved_at, second_at + timedelta(seconds=3))
+        self.assertEqual(nonretryable_failed.status, "failed")
+        self.assertIsNone(nonretryable_failed.next_retry_at)
+        self.assertNotIn("conv-nonretryable", {marker.conversation_id for marker in due_after_nonretryable})
+
+    def test_composite_upload_save_and_compensation_manage_resource_and_history(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        resource = self._resource("upl-composite", conversation_id="conv-composite")
+        now = datetime(2026, 6, 16, 7, 0, 1)
+
+        saved = asyncio.run(
+            storage.save_conversation_file_resource_with_upload_message(
+                resource,
+                build_file_upload_message_projection(resource),
+                now=now,
+            )
+        )
+        message = asyncio.run(storage.get_message(file_upload_message_id("upl-composite")))
+        compensation = asyncio.run(
+            storage.compensate_failed_conversation_file_upload(
+                "conv-composite",
+                "alice",
+                "upl-composite",
+                reason_code="index_write_failed",
+                now=now + timedelta(seconds=1),
+            )
+        )
+        resource_after = asyncio.run(
+            storage.get_conversation_file_resource("conv-composite", "alice", "upl-composite")
+        )
+        message_after = asyncio.run(storage.get_message(file_upload_message_id("upl-composite")))
+
+        self.assertEqual(saved, resource)
+        self.assertIsNotNone(message)
+        self.assertEqual(message.message_type, FILE_UPLOAD_MESSAGE_TYPE)
+        self.assertEqual(compensation["status"], "removed")
+        self.assertEqual(compensation["resource_deleted"], 1)
+        self.assertEqual(compensation["message_deleted"], 1)
+        self.assertIsNone(resource_after)
+        self.assertIsNone(message_after)
 
     def test_postgresql_boolean_default_uses_false_literal(self) -> None:
         ddl = str(CreateTable(ConversationFileResourceRow.__table__).compile(dialect=postgresql.dialect()))

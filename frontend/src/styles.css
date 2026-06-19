@@ -406,6 +406,10 @@ body {
   align-items: flex-start;
 }
 
+.message-file-upload {
+  align-items: flex-start;
+}
+
 .message-meta {
   margin-bottom: 6px;
   color: var(--color-muted);
@@ -433,6 +437,22 @@ body {
 .message-assistant .message-body {
   background: var(--color-surface-strong);
   border: 1px solid var(--color-border);
+}
+
+.file-upload-history-card {
+  max-width: min(760px, 85%);
+  min-width: min(360px, 85%);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: rgba(255, 250, 240, 0.72);
+  box-shadow: 0 8px 22px rgba(74, 67, 41, 0.08);
+}
+
+.file-upload-history-filename,
+.file-upload-history-summary,
+.file-upload-history-upload-id {
+  word-break: break-word;
 }
 
 .skill-status-lines {

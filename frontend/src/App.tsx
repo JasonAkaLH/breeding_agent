@@ -37,14 +37,16 @@ interface AppProps {
   waitingInputCheckDelayMs?: number;
 }
 
-type MessageRole = 'user' | 'assistant';
+type MessageRole = 'user' | 'assistant' | 'system';
 type ActivityNoticeStatus = 'pending' | 'failed' | 'cancelled';
 
 interface ConversationMessage {
   id: string;
+  kind: 'chat' | 'file_upload';
   role: MessageRole;
   content: string;
   mode: ChatMode;
+  metadata?: Record<string, unknown>;
   reasoningRequested?: boolean;
   reasoningComplete?: boolean;
   reasoningContent?: string;
@@ -802,6 +804,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const restoredAssistantId = `restored-assistant-${taskId}`;
     const restoredAssistantMessage: ConversationMessage = {
       id: restoredAssistantId,
+      kind: 'chat',
       role: 'assistant',
       content: '',
       mode,
@@ -1087,21 +1090,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch {
       return;
     }
+    const refreshedMessages = uploadedDrafts.length > 0
+      ? await loadConversationMessages(targetConversationId).catch(() => null)
+      : null;
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     initializedWorkspaceConversationIdRef.current = targetConversationId;
     setRestoredWorkspaceConversationId(targetConversationId);
     const displayContent = content || (intent.kind === 'ready' ? intent.command.command : content);
-    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode };
+    const userMessage: ConversationMessage = { id: makeClientId('user'), kind: 'chat', role: 'user', content: displayContent, mode };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
+      kind: 'chat',
       role: 'assistant',
       content: '',
       mode,
       reasoningRequested: deepThinking,
       activityText: taskProgressDisplayText(createSubmittingTaskState()),
     };
-    setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
+    setMessages((current) => [...(refreshedMessages ?? current), userMessage, applyPendingAssistantPatch(assistantMessage)]);
     updateCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState(createSubmittingTaskState());
@@ -1255,6 +1262,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       await api.deleteConversationUpload(conversationId, upload.upload_id);
       setPendingUploads((current) => current.filter((item) => item.upload_id !== upload.upload_id));
+      const loadedMessages = await loadConversationMessages(conversationId).catch(() => null);
+      if (loadedMessages) setMessages(loadedMessages);
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
@@ -1322,21 +1331,25 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     } catch {
       return;
     }
+    const refreshedMessages = uploadedDrafts.length > 0
+      ? await loadConversationMessages(targetConversationId).catch(() => null)
+      : null;
     const uploads = uploadedDrafts.map((item) => item.upload);
     localTaskRuntimeActiveRef.current = true;
     const generation = beginRestoreGeneration();
     const resumeProgressText = '补充信息已提交，正在继续任务';
     const displayContent = content || uploadAnswerDisplayText(uploads) || sheetSelectionDisplayText(sheetField, selectedSheets);
-    const userMessage: ConversationMessage = { id: makeClientId('user'), role: 'user', content: displayContent, mode: interrupt.mode };
+    const userMessage: ConversationMessage = { id: makeClientId('user'), kind: 'chat', role: 'user', content: displayContent, mode: interrupt.mode };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
+      kind: 'chat',
       role: 'assistant',
       content: '',
       mode: interrupt.mode,
       reasoningRequested: deepThinking,
       activityText: resumeProgressText,
     };
-    setMessages((current) => [...current, userMessage, applyPendingAssistantPatch(assistantMessage)]);
+    setMessages((current) => [...(refreshedMessages ?? current), userMessage, applyPendingAssistantPatch(assistantMessage)]);
     updateCurrentAssistantId(assistantMessage.id);
     setInput('');
     setTaskState((state) => ({
@@ -2010,7 +2023,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
               onScroll={handleConversationScroll}
             >
               {messages.length === 0 ? <EmptyWelcome key={conversationId} /> : messages.map((message) => (
-                <MessageBubble key={message.id} message={message} onDownloadArtifact={handleDownloadArtifact} />
+                message.kind === 'file_upload'
+                  ? <FileUploadHistoryCard key={message.id} message={message} />
+                  : <MessageBubble key={message.id} message={message} onDownloadArtifact={handleDownloadArtifact} />
               ))}
             </div>
             <div
@@ -2856,6 +2871,43 @@ function MessageBubble({
   );
 }
 
+function FileUploadHistoryCard({ message }: { message: ConversationMessage }) {
+  const metadata = message.metadata ?? {};
+  const filename = metadataText(metadata.filename) || '未命名文件';
+  const uploadId = metadataText(metadata.upload_id);
+  const descriptionStatus = metadataText(metadata.description_status);
+  const fileStatus = metadataText(metadata.file_status) || 'active';
+  const summary = metadataText(metadata.description_summary);
+  const deleted = fileStatus === 'deleted';
+  const statusText = deleted
+    ? '文件已删除 / 不可再用于任务'
+    : descriptionStatus === 'pending'
+      ? '文件摘要生成中'
+      : descriptionStatus === 'failed'
+        ? '摘要不可用'
+        : '文件已上传';
+  const tagColor = deleted ? 'default' : descriptionStatus === 'failed' ? 'red' : descriptionStatus === 'pending' ? 'blue' : 'green';
+  return (
+    <div className="message message-file-upload">
+      <div className="message-meta">文件</div>
+      <div className="file-upload-history-card" data-message-kind="file_upload">
+        <Flex vertical gap={4}>
+          <Flex align="center" gap={8} wrap="wrap">
+            <Typography.Text strong className="file-upload-history-filename">{filename}</Typography.Text>
+            <Tag color={tagColor}>{statusText}</Tag>
+          </Flex>
+          {uploadId ? <Typography.Text type="secondary" className="file-upload-history-upload-id">upload_id: {uploadId}</Typography.Text> : null}
+          {!deleted && summary ? <Typography.Text className="file-upload-history-summary">{summary}</Typography.Text> : null}
+        </Flex>
+      </div>
+    </div>
+  );
+}
+
+function metadataText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function SkillStatusLines({ statuses }: { statuses?: SkillStatusLine[] }) {
   if (!statuses?.length) return null;
   return (
@@ -3011,6 +3063,16 @@ function ReasoningBox({ content, complete }: { content: string; complete?: boole
 }
 
 function messageFromHistory(message: MessageResponse): ConversationMessage | null {
+  if (message.message_type === 'file_upload' && message.role === 'system') {
+    return {
+      id: message.message_id,
+      kind: 'file_upload',
+      role: 'system',
+      content: '',
+      mode: 'chat',
+      metadata: safeFileUploadHistoryMetadata(message.metadata),
+    };
+  }
   if (message.role !== 'user' && message.role !== 'assistant') return null;
   const assistantReplyCompleted = message.role === 'assistant' && message.stream_status === 'complete';
   const artifactDisplays = message.role === 'assistant'
@@ -3018,6 +3080,7 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
     : [];
   return {
     id: message.message_id,
+    kind: 'chat',
     role: message.role,
     content: message.content,
     mode: 'chat',
@@ -3025,6 +3088,12 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
     replyCompleted: assistantReplyCompleted || undefined,
     artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
   };
+}
+
+function safeFileUploadHistoryMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!metadata) return {};
+  const safeKeys = ['filename', 'upload_id', 'description_summary', 'description_status', 'file_status'];
+  return Object.fromEntries(safeKeys.map((key) => [key, metadata[key]]).filter(([, value]) => value !== undefined));
 }
 
 function conversationStorageKey(username: string): string {

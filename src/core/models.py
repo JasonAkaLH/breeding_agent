@@ -89,6 +89,21 @@ class ConversationFileResource:
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
+
+@dataclass(slots=True, frozen=True)
+class ConversationFileIndexRepairMarker:
+    conversation_id: str
+    repair_kind: str = "conversation_file_index"
+    status: str = "pending"
+    reason_code: str = ""
+    affected_upload_ids: tuple[str, ...] = ()
+    attempt_count: int = 0
+    next_retry_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
 @dataclass(slots=True, frozen=True)
 class AuthUserToken:
     username: str

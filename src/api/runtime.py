@@ -139,7 +139,11 @@ from src.storage.postgres import PostgreSQLStorage, bootstrap_postgres_database,
 from src.auth.postgres_invalidation_bus import PostgresAuthInvalidationBus
 from src.state.runtime_factory import StatePlatformBackend, build_state_platform_runtime_config
 from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
-from src.storage.conversation_files import ConversationFileIndexWriter, LocalConversationFileStore
+from src.storage.conversation_files import (
+    ConversationFileIndexWriter,
+    LocalConversationFileStore,
+    build_file_upload_message_projection,
+)
 
 from .conversation_titles import (
     ConversationTitleGenerator,
@@ -224,6 +228,9 @@ _INTERRUPT_SCHEMA_SWITCH_EXECUTION_CONFIDENCE = 0.85
 _V2_INTERRUPT_RAW_ANSWER_ALLOWED_KEYS = frozenset(
     {"text", "upload_ids", "sheet_selections", "upload_sheet_selections"}
 )
+CONVERSATION_FILE_INDEX_REPAIR_REQUIRED_EVENT = "conversation_file.file_upload_index_repair_required"
+CONVERSATION_FILE_INDEX_REPAIR_RESOLVED_EVENT = "conversation_file.file_upload_index_repair_resolved"
+CONVERSATION_FILE_INDEX_REPAIR_FAILED_EVENT = "conversation_file.file_upload_index_repair_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1142,6 +1149,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         content: bytes,
     ) -> UploadedFileRecord:
         existing_conversation = await self.ensure_upload_allowed(conversation_id, username)
+        if existing_conversation is not None:
+            await self._repair_conversation_file_index_if_due(conversation_id, username)
         now = self._utcnow_naive()
         try:
             self.conversation_file_store.conversation_dir(conversation_id)
@@ -1161,8 +1170,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 content=record.content_bytes,
             )
             description_status, description_summary, description_ref = self._initial_file_description(record)
-        except ValueError as exc:
-            self.upload_store.delete(upload_id=record.upload_id, username=username, conversation_id=conversation_id)
+        except Exception as exc:
+            await self._delete_request_upload_artifacts(
+                conversation_id=conversation_id,
+                username=username,
+                upload_id=record.upload_id,
+            )
             raise UploadValidationError("Uploaded file failed file storage safety validation") from exc
         resource = ConversationFileResource(
             file_id=record.upload_id,
@@ -1186,17 +1199,71 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             created_at=record.created_at,
             updated_at=now,
         )
-        if existing_conversation is None:
-            await self.storage.save_conversation(
-                Conversation(
+        conversation_created = False
+        try:
+            if existing_conversation is None:
+                await self.storage.save_conversation(
+                    Conversation(
+                        conversation_id=conversation_id,
+                        username=username,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                conversation_created = True
+            await self.storage.save_conversation_file_resource_with_upload_message(
+                resource,
+                build_file_upload_message_projection(resource),
+                now=now,
+            )
+        except Exception as exc:
+            await self._delete_request_upload_artifacts(
+                conversation_id=conversation_id,
+                username=username,
+                upload_id=record.upload_id,
+            )
+            if conversation_created:
+                await self.storage.delete_conversation_physical(conversation_id)
+            raise UploadValidationError("Uploaded file could not be persisted") from exc
+        try:
+            index_ok = await self._rewrite_conversation_file_index_with_repair(
+                conversation_id,
+                username,
+                affected_upload_ids=(record.upload_id,),
+                reason_code="upload_index_write_failed",
+            )
+        except Exception as exc:
+            try:
+                await self._compensate_failed_upload_after_index_error(
                     conversation_id=conversation_id,
                     username=username,
-                    created_at=now,
-                    updated_at=now,
+                    upload_id=record.upload_id,
+                    reason_code="index_write_failed_marker_failed",
+                    now=self._utcnow_naive(),
                 )
-            )
-        await self.storage.save_conversation_file_resource(resource)
-        await self._rewrite_conversation_file_index(conversation_id, username)
+            finally:
+                await self._delete_request_upload_artifacts(
+                    conversation_id=conversation_id,
+                    username=username,
+                    upload_id=record.upload_id,
+                )
+            raise UploadValidationError("Uploaded file could not be indexed") from exc
+        if not index_ok:
+            try:
+                await self._compensate_failed_upload_after_index_error(
+                    conversation_id=conversation_id,
+                    username=username,
+                    upload_id=record.upload_id,
+                    reason_code="index_write_failed",
+                    now=self._utcnow_naive(),
+                )
+            finally:
+                await self._delete_request_upload_artifacts(
+                    conversation_id=conversation_id,
+                    username=username,
+                    upload_id=record.upload_id,
+                )
+            raise UploadValidationError("Uploaded file could not be indexed")
         if self._audit_sink is not None:
             await self._audit_sink.record(
                 "conversation_file.upload_persisted",
@@ -1232,6 +1299,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
         if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
             raise PermissionError(f"Conversation is not available: {conversation_id}")
+        if existing_conversation is not None:
+            await self._repair_conversation_file_index_if_due(conversation_id, username)
         resources = await self.storage.list_conversation_file_resources(
             conversation_id,
             username,
@@ -1247,7 +1316,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
         if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
             raise PermissionError(f"Conversation is not available: {conversation_id}")
-        deleted = await self.storage.mark_conversation_file_resource_deleted(
+        if existing_conversation is not None:
+            await self._repair_conversation_file_index_if_due(conversation_id, username)
+        deleted = await self.storage.mark_conversation_file_resource_and_upload_message_deleted(
             conversation_id,
             username,
             upload_id,
@@ -1255,24 +1326,39 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         )
         if deleted is None:
             return False
+        local_files_deleted = True
         try:
             self.conversation_file_store.delete_resource_dir(
                 conversation_id=deleted.conversation_id,
                 upload_id=deleted.file_id,
             )
         except Exception as exc:
+            local_files_deleted = False
             if self._audit_sink is not None:
                 await self._audit_sink.record(
                     "conversation_file.upload_directory_cleanup_failed",
                     {"upload_id": upload_id, "error_type": exc.__class__.__name__},
                     conversation_id=conversation_id,
                 )
-            raise
-        await self._rewrite_conversation_file_index(conversation_id, username)
+        try:
+            await self._rewrite_conversation_file_index_with_repair(
+                conversation_id,
+                username,
+                affected_upload_ids=(upload_id,),
+                reason_code="delete_index_write_failed",
+            )
+        except Exception as exc:
+            if self._audit_sink is not None:
+                await self._audit_sink.record(
+                    "conversation_file.delete_index_repair_marker_failed",
+                    {"upload_id": upload_id, "error_type": exc.__class__.__name__},
+                    conversation_id=conversation_id,
+                )
+            raise UploadValidationError("Deleted file could not be indexed") from exc
         if self._audit_sink is not None:
             await self._audit_sink.record(
                 "conversation_file.delete_marked",
-                {"upload_id": upload_id, "local_files_deleted": True},
+                {"upload_id": upload_id, "local_files_deleted": local_files_deleted},
                 conversation_id=conversation_id,
             )
         return True
@@ -1291,6 +1377,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             upload_ids = [upload_ids]
         if not isinstance(upload_ids, list | tuple):
             raise UploadValidationError("metadata.upload_ids must be a list")
+        await self._repair_conversation_file_index_if_due(conversation_id, username)
         sheet_selections = self._normalize_upload_sheet_selections(upload_sheet_selections)
         uploaded_artifacts: list[dict[str, Any]] = []
         skill_artifacts: list[dict[str, Any]] = []
@@ -1342,6 +1429,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         *,
         upload_sheet_selections: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        await self._repair_conversation_file_index_if_due(conversation_id, username)
         resources = await self.storage.list_conversation_file_resources(
             conversation_id,
             username,
@@ -5767,6 +5855,180 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         resources = await self.storage.list_conversation_file_resources(conversation_id, username, include_deleted=True)
         self._conversation_file_index_writer.write_index(conversation_id=conversation_id, resources=resources)
 
+    async def _delete_request_upload_artifacts(self, *, conversation_id: str, username: str, upload_id: str) -> None:
+        self.upload_store.delete(upload_id=upload_id, username=username, conversation_id=conversation_id)
+        try:
+            self.conversation_file_store.delete_resource_dir(conversation_id=conversation_id, upload_id=upload_id)
+        except Exception as exc:
+            if self._audit_sink is not None:
+                await self._audit_sink.record(
+                    "conversation_file.request_upload_cleanup_failed",
+                    {"upload_id": upload_id, "error_type": exc.__class__.__name__},
+                    conversation_id=conversation_id,
+                )
+
+    async def _compensate_failed_upload_after_index_error(
+        self,
+        *,
+        conversation_id: str,
+        username: str,
+        upload_id: str,
+        reason_code: str,
+        now: datetime,
+    ) -> None:
+        try:
+            await self.storage.compensate_failed_conversation_file_upload(
+                conversation_id,
+                username,
+                upload_id,
+                reason_code=reason_code,
+                now=now,
+            )
+        except Exception as exc:
+            marker_error_type: str | None = None
+            try:
+                await self.storage.record_conversation_file_index_repair_required(
+                    conversation_id,
+                    reason_code="index_write_failed_compensation_failed",
+                    affected_upload_ids=(upload_id,),
+                    now=now,
+                )
+            except Exception as marker_exc:
+                marker_error_type = marker_exc.__class__.__name__
+            if self._audit_sink is not None:
+                payload = {
+                    "upload_id": upload_id,
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": reason_code,
+                    "repair_marker_recorded": marker_error_type is None,
+                }
+                if marker_error_type is not None:
+                    payload["repair_marker_error_type"] = marker_error_type
+                await self._audit_sink.record(
+                    "conversation_file.upload_compensation_failed",
+                    payload,
+                    conversation_id=conversation_id,
+                )
+            raise
+
+    async def _rewrite_conversation_file_index_with_repair(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        affected_upload_ids: Iterable[str] = (),
+        reason_code: str,
+    ) -> bool:
+        try:
+            await self._rewrite_conversation_file_index(conversation_id, username)
+        except Exception:
+            try:
+                await self._rewrite_conversation_file_index(conversation_id, username)
+            except Exception as retry_exc:
+                marker = await self.storage.record_conversation_file_index_repair_required(
+                    conversation_id,
+                    reason_code=reason_code,
+                    affected_upload_ids=affected_upload_ids,
+                    now=self._utcnow_naive(),
+                )
+                if self._audit_sink is not None:
+                    await self._audit_sink.record(
+                        CONVERSATION_FILE_INDEX_REPAIR_REQUIRED_EVENT,
+                        {
+                            "repair_kind": marker.repair_kind,
+                            "status": marker.status,
+                            "reason_code": marker.reason_code,
+                            "affected_upload_ids": list(marker.affected_upload_ids),
+                            "attempt_count": marker.attempt_count,
+                            "error_type": retry_exc.__class__.__name__,
+                        },
+                        conversation_id=conversation_id,
+                    )
+                return False
+        await self._resolve_conversation_file_index_repair_marker_if_present(conversation_id)
+        return True
+
+    async def _resolve_conversation_file_index_repair_marker_if_present(self, conversation_id: str) -> None:
+        marker = await self.storage.get_conversation_file_index_repair_marker(conversation_id)
+        if marker is None or marker.status == "resolved":
+            return
+        resolved = await self.storage.mark_conversation_file_index_repair_resolved(
+            conversation_id,
+            now=self._utcnow_naive(),
+        )
+        if resolved is not None and self._audit_sink is not None:
+            await self._audit_sink.record(
+                CONVERSATION_FILE_INDEX_REPAIR_RESOLVED_EVENT,
+                {
+                    "repair_kind": resolved.repair_kind,
+                    "status": resolved.status,
+                    "affected_upload_ids": list(resolved.affected_upload_ids),
+                    "attempt_count": resolved.attempt_count,
+                },
+                conversation_id=conversation_id,
+            )
+
+    async def _repair_conversation_file_index_if_due(self, conversation_id: str, username: str) -> bool:
+        marker = await self.storage.get_conversation_file_index_repair_marker(conversation_id)
+        if marker is None or marker.status not in {"pending", "failed"}:
+            return True
+        now = self._utcnow_naive()
+        if marker.next_retry_at is not None and marker.next_retry_at > now:
+            return False
+        await self.storage.mark_conversation_file_index_repairing(conversation_id, now=now)
+        try:
+            await self._rewrite_conversation_file_index(conversation_id, username)
+        except Exception as exc:
+            failed = await self.storage.mark_conversation_file_index_repair_failed(
+                conversation_id,
+                reason_code="index_repair_failed",
+                now=self._utcnow_naive(),
+            )
+            if failed is not None and self._audit_sink is not None:
+                await self._audit_sink.record(
+                    CONVERSATION_FILE_INDEX_REPAIR_FAILED_EVENT,
+                    {
+                        "repair_kind": failed.repair_kind,
+                        "status": failed.status,
+                        "reason_code": failed.reason_code,
+                        "affected_upload_ids": list(failed.affected_upload_ids),
+                        "attempt_count": failed.attempt_count,
+                        "error_type": exc.__class__.__name__,
+                    },
+                    conversation_id=conversation_id,
+                )
+            return False
+        await self._resolve_conversation_file_index_repair_marker_if_present(conversation_id)
+        return True
+
+    async def repair_due_conversation_file_indexes(self, *, limit: int | None = None) -> int:
+        repaired = 0
+        markers = await self.storage.list_due_conversation_file_index_repairs(now=self._utcnow_naive(), limit=limit)
+        for marker in markers:
+            conversation = await self.storage.get_conversation(marker.conversation_id)
+            if conversation is None:
+                await self.storage.mark_conversation_file_index_repair_failed(
+                    marker.conversation_id,
+                    reason_code="conversation_missing",
+                    now=self._utcnow_naive(),
+                    retryable=False,
+                )
+                continue
+            if await self._repair_conversation_file_index_if_due(marker.conversation_id, conversation.username):
+                repaired += 1
+        return repaired
+
+    async def refresh_file_upload_history_message(
+        self,
+        resource: ConversationFileResource,
+        *,
+        now: datetime | None = None,
+    ) -> Message:
+        return await self.storage.upsert_file_upload_message(
+            build_file_upload_message_projection(resource),
+            now=now or self._utcnow_naive(),
+        )
+
     async def _apply_conversation_file_sheet_selection(
         self,
         resource: ConversationFileResource,
@@ -5795,7 +6057,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             updated_at=self._utcnow_naive(),
         )
         saved = await self.storage.save_conversation_file_resource(updated)
-        await self._rewrite_conversation_file_index(saved.conversation_id, saved.username)
+        await self.refresh_file_upload_history_message(saved)
+        await self._rewrite_conversation_file_index_with_repair(
+            saved.conversation_id,
+            saved.username,
+            affected_upload_ids=(saved.file_id,),
+            reason_code="sheet_selection_index_write_failed",
+        )
         return saved
 
     def _upload_record_from_resource(

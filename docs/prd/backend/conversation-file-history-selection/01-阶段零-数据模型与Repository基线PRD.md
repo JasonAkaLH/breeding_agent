@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21-Phase 0
 - **日期**：2026-06-19
-- **状态**：待实施
+- **状态**：已实施（2026-06-19，commit a871f86）
 - **上游依赖**：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`
 - **下游阶段**：阶段一上传删除强一致、阶段二 memory 安全、阶段四 selector 绑定
 - **目标模块**：`src/core/models.py`、`src/storage/`、`src/api/dto.py`、history API repository tests

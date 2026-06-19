@@ -6,7 +6,7 @@ import inspect
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import and_, delete, or_, select, text, update
@@ -22,6 +22,7 @@ from src.core.models import (
     Checkpoint,
     Conversation,
     ConversationMemorySummary,
+    ConversationFileIndexRepairMarker,
     ConversationFileResource,
     EventRecord,
     FileUploadMessageProjection,
@@ -67,6 +68,7 @@ from .models import (
     CheckpointRow,
     ConversationRow,
     ConversationMemorySummaryRow,
+    ConversationFileIndexRepairMarkerRow,
     ConversationFileResourceRow,
     EventRecordRow,
     InterruptAnswerRow,
@@ -82,6 +84,10 @@ from .models import (
     TaskNodeRow,
     TaskRow,
 )
+
+
+CONVERSATION_FILE_INDEX_REPAIR_KIND = "conversation_file_index"
+
 
 def _row_to_conversation(row: ConversationRow) -> Conversation:
     return Conversation(
@@ -125,6 +131,53 @@ def _row_to_conversation_file_resource(row: ConversationFileResourceRow) -> Conv
         selected_sheet=row.selected_sheet,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _normalize_repair_upload_ids(value: object) -> tuple[str, ...]:
+    if value is None or isinstance(value, str):
+        values = () if value is None else (value,)
+    elif isinstance(value, Iterable):
+        values = tuple(value)
+    else:
+        values = ()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        upload_id = str(item or "").strip()
+        if not upload_id or upload_id in seen:
+            continue
+        normalized.append(upload_id)
+        seen.add(upload_id)
+    return tuple(normalized)
+
+
+def _merge_repair_upload_ids(existing: object, incoming: Iterable[str]) -> list[str]:
+    return list(_normalize_repair_upload_ids((*_normalize_repair_upload_ids(existing), *tuple(incoming))))
+
+
+def _repair_next_retry_at(now: datetime, attempt_count: int) -> datetime:
+    if attempt_count <= 1:
+        return now + timedelta(seconds=5)
+    if attempt_count == 2:
+        return now + timedelta(seconds=30)
+    return now + timedelta(seconds=120)
+
+
+def _row_to_conversation_file_index_repair_marker(
+    row: ConversationFileIndexRepairMarkerRow,
+) -> ConversationFileIndexRepairMarker:
+    return ConversationFileIndexRepairMarker(
+        conversation_id=row.conversation_id,
+        repair_kind=row.repair_kind,
+        status=row.status,
+        reason_code=row.reason_code,
+        affected_upload_ids=_normalize_repair_upload_ids(row.affected_upload_ids),
+        attempt_count=int(row.attempt_count or 0),
+        next_retry_at=row.next_retry_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        resolved_at=row.resolved_at,
     )
 
 
@@ -1114,6 +1167,12 @@ class SQLiteStateRepository:
             "conversation_pending_skill_context",
             delete(PendingSkillContextRow).where(PendingSkillContextRow.conversation_id == conversation_id),
         )
+        _delete(
+            "conversation_file_index_repair_marker",
+            delete(ConversationFileIndexRepairMarkerRow).where(
+                ConversationFileIndexRepairMarkerRow.conversation_id == conversation_id
+            ),
+        )
         _delete("message", delete(MessageRow).where(or_(*message_conditions)))
         _delete("task", delete(TaskRow).where(TaskRow.conversation_id == conversation_id))
         _delete("conversation", delete(ConversationRow).where(ConversationRow.conversation_id == conversation_id))
@@ -1219,6 +1278,227 @@ class SQLiteStateRepository:
         row.updated_at = updated_at
         self._session.flush()
         return _row_to_conversation_file_resource(row)
+
+    def save_conversation_file_resource_with_upload_message(
+        self,
+        resource: ConversationFileResource,
+        projection: FileUploadMessageProjection,
+        *,
+        now: datetime,
+    ) -> ConversationFileResource:
+        saved = self.save_conversation_file_resource(resource)
+        self.upsert_file_upload_message(projection, now=now)
+        return saved
+
+    def mark_conversation_file_resource_and_upload_message_deleted(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+        *,
+        updated_at: datetime,
+    ) -> ConversationFileResource | None:
+        deleted = self.mark_conversation_file_resource_deleted(
+            conversation_id,
+            username,
+            file_id,
+            updated_at=updated_at,
+        )
+        if deleted is None:
+            return None
+        self.mark_file_upload_message_deleted(conversation_id, file_id, deleted_at=updated_at)
+        return deleted
+
+    def compensate_failed_conversation_file_upload(
+        self,
+        conversation_id: str,
+        username: str,
+        upload_id: str,
+        *,
+        reason_code: str,
+        now: datetime,
+    ) -> dict[str, object]:
+        result: dict[str, object] = {
+            "upload_id": upload_id,
+            "reason_code": reason_code,
+            "resource_deleted": 0,
+            "message_deleted": 0,
+            "status": "noop",
+        }
+        resource_row = self._session.get(ConversationFileResourceRow, upload_id)
+        if (
+            resource_row is not None
+            and resource_row.conversation_id == conversation_id
+            and resource_row.username == username
+        ):
+            self._session.delete(resource_row)
+            result["resource_deleted"] = 1
+        message_row = self._session.get(MessageRow, file_upload_message_id(upload_id))
+        if (
+            message_row is not None
+            and message_row.conversation_id == conversation_id
+            and _message_type_value(message_row.message_type) == FILE_UPLOAD_MESSAGE_TYPE
+        ):
+            self._session.delete(message_row)
+            result["message_deleted"] = 1
+        if result["resource_deleted"] or result["message_deleted"]:
+            result["status"] = "removed"
+        result["compensated_at"] = now.isoformat()
+        self._session.flush()
+        return result
+
+    def record_conversation_file_index_repair_required(
+        self,
+        conversation_id: str,
+        *,
+        reason_code: str,
+        affected_upload_ids: Iterable[str] = (),
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker:
+        row = self._session.get(
+            ConversationFileIndexRepairMarkerRow,
+            (conversation_id, CONVERSATION_FILE_INDEX_REPAIR_KIND),
+        )
+        if row is None:
+            attempt_count = 1
+            row = ConversationFileIndexRepairMarkerRow(
+                conversation_id=conversation_id,
+                repair_kind=CONVERSATION_FILE_INDEX_REPAIR_KIND,
+                status="pending",
+                reason_code=str(reason_code or "index_write_failed"),
+                affected_upload_ids=_merge_repair_upload_ids((), affected_upload_ids),
+                attempt_count=attempt_count,
+                next_retry_at=_repair_next_retry_at(now, attempt_count),
+                created_at=now,
+                updated_at=now,
+                resolved_at=None,
+            )
+            self._session.add(row)
+        else:
+            attempt_count = int(row.attempt_count or 0) + 1
+            row.status = "pending"
+            row.reason_code = str(reason_code or row.reason_code or "index_write_failed")
+            row.affected_upload_ids = _merge_repair_upload_ids(row.affected_upload_ids, affected_upload_ids)
+            row.attempt_count = attempt_count
+            row.next_retry_at = _repair_next_retry_at(now, attempt_count)
+            row.updated_at = now
+            row.resolved_at = None
+            if row.created_at is None:
+                row.created_at = now
+        self._session.flush()
+        return _row_to_conversation_file_index_repair_marker(row)
+
+    def get_conversation_file_index_repair_marker(
+        self,
+        conversation_id: str,
+    ) -> ConversationFileIndexRepairMarker | None:
+        row = self._session.get(
+            ConversationFileIndexRepairMarkerRow,
+            (conversation_id, CONVERSATION_FILE_INDEX_REPAIR_KIND),
+        )
+        return None if row is None else _row_to_conversation_file_index_repair_marker(row)
+
+    def list_due_conversation_file_index_repairs(
+        self,
+        *,
+        now: datetime,
+        limit: int | None = None,
+    ) -> list[ConversationFileIndexRepairMarker]:
+        statement = (
+            select(ConversationFileIndexRepairMarkerRow)
+            .where(
+                ConversationFileIndexRepairMarkerRow.repair_kind == CONVERSATION_FILE_INDEX_REPAIR_KIND,
+                or_(
+                    and_(
+                        ConversationFileIndexRepairMarkerRow.status == "pending",
+                        or_(
+                            ConversationFileIndexRepairMarkerRow.next_retry_at.is_(None),
+                            ConversationFileIndexRepairMarkerRow.next_retry_at <= now,
+                        ),
+                    ),
+                    and_(
+                        ConversationFileIndexRepairMarkerRow.status == "failed",
+                        ConversationFileIndexRepairMarkerRow.next_retry_at.is_not(None),
+                        ConversationFileIndexRepairMarkerRow.next_retry_at <= now,
+                    ),
+                ),
+            )
+            .order_by(
+                ConversationFileIndexRepairMarkerRow.next_retry_at,
+                ConversationFileIndexRepairMarkerRow.updated_at,
+                ConversationFileIndexRepairMarkerRow.conversation_id,
+            )
+        )
+        if limit is not None and limit > 0:
+            statement = statement.limit(limit)
+        rows = self._session.scalars(statement).all()
+        return [_row_to_conversation_file_index_repair_marker(row) for row in rows]
+
+    def mark_conversation_file_index_repairing(
+        self,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker | None:
+        row = self._session.get(
+            ConversationFileIndexRepairMarkerRow,
+            (conversation_id, CONVERSATION_FILE_INDEX_REPAIR_KIND),
+        )
+        if row is None:
+            return None
+        row.status = "repairing"
+        row.attempt_count = int(row.attempt_count or 0) + 1
+        row.next_retry_at = None
+        row.updated_at = now
+        if row.created_at is None:
+            row.created_at = now
+        self._session.flush()
+        return _row_to_conversation_file_index_repair_marker(row)
+
+    def mark_conversation_file_index_repair_resolved(
+        self,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker | None:
+        row = self._session.get(
+            ConversationFileIndexRepairMarkerRow,
+            (conversation_id, CONVERSATION_FILE_INDEX_REPAIR_KIND),
+        )
+        if row is None:
+            return None
+        row.status = "resolved"
+        row.next_retry_at = None
+        row.updated_at = now
+        row.resolved_at = now
+        if row.created_at is None:
+            row.created_at = now
+        self._session.flush()
+        return _row_to_conversation_file_index_repair_marker(row)
+
+    def mark_conversation_file_index_repair_failed(
+        self,
+        conversation_id: str,
+        *,
+        reason_code: str,
+        now: datetime,
+        retryable: bool = True,
+    ) -> ConversationFileIndexRepairMarker | None:
+        row = self._session.get(
+            ConversationFileIndexRepairMarkerRow,
+            (conversation_id, CONVERSATION_FILE_INDEX_REPAIR_KIND),
+        )
+        if row is None:
+            return None
+        row.status = "failed"
+        row.reason_code = str(reason_code or row.reason_code or "index_repair_failed")
+        row.updated_at = now
+        row.resolved_at = None
+        if row.created_at is None:
+            row.created_at = now
+        row.next_retry_at = _repair_next_retry_at(now, int(row.attempt_count or 0)) if retryable else None
+        self._session.flush()
+        return _row_to_conversation_file_index_repair_marker(row)
 
     def save_message(self, message: Message) -> Message:
         row = MessageRow(
@@ -2261,6 +2541,156 @@ class SQLiteStorage(StoragePort):
                 username,
                 file_id,
                 updated_at=updated_at,
+            )
+        )
+
+    async def save_conversation_file_resource_with_upload_message(
+        self,
+        resource: ConversationFileResource,
+        projection: FileUploadMessageProjection,
+        *,
+        now: datetime,
+    ) -> ConversationFileResource:
+        try:
+            return await self._run(
+                lambda state, collab: state.save_conversation_file_resource_with_upload_message(
+                    resource,
+                    projection,
+                    now=now,
+                )
+            )
+        except ValueError as exc:
+            reason_code = _file_upload_message_error_reason(str(exc))
+            await self._run(
+                lambda state, collab: state.record_file_upload_message_audit(
+                    event_type=FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+                    conversation_id=projection.conversation_id,
+                    upload_id=projection.upload_id,
+                    outcome="failed",
+                    reason_code=reason_code,
+                    at=now,
+                    projection=projection,
+                )
+            )
+            raise
+
+    async def mark_conversation_file_resource_and_upload_message_deleted(
+        self,
+        conversation_id: str,
+        username: str,
+        file_id: str,
+        *,
+        updated_at: datetime,
+    ) -> ConversationFileResource | None:
+        try:
+            return await self._run(
+                lambda state, collab: state.mark_conversation_file_resource_and_upload_message_deleted(
+                    conversation_id,
+                    username,
+                    file_id,
+                    updated_at=updated_at,
+                )
+            )
+        except ValueError as exc:
+            reason_code = _file_upload_message_error_reason(str(exc))
+            await self._run(
+                lambda state, collab: state.record_file_upload_message_audit(
+                    event_type=FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
+                    conversation_id=conversation_id,
+                    upload_id=file_id,
+                    outcome="failed",
+                    reason_code=reason_code,
+                    at=updated_at,
+                )
+            )
+            raise
+
+    async def compensate_failed_conversation_file_upload(
+        self,
+        conversation_id: str,
+        username: str,
+        upload_id: str,
+        *,
+        reason_code: str,
+        now: datetime,
+    ) -> Mapping[str, Any]:
+        return await self._run(
+            lambda state, collab: state.compensate_failed_conversation_file_upload(
+                conversation_id,
+                username,
+                upload_id,
+                reason_code=reason_code,
+                now=now,
+            )
+        )
+
+    async def record_conversation_file_index_repair_required(
+        self,
+        conversation_id: str,
+        *,
+        reason_code: str,
+        affected_upload_ids: Iterable[str] = (),
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker:
+        return await self._run(
+            lambda state, collab: state.record_conversation_file_index_repair_required(
+                conversation_id,
+                reason_code=reason_code,
+                affected_upload_ids=affected_upload_ids,
+                now=now,
+            )
+        )
+
+    async def get_conversation_file_index_repair_marker(
+        self,
+        conversation_id: str,
+    ) -> ConversationFileIndexRepairMarker | None:
+        return await self._run(lambda state, collab: state.get_conversation_file_index_repair_marker(conversation_id))
+
+    async def list_due_conversation_file_index_repairs(
+        self,
+        *,
+        now: datetime,
+        limit: int | None = None,
+    ) -> list[ConversationFileIndexRepairMarker]:
+        return await self._run(
+            lambda state, collab: state.list_due_conversation_file_index_repairs(now=now, limit=limit)
+        )
+
+    async def mark_conversation_file_index_repairing(
+        self,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker | None:
+        return await self._run(
+            lambda state, collab: state.mark_conversation_file_index_repairing(conversation_id, now=now)
+        )
+
+    async def mark_conversation_file_index_repair_resolved(
+        self,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> ConversationFileIndexRepairMarker | None:
+        return await self._run(
+            lambda state, collab: state.mark_conversation_file_index_repair_resolved(conversation_id, now=now)
+        )
+
+    async def mark_conversation_file_index_repair_failed(
+        self,
+        conversation_id: str,
+        *,
+        reason_code: str,
+        now: datetime,
+        retryable: bool = True,
+    ) -> ConversationFileIndexRepairMarker | None:
+        return await self._run(
+            lambda state, collab: state.mark_conversation_file_index_repair_failed(
+                conversation_id,
+                reason_code=reason_code,
+                now=now,
+                retryable=retryable,
             )
         )
 

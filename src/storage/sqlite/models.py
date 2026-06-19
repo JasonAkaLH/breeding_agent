@@ -64,6 +64,24 @@ class ConversationFileResourceRow(SQLiteBase):
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class ConversationFileIndexRepairMarkerRow(SQLiteBase):
+    __tablename__ = "conversation_file_index_repair_marker"
+    __table_args__ = (
+        Index("idx_conversation_file_index_repair_status_retry", "status", "next_retry_at", "updated_at"),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    repair_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    affected_upload_ids: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    next_retry_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    resolved_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
 class ConversationMemorySummaryRow(SQLiteBase):
     __tablename__ = "conversation_memory_summary"
     __table_args__ = (
