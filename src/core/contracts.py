@@ -13,6 +13,7 @@ from .models import (
     ConversationMemorySummary,
     ConversationFileResource,
     EventRecord,
+    FileUploadMessageProjection,
     Interrupt,
     InterruptAnswer,
     MailboxDelivery,
@@ -216,6 +217,21 @@ class StoragePort(Protocol):
     async def get_message(self, message_id: str) -> Message | None: ...
 
     async def list_messages_for_conversation(self, conversation_id: str) -> list[Message]: ...
+
+    async def upsert_file_upload_message(
+        self,
+        projection: FileUploadMessageProjection,
+        *,
+        now: datetime,
+    ) -> Message: ...
+
+    async def mark_file_upload_message_deleted(
+        self,
+        conversation_id: str,
+        upload_id: str,
+        *,
+        deleted_at: datetime,
+    ) -> Message | None: ...
 
     async def save_task(self, task: Task) -> Task: ...
 

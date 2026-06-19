@@ -289,6 +289,9 @@ class MessageResponse(BaseModel):
     task_id: str | None
     stream_status: str | None
     created_at: datetime | None
+    message_type: str = "chat"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime | None = None
     artifacts: list[ArtifactResponse] = Field(default_factory=list)
 
 

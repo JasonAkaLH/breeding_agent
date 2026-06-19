@@ -157,6 +157,9 @@ export interface MessageResponse {
   task_id: string | null;
   stream_status: string | null;
   created_at: string | null;
+  message_type?: string;
+  metadata?: Record<string, unknown>;
+  updated_at?: string | null;
   artifacts?: ArtifactResponse[];
 }
 

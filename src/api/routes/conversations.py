@@ -6,6 +6,7 @@ from src.core.enums import ConversationStatus, MessageRole
 from src.core.models import Artifact, Conversation, Message
 from src.lifecycle.errors import ConversationBusyError
 from src.api.upload_store import UploadValidationError
+from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, safe_file_upload_message_metadata
 
 from ..artifact_responses import artifact_response, should_return_history_display_artifact
 from ..auth import require_authenticated_user, require_conversation_owner
@@ -98,7 +99,8 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
     await require_conversation_owner(runtime, conversation_id, user)
     await runtime.sync_assistant_history_messages(conversation_id)
     messages = await runtime.storage.list_messages_for_conversation(conversation_id)
-    artifacts_by_task_id = await _history_display_artifacts_by_task_id(runtime, conversation_id, messages)
+    public_messages = [message for message in messages if _is_public_history_message(message)]
+    artifacts_by_task_id = await _history_display_artifacts_by_task_id(runtime, conversation_id, public_messages)
     return ConversationMessagesResponse(
         conversation_id=conversation_id,
         messages=[
@@ -110,19 +112,45 @@ async def list_conversation_messages(conversation_id: str, request: Request) -> 
                 task_id=message.task_id,
                 stream_status=message.stream_status,
                 created_at=message.created_at,
+                message_type=message.message_type,
+                metadata=_public_message_metadata(message),
+                updated_at=message.updated_at,
                 artifacts=(
                     artifacts_by_task_id.get(message.task_id, [])
                     if (
-                        message.role == MessageRole.ASSISTANT
+                        str(message.role) == str(MessageRole.ASSISTANT)
                         and message.task_id is not None
                         and message.stream_status == "complete"
                     )
                     else []
                 ),
             )
-            for message in messages
+            for message in public_messages
         ],
     )
+
+
+def _is_public_history_message(message: Message) -> bool:
+    if str(message.message_type or "chat") == "chat":
+        return str(message.role) in {str(MessageRole.USER), str(MessageRole.ASSISTANT)}
+    if str(message.message_type) == FILE_UPLOAD_MESSAGE_TYPE:
+        return str(message.role) == str(MessageRole.SYSTEM) and _file_upload_id_from_message(message) is not None
+    return False
+
+
+def _public_message_metadata(message: Message) -> dict[str, object]:
+    if str(message.message_type) == FILE_UPLOAD_MESSAGE_TYPE:
+        upload_id = _file_upload_id_from_message(message)
+        return safe_file_upload_message_metadata(message.metadata, upload_id=upload_id)
+    return dict(message.metadata)
+
+
+def _file_upload_id_from_message(message: Message) -> str | None:
+    prefix = f"{FILE_UPLOAD_MESSAGE_TYPE}:"
+    if not message.message_id.startswith(prefix):
+        return None
+    upload_id = message.message_id[len(prefix):].strip()
+    return upload_id or None
 
 
 async def _history_display_artifacts_by_task_id(
@@ -133,7 +161,7 @@ async def _history_display_artifacts_by_task_id(
     assistant_task_ids = {
         message.task_id
         for message in messages
-        if message.role == MessageRole.ASSISTANT
+        if str(message.role) == str(MessageRole.ASSISTANT)
         and message.task_id is not None
         and message.stream_status == "complete"
     }

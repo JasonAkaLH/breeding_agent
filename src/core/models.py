@@ -110,6 +110,18 @@ class Message:
     task_id: str | None = None
     stream_status: str | None = None
     created_at: datetime | None = None
+    message_type: str = "chat"
+    metadata: JsonMapping = field(default_factory=dict)
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class FileUploadMessageProjection:
+    upload_id: str
+    conversation_id: str
+    content: str
+    metadata: JsonMapping = field(default_factory=dict)
+    created_at: datetime | None = None
 
 
 @dataclass(slots=True, frozen=True)

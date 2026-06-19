@@ -4,7 +4,7 @@ import dataclasses
 import unittest
 
 from src.core import enums
-from src.core.models import AuthUserToken, Conversation, ConversationMemorySummary, Task
+from src.core.models import AuthUserToken, Conversation, ConversationMemorySummary, FileUploadMessageProjection, Message, Task
 from src.core.rust_contract import load_core_contract
 
 
@@ -27,7 +27,7 @@ class CoreRustContractArtifactTest(unittest.TestCase):
         for legacy_model in ("AuthUser", "AuthSession", "CaptchaChallenge", "AuthApiToken"):
             self.assertNotIn(legacy_model, contract["models"])
 
-        for model in (Task, Conversation, ConversationMemorySummary, AuthUserToken):
+        for model in (Task, Conversation, ConversationMemorySummary, AuthUserToken, Message, FileUploadMessageProjection):
             self.assertEqual(
                 contract["models"][model.__name__],
                 [field.name for field in dataclasses.fields(model)],

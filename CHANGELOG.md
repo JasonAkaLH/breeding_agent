@@ -10,6 +10,7 @@
 
 ### 2026-06-19
 
+- 对话文件历史与智能选择 Phase 0 已落地：`Message`/DTO/SQLite message 表新增 `message_type`、安全 `metadata` 与 `updated_at` 兼容字段，新增 `file_upload` canonical projection、稳定 `file_upload:<upload_id>` repository upsert/delete 契约、public history allowlist、SQLite audit-only 事件和旧 SQLite message row 迁移；repository/API 信任边界会二次过滤 file_upload metadata，测试覆盖安全投影、冲突保护、audit outcome、deleted no-resurrection、metadata object enforcement 与历史 API 隐藏 internal system message。License Requirement：代码/测试变更，无新增依赖/许可变更。
 - 对话文件历史与智能选择后端总览索引同步最终契约：`docs/prd/backend/00-主代理框架PRD.md` 的 5.14 改为 `file_selection` 最终字段、旧字段拒绝、exact upload_id、repair marker、四个 rollout mode 与 active context 不短路 selector 口径。License Requirement：文档索引更新，无依赖/许可变更。
 - 对话文件历史与智能选择父入口 PRD 已同步分步最终稿口径：`docs/prd/backend/21-对话文件历史与智能选择PRD.md` 收敛到 active context 不短路 selector、message 表扩展承载 file_upload、DB durable repair marker、四个 rollout mode、当前 `upl-` + 12 hex 精确匹配，以及 `file_selection` closed schema / 旧字段拒绝。License Requirement：文档加固，无依赖/许可变更。
 - 对话文件历史与智能选择分步 PRD 第二轮决策落文：`FileRequirementProfile` 收敛为交付级 closed schema，仅保留 `source/required/allow_multiple/expected_content/supported_file_types/helpful_columns/disambiguation_hint/user_file_reference/context_notes` 最终字段；Skill 文件需求只接受 `file_selection` 最终字段，拒绝 `file_intent`、`accepted_file_types`、`intent`、`expected_inputs`、`needs_file` 等旧字段，不做 alias 映射或 legacy type 推断。License Requirement：文档加固，无依赖/许可变更。

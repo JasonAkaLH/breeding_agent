@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
 from src.auth.postgres_invalidation_bus import auth_generation_notify_sql
 from src.core.contracts import StoragePort
-from src.core.enums import ArtifactType, ConversationStatus, EdgeType, EventVisibility, TaskStatus
+from src.core.enums import ArtifactType, ConversationStatus, EdgeType, EventVisibility, MessageRole, TaskStatus
 from src.core.models import (
     Artifact,
     AuthUserToken,
@@ -24,6 +24,7 @@ from src.core.models import (
     ConversationMemorySummary,
     ConversationFileResource,
     EventRecord,
+    FileUploadMessageProjection,
     Interrupt,
     InterruptAnswer,
     MailboxDelivery,
@@ -36,6 +37,15 @@ from src.core.models import (
     TaskEdge,
     TaskInputAttachment,
     TaskNode,
+)
+from src.storage.conversation_files import (
+    FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
+    FILE_UPLOAD_MESSAGE_TYPE,
+    FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+    file_upload_message_audit_payload,
+    file_upload_message_id,
+    render_file_upload_message,
+    safe_file_upload_message_metadata,
 )
 from src.lifecycle.rust_contract import contract_value as lifecycle_contract_value
 from src.lifecycle.rust_contract import status_list as lifecycle_status_list
@@ -174,6 +184,50 @@ def _row_to_auth_user_token(row: AuthUserTokenRow) -> AuthUserToken:
     )
 
 
+def _message_metadata_object(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _message_type_value(value: object) -> str:
+    text = str(value or "").strip()
+    return text or "chat"
+
+
+def _file_upload_audit_event_id(
+    *,
+    event_type: str,
+    conversation_id: str,
+    upload_id: str,
+    outcome: str,
+    reason_code: str | None,
+    at: datetime,
+) -> str:
+    serialized = json.dumps(
+        {
+            "at": at.isoformat(),
+            "conversation_id": conversation_id,
+            "event_type": event_type,
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "upload_id": upload_id,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+    return f"file_upload_audit:{upload_id}:{event_type.rsplit('.', 1)[-1]}:{digest}"
+
+
+def _file_upload_message_error_reason(message: str) -> str:
+    if "another conversation" in message:
+        return "conversation_mismatch"
+    if "non-file_upload" in message:
+        return "message_type_conflict"
+    if "resurrected" in message:
+        return "deleted_no_resurrection"
+    return "repository_error"
+
+
 def _row_to_message(row: MessageRow) -> Message:
     return Message(
         message_id=row.message_id,
@@ -183,6 +237,9 @@ def _row_to_message(row: MessageRow) -> Message:
         task_id=row.task_id,
         stream_status=row.stream_status,
         created_at=row.created_at,
+        message_type=_message_type_value(getattr(row, "message_type", None)),
+        metadata=_message_metadata_object(getattr(row, "message_metadata", None)),
+        updated_at=getattr(row, "updated_at", None),
     )
 
 
@@ -1167,11 +1224,14 @@ class SQLiteStateRepository:
         row = MessageRow(
             message_id=message.message_id,
             conversation_id=message.conversation_id,
-            role=message.role,
+            role=str(message.role),
             content=message.content,
             task_id=message.task_id,
             stream_status=message.stream_status,
             created_at=message.created_at,
+            message_type=_message_type_value(message.message_type),
+            message_metadata=_message_metadata_object(message.metadata),
+            updated_at=message.updated_at,
         )
         merged = self._session.merge(row)
         self._session.flush()
@@ -1186,6 +1246,175 @@ class SQLiteStateRepository:
             select(MessageRow).where(MessageRow.conversation_id == conversation_id).order_by(MessageRow.created_at, MessageRow.message_id)
         ).all()
         return [_row_to_message(row) for row in rows]
+
+    def upsert_file_upload_message(self, projection: FileUploadMessageProjection, *, now: datetime) -> Message:
+        message_id = file_upload_message_id(projection.upload_id)
+        metadata = safe_file_upload_message_metadata(projection.metadata, upload_id=projection.upload_id)
+        content = render_file_upload_message(metadata)
+        row = self._session.execute(
+            select(MessageRow).where(MessageRow.message_id == message_id).with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            row = MessageRow(
+                message_id=message_id,
+                conversation_id=projection.conversation_id,
+                role=str(MessageRole.SYSTEM),
+                content=content,
+                task_id=None,
+                stream_status="complete",
+                created_at=projection.created_at or now,
+                message_type=FILE_UPLOAD_MESSAGE_TYPE,
+                message_metadata=metadata,
+                updated_at=now,
+            )
+            self._session.add(row)
+            self._session.flush()
+            self.record_file_upload_message_audit(
+                event_type=FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+                conversation_id=projection.conversation_id,
+                upload_id=projection.upload_id,
+                outcome="inserted",
+                at=now,
+                projection=FileUploadMessageProjection(
+                    upload_id=projection.upload_id,
+                    conversation_id=projection.conversation_id,
+                    content=content,
+                    metadata=metadata,
+                    created_at=projection.created_at,
+                ),
+            )
+            return _row_to_message(row)
+        if row.conversation_id != projection.conversation_id:
+            raise ValueError("file_upload message id belongs to another conversation")
+        if _message_type_value(row.message_type) != FILE_UPLOAD_MESSAGE_TYPE:
+            raise ValueError("file_upload message id conflicts with non-file_upload message")
+        existing_metadata = _message_metadata_object(row.message_metadata)
+        if existing_metadata.get("file_status") == "deleted" and metadata.get("file_status") != "deleted":
+            raise ValueError("deleted file_upload message cannot be resurrected")
+        row.role = str(MessageRole.SYSTEM)
+        row.content = content
+        row.task_id = None
+        row.stream_status = "complete"
+        row.message_type = FILE_UPLOAD_MESSAGE_TYPE
+        row.message_metadata = metadata
+        row.updated_at = now
+        self._session.flush()
+        self.record_file_upload_message_audit(
+            event_type=FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+            conversation_id=projection.conversation_id,
+            upload_id=projection.upload_id,
+            outcome="updated",
+            at=now,
+            projection=FileUploadMessageProjection(
+                upload_id=projection.upload_id,
+                conversation_id=projection.conversation_id,
+                content=content,
+                metadata=metadata,
+                created_at=projection.created_at,
+            ),
+        )
+        return _row_to_message(row)
+
+    def mark_file_upload_message_deleted(
+        self,
+        conversation_id: str,
+        upload_id: str,
+        *,
+        deleted_at: datetime,
+    ) -> Message | None:
+        row = self._session.execute(
+            select(MessageRow).where(MessageRow.message_id == file_upload_message_id(upload_id)).with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            self.record_file_upload_message_audit(
+                event_type=FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
+                conversation_id=conversation_id,
+                upload_id=upload_id,
+                outcome="noop",
+                reason_code="message_missing",
+                at=deleted_at,
+            )
+            self._session.flush()
+            return None
+        if row.conversation_id != conversation_id:
+            raise ValueError("file_upload message id belongs to another conversation")
+        if _message_type_value(row.message_type) != FILE_UPLOAD_MESSAGE_TYPE:
+            raise ValueError("file_upload message id conflicts with non-file_upload message")
+        metadata = safe_file_upload_message_metadata(row.message_metadata, upload_id=upload_id)
+        metadata["file_status"] = "deleted"
+        row.role = str(MessageRole.SYSTEM)
+        row.content = render_file_upload_message(metadata)
+        row.task_id = None
+        row.stream_status = "complete"
+        row.message_type = FILE_UPLOAD_MESSAGE_TYPE
+        row.message_metadata = metadata
+        row.updated_at = deleted_at
+        self._session.flush()
+        self.record_file_upload_message_audit(
+            event_type=FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
+            conversation_id=conversation_id,
+            upload_id=upload_id,
+            outcome="marked_deleted",
+            at=deleted_at,
+            projection=FileUploadMessageProjection(
+                upload_id=upload_id,
+                conversation_id=conversation_id,
+                content=row.content,
+                metadata=metadata,
+                created_at=row.created_at,
+            ),
+        )
+        return _row_to_message(row)
+
+    def record_file_upload_message_audit(
+        self,
+        *,
+        event_type: str,
+        conversation_id: str,
+        upload_id: str,
+        outcome: str,
+        at: datetime,
+        projection: FileUploadMessageProjection | None = None,
+        reason_code: str | None = None,
+    ) -> EventRecord:
+        event = EventRecord(
+            event_id=_file_upload_audit_event_id(
+                event_type=event_type,
+                conversation_id=conversation_id,
+                upload_id=upload_id,
+                outcome=outcome,
+                reason_code=reason_code,
+                at=at,
+            ),
+            conversation_id=conversation_id,
+            task_id=f"conversation_file:{upload_id}",
+            event_type=event_type,
+            payload=file_upload_message_audit_payload(
+                event_type=event_type,
+                conversation_id=conversation_id,
+                upload_id=upload_id,
+                outcome=outcome,
+                projection=projection,
+                reason_code=reason_code,
+            ),
+            visibility=EventVisibility.AUDIT_ONLY,
+            created_at=at,
+        )
+        _ensure_event_append_payload_within_rust_contract(event)
+        row = EventRecordRow(
+            event_id=event.event_id,
+            conversation_id=event.conversation_id,
+            task_id=event.task_id,
+            node_id=event.node_id,
+            agent_id=event.agent_id,
+            event_type=event.event_type,
+            payload=dict(event.payload),
+            visibility=event.visibility,
+            created_at=event.created_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_event_record(merged)
 
     def save_task(self, task: Task) -> Task:
         _ensure_runtime_store_write_allowed_by_rust_contract("task_submit")
@@ -2085,6 +2314,53 @@ class SQLiteStorage(StoragePort):
 
     async def list_messages_for_conversation(self, conversation_id: str) -> list[Message]:
         return await self._run(lambda state, collab: state.list_messages_for_conversation(conversation_id))
+
+    async def upsert_file_upload_message(self, projection: FileUploadMessageProjection, *, now: datetime) -> Message:
+        try:
+            return await self._run(lambda state, collab: state.upsert_file_upload_message(projection, now=now))
+        except ValueError as exc:
+            reason_code = _file_upload_message_error_reason(str(exc))
+            await self._run(
+                lambda state, collab: state.record_file_upload_message_audit(
+                    event_type=FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+                    conversation_id=projection.conversation_id,
+                    upload_id=projection.upload_id,
+                    outcome="failed",
+                    reason_code=reason_code,
+                    at=now,
+                    projection=projection,
+                )
+            )
+            raise
+
+    async def mark_file_upload_message_deleted(
+        self,
+        conversation_id: str,
+        upload_id: str,
+        *,
+        deleted_at: datetime,
+    ) -> Message | None:
+        try:
+            return await self._run(
+                lambda state, collab: state.mark_file_upload_message_deleted(
+                    conversation_id,
+                    upload_id,
+                    deleted_at=deleted_at,
+                )
+            )
+        except ValueError as exc:
+            reason_code = _file_upload_message_error_reason(str(exc))
+            await self._run(
+                lambda state, collab: state.record_file_upload_message_audit(
+                    event_type=FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
+                    conversation_id=conversation_id,
+                    upload_id=upload_id,
+                    outcome="failed",
+                    reason_code=reason_code,
+                    at=deleted_at,
+                )
+            )
+            raise
 
     async def save_task(self, task: Task) -> Task:
         sidecar_client = self._runtime_sidecar_client_for(

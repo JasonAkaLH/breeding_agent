@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
+from pathlib import Path
 
 from sqlalchemy import inspect, text
 
 from src.core.models import AuthUserToken, Conversation
 from src.core.contracts import StoragePort as CoreStoragePort
 from src.storage.interfaces import StoragePort
-from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database
+from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.storage.support import SQLiteStorageTestCase
 
@@ -125,3 +127,40 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
 
         self.assertEqual(saved, conversation)
         self.assertEqual(loaded, conversation)
+
+    def test_bootstrap_migrates_legacy_message_rows_with_public_history_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-message.sqlite3")
+            try:
+                session_factory = create_sqlite_session_factory(engine)
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "CREATE TABLE message ("
+                            "message_id TEXT PRIMARY KEY, "
+                            "conversation_id TEXT NOT NULL, "
+                            "role TEXT NOT NULL, "
+                            "content TEXT NOT NULL, "
+                            "task_id TEXT, "
+                            "stream_status TEXT, "
+                            "created_at TEXT)"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO message "
+                            "(message_id, conversation_id, role, content, task_id, stream_status, created_at) "
+                            "VALUES ('msg-legacy', 'conv-legacy', 'user', 'hello', NULL, NULL, '2026-06-16T07:00:00')"
+                        )
+                    )
+
+                bootstrap_sqlite_database(engine)
+                storage = SQLiteStorage(session_factory)
+                loaded = asyncio.run(storage.get_message("msg-legacy"))
+
+                self.assertEqual(loaded.message_type, "chat")
+                self.assertEqual(loaded.metadata, {})
+                self.assertIsNone(loaded.updated_at)
+                self.assertEqual(loaded.content, "hello")
+            finally:
+                engine.dispose()

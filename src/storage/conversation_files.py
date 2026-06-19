@@ -12,7 +12,52 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
 
-from src.core.models import ConversationFileResource
+from src.core.models import ConversationFileResource, FileUploadMessageProjection
+
+
+FILE_UPLOAD_MESSAGE_TYPE = "file_upload"
+FILE_UPLOAD_MESSAGE_SCHEMA_VERSION = 1
+FILE_UPLOAD_MESSAGE_UPSERTED_EVENT = "conversation_file.file_upload_message_upserted"
+FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT = "conversation_file.file_upload_message_marked_deleted"
+FILE_UPLOAD_MESSAGE_METADATA_ALLOWLIST = frozenset(
+    {
+        "schema_version",
+        "upload_id",
+        "filename",
+        "description_summary",
+        "description_status",
+        "file_type",
+        "content_type",
+        "size_bytes",
+        "sha256",
+        "file_status",
+        "uploaded_at",
+        "selected_sheet",
+        "requires_sheet_selection",
+        "row_count",
+        "column_count",
+        "sheet_names",
+        "description_updated_at",
+    }
+)
+FILE_UPLOAD_MESSAGE_FORBIDDEN_METADATA_KEYS = frozenset(
+    {
+        "storage_key",
+        "path",
+        "absolute_path",
+        "relative_path",
+        "runtime_path",
+        "mount_path",
+        "content",
+        "content_base64",
+        "provider_payload",
+        "raw_payload",
+        "token",
+        "secret",
+        "api_key",
+        "authorization",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -20,6 +65,139 @@ class StoredConversationFile:
     storage_key: str
     size_bytes: int
     sha256: str
+
+
+def file_upload_message_id(upload_id: str) -> str:
+    return f"{FILE_UPLOAD_MESSAGE_TYPE}:{upload_id}"
+
+
+def build_file_upload_message_projection(resource: ConversationFileResource) -> FileUploadMessageProjection:
+    metadata = _file_upload_message_metadata(resource)
+    return FileUploadMessageProjection(
+        upload_id=resource.file_id,
+        conversation_id=resource.conversation_id,
+        content=render_file_upload_message(metadata),
+        metadata=metadata,
+        created_at=resource.created_at,
+    )
+
+
+def render_file_upload_message(metadata: Mapping[str, Any]) -> str:
+    upload_id = str(metadata.get("upload_id") or "")
+    filename = str(metadata.get("filename") or upload_id)
+    file_status = str(metadata.get("file_status") or "active")
+    description_status = str(metadata.get("description_status") or "pending")
+    summary = metadata.get("description_summary")
+    lines = [
+        f"文件上传：{filename}",
+        f"- upload_id: {upload_id}",
+        f"- 状态: {file_status}",
+        f"- 描述状态: {description_status}",
+    ]
+    if file_status == "deleted":
+        lines.append("- 可用性: 已删除，不可作为后续任务输入。")
+    elif isinstance(summary, str) and summary.strip():
+        lines.append(f"- 摘要: {summary.strip()}")
+    return "\n".join(lines)
+
+
+def file_upload_message_audit_payload(
+    *,
+    event_type: str,
+    conversation_id: str,
+    upload_id: str,
+    outcome: str,
+    projection: FileUploadMessageProjection | None = None,
+    reason_code: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "event_type": event_type,
+        "conversation_id": conversation_id,
+        "upload_id": upload_id,
+        "message_id": file_upload_message_id(upload_id),
+        "outcome": outcome,
+    }
+    if projection is not None:
+        metadata = safe_file_upload_message_metadata(projection.metadata, upload_id=upload_id)
+        payload.update(
+            {
+                "message_type": FILE_UPLOAD_MESSAGE_TYPE,
+                "metadata_keys": sorted(metadata),
+                "file_status": metadata.get("file_status"),
+                "description_status": metadata.get("description_status"),
+            }
+        )
+    if reason_code is not None:
+        payload["reason_code"] = reason_code
+    return payload
+
+
+def safe_file_upload_message_metadata(
+    metadata: Mapping[str, Any] | object,
+    *,
+    upload_id: str | None = None,
+) -> dict[str, Any]:
+    safe = {
+        key: value
+        for key, value in _safe_metadata_object(metadata).items()
+        if key in FILE_UPLOAD_MESSAGE_METADATA_ALLOWLIST
+    }
+    if upload_id is not None:
+        safe["upload_id"] = upload_id
+    return safe
+
+
+def _file_upload_message_metadata(resource: ConversationFileResource) -> dict[str, Any]:
+    preview = _safe_metadata_object(resource.preview)
+    metadata: dict[str, Any] = {
+        "schema_version": FILE_UPLOAD_MESSAGE_SCHEMA_VERSION,
+        "upload_id": resource.file_id,
+        "filename": resource.original_filename,
+        "description_summary": resource.description_summary,
+        "description_status": resource.description_status,
+        "file_type": resource.file_type,
+        "content_type": resource.content_type,
+        "size_bytes": int(resource.size_bytes or 0),
+        "sha256": resource.sha256,
+        "file_status": resource.status,
+        "uploaded_at": _datetime_for_metadata(resource.created_at),
+    }
+    if resource.selected_sheet is not None:
+        metadata["selected_sheet"] = resource.selected_sheet
+    if resource.requires_sheet_selection:
+        metadata["requires_sheet_selection"] = True
+    for key in ("row_count", "column_count"):
+        if key in preview:
+            metadata[key] = preview.get(key)
+    sheet_names = _preview_sheet_names(preview)
+    if sheet_names:
+        metadata["sheet_names"] = sheet_names
+    if resource.updated_at is not None:
+        metadata["description_updated_at"] = _datetime_for_metadata(resource.updated_at)
+    return safe_file_upload_message_metadata(metadata, upload_id=resource.file_id)
+
+
+def _safe_metadata_object(value: Mapping[str, Any] | object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _datetime_for_metadata(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.isoformat()
+    return value.astimezone(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+
+
+def _preview_sheet_names(preview: Mapping[str, Any]) -> list[str]:
+    sheets = preview.get("excel_sheets")
+    if not isinstance(sheets, list):
+        return []
+    return [
+        str(sheet.get("sheet_name"))
+        for sheet in sheets
+        if isinstance(sheet, Mapping) and sheet.get("sheet_name")
+    ]
 
 
 class LocalConversationFileStore:

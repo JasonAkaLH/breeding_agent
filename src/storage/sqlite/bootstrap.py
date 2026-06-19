@@ -15,6 +15,7 @@ LEGACY_AUTH_TABLES = (
 
 def bootstrap_sqlite_database(engine: Engine) -> None:
     _migrate_username_owner_columns(engine)
+    _migrate_message_public_columns(engine)
     _drop_legacy_auth_tables(engine)
     SQLiteBase.metadata.create_all(engine)
 
@@ -63,6 +64,47 @@ def _migrate_username_owner_columns(engine: Engine) -> None:
                 )
             )
             _rebuild_table_without_legacy_owner(connection, table_name, old_column)
+
+
+def _migrate_message_public_columns(engine: Engine) -> None:
+    """Add public-history message columns to existing SQLite message tables.
+
+    SQLAlchemy `create_all` does not alter existing tables. The file upload
+    history projection reuses the message table, so legacy local databases need
+    the new nullable/defaulted columns before metadata is created.
+    """
+    with engine.begin() as connection:
+        existing_tables = set(inspect(connection).get_table_names())
+        if "message" not in existing_tables:
+            return
+        columns = {column["name"] for column in inspect(connection).get_columns("message")}
+        quoted_table = _quote(connection, "message")
+        if "message_type" not in columns:
+            connection.execute(
+                text(f"ALTER TABLE {quoted_table} ADD COLUMN {_quote(connection, 'message_type')} TEXT NOT NULL DEFAULT 'chat'")
+            )
+        else:
+            connection.execute(
+                text(
+                    f"UPDATE {quoted_table} SET {_quote(connection, 'message_type')} = 'chat' "
+                    f"WHERE {_quote(connection, 'message_type')} IS NULL OR {_quote(connection, 'message_type')} = ''"
+                )
+            )
+        if "metadata" not in columns:
+            connection.execute(
+                text(f"ALTER TABLE {quoted_table} ADD COLUMN {_quote(connection, 'metadata')} TEXT NOT NULL DEFAULT '{{}}'")
+            )
+        else:
+            connection.execute(
+                text(
+                    f"UPDATE {quoted_table} SET {_quote(connection, 'metadata')} = '{{}}' "
+                    f"WHERE {_quote(connection, 'metadata')} IS NULL OR trim({_quote(connection, 'metadata')}) = ''"
+                )
+            )
+        if "updated_at" not in columns:
+            connection.execute(
+                text(f"ALTER TABLE {quoted_table} ADD COLUMN {_quote(connection, 'updated_at')} TEXT")
+            )
 
 
 def _rebuild_table_without_legacy_owner(connection: Connection, table_name: str, old_column: str) -> None:

@@ -142,6 +142,9 @@ class MessageRow(SQLiteBase):
     task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     stream_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    message_type: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'chat'"))
+    message_metadata: Mapped[dict | None] = mapped_column("metadata", JSONText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
 class TaskRow(SQLiteBase):

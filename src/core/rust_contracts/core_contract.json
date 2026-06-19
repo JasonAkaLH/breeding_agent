@@ -1,7 +1,7 @@
 {
   "component": "maf_core_types",
   "contract_version": "core.v1",
-  "schema_hash": "maf_core_types_core_v1_schema_20260526_auth_generation_strong_conversation_delete",
+  "schema_hash": "maf_core_types_core_v1_schema_20260619_auth_generation_message_public_history",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
   "supported_features": [
     "core_contract_artifact",
@@ -464,7 +464,10 @@
       "content",
       "task_id",
       "stream_status",
-      "created_at"
+      "created_at",
+      "message_type",
+      "metadata",
+      "updated_at"
     ],
     "Task": [
       "task_id",
@@ -500,6 +503,13 @@
       "output_refs",
       "started_at",
       "finished_at"
+    ],
+    "FileUploadMessageProjection": [
+      "upload_id",
+      "conversation_id",
+      "content",
+      "metadata",
+      "created_at"
     ]
   },
   "error_codes": [

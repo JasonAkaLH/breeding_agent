@@ -21,6 +21,7 @@ from src.core.models import (
     Checkpoint,
     Conversation,
     EventRecord,
+    FileUploadMessageProjection,
     Interrupt,
     InterruptAnswer,
     MailboxDelivery,
@@ -71,6 +72,29 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "content",
                 "task_id",
                 "stream_status",
+                "created_at",
+                "message_type",
+                "metadata",
+                "updated_at",
+            ],
+        )
+
+    def test_message_metadata_default_is_not_shared(self) -> None:
+        first = Message("msg-1", "conv-1", "user", "hello")
+        second = Message("msg-2", "conv-1", "assistant", "hi")
+
+        self.assertEqual(first.message_type, "chat")
+        self.assertEqual(dict(first.metadata), {})
+        self.assertIsNot(first.metadata, second.metadata)
+
+    def test_file_upload_message_projection_fields_match_prd(self) -> None:
+        self.assert_dataclass_contract(
+            FileUploadMessageProjection,
+            [
+                "upload_id",
+                "conversation_id",
+                "content",
+                "metadata",
                 "created_at",
             ],
         )

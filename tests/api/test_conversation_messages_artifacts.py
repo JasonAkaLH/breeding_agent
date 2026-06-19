@@ -7,6 +7,7 @@ from functools import wraps
 from src.core.enums import ArtifactType, MessageRole, TaskStatus
 from src.core.models import Artifact, Conversation, Interrupt, Message, Task
 from src.storage.artifact_files import build_file_storage_ref
+from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, file_upload_message_id
 from tests.api.support import APITestCase
 
 
@@ -250,6 +251,103 @@ class ConversationMessagesArtifactRestoreAPITest(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual([message["artifacts"] for message in response.json()["messages"]], [[], []])
+
+    async def test_conversation_messages_public_allowlist_includes_file_upload_and_hides_internal_system(self) -> None:
+        conversation_id = "conv-history-public-allowlist"
+        updated_at = datetime(2026, 6, 3, 1, 0, 3)
+        await self.runtime.storage.save_conversation(Conversation(conversation_id, "acc-1"))
+        await self.runtime.storage.save_message(
+            Message("msg-user", conversation_id, MessageRole.USER, "用户", created_at=datetime(2026, 6, 3, 1, 0, 0))
+        )
+        await self.runtime.storage.save_message(
+            Message("msg-system-chat", conversation_id, MessageRole.SYSTEM, "内部系统消息", created_at=datetime(2026, 6, 3, 1, 0, 1))
+        )
+        await self.runtime.storage.save_message(
+            Message(
+                "msg-system-internal",
+                conversation_id,
+                MessageRole.SYSTEM,
+                "未知内部消息",
+                created_at=datetime(2026, 6, 3, 1, 0, 2),
+                message_type="internal",
+            )
+        )
+        await self.runtime.storage.save_message(
+            Message(
+                file_upload_message_id("upl-123abc456def"),
+                conversation_id,
+                MessageRole.SYSTEM,
+                "文件上传：materials.csv",
+                stream_status="complete",
+                created_at=updated_at,
+                message_type=FILE_UPLOAD_MESSAGE_TYPE,
+                metadata={
+                    "schema_version": 1,
+                    "upload_id": "upl-123abc456def",
+                    "filename": "materials.csv",
+                    "file_status": "active",
+                },
+                updated_at=updated_at,
+            )
+        )
+
+        response = await self.client.get(f"/api/v1/conversations/{conversation_id}/messages")
+
+        self.assertEqual(response.status_code, 200)
+        messages = response.json()["messages"]
+        self.assertEqual([message["message_id"] for message in messages], ["msg-user", "file_upload:upl-123abc456def"])
+        file_message = messages[1]
+        self.assertEqual(file_message["role"], "system")
+        self.assertEqual(file_message["message_type"], FILE_UPLOAD_MESSAGE_TYPE)
+        self.assertEqual(file_message["metadata"]["upload_id"], "upl-123abc456def")
+        self.assertEqual(file_message["updated_at"], "2026-06-03T01:00:03")
+        self.assertEqual(file_message["artifacts"], [])
+
+    async def test_conversation_file_upload_history_metadata_is_sanitized_at_public_api_boundary(self) -> None:
+        conversation_id = "conv-history-file-upload-sanitize"
+        await self.runtime.storage.save_conversation(Conversation(conversation_id, "acc-1"))
+        await self.runtime.storage.save_message(
+            Message(
+                file_upload_message_id("upl-123abc456def"),
+                conversation_id,
+                MessageRole.SYSTEM,
+                "文件上传：materials.csv",
+                stream_status="complete",
+                created_at=datetime(2026, 6, 3, 1, 0, 0),
+                message_type=FILE_UPLOAD_MESSAGE_TYPE,
+                metadata={
+                    "upload_id": "wrong-id",
+                    "filename": "materials.csv",
+                    "file_status": "active",
+                    "storage_key": "/tmp/secret/materials.csv",
+                    "content": "raw file body",
+                    "content_base64": "abc",
+                },
+            )
+        )
+        await self.runtime.storage.save_message(
+            Message(
+                "bad-file-upload-id",
+                conversation_id,
+                MessageRole.SYSTEM,
+                "bad id",
+                created_at=datetime(2026, 6, 3, 1, 0, 1),
+                message_type=FILE_UPLOAD_MESSAGE_TYPE,
+                metadata={"upload_id": "upl-bad"},
+            )
+        )
+
+        response = await self.client.get(f"/api/v1/conversations/{conversation_id}/messages")
+
+        self.assertEqual(response.status_code, 200)
+        messages = response.json()["messages"]
+        self.assertEqual([message["message_id"] for message in messages], ["file_upload:upl-123abc456def"])
+        metadata = messages[0]["metadata"]
+        self.assertEqual(metadata["upload_id"], "upl-123abc456def")
+        self.assertEqual(metadata["filename"], "materials.csv")
+        self.assertNotIn("storage_key", metadata)
+        self.assertNotIn("content", metadata)
+        self.assertNotIn("content_base64", metadata)
 
     async def test_conversation_messages_backfill_interrupt_questions_without_artifact_duplication(self) -> None:
         conversation_id = "conv-history-interrupt-visible"

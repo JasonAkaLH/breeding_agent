@@ -1,24 +1,41 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
-from src.core.models import ConversationFileResource
+from src.core.enums import MessageRole
+from src.core.models import ConversationFileResource, FileUploadMessageProjection, Message
+from src.storage.conversation_files import (
+    FILE_UPLOAD_MESSAGE_FORBIDDEN_METADATA_KEYS,
+    FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
+    FILE_UPLOAD_MESSAGE_TYPE,
+    FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+    build_file_upload_message_projection,
+    file_upload_message_audit_payload,
+    file_upload_message_id,
+)
 from src.storage.conversation_files import ConversationFileIndexWriter, LocalConversationFileStore
 from src.storage.sqlite import SQLiteStorage
-from src.storage.sqlite.models import ConversationFileResourceRow
-from src.storage.sqlite.repositories import SQLiteStateRepository
+from src.storage.sqlite.models import ConversationFileResourceRow, EventRecordRow, MessageRow
 from tests.storage.support import SQLiteStorageTestCase
 
 
 class ConversationFileResourceRepositoryTest(SQLiteStorageTestCase):
+    def _file_upload_audit_payloads(self, event_type: str) -> list[dict]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(EventRecordRow).where(EventRecordRow.event_type == event_type).order_by(EventRecordRow.created_at)
+            ).all()
+        return [dict(row.payload or {}) for row in rows]
+
     def test_bootstrap_creates_conversation_file_resource_table_and_indexes(self) -> None:
         inspector = inspect(self.engine)
         self.assertIn("conversation_file_resource", set(inspector.get_table_names()))
@@ -74,6 +91,273 @@ class ConversationFileResourceRepositoryTest(SQLiteStorageTestCase):
         self.assertEqual(deleted.status, "deleted")
         self.assertEqual(active_after_delete, [])
         self.assertEqual(all_after_delete[0].status, "deleted")
+
+    def test_file_upload_projection_contains_only_safe_allowlisted_metadata(self) -> None:
+        resource = ConversationFileResource(
+            file_id="upl-123abc456def",
+            conversation_id="conv-safe",
+            username="alice",
+            original_filename="materials.csv",
+            content_type="text/csv",
+            file_type="csv",
+            size_bytes=12,
+            sha256="sha-safe",
+            storage_key="/tmp/secret/materials.csv",
+            preview={
+                "row_count": 10,
+                "column_count": 3,
+                "excel_sheets": [{"sheet_name": "Sheet1"}],
+                "content": "do not leak",
+            },
+            description_status="ready",
+            description_summary="Materials table",
+            status="active",
+            selected_sheet="Sheet1",
+            requires_sheet_selection=True,
+            created_at=datetime(2026, 6, 16, 7, 0, 0),
+            updated_at=datetime(2026, 6, 16, 7, 1, 0),
+        )
+
+        projection = build_file_upload_message_projection(resource)
+        metadata_json = json.dumps(dict(projection.metadata), ensure_ascii=False, sort_keys=True)
+
+        self.assertEqual(projection.upload_id, "upl-123abc456def")
+        self.assertEqual(projection.conversation_id, "conv-safe")
+        self.assertEqual(projection.metadata["upload_id"], "upl-123abc456def")
+        self.assertEqual(projection.metadata["filename"], "materials.csv")
+        self.assertEqual(projection.metadata["row_count"], 10)
+        self.assertEqual(projection.metadata["column_count"], 3)
+        self.assertEqual(projection.metadata["sheet_names"], ["Sheet1"])
+        for forbidden in FILE_UPLOAD_MESSAGE_FORBIDDEN_METADATA_KEYS:
+            self.assertNotIn(forbidden, projection.metadata)
+        for leaked_value in ("/tmp/secret", "storage_key", "mount_path", "content_base64", "do not leak"):
+            self.assertNotIn(leaked_value, metadata_json)
+
+    def test_file_upload_message_upsert_insert_and_update_keep_stable_identity(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        created_at = datetime(2026, 6, 16, 7, 0, 0)
+        first = build_file_upload_message_projection(
+            ConversationFileResource(
+                file_id="upl-123abc456def",
+                conversation_id="conv-file-history",
+                username="alice",
+                original_filename="materials.csv",
+                content_type="text/csv",
+                file_type="csv",
+                size_bytes=12,
+                sha256="sha-1",
+                storage_key="conv/upl/original",
+                description_status="pending",
+                status="active",
+                created_at=created_at,
+            )
+        )
+        updated = build_file_upload_message_projection(
+            ConversationFileResource(
+                file_id="upl-123abc456def",
+                conversation_id="conv-file-history",
+                username="alice",
+                original_filename="materials.csv",
+                content_type="text/csv",
+                file_type="csv",
+                size_bytes=12,
+                sha256="sha-1",
+                storage_key="conv/upl/original",
+                description_status="ready",
+                description_summary="Ready summary",
+                status="active",
+                created_at=created_at,
+                updated_at=datetime(2026, 6, 16, 7, 2, 0),
+            )
+        )
+
+        saved = asyncio.run(storage.upsert_file_upload_message(first, now=datetime(2026, 6, 16, 7, 0, 1)))
+        saved_again = asyncio.run(storage.upsert_file_upload_message(updated, now=datetime(2026, 6, 16, 7, 3, 0)))
+        listed = asyncio.run(storage.list_messages_for_conversation("conv-file-history"))
+
+        self.assertEqual(saved.message_id, file_upload_message_id("upl-123abc456def"))
+        self.assertEqual(saved.role, MessageRole.SYSTEM)
+        self.assertEqual(saved.message_type, FILE_UPLOAD_MESSAGE_TYPE)
+        self.assertEqual(saved.stream_status, "complete")
+        self.assertEqual(saved.created_at, created_at)
+        self.assertEqual(saved.metadata["description_status"], "pending")
+        self.assertEqual(saved_again.message_id, saved.message_id)
+        self.assertEqual(saved_again.created_at, created_at)
+        self.assertEqual(saved_again.updated_at, datetime(2026, 6, 16, 7, 3, 0))
+        self.assertEqual(saved_again.metadata["description_summary"], "Ready summary")
+        self.assertEqual(len(listed), 1)
+        audit_payloads = self._file_upload_audit_payloads(FILE_UPLOAD_MESSAGE_UPSERTED_EVENT)
+        self.assertEqual([payload["outcome"] for payload in audit_payloads], ["inserted", "updated"])
+        self.assertEqual(audit_payloads[-1]["metadata_keys"], sorted(saved_again.metadata))
+
+    def test_file_upload_message_upsert_filters_unsafe_projection_metadata_and_content(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        projection = FileUploadMessageProjection(
+            upload_id="upl-unsafe",
+            conversation_id="conv-unsafe",
+            content="malicious content with /tmp/secret and content_base64",
+            metadata={
+                "upload_id": "wrong-id",
+                "filename": "safe.csv",
+                "file_status": "active",
+                "storage_key": "/tmp/secret/file.csv",
+                "content": "raw file content",
+                "content_base64": "abc",
+            },
+            created_at=datetime(2026, 6, 16, 7, 0, 0),
+        )
+
+        saved = asyncio.run(storage.upsert_file_upload_message(projection, now=datetime(2026, 6, 16, 7, 0, 1)))
+        saved_json = json.dumps(dict(saved.metadata), ensure_ascii=False, sort_keys=True)
+
+        self.assertEqual(saved.metadata["upload_id"], "upl-unsafe")
+        self.assertEqual(saved.metadata["filename"], "safe.csv")
+        self.assertNotIn("storage_key", saved.metadata)
+        self.assertNotIn("content", saved.metadata)
+        self.assertNotIn("/tmp/secret", saved_json)
+        self.assertNotIn("content_base64", saved.content)
+        self.assertNotIn("/tmp/secret", saved.content)
+
+    def test_file_upload_message_upsert_conflicts_fail_closed(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        now = datetime(2026, 6, 16, 7, 0, 0)
+        asyncio.run(
+            storage.save_message(
+                Message(
+                    file_upload_message_id("upl-conflict"),
+                    "conv-conflict",
+                    MessageRole.USER,
+                    "ordinary chat collision",
+                    created_at=now,
+                )
+            )
+        )
+        projection = FileUploadMessageProjection(
+            upload_id="upl-conflict",
+            conversation_id="conv-conflict",
+            content="file",
+            metadata={"upload_id": "upl-conflict", "file_status": "active"},
+            created_at=now,
+        )
+
+        with self.assertRaisesRegex(ValueError, "non-file_upload"):
+            asyncio.run(storage.upsert_file_upload_message(projection, now=now))
+        failure_payloads = self._file_upload_audit_payloads(FILE_UPLOAD_MESSAGE_UPSERTED_EVENT)
+        self.assertEqual(failure_payloads[-1]["outcome"], "failed")
+        self.assertEqual(failure_payloads[-1]["reason_code"], "message_type_conflict")
+
+        existing = Message(
+            file_upload_message_id("upl-other-conv"),
+            "conv-a",
+            MessageRole.SYSTEM,
+            "file",
+            created_at=now,
+            message_type=FILE_UPLOAD_MESSAGE_TYPE,
+            metadata={"upload_id": "upl-other-conv", "file_status": "active"},
+        )
+        asyncio.run(storage.save_message(existing))
+        other_conversation_projection = FileUploadMessageProjection(
+            upload_id="upl-other-conv",
+            conversation_id="conv-b",
+            content="file",
+            metadata={"upload_id": "upl-other-conv", "file_status": "active"},
+            created_at=now,
+        )
+        with self.assertRaisesRegex(ValueError, "another conversation"):
+            asyncio.run(storage.upsert_file_upload_message(other_conversation_projection, now=now))
+        failure_payloads = self._file_upload_audit_payloads(FILE_UPLOAD_MESSAGE_UPSERTED_EVENT)
+        self.assertEqual(failure_payloads[-1]["outcome"], "failed")
+        self.assertEqual(failure_payloads[-1]["reason_code"], "conversation_mismatch")
+
+    def test_file_upload_mark_deleted_no_backfill_and_no_resurrection(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        created_at = datetime(2026, 6, 16, 7, 0, 0)
+        projection = FileUploadMessageProjection(
+            upload_id="upl-delete",
+            conversation_id="conv-delete",
+            content="active",
+            metadata={"schema_version": 1, "upload_id": "upl-delete", "filename": "a.csv", "file_status": "active"},
+            created_at=created_at,
+        )
+
+        missing = asyncio.run(
+            storage.mark_file_upload_message_deleted(
+                "conv-delete",
+                "upl-missing",
+                deleted_at=datetime(2026, 6, 16, 7, 5, 0),
+            )
+        )
+        saved = asyncio.run(storage.upsert_file_upload_message(projection, now=datetime(2026, 6, 16, 7, 1, 0)))
+        deleted = asyncio.run(
+            storage.mark_file_upload_message_deleted(
+                "conv-delete",
+                "upl-delete",
+                deleted_at=datetime(2026, 6, 16, 7, 6, 0),
+            )
+        )
+
+        self.assertIsNone(missing)
+        self.assertEqual(deleted.created_at, saved.created_at)
+        self.assertEqual(deleted.updated_at, datetime(2026, 6, 16, 7, 6, 0))
+        self.assertEqual(deleted.metadata["file_status"], "deleted")
+        self.assertIn("已删除", deleted.content)
+        with self.assertRaisesRegex(ValueError, "resurrected"):
+            asyncio.run(storage.upsert_file_upload_message(projection, now=datetime(2026, 6, 16, 7, 7, 0)))
+        delete_payloads = self._file_upload_audit_payloads(FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT)
+        self.assertEqual([payload["outcome"] for payload in delete_payloads], ["noop", "marked_deleted"])
+        self.assertEqual(delete_payloads[0]["reason_code"], "message_missing")
+        upsert_payloads = self._file_upload_audit_payloads(FILE_UPLOAD_MESSAGE_UPSERTED_EVENT)
+        self.assertEqual(upsert_payloads[-1]["outcome"], "failed")
+        self.assertEqual(upsert_payloads[-1]["reason_code"], "deleted_no_resurrection")
+
+    def test_message_metadata_non_object_rows_read_as_empty_public_metadata(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        with self.session_factory() as session:
+            session.add(
+                MessageRow(
+                    message_id="msg-list-metadata",
+                    conversation_id="conv-metadata",
+                    role="user",
+                    content="hello",
+                    message_type="chat",
+                    message_metadata=["not", "object"],
+                    created_at=datetime(2026, 6, 16, 7, 0, 0),
+                )
+            )
+            session.commit()
+
+        loaded = asyncio.run(storage.get_message("msg-list-metadata"))
+
+        self.assertEqual(loaded.metadata, {})
+
+    def test_file_upload_audit_payload_uses_safe_summary_only(self) -> None:
+        projection = FileUploadMessageProjection(
+            upload_id="upl-audit",
+            conversation_id="conv-audit",
+            content="file",
+            metadata={"upload_id": "upl-audit", "filename": "safe.csv", "file_status": "active"},
+        )
+
+        payload = file_upload_message_audit_payload(
+            event_type=FILE_UPLOAD_MESSAGE_UPSERTED_EVENT,
+            conversation_id="conv-audit",
+            upload_id="upl-audit",
+            outcome="inserted",
+            projection=projection,
+        )
+        deleted_payload = file_upload_message_audit_payload(
+            event_type=FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
+            conversation_id="conv-audit",
+            upload_id="upl-audit",
+            outcome="marked_deleted",
+            projection=projection,
+        )
+        payload_json = json.dumps({"upsert": payload, "delete": deleted_payload}, ensure_ascii=False, sort_keys=True)
+
+        self.assertEqual(payload["message_id"], "file_upload:upl-audit")
+        self.assertEqual(deleted_payload["event_type"], FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT)
+        for forbidden in FILE_UPLOAD_MESSAGE_FORBIDDEN_METADATA_KEYS:
+            self.assertNotIn(forbidden, payload_json)
 
     def test_cursor_pagination_uses_created_at_order_not_random_upload_id_order(self) -> None:
         storage = SQLiteStorage(self.session_factory)
