@@ -10,6 +10,7 @@
 
 ### 2026-06-19
 
+- 对话文件历史与智能选择后端总览索引同步最终契约：`docs/prd/backend/00-主代理框架PRD.md` 的 5.14 改为 `file_selection` 最终字段、旧字段拒绝、exact upload_id、repair marker、四个 rollout mode 与 active context 不短路 selector 口径。License Requirement：文档索引更新，无依赖/许可变更。
 - 对话文件历史与智能选择父入口 PRD 已同步分步最终稿口径：`docs/prd/backend/21-对话文件历史与智能选择PRD.md` 收敛到 active context 不短路 selector、message 表扩展承载 file_upload、DB durable repair marker、四个 rollout mode、当前 `upl-` + 12 hex 精确匹配，以及 `file_selection` closed schema / 旧字段拒绝。License Requirement：文档加固，无依赖/许可变更。
 - 对话文件历史与智能选择分步 PRD 第二轮决策落文：`FileRequirementProfile` 收敛为交付级 closed schema，仅保留 `source/required/allow_multiple/expected_content/supported_file_types/helpful_columns/disambiguation_hint/user_file_reference/context_notes` 最终字段；Skill 文件需求只接受 `file_selection` 最终字段，拒绝 `file_intent`、`accepted_file_types`、`intent`、`expected_inputs`、`needs_file` 等旧字段，不做 alias 映射或 legacy type 推断。License Requirement：文档加固，无依赖/许可变更。
 - 对话文件历史与智能选择分步 PRD 完成首轮 document-perfectization 决策落文：确认 active conversation file context 不得短路 required/narrow selector、`file_upload` 历史使用现有 `message` 表扩展承载、`index.md` 重写失败使用 DB durable repair marker 并按当场重试/后台退避/懒修复三层恢复、selector rollout mode 统一为 `disabled|shadow|enforce_narrow|enforce_guarded_multi` 且旧 `enforce` 不保留 alias、正文 upload_id 精准匹配当前 `upl-` + 12 位十六进制生成规则。License Requirement：文档加固，无依赖/许可变更。

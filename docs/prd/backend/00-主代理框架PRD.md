@@ -215,11 +215,14 @@
 - `file_upload` 使用 `role=system`，但历史 API、前端和 memory 只能通过 public `message_type` allowlist 暴露该类 system message；不得泛化展示或注入其他 internal system message。
 - 文件名、摘要、preview/OCR/PDF 文本全部视为不可信 file-derived data，只能作为历史事实和文件定位线索，不能覆盖系统指令或安全约束。
 - 当前 conversation active 文件可作为默认文件上下文；task attachment 只记录显式上传、selector 选择、interrupt answer、sheet selection 等本轮实际 provenance，避免把“文件池存在”误记为“本轮已使用”。
-- selector 是 conversation file context 之上的缩窄、消歧、缺文件和 provenance 写入机制；显式 `metadata.upload_ids` 优先，普通问答不强制 selector。
+- selector 是 conversation file context 之上的缩窄、消歧、缺文件和 provenance 写入机制；显式 `metadata.upload_ids` 优先，普通问答不强制 selector，但 required file、明确单文件指代、同名/多候选缩窄、recent usage continuation、interrupt answer 恢复或正文 `upload_id` 精准选择不得被 active context 短路。
 - 多候选、同名文件、低置信或 required file 缺失时复用现有 interrupt，使用 `file_selection_ambiguous` / `no_files_in_conversation` 等稳定 reason_code，不新增公开 API 或前端点选组件。
+- 正文 / interrupt answer 中的 `upload_id` 精准选择只接受当前生成格式 `upl-` + 12 位十六进制字符的完整 token；未知、越权、deleted 或不属于当前 conversation 的 id 不得交给 LLM 猜测或静默忽略。
 - recent usage 必须来自 task attachment / selector binding / interrupt answer / sheet selection 等实际使用 provenance，不得只根据上传时间推断。
 - deleted 文件保留为历史事实，但必须在 API、前端卡片和 prompt 中标记不可复用，且不得进入 active context、selector、binding 或 Skill manifest。
-- 未来 Skill 文件需求必须由 contract/schema 的 `file_intent` / `file_selection` 或 `type: file/artifact/data` 等机器可读字段驱动，平台不得硬编码当前 Skill 名称；实施时必须同步更新 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`。
+- `index.md` 是 DB 投影而非权限事实源；重写失败必须写 DB durable repair marker，并按当场重试、后台退避、下次访问懒修复恢复；repair pending 时 selector / rollback 都必须以 DB resource 为准，不得信任旧 index。
+- selector rollout mode 只接受 `disabled`、`shadow`、`enforce_narrow`、`enforce_guarded_multi`；旧 `enforce` 不保留兼容 alias。
+- 未来 Skill 文件需求必须由 contract/schema 的 `file_selection` 最终字段驱动，平台不得硬编码当前 Skill 名称；不得接受 `file_intent`、旧 schema `type: file/artifact/data` 或别名字段作为交付契约；实施时必须同步更新 `breeding-skill-builder` 的模板、checklist 和指南。
 - 第一阶段不 backfill 旧文件，避免伪造历史上传时序；旧 active resources 仍可通过文件池和 selector 使用。
 
 ### 5.15 Rust 化 Runtime 决策
