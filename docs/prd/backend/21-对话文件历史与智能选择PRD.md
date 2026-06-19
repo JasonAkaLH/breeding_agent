@@ -30,7 +30,7 @@ selector decision         = 当需要缩窄或消歧时，从 active 文件池�
 ## 2. 产品目标
 
 1. **上传成功即进入历史**：文件从前端成功上传到后端后，conversation history 中立即出现 `message_type=file_upload` 的结构化历史片段。
-2. **聊天内引用文件**：用户无需点选 UI，也可用“刚才的文件”“materials.csv”“第一份表”等自然语言引用 conversation 文件。
+2. **聊天内引用文件**：用户无需点选 UI，也可用“刚才的文件”“materials.csv”“第一份表”等自然语言引用 conversation 文件；如果用户愿意，也可以直接发送 `upload_id` 精准指定文件。
 3. **文件池与本轮使用分离**：active conversation 文件默认可作为上下文候选，但 task-level attachment 只记录显式上传、selector 选择、interrupt answer 或 sheet selection 等本轮实际 provenance。
 4. **低置信不猜测**：多个候选、同名候选、候选信息不足或 selector 异常时，进入聊天式 `file_selection_ambiguous` interrupt 或缺文件提示，不静默绑定低置信文件。
 5. **deleted 文件不可复用**：已删除文件保留为历史事实，但必须在 API、前端卡片和 prompt 中标记不可复用，不得进入 selector、binding 或 Skill manifest。
@@ -56,9 +56,10 @@ selector decision         = 当需要缩窄或消歧时，从 active 文件池�
 3. **`file_upload` message 是历史事实，不是可用性事实源**：它用于排序、展示、记忆和用户引用理解；不能凭历史消息伪造 active 文件。
 4. **`task_input_attachment` 是本轮实际使用 provenance**：recent usage 必须优先来自 task attachment / selector binding / interrupt answer，而不是仅根据上传时间推断。
 5. **显式 `metadata.upload_ids` 优先**：如果前端 / 用户本轮显式绑定文件，沿用既有校验与绑定流程，不被 selector 吞掉或降级。
-6. **文件派生文本不可信**：`filename`、`description_summary`、preview、OCR/PDF 摘要、sheet 名和列名全部按 untrusted user/file data 处理。
-7. **selector 只看元数据**：第一版 selector 不读取文件正文；后端只做权限、状态、候选范围、schema 和安全后处理校验。
-8. **歧义走聊天 interrupt**：用户通过普通自然语言回答 upload_id、序号、文件描述或重新上传文件；不要求新增前端点选组件。
+6. **正文中的 `upload_id` 是精准选择提示**：用户在普通消息或 interrupt answer 中直接发送 / 粘贴 `upload_id` 时，平台必须先做服务端精确匹配和权限校验；合法 active match 可作为高置信选择，未知、越权或 deleted id 不得被 LLM 猜测补全。
+7. **文件派生文本不可信**：`filename`、`description_summary`、preview、OCR/PDF 摘要、sheet 名和列名全部按 untrusted user/file data 处理。
+8. **selector 只看元数据**：第一版 selector 不读取文件正文；后端只做权限、状态、候选范围、schema 和安全后处理校验。
+9. **歧义走聊天 interrupt**：用户通过普通自然语言回答 upload_id、序号、文件描述或重新上传文件；不要求新增前端点选组件。
 
 ## 5. 合并冲突与最终裁决
 
@@ -319,7 +320,7 @@ selector 输出结构化决策：
 | `needs_sheet_selection` | 已选表格还需 sheet selection | 链式进入 `sheet_selection_required` |
 | `llm_selector_failed` | LLM 调用失败、返回格式错误或无法解析 | 降级澄清或缺文件提示 |
 | `recent_usage` | 根据最近实际使用文件定位 | 可自动选择或用于候选解释 |
-| `explicit_upload_id` | 用户或前端显式给出 upload_id | 走既有显式绑定流程 |
+| `explicit_upload_id` | 前端通过 `metadata.upload_ids` 或用户在正文 / interrupt answer 中精确给出 upload_id | metadata 走提交前显式绑定；正文 / interrupt answer 走服务端精确匹配、权限校验和 selector provenance 路径 |
 
 ## 8. 上传、删除与历史写入流程
 
@@ -464,6 +465,9 @@ POST /api/v1/conversations/chat-messages
        -> resolve_conversation_uploads_for_message() 注入 active conversation file context
        -> 若 active 文件需要 sheet selection：打开 sheet_selection_required
        -> 构造 FileRequirementProfile
+       -> 先从用户正文中做 upload_id exact-token extraction
+       -> 若正文 upload_id 精确命中 active resource：校验后写 effective_upload_ids 和 task attachment
+       -> 若正文 upload_id 不存在、越权或 deleted：进入不可用文件澄清，不交给 LLM 猜测
        -> FileSelectionTriggerDetector 判断是否需要缩窄 / 澄清 / 缺文件提示
        -> 不触发 selector：继续执行，保留 conversation file context，不写 task attachment
        -> 触发 selector：读取 active candidates + recent_usage，生成 FileSelectionDecision
@@ -478,7 +482,7 @@ POST /api/v1/conversations/chat-messages
 必须触发或进入等价缺文件分支：
 
 - `FileRequirementProfile.required=true` 且本轮没有显式 `metadata.upload_ids`；
-- 用户 query 明确要求“用这个文件 / 刚才那个表 / materials.csv / 第一份文件”等文件指代，且当前文件池需要缩窄；
+- 用户 query 明确要求“用这个文件 / 刚才那个表 / materials.csv / 第一份文件”等文件指代，或直接包含 `upload_id`，且当前文件池需要缩窄或写入 task-level provenance；
 - 多个 active 文件同名、同类型或都满足当前 Skill 文件需求，且下游只接受单文件；
 - continuation 明确要求“继续用刚才那个数据”，需要基于 recent usage 判断；
 - interrupt answer 恢复时需要把自然语言选择解析为 upload_id；
@@ -509,6 +513,21 @@ LLM / selector 输出后必须服务端验证：
 10. 选中文件若 `requires_sheet_selection=true`，必须链式进入 `sheet_selection_required`；sheet 选择完成后再恢复原任务并绑定 attachment。
 11. 最终仍调用 `resolve_uploads_for_message()` 或等价权限校验做 fail-closed 校验。
 
+### 10.5 用户正文中的 upload_id 精准选择
+
+为兼容高级用户、调试场景和从历史卡片复制 id 的工作流，用户可以在普通 chat message 或 interrupt answer 中直接发送 `upload_id` 来精准选择文件。该能力是自然语言选择的一部分，不要求前端把它转换为 `metadata.upload_ids`。
+
+处理规则：
+
+1. 后端在调用 LLM selector 前，必须先做 `upload_id` exact-token extraction，只接受完整 token 命中，不做模糊补全、编辑距离匹配或大小写外的猜测。
+2. 若正文中恰好一个 `upload_id` 命中当前 conversation / user 的 active resource，且本轮语义需要文件或平台需要写 task-level provenance，则以 `reason_code=explicit_upload_id` 生成高置信 `select_one`，再走权限校验、sheet selection 和 task attachment 绑定。
+3. 若正文中出现多个有效 `upload_id`：
+   - 用户明确要求比较、合并或 `FileRequirementProfile.allow_multiple=true` 时，可进入 `select_many` 后处理；V1 默认仍按 guarded multi-select 策略决定是否需要确认。
+   - 下游只接受单文件时，必须进入 `file_selection_ambiguous`，提示用户选择其中一个。
+4. 若正文中的 `upload_id` 不存在、越权、已删除或不属于当前 conversation，不能交给 LLM 猜测，也不能静默忽略；应打开不可用文件澄清或返回用户可见说明，请用户重新上传或选择 active 文件。
+5. 正文 `upload_id` 与结构化 `metadata.upload_ids` 的失败语义不同：`metadata.upload_ids` 是 API 显式绑定契约，仍在提交前 HTTP 400 fail-closed；正文 `upload_id` 是聊天内容，通常在 message/task 创建后通过 interrupt / 可见说明恢复。
+6. 审计事件必须记录 `reason_code=explicit_upload_id`、命中的 selected_upload_ids 和失败原因摘要，但不得记录文件正文或敏感路径。
+
 ## 11. Interrupt 与恢复
 
 ### 11.1 file_selection_ambiguous
@@ -533,7 +552,7 @@ LLM / selector 输出后必须服务端验证：
 
 用户可通过以下方式回答：
 
-- 直接回复 `upload_id`；
+- 直接回复一个或多个有效 `upload_id`；
 - 回复“第一份 / 第二个 / 用 120 行那个”等自然语言；
 - 重新上传文件并说“用这个”；
 - 明确说“不用文件”。
@@ -649,6 +668,7 @@ conversation_file.file_selector_auto_bound
 - post-processing：非法 JSON、未知 upload_id、低置信、select_many 默认澄清、no_usable_file 标准 reason_code。
 - 单文件 required 自动选择并写 task attachment。
 - 多个同名 `materials.csv` 打开 `file_selection_ambiguous`。
+- 用户在普通消息正文或 interrupt answer 中直接给出 upload_id 时，可精准选择 active 文件；未知、越权或 deleted id 进入澄清，不交给 LLM 猜测。
 - 用户回复 upload_id / 序号 / 新上传文件后恢复原 task。
 - recent_usage 基于 task attachment 选择最近实际使用文件，而不是最新上传文件。
 - selector 选中多 sheet 文件后进入 `sheet_selection_required`。
@@ -696,6 +716,7 @@ cd frontend && npm run typecheck
 | AC-015 | 显式 `metadata.upload_ids` 保持既有 HTTP 400 fail-closed 语义，不被 selector 吞掉。 | API 负向测试 |
 | AC-016 | 新增或迁移 Skill 可通过 `file_selection` / `file_intent` 声明文件需求，selector 不硬编码 Skill 名。 | Skill parser/builder 测试 |
 | AC-017 | 第一阶段不 backfill 旧文件；旧 active resources 仍可通过文件池和 selector 使用。 | Migration/兼容测试 |
+| AC-018 | 用户可在普通消息或 interrupt answer 中直接发送 `upload_id` 精准选择 active 文件；未知、越权或 deleted id 不被猜测或静默忽略。 | API / selector 集成测试 |
 
 ## 17. 风险与缓解
 
