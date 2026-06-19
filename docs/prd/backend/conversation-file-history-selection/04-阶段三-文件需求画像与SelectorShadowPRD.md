@@ -8,15 +8,15 @@
 
 ## 1. 阶段目标
 
-在不改变实际执行路径的 shadow 模式下，建立文件需求识别、`FileRequirementProfile` 归一化、selector 触发判定、candidate 摘要和 would-select 审计，为后续 enforce 阶段提供可观测证据。
+在不改变实际执行路径的 shadow 模式下，建立文件需求识别、`FileRequirementProfile` 归一化、selector 触发判定、candidate 摘要和 would-select 审计，为后续 `enforce_narrow` 阶段提供可观测证据。
 
 ## 2. 范围
 
 ### In scope
 
 - 定义并实现 `FileRequirementProfile` 归一化结构。
-- 从 interrupt/resume、metadata、pending Skill、Skill contract/schema、旧 schema type 和用户 query 推断文件需求。
-- 支持 Skill contract / schema 中的 `file_selection` / `file_intent` 字段解析。
+- 从 interrupt/resume、metadata、pending Skill、Skill contract/schema 和用户 query 推断文件需求。
+- 支持 Skill contract / schema 中的 `file_selection` 最终字段解析；不接受 `file_intent`、旧 schema type 或别名字段作为交付契约。
 - 建立 selector trigger detector，但阶段三只 shadow 记录，不写 binding、不打开新 interrupt。
 - 为 active candidates 构造 prompt-safe 摘要和 recent usage 摘要，但不让 LLM 结果改变执行。
 - 同步 builder 模板、checklist、指南的文件需求声明要求。
@@ -30,37 +30,45 @@
 
 ## 3. FileRequirementProfile
 
-`FileRequirementProfile` 归一化本轮为什么可能需要文件：
+`FileRequirementProfile` 归一化本轮为什么可能需要文件。该结构是交付级 closed schema，只接受以下最终字段；不得用 alias、legacy 字段或版本化 fallback 兜底：
 
 ```json
 {
-  "source": "skill_schema | user_query | interrupt | continuation | platform",
-  "needs_file": true,
+  "source": "metadata | soft_skill_binding | skill_contract | input_schema | user_query | interrupt",
   "required": true,
-  "intent": "table_analysis | document_qa | image_understanding | skill_execution | file_summary | file_conversion | comparison | continuation | unknown",
-  "accepted_file_types": ["csv", "spreadsheet"],
   "allow_multiple": false,
-  "expected_inputs": [
-    {
-      "name": "material_data",
-      "type": "data",
-      "required": true,
-      "description": "实验材料表"
-    }
-  ],
+  "expected_content": ["材料表"],
+  "supported_file_types": ["csv", "xlsx"],
+  "helpful_columns": ["ped_id", "variety"],
+  "disambiguation_hint": "优先选择最近实际用于本会话设计任务的材料表",
   "user_file_reference": "刚才上传的表",
   "context_notes": ["当前 Skill schema 有 required data 输入", "用户提到刚才上传"]
 }
 ```
 
+字段约束：
+
+| 字段 | 要求 |
+| --- | --- |
+| `source` | 枚举：`metadata`、`soft_skill_binding`、`skill_contract`、`input_schema`、`user_query`、`interrupt`。 |
+| `required` | boolean；是否必须选择文件才能继续。 |
+| `allow_multiple` | boolean；是否允许多文件作为同一需求的有效输入。 |
+| `expected_content` | string array；描述期望文件内容、业务语义或数据对象。 |
+| `supported_file_types` | string array；允许的文件类型或归一化类型，例如 `csv`、`xlsx`、`txt`、`image`。 |
+| `helpful_columns` | string array；用于表格类文件消歧的关键列名提示。 |
+| `disambiguation_hint` | string；候选多个时的业务消歧提示。 |
+| `user_file_reference` | string；用户原话中的文件指代片段。 |
+| `context_notes` | string array；解释 profile 来源和推断依据，只能包含安全摘要。 |
+
+以下旧字段不得出现在交付契约中：`needs_file`、`intent`、`accepted_file_types`、`expected_inputs`、`requires_file`、`required_file`、`default_allow_multiple`。若这些字段出现在 metadata、contract 或 schema 中，应作为契约错误处理，不得静默映射到最终字段。
+
 归一化来源优先级：
 
 1. interrupt / resume 上下文中的文件需求；
-2. 显式 `metadata.file_requirement_profile` / `metadata.file_selection` / `metadata.file_intent`；
+2. 显式 `metadata.file_requirement_profile` / `metadata.file_selection`；
 3. soft / pending Skill binding 中的 file profile；
-4. Skill contract / input schema 的 `file_selection` / `file_intent`；
-5. 旧 schema `type: file | artifact | data` 的基础推断；
-6. 用户 query 中的文件指代、continuation 词和比较 / 合并意图。
+4. Skill contract / input schema 的 `file_selection`；
+5. 用户 query 中的文件指代、continuation 词和比较 / 合并意图。
 
 显式 `metadata.upload_ids` 存在时直接退出 selector，不生成 profile-driven selection。
 
@@ -75,6 +83,10 @@
 - interrupt answer 恢复时需要把自然语言选择解析为 upload_id。
 - future Skill schema / contract 声明 required file input。
 
+触发判定必须在“已有 active conversation files 已注入上下文”之后仍可运行：active context 只表示文件池可用，不代表本轮已经选择文件，也不得让 required / narrowing 场景跳过 shadow audit。
+
+正文 `upload_id` 识别必须使用当前上传 ID 生成规则的完整 token：`upl-` + 12 位十六进制字符，正则为 `(?<![A-Za-z0-9_-])upl-[0-9a-fA-F]{12}(?![A-Za-z0-9_-])`。substring 命中、编辑距离、前缀补全或把 `upl_` / `upload_` 当作等价格式都不得触发精准选择。
+
 不应触发 selector：
 
 - 本轮已有显式 `metadata.upload_ids`。
@@ -82,13 +94,13 @@
 - 普通问答且无文件指代、无 required file profile。
 - 只有 conversation file context 注入即可满足普通 summarization / exploratory query，且平台策略不要求 task-level binding。
 
-若 query、Skill contract/schema 或 interrupt 明确需要文件，但当前会话没有 active 文件，平台在 shadow 阶段只记录 would-no-usable-file，不改变执行路径；enforce 阶段再打开缺文件澄清。
+若 query、Skill contract/schema 或 interrupt 明确需要文件，但当前会话没有 active 文件，平台在 shadow 阶段只记录 would-no-usable-file，不改变执行路径；`enforce_narrow` 阶段再打开缺文件澄清。
 
 ## 5. Skill contract 与 builder 同步
 
 Skill 文件需求必须进入 machine-readable contract/schema，不得只写在 `SKILL.md` 或 prose reference。
 
-建议 schema 字段：
+标准 schema 字段：
 
 ```yaml
 properties:
@@ -97,9 +109,9 @@ properties:
     description: 实验材料表
     file_selection:
       required: true
-      accepted_file_types: [csv, spreadsheet]
-      intent: table_analysis
       allow_multiple: false
+      expected_content: [材料表]
+      supported_file_types: [csv, xlsx]
       helpful_columns: [ped_id, variety, block]
       disambiguation_hint: 优先选择最近实际用于本会话设计任务的材料表
 ```
@@ -114,10 +126,10 @@ properties:
 更新要求：
 
 1. Golden rules 增加：文件需求必须写入 contract/schema，不得只写在 prose 中。
-2. 模板增加 `file_selection` 和 `file_intent` 示例。
+2. 模板增加 `file_selection` 最终字段示例。
 3. checklist 增加：文件类 input 是否可归一化为 `FileRequirementProfile`。
-4. 明确脚本继续优先通过 `resource_manifest_path` / `files[].mount_path` 读取文件，`uploaded_artifacts[].content` / `content_base64` 只作 legacy fallback。
-5. 旧 Skill 未声明 `file_selection` 时，平台仍可通过 `type: file/artifact/data` 做基础推断。
+4. 明确脚本继续通过 `resource_manifest_path` / `files[].mount_path` 读取文件；文件需求声明不得依赖 `uploaded_artifacts[].content` / `content_base64` 或 prose 描述。
+5. `file_selection` 必须使用最终字段；builder 应拒绝 `file_intent`、`accepted_file_types`、`intent`、`expected_inputs`、`needs_file` 等旧字段。
 
 ## 6. Shadow 审计
 
@@ -143,12 +155,13 @@ conversation_file.file_selector_invalid_output
 
 | 测试 | 断言 |
 | --- | --- |
-| profile 来源优先级 | interrupt > metadata > pending skill > schema > legacy type > user query。 |
+| profile 来源优先级 | interrupt > metadata > pending skill > schema > user query。 |
 | 显式 upload_ids | 不触发 profile-driven selector。 |
-| required file schema | 归一化为 `required=true`、accepted types、intent、allow_multiple。 |
-| legacy type | `type: data/file/artifact` 可基础推断。 |
+| required file schema | 归一化为 `required=true`、`supported_file_types`、`expected_content`、`allow_multiple`。 |
+| 非标准字段 | `file_intent`、`accepted_file_types`、`intent`、`expected_inputs`、`needs_file` 等旧字段触发契约错误，不被 alias 映射。 |
 | 普通问答 | 不触发 selector shadow。 |
 | continuation | “继续用刚才那个数据”触发 recent usage 需求。 |
+| upload_id token | 只完整匹配 `upl-[0-9a-fA-F]{12}`；嵌在更长 token 中不命中。 |
 | shadow only | 不写 task attachment、不打开 interrupt、不改变 execution metadata。 |
 | audit safety | 不记录 raw prompt、正文、路径、storage_key、secret。 |
 
@@ -165,4 +178,4 @@ python -m pytest tests/api/test_pending_skill_context.py
 - 文件需求可从 machine-readable schema / contract 进入平台画像。
 - selector 触发条件在 shadow 模式下可观测且不改变当前产品行为。
 - builder 文档和模板要求新 Skill 显式声明文件需求。
-- 后续 enforce 阶段可直接复用 profile、trigger 和 audit payload。
+- 后续 `enforce_narrow` 阶段可直接复用 profile、trigger 和 audit payload。

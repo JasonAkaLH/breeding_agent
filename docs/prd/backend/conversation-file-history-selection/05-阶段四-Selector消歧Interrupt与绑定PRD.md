@@ -8,7 +8,7 @@
 
 ## 1. 阶段目标
 
-在 narrow enforce 范围内启用文件 selector：当用户明确引用文件、下游 required file、同名 / 多候选需要缩窄、continuation 需要 recent usage 或 interrupt answer 需要恢复时，平台可以安全选择、澄清或提示缺文件，并把最终选择写入 task attachment provenance。
+在 `enforce_narrow` 范围内启用文件 selector：当用户明确引用文件、下游 required file、同名 / 多候选需要缩窄、continuation 需要 recent usage 或 interrupt answer 需要恢复时，平台可以安全选择、澄清或提示缺文件，并把最终选择写入 task attachment provenance。
 
 ## 2. 范围
 
@@ -34,7 +34,7 @@
 
 ```json
 {
-  "upload_id": "upl_xxx",
+  "upload_id": "upl-1a2b3c4d5e6f",
   "filename": "materials.csv",
   "original_filename": "materials.csv",
   "normalized_filename": "materials.csv",
@@ -66,7 +66,7 @@ selector 输出结构化决策：
 ```json
 {
   "decision": "select_one | select_many | ambiguous | no_file_needed | no_usable_file",
-  "selected_upload_ids": ["upl_xxx"],
+  "selected_upload_ids": ["upl-1a2b3c4d5e6f"],
   "confidence": 0.91,
   "reason_code": "single_candidate | filename_match | recent_usage | ambiguous_candidates | no_files_in_conversation | metadata_insufficient"
 }
@@ -95,7 +95,7 @@ LLM / selector 输出后必须服务端验证：
 3. `confidence` 必须在 0 到 1。
 4. `decision=select_one` 时必须恰好一个合法 id。
 5. `decision=select_many` 时必须多个合法 id，且 `FileRequirementProfile.allow_multiple=true` 或用户明确要求比较 / 合并多个文件；否则转 `ambiguous`。
-6. V1 enforce 默认只自动绑定高置信 `select_one`；`select_many` 默认转入澄清确认，除非后续显式开启 guarded multi-select。
+6. `enforce_narrow` 默认只自动绑定高置信 `select_one`；`select_many` 默认转入澄清确认，除非显式开启 `enforce_guarded_multi` 且满足 allow_multiple / 明确比较合并意图。
 7. 低于置信阈值（建议 `<0.75`）转 `ambiguous`。
 8. 候选集合未完整参与判断时，即使生成 shortlist，也不得自动绑定；只能进入澄清并提示用户缩小描述或选择候选。
 9. JSON parse 失败、schema invalid、选择不存在文件时降级为 `ambiguous` 或 `no_usable_file`，并写入标准 reason_code。
@@ -108,9 +108,9 @@ LLM / selector 输出后必须服务端验证：
 
 处理规则：
 
-1. 后端在调用 LLM selector 前，必须先做 `upload_id` exact-token extraction，只接受完整 token 命中，不做模糊补全、编辑距离匹配或大小写外的猜测。
+1. 后端在调用 LLM selector 前，必须先做 `upload_id` exact-token extraction，只接受当前系统生成格式的完整 token：`upl-` + 12 位十六进制字符。匹配正则为 `(?<![A-Za-z0-9_-])upl-[0-9a-fA-F]{12}(?![A-Za-z0-9_-])`，大小写不敏感；不支持 `upl_...`、`upload_...`、substring、编辑距离匹配或前缀补全。
 2. 若正文中恰好一个 `upload_id` 命中当前 conversation / user 的 active resource，且本轮语义需要文件或平台需要写 task-level provenance，则以 `reason_code=explicit_upload_id` 生成高置信 `select_one`，再走权限校验、sheet selection 和 task attachment 绑定。
-3. 若正文中出现多个有效 `upload_id`，且用户明确要求比较、合并或 `allow_multiple=true`，可进入 `select_many` 后处理；V1 默认仍按 guarded multi-select 策略决定是否需要确认。
+3. 若正文中出现多个有效 `upload_id`，且用户明确要求比较、合并或 `allow_multiple=true`，可进入 `select_many` 后处理；默认仍按 `enforce_guarded_multi` 门禁决定是否可自动绑定，否则需要澄清确认。
 4. 若正文中的 `upload_id` 不存在、越权、已删除或不属于当前 conversation，不能交给 LLM 猜测，也不能静默忽略；应打开不可用文件澄清或返回用户可见说明。
 5. 正文 `upload_id` 与结构化 `metadata.upload_ids` 的失败语义不同：`metadata.upload_ids` 仍在提交前 HTTP 400 fail-closed；正文 `upload_id` 是聊天内容，通常在 message/task 创建后通过 interrupt / 可见说明恢复。
 6. 审计事件必须记录 `reason_code=explicit_upload_id`、命中的 selected_upload_ids 和失败原因摘要，但不得记录文件正文或敏感路径。
@@ -145,9 +145,9 @@ LLM / selector 输出后必须服务端验证：
 5. 若选中文件需 sheet selection，先进入 `sheet_selection_required`，完成后恢复原 task。
 6. 恢复事件必须记录 selected ids、reason_code、source，不记录完整文件正文或 prompt。
 
-## 8. Enforce narrow 范围
+## 8. `enforce_narrow` 范围
 
-阶段四只允许对以下场景 enforce：
+阶段四只允许对以下场景执行 `enforce_narrow`：
 
 - required file profile；
 - 明确文件指代；
@@ -158,6 +158,8 @@ LLM / selector 输出后必须服务端验证：
 
 普通问答、探索性总结、无 required profile 且 conversation file context 已可满足的场景，不应为了写 provenance 强制 selector。
 
+但 active conversation file context 不得短路上述 `enforce_narrow` 场景：当请求已经落入 required file、明确单文件指代、同名/多候选缩窄、recent usage continuation、interrupt answer 恢复或正文 `upload_id` 时，即使当前会话 active 文件已经注入执行 metadata，也必须继续 selector / deterministic selection 判定，并最终写 task attachment provenance、打开澄清或返回不可用文件说明。
+
 ## 9. 测试计划
 
 | 测试 | 断言 |
@@ -167,7 +169,7 @@ LLM / selector 输出后必须服务端验证：
 | 多个同名 materials.csv | 打开 `file_selection_ambiguous`。 |
 | 全部文件总结 | 可使用 conversation context，不中断。 |
 | recent usage | 先用 A、再上传 B、说“继续用刚才那个”选择 A。 |
-| 正文 upload_id | active id 精准选择；未知、越权、deleted id 澄清且不交 LLM 猜测。 |
+| 正文 upload_id | `upl-[0-9a-fA-F]{12}` 完整 token active id 精准选择；未知、越权、deleted id 澄清且不交 LLM 猜测；嵌入更长 token 时不命中。 |
 | selector invalid JSON | 降级 ambiguous / no_usable_file 并记录 reason_code。 |
 | low confidence | 不自动绑定，进入 interrupt。 |
 | select_many 默认 | 默认澄清确认，不自动多绑定。 |
@@ -185,7 +187,7 @@ python -m pytest tests/integrations/agent_skills/test_artifact_context.py
 
 ## 10. 阶段验收
 
-- selector narrow enforce 场景能安全自动选择、澄清或提示缺文件。
+- selector `enforce_narrow` 场景能安全自动选择、澄清或提示缺文件。
 - 所有最终绑定都写入 task attachment provenance 并通过权限 / 状态校验。
 - 多候选、低置信、selector 异常、deleted / 越权 / 未知 id 均 fail closed。
 - 用户可只用聊天自然语言完成文件消歧，不需要新增前端控件。

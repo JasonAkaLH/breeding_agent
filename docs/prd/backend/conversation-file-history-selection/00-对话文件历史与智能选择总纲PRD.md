@@ -17,6 +17,14 @@
 3. 多文件 / 同名文件需要聊天式消歧，低置信时不得强行选择。
 4. 未来 Skill 文件需求必须来自 machine-readable contract/schema，不能硬编码 Skill 名称。
 
+### 1.1 已确认实施口径
+
+- **active context 是基线，不是 selector bypass**：无显式 `metadata.upload_ids` 时，active conversation 文件仍可默认作为上下文候选注入；但 required file、明确单文件指代、同名/多候选缩窄、recent usage continuation、interrupt answer 恢复或正文 `upload_id` 精准选择必须进入 selector / deterministic selection 判定，并写 task attachment provenance 或打开澄清。
+- **`file_upload` 存在现有 message 表**：不新增独立 `conversation_file_history` 表；通过扩展 `Message` / `message` / `MessageResponse` 的 `message_type`、`metadata`、`updated_at` 支持文件上传历史。
+- **`index.md` repair marker 必须持久化**：`index.md` 只是 DB 投影；重写失败后必须写 DB durable repair marker，audit event 不能替代 marker。repair 采用当场重试一次、后台退避重试、下次访问懒修复三层触发。
+- **rollout mode 使用显式阶段名**：selector 配置为 `disabled | shadow | enforce_narrow | enforce_guarded_multi`；旧 `enforce` 不作为兼容 alias。
+- **正文 upload_id 精准匹配系统生成规则**：当前上传 ID 生成格式为 `upl-` + 12 位十六进制字符；自然语言 exact-token extraction 只识别完整 token 正则 `(?<![A-Za-z0-9_-])upl-[0-9a-fA-F]{12}(?![A-Za-z0-9_-])`，再做服务端权限 / 状态校验。
+
 ## 2. 统一契约
 
 ```text
@@ -34,7 +42,7 @@ selector decision         = 需要缩窄或消歧时，从 active 文件池中�
 4. deleted 文件保留为历史事实，但在 API、前端、prompt、selector、binding 和 Skill manifest 中都不可复用。
 5. LLM、前端、selector、audit 只接收安全元数据，不接收文件正文、本地路径、`storage_key`、`content` 或 `content_base64`。
 6. 保持既有 chat message、interrupt answer、uploads 和 `metadata.upload_ids` 语义，不新增公开 API。
-7. 新增 / 迁移 Skill 通过 contract/schema 声明文件需求，平台归一化为 `FileRequirementProfile`。
+7. 新增 / 迁移 Skill 通过 contract/schema 的 `file_selection` 最终字段声明文件需求，平台归一化为 `FileRequirementProfile`；不保留旧字段 alias 或 legacy type 推断。
 8. 上传历史写入、selector 触发、自动选择、歧义中断、恢复选择、删除标记和 repair 都留下结构化事件或状态。
 
 ## 4. 非目标
@@ -58,13 +66,15 @@ selector decision         = 需要缩窄或消歧时，从 active 文件池中�
 7. **文件派生文本不可信**：`filename`、`description_summary`、preview、OCR/PDF 摘要、sheet 名和列名全部按 untrusted user/file data 处理。
 8. **selector 只看元数据**：第一版 selector 不读取文件正文；后端只做权限、状态、候选范围、schema 和安全后处理校验。
 9. **歧义走聊天 interrupt**：用户通过普通自然语言回答 upload_id、序号、文件描述或重新上传文件；不要求新增前端点选组件。
+10. **active context 不短路 required/narrow selector**：conversation file context 可服务普通问答和“全部文件”总结，但不得让 required file、明确单文件指代、同名/多候选缩窄、recent usage continuation 或正文 `upload_id` 绕过 provenance 绑定 / 澄清判定。
+11. **`index.md` repair pending 时禁止信旧投影**：只允许从 DB active resources 构造候选；repair 完成前不得用旧 `index.md` 判断文件仍可用。
 
 ## 6. 阶段拆分
 
 | 阶段 | 主题 | 可独立完成的结果 |
 | --- | --- | --- |
 | 阶段零 | 数据模型与 repository 基线 | `Message` 兼容字段、file_upload projection、repository upsert/delete 契约、public allowlist 与安全投影测试。 |
-| 阶段一 | 上传删除强一致与历史展示 | 上传 / 摘要回填 / 删除流程写入并维护 `file_upload` history；历史 API 和前端卡片可展示 active/deleted 文件。 |
+| 阶段一 | 上传删除强一致与历史展示 | 上传 / 摘要回填 / 删除流程写入并维护 `file_upload` history；定义 DB repair marker 与三层 repair 触发；历史 API 和前端卡片可展示 active/deleted 文件。 |
 | 阶段二 | 会话文件上下文与 memory 安全 | active conversation file context 与 task attachment provenance 分离；memory 渲染 file_upload 历史并强约束 deleted 不可用。 |
 | 阶段三 | 文件需求画像与 selector shadow | 从 metadata、Skill contract/schema、用户 query 归一化文件需求；selector 只 shadow 记录 would-select 和 reason_code。 |
 | 阶段四 | selector 消歧、interrupt 与绑定 | 实施候选、recent usage、upload_id 精确选择、selector 后处理、`file_selection_ambiguous` 恢复与 task attachment 绑定。 |
@@ -89,9 +99,10 @@ selector decision         = 需要缩窄或消歧时，从 active 文件池中�
 | AC-013 | 自动选择只在合法、单一、高置信且候选完整参与判断时发生。 | 阶段四 |
 | AC-014 | 所有最终绑定都复用权限校验与 task attachment provenance 路径。 | 阶段四 |
 | AC-015 | 显式 `metadata.upload_ids` 保持既有 HTTP 400 fail-closed 语义，不被 selector 吞掉。 | 阶段二 / 四 |
-| AC-016 | 新增或迁移 Skill 可通过 `file_selection` / `file_intent` 声明文件需求，selector 不硬编码 Skill 名。 | 阶段三 |
+| AC-016 | 新增或迁移 Skill 必须通过 `file_selection` 最终字段声明文件需求，selector 不硬编码 Skill 名，且不接受旧字段 alias / legacy type 推断。 | 阶段三 |
 | AC-017 | 第一阶段不 backfill 旧文件；旧 active resources 仍可通过文件池和 selector 使用。 | 阶段一 / 四 |
 | AC-018 | 用户可在普通消息或 interrupt answer 中直接发送 `upload_id` 精准选择 active 文件；未知、越权或 deleted id 不被猜测或静默忽略。 | 阶段四 |
+| AC-019 | selector rollout mode 只接受 `disabled`、`shadow`、`enforce_narrow`、`enforce_guarded_multi`；旧 `enforce` 不作为兼容 alias。 | 阶段五 |
 
 ## 8. 风险与缓解
 
@@ -104,7 +115,7 @@ selector decision         = 需要缩窄或消歧时，从 active 文件池中�
 | 文件候选太多导致 prompt 过大 | 可压缩、分批或 shortlist；只要完整候选未参与判断，就不得自动绑定。 |
 | 文件正文泄漏 | 统一 allowlist projection；安全测试锁定禁止字段。 |
 | 删除时 index 与 DB 状态短暂不一致 | durable repair marker；repair 完成前禁止基于旧 index 自动选择。 |
-| 未来 Skill 未声明文件需求 | 旧 `type: file/artifact/data` 可基础推断；builder 模板和 checklist 强制新 Skill 写声明。 |
+| 未来 Skill 未声明文件需求 | builder 模板和 checklist 强制写 `file_selection` 最终字段；缺失或使用旧字段时作为契约错误处理，不做 legacy type 推断。 |
 
 ## 9. 全局测试入口
 

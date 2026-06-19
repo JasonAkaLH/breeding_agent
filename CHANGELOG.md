@@ -10,6 +10,9 @@
 
 ### 2026-06-19
 
+- 对话文件历史与智能选择父入口 PRD 已同步分步最终稿口径：`docs/prd/backend/21-对话文件历史与智能选择PRD.md` 收敛到 active context 不短路 selector、message 表扩展承载 file_upload、DB durable repair marker、四个 rollout mode、当前 `upl-` + 12 hex 精确匹配，以及 `file_selection` closed schema / 旧字段拒绝。License Requirement：文档加固，无依赖/许可变更。
+- 对话文件历史与智能选择分步 PRD 第二轮决策落文：`FileRequirementProfile` 收敛为交付级 closed schema，仅保留 `source/required/allow_multiple/expected_content/supported_file_types/helpful_columns/disambiguation_hint/user_file_reference/context_notes` 最终字段；Skill 文件需求只接受 `file_selection` 最终字段，拒绝 `file_intent`、`accepted_file_types`、`intent`、`expected_inputs`、`needs_file` 等旧字段，不做 alias 映射或 legacy type 推断。License Requirement：文档加固，无依赖/许可变更。
+- 对话文件历史与智能选择分步 PRD 完成首轮 document-perfectization 决策落文：确认 active conversation file context 不得短路 required/narrow selector、`file_upload` 历史使用现有 `message` 表扩展承载、`index.md` 重写失败使用 DB durable repair marker 并按当场重试/后台退避/懒修复三层恢复、selector rollout mode 统一为 `disabled|shadow|enforce_narrow|enforce_guarded_multi` 且旧 `enforce` 不保留 alias、正文 upload_id 精准匹配当前 `upl-` + 12 位十六进制生成规则。License Requirement：文档加固，无依赖/许可变更。
 - 对话文件历史与智能选择 PRD 已拆分为阶段性专题目录：新增 `docs/prd/backend/conversation-file-history-selection/`，包含 README、总纲和阶段零至阶段五 PRD，按数据模型 / 上传历史 / memory 安全 / selector shadow / interrupt 绑定 / 灰度发布拆解原 `docs/prd/backend/21-对话文件历史与智能选择PRD.md`；同步 PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
 - 后端 PRD 21/22 已按文件上下文边界合并重排：原 `21-文件上传历史消息PRD.md` 与 `22-聊天式会话文件智能选择PRD.md` 合并为 `docs/prd/backend/21-对话文件历史与智能选择PRD.md`，显式裁决 `ConversationFileResource` 事实源、`file_upload` 历史、conversation file context、task attachment provenance、selector 缩窄/消歧、用户正文 `upload_id` 精准选择兼容、recent usage、deleted 不可复用和 LLM/确定性选择边界；原 `23-Skill运行闭环Workbench总纲PRD.md` 重编号为 `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md`，并同步 PRD 索引、后端总览与 Future Work。License Requirement：文档重排/索引变更，无依赖/许可变更。
 

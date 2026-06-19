@@ -23,7 +23,7 @@
 
 ### Out of scope
 
-- 不实现 selector enforce。
+- 不实现 selector 强制模式。
 - 不改变 `metadata.upload_ids` 显式绑定语义。
 - 不 backfill 旧上传文件的 file_upload history。
 - 不新增前端文件选择控件。
@@ -49,7 +49,35 @@ POST /api/v1/conversations/uploads
 
 - 原始文件写入失败：不写 DB，不写 history，返回上传失败。
 - DB transaction 失败：rollback resource + message，删除刚写入的文件目录和内存 upload record，返回上传失败。
-- `index.md` 重写失败：回滚或标记删除本次新增 resource + file_upload message，删除刚写入的原始文件目录和内存 upload record，返回上传失败并记录 audit。
+- `index.md` 重写失败：当场从 DB authoritative resources 立即重建一次；若仍失败，回滚或标记删除本次新增 resource + file_upload message，删除刚写入的原始文件目录和内存 upload record，返回上传失败，并写 durable repair marker + audit。
+
+### 3.1 Durable repair marker
+
+`index.md` 是 DB 的投影，不是权限事实源。任何重写失败都必须由 DB 持久 repair marker 记录；audit event、日志或内存 flag 不能替代 marker。
+
+repair marker 至少包含：
+
+| 字段 | 要求 |
+| --- | --- |
+| `conversation_id` | 需要修复索引的 conversation。 |
+| `repair_kind` | 固定为 `conversation_file_index`。 |
+| `status` | `pending | repairing | resolved | failed`。 |
+| `reason_code` | 写入失败、权限异常、IO 异常、并发冲突等稳定原因码。 |
+| `affected_upload_ids` | 本次上传 / 删除影响的 upload_id 列表，可为空但字段必须存在。 |
+| `attempt_count` / `next_retry_at` | 后台退避重试调度信息。 |
+| `created_at` / `updated_at` / `resolved_at` | 生命周期时间。 |
+
+repair 触发时机：
+
+1. **当场重试一次**：上传 / 删除路径发现 `index.md` 重写失败后，立即从 DB 全量 active/deleted resources 重建一次，不从旧 `index.md` 增量修。
+2. **后台退避重试**：仍失败时写 `pending` marker，后台 repair worker / runtime task 按退避策略重试，例如 5 秒、30 秒、2 分钟。
+3. **下次访问懒修复**：后续上传、删除、列文件、提交消息或 selector 访问该 conversation 时，如果发现 `pending` marker，应先尝试 repair；失败时继续以 DB 为事实源，但不得使用旧 `index.md` 做自动选择依据。
+
+selector / prompt 约束：
+
+- repair pending 时，selector candidates 只能来自 DB `ConversationFileResource` active resources。
+- repair pending 时，不得把旧 `index.md` 作为 active 文件可用性依据。
+- repair 成功后 marker 更新为 `resolved`，并记录对应 audit event。
 
 ## 4. 摘要回填
 
@@ -73,7 +101,7 @@ DELETE /api/v1/conversations/uploads/{upload_id}
   -> 物理删除本地资源目录或按既有删除策略清理
 ```
 
-若 `index.md` 重写失败，后端必须记录 durable repair marker 并自动修复；repair 完成前，后续 selector 阶段不得基于旧 index 认定 deleted 文件仍可用。
+若 `index.md` 重写失败，后端必须保留 DB deleted 事实，记录 durable repair marker 并自动修复；repair 完成前，后续 selector 阶段不得基于旧 index 认定 deleted 文件仍可用。删除 API 只有在 deleted 事实已持久化且 repair marker / audit 已写入后，才可返回删除事实成功。
 
 ## 6. 历史 API
 
@@ -120,7 +148,8 @@ conversation_file.file_upload_index_repair_required
 | --- | --- |
 | 上传成功返回后 history 可读 | 同一 conversation history 立即返回 `message_type=file_upload`。 |
 | 上传 DB 失败补偿 | 无 resource、无 message、无残留文件目录。 |
-| index 写失败 fail closed | 不返回上传成功，或标记 repair 后禁止自动选择。 |
+| 上传 index 写失败 fail closed | 当场重试仍失败时不返回上传成功；补偿本次新增 resource / message / 文件目录，并写 repair marker + audit。 |
+| repair marker 生命周期 | 当场重试失败后写 pending marker；后台 / 懒修复成功后标记 resolved；selector repair pending 时不信旧 index。 |
 | 摘要回填 | 更新同一条 message，不改变 `created_at`。 |
 | 删除文件 | resource deleted、file_upload metadata deleted、index 重写、前端显示不可复用。 |
 | 历史 API allowlist | internal system message 不返回。 |

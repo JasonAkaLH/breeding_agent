@@ -34,6 +34,8 @@
 
 ## 3. 数据模型要求
 
+本阶段采用 **扩展现有 `message` 表** 的方案承载文件上传历史，不新增独立 `conversation_file_history` 表。`file_upload` 与普通 chat message 共享 conversation history 排序、分页和恢复路径；专用 repository 方法负责创建 / 更新该类型消息，业务代码不得手写任意 public system message。
+
 ### 3.1 Message 扩展
 
 `Message` 增加字段：
@@ -43,6 +45,13 @@ message_type: str = "chat"
 metadata: dict[str, Any] = {}
 updated_at: datetime | None = None
 ```
+
+Migration 要求：
+
+1. 新列 `message_type` 对旧 row 默认视为 `chat`；数据库层建议使用非空默认值 `chat`，读取层仍需兼容缺列 / 空值。
+2. 新列 `metadata` 对旧 row 默认 `{}`；必须是 JSON object，不接受 list / scalar 作为 public metadata。
+3. 新列 `updated_at` 可为空；普通旧 chat 不要求回填。
+4. `file_upload` message 的 `metadata` 只能由后端 canonical projection 生成，不能从用户提交的 `metadata` merge。
 
 初始类型：
 
