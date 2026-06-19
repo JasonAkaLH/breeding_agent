@@ -89,7 +89,7 @@
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
 | 表格上传编码兼容与表头规范化分步实施 | `docs/prd/backend/table-upload-normalization/README.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt、prompt-safe 摘要上限与 Skill artifact 规范化输入 |
 | 对话文件本地资源文件系统 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件本地持久化、`index.md` 文件索引、Skill workspace manifest / mount_path 与删除清理语义 |
-| 对话文件历史与智能选择 | `docs/prd/backend/21-对话文件历史与智能选择PRD.md` | 合并上传历史消息与聊天式文件选择，统一 file_upload 历史、active resource 事实源、conversation file context、selector 缩窄/消歧、recent usage provenance、deleted 不可复用与 index.md 强一致 |
+| 对话文件历史与智能选择分步实施 | `docs/prd/backend/conversation-file-history-selection/README.md` | 将合并后的 PRD 21 拆成数据模型、上传历史、memory 安全、selector shadow、interrupt 绑定、灰度发布六个可独立验收阶段；父兼容入口保留在 `docs/prd/backend/21-对话文件历史与智能选择PRD.md` |
 | Skill 运行闭环 Workbench 总纲 | `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 平台层 Skill 运行闭环、内部 workbench capability、Skill 执行后验证、受控重编排与安全 digest 总体设计 |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
@@ -209,6 +209,7 @@
 
 ### 5.14 对话文件历史与智能选择决策
 
+- 该专题已拆为 `docs/prd/backend/conversation-file-history-selection/` 下的总纲与阶段 PRD，实施时必须按阶段门禁推进；原 `docs/prd/backend/21-对话文件历史与智能选择PRD.md` 保留为父兼容入口。
 - `ConversationFileResource` 是 active/deleted、权限、分页和 selector candidate 的事实源；`file_upload` message 只作为 conversation history 中的上传事件快照和展示入口。
 - 上传接口成功即写入 `message_type=file_upload` 的结构化历史消息，记录 `filename`、`upload_id`、`description_summary`、`description_status` 与 `file_status`；上传成功定义包含原始文件、DB resource、file_upload message 和最新 `index.md`。
 - `file_upload` 使用 `role=system`，但历史 API、前端和 memory 只能通过 public `message_type` allowlist 暴露该类 system message；不得泛化展示或注入其他 internal system message。
@@ -274,7 +275,8 @@
 - 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
 - 表格上传编码兼容与表头规范化 PRD：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
 - 对话文件本地资源文件系统 PRD：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`。
-- 对话文件历史与智能选择 PRD：`docs/prd/backend/21-对话文件历史与智能选择PRD.md`。
+- 对话文件历史与智能选择兼容入口：`docs/prd/backend/21-对话文件历史与智能选择PRD.md`。
+- 对话文件历史与智能选择分步 PRD：`docs/prd/backend/conversation-file-history-selection/README.md`。
 - Skill 运行闭环 Workbench 总纲 PRD：`docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md`。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`

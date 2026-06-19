@@ -3,6 +3,7 @@
 - **编号**：后端 PRD 21
 - **日期**：2026-06-19
 - **状态**：设计已确认，待实施 / 待与现有 conversation-scoped 文件上下文对齐
+- **阶段拆分入口**：`docs/prd/backend/conversation-file-history-selection/README.md`
 - **合并来源**：原 `21-文件上传历史消息PRD.md` 与原 `22-聊天式会话文件智能选择PRD.md`
 - **目标模块**：`src/core/models.py`、`src/storage/`、`src/api/runtime.py`、`src/api/dto.py`、`src/api/file_selection.py`、`src/api/file_selection_runtime.py`、`src/capabilities/main_agent/`、`src/integrations/agent_skills/`、`frontend/`
 - **关联 PRD**：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`、`docs/prd/backend/skill-contract-progressive-disclosure/README.md`、`docs/prd/backend/table-upload-normalization/README.md`

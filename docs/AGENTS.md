@@ -17,5 +17,5 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `prd/backend/21-对话文件历史与智能选择PRD.md` | 设计已确认，待实施 / 待与现有 conversation-scoped 文件上下文对齐 | 统一实现 `file_upload` 历史消息、active/deleted 文件事实源、conversation file context、selector 缩窄/消歧、recent usage provenance、public system message allowlist、`index.md` 强一致与前端文件卡片。 |
+| `prd/backend/conversation-file-history-selection/README.md`（父入口：`prd/backend/21-对话文件历史与智能选择PRD.md`） | 已拆分阶段 PRD，待按阶段实施 | 按阶段推进数据模型与 repository 基线、上传删除强一致与历史展示、memory 安全、selector shadow、selector interrupt/绑定、灰度发布与回归门禁。 |
 | `prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 总体设计稿，待拆分阶段实施 PRD | 拆分并实施 Workbench 内部 capability、固定 DAG MVP、确定性 runtime replanner 与 contract / policy 驱动策略。 |
