@@ -89,9 +89,8 @@
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
 | 表格上传编码兼容与表头规范化分步实施 | `docs/prd/backend/table-upload-normalization/README.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt、prompt-safe 摘要上限与 Skill artifact 规范化输入 |
 | 对话文件本地资源文件系统 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件本地持久化、`index.md` 文件索引、Skill workspace manifest / mount_path 与删除清理语义 |
-| 文件上传历史消息 | `docs/prd/backend/21-文件上传历史消息PRD.md` | 上传成功即写入结构化 file_upload 历史消息，约束 public system message allowlist、文件派生文本不可信、deleted 文件不可复用与 index.md 强一致 |
-| 聊天式会话文件智能选择 | `docs/prd/backend/22-聊天式会话文件智能选择PRD.md` | 无显式 upload_ids 时，基于用户 query、Skill 文件需求契约、文件元数据和 recent usage 自动绑定会话文件；多候选复用 interrupt 自然语言消歧 |
-| Skill 运行闭环 Workbench 总纲 | `docs/prd/backend/23-Skill运行闭环Workbench总纲PRD.md` | 平台层 Skill 运行闭环、内部 workbench capability、Skill 执行后验证、受控重编排与安全 digest 总体设计 |
+| 对话文件历史与智能选择 | `docs/prd/backend/21-对话文件历史与智能选择PRD.md` | 合并上传历史消息与聊天式文件选择，统一 file_upload 历史、active resource 事实源、conversation file context、selector 缩窄/消歧、recent usage provenance、deleted 不可复用与 index.md 强一致 |
+| Skill 运行闭环 Workbench 总纲 | `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 平台层 Skill 运行闭环、内部 workbench capability、Skill 执行后验证、受控重编排与安全 digest 总体设计 |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
 | 大语言模型提示词信封分步实施 | `docs/prd/backend/prompt-envelope/README.md` | 将 prompt 组装拆成测试基线、核心模型、主代理迁移、记忆候选、工具信息分层、多调用场景档案、消息原生运行时、供应商缓存八个可独立验收阶段 |
@@ -208,24 +207,21 @@
 - 单文件删除必须标记 DB `deleted` 并物理删除对应本地资源目录；conversation 删除必须清理该 conversation 文件目录。
 - 图片文件上传阶段不自动生成描述或 OCR；PDF 后续可接受控文本抽取 / OCR adapter，但失败不得阻塞文件作为 Skill 输入。
 
-### 5.14 文件上传历史消息决策
+### 5.14 对话文件历史与智能选择决策
 
-- 上传接口成功即写入 `message_type=file_upload` 的结构化历史消息，记录 `filename`、`upload_id`、`description_summary`、`description_status` 与 `file_status`。
+- `ConversationFileResource` 是 active/deleted、权限、分页和 selector candidate 的事实源；`file_upload` message 只作为 conversation history 中的上传事件快照和展示入口。
+- 上传接口成功即写入 `message_type=file_upload` 的结构化历史消息，记录 `filename`、`upload_id`、`description_summary`、`description_status` 与 `file_status`；上传成功定义包含原始文件、DB resource、file_upload message 和最新 `index.md`。
 - `file_upload` 使用 `role=system`，但历史 API、前端和 memory 只能通过 public `message_type` allowlist 暴露该类 system message；不得泛化展示或注入其他 internal system message。
 - 文件名、摘要、preview/OCR/PDF 文本全部视为不可信 file-derived data，只能作为历史事实和文件定位线索，不能覆盖系统指令或安全约束。
-- 上传成功定义包含原始文件、DB resource、file_upload message 和最新 `index.md`；任一失败不得对外宣称上传成功。
-- deleted 文件保留为历史事实，但必须在 API、前端卡片和 prompt 中标记不可复用，且不得进入 selector、binding 或 Skill manifest。
+- 当前 conversation active 文件可作为默认文件上下文；task attachment 只记录显式上传、selector 选择、interrupt answer、sheet selection 等本轮实际 provenance，避免把“文件池存在”误记为“本轮已使用”。
+- selector 是 conversation file context 之上的缩窄、消歧、缺文件和 provenance 写入机制；显式 `metadata.upload_ids` 优先，普通问答不强制 selector。
+- 多候选、同名文件、低置信或 required file 缺失时复用现有 interrupt，使用 `file_selection_ambiguous` / `no_files_in_conversation` 等稳定 reason_code，不新增公开 API 或前端点选组件。
+- recent usage 必须来自 task attachment / selector binding / interrupt answer / sheet selection 等实际使用 provenance，不得只根据上传时间推断。
+- deleted 文件保留为历史事实，但必须在 API、前端卡片和 prompt 中标记不可复用，且不得进入 active context、selector、binding 或 Skill manifest。
+- 未来 Skill 文件需求必须由 contract/schema 的 `file_intent` / `file_selection` 或 `type: file/artifact/data` 等机器可读字段驱动，平台不得硬编码当前 Skill 名称；实施时必须同步更新 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`。
 - 第一阶段不 backfill 旧文件，避免伪造历史上传时序；旧 active resources 仍可通过文件池和 selector 使用。
 
-### 5.15 聊天式会话文件智能选择决策
-
-- 文件选择器不做 RAG、不引入向量检索、不读取文件正文；只把当前 conversation active 文件的 prompt-safe 元数据、用户 query、上下文和 Skill 文件需求画像发送给 LLM。
-- 显式 `metadata.upload_ids` 仍优先；无显式 upload_ids 且触发文件需求时，selector 输出 `select_one` / `select_many` / `ambiguous` / `no_file_needed` / `no_usable_file` 结构化决策。
-- 多候选或低置信时复用现有 interrupt，使用 `file_selection_ambiguous` reason_code 和自然语言候选列表，不新增公开 API 或前端点选组件。
-- 候选与澄清必须包含文件名、`description_summary`、`upload_id`、上传时间；有 recent usage 时应展示最近使用情况。
-- 未来 Skill 文件需求必须由 contract/schema 的 `file_intent` / `file_selection` 或 `type: file/artifact/data` 等机器可读字段驱动，平台不得硬编码当前 Skill 名称；实施时必须同步更新 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`。
-
-### 5.16 Rust 化 Runtime 决策
+### 5.15 Rust 化 Runtime 决策
 
 - 主体框架 Rust 化不应为任何具体业务 Skill 重新引入 native capability、专属 route、专属 executor 或前端协议。
 - `ApiRuntime` 不作为整体迁移对象；应把 task dispatcher、event log、bundle revision pinning、cancellation token、storage lease 等 runtime substrate 抽成 Rust sidecar / kernel。
@@ -278,9 +274,8 @@
 - 失败自检、恢复与 Fallback 控制层 PRD：`docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md`。
 - 表格上传编码兼容与表头规范化 PRD：`docs/prd/backend/19-表格上传编码兼容与表头规范化PRD.md`。
 - 对话文件本地资源文件系统 PRD：`docs/prd/backend/20-对话文件本地资源文件系统PRD.md`。
-- 文件上传历史消息 PRD：`docs/prd/backend/21-文件上传历史消息PRD.md`。
-- 聊天式会话文件智能选择 PRD：`docs/prd/backend/22-聊天式会话文件智能选择PRD.md`。
-- Skill 运行闭环 Workbench 总纲 PRD：`docs/prd/backend/23-Skill运行闭环Workbench总纲PRD.md`。
+- 对话文件历史与智能选择 PRD：`docs/prd/backend/21-对话文件历史与智能选择PRD.md`。
+- Skill 运行闭环 Workbench 总纲 PRD：`docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md`。
 - 失败自检、恢复与 Fallback 控制层分步 PRD：`docs/prd/backend/failure-recovery/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`
 - MCP Runtime 联合改造 Phase PRD：`docs/prd/MCP/README.md`

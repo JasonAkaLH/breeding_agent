@@ -512,6 +512,6 @@ workbench:
 
 - `22-01-Workbench内部Capability与固定DAG插入PRD.md`
 - `22-02-WorkbenchRuntimeReplanner与预算闭环PRD.md`
-- `21-03-SkillContract质量工作台策略与健康诊断PRD.md`
+- `22-03-SkillContract质量工作台策略与健康诊断PRD.md`
 
 拆分前，本文件作为总体方向、跨阶段不变量和验收矩阵的事实源；阶段 PRD 不得放宽本总纲的 public/internal、安全、answer mode、预算和脱敏边界。
