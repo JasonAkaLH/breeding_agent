@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import textwrap
+from datetime import datetime, timedelta
 from io import BytesIO
 
 from openpyxl import Workbook
 
-from src.api.file_selection import FileRequirementProfile, candidate_from_resource
+from src.api.file_selection import FileRequirementProfile, build_recent_usage, candidate_from_resource, deterministic_file_decision
+from src.core.models import TaskInputAttachment
 
 from tests.api.support import APITestCase
 
@@ -281,6 +283,80 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertNotIn("content_base64", prompt)
         self.assertNotIn("storage_key", prompt)
         self.assertNotIn("mount_path", prompt)
+
+    async def test_selector_candidates_exclude_deleted_resources(self) -> None:
+        conversation_id = "conv-file-selector-deleted"
+        active_id = await self._upload_csv(conversation_id, "active.csv")
+        deleted_id = await self._upload_csv(conversation_id, "deleted.csv")
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": conversation_id, "upload_id": deleted_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+
+        resources = await self.runtime.storage.list_conversation_file_resources(
+            conversation_id,
+            "acc-1",
+            include_deleted=False,
+        )
+        candidates = tuple(candidate_from_resource(resource) for resource in resources)
+
+        self.assertEqual([candidate.upload_id for candidate in candidates], [active_id])
+        decision = deterministic_file_decision(
+            text=f"请继续使用 {deleted_id} 这个文件。",
+            profile=FileRequirementProfile(),
+            candidates=candidates,
+        )
+        self.assertEqual(decision.decision, "ambiguous")
+        self.assertEqual(decision.reason_code, "unknown_upload_id")
+
+    async def test_recent_usage_ignores_file_upload_history_without_task_attachment(self) -> None:
+        conversation_id = "conv-file-recent-history"
+        first_id = await self._upload_csv(conversation_id, "first.csv")
+        second_id = await self._upload_csv(conversation_id, "second.csv")
+        resources = await self.runtime.storage.list_conversation_file_resources(
+            conversation_id,
+            "acc-1",
+            include_deleted=False,
+        )
+        candidates = tuple(candidate_from_resource(resource, recent_usage=build_recent_usage(()).get(resource.file_id)) for resource in resources)
+
+        self.assertEqual({candidate.upload_id for candidate in candidates}, {first_id, second_id})
+        self.assertTrue(all(candidate.recent_usage is None for candidate in candidates))
+        no_provenance = deterministic_file_decision(
+            text="继续用刚才的文件。",
+            profile=FileRequirementProfile(),
+            candidates=candidates,
+        )
+        self.assertEqual(no_provenance.decision, "ambiguous")
+        self.assertEqual(no_provenance.reason_code, "multiple_candidates")
+
+        used_at = datetime(2026, 6, 19, 12, 0, 0)
+        recent_usage = build_recent_usage(
+            (
+                TaskInputAttachment(
+                    attachment_id="att-recent",
+                    task_id="task-recent",
+                    conversation_id=conversation_id,
+                    source_kind="file_selector",
+                    source_upload_id=second_id,
+                    filename="second.csv",
+                    created_at=used_at - timedelta(minutes=1),
+                    updated_at=used_at,
+                ),
+            )
+        )
+        candidates_with_usage = tuple(candidate_from_resource(resource, recent_usage=recent_usage.get(resource.file_id)) for resource in resources)
+        with_provenance = deterministic_file_decision(
+            text="继续用刚才的文件。",
+            profile=FileRequirementProfile(),
+            candidates=candidates_with_usage,
+        )
+
+        self.assertEqual(with_provenance.decision, "select_one")
+        self.assertEqual(with_provenance.upload_ids, (second_id,))
+        self.assertEqual(with_provenance.reason_code, "recent_usage")
 
     async def test_required_file_skill_metadata_opens_selector_without_uploads(self) -> None:
         capability_id = self._write_file_required_skill()

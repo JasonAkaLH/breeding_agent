@@ -395,6 +395,113 @@ entrypoints: {run: {path: scripts/fail.py}}
         event_payloads = json.dumps([event.payload for event in events], ensure_ascii=False, default=str)
         self.assertNotIn("ped_id,hyb_check,set", event_payloads)
 
+    async def test_explicit_upload_ids_bind_task_attachment_and_preserve_source_kind(self) -> None:
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-explicit-upload"},
+            files={"file": ("materials.csv", "ped_id,hyb_check,set\nCK,CK,A\nA001,Test,A\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+
+        response = await self.submit_message(
+            conversation_id="conv-explicit-upload",
+            content="请使用这个材料文件做设计",
+            capability_id="main_agent.respond",
+            metadata={"upload_ids": [upload_id]},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        attachment = attachments[0]
+        self.assertEqual(attachment.source_kind, "message_upload")
+        self.assertEqual(attachment.source_upload_id, upload_id)
+        self.assertEqual(attachment.source_message_id, response.json()["message_id"])
+        self.assertNotIn("content", attachment.prompt_artifact)
+        self.assertNotIn("content_base64", attachment.prompt_artifact)
+        self.assertNotIn("storage_key", attachment.prompt_artifact)
+        self.assertIn("content", attachment.skill_artifact)
+
+    async def test_missing_upload_id_in_message_metadata_fails_before_message_or_task(self) -> None:
+        response = await self.submit_message(
+            conversation_id="conv-missing-upload-id",
+            content="请使用缺失文件",
+            capability_id="main_agent.respond",
+            metadata={"upload_ids": ["upl-missing"]},
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIsNone(await self.runtime.storage.get_conversation("conv-missing-upload-id"))
+        self.assertEqual(await self.runtime.storage.list_messages_for_conversation("conv-missing-upload-id"), [])
+        self.assertEqual(await self.runtime.storage.list_tasks_for_conversation("conv-missing-upload-id"), [])
+        self.assertEqual(
+            await self.runtime.storage.list_task_input_attachments_for_conversation("conv-missing-upload-id"),
+            [],
+        )
+
+    async def test_deleted_upload_id_in_message_metadata_fails_before_message_or_task(self) -> None:
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-deleted-upload-id"},
+            files={"file": ("materials.csv", "ped_id,hyb_check,set\nCK,CK,A\nA001,Test,A\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": "conv-deleted-upload-id", "upload_id": upload_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        before = await self.runtime.storage.get_conversation("conv-deleted-upload-id")
+        before_message_ids = [
+            message.message_id
+            for message in await self.runtime.storage.list_messages_for_conversation("conv-deleted-upload-id")
+        ]
+
+        response = await self.submit_message(
+            conversation_id="conv-deleted-upload-id",
+            content="继续使用刚才删除的文件",
+            capability_id="main_agent.respond",
+            metadata={"upload_ids": [upload_id]},
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        after = await self.runtime.storage.get_conversation("conv-deleted-upload-id")
+        self.assertEqual(after.current_task_id, before.current_task_id)
+        self.assertEqual(await self.runtime.storage.list_tasks_for_conversation("conv-deleted-upload-id"), [])
+        self.assertEqual(
+            [message.message_id for message in await self.runtime.storage.list_messages_for_conversation("conv-deleted-upload-id")],
+            before_message_ids,
+        )
+        self.assertEqual(
+            await self.runtime.storage.list_task_input_attachments_for_conversation("conv-deleted-upload-id"),
+            [],
+        )
+
+    async def test_cross_conversation_upload_id_fails_before_message_or_task(self) -> None:
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-upload-owner"},
+            files={"file": ("materials.csv", "ped_id,hyb_check,set\nCK,CK,A\nA001,Test,A\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+
+        response = await self.submit_message(
+            conversation_id="conv-upload-other",
+            content="请使用另一个会话的文件",
+            capability_id="main_agent.respond",
+            metadata={"upload_ids": [upload_id]},
+        )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertIsNone(await self.runtime.storage.get_conversation("conv-upload-other"))
+        self.assertEqual(await self.runtime.storage.list_messages_for_conversation("conv-upload-other"), [])
+        self.assertEqual(await self.runtime.storage.list_tasks_for_conversation("conv-upload-other"), [])
+
     async def test_conversation_upload_resolves_artifact_slot_without_task_upload_ids(self) -> None:
         upload = await self.client.post(
             "/api/v1/conversations/uploads",

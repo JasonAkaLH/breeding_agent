@@ -133,6 +133,48 @@ class SkillArtifactContextTest(unittest.TestCase):
         self.assertNotIn("storage_key", safe_metadata["uploaded_artifacts"][0])
         self.assertNotIn("storage_key", safe_metadata["skill_artifacts"][0])
 
+    def test_deleted_artifact_items_are_not_promoted_to_skill_context(self) -> None:
+        metadata = {
+            "uploaded_artifacts": [
+                {
+                    "upload_id": "upl-deleted",
+                    "filename": "old.csv",
+                    "file_status": "deleted",
+                    "preview": {"row_count": 1},
+                },
+                {
+                    "upload_id": "upl-active",
+                    "filename": "active.csv",
+                    "file_status": "active",
+                    "preview": {"row_count": 1},
+                },
+            ],
+            "skill_artifacts": [
+                {
+                    "upload_id": "upl-deleted",
+                    "filename": "old.csv",
+                    "file_status": "deleted",
+                    "storage_key": "conv/upl-deleted/original",
+                    "content": "raw old",
+                },
+                {
+                    "upload_id": "upl-active",
+                    "filename": "active.csv",
+                    "storage_key": "conv/upl-active/original",
+                    "content": "raw active",
+                },
+            ],
+        }
+
+        safe_context = build_skill_artifact_context(metadata)
+        script_context = build_skill_script_artifact_context(metadata)
+        safe_metadata = build_skill_safe_metadata(metadata)
+
+        serialized = str((safe_context, script_context, safe_metadata))
+        self.assertIn("upl-active", serialized)
+        self.assertNotIn("upl-deleted", serialized)
+        self.assertNotIn("old.csv", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

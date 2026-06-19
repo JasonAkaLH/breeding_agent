@@ -662,7 +662,7 @@ def _resolve_v2_structured_schema_fields(schema: SkillInputSchema, payload: Mapp
     artifacts = resolved.get("uploaded_artifacts")
     artifact_count = len(artifacts) if isinstance(artifacts, list | tuple) else len(context.artifact_summaries)
     safe_metadata = resolved.get("metadata") if isinstance(resolved.get("metadata"), Mapping) else {}
-    for name, field in schema.inputs.items():
+    for name, input_field in schema.inputs.items():
         if name in resolved and resolved[name] not in (None, ""):
             sources[name] = SkillInputSource(source="payload", confidence="high")
             continue
@@ -670,11 +670,11 @@ def _resolve_v2_structured_schema_fields(schema: SkillInputSchema, payload: Mapp
             resolved[name] = safe_metadata[name]
             sources[name] = SkillInputSource(source="metadata", confidence="high")
             continue
-        if field.const is not None:
-            resolved[name] = field.const
+        if input_field.const is not None:
+            resolved[name] = input_field.const
             sources[name] = SkillInputSource(source="schema_const", confidence="high")
             continue
-        if field.type in {"artifact", "file", "data"}:
+        if input_field.type in {"artifact", "file", "data"}:
             if artifact_count > 0:
                 artifact_value: dict[str, Any] = {"available": True, "count": artifact_count}
                 source_artifacts = artifacts if isinstance(artifacts, list | tuple) else context.artifact_summaries
@@ -796,15 +796,15 @@ def _resolve_v2_text_schema_fields(
         ("resolved_user_message", context.resolved_user_message),
         *(("recent_user_message", item) for item in context.recent_user_messages),
     )
-    for name, field in schema.inputs.items():
+    for name, input_field in schema.inputs.items():
         if name in payload:
             continue
-        if field.type in {"artifact", "file", "data"}:
+        if input_field.type in {"artifact", "file", "data"}:
             continue
         for source_name, text in text_sources:
             if not text:
                 continue
-            value = _match_v2_field(field, text)
+            value = _match_v2_field(input_field, text)
             if value is not None:
                 payload[name] = value
                 sources[name] = SkillInputSource(source=source_name, confidence="high")
@@ -1087,6 +1087,8 @@ def _sanitize_artifact_items(raw_items: Any, *, allowed_keys: frozenset[str]) ->
     for item in raw_items:
         if not isinstance(item, Mapping):
             continue
+        if _artifact_item_marked_deleted(item):
+            continue
         safe = {
             str(key): value
             for key, value in item.items()
@@ -1095,6 +1097,11 @@ def _sanitize_artifact_items(raw_items: Any, *, allowed_keys: frozenset[str]) ->
         if safe:
             sanitized.append(safe)
     return tuple(sanitized)
+
+
+def _artifact_item_marked_deleted(item: Mapping[str, Any]) -> bool:
+    status = str(item.get("file_status") or item.get("status") or "").strip().lower()
+    return status == "deleted"
 
 
 def build_skill_safe_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:

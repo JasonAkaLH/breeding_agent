@@ -118,6 +118,7 @@ _FILE_REFERENCE_RE = re.compile(
 _NO_FILE_RE = re.compile(r"(不用|不需要|不要).{0,6}(文件|数据|表|上传)")
 _ROW_COUNT_RE = re.compile(r"(\d+)\s*(?:行|rows?)", re.IGNORECASE)
 _ORDINAL_RE = re.compile(r"第\s*([一二三四五六七八九十\d]+)\s*(?:个|份|张|个文件|份文件)?")
+_UPLOAD_ID_RE = re.compile(r"\bupl-[0-9a-f]{12}\b", re.IGNORECASE)
 _SECRET_KEY_RE = re.compile(r"(secret|token|password|storage_key|mount_path|content_base64|content|path)", re.IGNORECASE)
 
 
@@ -268,6 +269,8 @@ def deterministic_file_decision(
     exact = [candidate for candidate in candidates if candidate.upload_id.lower() in text_l]
     if len(exact) == 1:
         return FileSelectionDecision("select_one", (exact[0].upload_id,), 0.99, "explicit_upload_id")
+    if _unknown_upload_id_references(text_l, candidates):
+        return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
     name_hits = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
     if len(name_hits) == 1:
         return FileSelectionDecision("select_one", (name_hits[0].upload_id,), 0.9, "filename_match")
@@ -324,6 +327,8 @@ class FileSelectionAnswerResolver:
         by_id = [candidate for candidate in candidates if candidate.upload_id.lower() in text_l]
         if len(by_id) == 1:
             return FileSelectionDecision("select_one", (by_id[0].upload_id,), 1.0, "explicit_upload_id")
+        if _unknown_upload_id_references(text_l, candidates):
+            return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
         by_name = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
         if len(by_name) == 1:
             return FileSelectionDecision("select_one", (by_name[0].upload_id,), 0.95, "filename_match")
@@ -373,6 +378,14 @@ def _candidate_filename_aliases(candidate: ConversationFileCandidate) -> tuple[s
         if alias and alias not in aliases:
             aliases.append(alias)
     return tuple(aliases)
+
+
+def _unknown_upload_id_references(text_l: str, candidates: Sequence[ConversationFileCandidate]) -> bool:
+    referenced = {match.group(0).lower() for match in _UPLOAD_ID_RE.finditer(text_l or "")}
+    if not referenced:
+        return False
+    candidate_ids = {candidate.upload_id.lower() for candidate in candidates}
+    return any(upload_id not in candidate_ids for upload_id in referenced)
 
 
 def _sanitize_preview(value: Mapping[str, Any]) -> dict[str, Any]:

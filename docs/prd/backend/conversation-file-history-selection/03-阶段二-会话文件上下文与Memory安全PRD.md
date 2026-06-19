@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21-Phase 2
 - **日期**：2026-06-19
-- **状态**：待实施
+- **状态**：已实施
 - **前置阶段**：阶段一上传删除强一致与历史展示
 - **目标模块**：`src/api/runtime.py`、conversation file context resolver、conversation memory builder、Skill runtime manifest projection、task attachment repository
 
@@ -138,3 +138,11 @@ python -m pytest tests/api/test_uploads.py -k "conversation or deleted or metada
 - memory 可引用 file_upload 历史，但不把历史消息提升为系统指令或可用性事实源。
 - deleted 文件跨 API、prompt、context、manifest 均不可复用。
 - 后续 selector 阶段可安全复用 active context 与 attachment 聚合。
+
+
+## 10. 实施记录
+
+- **实施日期**：2026-06-19
+- **提交范围**：conversation memory `file_upload_history` 安全投影、deleted history 不可复用约束、默认 active context / task attachment provenance 分离、显式 `metadata.upload_ids` fail-closed、task-bound deleted-before-execution fail-closed、默认 active context deleted/stale artifact scrub、selector active-candidate 与 recent-usage provenance 边界测试。
+- **关键验证**：`tests/api/test_pending_skill_context.py`、`tests/api/test_uploads.py`、`tests/api/test_conversation_file_selection.py`、`tests/orchestration/test_conversation_memory.py`、`tests/integrations/agent_skills/test_artifact_context.py`、`tests/capabilities/main_agent/test_conversation_memory_prompt.py`、`tests/api/test_conversation_messages_artifacts.py`、`tests/api/test_route_contract.py`、`tests/storage/test_conversation_file_resources.py`。
+- **已知非阻断**：仓库宽 `tests/api` 当前仍有 main-agent orchestration 旧式 Skill fixture / shared planner thinking 期望相关失败；本阶段相关文件上下文、memory、upload、selector、route 与 storage 周边验证已通过。

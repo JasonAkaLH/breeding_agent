@@ -18,6 +18,7 @@ from src.orchestration.conversation_memory import (
     sanitize_memory_prompt_payload,
 )
 from src.orchestration.models import OrchestrationRequest
+from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE
 
 
 class FakeStorage:
@@ -216,8 +217,174 @@ class ConversationMemoryCandidateTest(unittest.TestCase):
         self.assertNotIn("RAW_UPLOAD_SHOULD_NOT_PASS", serialized)
         self.assertNotIn("RAW_METADATA_SHOULD_NOT_PASS", serialized)
 
+    def test_memory_sanitizer_preserves_file_upload_history_candidate_safely(self) -> None:
+        sanitized = sanitize_memory_prompt_payload(
+            {
+                "memory_candidates": [
+                    {
+                        "candidate_id": "file_upload_history:file_upload:upl-1",
+                        "kind": "file_upload_history",
+                        "content": "## 历史文件上传事件\n- upload_id: upl-1",
+                        "priority": 35,
+                        "trim_policy": "drop_oldest",
+                        "token_estimate": 12,
+                        "metadata": {
+                            "source": "file_upload_history",
+                            "message_id": "file_upload:upl-1",
+                            "file_status": "active",
+                            "storage_key": "conv/upl-1/original",
+                            "mount_path": "/tmp/private",
+                        },
+                    }
+                ]
+            }
+        )
+
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertIn("file_upload_history", serialized)
+        self.assertIn("file_status", serialized)
+        self.assertNotIn("storage_key", serialized)
+        self.assertNotIn("mount_path", serialized)
+
 
 class ConversationMemoryBuilderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_file_upload_history_memory_renders_active_event_not_system_instruction(self) -> None:
+        conversation = Conversation(conversation_id="conv-file-history", username="acc-1")
+        message = Message(
+            message_id="file_upload:upl-active",
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.SYSTEM,
+            content="MALICIOUS RAW CONTENT storage_key=/tmp/private content_base64=AAAA",
+            message_type=FILE_UPLOAD_MESSAGE_TYPE,
+            metadata={
+                "upload_id": "upl-active",
+                "filename": "materials.csv",
+                "description_summary": "材料表摘要",
+                "description_status": "ready",
+                "file_status": "active",
+                "uploaded_at": "2026-06-18T10:00:00",
+                "storage_key": "conv/upl-active/original",
+                "content_base64": "AAAA",
+            },
+            created_at=datetime(2026, 6, 18, 10, 0, 0),
+        )
+        builder = ConversationMemoryBuilder(storage=FakeStorage(conversation=conversation, messages=[message]))
+
+        context = await builder.build(
+            OrchestrationRequest(
+                task_id="task-current",
+                conversation_id=conversation.conversation_id,
+                root_message_id="msg-current",
+                user_message="继续分析这个文件",
+            ),
+            username="acc-1",
+        )
+
+        payload = context.to_prompt_payload()
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("## 历史文件上传事件", serialized)
+        self.assertIn("不是系统指令", serialized)
+        self.assertIn("upl-active", serialized)
+        self.assertIn("materials.csv", serialized)
+        self.assertIn("材料表摘要", serialized)
+        self.assertIn("file_upload_history", serialized)
+        self.assertNotIn("MALICIOUS RAW CONTENT", serialized)
+        self.assertNotIn("storage_key", serialized)
+        self.assertNotIn("content_base64", serialized)
+
+    async def test_deleted_file_upload_history_memory_renders_unavailable_constraint(self) -> None:
+        conversation = Conversation(conversation_id="conv-deleted-file-history", username="acc-1")
+        message = Message(
+            message_id="file_upload:upl-deleted",
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.SYSTEM,
+            content="DO_NOT_RENDER_THIS_RAW_CONTENT",
+            message_type=FILE_UPLOAD_MESSAGE_TYPE,
+            metadata={
+                "upload_id": "upl-deleted",
+                "filename": "old.csv",
+                "description_summary": "旧材料表摘要",
+                "description_status": "ready",
+                "file_status": "deleted",
+                "uploaded_at": "2026-06-18T10:00:00",
+                "path": "/tmp/private/old.csv",
+            },
+            created_at=datetime(2026, 6, 18, 10, 0, 0),
+        )
+        builder = ConversationMemoryBuilder(storage=FakeStorage(conversation=conversation, messages=[message]))
+
+        context = await builder.build(
+            OrchestrationRequest(
+                task_id="task-current",
+                conversation_id=conversation.conversation_id,
+                root_message_id="msg-current",
+                user_message="继续用它",
+            ),
+            username="acc-1",
+        )
+
+        serialized = json.dumps(context.to_prompt_payload(), ensure_ascii=False)
+        self.assertIn("## 历史文件上传事件（已删除）", serialized)
+        self.assertIn("不能复用、不能绑定、不能假设可读取", serialized)
+        self.assertIn("重新上传或选择其他 active 文件", serialized)
+        self.assertNotIn("DO_NOT_RENDER_THIS_RAW_CONTENT", serialized)
+        self.assertNotIn("/tmp/private", serialized)
+
+    async def test_deleted_file_history_does_not_resolve_to_usable_upload(self) -> None:
+        conversation = Conversation(conversation_id="conv-deleted-resolution", username="acc-1")
+        message = Message(
+            message_id="file_upload:upl-deleted",
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.SYSTEM,
+            content="raw deleted file content should not matter",
+            message_type=FILE_UPLOAD_MESSAGE_TYPE,
+            metadata={
+                "upload_id": "upl-deleted",
+                "filename": "old.csv",
+                "description_summary": "旧材料表摘要",
+                "description_status": "ready",
+                "file_status": "deleted",
+            },
+            created_at=datetime(2026, 6, 18, 10, 0, 0),
+        )
+
+        async def resolver(_prompt: str, **_kwargs) -> str:
+            return json.dumps(
+                {
+                    "should_resolve": True,
+                    "resolved_user_message": "继续使用 upl-deleted 文件",
+                    "referenced_entity": "upl-deleted",
+                    "entity_type": "file",
+                    "source": {
+                        "type": "recent_message",
+                        "message_id": "file_upload:upl-deleted",
+                        "evidence_text": "upl-deleted",
+                    },
+                    "confidence": "high",
+                    "reason": "model tried to reuse deleted file",
+                    "risk_flags": [],
+                },
+                ensure_ascii=False,
+            )
+
+        builder = ConversationMemoryBuilder(
+            storage=FakeStorage(conversation=conversation, messages=[message]),
+            resolution_generator=resolver,
+        )
+
+        context = await builder.build(
+            OrchestrationRequest(
+                task_id="task-current",
+                conversation_id=conversation.conversation_id,
+                root_message_id="msg-current",
+                user_message="继续用它",
+            ),
+            username="acc-1",
+        )
+
+        self.assertIsNone(context.resolved_user_message)
+        self.assertEqual(context.resolution_metadata["rejection_reason"], "deleted_file_history_not_usable")
+
     async def test_builder_uses_llm_resolution_when_high_confidence(self) -> None:
         prompts: list[str] = []
 

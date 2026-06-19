@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21 分步总纲
 - **日期**：2026-06-19
-- **状态**：阶段零、阶段一已实施；阶段二至阶段五待实施
+- **状态**：阶段零、阶段一、阶段二已实施；阶段三至阶段五待实施
 - **父兼容入口**：`docs/prd/backend/21-对话文件历史与智能选择PRD.md`
 - **目标模块**：`src/core/models.py`、`src/storage/`、`src/api/runtime.py`、`src/api/dto.py`、`src/api/file_selection.py`、`src/api/file_selection_runtime.py`、`src/capabilities/main_agent/`、`src/integrations/agent_skills/`、`frontend/`
 

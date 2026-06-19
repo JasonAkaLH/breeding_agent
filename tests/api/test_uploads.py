@@ -13,6 +13,7 @@ from openpyxl import Workbook
 from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, file_upload_message_id
 from src.api.routes.uploads import _read_upload_content_with_limit
 from src.api.upload_store import DEFAULT_MAX_UPLOAD_FILE_BYTES, InMemoryUploadStore, UploadValidationError
+from src.orchestration.models import OrchestrationRequest
 from tests.api.support import APITestCase
 
 
@@ -332,6 +333,119 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(message.metadata["file_status"], "deleted")
         index_text = (self.runtime.conversation_file_store.conversation_dir("conv-delete-history") / "index.md").read_text()
         self.assertIn("文件本体已物理删除", index_text)
+
+    async def test_deleted_resource_not_in_conversation_upload_context(self) -> None:
+        active = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-deleted-context"},
+            files={"file": ("active.csv", "ped_id,value\nA001,1\n", "text/csv")},
+        )
+        deleted_upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-deleted-context"},
+            files={"file": ("deleted.csv", "ped_id,value\nB001,2\n", "text/csv")},
+        )
+        self.assertEqual(active.status_code, 201, active.text)
+        self.assertEqual(deleted_upload.status_code, 201, deleted_upload.text)
+        active_id = active.json()["upload_id"]
+        deleted_id = deleted_upload.json()["upload_id"]
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": "conv-deleted-context", "upload_id": deleted_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+
+        context = await self.runtime.resolve_conversation_uploads_for_message("conv-deleted-context", "acc-1")
+
+        serialized = json.dumps(context, ensure_ascii=False, default=str)
+        self.assertIn(active_id, serialized)
+        self.assertNotIn(deleted_id, serialized)
+        self.assertNotIn("deleted.csv", serialized)
+
+    async def test_default_context_after_delete_scrubs_stale_upload_metadata(self) -> None:
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-stale-metadata"},
+            files={"file": ("stale.csv", "ped_id,value\nA001,1\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+        context = await self.runtime.resolve_conversation_uploads_for_message("conv-stale-metadata", "acc-1")
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": "conv-stale-metadata", "upload_id": upload_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+
+        request = OrchestrationRequest(
+            task_id="task-stale",
+            conversation_id="conv-stale-metadata",
+            root_message_id="msg-stale",
+            user_message="use stale file",
+            metadata={
+                "uploaded_artifacts": context["uploaded_artifacts"],
+                "skill_artifacts": context["skill_artifacts"],
+            },
+        )
+        scrubbed = await self.runtime._scrub_deleted_file_context_for_execution(request)
+
+        serialized = json.dumps(scrubbed.metadata, ensure_ascii=False, default=str)
+        self.assertNotIn(upload_id, serialized)
+        self.assertNotIn("stale.csv", serialized)
+        self.assertNotIn("storage_key", serialized)
+
+    async def test_task_bound_upload_deleted_before_execution_fails_closed(self) -> None:
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-bound-delete-before-execution"},
+            files={"file": ("bound.csv", "ped_id,value\nA001,1\n", "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        upload_id = upload.json()["upload_id"]
+        scheduled: list[OrchestrationRequest] = []
+        main_agent_called = False
+
+        async def capture_execution(request: OrchestrationRequest) -> None:
+            scheduled.append(request)
+
+        def fail_if_called(_prompt: str, **_kwargs):
+            nonlocal main_agent_called
+            main_agent_called = True
+            return "should not run"
+
+        await self.reconfigure_runtime(main_agent_stream_generator=fail_if_called)
+        self.runtime._schedule_execution = capture_execution
+        response = await self.submit_message(
+            conversation_id="conv-bound-delete-before-execution",
+            capability_id=None,
+            content="请使用显式绑定的文件。",
+            metadata={"upload_ids": [upload_id]},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(len(scheduled), 1)
+        task_id = response.json()["task_id"]
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual([attachment.source_upload_id for attachment in attachments], [upload_id])
+
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": "conv-bound-delete-before-execution", "upload_id": upload_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+
+        await self.runtime._run_execution(scheduled[0], active_task_count=0)
+
+        task = await self.runtime.storage.get_task(task_id)
+        self.assertEqual(str(task.status), "failed")
+        self.assertFalse(main_agent_called)
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        failed = next(event for event in events if event.event_type == "task.failed")
+        self.assertEqual(failed.payload["code"], "execution_crash")
+        self.assertIn(upload_id, failed.payload["message"])
+        self.assertIn("re-upload", failed.payload["message"])
 
     async def test_delete_index_failure_keeps_deleted_fact_and_records_repair_marker(self) -> None:
         upload = await self.client.post(

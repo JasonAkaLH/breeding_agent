@@ -1671,6 +1671,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
     async def _run_execution(self, request: OrchestrationRequest, *, active_task_count: int) -> None:
         try:
+            request = await self._scrub_deleted_file_context_for_execution(request)
             request = await self._attach_conversation_memory(request)
             plan_result = self.workflow_provider.build_plan(request)
             plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
@@ -1705,6 +1706,94 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 self._locally_cancelled_task_ids.discard(request.task_id)
                 async with self._lock:
                     self._running_tasks.pop(request.task_id, None)
+
+    async def _scrub_deleted_file_context_for_execution(self, request: OrchestrationRequest) -> OrchestrationRequest:
+        await self._fail_if_effective_uploads_inactive_for_execution(request)
+        metadata = dict(request.metadata)
+        changed = False
+        for key in ("uploaded_artifacts", "skill_artifacts", "artifacts"):
+            if key not in metadata:
+                continue
+            filtered, key_changed = await self._filter_active_upload_artifact_items(
+                request.conversation_id,
+                metadata.get(key),
+            )
+            changed = changed or key_changed
+            if filtered:
+                metadata[key] = filtered
+            else:
+                metadata.pop(key, None)
+        if not changed:
+            return request
+        return replace(request, metadata=metadata)
+
+    async def _filter_active_upload_artifact_items(
+        self,
+        conversation_id: str,
+        raw_items: object,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if not isinstance(raw_items, list | tuple):
+            return [], bool(raw_items)
+        conversation = await self.storage.get_conversation(conversation_id)
+        username = conversation.username if conversation is not None else None
+        filtered: list[dict[str, Any]] = []
+        changed = False
+        for raw in raw_items:
+            if not isinstance(raw, Mapping):
+                changed = True
+                continue
+            item = dict(raw)
+            upload_id = str(item.get("upload_id") or item.get("file_id") or "").strip()
+            if self._artifact_item_marked_deleted(item):
+                changed = True
+                continue
+            if upload_id:
+                if username is None:
+                    changed = True
+                    continue
+                resource = await self.storage.get_conversation_file_resource(conversation_id, username, upload_id)
+                if resource is None or resource.status == "deleted":
+                    changed = True
+                    continue
+            filtered.append(item)
+        return filtered, changed or len(filtered) != len(raw_items)
+
+    async def _fail_if_effective_uploads_inactive_for_execution(self, request: OrchestrationRequest) -> None:
+        upload_ids = set(self._normalize_upload_ids(request.metadata.get("upload_ids") or ()))
+        inactive_upload_ids: set[str] = set()
+        for attachment in await self.storage.list_task_input_attachments_for_task(request.task_id):
+            upload_id = str(attachment.source_upload_id or "").strip()
+            if not upload_id:
+                continue
+            upload_ids.add(upload_id)
+            if (
+                isinstance(attachment.prompt_artifact, Mapping)
+                and self._artifact_item_marked_deleted(attachment.prompt_artifact)
+            ) or (
+                isinstance(attachment.skill_artifact, Mapping)
+                and self._artifact_item_marked_deleted(attachment.skill_artifact)
+            ):
+                inactive_upload_ids.add(upload_id)
+        if not upload_ids:
+            return
+        conversation = await self.storage.get_conversation(request.conversation_id)
+        if conversation is None:
+            inactive_upload_ids.update(upload_ids)
+        else:
+            for upload_id in upload_ids:
+                resource = await self.storage.get_conversation_file_resource(
+                    request.conversation_id,
+                    conversation.username,
+                    upload_id,
+                )
+                if resource is None or resource.status == "deleted":
+                    inactive_upload_ids.add(upload_id)
+        if inactive_upload_ids:
+            missing = ", ".join(sorted(inactive_upload_ids))
+            raise UploadValidationError(
+                f"Task-bound uploads are no longer available for execution: {missing}. "
+                "Please re-upload the file or select another active file."
+            )
 
     async def _restore_cancelled_task_if_requested(self, task_id: str, conversation_id: str) -> Task | None:
         task = await self.storage.get_task(task_id)
@@ -5351,6 +5440,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             if attachment.source_upload_id
         }
         task = await self.storage.get_task(task_id)
+        conversation = None
         if task is not None:
             conversation = await self.storage.get_conversation(task.conversation_id)
             if conversation is not None:
@@ -5389,7 +5479,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 if summaries:
                     return summaries
         for attachment in attachments:
+            if not await self._task_input_attachment_upload_is_active(attachment, task=task, conversation=conversation):
+                continue
             prompt_artifact = attachment.prompt_artifact if isinstance(attachment.prompt_artifact, Mapping) else {}
+            if self._artifact_item_marked_deleted(prompt_artifact):
+                continue
             preview = prompt_artifact.get("preview") if isinstance(prompt_artifact.get("preview"), Mapping) else {}
             summaries.append(
                 {
@@ -5629,10 +5723,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             selected_sheet = sheet_selections.get(upload_id)
             existing_attachment = existing.get(upload_id)
             if existing_attachment is not None:
+                resource = await self.storage.get_conversation_file_resource(task.conversation_id, username, upload_id)
+                if resource is None or resource.status == "deleted":
+                    missing_upload_ids.append(upload_id)
+                    continue
                 if selected_sheet:
-                    resource = await self.storage.get_conversation_file_resource(task.conversation_id, username, upload_id)
-                    if resource is not None and resource.status != "deleted":
-                        await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
+                    await self._apply_conversation_file_sheet_selection(resource, selected_sheet)
                     await self._update_task_input_attachment_sheet_selection(
                         existing_attachment,
                         selected_sheet=selected_sheet,
@@ -5775,22 +5871,72 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         attachments = await self.storage.list_task_input_attachments_for_task(task_id)
         if not attachments:
             return {}
+        task = await self.storage.get_task(task_id)
+        conversation = await self.storage.get_conversation(task.conversation_id) if task is not None else None
+        inactive_upload_ids: set[str] = set()
+        active_attachments: list[TaskInputAttachment] = []
+        if task is None or conversation is None:
+            inactive_upload_ids.update(
+                str(attachment.source_upload_id or "").strip()
+                for attachment in attachments
+                if str(attachment.source_upload_id or "").strip()
+            )
+        else:
+            for attachment in attachments:
+                if await self._task_input_attachment_upload_is_active(
+                    attachment,
+                    task=task,
+                    conversation=conversation,
+                ):
+                    active_attachments.append(attachment)
+                    continue
+                upload_id = str(attachment.source_upload_id or "").strip()
+                if upload_id:
+                    inactive_upload_ids.add(upload_id)
+        if inactive_upload_ids:
+            missing = ", ".join(sorted(inactive_upload_ids))
+            raise UploadValidationError(
+                f"Task-bound uploads are no longer available for execution: {missing}. "
+                "Please re-upload the file or select another active file."
+            )
         return {
             "uploaded_artifacts": [
                 dict(attachment.prompt_artifact)
-                for attachment in attachments
+                for attachment in active_attachments
                 if isinstance(attachment.prompt_artifact, Mapping) and attachment.prompt_artifact
+                and not self._artifact_item_marked_deleted(attachment.prompt_artifact)
             ],
             "skill_artifacts": [
                 dict(attachment.skill_artifact)
-                for attachment in attachments
+                for attachment in active_attachments
                 if isinstance(attachment.skill_artifact, Mapping) and attachment.skill_artifact
+                and not self._artifact_item_marked_deleted(attachment.skill_artifact)
             ],
         }
+
+    async def _task_input_attachment_upload_is_active(
+        self,
+        attachment: TaskInputAttachment,
+        *,
+        task: Task | None,
+        conversation: Conversation | None,
+    ) -> bool:
+        upload_id = str(attachment.source_upload_id or "").strip()
+        if not upload_id:
+            return True
+        if task is None or conversation is None:
+            return False
+        resource = await self.storage.get_conversation_file_resource(task.conversation_id, conversation.username, upload_id)
+        return resource is not None and resource.status != "deleted"
 
     @staticmethod
     def _task_input_attachment_id(task_id: str, upload_id: str) -> str:
         return f"{task_id}:input:{upload_id}"
+
+    @staticmethod
+    def _artifact_item_marked_deleted(item: Mapping[str, Any]) -> bool:
+        status = str(item.get("file_status") or item.get("status") or "").strip().lower()
+        return status == "deleted"
 
     @staticmethod
     def _prompt_artifact_from_skill_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
