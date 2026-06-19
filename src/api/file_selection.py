@@ -166,7 +166,22 @@ _FILE_REFERENCE_RE = re.compile(
 )
 _NO_FILE_RE = re.compile(r"(不用|不需要|不要).{0,6}(文件|数据|表|上传)")
 _ROW_COUNT_RE = re.compile(r"(\d+)\s*(?:行|rows?)", re.IGNORECASE)
-_ORDINAL_RE = re.compile(r"第\s*([一二三四五六七八九十\d]+)\s*(?:个|份|张|个文件|份文件)?")
+_ORDINAL_RE = re.compile(r"第\s*([一二三四五六七八九十\d]+)\s*(?:个文件|份文件|个|份|张)")
+_FILE_ORDINAL_RE = re.compile(
+    r"第\s*([一二三四五六七八九十\d]+)\s*(?:个文件|份文件|张文件|个表|份表|张表|个数据|份数据)"
+)
+_MULTI_FILE_ACTION_RE = re.compile(
+    r"((比较|对比|合并|compare|merge|combine).{0,24}"
+    r"(文件|表|数据|csv|xlsx|excel|upload[_ -]?id|upl-[0-9a-fA-F]{12})|"
+    r"(文件|表|数据|csv|xlsx|excel|upload[_ -]?id|upl-[0-9a-fA-F]{12}).{0,24}"
+    r"(比较|对比|合并|compare|merge|combine))",
+    re.IGNORECASE,
+)
+_MULTI_FILE_QUANTIFIER_RE = re.compile(
+    r"((全部|所有|都|多个|两个|both|all).{0,12}(文件|表|数据|csv|xlsx|excel)|"
+    r"(文件|表|数据|csv|xlsx|excel).{0,12}(全部|所有|都|多个|两个|both|all))",
+    re.IGNORECASE,
+)
 _UPLOAD_ID_RE = re.compile(r"(?<![A-Za-z0-9_-])upl-[0-9a-fA-F]{12}(?![A-Za-z0-9_-])")
 _SECRET_KEY_RE = re.compile(r"(secret|token|password|storage_key|mount_path|content_base64|content|path)", re.IGNORECASE)
 
@@ -179,6 +194,10 @@ def query_mentions_file(text: str) -> bool:
     if query_declines_files(text):
         return False
     return bool(_UPLOAD_ID_RE.search(text or "") or _FILE_REFERENCE_RE.search(text or ""))
+
+
+def query_requests_multiple_files(text: str) -> bool:
+    return bool(_MULTI_FILE_ACTION_RE.search(text or "") or _MULTI_FILE_QUANTIFIER_RE.search(text or ""))
 
 
 class FileSelectionTriggerDetector:
@@ -205,6 +224,33 @@ class FileSelectionTriggerDetector:
             return True, "recent_usage_reference"
         if profile.user_file_reference or query_mentions_file(text):
             return True, "query_reference"
+        return False, "ordinary_query"
+
+    def should_trigger_enforce_narrow(
+        self,
+        *,
+        text: str,
+        profile: FileRequirementProfile,
+        has_explicit_uploads: bool,
+        candidates: Sequence[ConversationFileCandidate],
+    ) -> tuple[bool, str]:
+        if has_explicit_uploads or query_declines_files(text):
+            return False, "explicit_or_declined"
+        if profile.required:
+            if not candidates:
+                return True, "no_files_in_conversation"
+            return True, "required_profile"
+        if _upload_id_references(text):
+            return True, "explicit_upload_id_reference"
+        if not candidates:
+            return False, "no_active_files"
+        text_l = (text or "").lower()
+        if any(alias in text_l for candidate in candidates for alias in _candidate_filename_aliases(candidate)):
+            return True, "filename_reference"
+        if _file_ordinal_index(text) is not None:
+            return True, "ordinal_reference"
+        if ("刚才" in text or "继续" in text or "recent" in text_l) and any(candidate.recent_usage is not None for candidate in candidates):
+            return True, "recent_usage_reference"
         return False, "ordinary_query"
 
 
@@ -297,7 +343,7 @@ def parse_selector_decision(
         return FileSelectionDecision(decision, confidence=confidence, reason_code=str(raw.get("reason_code") or decision), question=str(raw.get("question") or ""), raw=raw)
     ids = tuple(str(item).strip() for item in (raw.get("upload_ids") or raw.get("selected_upload_ids") or []) if str(item).strip())
     if any(upload_id not in candidate_ids for upload_id in ids):
-        return FileSelectionDecision("ambiguous", upload_ids=ids, confidence=confidence, reason_code="unknown_upload_id", raw=raw)
+        return FileSelectionDecision("ambiguous", confidence=confidence, reason_code="unknown_upload_id", raw=raw)
     if confidence < confidence_threshold:
         return FileSelectionDecision("ambiguous", upload_ids=ids, confidence=confidence, reason_code="low_confidence", raw=raw)
     if decision == "select_one" and len(ids) == 1:
@@ -317,21 +363,33 @@ def deterministic_file_decision(
     profile: FileRequirementProfile,
     candidates: Sequence[ConversationFileCandidate],
 ) -> FileSelectionDecision:
-    if not candidates:
-        return FileSelectionDecision("no_usable_file", reason_code="no_files_in_conversation")
     if query_declines_files(text):
         return FileSelectionDecision("no_file_needed", reason_code="user_declined_file")
     text_l = (text or "").lower()
     referenced_upload_ids = _upload_id_references(text_l)
+    if referenced_upload_ids and not candidates:
+        return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
+    if not candidates:
+        return FileSelectionDecision("no_usable_file", reason_code="no_files_in_conversation")
+    if _unknown_upload_id_references(text_l, candidates, referenced_upload_ids=referenced_upload_ids):
+        return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
     exact = [candidate for candidate in candidates if candidate.upload_id.lower() in referenced_upload_ids]
     if len(exact) == 1:
         return FileSelectionDecision("select_one", (exact[0].upload_id,), 0.99, "explicit_upload_id")
-    if _unknown_upload_id_references(text_l, candidates, referenced_upload_ids=referenced_upload_ids):
-        return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
+    if len(exact) > 1:
+        return FileSelectionDecision("ambiguous", tuple(candidate.upload_id for candidate in exact), 0.99, "multi_select_requires_confirmation")
     name_hits = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
+    duplicate_filename_ids = _duplicate_filename_reference_upload_ids(text_l, candidates)
+    if duplicate_filename_ids:
+        return FileSelectionDecision(
+            "ambiguous",
+            duplicate_filename_ids,
+            0.9,
+            "duplicate_filename_candidates",
+        )
     if len(name_hits) == 1:
         return FileSelectionDecision("select_one", (name_hits[0].upload_id,), 0.9, "filename_match")
-    ordinal = _ordinal_index(text)
+    ordinal = _file_ordinal_index(text)
     if ordinal is not None and 0 <= ordinal < len(candidates):
         return FileSelectionDecision("select_one", (candidates[ordinal].upload_id,), 0.88, "ordinal")
     if len(candidates) == 1 and (profile.required or query_mentions_file(text)):
@@ -382,11 +440,16 @@ class FileSelectionAnswerResolver:
             return FileSelectionDecision("no_file_needed", confidence=1.0, reason_code="user_declined_file")
         text_l = (text or "").lower()
         referenced_upload_ids = _upload_id_references(text_l)
+        if _unknown_upload_id_references(text_l, candidates, referenced_upload_ids=referenced_upload_ids):
+            return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
         by_id = [candidate for candidate in candidates if candidate.upload_id.lower() in referenced_upload_ids]
         if len(by_id) == 1:
             return FileSelectionDecision("select_one", (by_id[0].upload_id,), 1.0, "explicit_upload_id")
-        if _unknown_upload_id_references(text_l, candidates, referenced_upload_ids=referenced_upload_ids):
-            return FileSelectionDecision("ambiguous", reason_code="unknown_upload_id")
+        if len(by_id) > 1:
+            ids = tuple(candidate.upload_id for candidate in by_id)
+            if allow_multiple:
+                return FileSelectionDecision("select_many", ids, 1.0, "explicit_upload_id")
+            return FileSelectionDecision("ambiguous", ids, 1.0, "multi_select_requires_confirmation")
         by_name = [candidate for candidate in candidates if any(name in text_l for name in _candidate_filename_aliases(candidate))]
         if len(by_name) == 1:
             return FileSelectionDecision("select_one", (by_name[0].upload_id,), 0.95, "filename_match")
@@ -416,10 +479,18 @@ class FileSelectionAnswerResolver:
 
 
 def _ordinal_index(text: str) -> int | None:
+    return _ordinal_index_from_pattern(text, _ORDINAL_RE, allow_plain_number=True)
+
+
+def _file_ordinal_index(text: str) -> int | None:
+    return _ordinal_index_from_pattern(text, _FILE_ORDINAL_RE, allow_plain_number=False)
+
+
+def _ordinal_index_from_pattern(text: str, pattern: re.Pattern[str], *, allow_plain_number: bool) -> int | None:
     stripped = (text or "").strip()
-    m = _ORDINAL_RE.search(stripped)
+    m = pattern.search(stripped)
     if not m:
-        if stripped.isdigit():
+        if allow_plain_number and stripped.isdigit():
             return int(stripped) - 1
         return None
     raw = m.group(1)
@@ -436,6 +507,19 @@ def _candidate_filename_aliases(candidate: ConversationFileCandidate) -> tuple[s
         if alias and alias not in aliases:
             aliases.append(alias)
     return tuple(aliases)
+
+
+def _duplicate_filename_reference_upload_ids(text_l: str, candidates: Sequence[ConversationFileCandidate]) -> tuple[str, ...]:
+    by_alias: dict[str, list[str]] = {}
+    for candidate in candidates:
+        for alias in _candidate_filename_aliases(candidate):
+            if alias in text_l:
+                by_alias.setdefault(alias, []).append(candidate.upload_id)
+    duplicate_ids: list[str] = []
+    for upload_ids in by_alias.values():
+        if len(upload_ids) > 1:
+            duplicate_ids.extend(upload_ids)
+    return tuple(dict.fromkeys(duplicate_ids))
 
 
 def _upload_id_references(text_l: str) -> set[str]:

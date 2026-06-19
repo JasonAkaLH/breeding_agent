@@ -17,6 +17,7 @@ from src.api.file_selection import (
     candidate_from_resource,
     deterministic_file_decision,
     parse_selector_decision,
+    query_requests_multiple_files,
     render_file_selection_question,
 )
 from src.orchestration.visible_message_history import persist_interrupt_question_message
@@ -57,14 +58,6 @@ class ConversationFileSelectionRuntimeMixin:
             continued_pending_context=continued_pending_context,
         )
         resources = await self.storage.list_conversation_file_resources(task.conversation_id, username, include_deleted=False)
-        trigger, trigger_reason = FileSelectionTriggerDetector().should_trigger(
-            text=request.content,
-            profile=profile,
-            has_explicit_uploads=bool(explicit_upload_ids),
-            active_file_count=len(resources),
-        )
-        if not trigger:
-            return False
         attachments = await self.storage.list_task_input_attachments_for_conversation(task.conversation_id, limit=100)
         recent_usage = build_recent_usage(attachments)
         candidates = tuple(
@@ -72,6 +65,23 @@ class ConversationFileSelectionRuntimeMixin:
             for resource in resources
             if resource.status != "deleted"
         )
+        detector = FileSelectionTriggerDetector()
+        if mode in {"enforce_narrow", "enforce_guarded_multi"}:
+            trigger, trigger_reason = detector.should_trigger_enforce_narrow(
+                text=request.content,
+                profile=profile,
+                has_explicit_uploads=bool(explicit_upload_ids),
+                candidates=candidates,
+            )
+        else:
+            trigger, trigger_reason = detector.should_trigger(
+                text=request.content,
+                profile=profile,
+                has_explicit_uploads=bool(explicit_upload_ids),
+                active_file_count=len(resources),
+            )
+        if not trigger:
+            return False
         await self._record_file_selection_audit_event(
             task=task,
             event_type="conversation_file.file_selector_invoked",
@@ -119,13 +129,14 @@ class ConversationFileSelectionRuntimeMixin:
             return False
         if decision.decision == "no_file_needed":
             return False
-        if decision.decision == "select_one":
+        if decision.decision in {"select_one", "select_many"}:
             await self._bind_file_selection_uploads_or_open_sheet_selection(
                 task=task,
                 username=username,
                 upload_ids=decision.upload_ids,
                 metadata=metadata,
                 source_message_id=task.root_message_id,
+                source_kind="file_selector",
             )
             if await self._has_open_interrupt(task.task_id):
                 return True
@@ -154,7 +165,23 @@ class ConversationFileSelectionRuntimeMixin:
         metadata: Mapping[str, Any],
     ) -> FileSelectionDecision:
         decision = deterministic_file_decision(text=text, profile=profile, candidates=candidates)
-        if decision.decision == "select_one" or self._skill_input_text_generator is None:
+        if (
+            decision.decision == "ambiguous"
+            and decision.reason_code == "multi_select_requires_confirmation"
+            and decision.upload_ids
+            and self._allows_guarded_multi_file_selection(text, profile)
+        ):
+            return FileSelectionDecision("select_many", decision.upload_ids, decision.confidence, "explicit_upload_id")
+        if (
+            decision.decision == "select_one"
+            or decision.reason_code in {
+                "unknown_upload_id",
+                "no_files_in_conversation",
+                "user_declined_file",
+                "duplicate_filename_candidates",
+            }
+            or self._skill_input_text_generator is None
+        ):
             return decision
         prompt = json.dumps(
             {
@@ -189,11 +216,12 @@ class ConversationFileSelectionRuntimeMixin:
         )
         if not raw:
             return decision
+        allow_guarded_multi_select = self._allows_guarded_multi_file_selection(text, profile)
         parsed = parse_selector_decision(
             raw,
             candidates=candidates,
             profile=profile,
-            allow_guarded_multi_select=self._conversation_file_selector_guarded_multi_select,
+            allow_guarded_multi_select=allow_guarded_multi_select,
         )
         if parsed.reason_code in {"empty_selector_output", "invalid_json", "invalid_shape", "unknown_decision", "unknown_upload_id", "cardinality_mismatch"}:
             return FileSelectionDecision(
@@ -252,6 +280,11 @@ class ConversationFileSelectionRuntimeMixin:
             active_file_count=1,
         )
         return FileRequirementProfile(source="user_query", user_file_reference=request.content if trigger else "")
+
+    def _allows_guarded_multi_file_selection(self, text: str, profile: FileRequirementProfile) -> bool:
+        return self._conversation_file_selector_guarded_multi_select and (
+            profile.allow_multiple or query_requests_multiple_files(text)
+        )
 
     def _file_requirement_profile_for_capability(self, capability_id: str | None, *, source: str) -> FileRequirementProfile | None:
         capability_id = self._metadata_text(capability_id)
@@ -409,15 +442,23 @@ class ConversationFileSelectionRuntimeMixin:
         username: str,
         upload_ids: tuple[str, ...],
         metadata: dict[str, Any],
+        source_kind: str = "file_selector",
         source_message_id: str | None = None,
         interrupt_answer_id: str | None = None,
     ) -> None:
         upload_context = await self.resolve_uploads_for_message(task.conversation_id, username, list(upload_ids))
         self._raise_missing_uploads(upload_context.get("missing_upload_ids"), context="file selection")
         if upload_context.get("pending_sheet_selections"):
+            sheet_metadata = {
+                **dict(metadata),
+                "_file_selection_pending_upload_ids": list(upload_ids),
+                "_file_selection_pending_source_kind": source_kind,
+            }
+            if interrupt_answer_id:
+                sheet_metadata["_file_selection_pending_interrupt_answer_id"] = interrupt_answer_id
             await self._open_sheet_selection_interrupt(
                 task=task,
-                metadata=metadata,
+                metadata=sheet_metadata,
                 pending_sheet_selections=upload_context["pending_sheet_selections"],
             )
             return
@@ -425,7 +466,7 @@ class ConversationFileSelectionRuntimeMixin:
             task=task,
             username=username,
             upload_ids=list(upload_ids),
-            source_kind="file_selector",
+            source_kind=source_kind,
             source_message_id=source_message_id or task.root_message_id,
             interrupt_answer_id=interrupt_answer_id,
         )
@@ -568,11 +609,12 @@ class ConversationFileSelectionRuntimeMixin:
             file_selection_context.get("profile") if isinstance(file_selection_context.get("profile"), Mapping) else {},
             source="interrupt",
         )
+        allow_multiple = self._allows_guarded_multi_file_selection(answer_text, profile)
         decision = FileSelectionAnswerResolver().resolve(
             answer_text,
             candidates,
             replacement_upload_ids=upload_ids,
-            allow_multiple=profile.allow_multiple,
+            allow_multiple=allow_multiple,
         )
         if decision.decision == "no_file_needed" and profile.required:
             decision = FileSelectionDecision("ambiguous", reason_code="required_file_cannot_be_skipped")
@@ -674,6 +716,7 @@ class ConversationFileSelectionRuntimeMixin:
             username=conversation.username,
             upload_ids=decision.upload_ids,
             metadata=resume_metadata,
+            source_kind="interrupt_answer_upload" if decision.reason_code == "replacement_upload" else "file_selector",
             source_message_id=answer.source_message_id,
             interrupt_answer_id=answer.interrupt_answer_id,
         )
@@ -699,6 +742,7 @@ class ConversationFileSelectionRuntimeMixin:
             },
         )
         if await self._has_open_interrupt(task.task_id):
+            self._task_file_selection_resume_metadata.pop(task.task_id, None)
             return {
                 "interrupt_id": saved_interrupt.interrupt_id,
                 "status": str(saved_interrupt.status),

@@ -17,5 +17,5 @@
 
 | PRD | 状态 | 后续动作 |
 |---|---|---|
-| `prd/backend/conversation-file-history-selection/README.md`（父入口：`prd/backend/21-对话文件历史与智能选择PRD.md`） | 阶段零、阶段一、阶段二、阶段三已实施；阶段四至阶段五待实施 | 继续推进 selector interrupt/绑定、灰度发布与回归门禁；后续若新增 file_upload public 字段，仍需同步后端 sanitizer、memory 投影与前端安全卡片 allowlist。 |
+| `prd/backend/conversation-file-history-selection/README.md`（父入口：`prd/backend/21-对话文件历史与智能选择PRD.md`） | 阶段零、阶段一、阶段二、阶段三、阶段四已实施；阶段五待实施 | 继续推进灰度发布、审计指标、回归门禁与 release gate；后续若新增 file_upload public 字段，仍需同步后端 sanitizer、memory 投影与前端安全卡片 allowlist。 |
 | `prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 总体设计稿，待拆分阶段实施 PRD | 拆分并实施 Workbench 内部 capability、固定 DAG MVP、确定性 runtime replanner 与 contract / policy 驱动策略。 |

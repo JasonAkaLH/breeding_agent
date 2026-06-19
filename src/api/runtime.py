@@ -380,13 +380,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
         self._mcp_refresh_lock = asyncio.Lock()
-        self._conversation_file_selector_mode = os.environ.get("MAF_CONVERSATION_FILE_SELECTOR_MODE", "disabled").strip().lower()
-        if self._conversation_file_selector_mode not in {"disabled", "shadow", "enforce"}:
-            self._conversation_file_selector_mode = "disabled"
-        self._conversation_file_selector_guarded_multi_select = os.environ.get(
-            "MAF_CONVERSATION_FILE_SELECTOR_GUARDED_MULTI_SELECT",
-            "",
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._conversation_file_selector_mode = self._normalize_conversation_file_selector_mode(
+            os.environ.get("MAF_CONVERSATION_FILE_SELECTOR_MODE", "disabled")
+        )
+        self._conversation_file_selector_guarded_multi_select = (
+            self._conversation_file_selector_mode == "enforce_guarded_multi"
+        )
 
     @staticmethod
     def _utcnow_naive() -> datetime:
@@ -898,17 +897,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
             )
         metadata.update(self._upload_context_metadata(conversation_upload_context))
-        if conversation_upload_context.get("pending_sheet_selections"):
-            await self._open_sheet_selection_interrupt(
-                task=task,
-                metadata=metadata,
-                pending_sheet_selections=conversation_upload_context["pending_sheet_selections"],
-            )
-            return message, task
-        should_run_file_selector = not explicit_upload_ids and (
-            not conversation_upload_context.get("uploaded_artifacts")
-            or self._conversation_file_selector_mode == "shadow"
-        )
+        should_run_file_selector = not explicit_upload_ids and self._conversation_file_selector_mode != "disabled"
         if should_run_file_selector and await self._maybe_handle_conversation_file_selection(
             task=task,
             username=authenticated_username,
@@ -918,6 +907,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             continued_pending_context=continued_pending_context,
             explicit_upload_ids=explicit_upload_ids,
         ):
+            return message, task
+        if conversation_upload_context.get("pending_sheet_selections"):
+            await self._open_sheet_selection_interrupt(
+                task=task,
+                metadata=metadata,
+                pending_sheet_selections=conversation_upload_context["pending_sheet_selections"],
+            )
             return message, task
 
         orchestration_request = OrchestrationRequest(
@@ -2762,7 +2758,27 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             source_message_id=source_message_id or self._make_id("msg"),
             created_at=self._utcnow_naive(),
         )
-        upload_ids = self._merged_answer_upload_ids(answer_payloads)
+        pending_file_selection_upload_ids = self._normalize_upload_ids(
+            sheet_selection_resume_metadata.get("_file_selection_pending_upload_ids") or ()
+        )
+        pending_file_selection_source_kind = str(
+            sheet_selection_resume_metadata.get("_file_selection_pending_source_kind") or ""
+        ).strip()
+        if pending_file_selection_source_kind not in {"file_selector", "interrupt_answer_upload"}:
+            pending_file_selection_source_kind = "interrupt_answer_upload"
+        pending_file_selection_answer_id = str(
+            sheet_selection_resume_metadata.get("_file_selection_pending_interrupt_answer_id") or ""
+        ).strip()
+        pending_file_selection_binding_source = "interrupt_answer_upload"
+        if pending_file_selection_upload_ids:
+            pending_file_selection_binding_source = pending_file_selection_source_kind
+        for internal_key in (
+            "_file_selection_pending_upload_ids",
+            "_file_selection_pending_source_kind",
+            "_file_selection_pending_interrupt_answer_id",
+        ):
+            resume_metadata.pop(internal_key, None)
+        upload_ids = pending_file_selection_upload_ids or self._merged_answer_upload_ids(answer_payloads)
         if upload_ids:
             conversation = await self.storage.get_conversation(task.conversation_id)
             if conversation is None:
@@ -2771,9 +2787,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 task=task,
                 username=conversation.username,
                 upload_ids=upload_ids,
-                source_kind="interrupt_answer_upload",
+                source_kind=pending_file_selection_binding_source,
                 source_message_id=answer.source_message_id,
-                interrupt_answer_id=answer.interrupt_answer_id,
+                interrupt_answer_id=pending_file_selection_answer_id or answer.interrupt_answer_id,
                 upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
             )
         resume_metadata.update(
@@ -6442,6 +6458,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if self.postgres_auth_invalidation_bus is not None:
             await self.postgres_auth_invalidation_bus.aclose()
         await asyncio.to_thread(self._engine.dispose)
+
+    @staticmethod
+    def _normalize_conversation_file_selector_mode(raw_mode: object) -> str:
+        mode = str(raw_mode or "disabled").strip().lower()
+        if mode in {"disabled", "shadow", "enforce_narrow", "enforce_guarded_multi"}:
+            return mode
+        return "disabled"
 
     @staticmethod
     def _canonical_capability_id(capability_id: str | None) -> str | None:

@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21-Phase 4
 - **日期**：2026-06-19
-- **状态**：待实施
+- **状态**：已实施
 - **前置阶段**：阶段三文件需求画像与 selector shadow
 - **目标模块**：`src/api/file_selection.py`、`src/api/file_selection_runtime.py`、task attachment repository、interrupt resume、sheet selection 链路
 
@@ -191,3 +191,13 @@ python -m pytest tests/integrations/agent_skills/test_artifact_context.py
 - 所有最终绑定都写入 task attachment provenance 并通过权限 / 状态校验。
 - 多候选、低置信、selector 异常、deleted / 越权 / 未知 id 均 fail closed。
 - 用户可只用聊天自然语言完成文件消歧，不需要新增前端控件。
+
+
+## 11. 实施记录（2026-06-19）
+
+- `src/api/runtime.py` 的 submit selector gate 调整为：运行时 selector mode 只接受 `disabled|shadow|enforce_narrow|enforce_guarded_multi`，旧 `enforce` 配置 fail-closed 到 disabled；非显式 `metadata.upload_ids` 且 selector mode 非 disabled 时进入 selector runtime，由 runtime 内部判断是否属于 `enforce_narrow`；普通 active conversation context 仍可直接执行，不写 task attachment。
+- `src/api/file_selection.py` 新增 enforce narrow 触发判定：required profile、exact upload_id、active candidate filename、file/table/data 专用 ordinal、以及有 task attachment provenance 的 recent usage 才会在 enforce 下触发；泛化“文件/上传/继续”和“第一个问题/阶段”等非文件序数不再单独触发自动绑定。
+- 正文/interrupt answer exact `upload_id` miss（未知、deleted、跨会话/越权）在 LLM selector 前 fail-closed，打开 `file_selection_ambiguous`，不交给 LLM 猜测。
+- selector 自动选择、interrupt answer 选择与 sheet selection 链式恢复均复用 `resolve_uploads_for_message()` / task attachment helper；selector 来源写 `source_kind=file_selector`，file-selection interrupt 中新上传替换文件保持 `source_kind=interrupt_answer_upload`，并覆盖 replacement upload → sheet selection → selected_sheet/provenance 联合恢复。
+- 多候选同名、低置信、invalid JSON、`enforce_narrow` 默认 select_many 均打开自然语言澄清，不自动绑定；`enforce_guarded_multi` 只有在 allow_multiple 或用户明确比较/合并多个文件意图下才自动多绑定（含 submit 与 interrupt answer 中的多个 exact `upload_id`）；audit payload 继续只记录安全 profile/candidate/decision 摘要，不包含文件正文、路径、storage_key、base64 或 raw selector output。
+- 新增/更新 `tests/api/test_conversation_file_selection.py` Phase 4 回归：required auto-bind、普通 no-bind context、filename/file-specific ordinal/id narrow binding、非文件序数 no-bind、guarded multi submit/interrupt allow/deny、多 exact upload_id guarded binding、同名 ambiguity、unknown/deleted/跨会话 upload_id LLM 前 fail-closed、low confidence、invalid JSON、select_many confirmation、recent usage provenance、interrupt resume/no-skip/replacement provenance、sheet chaining selected_sheet/source_kind。

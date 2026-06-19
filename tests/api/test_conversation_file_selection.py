@@ -117,6 +117,19 @@ class ConversationFileSelectionAPITest(APITestCase):
         sheet.title = "materials"
         for row in rows or [["材料名称", "是否对照", "组别"], ["A001", 0, 1]]:
             sheet.append(row)
+        return await self._upload_workbook(conversation_id, filename, workbook)
+
+    async def _upload_multi_sheet_xlsx(self, conversation_id: str, filename: str) -> str:
+        workbook = Workbook()
+        workbook.active.title = "Alpha"
+        workbook.active.append(["ped_id", "hyb_check"])
+        workbook.active.append(["A001", 0])
+        beta = workbook.create_sheet("Beta")
+        beta.append(["ped_id", "hyb_check"])
+        beta.append(["B001", 1])
+        return await self._upload_workbook(conversation_id, filename, workbook)
+
+    async def _upload_workbook(self, conversation_id: str, filename: str, workbook: Workbook) -> str:
         buffer = BytesIO()
         workbook.save(buffer)
         response = await self.client.post(
@@ -134,7 +147,7 @@ class ConversationFileSelectionAPITest(APITestCase):
         return response.json()["upload_id"]
 
     async def test_active_conversation_file_is_available_without_task_attachment(self) -> None:
-        self.runtime._conversation_file_selector_mode = "enforce"
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
         conversation_id = "conv-file-auto"
         upload_id = await self._upload_csv(conversation_id, "materials.csv")
 
@@ -154,10 +167,10 @@ class ConversationFileSelectionAPITest(APITestCase):
         events = await self.runtime.storage.list_events_for_task(task_id)
         self.assertNotIn("conversation_file.file_selector_auto_bound", [event.event_type for event in events])
 
-    async def test_referenced_original_spreadsheet_filename_keeps_conversation_context_available(self) -> None:
-        self.runtime._conversation_file_selector_mode = "enforce"
+    async def test_referenced_original_spreadsheet_filename_binds_file_selector_attachment(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
         conversation_id = "conv-file-original-name"
-        await self._upload_xlsx(conversation_id, "间比法双组材料清单.xlsx")
+        selected_id = await self._upload_xlsx(conversation_id, "间比法双组材料清单.xlsx")
         await self._upload_xlsx(conversation_id, "对角线增广列数20材料清单.xlsx")
 
         response = await self.submit_message(
@@ -170,14 +183,17 @@ class ConversationFileSelectionAPITest(APITestCase):
         task_id = response.json()["task_id"]
         await self.runtime._await_existing_execution(task_id)
         attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
-        self.assertEqual(attachments, [])
-        resolved = await self.runtime.resolve_conversation_uploads_for_message(conversation_id, "acc-1")
-        self.assertEqual([artifact["filename"] for artifact in resolved["uploaded_artifacts"]], ["间比法双组材料清单.xlsx", "对角线增广列数20材料清单.xlsx"])
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+        self.assertEqual(attachments[0].source_upload_id, selected_id)
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        auto_bound = next(event for event in events if event.event_type == "conversation_file.file_selector_auto_bound")
+        self.assertEqual(auto_bound.payload["selected_upload_ids"], [selected_id])
 
-    async def test_initial_message_ordinal_reference_keeps_conversation_context_available(self) -> None:
-        self.runtime._conversation_file_selector_mode = "enforce"
+    async def test_initial_message_ordinal_reference_binds_file_selector_attachment(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
         conversation_id = "conv-file-ordinal"
-        await self._upload_xlsx(conversation_id, "对角线增广列数20材料清单.xlsx")
+        selected_id = await self._upload_xlsx(conversation_id, "对角线增广列数20材料清单.xlsx")
         await self._upload_xlsx(conversation_id, "间比法双组材料清单.xlsx")
 
         response = await self.submit_message(
@@ -190,9 +206,9 @@ class ConversationFileSelectionAPITest(APITestCase):
         task_id = response.json()["task_id"]
         await self.runtime._await_existing_execution(task_id)
         attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
-        self.assertEqual(attachments, [])
-        resolved = await self.runtime.resolve_conversation_uploads_for_message(conversation_id, "acc-1")
-        self.assertEqual(len(resolved["uploaded_artifacts"]), 2)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+        self.assertEqual(attachments[0].source_upload_id, selected_id)
 
     async def test_shadow_records_audit_but_does_not_bind_or_interrupt(self) -> None:
         self.runtime._conversation_file_selector_mode = "shadow"
@@ -222,7 +238,7 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertNotIn("storage_key", json.dumps(decision.payload, ensure_ascii=False))
 
     async def test_multiple_active_files_are_available_without_selector_interrupt(self) -> None:
-        self.runtime._conversation_file_selector_mode = "enforce"
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
         conversation_id = "conv-file-ambiguous"
         await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
         await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
@@ -311,6 +327,57 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertTrue(trigger)
         self.assertEqual(reason, "recent_usage_reference")
 
+    async def test_enforce_narrow_ignores_non_file_ordinal_language(self) -> None:
+        conversation_id = "conv-file-non-file-ordinal"
+        await self._upload_csv(conversation_id, "materials.csv")
+        resources = await self.runtime.storage.list_conversation_file_resources(
+            conversation_id,
+            "acc-1",
+            include_deleted=False,
+        )
+        candidates = tuple(candidate_from_resource(resource) for resource in resources)
+
+        self.assertEqual(
+            FileSelectionTriggerDetector().should_trigger_enforce_narrow(
+                text="请解释第一阶段的试验设计概念。",
+                profile=FileRequirementProfile(),
+                has_explicit_uploads=False,
+                candidates=candidates,
+            ),
+            (False, "ordinary_query"),
+        )
+
+    async def test_enforce_narrow_does_not_bind_generic_ordinal_submit_message(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-generic-ordinal"
+        await self._upload_csv(conversation_id, "materials.csv")
+        await self._upload_csv(conversation_id, "other.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请先解释第一个问题的试验设计概念。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        interrupts = await self.runtime.list_interrupts(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(interrupts, [])
+        self.assertEqual(attachments, [])
+
+    async def test_selector_mode_normalization_rejects_legacy_enforce_alias(self) -> None:
+        self.assertEqual(self.runtime._normalize_conversation_file_selector_mode("disabled"), "disabled")
+        self.assertEqual(self.runtime._normalize_conversation_file_selector_mode("shadow"), "shadow")
+        self.assertEqual(self.runtime._normalize_conversation_file_selector_mode("enforce_narrow"), "enforce_narrow")
+        self.assertEqual(
+            self.runtime._normalize_conversation_file_selector_mode("enforce_guarded_multi"),
+            "enforce_guarded_multi",
+        )
+        self.assertEqual(self.runtime._normalize_conversation_file_selector_mode("enforce"), "disabled")
+        self.assertEqual(self.runtime._normalize_conversation_file_selector_mode("unexpected"), "disabled")
+
     async def test_upload_id_token_requires_exact_generated_shape(self) -> None:
         conversation_id = "conv-file-upload-id-token"
         await self._upload_csv(conversation_id, "materials.csv")
@@ -346,6 +413,22 @@ class ConversationFileSelectionAPITest(APITestCase):
             candidates=candidates,
         )
         self.assertEqual(exact_unknown.reason_code, "unknown_upload_id")
+
+        mixed_existing_unknown = deterministic_file_decision(
+            text=f"请同时使用 {candidates[0].upload_id} 和 upl-abcdef123456。",
+            profile=FileRequirementProfile(),
+            candidates=candidates,
+        )
+        self.assertEqual(mixed_existing_unknown.decision, "ambiguous")
+        self.assertEqual(mixed_existing_unknown.reason_code, "unknown_upload_id")
+        self.assertEqual(mixed_existing_unknown.upload_ids, ())
+        answer_mixed_existing_unknown = FileSelectionAnswerResolver().resolve(
+            f"使用 {candidates[0].upload_id} 和 upl-abcdef123456",
+            candidates,
+        )
+        self.assertEqual(answer_mixed_existing_unknown.decision, "ambiguous")
+        self.assertEqual(answer_mixed_existing_unknown.reason_code, "unknown_upload_id")
+        self.assertEqual(answer_mixed_existing_unknown.upload_ids, ())
 
         trigger, reason = FileSelectionTriggerDetector().should_trigger(
             text="请使用 xxxupl-abcdef123456yyy 这个文件。",
@@ -384,7 +467,7 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertNotIn("conversation_file.file_selector_invoked", event_types)
 
     async def test_required_file_with_no_active_files_opens_missing_file_clarification(self) -> None:
-        self.runtime._conversation_file_selector_mode = "enforce"
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
         response = await self.submit_message(
             conversation_id="conv-file-required-missing",
             capability_id=None,
@@ -400,6 +483,697 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertEqual(interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "no_files_in_conversation")
         self.assertIn("还没有可用文件", interrupts[0]["question"])
 
+    async def test_required_single_active_file_auto_binds_task_attachment(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-required-auto-bind"
+        upload_id = await self._upload_csv(conversation_id, "materials.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True, "expected_content": ["材料表"]}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+        self.assertEqual(attachments[0].source_upload_id, upload_id)
+        self.assertEqual(await self.runtime.list_interrupts(task_id), [])
+
+    async def test_same_filename_required_opens_ambiguous_interrupt_without_binding(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-required-same-name"
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual(interrupts[0]["reason_code"], "file_selection_ambiguous")
+        self.assertEqual(len(interrupts[0]["required_fields"]["_file_selection"]["candidate_upload_ids"]), 2)
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_same_filename_ambiguity_does_not_delegate_to_selector_guess(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-same-name-no-selector-guess"
+        first = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        second = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        selector_calls = 0
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            nonlocal selector_calls
+            selector_calls += 1
+            return json.dumps(
+                {
+                    "decision": "select_one",
+                    "selected_upload_ids": [first],
+                    "confidence": 0.99,
+                    "reason_code": "guessed_duplicate_filename",
+                }
+            )
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(selector_calls, 0)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual(interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "duplicate_filename_candidates")
+        self.assertCountEqual(interrupts[0]["required_fields"]["_file_selection"]["candidate_upload_ids"], [first, second])
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_body_upload_id_exact_token_binds_active_file(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-body-upload-id"
+        upload_id = await self._upload_csv(conversation_id, "materials.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content=f"请使用 {upload_id} 这个文件做摘要。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+        self.assertEqual(attachments[0].source_upload_id, upload_id)
+        decision = next(
+            event
+            for event in await self.runtime.storage.list_events_for_task(task_id)
+            if event.event_type == "conversation_file.file_selector_decision_recorded"
+        )
+        self.assertEqual(decision.payload["reason_code"], "explicit_upload_id")
+
+    async def test_body_upload_id_invalid_tokens_fail_closed_before_llm_selector(self) -> None:
+        selector_calls = 0
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            nonlocal selector_calls
+            selector_calls += 1
+            return json.dumps({"decision": "select_one", "upload_ids": ["upl-deadbeef0000"], "confidence": 1})
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+
+        active_conversation = "conv-file-unknown-body-id"
+        active_id = await self._upload_csv(active_conversation, "active.csv")
+        unknown = await self.submit_message(
+            conversation_id=active_conversation,
+            capability_id=None,
+            content=f"请使用 {active_id} 和 upl-abcdef123456 这两个文件。",
+        )
+        self.assertEqual(unknown.status_code, 202, unknown.text)
+        unknown_task = unknown.json()["task_id"]
+        unknown_interrupts = await self.runtime.list_interrupts(unknown_task)
+        self.assertEqual(len(unknown_interrupts), 1)
+        self.assertEqual(unknown_interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "unknown_upload_id")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(unknown_task), [])
+
+        deleted_conversation = "conv-file-deleted-body-id"
+        deleted_id = await self._upload_csv(deleted_conversation, "deleted.csv")
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": deleted_conversation, "upload_id": deleted_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        deleted_submit = await self.submit_message(
+            conversation_id=deleted_conversation,
+            capability_id=None,
+            content=f"请使用 {deleted_id} 这个文件。",
+        )
+        self.assertEqual(deleted_submit.status_code, 202, deleted_submit.text)
+        deleted_task = deleted_submit.json()["task_id"]
+        deleted_interrupts = await self.runtime.list_interrupts(deleted_task)
+        self.assertEqual(len(deleted_interrupts), 1)
+        self.assertEqual(deleted_interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "unknown_upload_id")
+
+        foreign_id = await self._upload_csv("conv-file-foreign-source", "foreign.csv")
+        foreign_submit = await self.submit_message(
+            conversation_id="conv-file-foreign-target",
+            capability_id=None,
+            content=f"请使用 {foreign_id} 这个文件。",
+        )
+        self.assertEqual(foreign_submit.status_code, 202, foreign_submit.text)
+        foreign_task = foreign_submit.json()["task_id"]
+        foreign_interrupts = await self.runtime.list_interrupts(foreign_task)
+        self.assertEqual(len(foreign_interrupts), 1)
+        self.assertEqual(foreign_interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "unknown_upload_id")
+        self.assertEqual(selector_calls, 0)
+
+    async def test_low_confidence_selector_opens_clarification_without_binding(self) -> None:
+        conversation_id = "conv-file-low-confidence"
+        first = await self._upload_csv(conversation_id, "first.csv")
+        await self._upload_csv(conversation_id, "second.csv")
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return json.dumps({"decision": "select_one", "selected_upload_ids": [first], "confidence": 0.5})
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual(interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "low_confidence")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_invalid_selector_json_clarifies_and_records_audit_without_binding(self) -> None:
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return "not-json SECRET_SHOULD_NOT_APPEAR"
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-invalid-json-enforce"
+        await self._upload_csv(conversation_id, "first.csv")
+        await self._upload_csv(conversation_id, "second.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual(interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "invalid_json")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+        invalid = next(
+            event
+            for event in await self.runtime.storage.list_events_for_task(task_id)
+            if event.event_type == "conversation_file.file_selector_invalid_output"
+        )
+        payload_text = json.dumps(invalid.payload, ensure_ascii=False)
+        self.assertNotIn("SECRET_SHOULD_NOT_APPEAR", payload_text)
+
+    async def test_invalid_selector_selected_ids_are_not_copied_to_audit(self) -> None:
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return json.dumps(
+                {
+                    "decision": "select_one",
+                    "selected_upload_ids": ["storage_key=/tmp/private/secret.txt"],
+                    "confidence": 0.99,
+                }
+            )
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-invalid-selector-id-audit"
+        await self._upload_csv(conversation_id, "first.csv")
+        await self._upload_csv(conversation_id, "second.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        decision = next(
+            event
+            for event in await self.runtime.storage.list_events_for_task(task_id)
+            if event.event_type == "conversation_file.file_selector_decision_recorded"
+        )
+        payload_text = json.dumps(decision.payload, ensure_ascii=False)
+        self.assertEqual(decision.payload["reason_code"], "unknown_upload_id")
+        self.assertEqual(decision.payload["selected_upload_ids"], [])
+        self.assertNotIn("storage_key", payload_text)
+        self.assertNotIn("/tmp/private", payload_text)
+
+    async def test_select_many_default_requires_confirmation_without_binding(self) -> None:
+        conversation_id = "conv-file-select-many-confirm"
+        first = await self._upload_csv(conversation_id, "first.csv")
+        second = await self._upload_csv(conversation_id, "second.csv")
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return json.dumps(
+                {
+                    "decision": "select_many",
+                    "selected_upload_ids": [first, second],
+                    "confidence": 0.95,
+                    "reason_code": "comparison",
+                }
+            )
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请比较材料文件。",
+            metadata={"file_requirement_profile": {"required": True, "allow_multiple": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual(interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "multi_select_rollout_disabled")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_guarded_multi_auto_binds_clear_multi_intent(self) -> None:
+        conversation_id = "conv-file-guarded-multi"
+        first = await self._upload_csv(conversation_id, "first.csv")
+        second = await self._upload_csv(conversation_id, "second.csv")
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return json.dumps(
+                {
+                    "decision": "select_many",
+                    "selected_upload_ids": [first, second],
+                    "confidence": 0.96,
+                    "reason_code": "comparison",
+                }
+            )
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"
+        self.runtime._conversation_file_selector_guarded_multi_select = True
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请比较 first.csv 和 second.csv 两个文件。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual({attachment.source_upload_id for attachment in attachments}, {first, second})
+        self.assertTrue(all(attachment.source_kind == "file_selector" for attachment in attachments))
+        self.assertEqual(await self.runtime.list_interrupts(task_id), [])
+
+    async def test_guarded_multi_still_requires_explicit_multi_intent(self) -> None:
+        conversation_id = "conv-file-guarded-multi-no-intent"
+        first = await self._upload_csv(conversation_id, "first.csv")
+        second = await self._upload_csv(conversation_id, "second.csv")
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return json.dumps(
+                {
+                    "decision": "select_many",
+                    "selected_upload_ids": [first, second],
+                    "confidence": 0.96,
+                    "reason_code": "comparison",
+                }
+            )
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"
+        self.runtime._conversation_file_selector_guarded_multi_select = True
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请比较第一个阶段和第二个阶段。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual(interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "multi_select_requires_confirmation")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_guarded_multi_auto_binds_multiple_exact_upload_ids_with_multi_intent(self) -> None:
+        conversation_id = "conv-file-guarded-multi-exact"
+        first = await self._upload_csv(conversation_id, "first.csv")
+        second = await self._upload_csv(conversation_id, "second.csv")
+        self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"
+        self.runtime._conversation_file_selector_guarded_multi_select = True
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content=f"请比较 {first} 和 {second} 两个文件。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual({attachment.source_upload_id for attachment in attachments}, {first, second})
+        self.assertTrue(all(attachment.source_kind == "file_selector" for attachment in attachments))
+        self.assertEqual(await self.runtime.list_interrupts(task_id), [])
+
+    async def test_guarded_multi_exact_upload_ids_without_multi_intent_clarifies(self) -> None:
+        conversation_id = "conv-file-guarded-multi-exact-no-intent"
+        first = await self._upload_csv(conversation_id, "first.csv")
+        second = await self._upload_csv(conversation_id, "second.csv")
+        self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"
+        self.runtime._conversation_file_selector_guarded_multi_select = True
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content=f"请使用 {first} 和 {second}。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(len(interrupts), 1)
+        self.assertEqual(interrupts[0]["required_fields"]["_file_selection"]["reason_code"], "multi_select_requires_confirmation")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_recent_usage_selects_previous_attachment_not_newer_upload(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-recent-enforce"
+        first = await self._upload_csv(conversation_id, "first.csv")
+        await self.runtime.storage.save_task_input_attachment(
+            TaskInputAttachment(
+                attachment_id="att-recent-enforce",
+                task_id="task-recent-enforce",
+                conversation_id=conversation_id,
+                source_kind="file_selector",
+                source_upload_id=first,
+                filename="first.csv",
+                created_at=datetime(2026, 6, 19, 12, 0, 0),
+                updated_at=datetime(2026, 6, 19, 12, 5, 0),
+            )
+        )
+        await self._upload_csv(conversation_id, "second.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="继续用刚才那个数据做分析。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_upload_id, first)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+
+    async def test_file_selection_interrupt_resume_binds_upload_id_answer(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-interrupt-resume"
+        first = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content=f"使用 {first}",
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        self.assertEqual(answer.json()["action"], "interrupt_resumed")
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_upload_id, first)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+        self.assertIsNotNone(attachments[0].interrupt_answer_id)
+
+    async def test_file_selection_interrupt_answer_mixed_valid_unknown_upload_id_stays_clarifying(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-interrupt-mixed-id"
+        first = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content=f"使用 {first} 和 upl-abcdef123456",
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        self.assertEqual(answer.json()["action"], "interrupt_clarification_answer")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_guarded_multi_interrupt_answer_binds_multiple_exact_upload_ids_with_multi_intent(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"
+        self.runtime._conversation_file_selector_guarded_multi_select = True
+        conversation_id = "conv-file-interrupt-guarded-multi"
+        first = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        second = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content=f"请比较 {first} 和 {second} 两个文件。",
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        self.assertEqual(answer.json()["action"], "interrupt_resumed")
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual({attachment.source_upload_id for attachment in attachments}, {first, second})
+        self.assertTrue(all(attachment.source_kind == "file_selector" for attachment in attachments))
+        self.assertTrue(all(attachment.interrupt_answer_id for attachment in attachments))
+
+    async def test_guarded_multi_interrupt_answer_exact_upload_ids_without_multi_intent_clarifies(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"
+        self.runtime._conversation_file_selector_guarded_multi_select = True
+        conversation_id = "conv-file-interrupt-guarded-multi-no-intent"
+        first = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        second = await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content=f"使用 {first} 和 {second}。",
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        self.assertEqual(answer.json()["action"], "interrupt_clarification_answer")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_enforce_narrow_interrupt_answer_allow_multiple_still_requires_guarded_mode(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-interrupt-allow-multiple-narrow"
+        first = await self._upload_csv(conversation_id, "first.csv", "ped_id,value\nA001,1\n")
+        second = await self._upload_csv(conversation_id, "second.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True, "allow_multiple": True}},
+        )
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content=f"请比较 {first} 和 {second} 两个文件。",
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        self.assertEqual(answer.json()["action"], "interrupt_clarification_answer")
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_required_file_selection_interrupt_answer_cannot_skip_file(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-required-no-skip"
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content="不用文件。",
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        self.assertEqual(answer.json()["action"], "interrupt_clarification_answer")
+        self.assertIn("assistant_message", answer.json())
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_replacement_upload_in_file_selection_interrupt_keeps_interrupt_upload_provenance(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-replacement-provenance"
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+        replacement = await self._upload_csv(conversation_id, "replacement.csv", "ped_id,value\nC001,3\n")
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content="用这个新上传的文件。",
+            metadata={"upload_ids": [replacement]},
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_upload_id, replacement)
+        self.assertEqual(attachments[0].source_kind, "interrupt_answer_upload")
+
+    async def test_replacement_upload_requiring_sheet_selection_preserves_interrupt_provenance_after_sheet_answer(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-replacement-sheet-provenance"
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
+        await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nB001,2\n")
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析 materials.csv。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        task_id = submitted.json()["task_id"]
+        file_interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+        replacement = await self._upload_multi_sheet_xlsx(conversation_id, "replacement.xlsx")
+
+        replacement_answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=file_interrupt["interrupt_id"],
+            content="用这个新上传的表格。",
+            metadata={"upload_ids": [replacement]},
+        )
+
+        self.assertEqual(replacement_answer.status_code, 202, replacement_answer.text)
+        self.assertEqual(replacement_answer.json()["action"], "interrupt_sheet_selection_required")
+        sheet_interrupt = next(
+            item
+            for item in await self.runtime.list_interrupts(task_id)
+            if item["status"] == "open" and item["reason_code"] == "sheet_selection_required"
+        )
+
+        sheet_answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=sheet_interrupt["interrupt_id"],
+            content="选择 Beta",
+            metadata={"upload_sheet_selections": {replacement: "Beta"}},
+        )
+
+        self.assertEqual(sheet_answer.status_code, 202, sheet_answer.text)
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_upload_id, replacement)
+        self.assertEqual(attachments[0].source_kind, "interrupt_answer_upload")
+        self.assertEqual(attachments[0].selected_sheet, "Beta")
+
+    async def test_selected_spreadsheet_opens_sheet_selection_then_binds_selector_sheet(self) -> None:
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        conversation_id = "conv-file-selector-sheet"
+        upload_id = await self._upload_multi_sheet_xlsx(conversation_id, "materials.xlsx")
+
+        submitted = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        task_id = submitted.json()["task_id"]
+        interrupt = next(item for item in await self.runtime.list_interrupts(task_id) if item["status"] == "open")
+        self.assertEqual(interrupt["reason_code"], "sheet_selection_required")
+        self.assertEqual(interrupt["required_fields"]["upload_sheet_selections"]["required_upload_ids"], [upload_id])
+
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=conversation_id,
+            interrupt_id=interrupt["interrupt_id"],
+            content="选择 Beta",
+            metadata={"upload_sheet_selections": {upload_id: "Beta"}},
+        )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        await self.runtime._await_existing_execution(task_id)
+        attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].source_upload_id, upload_id)
+        self.assertEqual(attachments[0].source_kind, "file_selector")
+        self.assertEqual(attachments[0].selected_sheet, "Beta")
+
     async def test_selector_prompt_excludes_text_sample_and_raw_preview_values(self) -> None:
         captured_prompts: list[str] = []
 
@@ -408,7 +1182,7 @@ class ConversationFileSelectionAPITest(APITestCase):
             return json.dumps({"decision": "ambiguous", "confidence": 0.4, "reason_code": "test"})
 
         await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
-        self.runtime._conversation_file_selector_mode = "enforce"
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
         conversation_id = "conv-file-redaction"
         await self._upload_csv(conversation_id, "secret.txt", "SECRET_VALUE_XYZ\nsecond line\n")
         await self._upload_csv(conversation_id, "materials.csv", "ped_id,value\nA001,1\n")
@@ -585,7 +1359,7 @@ class ConversationFileSelectionAPITest(APITestCase):
         capability_id = self._write_file_required_skill()
         skill_root = self.workspace / "file-required-skill"
         await self.reconfigure_runtime(skill_roots=(skill_root,), public_skill_roots=(skill_root,))
-        self.runtime._conversation_file_selector_mode = "enforce"
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
 
         response = await self.submit_message(
             conversation_id="conv-file-required-skill",
