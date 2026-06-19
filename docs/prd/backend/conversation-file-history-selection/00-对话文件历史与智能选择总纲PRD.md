@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21 分步总纲
 - **日期**：2026-06-19
-- **状态**：阶段零、阶段一、阶段二、阶段三、阶段四已实施；阶段五待实施
+- **状态**：阶段零、阶段一、阶段二、阶段三、阶段四、阶段五均已实施
 - **父兼容入口**：`docs/prd/backend/21-对话文件历史与智能选择PRD.md`
 - **目标模块**：`src/core/models.py`、`src/storage/`、`src/api/runtime.py`、`src/api/dto.py`、`src/api/file_selection.py`、`src/api/file_selection_runtime.py`、`src/capabilities/main_agent/`、`src/integrations/agent_skills/`、`frontend/`
 
@@ -22,7 +22,7 @@
 - **active context 是基线，不是 selector bypass**：无显式 `metadata.upload_ids` 时，active conversation 文件仍可默认作为上下文候选注入；但 required file、明确单文件指代、同名/多候选缩窄、recent usage continuation、interrupt answer 恢复或正文 `upload_id` 精准选择必须进入 selector / deterministic selection 判定，并写 task attachment provenance 或打开澄清。
 - **`file_upload` 存在现有 message 表**：不新增独立 `conversation_file_history` 表；通过扩展 `Message` / `message` / `MessageResponse` 的 `message_type`、`metadata`、`updated_at` 支持文件上传历史。
 - **`index.md` repair marker 必须持久化**：`index.md` 只是 DB 投影；重写失败后必须写 DB durable repair marker，audit event 不能替代 marker。repair 采用当场重试一次、后台退避重试、下次访问懒修复三层触发。
-- **rollout mode 使用显式阶段名**：selector 配置为 `disabled | shadow | enforce_narrow | enforce_guarded_multi`；旧 `enforce` 不作为兼容 alias。
+- **rollout mode 使用显式阶段名**：selector 配置为 `disabled | shadow | enforce_narrow | enforce_guarded_multi`；旧 `enforce` 不作为兼容 alias，运行时非法值 fail-closed 到 `disabled` 并写配置错误 audit。
 - **正文 upload_id 精准匹配系统生成规则**：当前上传 ID 生成格式为 `upl-` + 12 位十六进制字符；自然语言 exact-token extraction 只识别完整 token 正则 `(?<![A-Za-z0-9_-])upl-[0-9a-fA-F]{12}(?![A-Za-z0-9_-])`，再做服务端权限 / 状态校验。
 
 ## 2. 统一契约

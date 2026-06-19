@@ -4,6 +4,7 @@ import json
 import textwrap
 from datetime import datetime, timedelta
 from io import BytesIO
+from unittest.mock import patch
 
 from openpyxl import Workbook
 
@@ -16,6 +17,7 @@ from src.api.file_selection import (
     candidate_from_resource,
     deterministic_file_decision,
 )
+from src.core.enums import EventVisibility
 from src.core.models import TaskInputAttachment
 
 from tests.api.support import APITestCase
@@ -105,6 +107,27 @@ class ConversationFileSelectionAPITest(APITestCase):
         )
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["upload_id"]
+
+    def _assert_audit_payload_redacted(self, payload: object) -> None:
+        serialized = json.dumps(payload, ensure_ascii=False, default=str)
+        for forbidden in (
+            "storage_key",
+            "content_base64",
+            "mount_path",
+            "provider_payload",
+            "raw_payload",
+            "raw_prompt",
+            "raw_output",
+            "user_message",
+            "SECRET_VALUE",
+            "token=abc",
+            "api_key",
+            "Authorization",
+            "Bearer abc",
+            "/tmp/",
+            "/Users/",
+        ):
+            self.assertNotIn(forbidden, serialized)
 
     async def _upload_xlsx(
         self,
@@ -236,6 +259,78 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertNotIn("user_message", json.dumps(decision.payload, ensure_ascii=False))
         self.assertNotIn("content_base64", json.dumps(decision.payload, ensure_ascii=False))
         self.assertNotIn("storage_key", json.dumps(decision.payload, ensure_ascii=False))
+
+    async def test_selector_audit_release_catalog_is_audit_only_and_redacted(self) -> None:
+        auto_conversation = "conv-file-audit-catalog-auto"
+        auto_upload = await self._upload_csv(auto_conversation, "materials.csv")
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        auto_response = await self.submit_message(
+            conversation_id=auto_conversation,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+        self.assertEqual(auto_response.status_code, 202, auto_response.text)
+        auto_task_id = auto_response.json()["task_id"]
+        await self.runtime._await_existing_execution(auto_task_id)
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            return "not-json SECRET_VALUE_SHOULD_NOT_BE_AUDITED"
+
+        await self.reconfigure_runtime(skill_input_text_generator=selector_generator)
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+        invalid_conversation = "conv-file-audit-catalog-invalid"
+        first = await self._upload_csv(invalid_conversation, "first.csv")
+        await self._upload_csv(invalid_conversation, "second.csv")
+        invalid_response = await self.submit_message(
+            conversation_id=invalid_conversation,
+            capability_id=None,
+            content="请分析材料文件。",
+            metadata={
+                "file_requirement_profile": {
+                    "required": True,
+                    "disambiguation_hint": "storage_key=/tmp/private/secret.txt",
+                    "context_notes": ["safe note", "token=abc"],
+                }
+            },
+        )
+        self.assertEqual(invalid_response.status_code, 202, invalid_response.text)
+        invalid_task_id = invalid_response.json()["task_id"]
+        invalid_interrupt = next(item for item in await self.runtime.list_interrupts(invalid_task_id) if item["status"] == "open")
+        answer = await self.answer_interrupt_with_chat(
+            conversation_id=invalid_conversation,
+            interrupt_id=invalid_interrupt["interrupt_id"],
+            content=f"使用 {first}",
+        )
+        self.assertEqual(answer.status_code, 202, answer.text)
+        await self.runtime._await_existing_execution(invalid_task_id)
+
+        events = [
+            *(await self.runtime.storage.list_events_for_task(auto_task_id)),
+            *(await self.runtime.storage.list_events_for_task(invalid_task_id)),
+        ]
+        catalog_events = {
+            "conversation_file.file_selector_invoked",
+            "conversation_file.file_selector_decision_recorded",
+            "conversation_file.file_selector_invalid_output",
+            "conversation_file.file_selector_clarification_requested",
+            "conversation_file.file_selector_resumed_from_interrupt",
+            "conversation_file.file_selector_auto_bound",
+        }
+        by_type = {event.event_type: event for event in events if event.event_type in catalog_events}
+
+        self.assertEqual(set(by_type), catalog_events)
+        self.assertEqual(
+            next(
+                event
+                for event in await self.runtime.storage.list_events_for_task(auto_task_id)
+                if event.event_type == "conversation_file.file_selector_auto_bound"
+            ).payload["selected_upload_ids"],
+            [auto_upload],
+        )
+        for event in by_type.values():
+            self.assertEqual(event.visibility, EventVisibility.AUDIT_ONLY)
+            self._assert_audit_payload_redacted(event.payload)
 
     async def test_multiple_active_files_are_available_without_selector_interrupt(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce_narrow"
@@ -377,6 +472,112 @@ class ConversationFileSelectionAPITest(APITestCase):
         )
         self.assertEqual(self.runtime._normalize_conversation_file_selector_mode("enforce"), "disabled")
         self.assertEqual(self.runtime._normalize_conversation_file_selector_mode("unexpected"), "disabled")
+
+    async def test_selector_mode_runtime_bootstrap_records_invalid_mode_config_error(self) -> None:
+        with patch.dict("os.environ", {"MAF_CONVERSATION_FILE_SELECTOR_MODE": "enforce"}, clear=False):
+            await self.reconfigure_runtime()
+
+        self.assertEqual(self.runtime._conversation_file_selector_mode, "disabled")
+        self.assertFalse(self.runtime._conversation_file_selector_guarded_multi_select)
+        audit_log = (self.workspace / "audit.jsonl").read_text(encoding="utf-8")
+        self.assertIn("conversation_file.file_selector_config_invalid", audit_log)
+        self.assertIn("invalid_conversation_file_selector_mode", audit_log)
+        self.assertIn("enforce", audit_log)
+        self.assertNotIn("MAF_POSTGRES_STATE_DSN", audit_log)
+        self.assertNotIn("content_base64", audit_log)
+
+        with patch.dict("os.environ", {"MAF_CONVERSATION_FILE_SELECTOR_MODE": "enforce_guarded_multi"}, clear=False):
+            await self.reconfigure_runtime()
+
+        self.assertEqual(self.runtime._conversation_file_selector_mode, "enforce_guarded_multi")
+        self.assertTrue(self.runtime._conversation_file_selector_guarded_multi_select)
+
+        with patch.dict("os.environ", {"MAF_CONVERSATION_FILE_SELECTOR_MODE": "shadow"}, clear=False):
+            await self.reconfigure_runtime()
+
+        self.assertEqual(self.runtime._conversation_file_selector_mode, "shadow")
+        self.assertFalse(self.runtime._conversation_file_selector_guarded_multi_select)
+
+    async def test_disabled_rollback_keeps_context_without_selector_attachment_or_audit(self) -> None:
+        selector_calls = 0
+        captured_prompts: list[str] = []
+
+        def selector_generator(_prompt: str, **_kwargs) -> str:
+            nonlocal selector_calls
+            selector_calls += 1
+            return json.dumps({"decision": "select_one", "upload_ids": ["upl-deadbeef0000"], "confidence": 1})
+
+        def main_agent_generator(prompt: str, **_kwargs) -> list[str]:
+            captured_prompts.append(str(prompt))
+            return ["完成。"]
+
+        await self.reconfigure_runtime(
+            main_agent_stream_generator=main_agent_generator,
+            skill_input_text_generator=selector_generator,
+        )
+        self.runtime._conversation_file_selector_mode = "disabled"
+        conversation_id = "conv-file-disabled-rollback"
+        upload_id = await self._upload_csv(conversation_id, "materials.csv")
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请用当前会话文件做一个摘要。",
+            metadata={"file_requirement_profile": {"required": True}},
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.wait_for_terminal_task(task_id)
+        self.assertEqual(selector_calls, 0)
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+        event_types = [event.event_type for event in await self.runtime.storage.list_events_for_task(task_id)]
+        self.assertFalse(any(event_type.startswith("conversation_file.file_selector_") for event_type in event_types))
+        self.assertTrue(captured_prompts)
+        prompt = "\n".join(captured_prompts)
+        self.assertIn("materials.csv", prompt)
+        self.assertIn(upload_id, prompt)
+        history = await self.client.get(f"/api/v1/conversations/{conversation_id}/messages")
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertTrue(
+            any(message["message_type"] == "file_upload" and message["metadata"]["upload_id"] == upload_id for message in history.json()["messages"])
+        )
+
+    async def test_shadow_to_enforce_narrow_ordinary_question_keeps_execution_shape(self) -> None:
+        async def run_mode(mode: str) -> tuple[list[str], list[str], list[str]]:
+            prompts: list[str] = []
+
+            def main_agent_generator(prompt: str, **_kwargs) -> list[str]:
+                prompts.append(str(prompt))
+                return ["完成。"]
+
+            await self.reconfigure_runtime(main_agent_stream_generator=main_agent_generator)
+            self.runtime._conversation_file_selector_mode = mode
+            conversation_id = f"conv-file-ordinary-{mode}"
+            await self._upload_csv(conversation_id, "materials.csv")
+            response = await self.submit_message(
+                conversation_id=conversation_id,
+                capability_id=None,
+                content="请解释一下随机区组设计的基本概念。",
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            task_id = response.json()["task_id"]
+            await self.wait_for_terminal_task(task_id)
+            attachments = await self.runtime.storage.list_task_input_attachments_for_task(task_id)
+            interrupts = await self.runtime.list_interrupts(task_id)
+            event_types = [event.event_type for event in await self.runtime.storage.list_events_for_task(task_id)]
+            self.assertEqual(attachments, [])
+            self.assertEqual(interrupts, [])
+            return prompts, event_types, [attachment.source_upload_id for attachment in attachments]
+
+        shadow_prompts, shadow_events, shadow_attachment_ids = await run_mode("shadow")
+        enforce_prompts, enforce_events, enforce_attachment_ids = await run_mode("enforce_narrow")
+
+        self.assertEqual(shadow_attachment_ids, enforce_attachment_ids)
+        self.assertFalse(any(event_type == "conversation_file.file_selector_auto_bound" for event_type in shadow_events))
+        self.assertFalse(any(event_type == "conversation_file.file_selector_auto_bound" for event_type in enforce_events))
+        self.assertTrue(shadow_prompts)
+        self.assertTrue(enforce_prompts)
 
     async def test_upload_id_token_requires_exact_generated_shape(self) -> None:
         conversation_id = "conv-file-upload-id-token"
@@ -801,6 +1002,10 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertEqual({attachment.source_upload_id for attachment in attachments}, {first, second})
         self.assertTrue(all(attachment.source_kind == "file_selector" for attachment in attachments))
         self.assertEqual(await self.runtime.list_interrupts(task_id), [])
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        auto_bound = next(event for event in events if event.event_type == "conversation_file.file_selector_auto_bound")
+        self.assertEqual(auto_bound.payload["multi_select_resolution"], "multi_select_auto_bound")
+        self._assert_audit_payload_redacted(auto_bound.payload)
 
     async def test_guarded_multi_still_requires_explicit_multi_intent(self) -> None:
         conversation_id = "conv-file-guarded-multi-no-intent"
@@ -991,6 +1196,15 @@ class ConversationFileSelectionAPITest(APITestCase):
         self.assertEqual({attachment.source_upload_id for attachment in attachments}, {first, second})
         self.assertTrue(all(attachment.source_kind == "file_selector" for attachment in attachments))
         self.assertTrue(all(attachment.interrupt_answer_id for attachment in attachments))
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        resumed = [
+            event
+            for event in events
+            if event.event_type == "conversation_file.file_selector_resumed_from_interrupt"
+            and set(event.payload.get("selected_upload_ids", [])) == {first, second}
+        ][-1]
+        self.assertEqual(resumed.payload["multi_select_resolution"], "multi_select_confirmed_by_user")
+        self._assert_audit_payload_redacted(resumed.payload)
 
     async def test_guarded_multi_interrupt_answer_exact_upload_ids_without_multi_intent_clarifies(self) -> None:
         self.runtime._conversation_file_selector_mode = "enforce_guarded_multi"
@@ -1307,6 +1521,84 @@ class ConversationFileSelectionAPITest(APITestCase):
         )
         self.assertEqual(decision.decision, "ambiguous")
         self.assertEqual(decision.reason_code, "unknown_upload_id")
+
+    async def test_repair_pending_disabled_context_uses_db_resources_not_stale_index(self) -> None:
+        conversation_id = "conv-file-repair-disabled-db-truth"
+        active_id = await self._upload_csv(conversation_id, "active.csv")
+        deleted_id = await self._upload_csv(conversation_id, "deleted.csv")
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": conversation_id, "upload_id": deleted_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        (self.runtime.conversation_file_store.conversation_dir(conversation_id) / "index.md").write_text(
+            f"# stale index\n- {deleted_id} deleted.csv should not be trusted\n",
+            encoding="utf-8",
+        )
+        await self.runtime.storage.record_conversation_file_index_repair_required(
+            conversation_id,
+            reason_code="test_stale_index_pending",
+            affected_upload_ids=(deleted_id,),
+            now=self.runtime._utcnow_naive(),
+        )
+        self.runtime._conversation_file_selector_mode = "disabled"
+
+        resolved = await self.runtime.resolve_conversation_uploads_for_message(conversation_id, "acc-1")
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content="请用当前会话文件做摘要。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        await self.runtime._await_existing_execution(task_id)
+        self.assertEqual([artifact["upload_id"] for artifact in resolved["uploaded_artifacts"]], [active_id])
+        serialized = json.dumps(resolved, ensure_ascii=False, default=str)
+        self.assertNotIn(deleted_id, serialized)
+        self.assertNotIn("deleted.csv", serialized)
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
+
+    async def test_repair_pending_selector_candidates_use_db_resources_not_stale_index(self) -> None:
+        conversation_id = "conv-file-repair-selector-db-truth"
+        active_id = await self._upload_csv(conversation_id, "active.csv")
+        deleted_id = await self._upload_csv(conversation_id, "deleted.csv")
+        deleted = await self.client.request(
+            "DELETE",
+            "/api/v1/conversations/uploads",
+            json={"conversation_id": conversation_id, "upload_id": deleted_id},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        (self.runtime.conversation_file_store.conversation_dir(conversation_id) / "index.md").write_text(
+            f"# stale index\n- {deleted_id} deleted.csv should not be trusted\n",
+            encoding="utf-8",
+        )
+        await self.runtime.storage.record_conversation_file_index_repair_required(
+            conversation_id,
+            reason_code="test_stale_index_pending",
+            affected_upload_ids=(deleted_id,),
+            now=self.runtime._utcnow_naive(),
+        )
+        self.runtime._conversation_file_selector_mode = "enforce_narrow"
+
+        response = await self.submit_message(
+            conversation_id=conversation_id,
+            capability_id=None,
+            content=f"请使用 {deleted_id} 这个文件。",
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        interrupts = await self.runtime.list_interrupts(task_id)
+        self.assertEqual(len(interrupts), 1)
+        selection = interrupts[0]["required_fields"]["_file_selection"]
+        self.assertEqual(selection["reason_code"], "unknown_upload_id")
+        self.assertEqual(selection["candidate_upload_ids"], [active_id])
+        serialized = json.dumps(selection, ensure_ascii=False, default=str)
+        self.assertNotIn(deleted_id, serialized)
+        self.assertNotIn("deleted.csv", serialized)
+        self.assertEqual(await self.runtime.storage.list_task_input_attachments_for_task(task_id), [])
 
     async def test_recent_usage_ignores_file_upload_history_without_task_attachment(self) -> None:
         conversation_id = "conv-file-recent-history"

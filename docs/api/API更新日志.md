@@ -1,5 +1,29 @@
 # API 更新日志
 
+## 2026-06-19
+
+### 更新摘要
+
+对话文件历史与智能选择进入发布门禁：客户端仍使用既有上传、消息、历史、interrupt 与 SSE 接口；新增行为主要体现在 history 可返回安全的 `message_type=file_upload` system message、自然语言文件引用可触发文件选择澄清，以及后端 selector 灰度 / 回滚审计。未新增公开 endpoint。
+
+### `/api/v1/conversations/{conversation_id}/messages`
+
+- 历史消息可包含 `role=system` 且 `message_type=file_upload` 的上传事件卡片；这是唯一允许公开返回的 system message 类型。前端只应展示 `metadata.filename`、`upload_id`、`description_summary`、`description_status`、`file_status` 等安全字段。
+- deleted 上传仍可作为历史事实展示，但 `metadata.file_status=deleted` 表示不可复用；它不会进入 active context、selector candidates、task attachment 或 Skill manifest。
+- file_upload metadata 不包含本地路径、`storage_key`、完整正文、`content`、`content_base64` 或 secret。
+
+### `/api/v1/conversations/uploads` 与删除
+
+- 上传成功的定义包含原始文件、DB resource、`file_upload` history message 与 `index.md` 投影；写入失败会 fail closed 或记录 repair marker，不能返回“resource 成功但 history/index 失败”的不一致成功。
+- 删除上传会同步标记 resource 与 `file_upload` history；历史仍可展示 deleted 文件，但后续消息或 interrupt answer 不能复用 deleted upload。
+- `index.md` repair pending 时，后端继续以 DB resource 作为事实源；客户端不应依赖本地索引文件判断文件可用性。
+
+### `/api/v1/conversations/chat-messages` 与文件选择 interrupt
+
+- 没有显式 `metadata.upload_ids` 时，active conversation files 仍可作为默认上下文；但明确 `upload_id`、文件名、序号、recent usage continuation 或 Skill 文件需求会触发后端 selector / deterministic selection。
+- 低置信、多候选、同名候选或 invalid selector output 会进入既有聊天式 interrupt；客户端继续通过同一个 `chat-messages` 端点提交自然语言回答、`upload_id`、序号或替换上传。
+- selector rollout mode 为服务端配置：`disabled` 会停止 selector attachment/audit 并保留默认 conversation file context；`shadow` 只审计；`enforce_narrow` 执行窄触发；`enforce_guarded_multi` 才允许受控多文件自动绑定。旧 `enforce` 配置会 fail closed 到 `disabled` 并记录 audit。
+
 ## 2026-06-17
 
 ### 更新摘要

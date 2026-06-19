@@ -2,7 +2,7 @@
 
 - **编号**：后端 PRD 21-Phase 5
 - **日期**：2026-06-19
-- **状态**：待实施
+- **状态**：已实施
 - **前置阶段**：阶段四 selector 消歧、interrupt 与绑定
 - **目标模块**：runtime feature flags、audit sink、API/frontend docs、release checks、rollout/rollback config
 
@@ -143,3 +143,12 @@ cd frontend && npm run typecheck
 - audit 事件足以解释每次自动选择、澄清、恢复、失败和 repair。
 - 全量 release gate 通过或明确记录无法运行的验证缺口。
 - 文档和索引指向阶段化 PRD 入口，不再只依赖单一长篇 PRD。
+
+## 11. 实施记录（2026-06-19）
+
+- 运行时 selector mode allowlist 已收敛到 `disabled | shadow | enforce_narrow | enforce_guarded_multi`；非法/旧 `enforce` 配置启动时 fail-closed 到 `disabled`，并记录 `conversation_file.file_selector_config_invalid` audit。
+- `disabled` 回滚测试覆盖：不调用 selector、不写 selector attachment/audit，同时保留 active conversation file context 与 `file_upload` history。
+- audit 回归覆盖 selector invoked / decision / invalid output / clarification / resumed / auto bound、upload history upsert/delete 与 index repair required；payload 静态断言不含路径、`storage_key`、正文、base64、secret。
+- guarded multi-select audit 已区分 `multi_select_auto_bound` 与 `multi_select_confirmed_by_user`；默认仍仅在 `enforce_guarded_multi` 且明确多文件意图/allow_multiple 成立时自动多绑定。
+- repair pending 与 deleted 排除均以 DB resource 为事实源，不使用旧 `index.md` 作为 selector / rollback 自动选择依据。
+- 发布门禁执行记录以本阶段最终提交和 `CHANGELOG.md` 为准；后续若放量 guarded multi-select，应追加独立灰度指标与前端/运营说明。

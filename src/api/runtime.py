@@ -231,6 +231,10 @@ _V2_INTERRUPT_RAW_ANSWER_ALLOWED_KEYS = frozenset(
 CONVERSATION_FILE_INDEX_REPAIR_REQUIRED_EVENT = "conversation_file.file_upload_index_repair_required"
 CONVERSATION_FILE_INDEX_REPAIR_RESOLVED_EVENT = "conversation_file.file_upload_index_repair_resolved"
 CONVERSATION_FILE_INDEX_REPAIR_FAILED_EVENT = "conversation_file.file_upload_index_repair_failed"
+CONVERSATION_FILE_SELECTOR_CONFIG_INVALID_EVENT = "conversation_file.file_selector_config_invalid"
+CONVERSATION_FILE_SELECTOR_ALLOWED_MODES = frozenset(
+    {"disabled", "shadow", "enforce_narrow", "enforce_guarded_multi"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,9 +384,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
         self._mcp_refresh_lock = asyncio.Lock()
-        self._conversation_file_selector_mode = self._normalize_conversation_file_selector_mode(
-            os.environ.get("MAF_CONVERSATION_FILE_SELECTOR_MODE", "disabled")
-        )
+        raw_selector_mode = os.environ.get("MAF_CONVERSATION_FILE_SELECTOR_MODE", "disabled")
+        self._conversation_file_selector_mode = self._normalize_conversation_file_selector_mode(raw_selector_mode)
+        self._record_invalid_conversation_file_selector_mode(raw_selector_mode, self._conversation_file_selector_mode)
         self._conversation_file_selector_guarded_multi_select = (
             self._conversation_file_selector_mode == "enforce_guarded_multi"
         )
@@ -6462,9 +6466,25 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     @staticmethod
     def _normalize_conversation_file_selector_mode(raw_mode: object) -> str:
         mode = str(raw_mode or "disabled").strip().lower()
-        if mode in {"disabled", "shadow", "enforce_narrow", "enforce_guarded_multi"}:
+        if mode in CONVERSATION_FILE_SELECTOR_ALLOWED_MODES:
             return mode
         return "disabled"
+
+    def _record_invalid_conversation_file_selector_mode(self, raw_mode: object, normalized_mode: str) -> None:
+        mode = str(raw_mode or "disabled").strip().lower()
+        if mode in CONVERSATION_FILE_SELECTOR_ALLOWED_MODES or self._audit_sink is None:
+            return
+        invalid_mode = ConversationFileSelectionRuntimeMixin._safe_audit_text(str(raw_mode or ""))
+        self._audit_sink.record_sync(
+            CONVERSATION_FILE_SELECTOR_CONFIG_INVALID_EVENT,
+            {
+                "config_key": "MAF_CONVERSATION_FILE_SELECTOR_MODE",
+                "invalid_mode": invalid_mode or "[redacted]",
+                "normalized_mode": normalized_mode,
+                "reason_code": "invalid_conversation_file_selector_mode",
+                "allowed_modes": sorted(CONVERSATION_FILE_SELECTOR_ALLOWED_MODES),
+            },
+        )
 
     @staticmethod
     def _canonical_capability_id(capability_id: str | None) -> str | None:

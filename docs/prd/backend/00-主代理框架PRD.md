@@ -89,7 +89,7 @@
 | 失败自检、恢复与 Fallback 控制层 | `docs/prd/backend/18-失败自检恢复与Fallback控制层PRD.md` | 节点异常归一、retry/timeout、SSE 重连、artifact 重试、upload warning、审计隔离、sidecar bounded retry 与 LLM provider fallback 策略 |
 | 表格上传编码兼容与表头规范化分步实施 | `docs/prd/backend/table-upload-normalization/README.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt、prompt-safe 摘要上限与 Skill artifact 规范化输入 |
 | 对话文件本地资源文件系统 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件本地持久化、`index.md` 文件索引、Skill workspace manifest / mount_path 与删除清理语义 |
-| 对话文件历史与智能选择分步实施 | `docs/prd/backend/conversation-file-history-selection/README.md` | 将合并后的 PRD 21 拆成数据模型、上传历史、memory 安全、selector shadow、interrupt 绑定、灰度发布六个可独立验收阶段；父兼容入口保留在 `docs/prd/backend/21-对话文件历史与智能选择PRD.md` |
+| 对话文件历史与智能选择分步实施 | `docs/prd/backend/conversation-file-history-selection/README.md` | 将合并后的 PRD 21 拆成数据模型、上传历史、memory 安全、selector shadow、interrupt 绑定、灰度发布六个可独立验收阶段；阶段零至阶段五已实施，父兼容入口保留在 `docs/prd/backend/21-对话文件历史与智能选择PRD.md` |
 | Skill 运行闭环 Workbench 总纲 | `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 平台层 Skill 运行闭环、内部 workbench capability、Skill 执行后验证、受控重编排与安全 digest 总体设计 |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
@@ -221,7 +221,9 @@
 - recent usage 必须来自 task attachment / selector binding / interrupt answer / sheet selection 等实际使用 provenance，不得只根据上传时间推断。
 - deleted 文件保留为历史事实，但必须在 API、前端卡片和 prompt 中标记不可复用，且不得进入 active context、selector、binding 或 Skill manifest。
 - `index.md` 是 DB 投影而非权限事实源；重写失败必须写 DB durable repair marker，并按当场重试、后台退避、下次访问懒修复恢复；repair pending 时 selector / rollback 都必须以 DB resource 为准，不得信任旧 index。
-- selector rollout mode 只接受 `disabled`、`shadow`、`enforce_narrow`、`enforce_guarded_multi`；旧 `enforce` 不保留兼容 alias。
+- selector rollout mode 只接受 `disabled`、`shadow`、`enforce_narrow`、`enforce_guarded_multi`；旧 `enforce` 不保留兼容 alias，运行时遇到非法值必须 fail-closed 到 `disabled` 并记录 `conversation_file.file_selector_config_invalid` audit。
+- `disabled` 回滚模式停止 selector attachment 与 selector audit，但保留 active conversation file context、`file_upload` history 展示和 deleted 不可复用约束；`index.md` repair pending 时继续以 DB resource 构造 active context / selector candidates，不得信任旧投影。
+- guarded multi-select 默认关闭；只有 `enforce_guarded_multi` 且 allow_multiple / 明确比较合并意图成立时才允许自动多绑定，audit 必须区分 `multi_select_auto_bound` 与 `multi_select_confirmed_by_user`。
 - 未来 Skill 文件需求必须由 contract/schema 的 `file_selection` 最终字段驱动，平台不得硬编码当前 Skill 名称；不得接受 `file_intent`、旧 schema `type: file/artifact/data` 或别名字段作为交付契约；实施时必须同步更新 `breeding-skill-builder` 的模板、checklist 和指南。
 - 第一阶段不 backfill 旧文件，避免伪造历史上传时序；旧 active resources 仍可通过文件池和 selector 使用。
 

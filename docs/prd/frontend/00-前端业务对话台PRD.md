@@ -62,6 +62,13 @@
 | 查询产物 | `GET /api/v1/tasks/{task_id}/artifacts` | 获取主代理最终文本与 结构化表格结果预览。 |
 | 查询能力目录 | `GET /api/v1/capabilities` | 确认当前 public capability：主代理与已安装 public Skill。 |
 
+### 4.1.1 对话文件历史与自然语言选择补充（2026-06-19）
+
+- 历史接口可返回 `role=system` 且 `message_type=file_upload` 的公开 system message；这是上传事件卡片，不是内部系统消息。前端只展示 `metadata.filename`、`upload_id`、`description_summary`、`description_status`、`file_status` 等 allowlist 字段。
+- `file_status=deleted` 的上传仍可在历史中展示，但必须提示“已删除 / 不可复用”；前端不得把 deleted upload 重新放入发送附件、任务附件或 sheet selection。
+- 普通消息可继续显式提交 `metadata.upload_ids`；若用户只用自然语言提到“刚才那个文件”“materials.csv”“第一份表”或粘贴完整 `upl-` + 12 位十六进制 `upload_id`，后端会在 selector rollout 下自行缩窄、自动绑定或打开 `file_selection_ambiguous` / `no_files_in_conversation` 等聊天式 interrupt。
+- file selection interrupt 沿用 `chat-messages` 作为回答入口；用户下一条自然语言、序号、upload_id 或替换上传都作为 interrupt answer 继续原任务，不新增前端点选组件。
+
 ### 4.2 提交消息契约
 
 请求体字段来自 `src/api/dto.py`：
@@ -211,6 +218,7 @@ v1 采用单页业务对话台：
 - `task.failed` / `node.failed`：显示“本次任务未完成”，并根据 payload code 映射业务提示。
 - SQL Guard 阻断通过 `task.failed` / `node.failed` 的安全错误 payload 映射提示“该查询不符合当前只读查询安全边界，请改用查询类问题”。
 - interrupt 相关等待：前端通过任务图与 interrupt API 发现 `waiting_for_input` 后展示补充信息卡片；用户下一条输入应作为 interrupt answer 继续原任务，而不是提交新任务或要求重新提问。
+- 文件选择相关等待：当 `reason_code=file_selection_ambiguous`、`no_files_in_conversation` 或其他文件选择澄清原因出现时，补充信息卡片直接展示后端 `question`；回答仍走普通输入框，前端不暴露 selector 审计、候选内部分数、文件路径或 `storage_key`。
 
 ## 7. 数据查询结果卡片
 

@@ -205,6 +205,12 @@ class UploadsAPITest(APITestCase):
         self.assertFalse(
             (self.runtime.conversation_file_store.conversation_dir("conv-upload-index-fail") / upload_id).exists()
         )
+        audit_log = (self.workspace / "audit.jsonl").read_text(encoding="utf-8")
+        self.assertIn("conversation_file.file_upload_index_repair_required", audit_log)
+        self.assertIn("upload_index_write_failed", audit_log)
+        self.assertNotIn("storage_key", audit_log)
+        self.assertNotIn("content_base64", audit_log)
+        self.assertNotIn("ped_id,value", audit_log)
 
     async def test_upload_composite_db_failure_compensates_local_and_memory_state(self) -> None:
         original_save_composite = self.runtime.storage.save_conversation_file_resource_with_upload_message

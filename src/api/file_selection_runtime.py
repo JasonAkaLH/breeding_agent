@@ -141,10 +141,16 @@ class ConversationFileSelectionRuntimeMixin:
             if await self._has_open_interrupt(task.task_id):
                 return True
             metadata.update(await self._conversation_file_context_metadata_for_task(task))
+            auto_bound_payload: dict[str, Any] = {
+                "selected_upload_ids": list(decision.upload_ids),
+                "source": "submit_message",
+            }
+            if len(decision.upload_ids) > 1:
+                auto_bound_payload["multi_select_resolution"] = "multi_select_auto_bound"
             await self._record_file_selection_audit_event(
                 task=task,
                 event_type="conversation_file.file_selector_auto_bound",
-                payload={"selected_upload_ids": list(decision.upload_ids), "source": "submit_message"},
+                payload=auto_bound_payload,
             )
             return False
         await self._open_file_selection_interrupt(
@@ -732,14 +738,17 @@ class ConversationFileSelectionRuntimeMixin:
                 created_at=self._utcnow_naive(),
             )
         )
+        resumed_payload: dict[str, Any] = {
+            "decision": decision.decision,
+            "reason_code": decision.reason_code,
+            "selected_upload_ids": list(decision.upload_ids),
+        }
+        if len(decision.upload_ids) > 1:
+            resumed_payload["multi_select_resolution"] = "multi_select_confirmed_by_user"
         await self._record_file_selection_audit_event(
             task=task,
             event_type="conversation_file.file_selector_resumed_from_interrupt",
-            payload={
-                "decision": decision.decision,
-                "reason_code": decision.reason_code,
-                "selected_upload_ids": list(decision.upload_ids),
-            },
+            payload=resumed_payload,
         )
         if await self._has_open_interrupt(task.task_id):
             self._task_file_selection_resume_metadata.pop(task.task_id, None)
