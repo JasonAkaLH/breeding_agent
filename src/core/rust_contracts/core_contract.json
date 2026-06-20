@@ -365,6 +365,18 @@
       "delete_error_summary",
       "delete_phase"
     ],
+    "ConversationFileIndexRepairMarker": [
+      "conversation_id",
+      "repair_kind",
+      "status",
+      "reason_code",
+      "affected_upload_ids",
+      "attempt_count",
+      "next_retry_at",
+      "created_at",
+      "updated_at",
+      "resolved_at"
+    ],
     "ConversationMemorySummary": [
       "summary_id",
       "conversation_id",
@@ -392,6 +404,13 @@
       "event_type",
       "payload",
       "visibility",
+      "created_at"
+    ],
+    "FileUploadMessageProjection": [
+      "upload_id",
+      "conversation_id",
+      "content",
+      "metadata",
       "created_at"
     ],
     "Interrupt": [
@@ -503,25 +522,6 @@
       "output_refs",
       "started_at",
       "finished_at"
-    ],
-    "FileUploadMessageProjection": [
-      "upload_id",
-      "conversation_id",
-      "content",
-      "metadata",
-      "created_at"
-    ],
-    "ConversationFileIndexRepairMarker": [
-      "conversation_id",
-      "repair_kind",
-      "status",
-      "reason_code",
-      "affected_upload_ids",
-      "attempt_count",
-      "next_retry_at",
-      "created_at",
-      "updated_at",
-      "resolved_at"
     ]
   },
   "error_codes": [

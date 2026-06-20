@@ -9,8 +9,7 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
-pub const SCHEMA_HASH: &str =
-    "maf_core_types_core_v1_schema_20260526_auth_generation_strong_conversation_delete";
+pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260619_auth_generation_message_public_history_file_index_repair_marker";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,6 +462,9 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "task_id",
                 "stream_status",
                 "created_at",
+                "message_type",
+                "metadata",
+                "updated_at",
             ]),
         ),
         (
@@ -502,6 +504,31 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "output_refs",
                 "started_at",
                 "finished_at",
+            ]),
+        ),
+        (
+            "FileUploadMessageProjection".to_owned(),
+            fields(&[
+                "upload_id",
+                "conversation_id",
+                "content",
+                "metadata",
+                "created_at",
+            ]),
+        ),
+        (
+            "ConversationFileIndexRepairMarker".to_owned(),
+            fields(&[
+                "conversation_id",
+                "repair_kind",
+                "status",
+                "reason_code",
+                "affected_upload_ids",
+                "attempt_count",
+                "next_retry_at",
+                "created_at",
+                "updated_at",
+                "resolved_at",
             ]),
         ),
     ])
