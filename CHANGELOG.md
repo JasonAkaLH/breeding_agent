@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 2026-06-23
+
+- Docker 开发环境镜像发布为 `0.1.20`：按当前 `main` 构建并推送 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.20` 与 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.20`，用于发布对话文件历史与智能选择完整实现、API/前端文档同步以及 Rust core contract 对齐修复；远端 manifest 已验证：backend `sha256:87539f083ec378be409e64450ede23778cee5c8b3da6b5827e5105660b650d0e`，frontend `sha256:b048fe0edec6a21414f4bd9c688ee86665cad90443223e343afa53035ebcb116`；`docker_cmd.md` 开发环境启动命令同步改为 `0.1.20`。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。
+
 ### 2026-06-19
 
 - 对话文件历史与智能选择 Phase 5 已落地：补齐灰度发布审计与回归门禁，selector mode 运行时只接受 `disabled|shadow|enforce_narrow|enforce_guarded_multi`，旧 `enforce` 配置启动时 fail-closed 到 disabled 并写 `conversation_file.file_selector_config_invalid` audit；disabled 回滚保持 active conversation file context 与 `file_upload` 历史展示但停止 selector attachment/audit，repair pending 与 deleted 排除均以 DB resource 为事实源；selector audit catalog 覆盖 invoked/decision/invalid/clarification/resume/auto_bound，payload 脱敏且 guarded multi-select 区分 `multi_select_auto_bound` 与 `multi_select_confirmed_by_user`。同步 API/前端/PRD/Future Work 文档，并新增发布门禁与周边联通回归。License Requirement：代码/测试/文档变更，无新增依赖/许可变更。
