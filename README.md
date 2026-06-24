@@ -122,7 +122,7 @@ docker compose up
 git clone git@gitee.com:wellionx/vibe-breeding.git /data/peihai/vibe-skill
 ```
 
-Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`，Skill bundle 通过 `/data/peihai/vibe-skill/skills:/app/skill:ro` 只读挂载进入 backend 容器。
+Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/seedpilot/api/`、`/seedpilot/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999/seedpilot/`，经前端 nginx 访问 API 文档 `http://127.0.0.1:51999/seedpilot/api-doc`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`，Skill bundle 通过 `/data/peihai/vibe-skill/skills:/app/skill:ro` 只读挂载进入 backend 容器。
 
 `.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
 

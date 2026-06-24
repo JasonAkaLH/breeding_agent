@@ -34,6 +34,9 @@ services:
       context: .
       dockerfile: Dockerfile
       target: frontend
+      args:
+        VITE_APP_BASE_PATH: /seedpilot/
+        VITE_API_BASE_URL: /seedpilot
     image: breeding-agent-frontend:local
     depends_on:
       backend:
@@ -41,7 +44,7 @@ services:
     ports:
       - "51999:80"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/seedpilot/"]
       interval: 30s
       timeout: 5s
       start_period: 10s

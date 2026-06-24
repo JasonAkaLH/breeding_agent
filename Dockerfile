@@ -2,6 +2,11 @@ FROM node:25-bookworm AS frontend-build
 
 WORKDIR /workspace/frontend
 
+ARG VITE_APP_BASE_PATH=/seedpilot/
+ARG VITE_API_BASE_URL=/seedpilot
+ENV VITE_APP_BASE_PATH=${VITE_APP_BASE_PATH} \
+    VITE_API_BASE_URL=${VITE_API_BASE_URL}
+
 COPY frontend/package*.json ./
 RUN npm ci
 
@@ -84,11 +89,11 @@ RUN apt-get update \
     && rm -f /etc/nginx/sites-enabled/default
 
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=frontend-build /workspace/frontend/dist /usr/share/nginx/html
+COPY --from=frontend-build /workspace/frontend/dist/ /usr/share/nginx/html/seedpilot/
 
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1/ >/dev/null || exit 1
+    CMD curl -fsS http://127.0.0.1/seedpilot/ >/dev/null || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

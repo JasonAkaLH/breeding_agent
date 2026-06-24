@@ -12,6 +12,7 @@
 
 - 生产镜像构建与 Skill 部署解耦：`Dockerfile` 不再要求仓库内存在 `skill/` 才能构建 backend，而是在镜像内创建空 `/app/skill` 挂载点；`docker-compose.yml` 将服务器 `/data/peihai/vibe-skill/skills` 只读挂载到容器 `/app/skill`，配合独立 Skill 仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 目录部署。`README.md` 与 `AGENTS.md` 同步说明内置 `skill/` 已退役，生产应更新/挂载独立 Skill 仓库。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 - `/api/v1/capabilities` 现在会在返回列表前刷新 Skill bundle 指纹：新增、删除或更新外部 Skill 仓库内容后，下一次 capability 列表请求即可同步最新公开 Skill；刷新失败时保留上一版列表并记录 `skill.bundle_refresh_failed` 审计，避免列表接口因可恢复的 Skill 同步问题直接不可用。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+- 生产前端部署路径恢复为 `/seedpilot/`：Docker build 默认注入 `VITE_APP_BASE_PATH=/seedpilot/` 与 `VITE_API_BASE_URL=/seedpilot`，nginx 只服务 `/seedpilot/` 并把 `/seedpilot/api/*` 重写到后端 `/api/*`，根路径 `/` 返回 404。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
 
 ### 2026-06-18
 
