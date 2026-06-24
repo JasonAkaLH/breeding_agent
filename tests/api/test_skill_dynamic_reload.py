@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+from src.integrations.agent_skills.skill_runtime_state import SkillRuntimeRefreshResult
 from tests.api.support import APITestCase
 
 
@@ -211,6 +212,40 @@ entrypoints:
                 )
 
         self.assertEqual(self.runtime._skill_runtime_state.active_revision, previous_revision)  # noqa: SLF001
-        after = await self.client.get("/api/v1/capabilities")
-        after_ids = {item["capability_id"] for item in after.json()["capabilities"]}
+        after_ids = {descriptor.capability_id for descriptor in self.runtime.capability_registry.list(public_only=True)}
         self.assertEqual(before_ids, after_ids)
+
+    async def test_new_conversation_refresh_failed_result_raises_before_submit_message(self) -> None:
+        project_skill_root = self.workspace / "skill"
+        self._write_skill(project_skill_root, name="baseline-skill", description="基础 Skill")
+        await self.reconfigure_runtime(skill_roots=(project_skill_root,), public_skill_roots=(project_skill_root,))
+        previous_revision = self.runtime._skill_runtime_state.active_revision  # noqa: SLF001 - test validates refresh seam
+
+        failed_result = SkillRuntimeRefreshResult(
+            status="failed",
+            reason="conversation_start",
+            previous_revision=previous_revision,
+            active_revision=previous_revision,
+            registered_count=1,
+            skipped_count=0,
+            duration_ms=1,
+            script_package_snapshot=False,
+            error_type="RuntimeError",
+        )
+        with patch.object(self.runtime._skill_runtime_state, "refresh_if_changed", return_value=failed_result):  # noqa: SLF001
+            with self.assertRaises(RuntimeError):
+                await self.submit_message(
+                    conversation_id="conv-refresh-failed-result",
+                    content="触发刷新返回失败",
+                    capability_id=None,
+                )
+
+        audit_records = [
+            json.loads(line)
+            for line in (self.workspace / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        failed = [record for record in audit_records if record["event_type"] == "skill.bundle_refresh_failed"]
+        self.assertTrue(failed)
+        self.assertEqual(failed[-1]["payload"]["reason"], "conversation_start")
+        self.assertEqual(failed[-1]["payload"]["fallback_revision"], previous_revision)

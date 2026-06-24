@@ -15,6 +15,7 @@ def _runtime(request: Request) -> ApiRuntime:
 @router.get("/api/v1/capabilities", response_model=CapabilityListResponse)
 async def list_capabilities(request: Request) -> CapabilityListResponse:
     runtime = _runtime(request)
+    await runtime.refresh_skills_for_capabilities_list()
     return CapabilityListResponse(
         capabilities=[
             CapabilityResponse(
