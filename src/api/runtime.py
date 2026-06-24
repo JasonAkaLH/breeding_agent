@@ -6511,30 +6511,106 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             tasks = await self.storage.list_tasks_for_conversation(conversation_id)
             if tasks:
                 return
-        async with self._skill_refresh_lock:
+
+        async def _still_new_conversation() -> bool:
             if existing_conversation is not None:
                 tasks = await self.storage.list_tasks_for_conversation(conversation_id)
                 if tasks:
-                    return
-            self._record_skill_refresh_started("conversation_start")
+                    return False
+            return True
+
+        await self._refresh_skills_if_changed(
+            reason="conversation_start",
+            raise_on_refresh_error=True,
+            pre_refresh_check=_still_new_conversation,
+        )
+
+    async def refresh_skills_for_capabilities_list(self) -> SkillRuntimeRefreshResult | None:
+        return await self._refresh_skills_if_changed(
+            reason="capabilities_list",
+            raise_on_refresh_error=False,
+        )
+
+    async def _refresh_skills_if_changed(
+        self,
+        *,
+        reason: str,
+        raise_on_refresh_error: bool,
+        pre_refresh_check: Callable[[], Any] | None = None,
+    ) -> SkillRuntimeRefreshResult | None:
+        if self._skill_runtime_state is None:
+            return None
+        async with self._skill_refresh_lock:
+            if pre_refresh_check is not None:
+                should_refresh = pre_refresh_check()
+                if inspect.isawaitable(should_refresh):
+                    should_refresh = await should_refresh
+                if not should_refresh:
+                    return None
+            self._record_skill_refresh_started(reason)
             previous_revision = self._skill_runtime_state.active_revision
             self._skill_runtime_state.retain_revision(previous_revision)
             try:
-                result = self._skill_runtime_state.refresh_if_changed(reason="conversation_start")
+                result = self._skill_runtime_state.refresh_if_changed(reason=reason)
+                if result.status == "failed":
+                    self._record_skill_refresh_audit(result)
+                    if raise_on_refresh_error:
+                        raise RuntimeError(f"Skill runtime refresh failed: {result.error_type or 'unknown'}")
+                    return result
                 if result.status == "completed":
                     try:
                         self._sync_skill_capability_registry()
-                    except Exception:
+                    except Exception as exc:
                         self._skill_runtime_state.activate_revision(previous_revision)
-                        raise
+                        failed_result = self._skill_refresh_sync_failed_result(
+                            result,
+                            previous_revision=previous_revision,
+                            error_type=type(exc).__name__,
+                        )
+                        self._record_skill_refresh_audit(failed_result)
+                        if raise_on_refresh_error:
+                            raise
+                        return failed_result
                     if self._audit_sink is not None:
                         _record_skill_capability_startup_audit(
                             self._audit_sink,
                             self._skill_runtime_state.active_bundle.skill_capabilities,
                         )
                 self._record_skill_refresh_audit(result)
+                return result
             finally:
                 self._skill_runtime_state.release_revision(previous_revision)
+
+    def _skill_refresh_sync_failed_result(
+        self,
+        result: SkillRuntimeRefreshResult,
+        *,
+        previous_revision: str,
+        error_type: str,
+    ) -> SkillRuntimeRefreshResult:
+        active = (
+            self._skill_runtime_state.active_bundle
+            if self._skill_runtime_state is not None
+            else None
+        )
+        registered_count = result.registered_count
+        skipped_count = result.skipped_count
+        script_package_snapshot = result.script_package_snapshot
+        if active is not None:
+            registered_count = len(active.skill_capabilities.descriptors)
+            skipped_count = len(active.skill_capabilities.diagnostics)
+            script_package_snapshot = active.script_package_snapshot
+        return SkillRuntimeRefreshResult(
+            status="failed",
+            reason=result.reason,
+            previous_revision=previous_revision,
+            active_revision=previous_revision,
+            registered_count=registered_count,
+            skipped_count=skipped_count,
+            duration_ms=result.duration_ms,
+            script_package_snapshot=script_package_snapshot,
+            error_type=error_type,
+        )
 
     def _sync_skill_capability_registry(self) -> None:
         if self._skill_runtime_state is None:

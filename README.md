@@ -11,7 +11,7 @@
 | `requirements.txt` | `multi_agent` Conda 环境依赖快照。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/` 其他文件 | Capability 接入指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
-| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，构建约束与模板见独立 Skill 仓库 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`，模板/清单由该仓库 references 维护。 |
+| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，构建约束与模板见独立 Skill 仓库 `git@gitee.com:biobin/breeding-skill-builder.git` 的 `references/Skill构建指南.md`，模板/清单由该仓库 references 维护。`GET /api/v1/capabilities` 会在返回前执行受控 Skill refresh check，方便用户打开 Skill 列表时看到最新公开 Skill。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |
@@ -111,11 +111,12 @@ python scripts/run_fullstack_dev.py
 - Docker Compose 打包 / 启动（会把本地 git-ignored `config.yaml` 复制进 backend 镜像；该文件包含 provider / 数据库等敏感配置时只应在受控环境构建和分发镜像）：
 
 ```bash
+git clone git@gitee.com:wellionx/vibe-breeding.git /srv/vibe-breeding
 docker compose build
 docker compose up
 ```
 
-Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`。
+Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`。生产 Skill bundle 从独立仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录读取，Compose 默认把宿主机 `/srv/vibe-breeding/skills` 只读挂载到 backend 容器 `/app/skill`；更新 Skill 时在宿主机执行 `cd /srv/vibe-breeding && git pull`，下一次 `GET /api/v1/capabilities` 会触发刷新。
 
 `.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
 

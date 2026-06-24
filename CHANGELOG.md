@@ -10,7 +10,11 @@
 
 ### 2026-06-24
 
+- Docker Compose 与生产部署脚本补充外部 Skill repo 挂载：默认将宿主机 `/srv/vibe-breeding/skills` 只读挂载到容器 `/app/skill`，生产脚本 / 手工命令会 clone 或 fast-forward pull `git@gitee.com:wellionx/vibe-breeding.git`，配合 `/api/v1/capabilities` read-through refresh，实现更新 Skill repo 后无需重打包项目镜像即可刷新公开 Skill 列表。License Requirement：Docker/文档/部署脚本变更，无新增依赖/许可变更。
+
 - SeedPilot 子路径部署改造开始落地：生产 Docker/frontend 默认构建到 `/seedpilot/`，Vite `base`、`VITE_API_BASE_URL`、frontend healthcheck、nginx 子路径 SPA/API/API-doc 代理与 API 文档相对资源路径同步调整；根路径 `/`、`/api/`、`/assets/` 不再由 SeedPilot frontend nginx 承载。新增前端 API client / SSE subpath 回归，并保留本地 Vite dev 根路径体验。License Requirement：前端/Docker/nginx/文档/测试变更，无新增依赖/许可变更。
+
+- `/api/v1/capabilities` 接入 Skill runtime read-through refresh：能力列表返回前会检查 `skill_roots` 指纹并同步最新公开 `skill.*` capability；新增 / 修改 / 删除 Skill 可在用户打开列表时生效，refresh/sync 可恢复失败时返回旧列表并记录失败审计，同时保留新 conversation 首次消息刷新与任务 `skill_bundle_revision` 稳定语义。新增 API 回归覆盖新增、更新、删除、skipped、GET fallback 与 submit_message 失败语义不漂移。License Requirement：后端代码/测试/文档变更，无新增依赖/许可变更。
 
 - 新增 SeedPilot 子路径部署改造计划：`docs/runbooks/seedpilot-subpath-deployment-plan.md` 规划将正式环境 Web 站点挂载到 `/seedpilot/`，覆盖 Vite base、`VITE_API_BASE_URL`、nginx `/seedpilot/` SPA fallback、`/seedpilot/api/` 代理、验收与回滚步骤，避免同域名根路径 `/assets`、`/api` 与其他应用冲突。License Requirement：文档计划变更，无依赖/许可变更。
 

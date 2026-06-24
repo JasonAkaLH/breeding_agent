@@ -111,10 +111,16 @@ v1 必须支持以下刷新触发：
    - 如果 conversation 已因上传文件提前创建，但尚未提交过任务，也仍视为新聊天首次任务。
    - 刷新检查可以基于文件指纹 / mtime / TTL 跳过实际重扫，但语义上必须保证“新聊天首次任务前有机会看到最新 Skill”。
 
-2. **服务启动期初始化**
+2. **Capabilities 读前刷新检查**
+   - 当客户端请求 `GET /api/v1/capabilities` 时，后端必须在返回 public capability pool 前执行一次受控 read-through Skill 刷新检查。
+   - 如果文件指纹未变化，应通过 skipped 路径快速返回当前列表。
+   - 如果刷新构建或 registry 同步失败，应保留旧 active bundle / 旧 capability 列表并记录失败审计；该 GET 不应因可恢复刷新失败返回 500。
+   - 该 GET 具有 intentional read-through side effect，不是严格无副作用的纯读接口；多副本部署仍由各进程独立刷新。
+
+3. **服务启动期初始化**
    - 保留当前启动期扫描能力，作为初始 active bundle。
 
-3. **显式运维刷新入口（建议 v1.1）**
+4. **显式运维刷新入口（建议 v1.1）**
    - 可增加受保护的 `POST /api/v1/admin/skills/reload` 或内部 runtime 方法，用于手动触发刷新。
    - 该入口不是前端业务对话台 v1 的必要依赖。
 
@@ -201,7 +207,7 @@ Skill 刷新必须以“构建新 bundle → 校验 → 原子激活”的顺序
 
 ### 6.8 `/api/v1/capabilities` 行为
 
-`GET /api/v1/capabilities` 应返回当前 active bundle 对应的 public capability pool。
+`GET /api/v1/capabilities` 应先触发一次 Skill runtime refresh check，再返回当前 active bundle 对应的 public capability pool。刷新成功后列表反映最新公开 Skill；刷新 skipped 时返回当前列表；可恢复刷新失败时返回旧 active bundle 的列表并记录失败审计。
 
 建议扩展响应 metadata：
 
@@ -247,10 +253,10 @@ Skill 热部署不得改变既有安全边界：
 新增审计事件：
 
 - `skill.bundle_refresh_started`
-  - `reason`: `startup` / `conversation_start` / `manual`
+  - `reason`: `startup` / `conversation_start` / `capabilities_list` / `manual`
   - `previous_revision`
 - `skill.bundle_refresh_skipped`
-  - `reason`: `fingerprint_unchanged` / `refresh_in_progress` / `disabled`
+  - `reason`: `fingerprint_unchanged` / `disabled`
   - `active_revision`
 - `skill.bundle_refresh_completed`
   - `previous_revision`
@@ -381,6 +387,7 @@ npm run build
 
 - 增加受保护的显式 reload 入口。
 - `/api/v1/capabilities` 暴露 active skill bundle revision 或整体响应 metadata。
+- `/api/v1/capabilities` 当前已作为读前刷新触发点；未来诊断增强应继续保留 GET fallback 返回旧列表的兼容语义。
 - 增加 refresh 指纹、跳过原因、耗时与 retained bundle 数量的诊断查询。
 - 完善 refresh in progress 的并发等待 / 复用策略。
 
@@ -407,6 +414,7 @@ npm run build
 
 - 已新增 `SkillRuntimeState` / `SkillRuntimeBundle`，统一管理 active / retained Skill bundle、内容指纹、revision、catalog 与 public `skill.*` capability 映射。
 - API runtime 已在新 conversation 首次任务提交前执行刷新检查；上传先创建 conversation 但尚无任务时，也按首次任务边界刷新。
+- `GET /api/v1/capabilities` 已在返回前执行受控 read-through Skill 刷新检查；新增 / 修改 / 删除 Skill 可在用户打开能力列表时更新，refresh/sync 可恢复失败时保留旧列表并记录失败审计。
 - 刷新成功后同步更新 `CapabilityRegistry`；显式 `skill.*` 路由校验发生在刷新之后。
 - `WorkflowExpander`、LLM Planner、AutoWorkflow、Runtime Replanner、`SkillWorkflowProvider` 与 `MainAgentExecutor` 已通过动态 resolver / `skill_bundle_revision` 使用同一 Skill 快照。
 - 运行中任务会 retain 规划时的 revision，任务终态后释放；刷新失败时保留上一份 active bundle 并记录失败诊断。
