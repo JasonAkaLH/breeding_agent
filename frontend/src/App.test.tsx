@@ -5,6 +5,7 @@ import App from './App';
 import type { ApiClient } from './api/client';
 import type { ConversationMessagesResponse, DeleteConversationResponse, TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
+import { COMPOSER_PLACEHOLDERS } from './domain/composerPlaceholders';
 import { WELCOME_PROMPTS } from './domain/welcomePrompts';
 
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -253,7 +254,7 @@ describe('App', () => {
     expect(screen.queryByText('数据查询可用')).not.toBeInTheDocument();
     expect(screen.queryByText(/user:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/conversation:/)).not.toBeInTheDocument();
-    expect(within(sendRow).getByLabelText('请输入问题')).toHaveAttribute('placeholder', '从这里开始...');
+    expect(COMPOSER_PLACEHOLDERS).toContain(within(sendRow).getByLabelText('请输入问题').getAttribute('placeholder'));
     const sendButton = within(sendRow).getByRole('button', { name: '发送' });
     const inputMenuButton = within(sendRow).getByRole('button', { name: '打开输入功能菜单' });
     expect(sendButton).toBeInTheDocument();
@@ -3051,7 +3052,7 @@ describe('App', () => {
     expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
     expect(await screen.findByText(/我找到了多个可能的数据文件/)).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/你可以直接回复 upload_id/)).toBeInTheDocument();
-    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
     expect(uploadInput).not.toBeDisabled();
 
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'replacement.csv', { type: 'text/csv' });

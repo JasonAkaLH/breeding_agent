@@ -108,7 +108,7 @@ from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.interrupt_service import InterruptService
 from src.orchestration.answer_selection import select_final_text_artifact
-from src.orchestration.backpressure import BackpressureGuard
+from src.orchestration.backpressure import DEFAULT_MAX_ACTIVE_TASKS, BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
 from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig, ResolutionGenerator
@@ -7469,7 +7469,7 @@ def build_api_runtime(
             ]
         ),
         completion_policy=CompletionPolicy(),
-        backpressure=BackpressureGuard(max_active_tasks=10),
+        backpressure=BackpressureGuard(max_active_tasks=DEFAULT_MAX_ACTIVE_TASKS),
         event_sink=event_broker,
         runtime_replanner=resolved_runtime_replanner,
     )
