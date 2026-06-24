@@ -37,6 +37,9 @@
 - 对话文件历史与智能选择 PRD 已拆分为阶段性专题目录：新增 `docs/prd/backend/conversation-file-history-selection/`，包含 README、总纲和阶段零至阶段五 PRD，按数据模型 / 上传历史 / memory 安全 / selector shadow / interrupt 绑定 / 灰度发布拆解原 `docs/prd/backend/21-对话文件历史与智能选择PRD.md`；同步 PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
 - 后端 PRD 21/22 已按文件上下文边界合并重排：原 `21-文件上传历史消息PRD.md` 与 `22-聊天式会话文件智能选择PRD.md` 合并为 `docs/prd/backend/21-对话文件历史与智能选择PRD.md`，显式裁决 `ConversationFileResource` 事实源、`file_upload` 历史、conversation file context、task attachment provenance、selector 缩窄/消歧、用户正文 `upload_id` 精准选择兼容、recent usage、deleted 不可复用和 LLM/确定性选择边界；原 `23-Skill运行闭环Workbench总纲PRD.md` 重编号为 `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md`，并同步 PRD 索引、后端总览与 Future Work。License Requirement：文档重排/索引变更，无依赖/许可变更。
 
+- 会话文件上传新增 TSV Skill 输入支持：后端放行 `.tsv`、`text/tab-separated-values` 与 `text/tsv`，按 CSV-family 表格归一化并保持 `file_type=csv`；Skill 兼容通道获取 UTF-8 CSV `content`，resource manifest 仍挂载原始 TSV 文件；前端文件选择器和文件标签同步识别 TSV，API 文档补充 TSV 行为。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
+
 ### 2026-06-18
 
 - 项目仓库取消跟踪 `.codex/skills/breeding-skill-builder/`：该 Skill 已改由独立仓库 `git@gitee.com:biobin/breeding-skill-builder.git` 承载，README、skill 目录说明与活动 PRD 引用同步改指独立仓库，避免 breeding_agent 远端继续保存误推送的 builder Skill 文件。License Requirement：文档/索引清理，无依赖/许可变更。
