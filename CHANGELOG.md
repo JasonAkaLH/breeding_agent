@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 2026-06-24
+
+- 生产镜像构建与 Skill 部署解耦：`Dockerfile` 不再要求仓库内存在 `skill/` 才能构建 backend，而是在镜像内创建空 `/app/skill` 挂载点；`docker-compose.yml` 将服务器 `/srv/vibe-breeding/skills` 只读挂载到容器 `/app/skill`，配合独立 Skill 仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 目录部署。`README.md` 与 `AGENTS.md` 同步说明内置 `skill/` 已退役，生产应更新/挂载独立 Skill 仓库。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
 ### 2026-06-18
 
 - 产品命名统一为“育种助手 / SeedPilot”：主 Agent 身份提示词拆分为 `[身份设定]` 与 `[行为准则]`，前端登录页、侧边栏标题、助手消息标识、API 文档标题与运行时重编排/soft-skill 角色文案同步去除“小奥 Agent/主代理”外显称呼；侧边栏品牌副标题从“AI育种助手”改为英文名 `SeedPilot`，并以原开发环境 tag 重新构建/推送 `breeding-agent-frontend-dev:0.1.19`；`docker_cmd.md` 版本号不变。License Requirement：前端文案/提示词/镜像发布变更，无依赖/许可变更，未触发 cargo-deny 风险。

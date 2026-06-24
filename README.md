@@ -12,7 +12,7 @@
 | `requirements.txt` | `multi_agent` Conda 环境依赖快照。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/` 其他文件 | Capability 接入指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
-| `skill/` | 项目级 Skill 目录；后端默认扫描 `skill/**/SKILL.md`，具体构建约束见 `Skill构建指南.md`。 |
+| `skill/` | 历史内置 Skill 目录；当前生产镜像不再追踪/打包该目录，后端默认扫描容器内 `/app/skill/**/SKILL.md`，部署时应把独立 Skill 仓库的 `skills/` 挂载到 `/app/skill`。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |
@@ -21,7 +21,7 @@
 | `src/capabilities/main_agent/` | `main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。 |
 | `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Skill 兼容层、MCP Python facade、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
 | `native/` | Rust workspace；当前包含 Core/Lifecycle、Runtime Store/Event/Dispatcher、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter、Skill Runtime policy / SkillSandboxService + tonic gRPC binding + `maf-skill-sandbox` 二进制入口与受限进程执行基线（client version / handler allowlist、相对 argv、sandbox root、timeout、stdin 上限、stdout/stderr 并发有界 drain、`env_clear` 最小环境、process-group cleanup）、MCP Runtime sidecar contract/kernel + `maf-mcp-runtime-sidecar` 二进制入口、Artifact/Auth/DataAccess/Audit 等 Rust contract/kernel crates 与 sidecar proto。部分 Python facade 已消费 Rust contract resource limits；Core/Lifecycle、Skill Runtime policy 与 Artifact/Auth/DataAccess/Audit safety kernels 已具备预构建 PyO3 module 加载 facade、Rust JSON bridge、`maturin` wheel build/import smoke 路径；RuntimeSidecar Python h2c / mTLS gRPC client 与 SkillSandbox Python h2c gRPC client 已可连接外部 Rust sidecar binary 做 runtime store/event/dispatcher RPC 与 Skill policy/sandbox RPC；MCP Runtime 目前仍是 Phase 0/1 sidecar contract/facade + evidence gate，MCP tool 真实执行仍走 Python legacy client，Phase 2-5 canonical runtime operations 待完成；RuntimeSidecar、Skill Runtime 与 MCP Runtime 均具备 artifact provenance / benchmark / promotion / ops / decommission gate + Python fail-closed validator；真实 production shadow / benchmark / ops drill / allowlist promotion evidence 仍按 PRD phase 门禁推进。 |
-| `skill/<domain-query>/` | 可移除 数据查询 Skill bundle，包含 manifest、领域 runtime、配置与 Skill 专属测试；移除该目录后系统只保留 generic Skill loader。 |
+| `/srv/vibe-breeding/skills` | 推荐的服务器 Skill 仓库挂载源；由 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 目录提供，容器内挂载到 `/app/skill`。 |
 | `scripts/` | 显式手工 smoke / 维护脚本，包含主代理真实 LLM smoke 与全栈开发启动脚本。 |
 | `tests/` | 后端分层 unittest 回归，包括 core、storage、lifecycle、orchestration、integrations、capabilities、api、e2e、observability。 |
 | `frontend/` | React + TypeScript + Vite + Ant Design 前端业务对话台，含 API/SSE client、状态 reducer、通用 data-query / file artifact 渲染与 Vitest 测试。 |
@@ -39,8 +39,8 @@ conda run -n multi_agent python -m unittest discover -s tests/lifecycle -p 'test
 conda run -n multi_agent python -m unittest discover -s tests/orchestration -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
-# 项目级可移除 Skill 自测：在对应 Skill bundle 目录下运行其 tests/ 目录
-(cd skill/<skill-name> && conda run -n multi_agent python -m unittest discover -s tests -p 'test_*.py')
+# 项目级可移除 Skill 自测：在独立 Skill 仓库对应 bundle 目录下运行其 tests/ 目录
+(cd /srv/vibe-breeding/skills/<skill-name> && conda run -n multi_agent python -m unittest discover -s tests -p 'test_*.py')
 conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
@@ -107,7 +107,7 @@ CI 中的 Ubuntu 22.04 x86_64 / Python 3.13 wheel job 还会用 `cargo metadata 
 python scripts/run_fullstack_dev.py
 ```
 
-真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随 `skill/<domain-query>/` bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
+真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随外部 Skill 仓库 bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
 
 - Docker Compose 打包 / 启动（会把本地 git-ignored `config.yaml` 复制进 backend 镜像；该文件包含 provider / 数据库等敏感配置时只应在受控环境构建和分发镜像）：
 
@@ -116,7 +116,13 @@ docker compose build
 docker compose up
 ```
 
-Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`。
+部署前先在服务器准备独立 Skill 仓库，并保持 bundle 位于仓库的 `skills/` 目录：
+
+```bash
+git clone git@gitee.com:wellionx/vibe-breeding.git /srv/vibe-breeding
+```
+
+Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`，Skill bundle 通过 `/srv/vibe-breeding/skills:/app/skill:ro` 只读挂载进入 backend 容器。
 
 `.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
 

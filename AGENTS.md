@@ -14,7 +14,7 @@
 - `src/orchestration/`：能力注册、调度、workflow plan、planner、router、validator、expander 等编排逻辑。
 - `src/capabilities/`：主代理与各类后端 capability 的业务实现入口。
 - `src/integrations/`：LLM、数据库、审计、Skill runtime、外部服务与适配层。
-- `skill/`：项目级 Skill bundles；每个子目录通常包含 `SKILL.md`、契约、schema、references 与脚本。
+- `skill/`：历史内置 Skill bundles 目录；生产部署不再追踪/打包该目录，改为把独立 Skill 仓库（默认 `/srv/vibe-breeding/skills`）挂载到容器 `/app/skill`。
 - `frontend/`：React + TypeScript + Vite 前端，对话台、API/SSE client、组件与前端测试。
 - `native/`：Rust workspace、runtime/kernel/sidecar/安全 facade 与相关 proto。
 - `tests/`：后端分层回归测试，目录大体对应 `src/` 的模块边界。
