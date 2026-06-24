@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import base64
+import csv
 import gzip
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
 import unittest
 
@@ -161,6 +162,62 @@ class UploadsAPITest(APITestCase):
         self.assertEqual(resolved["skill_artifacts"][0]["original_filename"], "materials.csv")
         self.assertEqual(resolved["skill_artifacts"][0]["normalized_filename"], "materials.csv")
         self.assertNotIn("content", resolved["uploaded_artifacts"][0])
+
+    async def test_upload_tsv_resolves_as_csv_family_skill_input(self) -> None:
+        tsv_content = "FID\tIID\tRootAngle_deg\n0\tCML103\t46.734638\n"
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-gwas-tsv"},
+            files={"file": ("phenotype.tsv", tsv_content, "text/tab-separated-values")},
+        )
+
+        self.assertEqual(upload.status_code, 201, upload.text)
+        payload = upload.json()
+        self.assertEqual(payload["filename"], "phenotype.tsv")
+        self.assertEqual(payload["content_type"], "text/tab-separated-values")
+        self.assertEqual(payload["file_type"], "csv")
+        self.assertEqual(payload["preview"]["columns"], ["FID", "IID", "RootAngle_deg"])
+        self.assertEqual(payload["preview"]["row_count"], 1)
+        self.assertEqual(payload["preview"]["normalized_content_type"], "text/csv")
+        self.assertNotIn("content", payload)
+
+        resolved = await self.runtime.resolve_uploads_for_message(
+            "conv-gwas-tsv", "acc-1", [payload["upload_id"]]
+        )
+        prompt_artifact = resolved["uploaded_artifacts"][0]
+        script_artifact = resolved["skill_artifacts"][0]
+        self.assertEqual(prompt_artifact["filename"], "phenotype.tsv")
+        self.assertNotIn("content", prompt_artifact)
+        self.assertNotIn("content_base64", prompt_artifact)
+        self.assertEqual(script_artifact["file_type"], "csv")
+        self.assertEqual(script_artifact["original_filename"], "phenotype.tsv")
+        self.assertEqual(script_artifact["normalized_filename"], "phenotype.csv")
+        self.assertEqual(script_artifact["filename"], "phenotype.csv")
+        self.assertEqual(script_artifact["content_type"], "text/csv")
+        self.assertEqual(script_artifact["normalized_content_type"], "text/csv")
+        self.assertEqual(script_artifact["content"].splitlines()[0], "FID,IID,RootAngle_deg")
+        self.assertIn("0,CML103,46.734638", script_artifact["content"])
+        self.assertNotIn("content_base64", script_artifact)
+
+    async def test_upload_tsv_forces_tab_delimiter_when_values_contain_commas(self) -> None:
+        tsv_content = "name\tnote,raw\nCML103\talpha,beta\n"
+
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-tsv-commas"},
+            files={"file": ("phenotype.tsv", tsv_content, "text/tab-separated-values")},
+        )
+
+        self.assertEqual(upload.status_code, 201, upload.text)
+        payload = upload.json()
+        self.assertEqual(payload["file_type"], "csv")
+        self.assertEqual(payload["preview"]["columns"], ["name", "note,raw"])
+        resolved = await self.runtime.resolve_uploads_for_message(
+            "conv-tsv-commas", "acc-1", [payload["upload_id"]]
+        )
+        rows = list(csv.reader(StringIO(resolved["skill_artifacts"][0]["content"])))
+        self.assertEqual(rows, [["name", "note,raw"], ["CML103", "alpha,beta"]])
 
     async def test_upload_csv_accepts_legacy_encoding_and_truncates_prompt_safe_summary(self) -> None:
         columns = [f"列{i:02d}" for i in range(55)]
@@ -451,6 +508,24 @@ class UploadsAPITest(APITestCase):
 
         self.assertEqual(upload.status_code, 201, upload.text)
         self.assertEqual(upload.json()["file_type"], "csv")
+
+    async def test_tab_separated_mime_without_extension_stays_csv_compatible(self) -> None:
+        upload = await self.client.post(
+            "/api/v1/conversations/uploads",
+            data={"conversation_id": "conv-tsv-mime"},
+            files={"file": ("phenotype", "FID\tIID\n0\tCML103\n", "text/tsv")},
+        )
+
+        self.assertEqual(upload.status_code, 201, upload.text)
+        payload = upload.json()
+        self.assertEqual(payload["content_type"], "text/tsv")
+        self.assertEqual(payload["file_type"], "csv")
+        self.assertEqual(payload["preview"]["columns"], ["FID", "IID"])
+        resolved = await self.runtime.resolve_uploads_for_message(
+            "conv-tsv-mime", "acc-1", [payload["upload_id"]]
+        )
+        self.assertEqual(resolved["skill_artifacts"][0]["normalized_filename"], "phenotype.csv")
+        self.assertEqual(resolved["skill_artifacts"][0]["content"].splitlines()[0], "FID,IID")
 
     async def test_upload_json_returns_preview(self) -> None:
         material_data = [

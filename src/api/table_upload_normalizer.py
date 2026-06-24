@@ -29,6 +29,8 @@ SUMMARY_SHEET_COLUMN_LIMIT = 50
 MAX_EXCEL_SCAN_ROWS = 10_000
 MAX_EXCEL_SCAN_COLUMNS = 500
 CSV_DELIMITERS = ",\t;"
+TSV_CONTENT_TYPES = {"text/tab-separated-values", "text/tsv"}
+CSV_COMPATIBLE_CONTENT_TYPES = {"text/csv", "application/csv", "application/vnd.ms-excel", *TSV_CONTENT_TYPES}
 XLSX_MAGIC = b"PK"
 XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
@@ -81,16 +83,16 @@ def detect_table_file_type(filename: str, content_type: str | None, content: byt
     suffix = Path(filename).suffix.lower()
     if suffix == ".json":
         return "json"
-    if suffix == ".csv":
+    if suffix in {".csv", ".tsv"}:
         return "csv"
     if suffix in {".xlsx", ".xls"}:
         return "spreadsheet"
     if _looks_like_excel(content):
         return "spreadsheet"
-    base_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    base_content_type = _base_content_type(content_type)
     if base_content_type in {"application/json", "text/json"}:
         return "json"
-    if base_content_type in {"text/csv", "application/csv", "application/vnd.ms-excel"}:
+    if base_content_type in CSV_COMPATIBLE_CONTENT_TYPES:
         return "csv"
     return None
 
@@ -104,10 +106,11 @@ def normalize_table_upload(
 ) -> TableNormalizationResult:
     file_type = detect_table_file_type(filename, content_type, content)
     if file_type is None:
-        raise UploadValidationError("Only JSON, CSV, Excel, PNG, JPG/JPEG, and PDF files are supported")
+        raise UploadValidationError("Only JSON, CSV/TSV, Excel, PNG, JPG/JPEG, and PDF files are supported")
     if file_type == "csv":
         decoded = _decode_text(content)
-        return _normalize_csv(decoded.text, source_encoding=decoded.encoding, filename=filename)
+        delimiter = "\t" if _is_tsv_upload(filename, content_type) else None
+        return _normalize_csv(decoded.text, source_encoding=decoded.encoding, filename=filename, delimiter=delimiter)
     if file_type == "json":
         decoded = _decode_text(content)
         return _normalize_json(decoded.text, source_encoding=decoded.encoding, filename=filename)
@@ -144,20 +147,29 @@ def _decode_text(content: bytes) -> _DecodedText:
             return _DecodedText(content.decode(encoding, errors="strict"), encoding)
         except UnicodeDecodeError:
             continue
-    raise UploadValidationError("Unable to detect text encoding; please save as UTF-8 CSV/JSON or Excel and upload again")
+    raise UploadValidationError("Unable to detect text encoding; please save as UTF-8 CSV/TSV/JSON or Excel and upload again")
 
 
-def _normalize_csv(text: str, *, source_encoding: str, filename: str) -> TableNormalizationResult:
-    try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=CSV_DELIMITERS)
-    except csv.Error:
-        dialect = csv.excel
+def _normalize_csv(
+    text: str,
+    *,
+    source_encoding: str,
+    filename: str,
+    delimiter: str | None = None,
+) -> TableNormalizationResult:
+    if delimiter == "\t":
+        dialect = csv.excel_tab
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(text[:4096], delimiters=CSV_DELIMITERS)
+        except csv.Error:
+            dialect = csv.excel
     try:
         rows = list(csv.reader(StringIO(text), dialect=dialect))
     except csv.Error as exc:
-        raise UploadValidationError(f"Invalid CSV file: {exc}") from exc
+        raise UploadValidationError(f"Invalid CSV/TSV file: {exc}") from exc
     if not rows:
-        raise UploadValidationError("CSV upload must include a header row")
+        raise UploadValidationError("CSV/TSV upload must include a header row")
     original_columns = ["" if value is None else str(value) for value in rows[0]]
     cleaned_columns, column_normalizations = _clean_columns(original_columns)
     output = StringIO()
@@ -564,6 +576,14 @@ def _safe_filename(filename: str) -> str:
     suffix = Path(filename).suffix.lower() or ".csv"
     safe_stem = _SAFE_FILENAME_CHARS.sub("_", unicodedata.normalize("NFKC", stem)).strip("._-")
     return f"{safe_stem or 'upload'}{suffix}"
+
+
+def _base_content_type(content_type: str | None) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _is_tsv_upload(filename: str, content_type: str | None) -> bool:
+    return Path(filename).suffix.lower() == ".tsv" or _base_content_type(content_type) in TSV_CONTENT_TYPES
 
 
 def _looks_like_excel(content: bytes) -> bool:

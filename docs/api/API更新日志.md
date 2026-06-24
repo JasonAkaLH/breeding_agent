@@ -1,5 +1,17 @@
 # API 更新日志
 
+## 2026-06-24
+
+### 更新摘要
+
+本次扩展会话文件上传白名单，允许 TSV 表格作为 Skill 输入文件。接口路径、请求体结构和响应 schema 不变；TSV 归入现有 CSV-family 表格处理，响应仍使用 `file_type=csv`。
+
+### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+
+- 上传白名单新增 `.tsv`、`text/tab-separated-values` 与 `text/tsv`。TSV 按 CSV-family 表格解析，preview 返回表头、行数、编码和 `normalized_content_type=text/csv`。
+- TSV 的 `original_filename` 保留 `.tsv`，执行通道兼容字段 `skill_artifacts[].content` 使用归一化 CSV 文本；新 Skill 仍应优先通过 `resource_manifest_path` 读取 `files[].mount_path` 中的原始 TSV 文件副本。
+- Prompt-safe response / `uploaded_artifacts` 继续不返回完整 `content`、`content_base64` 或原始行数据。
+
 ## 2026-06-17
 
 ### 更新摘要

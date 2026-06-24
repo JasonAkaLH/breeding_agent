@@ -19,11 +19,12 @@ from .upload_errors import UploadValidationError
 
 
 UploadFileType = Literal["json", "csv", "spreadsheet", "text", "image", "pdf", "vcf"]
-SUPPORTED_UPLOAD_DESCRIPTION = "JSON, CSV, Excel, TXT, PNG, JPG/JPEG, PDF, VCF, and VCF.GZ"
+SUPPORTED_UPLOAD_DESCRIPTION = "JSON, CSV, TSV, Excel, TXT, PNG, JPG/JPEG, PDF, VCF, and VCF.GZ"
 
 SUPPORTED_UPLOAD_EXTENSIONS: dict[str, UploadFileType] = {
     ".json": "json",
     ".csv": "csv",
+    ".tsv": "csv",
     ".xlsx": "spreadsheet",
     ".xls": "spreadsheet",
     ".vcf": "vcf",
@@ -38,6 +39,8 @@ SUPPORTED_UPLOAD_CONTENT_TYPES: dict[str, UploadFileType] = {
     "text/json": "json",
     "text/csv": "csv",
     "application/csv": "csv",
+    "text/tab-separated-values": "csv",
+    "text/tsv": "csv",
     "application/vnd.ms-excel": "csv",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "spreadsheet",
     "text/plain": "text",
