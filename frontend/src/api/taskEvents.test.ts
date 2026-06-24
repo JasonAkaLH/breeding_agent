@@ -36,6 +36,10 @@ describe('taskEvents', () => {
     expect(taskEventsUrl('task/id', 'https://api.example')).toBe('https://api.example/api/v1/tasks/task%2Fid/events');
   });
 
+  it('builds task event URLs below a subpath base URL', () => {
+    expect(taskEventsUrl('task-1', '/seedpilot')).toBe('/seedpilot/api/v1/tasks/task-1/events');
+  });
+
   it('supports Bearer authenticated fetch streams for cross-site clients', async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({

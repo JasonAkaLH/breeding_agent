@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+### 2026-06-24
+
+- SeedPilot 子路径部署改造开始落地：生产 Docker/frontend 默认构建到 `/seedpilot/`，Vite `base`、`VITE_API_BASE_URL`、frontend healthcheck、nginx 子路径 SPA/API/API-doc 代理与 API 文档相对资源路径同步调整；根路径 `/`、`/api/`、`/assets/` 不再由 SeedPilot frontend nginx 承载。新增前端 API client / SSE subpath 回归，并保留本地 Vite dev 根路径体验。License Requirement：前端/Docker/nginx/文档/测试变更，无新增依赖/许可变更。
+
+- 新增 SeedPilot 子路径部署改造计划：`docs/runbooks/seedpilot-subpath-deployment-plan.md` 规划将正式环境 Web 站点挂载到 `/seedpilot/`，覆盖 Vite base、`VITE_API_BASE_URL`、nginx `/seedpilot/` SPA fallback、`/seedpilot/api/` 代理、验收与回滚步骤，避免同域名根路径 `/assets`、`/api` 与其他应用冲突。License Requirement：文档计划变更，无依赖/许可变更。
+
 ### 2026-06-23
 
 - Docker 开发环境镜像发布为 `0.1.20`：按当前 `main` 构建并推送 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.20` 与 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.20`，用于发布对话文件历史与智能选择完整实现、API/前端文档同步以及 Rust core contract 对齐修复；远端 manifest 已验证：backend `sha256:87539f083ec378be409e64450ede23778cee5c8b3da6b5827e5105660b650d0e`，frontend `sha256:b048fe0edec6a21414f4bd9c688ee86665cad90443223e343afa53035ebcb116`；`docker_cmd.md` 开发环境启动命令同步改为 `0.1.20`。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。

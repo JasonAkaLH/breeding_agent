@@ -67,6 +67,24 @@ describe('createApiClient', () => {
     expect(result.capabilities[0]).toMatchObject({ capability_id: 'skill.data_lookup', display_name: '数据查询', kind: 'skill' });
   });
 
+  it('prefixes JSON requests with the configured subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ capabilities: [] }), { status: 200 }));
+    const api = createApiClient({ fetcher, baseUrl: '/seedpilot' });
+
+    await api.listCapabilities();
+
+    expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/capabilities', expect.any(Object));
+  });
+
+  it('normalizes a trailing slash in the subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ user: { username: 'alice' }, access_token: 'maf_tok_login' }), { status: 200 }));
+    const api = createApiClient({ fetcher, baseUrl: '/seedpilot/' });
+
+    await api.me();
+
+    expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/auth/me', expect.any(Object));
+  });
+
   it('loads model edition choices from backend config', async () => {
     const response = {
       default_model_edition: 'deepseek-v4-flash-260425',
@@ -293,6 +311,29 @@ describe('createApiClient', () => {
     expect(init.headers).toBeUndefined();
   });
 
+  it('prefixes multipart uploads with the configured subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      upload_id: 'upl-1',
+      conversation_id: 'conv-1',
+      filename: 'materials.csv',
+      content_type: 'text/csv',
+      file_type: 'csv',
+      size_bytes: 24,
+      sha256: 'hash',
+      expires_at: '2026-05-07T10:00:00',
+      preview: { row_count: 1, columns: ['ped_id'], shape: 'table' },
+    }), { status: 201 }));
+    const api = createApiClient({ fetcher, baseUrl: '/seedpilot' });
+    const file = new File(['a,b\n'], 'materials.csv', { type: 'text/csv' });
+
+    await api.uploadConversationFile('conv-1', file);
+
+    expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/conversations/uploads', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }));
+  });
+
 
 
   it('lists and deletes uploaded conversation files', async () => {
@@ -369,6 +410,29 @@ describe('createApiClient', () => {
       expect(createObjectUrl).toHaveBeenCalledOnce();
       expect(click).toHaveBeenCalledOnce();
       expect(revokeObjectUrl).toHaveBeenCalledWith('blob:artifact-download');
+    } finally {
+      URL.createObjectURL = originalCreateObjectUrl;
+      URL.revokeObjectURL = originalRevokeObjectUrl;
+      click.mockRestore();
+    }
+  });
+
+  it('prefixes artifact downloads with the configured subpath base URL', async () => {
+    const fetcher = vi.fn(async () => new Response('file-content', { status: 200 }));
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    URL.createObjectURL = vi.fn(() => 'blob:artifact-download') as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
+    try {
+      const api = createApiClient({ fetcher, baseUrl: '/seedpilot' });
+
+      await api.downloadArtifact('art-file-1', 'layout.html');
+
+      expect(fetcher).toHaveBeenCalledWith('/seedpilot/api/v1/artifacts/art-file-1/download', expect.objectContaining({
+        method: 'GET',
+        credentials: 'same-origin',
+      }));
     } finally {
       URL.createObjectURL = originalCreateObjectUrl;
       URL.revokeObjectURL = originalRevokeObjectUrl;
