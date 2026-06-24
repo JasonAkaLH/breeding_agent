@@ -5,6 +5,7 @@ import App from './App';
 import type { ApiClient } from './api/client';
 import type { ConversationMessagesResponse, DeleteConversationResponse, TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
+import { COMPOSER_PLACEHOLDERS } from './domain/composerPlaceholders';
 import { WELCOME_PROMPTS } from './domain/welcomePrompts';
 
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -253,7 +254,7 @@ describe('App', () => {
     expect(screen.queryByText('数据查询可用')).not.toBeInTheDocument();
     expect(screen.queryByText(/user:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/conversation:/)).not.toBeInTheDocument();
-    expect(within(sendRow).getByLabelText('请输入问题')).toHaveAttribute('placeholder', '从这里开始...');
+    expect(COMPOSER_PLACEHOLDERS).toContain(within(sendRow).getByLabelText('请输入问题').getAttribute('placeholder'));
     const sendButton = within(sendRow).getByRole('button', { name: '发送' });
     const inputMenuButton = within(sendRow).getByRole('button', { name: '打开输入功能菜单' });
     expect(sendButton).toBeInTheDocument();
@@ -262,12 +263,14 @@ describe('App', () => {
     expect(inputMenuButton.querySelector('img')).toHaveAttribute('src', '/pics/input-menu-plus-button.svg');
     expect(sendButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '发送');
     expect(inputMenuButton.closest('[data-tooltip]')).toHaveAttribute('data-tooltip', '打开输入功能菜单');
-    expect(within(sendRow).queryByRole('button', { name: '选择 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件' })).not.toBeInTheDocument();
+    expect(within(sendRow).queryByRole('button', { name: '选择 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件' })).not.toBeInTheDocument();
     expect(sendBar).toHaveClass('floating-composer');
 
     fireEvent.click(inputMenuButton);
-    expect(await screen.findByRole('button', { name: '选择 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件' })).toBeInTheDocument();
-    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
+    expect(await screen.findByRole('button', { name: '选择 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件' })).toBeInTheDocument();
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
+    expect(uploadInput.getAttribute('accept')).toContain('.tsv');
+    expect(uploadInput.getAttribute('accept')).toContain('text/tab-separated-values');
     expect(uploadInput.getAttribute('accept')).toContain('.vcf');
     expect(uploadInput.getAttribute('accept')).toContain('.vcf.gz');
     await waitFor(() => expect(screen.getAllByLabelText('思考强度').length).toBeGreaterThan(0));
@@ -1887,7 +1890,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     await screen.findByText(/待发送/);
@@ -1978,12 +1981,62 @@ describe('App', () => {
     expect(await screen.findByText('文件已删除 / 不可再用于任务')).toBeInTheDocument();
   });
 
+  it('labels saved TSV uploads by filename while preserving csv file type', async () => {
+    const api = makeApi({
+      listConversationUploads: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        uploads: [{
+          upload_id: 'upl-tsv',
+          conversation_id: 'conv-test',
+          filename: 'phenotype.tsv',
+          content_type: 'text/tab-separated-values',
+          file_type: 'csv',
+          size_bytes: 42,
+          sha256: 'hash-tsv',
+          expires_at: '2026-05-07T10:00:00',
+          preview: { row_count: 1, columns: ['FID', 'IID', 'RootAngle_deg'], shape: 'table' },
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    await openConversationFilesDrawer(1);
+    const drawer = getConversationFilesDrawer();
+    expect(await within(drawer).findByText(/phenotype.tsv/)).toBeInTheDocument();
+    expect(within(drawer).getByText(/TSV · 1 行 · FID\/IID\/RootAngle_deg/)).toBeInTheDocument();
+  });
+
+  it('labels saved TSV uploads by MIME type when filename has no suffix', async () => {
+    const api = makeApi({
+      listConversationUploads: vi.fn(async () => ({
+        conversation_id: 'conv-test',
+        uploads: [{
+          upload_id: 'upl-tsv-mime',
+          conversation_id: 'conv-test',
+          filename: 'phenotype',
+          content_type: 'text/tsv',
+          file_type: 'csv',
+          size_bytes: 24,
+          sha256: 'hash-tsv-mime',
+          expires_at: '2026-05-07T10:00:00',
+          preview: { row_count: 1, columns: ['FID', 'IID'], shape: 'table' },
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    await openConversationFilesDrawer(1);
+    const drawer = getConversationFilesDrawer();
+    expect(await within(drawer).findByText(/phenotype/)).toBeInTheDocument();
+    expect(within(drawer).getByText(/TSV · 1 行 · FID\/IID/)).toBeInTheDocument();
+  });
+
   it('deletes a draft attachment locally without calling backend delete', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'draft.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/draft.csv/);
     await screen.findByText(/待发送/);
@@ -1991,6 +2044,31 @@ describe('App', () => {
 
     expect(api.deleteConversationUpload).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByText(/draft.csv/)).not.toBeInTheDocument());
+  });
+
+  it('labels TSV draft attachments before uploading', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const file = new File(['FID\tIID\n0\tCML103\n'], 'phenotype.tsv', { type: 'text/tab-separated-values' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+
+    expect(await screen.findByText(/phenotype.tsv/)).toBeInTheDocument();
+    expect(await screen.findByText(/TSV ·/)).toBeInTheDocument();
+    expect(await screen.findByText(/待发送/)).toBeInTheDocument();
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
+  });
+
+  it('labels TSV draft attachments by MIME type before uploading', async () => {
+    const api = makeApi();
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    const file = new File(['FID\tIID\n0\tCML103\n'], 'phenotype', { type: 'text/tsv' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+
+    expect(await screen.findByText(/^phenotype$/)).toBeInTheDocument();
+    expect(await screen.findByText(/TSV ·/)).toBeInTheDocument();
+    expect(api.uploadConversationFile).not.toHaveBeenCalled();
   });
 
   it('clears draft attachments when switching conversations without backend side effects', async () => {
@@ -2016,7 +2094,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'switch-draft.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
     await screen.findByText(/switch-draft.csv/);
     await screen.findByRole('button', { name: /当前 0 个已保存文件/ });
 
@@ -2034,7 +2112,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'materials.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/materials.csv/);
     await screen.findByText(/待发送/);
@@ -2061,7 +2139,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const file = new File(['vcf-bytes'], 'sample.vcf.gz', { type: 'application/gzip' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
 
     await screen.findByText(/sample.vcf.gz/);
     await screen.findByText(/VCF/);
@@ -2110,7 +2188,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'broken.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做分析' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -2146,7 +2224,7 @@ describe('App', () => {
 
     const firstFile = new File(['ped_id\nA\n'], 'first.csv', { type: 'text/csv' });
     const secondFile = new File(['ped_id\nB\n'], 'second.csv', { type: 'text/csv' });
-    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件');
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件');
     fireEvent.change(uploadInput, { target: { files: [firstFile] } });
     fireEvent.change(uploadInput, { target: { files: [secondFile] } });
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '分析这两个文件' } });
@@ -2189,7 +2267,7 @@ describe('App', () => {
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
 
     const file = new File(['ped_id,design_check\nA,0\n'], 'residual.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用这个文件做分析' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
@@ -2838,7 +2916,7 @@ describe('App', () => {
     expect(await screen.findByText(/试验设计智能体 还缺少/)).toBeInTheDocument();
     vi.mocked(api.submitMessage).mockClear();
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'interrupt-broken.csv', { type: 'text/csv' });
-    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(api.uploadConversationFile).toHaveBeenCalled());
@@ -2893,7 +2971,7 @@ describe('App', () => {
 
     expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
     expect(await screen.findByText(/试验设计智能体 还缺少/)).toBeInTheDocument();
-    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
     expect(uploadInput).not.toBeDisabled();
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'materials.csv', { type: 'text/csv' });
     fireEvent.change(uploadInput, { target: { files: [file] } });
@@ -2974,7 +3052,7 @@ describe('App', () => {
     expect(screen.queryByRole('region', { name: '需要补充信息' })).not.toBeInTheDocument();
     expect(await screen.findByText(/我找到了多个可能的数据文件/)).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/你可以直接回复 upload_id/)).toBeInTheDocument();
-    const uploadInput = screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
+    const uploadInput = screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件') as HTMLInputElement;
     expect(uploadInput).not.toBeDisabled();
 
     const file = new File(['ped_id,hyb_check,set\nA01,0,S1\n'], 'replacement.csv', { type: 'text/csv' });
@@ -3368,8 +3446,8 @@ describe('App', () => {
     expect(screen.queryByText('_slot_collection')).not.toBeInTheDocument();
     expect(screen.getByText(/等待补充 · 下一条消息将继续当前任务/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
-    expect(screen.getByRole('button', { name: '选择 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件' })).toBeDisabled();
-    expect(screen.getByLabelText('上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '选择 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件' })).toBeDisabled();
+    expect(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件')).toBeDisabled();
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: '发送' }));

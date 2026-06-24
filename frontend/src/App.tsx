@@ -7,6 +7,7 @@ import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
 import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
+import { pickComposerPlaceholder } from './domain/composerPlaceholders';
 import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
 import {
@@ -239,6 +240,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [deepThinking, setDeepThinking] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('minimal');
   const [input, setInput] = useState('');
+  const composerPlaceholder = useMemo(() => pickComposerPlaceholder(), [conversationId]);
   const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
@@ -1889,12 +1891,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   const interactionLocked = active || Boolean(pendingInterrupt);
-  const inputPlaceholder = pendingInterrupt ? interruptAnswerPlaceholder(pendingInterrupt) : '从这里开始...';
+  const inputPlaceholder = pendingInterrupt ? interruptAnswerPlaceholder(pendingInterrupt) : composerPlaceholder;
   const composerMenuContent = (
     <Space direction="vertical" size="middle" className="composer-menu">
       <Button
         block
-        aria-label="选择 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件"
+        aria-label="选择 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件"
         onClick={() => uploadInputRef.current?.click()}
         disabled={!canUploadInCurrentComposer || uploadingFile}
         loading={uploadingFile}
@@ -2170,9 +2172,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   <input
                     ref={uploadInputRef}
                     className="file-input-hidden"
-                    aria-label="上传 JSON、CSV、Excel、TXT、VCF、图片或 PDF 文件"
+                    aria-label="上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件"
                     type="file"
-                    accept=".json,.csv,.xlsx,.xls,.txt,.vcf,.vcf.gz,.png,.jpg,.jpeg,.pdf,application/json,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,image/png,image/jpeg,application/pdf"
+                    accept=".json,.csv,.tsv,.xlsx,.xls,.txt,.vcf,.vcf.gz,.png,.jpg,.jpeg,.pdf,application/json,text/csv,text/tab-separated-values,text/tsv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,image/png,image/jpeg,application/pdf"
                     disabled={!canUploadInCurrentComposer || uploadingFile}
                     onChange={(event) => handleAttachFile(event.target.files?.[0])}
                   />
@@ -2455,7 +2457,13 @@ function uploadAnswerDisplayText(uploads: UploadFileResponse[]): string {
   return `已上传文件：${uploads.map((upload) => upload.filename).join('、')}`;
 }
 
+function isTsvContentType(contentType: string | null | undefined): boolean {
+  const normalized = (contentType || '').split(';', 1)[0].trim().toLowerCase();
+  return normalized === 'text/tab-separated-values' || normalized === 'text/tsv';
+}
+
 function uploadFileTypeLabel(upload: UploadFileResponse): string {
+  if (upload.filename.toLowerCase().endsWith('.tsv') || isTsvContentType(upload.content_type)) return 'TSV';
   switch (upload.file_type) {
     case 'spreadsheet':
       return 'Excel';
@@ -2512,6 +2520,7 @@ function draftAttachmentTypeLabel(attachment: DraftAttachment): string {
   if (filename.endsWith('.vcf') || filename.endsWith('.vcf.gz')) return 'VCF';
   if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) return 'Excel';
   if (filename.endsWith('.json')) return 'JSON';
+  if (filename.endsWith('.tsv') || isTsvContentType(attachment.contentType)) return 'TSV';
   if (filename.endsWith('.csv')) return 'CSV';
   if (filename.endsWith('.txt')) return 'TXT';
   if (filename.endsWith('.pdf')) return 'PDF';

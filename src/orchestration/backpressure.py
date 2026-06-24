@@ -5,6 +5,9 @@ class BackpressureRejected(RuntimeError):
     """Raised when strict reject backpressure denies a new orchestration request."""
 
 
+DEFAULT_MAX_ACTIVE_TASKS = 30
+
+
 class BackpressureGuard:
     def __init__(self, *, max_active_tasks: int) -> None:
         self._max_active_tasks = max_active_tasks
