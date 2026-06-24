@@ -27,9 +27,14 @@ import { MarkdownText } from './components/MarkdownText';
 import SlashCommandMenu from './components/SlashCommandMenu';
 import './styles.css';
 
-const INPUT_MENU_BUTTON_IMAGE = '/pics/input-menu-plus-button.svg';
-const SEND_BUTTON_IMAGE = '/pics/send-up-arrow-button.svg?v=20260511-arrow-balanced';
-const ACCOUNT_SETTINGS_BUTTON_IMAGE = '/pics/account-settings-gear-button.svg?v=20260511-gear-visible';
+const publicAssetPath = (path: string): string => {
+  const base = import.meta.env.BASE_URL || '/';
+  return `${base.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+};
+
+const INPUT_MENU_BUTTON_IMAGE = publicAssetPath('/pics/input-menu-plus-button.svg');
+const SEND_BUTTON_IMAGE = publicAssetPath('/pics/send-up-arrow-button.svg?v=20260511-arrow-balanced');
+const ACCOUNT_SETTINGS_BUTTON_IMAGE = publicAssetPath('/pics/account-settings-gear-button.svg?v=20260511-gear-visible');
 
 interface AppProps {
   apiClient?: ApiClient;

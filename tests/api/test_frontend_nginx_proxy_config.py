@@ -11,6 +11,8 @@ class FrontendNginxProxyConfigTest(unittest.TestCase):
         self.assertIn("location = /seedpilot/api-doc", nginx_conf)
         self.assertIn("location /seedpilot/api-doc/", nginx_conf)
         self.assertIn("proxy_pass $breeding_agent_backend;", nginx_conf)
+        self.assertIn("sub_filter '/api-doc/' '/seedpilot/api-doc/';", nginx_conf)
+        self.assertIn("sub_filter '/openapi.json' '/seedpilot/openapi.json';", nginx_conf)
 
     def test_seedpilot_subpath_replaces_root_frontend_routes(self) -> None:
         nginx_conf = Path("docker/nginx.conf").read_text(encoding="utf-8")
