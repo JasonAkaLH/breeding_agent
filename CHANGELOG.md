@@ -10,7 +10,7 @@
 
 ### 2026-06-25
 
-- Skill 运行闭环 Workbench PRD 经 document-perfectization 决策后收敛为 runtime replan 主线：`docs/prd/backend/skill-workbench/` 目录新增/更新 README、目录总纲，以及 Policy/runtime state、内部 capability/executor、runtime loop/finalizer digest、事件 graph prompt 脱敏、contract 质量策略与健康诊断五份实施 PRD；补齐 terminal / wait state、progress marker、pending node gate、同能力 refinement retry 上限与 input fingerprint 停止条件，防止能力不适配时无限 replan；用户输入缺失复用现有 interrupt / resume，不作为最终失败；同步父总纲、PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
+- Skill 运行闭环 Workbench PRD 经 document-perfectization 决策后收敛为 runtime replan 主线：`docs/prd/backend/skill-workbench/` 目录新增/更新 README、目录总纲，以及 Policy/runtime state、内部 capability/executor、runtime loop/finalizer digest、事件 graph prompt 脱敏、contract 质量策略与健康诊断五份实施 PRD；补齐 terminal / wait state、progress marker、pending node gate、stage placement、同能力 refinement retry 上限与 input fingerprint 停止条件，明确 preflight 只能 initial expansion 前置插入、同能力 retry 由 public-only SkillRefinementRuntimeReplanner 追加 public `skill.*`，防止能力不适配时无限 replan；用户输入缺失复用现有 interrupt / resume，不作为最终失败；同步父总纲、PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
 
 ### 2026-06-24
 

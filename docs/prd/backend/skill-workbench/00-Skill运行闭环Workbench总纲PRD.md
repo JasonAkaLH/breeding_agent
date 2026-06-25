@@ -18,7 +18,7 @@
 | --- | --- |
 | DAG 不变 | 不把 `WorkflowPlan` 改成循环图、LangGraph 式 cyclic state graph 或新的 public plan schema。 |
 | 内部能力 | `workbench.*` 必须注册为 `public=False`、`kind="workbench"`、`source="builtin"`，不得进入 public capability list 或 planner prompt。 |
-| Runtime 主线 | Workbench 节点由 deterministic runtime replanner 追加；不让 LLM 规划 Workbench，不采用固定 DAG 作为主路径。 |
+| Runtime 主线 | 后置 Workbench 节点由 deterministic runtime replanner 追加；前置 `preflight_validate` 如启用，只能由 initial expansion 插入；不让 LLM 规划 Workbench，不采用固定后置 DAG 作为主路径。 |
 | 策略来源 | 启用规则只能来自 execution mode、answer mode、input schema、output contract、artifact policy、resource policy、quality policy 等通用属性。 |
 | 预算与停止 | runtime replan 预算必须在 initial plan 阶段确定；revised plan 不得提高 `max_replans` 或 `max_dynamic_nodes`；loop 必须通过 terminal / wait state、stage 单调推进、progress marker、pending node gate、failure reason 去重和 input fingerprint 停止重复 replan；用户输入缺失复用已有 interrupt / resume。 |
 | digest | Workbench output 必须短、结构化、脱敏；进入 finalizer 前再次经过 Workbench 专用 allowlist 和敏感字段过滤。 |
@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | `workbench.data_profile` | 对输入、artifact metadata 或上游 output 摘要做轻量画像。 | 阶段一 / 二 |
 | `workbench.schema_match` | 判断输入或输出是否匹配 selected input schema / output contract。 | 阶段一 / 二 |
-| `workbench.preflight_validate` | 按通用 quality policy 做 metadata-only 执行前可用性检查。 | 阶段一 / 二 |
+| `workbench.preflight_validate` | 按通用 quality policy 做 metadata-only 执行前可用性检查；只能作为 pre-skill stage 由 initial expansion 插入。 | 阶段一 / 二 |
 | `workbench.domain_validate` | 按 contract 暴露的 domain / quality policy 做边界校验。 | 阶段一 / 二 / 四 |
 | `workbench.artifact_inspect` | 检查 Skill 产物是否存在、类型是否符合 contract、是否可下载。 | 阶段一 / 二 |
 | `workbench.report_verify` | 验证报告或最终 digest 是否覆盖 contract 关键事实和风险。 | 阶段一 / 二 / 四 |

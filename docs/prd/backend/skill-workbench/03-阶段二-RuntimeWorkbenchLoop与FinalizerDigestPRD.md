@@ -9,23 +9,25 @@
 
 ## 1. 阶段目标
 
-实现最终运行闭环主线：`WorkbenchRuntimeReplanner` 观察完成的 `skill.*` 或 `workbench.*` output，按策略追加下一批内部 Workbench nodes 和必要 finalizer。
+实现最终运行闭环主线：`WorkbenchRuntimeReplanner` 观察完成的 `skill.*` 或 `workbench.*` output，按策略追加下一批后置内部 Workbench nodes 和必要 finalizer；同能力输入改写 retry 由独立 public-only `SkillRefinementRuntimeReplanner` 追加新的 `skill.*` 节点。
 
-1. `WorkbenchRuntimeReplanner` 放在 LLM `MainAgentRuntimeReplanner` 前。
-2. Replanner 只读取安全 output、policy 和 `WorkbenchReplanState`，不调用 LLM。
-3. 只追加 `workbench.*` 或必要 `main_agent.respond` finalizer，不改写已存在 node capability / dependencies。
-4. `answer_mode=direct` 默认不新增第二个 finalizer。
-5. `answer_mode=requires_finalizer` 的 finalizer 必须等待必要 Workbench verifier 完成后再消费 digest。
-6. `answer_mode=none` 只有 `finalizer_digest_mode=required` 时才新增 task-level finalizer。
-7. Finalizer 综合 Skill output 与 Workbench safe digest；Skill output 继续走原有输出链路。
+1. `CompositeRuntimeReplanner` 顺序必须是 `WorkbenchRuntimeReplanner` -> `SkillRefinementRuntimeReplanner` -> LLM `MainAgentRuntimeReplanner`。
+2. `WorkbenchRuntimeReplanner` 只读取安全 output、policy 和 `WorkbenchReplanState`，不调用 LLM。
+3. `WorkbenchRuntimeReplanner` 只追加 `post_skill_stages` 中的后置 `workbench.*` 或必要 `main_agent.respond` finalizer，不改写已存在 node capability / dependencies，不回插 preflight。
+4. `SkillRefinementRuntimeReplanner` 只读取 Workbench safe digest 中的 `refinement_possible` hint 和 public Skill metadata，只追加 public `skill.*` retry 节点，不生成 `workbench.*`。
+5. `answer_mode=direct` 默认不新增第二个 finalizer。
+6. `answer_mode=requires_finalizer` 的 finalizer 必须等待必要 Workbench verifier 完成后再消费 digest。
+7. `answer_mode=none` 只有 `finalizer_digest_mode=required` 时才新增 task-level finalizer。
+8. Finalizer 综合 Skill output 与 Workbench safe digest；Skill output 继续走原有输出链路。
 
 ## 2. 范围
 
 ### In scope
 
 - 新增 deterministic `WorkbenchRuntimeReplanner`。
-- `CompositeRuntimeReplanner` 顺序调整：Workbench deterministic replanner 先于 LLM replanner。
-- 根据 `satisfaction.replan_recommended`、missing output、artifact policy、domain policy 追加 stage。
+- 新增 deterministic public-only `SkillRefinementRuntimeReplanner`。
+- `CompositeRuntimeReplanner` 顺序调整：Workbench deterministic replanner 先处理后置验证 / finalizer；无 Workbench decision 时，Skill refinement replanner 才可基于 safe hint 追加 public `skill.*` retry；最后才进入 LLM replanner。
+- 根据 `satisfaction.replan_recommended`、missing output、artifact policy、domain policy 追加 post-skill stage。
 - pending finalizer 处理策略：不得原地修改已存在依赖；必要时新增 finalizer 或 orphan pending finalizer。
 - Workbench node metadata：`internal_node`、`workbench_stage`、`target_skill_node_id`、`target_capability_id`。
 - Workbench node id 使用稳定 opaque 命名，真实 stage 只进内部 metadata / audit。
@@ -33,7 +35,7 @@
 
 ### Out of scope
 
-- 不采用 initial expansion 固定 DAG 作为主路径。
+- 不采用 initial expansion 固定后置 DAG 作为主路径；但允许 initial expansion 按 policy 插入 metadata-only `preflight_validate` 前置节点。
 - 不改 public plan schema。
 - 不新增 SSE event schema 或 graph DTO 字段。
 - 不要求所有 Skill 修改 contract。
@@ -43,7 +45,7 @@
 
 ### 3.1 追加位置
 
-典型链路：
+典型后置链路：
 
 ```text
 skill_execute
@@ -51,13 +53,15 @@ skill_execute
   -> WorkbenchRuntimeReplanner 必要时追加 main_agent.respond finalizer
 ```
 
-如果存在前置 preflight，阶段二只允许 metadata-only preflight：
+如果存在前置 preflight，它必须已经由 initial expansion / policy expansion 在 Skill node 创建前插入：
 
 ```text
 workbench.preflight_validate -> skill_execute
 ```
 
 metadata-only preflight 只能检查 Skill contract 摘要、input schema / output contract 元信息、artifact metadata、resource policy 和 platform policy；不得读取完整文件、完整 rows、storage key、本地路径，也不得声称已经验证 Skill 最终 resolved inputs。基于已解析输入的验证必须等后续提供 safe input digest seam 后再做。
+
+`WorkbenchRuntimeReplanner` 不得在 Skill node 已存在、已 pending 或已执行后回插 preflight；如果 initial expansion 未插入 preflight，runtime 阶段只能继续执行后置检查或记录 audit caveat。
 
 ### 3.2 Node metadata 与 node_id
 
@@ -84,10 +88,11 @@ Workbench node id 必须使用稳定 opaque 命名，例如：
 
 ### 3.3 Budget
 
-- Workbench 追加节点受 initial plan `max_replans` / `max_dynamic_nodes` 限制。
+- Workbench 后置追加节点和 public Skill refinement retry 都受 initial plan `max_replans` / `max_dynamic_nodes` 限制。
 - 普通 Skill 默认 `max_replans=0`、`max_dynamic_nodes=0`。
 - 后续 revised plan 不得提升预算。
 - 预算不足时不追加节点，记录安全 reason code；不得声称验证通过或已完成补救。
+- `max_same_capability_refinements` 单独限制同一 public capability 的输入改写 retry 次数；默认不超过 1。
 
 ## 4. Finalizer digest 规则
 
@@ -141,8 +146,8 @@ Criticality 规则：
 每次 replan 必须满足：
 
 1. initial plan 仍有 `max_replans` / `max_dynamic_nodes` 预算。
-2. 存在未执行且对当前状态有意义的 Workbench stage，或需要追加必要 finalizer，或允许一次同能力 refinement retry。
-3. 本次动作会让 `WorkbenchReplanState` 单调前进：减少 pending stage、增加 completed / failed stage、追加 finalizer、改变 retry input fingerprint，或进入 terminal / wait state。
+2. 存在未执行且对当前状态有意义的 post-skill Workbench stage，或需要追加必要 finalizer，或允许一次同能力 refinement retry。
+3. 本次动作会让 `WorkbenchReplanState` 单调前进：减少 pending post-skill stage、增加 completed / failed stage、追加 finalizer、改变 retry input fingerprint，或进入 terminal / wait state。
 4. 不重复执行相同 stage + 相同 failure reason。
 5. 不重复执行相同 capability + 相同 input fingerprint。
 6. 不绕过必须由用户提供的信息。
@@ -194,12 +199,13 @@ Workbench 可输出 safe hint：
 
 1. Workbench 不生成 refined query、不写业务 prompt、不针对具体 Skill 名称定制。
 2. Workbench 只提供 `failure_kind=refinement_possible`、safe caveats、缺失约束摘要和是否允许同能力 retry。
-3. 实际同能力 retry 必须由 public-only Runtime Replanner 追加新的 `skill.*` 节点完成；该 replanner 仍只能输出 public DAG。
-4. 同一 capability 的 refinement retry 必须有独立上限，例如 `max_same_capability_refinements`，并计入 `max_replans` / `max_dynamic_nodes`。
-5. 每次 retry 必须改变输入 fingerprint；如果 refined input 与上次等价，禁止重试。
+3. 实际同能力 retry 必须由独立 `SkillRefinementRuntimeReplanner` 追加新的 `skill.*` 节点完成；该 replanner 仍只能输出 public DAG，不能生成 `workbench.*`。
+4. 同一 capability 的 refinement retry 必须有独立上限 `max_same_capability_refinements`，并计入 `max_replans` / `max_dynamic_nodes`。
+5. 每次 retry 必须改变输入 fingerprint；如果 refined input 与上次等价，禁止重试。fingerprint 必须基于 public `skill.*` input payload 的规范化安全摘要，不包含 raw file、path、storage_key、SQL 或 secret。
 6. 连续出现相同 failure reason 或同一 missing constraint 集合时，停止 retry；若缺的是用户必填信息，进入 `needs_user_input` wait，否则进入 `unsatisfied_terminal`。
 7. 如果缺失的是必须由用户提供的信息，必须停止本轮 Workbench replan 并交给已有 interrupt / clarification / resume 机制，不得由主代理猜测。
-8. retry 后仍不满足，进入 terminal state；不得无限尝试。
+8. retry 后仍不满足，进入 terminal state 或 `needs_user_input` wait；不得无限尝试。
+9. `SkillRefinementRuntimeReplanner` 可以使用用户原始请求、public Skill descriptor、上一轮 public Skill input、安全 failure kind / missing constraints 生成更清晰的 public input payload；不得读取 Workbench 内部 stage、raw output、完整文件内容、路径、storage key、SQL、schema DDL、handler、runtime 或 secret。
 
 ### 6.5 当前能力无法解决时的停止规则
 
@@ -217,16 +223,17 @@ Workbench 可输出 safe hint：
 | no mutation | revised plan 不改写已有 node dependencies / capability。 |
 | opaque node id | Workbench node id 不包含 capability / stage 名称。 |
 | budget respected | 超过 `max_replans` 或 `max_dynamic_nodes` 时 fail closed 并审计。 |
-| replanner ordering | Workbench replanner 在 LLM replanner 前，LLM 仍只能输出 public DAG。 |
+| replanner ordering | 顺序为 Workbench -> Skill refinement -> LLM；Workbench 先处理后置验证 / finalizer，Skill refinement 只追加 public `skill.*`，LLM 仍只能输出 public DAG。 |
 | direct no duplicate finalizer | `answer_mode=direct` 不新增第二个 `main_agent.respond`。 |
 | requires finalizer digest | finalizer 等待 Workbench verifier，dependency context 包含 safe digest。 |
 | finalizer safety | pending finalizer 不提前消费未验证 Skill output。 |
 | resume dedupe | resume 后不会重复执行已完成 Workbench stage。 |
 | workbench failure matrix | execution failure / verification failure / replan unavailable 按矩阵处理。 |
 | terminal / wait states | verified / unsupported / budget_exhausted / unsafe_digest 等 terminal state 停止 replan；needs_user_input / pending 类 wait state 暂停本轮 replan 并等待 interrupt / resume 或现有节点完成。 |
-| refinement retry bounded | `refinement_possible` 只触发有限同能力 retry，且输入 fingerprint 必须变化。 |
+| refinement retry bounded | `refinement_possible` 只触发 `SkillRefinementRuntimeReplanner` 的有限同能力 retry，且输入 fingerprint 必须变化。 |
 | repeated failure stops | 相同 stage + failure reason 或相同 missing constraints 不重复 retry。 |
 | no progress stops | 候选 replan 不改变 progress marker 时进入 no-progress 停止。 |
+| preflight not backfilled | preflight 只能由 initial expansion 前置插入；runtime replanner 不回插、不改写 Skill dependency。 |
 | pending internal nodes stop | 已有 pending Workbench 或 pending finalizer 时不追加同义节点。 |
 | terminal task stop | task terminal / cancelling / unresolved interrupt 时 Workbench replanner 不追加节点。 |
 
@@ -240,8 +247,8 @@ python -m pytest tests/capabilities/main_agent/ -k "prompt or dependency"
 
 ## 8. 阶段验收
 
-- runtime loop 只追加内部节点且严格受预算限制。
-- LLM replanner 不知道也不能生成 `workbench.*`。
+- runtime loop 只追加后置内部节点或 public Skill retry，且严格受预算限制。
+- LLM replanner 和 Skill refinement replanner 都不能生成 `workbench.*`。
 - Workbench node id 不泄漏内部 stage。
 - finalizer 不提前消费未验证 output。
 - answer mode、failure matrix 与总纲一致。

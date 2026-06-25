@@ -12,7 +12,7 @@
 
 1. **DAG 不变量**：每一版 `WorkflowPlan` 仍是无环 DAG；运行闭环通过新 DAG 版本、预算和 replan decision 表达，不引入 cyclic graph。
 2. **Public/Internal 分层**：`workbench.*` 必须是 `public=False` 的内部 capability；Planner、用户、public capability API 和 LLM replanner 不得看到或生成它。
-3. **Runtime replan 主线**：Workbench 不采用固定 DAG 过渡方案 主路径；核心方案是 deterministic runtime replanner 在 Skill output 后追加 Workbench nodes / finalizer。
+3. **Runtime replan 主线**：Workbench 不采用固定 DAG 过渡方案主路径；核心方案是 deterministic runtime replanner 在 Skill output 后追加后置 Workbench nodes / finalizer；前置 `preflight_validate` 如启用，只能由 initial expansion 在 Skill 前插入。
 4. **Contract / Policy 驱动**：Workbench 启用和 stage 选择必须来自平台策略与 Skill contract 的通用字段，不得按具体 Skill 名称定制。
 5. **Answer mode 守恒**：`answer_mode=direct` 默认不得追加第二个 `main_agent.respond`；`requires_finalizer` 可让 finalizer 消费安全 digest；`none` 只有显式策略要求时才新增 finalizer。
 6. **Digest 安全**：Workbench output 必须短、结构化、脱敏，并禁止 raw rows、完整文件内容、路径、storage ref、SQL、schema DDL、handler、runtime、entrypoint、token、secret 等字段。
@@ -40,9 +40,9 @@
 | 阶段 | PRD | 目标 | 实施优先级 |
 | --- | --- | --- | --- |
 | 总纲 | `00-Skill运行闭环Workbench总纲PRD.md` | 目录内总纲摘录：统一 runtime replan 主线、不变量、术语、阶段依赖、总体验收矩阵与禁止项。 | Umbrella |
-| 阶段零 | `01-阶段零-Workbench基座Policy与RuntimeStatePRD.md` | 建立 `WorkbenchPolicy`、`WorkbenchStage`、`WorkbenchOutputContractV1`、runtime budget、replan state 和 policy decision；不执行 Workbench。 | P0 |
+| 阶段零 | `01-阶段零-Workbench基座Policy与RuntimeStatePRD.md` | 建立 `WorkbenchPolicy`、`WorkbenchStage`、stage placement、`WorkbenchOutputContractV1`、runtime budget、replan state 和 policy decision；不执行 Workbench。 | P0 |
 | 阶段一 | `02-阶段一-内部Capability与ExecutorPRD.md` | 注册 `workbench.*` 内部 capability，提供本地 executor、输出契约校验、敏感字段剔除和基础 consumer contract tests。 | P1 |
-| 阶段二 | `03-阶段二-RuntimeWorkbenchLoop与FinalizerDigestPRD.md` | 接入 deterministic `WorkbenchRuntimeReplanner`，根据 Skill / Workbench output 追加验证节点和必要 finalizer，并定义停止状态机与有限同能力 refinement retry。 | P2 |
+| 阶段二 | `03-阶段二-RuntimeWorkbenchLoop与FinalizerDigestPRD.md` | 接入 deterministic `WorkbenchRuntimeReplanner` 与 public-only `SkillRefinementRuntimeReplanner`，根据 Skill / Workbench output 追加后置验证节点、必要 finalizer 或有限同能力 retry，并定义停止状态机。 | P2 |
 | 阶段三 | `04-阶段三-事件GraphPrompt脱敏PRD.md` | 收口 SSE、`task.graph_updated`、task graph API、history artifact 与 finalizer prompt dependency context 的内部节点脱敏。 | P2 / Gate |
 | 阶段四 | `05-阶段四-Contract质量策略与健康诊断PRD.md` | 支持 optional `quality_workbench` contract、diagnostics、health payload 和 Skill builder 文档。 | P3 |
 

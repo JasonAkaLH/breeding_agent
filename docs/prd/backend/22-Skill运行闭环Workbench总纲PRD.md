@@ -83,7 +83,7 @@
 | --- | --- | --- | --- |
 | `workbench.data_profile` | 对 Skill 输入、上传 artifact metadata 或上游输出摘要做轻量画像。 | artifact metadata、input schema 摘要、上游 output 摘要。 | 数据规模、字段候选、文件/文本类型、缺失摘要。 |
 | `workbench.schema_match` | 判断输入或输出是否匹配 selected input schema / output contract。 | schema id、contract 摘要、data profile。 | matched/missing/ambiguous 字段、置信度、需补信息。 |
-| `workbench.preflight_validate` | 按通用 quality policy 做执行前可用性检查。 | selected schema、input digest、platform policy。 | 可执行性、阻断原因、非阻断 warning。 |
+| `workbench.preflight_validate` | 按通用 quality policy 做执行前 metadata-only 可用性检查。第一版只能由 initial expansion 在 Skill 前插入，runtime replanner 不得回插。 | Skill contract 摘要、input schema / output contract 元信息、artifact metadata、resource policy、platform policy。 | 可执行性、阻断原因、非阻断 warning。 |
 | `workbench.domain_validate` | 按 Skill contract 暴露的 domain/quality policy 做领域边界校验。 | output digest、domain policy、request intent 摘要。 | domain warnings、blocking errors、业务边界说明。 |
 | `workbench.artifact_inspect` | 检查 Skill 产物是否存在、类型是否符合 output contract、是否可被前端下载。 | output files / artifacts metadata、output contract。 | artifact 完整性、缺失项、文件摘要。 |
 | `workbench.report_verify` | 验证 Skill 输出的用户可见报告或最终 digest 是否覆盖 contract 要求的关键事实和风险。 | Skill output digest、artifact inspect、domain validate。 | report completeness、finalizer highlights/caveats。 |
@@ -154,20 +154,23 @@ optional 字段：
 | `output_required_fields` | `outputs.*.required` | 决定 output contract verify。 |
 | `output_artifact_policy` | `outputs.*.artifacts` | 决定是否需要 `artifact_inspect`。 |
 | `resource_policy` | `resource_policy` | 控制 Workbench 不读取越界资源。 |
-| `quality_workbench` | Phase 3 contract 可选字段 | 精确声明 stage、预算、digest 需求。 |
+| `quality_workbench` | Phase 4 contract 可选字段 | 精确声明 stage、预算、digest 需求。 |
 
 策略输出：
 
 ```yaml
 workbench_policy:
   enabled: true
-  stages:
+  pre_skill_stages:
+    - preflight_validate
+  post_skill_stages:
     - schema_match
     - artifact_inspect
     - report_verify
   finalizer_digest_mode: none | when_finalizer_exists | required
   max_replans: 0
   max_dynamic_nodes: 0
+  max_same_capability_refinements: 1
   event_visibility: masked_frontend | audit_only
 ```
 
@@ -178,6 +181,8 @@ workbench_policy:
 - `answer_mode=requires_finalizer` 默认 `finalizer_digest_mode=when_finalizer_exists`，Workbench digest 可进入已有 finalizer。
 - `answer_mode=none` 只有在策略显式声明 `finalizer_digest_mode=required` 时才新增 finalizer。
 - runtime replan 预算必须在 initial plan 阶段确定；后续 revised plan 不得提升预算。
+- `enabled` 是 contract / policy decision 字段，只表示该 Skill 在本次 plan 中命中 Workbench 策略；它不是环境级启停配置、灰度开关或生产应急开关。
+- policy helper 必须把 stage 归一化为 `pre_skill_stages` 和 `post_skill_stages`：`preflight_validate` 只能进入 `pre_skill_stages`，其它 Workbench stage 默认进入 `post_skill_stages`。
 
 ## 9. Runtime Replanner 主线与 Initial Expansion 取舍
 
@@ -187,7 +192,7 @@ workbench_policy:
 
 1. 观察完成的 `skill.*` 或 `workbench.*` output。
 2. 读取 `WorkbenchPolicy`、`WorkbenchReplanState` 和已执行 stage。
-3. 如果仍需检查且状态可单调推进，追加下一批 `workbench.*` nodes。
+3. 如果仍需后置检查且状态可单调推进，追加下一批 post-skill `workbench.*` nodes。
 4. 必要时追加新的 finalizer，或 orphan 旧的 pending finalizer；不得原地修改已存在节点依赖。
 5. 不调用 LLM。
 6. 不得提高 `max_replans` 或 `max_dynamic_nodes`；预算只能来自 initial plan。
@@ -198,7 +203,7 @@ workbench_policy:
 
 - 更贴近运行闭环，按输出事实决定下一步。
 - 可减少不必要检查。
-- 可在 Skill output 或 Workbench digest 表示 `satisfaction.replan_recommended` 且满足停止状态机约束时补足验证。
+- 可在 Skill output 或 Workbench digest 表示 `satisfaction.replan_recommended` 且满足停止状态机约束时补足后置验证或触发有限 public Skill retry。
 - 避免把所有 Workbench stage 固定插入到每个任务，降低无谓延迟。
 
 约束：
@@ -209,9 +214,11 @@ workbench_policy:
 
 ### 9.2 有限前置 preflight
 
-允许在 runtime loop 中追加位于 Skill 前的 `workbench.preflight_validate`，但第一版只能做 metadata-only 检查：Skill contract 摘要、input schema / output contract 元信息、artifact metadata、resource policy 和 platform policy。
+`workbench.preflight_validate` 是唯一允许出现在 Skill 前的 Workbench stage，但第一版必须由 initial expansion / policy expansion 在 Skill node 创建前插入；`WorkbenchRuntimeReplanner` 不得在 Skill node 已存在、已 pending 或已执行后回插 preflight，也不得改写既有 Skill node dependencies。
 
-前置 preflight 不得读取完整文件、完整 rows、storage key、本地路径，也不得声称已经验证 Skill 最终 resolved inputs。基于已解析输入的验证必须等后续提供 safe input digest seam 后再做。
+前置 preflight 只能做 metadata-only 检查：Skill contract 摘要、input schema / output contract 元信息、artifact metadata、resource policy 和 platform policy。它不得读取完整文件、完整 rows、storage key、本地路径，也不得声称已经验证 Skill 最终 resolved inputs。基于已解析输入的验证必须等后续提供 safe input digest seam 后再做。
+
+如果 initial expansion 未插入 preflight，runtime 阶段不得补插；只能继续执行后置 Workbench 验证，或在安全 digest 中记录“未执行前置 metadata preflight”的 audit caveat。
 
 ### 9.3 不采用：Initial Expansion 固定 Workbench DAG 作为主路径
 
@@ -221,13 +228,13 @@ workbench_policy:
 - 对长耗时 Skill 会增加固定尾部延迟。
 - 当前目标是一次设计最终 runtime loop，而不是先交付固定 DAG 过渡方案。
 
-Initial expansion 仍可负责写入 policy metadata 和 initial runtime replan budget，但不得直接插入 Workbench nodes 作为默认行为。
+Initial expansion 仍可负责写入 policy metadata 和 initial runtime replan budget；除显式命中 metadata-only `preflight_validate` 策略外，不得直接插入 Workbench nodes 作为默认行为。
 
 ### 9.4 不推荐：让 LLM Replanner 规划 Workbench
 
-不让 `MainAgentRuntimeReplanner` 生成 `workbench.*`：
+不让 `MainAgentRuntimeReplanner` 或任何 public-only Skill refinement replanner 生成 `workbench.*`：
 
-- 它的设计边界是 public-only revised DAG。
+- 它们的设计边界是 public-only revised DAG。
 - Workbench 是内部平台阶段，不应进入 public capability prompt。
 - LLM 输出内部节点会扩大 prompt 注入、能力泄漏和不可测试风险。
 
@@ -239,8 +246,9 @@ Runtime replan 主线下，该模块主要入口：
 
 - 解析 Skill capability id / manifest / answer mode 后，查询 `WorkbenchPolicy`。
 - 给命中策略的 Skill plan 设置受控预算。
-- 插入固定 Workbench nodes。
+- 只在 initial expansion 阶段按 policy 插入 metadata-only `preflight_validate` 前置节点；不得插入固定后置 Workbench DAG。
 - 把 Workbench strategy 写入 plan metadata，便于测试和审计。
+- 将 `pre_skill_stages` / `post_skill_stages` 分开写入 metadata，避免 runtime replanner 误把 preflight 当作可后插 stage。
 
 ### 10.2 `WorkflowExpander`
 
@@ -254,12 +262,13 @@ Runtime replan 主线下，该模块主要入口：
 
 Phase 2 新增 deterministic replanner：
 
-- 只读取 `RuntimeReplanContext` 中的安全 output。
-- 只追加 `workbench.*` 或必要 finalizer。
-- 不调用 LLM。
-- 不改写已存在节点 capability / dependencies。
-- 不提高 initial plan 预算。
-- `refinement_possible` 可触发有限同能力 retry，但必须由 public-only Runtime Replanner 追加新的 `skill.*` 节点，且输入 fingerprint 必须变化。
+- `WorkbenchRuntimeReplanner` 只读取 `RuntimeReplanContext` 中的安全 output。
+- `WorkbenchRuntimeReplanner` 只追加 `post_skill_stages` 中的后置 `workbench.*` 或必要 finalizer；不得回插 preflight。
+- `SkillRefinementRuntimeReplanner` 是独立 public-only replanner，只在 Workbench safe digest 给出 `refinement_possible` 时追加新的 `skill.*` retry 节点。
+- 两者都不调用 LLM。
+- 两者都不改写已存在节点 capability / dependencies。
+- 两者都不提高 initial plan 预算。
+- `refinement_possible` 可触发有限同能力 retry，但必须由 `SkillRefinementRuntimeReplanner` 追加新的 `skill.*` 节点，且输入 fingerprint 必须变化。
 - 当前能力无法解决、预算耗尽、同一 failure reason 重复、候选动作无 progress marker 变化时进入 terminal state；需要用户输入、pending internal node 未完成、已有 pending finalizer 时进入 wait / no-decision stop，不追加重复节点。
 
 ### 10.4 `CapabilityRegistry` / `InstanceRegistry`
@@ -352,6 +361,7 @@ runtime replan 主线接受的行为：
 
 - `WorkbenchPolicy`
 - `WorkbenchStage`
+- `WorkbenchStagePlacement`
 - `WorkbenchOutputContractV1`
 - `WorkbenchReplanState`
 - `WorkbenchStageDecision`
@@ -396,10 +406,11 @@ runtime replan 主线接受的行为：
 
 验收标准：
 
-- Skill output 完成后，`WorkbenchRuntimeReplanner` 能在状态可推进时追加下一批内部节点。
+- Skill output 完成后，`WorkbenchRuntimeReplanner` 能在状态可推进时追加下一批后置内部节点。
+- preflight 如启用，只能由 initial expansion 在 Skill 前插入；runtime 阶段不得回插，且 policy metadata 必须将其与 post-skill stages 分离。
 - 不修改已存在节点 dependencies / capability。
 - 不提高 initial plan 预算。
-- `refinement_possible` 可触发有限同能力 retry，但必须由 public-only Runtime Replanner 追加新的 `skill.*` 节点，且输入 fingerprint 必须变化。
+- `refinement_possible` 可触发有限同能力 retry，但必须由 `SkillRefinementRuntimeReplanner` 追加新的 public `skill.*` 节点，且输入 fingerprint 必须变化。
 - 当前能力无法解决、预算耗尽、同一 failure reason 重复、候选动作无 progress marker 变化时进入 terminal state；需要用户输入、pending internal node 未完成、已有 pending finalizer 时进入 wait / no-decision stop，不追加重复节点。
 - `answer_mode=direct` 不新增重复 finalizer。
 - `answer_mode=requires_finalizer` 的 finalizer 等待必要 Workbench verifier，并消费 safe digest。
@@ -463,7 +474,7 @@ runtime replan 主线接受的行为：
 9. **Event / graph 脱敏**：内部节点的 frontend 事件和 task graph response 不暴露 `workbench.*`、path、handler、runtime、SQL、schema DDL、storage_ref。
 10. **Interrupt / Resume**：resume 后不会重复执行已完成 Workbench stage。
 11. **Artifact 边界**：Workbench 不创建前端可展示 artifact；Skill output file 展示链路保持不变。
-12. **Health / diagnostics**：Phase 3 contract 中非法 workbench stage 能产生诊断。
+12. **Health / diagnostics**：Phase 4 contract 中非法 workbench stage 或非法 stage placement 能产生诊断。
 
 ## 15. 关键验收场景
 

@@ -60,14 +60,14 @@ Workbench executor 是平台层 digest / validation，不是业务算法：
 | --- | --- | --- |
 | `data_profile` | artifact metadata、input schema 摘要、上游 output 摘要 | 数据规模、文件/文本类型、字段候选、缺失摘要 |
 | `schema_match` | schema id、contract 摘要、data profile | matched / missing / ambiguous 字段、置信度、需补信息 |
-| `preflight_validate` | selected schema、input digest、platform policy | 可执行性、阻断原因、warning |
+| `preflight_validate` | Skill contract 摘要、selected schema 元信息、output contract 元信息、artifact metadata、resource policy、platform policy | metadata-only 可执行性、阻断原因、warning |
 | `domain_validate` | output digest、domain policy、request intent 摘要 | domain warnings、blocking errors、边界说明 |
 | `artifact_inspect` | artifact metadata、output contract | artifact 完整性、缺失项、类型摘要 |
 | `report_verify` | Skill output digest、artifact inspect、domain validate | report completeness、finalizer highlights / caveats |
 
 禁止行为：
 
-- 不读取完整文件内容、完整 rows、schema DDL 或 SQL。
+- 不读取完整文件内容、完整 rows、schema DDL、SQL、storage key、本地路径或最终 resolved input payload。
 - 不创建前端可展示 artifact。
 - 不把 handler、runtime、entrypoint、路径、storage ref 写入 output。
 - 不调用 LLM。
@@ -111,6 +111,7 @@ Workbench executor 是平台层 digest / validation，不是业务算法：
 | forbidden field sanitizer | executor 输出含禁止字段时失败或剔除。 |
 | no frontend artifact | executor 不创建用户可下载 artifact。 |
 | metadata-only inspection | `artifact_inspect` 只消费 artifact metadata，不读取文件原文。 |
+| preflight metadata-only | `preflight_validate` 不读取最终 resolved input、完整文件、rows、storage key 或本地路径。 |
 
 推荐命令：
 
