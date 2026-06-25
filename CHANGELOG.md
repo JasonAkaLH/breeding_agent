@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 2026-06-25
+
+- Skill 运行闭环 Workbench 总纲已拆分为 `docs/prd/backend/skill-workbench/` 阶段目录：新增 README、目录总纲，以及 Policy/audit-only、内部 capability/executor、固定 DAG/finalizer digest、事件 graph prompt 脱敏、runtime replanner 与 contract 健康诊断五份实施 PRD；同步父总纲拆分结果、PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
+
 ### 2026-06-24
 
 - Docker Compose 与生产部署脚本补充外部 Skill repo 挂载：默认将宿主机 `/srv/vibe-breeding/skills` 只读挂载到容器 `/app/skill`，生产脚本 / 手工命令会 clone 或 fast-forward pull `git@gitee.com:wellionx/vibe-breeding.git`，配合 `/api/v1/capabilities` read-through refresh，实现更新 Skill repo 后无需重打包项目镜像即可刷新公开 Skill 列表。License Requirement：Docker/文档/部署脚本变更，无新增依赖/许可变更。

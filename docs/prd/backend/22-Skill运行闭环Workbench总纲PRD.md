@@ -2,7 +2,7 @@
 
 - **项目**：breeding_agent
 - **范围**：后端平台层 Skill 运行闭环、内部 Workbench capability、Skill 执行后验证与受控重编排
-- **文档状态**：总体设计稿，待拆分阶段实施 PRD
+- **文档状态**：总体设计稿；已拆分阶段实施 PRD，见 `docs/prd/backend/skill-workbench/README.md`
 - **日期**：2026-06-17
 - **目标模块**：`src/orchestration/`、`src/capabilities/`、`src/api/runtime.py`、`src/integrations/agent_skills/`、Skill 平台准入契约
 
@@ -506,12 +506,16 @@ workbench:
 5. 稳定后引入 `runtime_replan`。
 6. 最后把策略迁移进 `skill.contract.yaml` 可选字段，并补 Skill 构建指南。
 
-## 18. 后续拆分建议
+## 18. 后续拆分结果
 
-本总纲后续建议拆成三份实施 PRD：
+本总纲已拆分到 `docs/prd/backend/skill-workbench/`，采用“总纲 + 5 个实施阶段 PRD”的落地结构：
 
-- `22-01-Workbench内部Capability与固定DAG插入PRD.md`
-- `22-02-WorkbenchRuntimeReplanner与预算闭环PRD.md`
-- `22-03-SkillContract质量工作台策略与健康诊断PRD.md`
+- `docs/prd/backend/skill-workbench/README.md`
+- `docs/prd/backend/skill-workbench/00-Skill运行闭环Workbench总纲PRD.md`
+- `docs/prd/backend/skill-workbench/01-阶段零-Workbench基座Policy与AuditOnlyPRD.md`
+- `docs/prd/backend/skill-workbench/02-阶段一-内部Capability与ExecutorPRD.md`
+- `docs/prd/backend/skill-workbench/03-阶段二-固定DAG插入与FinalizerDigestPRD.md`
+- `docs/prd/backend/skill-workbench/04-阶段三-事件GraphPrompt脱敏PRD.md`
+- `docs/prd/backend/skill-workbench/05-阶段四-RuntimeReplanner与Contract健康诊断PRD.md`
 
-拆分前，本文件作为总体方向、跨阶段不变量和验收矩阵的事实源；阶段 PRD 不得放宽本总纲的 public/internal、安全、answer mode、预算和脱敏边界。
+本文件继续作为总体方向、跨阶段不变量和验收矩阵的事实源；阶段 PRD 不得放宽本总纲的 public/internal、安全、answer mode、预算和脱敏边界。
