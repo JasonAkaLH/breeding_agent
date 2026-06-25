@@ -4,7 +4,7 @@
 - **日期**：2026-06-25
 - **状态**：待实施
 - **上游依赖**：阶段零 Workbench policy / output contract
-- **下游阶段**：阶段二固定 DAG 插入、阶段三脱敏门禁
+- **下游阶段**：阶段二 Runtime Workbench Loop、阶段三脱敏门禁
 - **目标模块**：`src/capabilities/workbench/`、`src/api/runtime.py`、`CapabilityRegistry`、`InstanceRegistry`、`CapabilityExecutor`、`tests/capabilities/workbench/`
 
 ## 1. 阶段目标
@@ -27,6 +27,7 @@
 - executor 默认不生成用户可下载 artifact。
 - 输出 required 字段和禁止字段验证。
 - timeout / digest size 上限的最小实现或配置接入。
+- runtime wiring：descriptor 注册、internal execution instance、CompositeExecutor 顺序、scheduler 可选中。
 
 ### Out of scope
 

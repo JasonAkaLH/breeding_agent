@@ -2,7 +2,7 @@
 
 - **项目**：breeding_agent
 - **范围**：后端平台层 Skill 运行闭环、内部 Workbench capability、Skill 执行后验证与受控重编排
-- **文档状态**：总体设计稿；已拆分阶段实施 PRD，见 `docs/prd/backend/skill-workbench/README.md`
+- **文档状态**：总体设计稿；已拆分为 runtime replan 主线阶段实施 PRD，见 `docs/prd/backend/skill-workbench/README.md`
 - **日期**：2026-06-17
 - **目标模块**：`src/orchestration/`、`src/capabilities/`、`src/api/runtime.py`、`src/integrations/agent_skills/`、Skill 平台准入契约
 
@@ -27,7 +27,7 @@
 - **G2 后端内部增强**：第一版不新增前端 API，不改变 SSE、artifact、interrupt、resume 的协议字段。
 - **G3 Workbench 内部 capability**：新增 `workbench.*` 作为 `public=False` 的后端内部 capability，Planner、用户和 public capability API 不可见。
 - **G4 Contract / policy 驱动**：Workbench 启用规则必须来自平台策略与 Skill contract 的通用字段，例如 execution mode、answer mode、input schema、output contract、artifact policy、resource policy、quality policy；不得根据具体 Skill 名称定制。
-- **G5 受控预算**：只有被平台策略明确允许的 Skill plan 才可开启有限预算；普通 Skill 默认保持现有一次性行为。
+- **G5 受控预算**：只有被平台策略明确允许的 Skill plan 才可在 initial plan 阶段写入有限 runtime replan 预算；普通 Skill 默认保持现有一次性行为。
 - **G6 Finalizer 可消费但不强制**：Workbench output 必须形成短、结构化、脱敏的 digest；只有当 Skill 的 answer mode 或平台策略需要 finalizer 时，该 digest 才进入 `main_agent.respond` 的 dependency context。
 - **G7 平台侧测试优先**：具体 Skill 测试集属于 Skill 资源维护者；平台侧重点补 Skill 准入契约、consumer contract tests、capability health / diagnostics。
 
@@ -38,7 +38,7 @@
 - 不让 LLM Planner 直接看到、选择或生成 `workbench.*`。
 - 不把具体业务算法或领域处理逻辑塞进主框架；Workbench 只做平台层画像、校验、摘要和验证。
 - 不替代各 Skill 自己的业务测试；平台只验证 Skill 与主框架之间的 consumer contract。
-- 不要求所有 Skill 立即修改 contract；MVP 可先由平台静态策略表驱动，contract 扩展放到后续阶段。
+- 不要求所有 Skill 立即修改 contract；前期可先由平台静态策略表驱动，contract 扩展放到后续阶段。
 
 ## 4. 干系人与受影响系统
 
@@ -57,7 +57,7 @@
 | --- | --- | --- |
 | `src/orchestration/models.py` | `WorkflowPlan` 只有 nodes / metadata / replan budgets。 | 继续用版本化 DAG 表达运行闭环，不改 plan schema。 |
 | `src/orchestration/workflow_plan_validator.py` | 校验 capability、payload JSON、依赖存在和无环。 | `workbench.*` 必须注册到 `CapabilityRegistry`，并保持 DAG 合法。 |
-| `src/orchestration/skill_workflow_provider.py` | `skill.*` 可展开为 Skill node + finalizer；当前预算为 0。 | 最适合承接 MVP 初始插入和平台预算策略。 |
+| `src/orchestration/skill_workflow_provider.py` | `skill.*` 可展开为 Skill node + finalizer；当前预算为 0。 | 适合在 initial plan 阶段承接 Workbench policy metadata 与 runtime replan 预算写入。 |
 | `src/orchestration/workflow_expander.py` | 展开 macro、补全全局 finalizer、继承 macro budgets。 | 需要保证 Workbench 链路不破坏已有 finalizer 规则。 |
 | `src/orchestration/service.py` | 运行时 replan 不允许改写已存在节点的 capability 或 dependencies；新增节点受 `max_dynamic_nodes` 限制。 | Phase 2 不能简单把已创建 finalizer 的依赖改到新 verifier 上，必须新增 finalizer 或初始延迟创建。 |
 | `src/capabilities/main_agent/runtime_replanner.py` | LLM replanner 只能输出 public capability DAG，且 sanitize node outputs。 | Workbench replanner 应是 deterministic 内部 replanner，放在 LLM replanner 前。 |
@@ -70,7 +70,7 @@
 1. **Plan 仍是 DAG**：运行闭环由“新一版 DAG + 预算 + replan decision”表达，不在单个 plan 内引入环。
 2. **Public / internal 分层**：Planner 和用户只看到 `skill.*` / `main_agent.respond`；`workbench.*` 只由后端 expander / deterministic replanner 注入。
 3. **Contract / policy 优先**：Workbench 不按 Skill 名称分支；只按 contract 字段、platform policy、execution mode、answer mode、output contract、artifact policy、resource policy 和显式 quality policy 决定 stage。
-4. **先确定性，后智能化**：MVP 先用平台策略和固定链路验证；Phase 2 再基于 node output 逐步追加。
+4. **确定性 runtime loop 优先**：Workbench 由 deterministic RuntimeReplanner 基于 node output 追加内部节点；不让 LLM 规划 Workbench，也不采用固定 DAG 作为主路径。
 5. **Digest 优先**：Workbench 不把原始文件、完整 rows、SQL、schema DDL、handler、runtime、路径或 secret 放进 prompt / SSE / audit 可见 payload。
 6. **Finalizer 尊重 answer mode**：`answer_mode=direct` 的 Skill 不得因为 Workbench 而重复追加主代理回答节点；只有 `requires_finalizer`、`none + finalizer policy` 或显式策略要求时，Workbench digest 才进入 finalizer。
 7. **Fail closed**：策略不匹配、输出 contract 缺失、digest 超限、敏感字段检测失败时，Workbench 节点应失败或降级为 audit-only caveat，不能静默放行并声称验证通过。
@@ -142,7 +142,7 @@ optional 字段：
 
 ## 8. 平台策略模型
 
-MVP 采用平台静态策略表，策略 key 不得是具体 Skill 名称，必须是 contract / capability descriptor / execution config 可推导的通用属性。
+前期采用平台静态策略表，策略 key 不得是具体 Skill 名称，必须是 contract / capability descriptor / execution config 可推导的通用属性。
 
 建议策略输入：
 
@@ -179,54 +179,49 @@ workbench_policy:
 - `answer_mode=none` 只有在策略显式声明 `finalizer_digest_mode=required` 时才新增 finalizer。
 - runtime replan 预算必须在 initial plan 阶段确定；后续 revised plan 不得提升预算。
 
-## 9. Initial Expansion 与 Runtime Replanner 取舍
+## 9. Runtime Replanner 主线与 Initial Expansion 取舍
 
-### 9.1 MVP：Initial Expansion 插入固定 Workbench DAG
+### 9.1 推荐：确定性 Runtime Workbench Loop
 
-推荐第一阶段在 `SkillWorkflowProvider` 或其附近的 policy helper 中完成：
-
-1. `skill.*` macro 展开为 Skill execute node。
-2. 根据 `WorkbenchPolicy` 在 Skill node 前后插入固定 Workbench nodes。
-3. 对已有 finalizer 的 Skill，把 finalizer 依赖连到最后一个 Workbench verifier，而不是直接依赖 Skill node。
-4. 对 `answer_mode=direct` 的 Skill，只追加 audit/health 型 Workbench 节点，不新增 finalizer。
-5. 对 `answer_mode=none` 的 Skill，只有策略显式要求 finalizer 时才新增 task-level finalizer。
-
-优点：
-
-- 图结构确定，便于测试和审计。
-- 不消耗 runtime replan budget。
-- 避免运行时重排改写已创建 finalizer 依赖被拒。
-- 第一版实现面小，不触碰 public API。
-
-缺点：
-
-- 可能执行不必要的 Workbench stage。
-- 无法根据 Skill output 动态选择下一步。
-- 对长耗时 Skill 可能增加固定尾部延迟。
-
-### 9.2 Phase 2：RuntimeReplanner 逐步追加
-
-在 `CompositeRuntimeReplanner` 中新增 `WorkbenchRuntimeReplanner`，顺序放在 `MainAgentRuntimeReplanner` 前：
+主路径是在 `CompositeRuntimeReplanner` 中新增 `WorkbenchRuntimeReplanner`，顺序放在 `MainAgentRuntimeReplanner` 前：
 
 1. 观察完成的 `skill.*` 或 `workbench.*` output。
-2. 读取 `WorkbenchPolicy` 和已执行 stage。
+2. 读取 `WorkbenchPolicy`、`WorkbenchReplanState` 和已执行 stage。
 3. 如果仍需检查，追加下一批 `workbench.*` nodes。
 4. 必要时追加新的 finalizer，或 orphan 旧的 pending finalizer；不得原地修改已存在节点依赖。
-5. 不得提高 `max_replans` 或 `max_dynamic_nodes`；预算只能来自 initial plan。
+5. 不调用 LLM。
+6. 不得提高 `max_replans` 或 `max_dynamic_nodes`；预算只能来自 initial plan。
 
 优点：
 
 - 更贴近运行闭环，按输出事实决定下一步。
 - 可减少不必要检查。
-- 可在 Skill output 表示 `satisfaction.replan_recommended` 时补足验证。
+- 可在 Skill output 或 Workbench digest 表示 `satisfaction.replan_recommended` 时补足验证。
+- 避免把所有 Workbench stage 固定插入到每个任务，降低无谓延迟。
 
-缺点：
+约束：
 
 - 需要严格管理预算和 node id。
-- finalizer 依赖处理更复杂。
-- `task.graph_updated` / `node.started` / task graph API 等输出需要更强内部节点脱敏。
+- finalizer 依赖处理必须使用新增 finalizer 或 orphan pending finalizer，不得修改已存在节点依赖。
+- `task.graph_updated` / `node.started` / task graph API 等输出必须对内部节点脱敏。
 
-### 9.3 不推荐：让 LLM Replanner 规划 Workbench
+### 9.2 有限前置 preflight
+
+允许在 runtime loop 中追加位于 Skill 前的 `workbench.preflight_validate`，但第一版只能做 metadata-only 检查：Skill contract 摘要、input schema / output contract 元信息、artifact metadata、resource policy 和 platform policy。
+
+前置 preflight 不得读取完整文件、完整 rows、storage key、本地路径，也不得声称已经验证 Skill 最终 resolved inputs。基于已解析输入的验证必须等后续提供 safe input digest seam 后再做。
+
+### 9.3 不采用：Initial Expansion 固定 Workbench DAG 作为主路径
+
+不把初始 plan 展开为固定 Workbench DAG 主路径：
+
+- 固定链路可能执行不必要 stage。
+- 对长耗时 Skill 会增加固定尾部延迟。
+- 当前目标是一次设计最终 runtime loop，而不是先交付固定 DAG 过渡方案。
+
+Initial expansion 仍可负责写入 policy metadata 和 initial runtime replan budget，但不得直接插入 Workbench nodes 作为默认行为。
+
+### 9.4 不推荐：让 LLM Replanner 规划 Workbench
 
 不让 `MainAgentRuntimeReplanner` 生成 `workbench.*`：
 
@@ -238,7 +233,7 @@ workbench_policy:
 
 ### 10.1 `SkillWorkflowProvider`
 
-MVP 主要入口：
+Runtime replan 主线下，该模块主要入口：
 
 - 解析 Skill capability id / manifest / answer mode 后，查询 `WorkbenchPolicy`。
 - 给命中策略的 Skill plan 设置受控预算。
@@ -290,7 +285,7 @@ Phase 2 新增 deterministic replanner：
 
 ### 10.7 Skill contract / profile
 
-MVP 不要求修改 Skill contract。
+前期不要求修改 Skill contract。
 
 Phase 3 可增加可选字段：
 
@@ -308,7 +303,7 @@ quality_workbench:
 
 本专题不新增 API，也不改变 DTO / SSE schema。但是需要保证内部节点不泄漏实现细节。
 
-MVP 接受的行为：
+runtime replan 主线接受的行为：
 
 - 前端仍收到标准 task/node 事件。
 - 内部 Workbench 节点可表现为泛化的“结果校验中 / 产物检查中”，但不展示 handler、runtime、路径、SQL、schema DDL。
@@ -316,111 +311,121 @@ MVP 接受的行为：
 
 必须实现的后端脱敏：
 
-- `node.started` payload 对 `metadata.internal_node=True` 的节点隐藏真实 `capability_id` 或映射为泛化 `internal.validation`。
+- Graph API 和事件脱敏不能只依赖 `metadata.internal_node=True`，因为持久化 `TaskNode` 当前不保存 plan metadata；必须可通过 `CapabilityRegistry` descriptor `public=False && kind=workbench` 识别内部节点。
+- `node.started` payload 对内部 Workbench 节点隐藏真实 `capability_id` 或映射为泛化 `internal.validation`。
+- Workbench node id 必须使用稳定 opaque 命名，不得包含真实 stage 或 `workbench.*`；真实 `workbench_stage` 只保留在内部 metadata / audit。
 - `task.graph_updated` 的 `added_node_ids` 如包含内部节点，应保持协议字段但避免暴露语义化内部实现名称；可以使用稳定 opaque node id 或 audit-only 详细映射。
 - `GET /api/v1/tasks/{task_id}/graph` 必须对内部节点做隐藏、泛化或 opaque id 映射；不得直接返回 `workbench.*` capability id 给普通前端视图。
 - task summary / history artifact 只展示最终回答和 Skill output file，不展示 Workbench digest artifact。
-- 审计侧可保留真实内部 node id / capability id，但必须继续执行敏感字段脱敏。
+- finalizer prompt 应综合 Skill output 与 Workbench safe digest；普通 Skill output 继续走通用 sanitizer，Workbench output 必须走专用 sanitizer。
+- 审计侧可保留真实内部 node id / capability id / stage，但必须继续执行敏感字段脱敏。
 
 ## 12. 非功能要求
 
 | 维度 | 要求 |
 | --- | --- |
-| 性能 | Workbench 节点默认轻量执行；单节点必须有 timeout policy；MVP 不读取完整文件和完整 rows。 |
+| 性能 | Workbench 节点默认轻量执行；单节点必须有 timeout policy；不读取完整文件和完整 rows。 |
 | 资源 | Workbench output digest 必须有大小上限；进入 finalizer dependency context 前必须再次经过 allowlist 和敏感字段过滤。 |
-| 安全 | 内部 capability、node id、handler、runtime、路径、SQL、schema DDL、secret 不得进入 public prompt、frontend event、graph API 或 history artifact。 |
+| 安全 | 内部 capability、node id、stage、handler、runtime、路径、SQL、schema DDL、secret 不得进入 public prompt、frontend event、graph API 或 history artifact。 |
 | 兼容 | 不改变 API/SSE schema；只允许在既有字段内泛化、隐藏或脱敏内部节点。 |
 | 可观测性 | 内部真实节点、stage、拒绝原因和 budget 消耗必须可审计，但 audit payload 不记录原始敏感内容。 |
-| 可回滚 | MVP 必须受 feature flag 控制；关闭后 Skill plan 回到现有一次性行为。 |
-
-建议 feature flag：
-
-```yaml
-workbench:
-  enabled: false
-  rollout_scope: disabled | audit_only | fixed_dag | runtime_replan
-```
+| 部署 | 先进入开发环境；生产环境必须等 runtime loop、脱敏、prompt sanitizer、graph API 和 consumer contract tests 全部通过后再部署。 |
 
 ## 13. 分阶段交付
 
-### 13.1 MVP：固定 Workbench DAG 与安全 digest
+本总纲已拆分到 `docs/prd/backend/skill-workbench/`，采用 runtime replan 主线，而不是固定 DAG 过渡方案。
+
+### 13.1 阶段零：Workbench 基座、Policy 与 Runtime State
 
 改动模块：
 
-- `src/capabilities/workbench/`
-- `src/orchestration/skill_workflow_provider.py`
-- `src/orchestration/workflow_expander.py`
+- `src/orchestration/`
 - `src/api/runtime.py`
-- `src/capabilities/main_agent/prompt_builder.py`
-- `src/api/routes/tasks.py`
 - `tests/orchestration/`
-- `tests/capabilities/workbench/`
-- `tests/api/`
 
 关键数据结构：
 
 - `WorkbenchPolicy`
 - `WorkbenchStage`
 - `WorkbenchOutputContractV1`
-- node metadata：`internal_node`、`workbench_stage`、`target_skill_node_id`、`target_capability_id`
-
-验收标准：
-
-- `workbench.*` 不出现在 public capability list 和 planner prompt。
-- Workbench policy 按 contract / policy 属性命中，不按 Skill 名称命中。
-- `answer_mode=direct` 不新增重复主代理 finalizer。
-- `answer_mode=requires_finalizer` 的 finalizer 可以消费 Workbench digest。
-- finalizer 的 dependency context 包含 Workbench safe digest，且不包含禁止字段。
-- SSE 和 graph API 不泄漏内部 capability id、handler、runtime、路径、SQL、schema DDL 或 storage ref。
-- interrupt/resume、artifact 下载、SkillExecutor 现有回归不退化。
-
-主要风险：
-
-- 固定链路可能增加耗时。
-- finalizer 规则与多 Skill 汇总容易重复或漏依赖。
-- 内部 node id / capability id 可能通过现有事件或 graph API 泄漏，需要配套脱敏。
-
-### 13.2 Phase 2：确定性 Runtime Workbench Loop
-
-改动模块：
-
-- `src/orchestration/workbench_replanner.py`
-- `src/orchestration/runtime_replanner.py`
-- `src/orchestration/service.py` 的内部事件脱敏辅助
-- `tests/orchestration/test_workbench_replanner.py`
-
-关键数据结构：
-
 - `WorkbenchReplanState`
 - `WorkbenchStageDecision`
 - `WorkbenchBudget`
 
 验收标准：
 
-- Skill output 完成后，`WorkbenchRuntimeReplanner` 能追加下一批内部节点。
-- 不修改已存在节点 dependencies。
-- 不提高 initial plan 预算。
-- 超过 `max_replans` 或 `max_dynamic_nodes` 时 fail closed 并记录审计。
-- LLM Runtime Replanner 仍只能输出 public DAG。
-- pending finalizer 不会提前消费未验证 Skill output。
+- Workbench policy 按 contract / policy 属性命中，不按 Skill 名称命中。
+- 只有策略明确允许的 Skill plan 才写入 runtime replan 预算。
+- 普通 Skill 预算保持 0，行为不变。
+- policy decision 和 state 不包含 path、storage key、SQL、schema DDL、handler、runtime 或 secret。
 
-主要风险：
-
-- 运行时图更新会增加状态机复杂度。
-- old finalizer orphan / new finalizer append 需要明确 task history 语义。
-- 预算不足时用户可能看到未验证但已完成的 direct answer，需要策略约束。
-
-### 13.3 Phase 3：Skill Contract 准入与健康诊断
+### 13.2 阶段一：内部 Capability 与 Executor
 
 改动模块：
 
-- `skill.contract.yaml` 可选字段扩展
+- `src/capabilities/workbench/`
+- `src/api/runtime.py`
+- `CapabilityRegistry` / `InstanceRegistry` / `CapabilityExecutor` wiring
+- `tests/capabilities/workbench/`
+
+验收标准：
+
+- `workbench.*` 不出现在 public capability list 和 planner prompt。
+- descriptors 全部 `public=False`、`kind=workbench`、`source=builtin`。
+- executor 输出满足 `WorkbenchOutputContractV1`。
+- output 缺 required 字段或包含禁止字段时失败或剔除。
+- Workbench 不生成前端可展示 artifact。
+
+### 13.3 阶段二：Runtime Workbench Loop 与 Finalizer Digest
+
+改动模块：
+
+- `src/orchestration/workbench_replanner.py`
+- `src/orchestration/runtime_replanner.py`
+- `src/orchestration/service.py`
+- `src/capabilities/main_agent/prompt_builder.py`
+- `tests/orchestration/test_workbench_replanner.py`
+
+验收标准：
+
+- Skill output 完成后，`WorkbenchRuntimeReplanner` 能追加下一批内部节点。
+- 不修改已存在节点 dependencies / capability。
+- 不提高 initial plan 预算。
+- `answer_mode=direct` 不新增重复 finalizer。
+- `answer_mode=requires_finalizer` 的 finalizer 等待必要 Workbench verifier，并消费 safe digest。
+- Workbench node id 使用 opaque 命名，不泄漏真实 stage。
+- LLM Runtime Replanner 仍只能输出 public DAG。
+
+### 13.4 阶段三：事件、Graph API 与 Prompt 脱敏
+
+改动模块：
+
+- `src/api/routes/tasks.py`
+- `src/api/runtime.py`
+- `src/orchestration/service.py`
+- `src/capabilities/main_agent/prompt_builder.py`
+- `tests/api/`
+
+验收标准：
+
+- SSE 和 graph API 不泄漏内部 capability id、stage、handler、runtime、路径、SQL、schema DDL 或 storage ref。
+- graph / event masking 可通过 `CapabilityRegistry` descriptor `public=False && kind=workbench` 识别内部节点，不依赖未持久化 metadata。
+- finalizer 的 dependency context 包含 Skill output 和 Workbench safe digest；Workbench output 走专用 sanitizer。
+- 普通 Skill output 的通用 sanitizer 不退化。
+- interrupt/resume、artifact 下载、SkillExecutor 现有回归不退化。
+
+### 13.5 阶段四：Contract 质量策略与健康诊断
+
+改动模块：
+
+- `src/integrations/agent_skills/contract.py`
 - `src/integrations/agent_skills/skill_capabilities.py`
 - Skill runtime diagnostics / health
-- 文档与 Skill 构建指南
+- Skill builder / 文档与 Skill 构建指南
 
 关键数据结构：
 
+- `SkillQualityWorkbenchContract`
 - `quality_workbench` contract section
 - `SkillCapabilityDiagnostic` 新增 workbench 策略诊断原因
 - capability health payload
@@ -428,15 +433,10 @@ workbench:
 验收标准：
 
 - Workbench 策略优先来自 Skill contract，静态表只作为兼容 fallback。
-- contract invalid 的 Workbench 策略不影响内置 capability，但该 Skill 产生诊断并按策略 fail closed 或降级。
+- contract invalid 的 Workbench 策略产生诊断，并对该 Skill 的 Workbench 行为 fail closed 或禁用 Workbench。
+- `quality_workbench` 为 optional；未声明字段的 Skill 保持兼容。
 - 平台 consumer contract tests 不依赖真实 Skill 测试集。
-- Skill 维护者能通过文档知道如何声明 workbench stages 和 output digest。
-
-主要风险：
-
-- Contract 扩展会增加 Skill 维护者负担。
-- 不同 Skill 的成熟度不同，过早强制可能导致现有 Skill 无法注册。
-- health diagnostics 若变成 public API，会扩大范围；建议先 audit/internal。
+- Skill 维护者能通过文档知道如何声明 workbench stages、output digest 和预算。
 
 ## 14. 最小 Consumer Contract Tests
 
@@ -490,32 +490,31 @@ workbench:
 | --- | --- |
 | 内部 capability 泄漏到前端 | `public=False` 之外增加 SSE 和 graph API masking；详细内部信息 audit-only。 |
 | Workbench 变成业务算法实现 | 明确 Workbench 只做平台画像/校验/digest，业务逻辑仍在 Skill。 |
-| 固定 DAG 增加延迟 | MVP stage 控制在轻量、可跳过；Phase 2 动态化。 |
+| Runtime loop 追加节点增加延迟 | Stage 控制在轻量、按需追加；预算不足时 fail closed 并记录诊断。 |
 | Direct Skill 被重复 finalizer | 默认 `direct` 不接 finalizer；需要 finalizer 必须显式 contract/policy 决策。 |
-| Runtime replan 提前/重复 finalizer | MVP 初始依赖连好；Phase 2 使用新增 finalizer 或 orphan pending finalizer，不改已有依赖。 |
+| Runtime replan 提前/重复 finalizer | 使用新增 finalizer 或 orphan pending finalizer，不改已有依赖；pending finalizer 不得提前消费未验证 output。 |
 | Skill contract 扩展影响注册 | Phase 3 先 optional + diagnostics，成熟后再变成准入要求。 |
 | 本地没有外部 Skill 测试集 | 平台 consumer contract tests 使用 fake Skill output 和 mock artifacts。 |
 | Prompt 泄漏敏感 output | Workbench output schema 禁止敏感字段；finalizer dependency context allowlist 和敏感词过滤双重控制。 |
 
-## 17. Rollout 建议
+## 17. 开发与生产部署建议
 
-1. 默认 feature flag 关闭。
-2. 先启用 `audit_only`，只记录 Workbench policy decision 和 would-run stages，不改 DAG。
-3. 再启用 `fixed_dag`，只覆盖 contract / policy 明确命中的 Skill 类型。
-4. 通过平台 consumer contract tests 和真实手工 smoke 验证 digest 是否改善最终回答或诊断质量。
-5. 稳定后引入 `runtime_replan`。
-6. 最后把策略迁移进 `skill.contract.yaml` 可选字段，并补 Skill 构建指南。
+1. 先在开发环境实现并验证完整 runtime Workbench loop。
+2. 生产环境部署前必须通过平台 consumer contract tests、事件 / graph / prompt 泄漏回归、interrupt/resume 回归、artifact 下载回归和真实手工 smoke。
+3. 生产部署必须确认 finalizer 不重复、direct Skill 用户可见回答不被 Workbench 改写、required artifact / output 缺失按失败矩阵处理。
+4. 部署文档必须记录 Workbench 的 internal capability、audit 事件、预算耗尽 reason code 和诊断排查入口。
+5. 稳定后再把策略迁移进 `skill.contract.yaml` 可选字段，并补 Skill 构建指南。
 
 ## 18. 后续拆分结果
 
-本总纲已拆分到 `docs/prd/backend/skill-workbench/`，采用“总纲 + 5 个实施阶段 PRD”的落地结构：
+本总纲已拆分到 `docs/prd/backend/skill-workbench/`，采用“总纲 + 5 个 runtime replan 主线实施阶段 PRD”的落地结构：
 
 - `docs/prd/backend/skill-workbench/README.md`
 - `docs/prd/backend/skill-workbench/00-Skill运行闭环Workbench总纲PRD.md`
-- `docs/prd/backend/skill-workbench/01-阶段零-Workbench基座Policy与AuditOnlyPRD.md`
+- `docs/prd/backend/skill-workbench/01-阶段零-Workbench基座Policy与RuntimeStatePRD.md`
 - `docs/prd/backend/skill-workbench/02-阶段一-内部Capability与ExecutorPRD.md`
-- `docs/prd/backend/skill-workbench/03-阶段二-固定DAG插入与FinalizerDigestPRD.md`
+- `docs/prd/backend/skill-workbench/03-阶段二-RuntimeWorkbenchLoop与FinalizerDigestPRD.md`
 - `docs/prd/backend/skill-workbench/04-阶段三-事件GraphPrompt脱敏PRD.md`
-- `docs/prd/backend/skill-workbench/05-阶段四-RuntimeReplanner与Contract健康诊断PRD.md`
+- `docs/prd/backend/skill-workbench/05-阶段四-Contract质量策略与健康诊断PRD.md`
 
 本文件继续作为总体方向、跨阶段不变量和验收矩阵的事实源；阶段 PRD 不得放宽本总纲的 public/internal、安全、answer mode、预算和脱敏边界。

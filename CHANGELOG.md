@@ -10,7 +10,7 @@
 
 ### 2026-06-25
 
-- Skill 运行闭环 Workbench 总纲已拆分为 `docs/prd/backend/skill-workbench/` 阶段目录：新增 README、目录总纲，以及 Policy/audit-only、内部 capability/executor、固定 DAG/finalizer digest、事件 graph prompt 脱敏、runtime replanner 与 contract 健康诊断五份实施 PRD；同步父总纲拆分结果、PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
+- Skill 运行闭环 Workbench PRD 经 document-perfectization 决策后收敛为 runtime replan 主线：`docs/prd/backend/skill-workbench/` 目录新增/更新 README、目录总纲，以及 Policy/runtime state、内部 capability/executor、runtime loop/finalizer digest、事件 graph prompt 脱敏、contract 质量策略与健康诊断五份实施 PRD；同步父总纲、PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
 
 ### 2026-06-24
 

@@ -18,4 +18,4 @@
 | PRD | 状态 | 后续动作 |
 |---|---|---|
 | `prd/backend/conversation-file-history-selection/README.md`（父入口：`prd/backend/21-对话文件历史与智能选择PRD.md`） | 阶段零至阶段五已实施；后续仅保留 guarded multi-select 放量/观测增强 | 若后续放量 `enforce_guarded_multi` 或新增 file_upload public 字段，需同步发布指标、后端 sanitizer、memory 投影、前端安全卡片 allowlist、API 文档与 CHANGELOG。 |
-| `prd/backend/skill-workbench/README.md`（父入口：`prd/backend/22-Skill运行闭环Workbench总纲PRD.md`） | 已拆分为阶段零至阶段四；待实施 | 按阶段实施 Workbench policy/audit-only、内部 capability/executor、固定 DAG/finalizer、事件 graph prompt 脱敏、runtime replanner 与 contract / health diagnostics。 |
+| `prd/backend/skill-workbench/README.md`（父入口：`prd/backend/22-Skill运行闭环Workbench总纲PRD.md`） | 已拆分为阶段零至阶段四；待实施 | 按阶段实施 Workbench policy/runtime state、内部 capability/executor、runtime loop/finalizer、事件 graph prompt 脱敏、contract / health diagnostics。 |

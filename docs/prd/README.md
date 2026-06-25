@@ -13,8 +13,8 @@
 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件的本地持久化、`index.md` 物化索引、Skill workspace manifest 与删除清理语义 | MVP 已落地；后续补 LLM/OCR 描述流水线 |
 | `docs/prd/backend/21-对话文件历史与智能选择PRD.md` | 合并上传历史消息与聊天式文件选择的父兼容入口：统一 `file_upload` 历史、active resource 事实源、conversation file context、selector 消歧、recent usage 与 deleted 不可复用语义 | 兼容入口；阶段零至阶段五已实施 |
 | `docs/prd/backend/conversation-file-history-selection/` | 对话文件历史与智能选择分步 PRD：数据模型、上传历史、memory 安全、selector shadow、interrupt 绑定、灰度发布六阶段 | 阶段零至阶段五已实施；后续仅保留 guarded multi-select 放量/观测增强 |
-| `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 平台层 Skill 运行闭环 Workbench、内部 `workbench.*` capability、执行后验证与受控重编排总纲 | 兼容入口；已拆分阶段 PRD |
-| `docs/prd/backend/skill-workbench/` | Skill 运行闭环 Workbench 分步 PRD：Policy/audit-only、内部 capability/executor、固定 DAG/finalizer、事件 graph prompt 脱敏、runtime replanner 与 contract diagnostics | 已拆分；待实施 |
+| `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` | 平台层 Skill 运行闭环 Workbench、内部 `workbench.*` capability、执行后验证与受控重编排总纲 | 兼容入口；已拆分 runtime replan 主线阶段 PRD |
+| `docs/prd/backend/skill-workbench/` | Skill 运行闭环 Workbench 分步 PRD：Policy/runtime state、内部 capability/executor、runtime loop/finalizer、事件 graph prompt 脱敏、contract quality diagnostics | 已拆分 runtime replan 主线；待实施 |
 | `docs/prd/backend/skill-contract-progressive-disclosure/` | Skill Contract v2-only 渐进式披露、显式 skill.* 执行、input schema、ResourceService 与 v1 manifest 路径删除 | v2-only 复审完成；待实施 |
 | `docs/prd/MCP/` | MCP Runtime 长任务流式 SSE、Rust sidecar 联合改造 Phase PRD、MCP Client 四版本兼容 PRD，以及官方 SDK 引入轨道 | Phase 拆分已冻结；client 四版本兼容与官方 SDK PRD 已新增 |
 | `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | v1 业务对话台与发送时上传文件专题已落地 |

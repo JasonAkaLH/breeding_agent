@@ -90,7 +90,7 @@
 | 表格上传编码兼容与表头规范化分步实施 | `docs/prd/backend/table-upload-normalization/README.md` | CSV / JSON / Excel 上传编码兼容、表头技术噪声清洗、Excel sheet 选择 interrupt、prompt-safe 摘要上限与 Skill artifact 规范化输入 |
 | 对话文件本地资源文件系统 | `docs/prd/backend/20-对话文件本地资源文件系统PRD.md` | 对话上传文件本地持久化、`index.md` 文件索引、Skill workspace manifest / mount_path 与删除清理语义 |
 | 对话文件历史与智能选择分步实施 | `docs/prd/backend/conversation-file-history-selection/README.md` | 将合并后的 PRD 21 拆成数据模型、上传历史、memory 安全、selector shadow、interrupt 绑定、灰度发布六个可独立验收阶段；阶段零至阶段五已实施，父兼容入口保留在 `docs/prd/backend/21-对话文件历史与智能选择PRD.md` |
-| Skill 运行闭环 Workbench 分步实施 | `docs/prd/backend/skill-workbench/README.md` | 将 Workbench 总纲拆成 Policy/audit-only、内部 capability/executor、固定 DAG/finalizer、事件 graph prompt 脱敏、runtime replanner 与 contract diagnostics 五个阶段；父兼容入口保留在 `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` |
+| Skill 运行闭环 Workbench 分步实施 | `docs/prd/backend/skill-workbench/README.md` | 将 Workbench 总纲拆成 Policy/runtime state、内部 capability/executor、runtime loop/finalizer、事件 graph prompt 脱敏、contract quality diagnostics 五个阶段；父兼容入口保留在 `docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md` |
 | 失败自检、恢复与 Fallback 控制层分步实施 | `docs/prd/backend/failure-recovery/README.md` | 将 18 总纲拆成节点执行保护壳、前端恢复、审计/Sidecar、LLM provider fallback、端到端 rollout 五份可独立实施 PRD |
 | PostgreSQL State Platform 防死锁与写队列 Phase | `docs/prd/backend/postgresql-state-platform/README.md` | 将生产级 PostgreSQL 状态平台拆为 driver/contract、schema/write queue、handler/read store/service、runtime/observability、SQLite migration/cutover 五个可独立验收 Phase |
 | 大语言模型提示词信封分步实施 | `docs/prd/backend/prompt-envelope/README.md` | 将 prompt 组装拆成测试基线、核心模型、主代理迁移、记忆候选、工具信息分层、多调用场景档案、消息原生运行时、供应商缓存八个可独立验收阶段 |

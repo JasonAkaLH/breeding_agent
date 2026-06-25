@@ -1,37 +1,38 @@
-# 阶段零：Workbench 基座、Policy 与 Audit-only PRD
+# 阶段零：Workbench 基座、Policy 与 Runtime State PRD
 
 - **编号**：后端 PRD 22-Phase 0
 - **日期**：2026-06-25
 - **状态**：待实施
 - **上游依赖**：`docs/prd/backend/22-Skill运行闭环Workbench总纲PRD.md`
-- **下游阶段**：阶段一内部 capability 与 executor、阶段二固定 DAG 插入
-- **目标模块**：`src/orchestration/`、`src/api/runtime.py`、配置加载、`tests/orchestration/`
+- **下游阶段**：阶段一内部 capability 与 executor、阶段二 Runtime Workbench Loop
+- **目标模块**：`src/orchestration/`、`src/api/runtime.py`、`tests/orchestration/`
 
 ## 1. 阶段目标
 
-建立 Workbench 的最小平台基座，但不改变任何现有 DAG：
+建立 Workbench 的最小平台基座，但不执行 Workbench：
 
 1. 定义 `WorkbenchPolicy`、`WorkbenchStage`、`WorkbenchOutputContractV1` 的平台模型。
-2. 定义 `workbench.enabled` 与 `workbench.rollout_scope` feature flag。
+2. 定义 runtime loop 需要的 `WorkbenchReplanState`、`WorkbenchStageDecision`、`WorkbenchBudget`。
 3. 实现按通用 contract / descriptor / runtime 属性计算 policy decision 的 helper。
-4. 在 `audit_only` 下记录 would-run stages、finalizer digest mode 和预算建议，但不插入节点、不执行 Workbench。
+4. 在 initial plan 阶段为命中策略的 Skill 写入有限 `max_replans` / `max_dynamic_nodes` 预算；普通 Skill 继续保持预算为 0。
 5. 用测试锁定“不得按具体 Skill 名称命中策略”。
 
 ## 2. 范围
 
 ### In scope
 
-- 配置模型：`disabled | audit_only | fixed_dag | runtime_replan`。
 - policy 输入：`execution_mode`、`answer_mode`、`input_schema_count`、`schema_selector`、`output_required_fields`、`output_artifact_policy`、`resource_policy`、未来 `quality_workbench`。
-- policy 输出：`enabled`、`stages`、`finalizer_digest_mode`、`max_replans`、`max_dynamic_nodes`、`event_visibility`。
-- audit-only 事件或等价内部诊断记录：只记录安全枚举和原因，不记录 payload、path、storage key 或 raw output。
+- policy 输出：`enabled`、`stages`、`finalizer_digest_mode`、`max_replans`、`max_dynamic_nodes`、`event_visibility`、`decision_reason`。
+- runtime state：已执行 stage、目标 Skill node、目标 capability、是否已有 finalizer、预算消耗摘要。
+- initial plan 预算写入：仅策略明确允许的 Skill 可提升预算；后续 revised plan 不得提升预算。
+- safe policy decision 记录：只记录安全枚举和原因，不记录 payload、path、storage key 或 raw output。
 - consumer contract tests 使用 fake Skill descriptor / contract，不依赖真实业务 Skill。
 
 ### Out of scope
 
 - 不注册 `workbench.*` capability。
 - 不新增 executor。
-- 不改 `SkillWorkflowProvider` 展开结果。
+- 不追加 Workbench nodes。
 - 不改 SSE、graph API、prompt dependency context。
 - 不要求 Skill contract 新增 `quality_workbench` 字段；本阶段只预留解析目标。
 
@@ -75,6 +76,7 @@ class WorkbenchPolicy:
 4. `answer_mode=requires_finalizer` 默认只允许 `when_finalizer_exists`。
 5. `answer_mode=none` 只有显式策略才允许 `required`。
 6. `max_replans/max_dynamic_nodes` 不能为负数。
+7. policy helper 不得读取完整用户 payload、原始文件、完整 rows、storage key 或本地路径。
 
 ### 3.3 WorkbenchOutputContractV1
 
@@ -97,39 +99,56 @@ class WorkbenchPolicy:
 
 禁止字段继承总纲：`sql`、`schema_ddl`、`raw_output`、完整 `rows`、完整文件内容、`storage_ref`、`storage_key`、`path`、`handler`、`runtime`、`entrypoint`、`token`、`secret`、`password`、`api_key`、`authorization` 等。
 
-## 4. Audit-only 行为
+### 3.4 WorkbenchReplanState
 
-当 `workbench.enabled=true` 且 `rollout_scope=audit_only`：
+Runtime loop 必须能从 plan metadata / node outputs / current nodes 中恢复状态，避免 resume 或重复 replan 时重复执行同一 stage。建议字段：
+
+```python
+class WorkbenchReplanState:
+    target_skill_node_id: str
+    target_capability_id: str
+    completed_stages: tuple[WorkbenchStage, ...]
+    pending_stages: tuple[WorkbenchStage, ...]
+    finalizer_node_id: str | None
+    budget: WorkbenchBudget
+```
+
+该状态不得包含 raw output、文件路径、storage key、SQL、schema DDL 或 secret。
+
+## 4. Policy decision 行为
+
+在 Skill plan initial 阶段：
 
 1. 解析候选 Skill 的通用属性。
 2. 计算 `WorkbenchPolicy`。
-3. 记录 safe policy decision：是否 enabled、stages 名称、finalizer digest mode、预算、命中原因。
-4. 不改变 `WorkflowPlan.nodes`、`metadata`、`max_replans`、`max_dynamic_nodes`。
-5. 不调用 executor、不生成 artifact、不进入 prompt。
+3. 将 safe policy decision 写入 plan metadata，便于 runtime replanner 后续读取。
+4. 若 `enabled=True`，只在 initial plan 写入受控预算；不追加 Workbench nodes。
+5. 若 `enabled=False`，保持现有 Skill plan 行为和预算。
 
-Audit payload 不得包含：用户原文、Skill payload、上传文件路径、storage key、原始输出、SQL、schema DDL、handler、runtime、secret。
+Decision payload 不得包含：用户原文、Skill payload、上传文件路径、storage key、原始输出、SQL、schema DDL、handler、runtime、secret。
 
 ## 5. 测试计划
 
 | 测试 | 断言 |
 | --- | --- |
-| default disabled | 未配置或 `enabled=false` 时 policy disabled，DAG 不变。 |
-| audit-only no DAG mutation | `audit_only` 只记录 decision，不新增 node、不改预算。 |
+| default disabled | 未命中策略时 policy disabled，DAG 不变，预算为 0。 |
+| budget only in initial plan | 命中策略时只在 initial plan 写入预算；revised plan 不得提高预算。 |
 | no skill-name matching | 两个不同 Skill 名称但相同 contract 属性得到同一 decision；名称变化不影响 policy。 |
 | answer mode defaults | `direct` 不需要 finalizer；`requires_finalizer` 只接已有 finalizer；`none` 默认不新增 finalizer。 |
 | output contract schema | required 字段缺失失败；禁止字段失败或被 sanitizer 剔除。 |
-| audit safe payload | audit decision 不包含 path、storage key、SQL、schema DDL、handler、runtime、secret。 |
+| decision safe payload | policy decision 不包含 path、storage key、SQL、schema DDL、handler、runtime、secret。 |
+| replan state safe | Workbench state 不包含 raw output、路径、storage key 或 secret。 |
 
 推荐命令：
 
 ```bash
-python -m pytest tests/orchestration/ -k "workbench or skill_workflow_provider"
+python -m pytest tests/orchestration/ -k "workbench or skill_workflow_provider or runtime_replanner"
 ```
 
 ## 6. 阶段验收
 
-- Feature flag 和 policy helper 有测试覆盖。
-- `audit_only` 不改变任何现有 Skill plan 行为。
+- Policy helper、budget 写入和 runtime state 有测试覆盖。
+- 未命中策略的 Skill 行为不变。
 - policy 决策来源只依赖通用属性。
-- output contract 和禁止字段规则已被测试锁定。
+- output contract、禁止字段和 state 安全规则已被测试锁定。
 - 本阶段完成后可以安全进入阶段一，但不能声称 Workbench 已执行。
