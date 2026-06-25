@@ -482,13 +482,16 @@ describe('App', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '文件历史' }));
 
-    expect(await screen.findByText('pending.csv')).toBeInTheDocument();
-    expect(screen.getByText('文件摘要生成中')).toBeInTheDocument();
+    const pendingCard = (await screen.findByText('pending.csv')).closest('.message-file-upload') as HTMLElement;
+    expect(pendingCard).toHaveClass('message-user');
+    expect(within(pendingCard).getByText('你')).toBeInTheDocument();
+    expect(screen.getByLabelText('已上传文件 pending.csv')).toBeInTheDocument();
     expect(screen.getByText('failed.csv')).toBeInTheDocument();
-    expect(screen.getByText('摘要不可用')).toBeInTheDocument();
     expect(screen.getByText('deleted.csv')).toBeInTheDocument();
-    expect(screen.getByText('文件已删除 / 不可再用于任务')).toBeInTheDocument();
-    expect(screen.getByText('upload_id: upl-pending')).toBeInTheDocument();
+    expect(screen.queryByText('文件摘要生成中')).not.toBeInTheDocument();
+    expect(screen.queryByText('摘要不可用')).not.toBeInTheDocument();
+    expect(screen.queryByText('文件已删除 / 不可再用于任务')).not.toBeInTheDocument();
+    expect(screen.queryByText('upload_id: upl-pending')).not.toBeInTheDocument();
     expect(screen.queryByText(/MALICIOUS_RAW_CONTENT/)).not.toBeInTheDocument();
     expect(screen.queryByText(/SHOULD_NOT_RENDER/)).not.toBeInTheDocument();
     expect(screen.queryByText(/INTERNAL_SECRET_MESSAGE/)).not.toBeInTheDocument();
@@ -1912,7 +1915,8 @@ describe('App', () => {
       }),
     })));
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
-    expect(await screen.findByText('Materials summary')).toBeInTheDocument();
+    expect(await screen.findByLabelText('已上传文件 materials.csv')).toBeInTheDocument();
+    expect(screen.queryByText('Materials summary')).not.toBeInTheDocument();
   });
 
   it('does not submit while IME composition is confirming text with Enter', async () => {
@@ -1978,7 +1982,8 @@ describe('App', () => {
     await waitFor(() => expect(api.deleteConversationUpload).toHaveBeenCalledWith(expect.any(String), 'upl-existing'));
     await waitFor(() => expect(within(getConversationFilesDrawer()).queryByText(/existing.csv/)).not.toBeInTheDocument());
     await waitFor(() => expect(api.listConversationMessages).toHaveBeenCalledWith(expect.any(String)));
-    expect(await screen.findByText('文件已删除 / 不可再用于任务')).toBeInTheDocument();
+    expect(await screen.findByLabelText('已上传文件 existing.csv')).toBeInTheDocument();
+    expect(screen.queryByText('文件已删除 / 不可再用于任务')).not.toBeInTheDocument();
   });
 
   it('labels saved TSV uploads by filename while preserving csv file type', async () => {

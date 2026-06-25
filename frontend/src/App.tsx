@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
-import { CopyOutlined, ExclamationCircleFilled, ReloadOutlined } from '@ant-design/icons';
+import { CopyOutlined, ExclamationCircleFilled, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Alert, Button, Card, ConfigProvider, Drawer, Flex, Input, Layout, Popover, Select, Space, Spin, Switch, Tag, Typography, theme, type ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
@@ -2883,31 +2883,15 @@ function MessageBubble({
 function FileUploadHistoryCard({ message }: { message: ConversationMessage }) {
   const metadata = message.metadata ?? {};
   const filename = metadataText(metadata.filename) || '未命名文件';
-  const uploadId = metadataText(metadata.upload_id);
-  const descriptionStatus = metadataText(metadata.description_status);
-  const fileStatus = metadataText(metadata.file_status) || 'active';
-  const summary = metadataText(metadata.description_summary);
-  const deleted = fileStatus === 'deleted';
-  const statusText = deleted
-    ? '文件已删除 / 不可再用于任务'
-    : descriptionStatus === 'pending'
-      ? '文件摘要生成中'
-      : descriptionStatus === 'failed'
-        ? '摘要不可用'
-        : '文件已上传';
-  const tagColor = deleted ? 'default' : descriptionStatus === 'failed' ? 'red' : descriptionStatus === 'pending' ? 'blue' : 'green';
+
   return (
-    <div className="message message-file-upload">
-      <div className="message-meta">文件</div>
-      <div className="file-upload-history-card" data-message-kind="file_upload">
-        <Flex vertical gap={4}>
-          <Flex align="center" gap={8} wrap="wrap">
-            <Typography.Text strong className="file-upload-history-filename">{filename}</Typography.Text>
-            <Tag color={tagColor}>{statusText}</Tag>
-          </Flex>
-          {uploadId ? <Typography.Text type="secondary" className="file-upload-history-upload-id">upload_id: {uploadId}</Typography.Text> : null}
-          {!deleted && summary ? <Typography.Text className="file-upload-history-summary">{summary}</Typography.Text> : null}
-        </Flex>
+    <div className="message message-user message-file-upload">
+      <div className="message-meta">你</div>
+      <div className="file-upload-history-card" data-message-kind="file_upload" aria-label={`已上传文件 ${filename}`}>
+        <FileTextOutlined className="file-upload-history-icon" aria-hidden="true" />
+        <Typography.Text strong ellipsis={{ tooltip: filename }} className="file-upload-history-filename">
+          {filename}
+        </Typography.Text>
       </div>
     </div>
   );
