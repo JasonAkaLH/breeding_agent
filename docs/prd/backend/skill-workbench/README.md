@@ -16,7 +16,7 @@
 4. **Contract / Policy 驱动**：Workbench 启用和 stage 选择必须来自平台策略与 Skill contract 的通用字段，不得按具体 Skill 名称定制。
 5. **Answer mode 守恒**：`answer_mode=direct` 默认不得追加第二个 `main_agent.respond`；`requires_finalizer` 可让 finalizer 消费安全 digest；`none` 只有显式策略要求时才新增 finalizer。
 6. **Digest 安全**：Workbench output 必须短、结构化、脱敏，并禁止 raw rows、完整文件内容、路径、storage ref、SQL、schema DDL、handler、runtime、entrypoint、token、secret 等字段。
-7. **预算受控**：普通 Skill 默认保持现有一次性行为；只有策略允许的 Skill plan 才在 initial plan 阶段写入有限 runtime replan 预算，后续 revised plan 不得提升预算。
+7. **预算受控与语义停止**：普通 Skill 默认保持现有一次性行为；只有策略允许的 Skill plan 才在 initial plan 阶段写入有限 runtime replan 预算，后续 revised plan 不得提升预算；runtime loop 必须通过 terminal / wait state、stage 单调推进、progress marker、pending node gate 和 input fingerprint 防止重复 replan；用户输入缺失复用已有 interrupt / resume。
 8. **事件和 graph 不泄漏**：SSE、task graph API、history artifact、prompt dependency context 不得暴露 `workbench.*` capability id、内部 stage、内部 node id 语义或实现细节。
 9. **测试先行**：每个阶段先补平台 consumer contract tests，再实现生产路径；具体 Skill 的业务测试仍由 Skill 维护者负责。
 
@@ -42,7 +42,7 @@
 | 总纲 | `00-Skill运行闭环Workbench总纲PRD.md` | 目录内总纲摘录：统一 runtime replan 主线、不变量、术语、阶段依赖、总体验收矩阵与禁止项。 | Umbrella |
 | 阶段零 | `01-阶段零-Workbench基座Policy与RuntimeStatePRD.md` | 建立 `WorkbenchPolicy`、`WorkbenchStage`、`WorkbenchOutputContractV1`、runtime budget、replan state 和 policy decision；不执行 Workbench。 | P0 |
 | 阶段一 | `02-阶段一-内部Capability与ExecutorPRD.md` | 注册 `workbench.*` 内部 capability，提供本地 executor、输出契约校验、敏感字段剔除和基础 consumer contract tests。 | P1 |
-| 阶段二 | `03-阶段二-RuntimeWorkbenchLoop与FinalizerDigestPRD.md` | 接入 deterministic `WorkbenchRuntimeReplanner`，根据 Skill / Workbench output 追加验证节点和必要 finalizer。 | P2 |
+| 阶段二 | `03-阶段二-RuntimeWorkbenchLoop与FinalizerDigestPRD.md` | 接入 deterministic `WorkbenchRuntimeReplanner`，根据 Skill / Workbench output 追加验证节点和必要 finalizer，并定义停止状态机与有限同能力 refinement retry。 | P2 |
 | 阶段三 | `04-阶段三-事件GraphPrompt脱敏PRD.md` | 收口 SSE、`task.graph_updated`、task graph API、history artifact 与 finalizer prompt dependency context 的内部节点脱敏。 | P2 / Gate |
 | 阶段四 | `05-阶段四-Contract质量策略与健康诊断PRD.md` | 支持 optional `quality_workbench` contract、diagnostics、health payload 和 Skill builder 文档。 | P3 |
 

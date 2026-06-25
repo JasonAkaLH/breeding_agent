@@ -20,7 +20,7 @@
 | 内部能力 | `workbench.*` 必须注册为 `public=False`、`kind="workbench"`、`source="builtin"`，不得进入 public capability list 或 planner prompt。 |
 | Runtime 主线 | Workbench 节点由 deterministic runtime replanner 追加；不让 LLM 规划 Workbench，不采用固定 DAG 作为主路径。 |
 | 策略来源 | 启用规则只能来自 execution mode、answer mode、input schema、output contract、artifact policy、resource policy、quality policy 等通用属性。 |
-| 预算 | runtime replan 预算必须在 initial plan 阶段确定；revised plan 不得提高 `max_replans` 或 `max_dynamic_nodes`。 |
+| 预算与停止 | runtime replan 预算必须在 initial plan 阶段确定；revised plan 不得提高 `max_replans` 或 `max_dynamic_nodes`；loop 必须通过 terminal / wait state、stage 单调推进、progress marker、pending node gate、failure reason 去重和 input fingerprint 停止重复 replan；用户输入缺失复用已有 interrupt / resume。 |
 | digest | Workbench output 必须短、结构化、脱敏；进入 finalizer 前再次经过 Workbench 专用 allowlist 和敏感字段过滤。 |
 | answer mode | `direct` 不重复 finalizer；`requires_finalizer` 可消费 digest；`none` 只有显式策略要求时才新增 finalizer。 |
 | 可见性 | 前端事件、graph API、history artifact、prompt 不能泄漏内部 capability、stage、handler、runtime、路径、SQL、schema DDL、storage ref、secret。 |
@@ -72,7 +72,7 @@
 | Answer mode | `direct` 不新增重复 finalizer；`requires_finalizer` digest 能进入 finalizer；`none` 只在显式策略下新增 finalizer。 |
 | Digest | required 字段完整；禁止字段失败或剔除；进入 prompt 的字段只包含 safe digest。 |
 | API / SSE | `node.started`、`task.graph_updated`、task graph response、history artifact 不暴露内部 capability id、stage 或敏感实现字段。 |
-| Runtime budget | 追加节点受 initial `max_replans/max_dynamic_nodes` 限制；预算耗尽 fail closed 并记录审计。 |
+| Runtime budget / stop | 追加节点受 initial `max_replans/max_dynamic_nodes` 限制；预算耗尽或无法语义推进时进入 terminal state 并记录审计；用户输入缺失或 pending 节点进入 wait state，不追加重复节点。 |
 | Interrupt / resume | resume 后不会重复执行已完成 Workbench stage。 |
 | Artifact | Workbench 不创建前端可展示 artifact；Skill output file 展示与下载链路保持不变。 |
 | Health | 非法 contract workbench stage 产生诊断，不破坏内置 capability 注册。 |

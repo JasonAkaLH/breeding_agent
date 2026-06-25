@@ -119,7 +119,97 @@ Criticality 规则：
 | required artifact / required output 缺失 | blocking。 |
 | optional artifact / optional output 缺失 | caveat。 |
 
-## 6. 测试计划
+## 6. Workbench Replan 停止条件与同能力输入改写
+
+`WorkbenchRuntimeReplanner` 必须按有限状态机推进，不能把 `satisfaction.replan_recommended=true` 解释为无条件继续 replan。
+
+### 6.1 Replan 前置停止门禁
+
+出现任一情况时，WorkbenchRuntimeReplanner 必须返回 no decision，不得追加节点：
+
+1. task 已经是 terminal / cancelling / cancelled，或 orchestration context 有 unresolved interrupt。
+2. 当前已有未完成的 Workbench 内部节点，必须等待其完成后再判断下一步。
+3. 当前已有 pending finalizer 且该 finalizer 等待的 verifier 未完成，不能再追加第二个同义 finalizer。
+4. `replan_count >= max_replans` 或追加节点会超过 `max_dynamic_nodes`。
+5. WorkbenchReplanState 已有 terminal state 或 wait state；wait state 必须等待现有 interrupt / resume 或 pending node 完成后再判断。
+6. 没有未执行且对当前状态有意义的 stage，也不需要追加 finalizer。
+7. 本次候选动作不会改变 progress marker：不减少 pending stage、不增加 completed / failed stage、不追加 finalizer、不改变 input fingerprint、不进入 terminal / wait state。
+8. 候选同能力 retry 已达到 `max_same_capability_refinements`。
+
+### 6.2 单次 replan 必须满足的条件
+
+每次 replan 必须满足：
+
+1. initial plan 仍有 `max_replans` / `max_dynamic_nodes` 预算。
+2. 存在未执行且对当前状态有意义的 Workbench stage，或需要追加必要 finalizer，或允许一次同能力 refinement retry。
+3. 本次动作会让 `WorkbenchReplanState` 单调前进：减少 pending stage、增加 completed / failed stage、追加 finalizer、改变 retry input fingerprint，或进入 terminal / wait state。
+4. 不重复执行相同 stage + 相同 failure reason。
+5. 不重复执行相同 capability + 相同 input fingerprint。
+6. 不绕过必须由用户提供的信息。
+
+### 6.3 Replan stop / wait states
+
+`needs_user_input` 不表示 Workbench 最终失败；它必须复用平台已有 interrupt / clarification / resume 机制。Workbench 的职责是停止本轮 replan、记录安全缺失摘要并让编排层进入等待；用户补充信息后，runtime 按现有 resume 流程恢复，再重新评估是否需要新的 Skill / Workbench 节点。
+
+| State | 类型 | 含义 | 处理 |
+| --- | --- | --- |
+| `verified` | terminal | Workbench 验证已满足 | 停止 replan；如需 finalizer，则追加 / 放行 finalizer。 |
+| `unsatisfied_terminal` | terminal | 当前 Skill output 不满足，但没有可用补救 stage | 停止 replan；finalizer 输出 caveat 或任务失败。 |
+| `unsupported_by_capability` | terminal | 当前 public capability 无法解决该任务 | 停止 replan；不得继续追加同能力检查。 |
+| `needs_user_input` | wait | 需要用户补充必需信息 | 停止本轮 Workbench replan；触发或复用已有 interrupt / clarification；resume 后重新评估。 |
+| `budget_exhausted` | terminal | replan 或 dynamic node 预算耗尽 | 停止；记录未完成验证。 |
+| `unsafe_digest` | terminal | digest 超限或含禁止字段 | 停止；fail closed，不进 finalizer。 |
+| `direct_audit_done` | terminal | direct Skill 的 audit / health 已完成 | 停止；不追加第二个回答。 |
+| `no_progress` | terminal | 候选 replan 不会改变 stage / finalizer / fingerprint / terminal / wait state | 停止；记录 no-progress reason。 |
+| `finalizer_pending` | wait | 已有 pending finalizer 等待 verifier 或最终输出 | 停止追加同义 finalizer；等待现有节点。 |
+| `workbench_pending` | wait | 已有 Workbench 内部节点未完成 | 停止本轮 replan；等待内部节点完成。 |
+| `refinement_exhausted` | terminal | 同能力输入改写 retry 达上限或 fingerprint 未变化 | 停止 retry；如缺少用户必填信息则转 `needs_user_input` wait，否则进入 `unsatisfied_terminal`。 |
+
+Terminal / wait state 必须写入 safe audit / Workbench digest。Finalizer 如存在，只能陈述验证结论、未解决原因和下一步，不能声称已修复或已验证通过；`needs_user_input` 场景下 finalizer 不得抢在 interrupt/resume 之前输出最终结论。
+
+### 6.4 Refinement possible：同一能力输入改写重试
+
+存在一类通用情况：当前结果未满足，但不是 capability 不支持，也不是必须由用户补充信息；同一个 public capability 可能通过更清晰的输入、补全上下文、缩小范围或调整表达方式再次执行后得到结果。
+
+Workbench 可输出 safe hint：
+
+```json
+{
+  "satisfaction": {
+    "satisfied": false,
+    "reason_code": "input_underspecified",
+    "replan_recommended": true
+  },
+  "structured_content": {
+    "safe_digest": {
+      "failure_kind": "refinement_possible",
+      "retry_same_capability_allowed": true,
+      "missing_constraints": ["时间范围", "对象名称"]
+    }
+  }
+}
+```
+
+规则：
+
+1. Workbench 不生成 refined query、不写业务 prompt、不针对具体 Skill 名称定制。
+2. Workbench 只提供 `failure_kind=refinement_possible`、safe caveats、缺失约束摘要和是否允许同能力 retry。
+3. 实际同能力 retry 必须由 public-only Runtime Replanner 追加新的 `skill.*` 节点完成；该 replanner 仍只能输出 public DAG。
+4. 同一 capability 的 refinement retry 必须有独立上限，例如 `max_same_capability_refinements`，并计入 `max_replans` / `max_dynamic_nodes`。
+5. 每次 retry 必须改变输入 fingerprint；如果 refined input 与上次等价，禁止重试。
+6. 连续出现相同 failure reason 或同一 missing constraint 集合时，停止 retry；若缺的是用户必填信息，进入 `needs_user_input` wait，否则进入 `unsatisfied_terminal`。
+7. 如果缺失的是必须由用户提供的信息，必须停止本轮 Workbench replan 并交给已有 interrupt / clarification / resume 机制，不得由主代理猜测。
+8. retry 后仍不满足，进入 terminal state；不得无限尝试。
+
+### 6.5 当前能力无法解决时的停止规则
+
+如果 Workbench 判断 required output 缺失、required artifact 缺失、domain boundary blocking、Skill 明确返回 `is_error=true`、输出表明 capability 不支持用户目标，或连续两个 stage 得出同一类 blocking reason，则不得继续 replan 同一个 Skill 链路。
+
+- `requires_finalizer`：追加或放行 finalizer，但 finalizer 必须说明当前能力未完成目标、已完成的验证、缺失内容和下一步。
+- `direct`：不改变 direct answer，不追加第二个 finalizer；只记录 audit / health。
+- `none + required finalizer`：按 required finalizer 处理，输出失败原因或 caveat。
+
+## 7. 测试计划
 
 | 测试 | 断言 |
 | --- | --- |
@@ -133,6 +223,12 @@ Criticality 规则：
 | finalizer safety | pending finalizer 不提前消费未验证 Skill output。 |
 | resume dedupe | resume 后不会重复执行已完成 Workbench stage。 |
 | workbench failure matrix | execution failure / verification failure / replan unavailable 按矩阵处理。 |
+| terminal / wait states | verified / unsupported / budget_exhausted / unsafe_digest 等 terminal state 停止 replan；needs_user_input / pending 类 wait state 暂停本轮 replan 并等待 interrupt / resume 或现有节点完成。 |
+| refinement retry bounded | `refinement_possible` 只触发有限同能力 retry，且输入 fingerprint 必须变化。 |
+| repeated failure stops | 相同 stage + failure reason 或相同 missing constraints 不重复 retry。 |
+| no progress stops | 候选 replan 不改变 progress marker 时进入 no-progress 停止。 |
+| pending internal nodes stop | 已有 pending Workbench 或 pending finalizer 时不追加同义节点。 |
+| terminal task stop | task terminal / cancelling / unresolved interrupt 时 Workbench replanner 不追加节点。 |
 
 推荐命令：
 
@@ -142,7 +238,7 @@ python -m pytest tests/orchestration/ -k "runtime_replanner or dynamic_nodes or 
 python -m pytest tests/capabilities/main_agent/ -k "prompt or dependency"
 ```
 
-## 7. 阶段验收
+## 8. 阶段验收
 
 - runtime loop 只追加内部节点且严格受预算限制。
 - LLM replanner 不知道也不能生成 `workbench.*`。

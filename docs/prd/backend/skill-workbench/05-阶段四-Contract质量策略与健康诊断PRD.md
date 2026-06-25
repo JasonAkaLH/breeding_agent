@@ -46,6 +46,7 @@ quality_workbench:
   finalizer_digest_mode: when_finalizer_exists
   max_replans: 1
   max_dynamic_nodes: 3
+  max_same_capability_refinements: 1
 ```
 
 建议 dataclass：
@@ -58,12 +59,13 @@ class SkillQualityWorkbenchContract:
     finalizer_digest_mode: str = "none"
     max_replans: int = 0
     max_dynamic_nodes: int = 0
+    max_same_capability_refinements: int = 1
 ```
 
 ## 4. Parser 与 diagnostics 规则
 
 1. Contract 策略优先，平台静态策略作为兼容 fallback。
-2. 非法 stage、非法预算、非法 finalizer mode 产生 `SkillCapabilityDiagnostic`。
+2. 非法 stage、非法预算、非法 finalizer mode、非法同能力 retry 上限产生 `SkillCapabilityDiagnostic`。
 3. 未声明 `quality_workbench` 的 Skill 不产生错误。
 4. 默认不因非法 `quality_workbench` 破坏内置 Workbench capability 注册。
 5. 对该 Skill 的 Workbench 行为按平台策略 fail closed 或禁用 Workbench；不得静默启用不合法 stage。
@@ -77,6 +79,7 @@ class SkillQualityWorkbenchContract:
 - stage 只允许平台定义的通用 stage。
 - `domain_kind` 只用于选择通用质量策略，不得把具体业务算法写进主框架。
 - `max_replans/max_dynamic_nodes` 是预算上限，不保证一定追加节点。
+- `max_same_capability_refinements` 控制同一 public capability 输入改写 retry 上限，默认不超过 1。
 - Workbench digest 只承载验证摘要，不替代 Skill 自己的业务测试。
 
 ## 6. 测试计划
@@ -87,6 +90,7 @@ class SkillQualityWorkbenchContract:
 | optional absent | 未声明字段的 Skill 保持兼容。 |
 | invalid stage diagnostics | 非法 stage 产生 diagnostic，不静默忽略。 |
 | invalid budget diagnostics | 负数或非整数预算产生 diagnostic。 |
+| invalid refinement cap diagnostics | 负数或非整数 `max_same_capability_refinements` 产生 diagnostic。 |
 | invalid finalizer mode diagnostics | 非法 finalizer mode 产生 diagnostic。 |
 | capability diagnostics bridge | `skill_capabilities.py` 输出 `SkillCapabilityDiagnostic`。 |
 | fallback policy | 无 contract 字段时仍可走平台静态策略 fallback。 |

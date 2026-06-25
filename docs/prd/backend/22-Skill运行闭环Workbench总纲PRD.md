@@ -27,7 +27,7 @@
 - **G2 后端内部增强**：第一版不新增前端 API，不改变 SSE、artifact、interrupt、resume 的协议字段。
 - **G3 Workbench 内部 capability**：新增 `workbench.*` 作为 `public=False` 的后端内部 capability，Planner、用户和 public capability API 不可见。
 - **G4 Contract / policy 驱动**：Workbench 启用规则必须来自平台策略与 Skill contract 的通用字段，例如 execution mode、answer mode、input schema、output contract、artifact policy、resource policy、quality policy；不得根据具体 Skill 名称定制。
-- **G5 受控预算**：只有被平台策略明确允许的 Skill plan 才可在 initial plan 阶段写入有限 runtime replan 预算；普通 Skill 默认保持现有一次性行为。
+- **G5 受控预算与停止条件**：只有被平台策略明确允许的 Skill plan 才可在 initial plan 阶段写入有限 runtime replan 预算；普通 Skill 默认保持现有一次性行为；runtime loop 必须通过 terminal / wait state、stage 单调推进、progress marker、pending node gate、failure reason 去重和 input fingerprint 防止重复 replan；用户输入缺失必须复用现有 interrupt / resume，而不是当作最终失败。
 - **G6 Finalizer 可消费但不强制**：Workbench output 必须形成短、结构化、脱敏的 digest；只有当 Skill 的 answer mode 或平台策略需要 finalizer 时，该 digest 才进入 `main_agent.respond` 的 dependency context。
 - **G7 平台侧测试优先**：具体 Skill 测试集属于 Skill 资源维护者；平台侧重点补 Skill 准入契约、consumer contract tests、capability health / diagnostics。
 
@@ -70,10 +70,10 @@
 1. **Plan 仍是 DAG**：运行闭环由“新一版 DAG + 预算 + replan decision”表达，不在单个 plan 内引入环。
 2. **Public / internal 分层**：Planner 和用户只看到 `skill.*` / `main_agent.respond`；`workbench.*` 只由后端 expander / deterministic replanner 注入。
 3. **Contract / policy 优先**：Workbench 不按 Skill 名称分支；只按 contract 字段、platform policy、execution mode、answer mode、output contract、artifact policy、resource policy 和显式 quality policy 决定 stage。
-4. **确定性 runtime loop 优先**：Workbench 由 deterministic RuntimeReplanner 基于 node output 追加内部节点；不让 LLM 规划 Workbench，也不采用固定 DAG 作为主路径。
+4. **确定性 runtime loop 优先**：Workbench 由 deterministic RuntimeReplanner 基于 node output 追加内部节点；不让 LLM 规划 Workbench，也不采用固定 DAG 作为主路径；每次 replan 必须推进状态、进入 terminal state，或因用户输入 / pending node 进入 wait state。
 5. **Digest 优先**：Workbench 不把原始文件、完整 rows、SQL、schema DDL、handler、runtime、路径或 secret 放进 prompt / SSE / audit 可见 payload。
 6. **Finalizer 尊重 answer mode**：`answer_mode=direct` 的 Skill 不得因为 Workbench 而重复追加主代理回答节点；只有 `requires_finalizer`、`none + finalizer policy` 或显式策略要求时，Workbench digest 才进入 finalizer。
-7. **Fail closed**：策略不匹配、输出 contract 缺失、digest 超限、敏感字段检测失败时，Workbench 节点应失败或降级为 audit-only caveat，不能静默放行并声称验证通过。
+7. **Fail closed / stop closed**：策略不匹配、输出 contract 缺失、digest 超限、敏感字段检测失败、预算耗尽、同一 failure reason 重复或当前能力无法解决时，Workbench 节点应失败、停止或降级为 audit-only caveat，不能静默放行并声称验证通过。
 
 ## 7. Workbench Capability 设计
 
@@ -187,21 +187,23 @@ workbench_policy:
 
 1. 观察完成的 `skill.*` 或 `workbench.*` output。
 2. 读取 `WorkbenchPolicy`、`WorkbenchReplanState` 和已执行 stage。
-3. 如果仍需检查，追加下一批 `workbench.*` nodes。
+3. 如果仍需检查且状态可单调推进，追加下一批 `workbench.*` nodes。
 4. 必要时追加新的 finalizer，或 orphan 旧的 pending finalizer；不得原地修改已存在节点依赖。
 5. 不调用 LLM。
 6. 不得提高 `max_replans` 或 `max_dynamic_nodes`；预算只能来自 initial plan。
+7. 如果没有未执行且有意义的 stage、同一 failure reason 重复、输入 fingerprint 未变化或当前 capability 不支持任务，则进入 terminal state，不再 replan；如果需要用户补充必需信息，则进入 wait state 并交给现有 interrupt / resume。
+8. 如果 task 已 terminal / cancelling / cancelled、有 unresolved interrupt、已有 pending Workbench 内部节点、已有 pending finalizer、候选动作不会改变 progress marker，或同能力 retry 达 `max_same_capability_refinements`，则不得追加节点。
 
 优点：
 
 - 更贴近运行闭环，按输出事实决定下一步。
 - 可减少不必要检查。
-- 可在 Skill output 或 Workbench digest 表示 `satisfaction.replan_recommended` 时补足验证。
+- 可在 Skill output 或 Workbench digest 表示 `satisfaction.replan_recommended` 且满足停止状态机约束时补足验证。
 - 避免把所有 Workbench stage 固定插入到每个任务，降低无谓延迟。
 
 约束：
 
-- 需要严格管理预算和 node id。
+- 需要严格管理预算、node id、terminal / wait state、progress marker、pending internal nodes、input fingerprint 和同能力 retry 次数。
 - finalizer 依赖处理必须使用新增 finalizer 或 orphan pending finalizer，不得修改已存在节点依赖。
 - `task.graph_updated` / `node.started` / task graph API 等输出必须对内部节点脱敏。
 
@@ -257,6 +259,8 @@ Phase 2 新增 deterministic replanner：
 - 不调用 LLM。
 - 不改写已存在节点 capability / dependencies。
 - 不提高 initial plan 预算。
+- `refinement_possible` 可触发有限同能力 retry，但必须由 public-only Runtime Replanner 追加新的 `skill.*` 节点，且输入 fingerprint 必须变化。
+- 当前能力无法解决、预算耗尽、同一 failure reason 重复、候选动作无 progress marker 变化时进入 terminal state；需要用户输入、pending internal node 未完成、已有 pending finalizer 时进入 wait / no-decision stop，不追加重复节点。
 
 ### 10.4 `CapabilityRegistry` / `InstanceRegistry`
 
@@ -297,6 +301,7 @@ quality_workbench:
   finalizer_digest_mode: when_finalizer_exists
   max_replans: 1
   max_dynamic_nodes: 3
+  max_same_capability_refinements: 1
 ```
 
 ## 11. 前端与 API 兼容边界
@@ -351,6 +356,9 @@ runtime replan 主线接受的行为：
 - `WorkbenchReplanState`
 - `WorkbenchStageDecision`
 - `WorkbenchBudget`
+- `WorkbenchTerminalState`
+- `WorkbenchInputFingerprint`
+- `WorkbenchProgressMarker`
 
 验收标准：
 
@@ -388,9 +396,11 @@ runtime replan 主线接受的行为：
 
 验收标准：
 
-- Skill output 完成后，`WorkbenchRuntimeReplanner` 能追加下一批内部节点。
+- Skill output 完成后，`WorkbenchRuntimeReplanner` 能在状态可推进时追加下一批内部节点。
 - 不修改已存在节点 dependencies / capability。
 - 不提高 initial plan 预算。
+- `refinement_possible` 可触发有限同能力 retry，但必须由 public-only Runtime Replanner 追加新的 `skill.*` 节点，且输入 fingerprint 必须变化。
+- 当前能力无法解决、预算耗尽、同一 failure reason 重复、候选动作无 progress marker 变化时进入 terminal state；需要用户输入、pending internal node 未完成、已有 pending finalizer 时进入 wait / no-decision stop，不追加重复节点。
 - `answer_mode=direct` 不新增重复 finalizer。
 - `answer_mode=requires_finalizer` 的 finalizer 等待必要 Workbench verifier，并消费 safe digest。
 - Workbench node id 使用 opaque 命名，不泄漏真实 stage。
@@ -436,7 +446,7 @@ runtime replan 主线接受的行为：
 - contract invalid 的 Workbench 策略产生诊断，并对该 Skill 的 Workbench 行为 fail closed 或禁用 Workbench。
 - `quality_workbench` 为 optional；未声明字段的 Skill 保持兼容。
 - 平台 consumer contract tests 不依赖真实 Skill 测试集。
-- Skill 维护者能通过文档知道如何声明 workbench stages、output digest 和预算。
+- Skill 维护者能通过文档知道如何声明 workbench stages、output digest、预算和同能力 retry 上限。
 
 ## 14. 最小 Consumer Contract Tests
 
@@ -448,7 +458,7 @@ runtime replan 主线接受的行为：
 4. **Answer mode**：`direct` 不追加重复 finalizer；`requires_finalizer` 可把 verifier digest 接入已有 finalizer。
 5. **Output 契约**：Workbench output 缺 required 字段时失败；包含敏感字段时失败或剔除。
 6. **Prompt 消费**：`main_agent.respond` dependency context 包含 safe digest，不包含禁止字段。
-7. **Runtime 预算**：Phase 2 追加节点受 initial `max_replans/max_dynamic_nodes` 限制。
+7. **Runtime 预算与停止**：Phase 2 追加节点受 initial `max_replans/max_dynamic_nodes` 限制；terminal / wait state、progress marker、pending node gate、failure reason 去重和 input fingerprint 防止重复 replan；用户输入缺失复用 interrupt / resume。
 8. **No mutation**：Phase 2 不改写已有 node dependencies，改图只能新增或 orphan pending node。
 9. **Event / graph 脱敏**：内部节点的 frontend 事件和 task graph response 不暴露 `workbench.*`、path、handler、runtime、SQL、schema DDL、storage_ref。
 10. **Interrupt / Resume**：resume 后不会重复执行已完成 Workbench stage。
@@ -490,7 +500,7 @@ runtime replan 主线接受的行为：
 | --- | --- |
 | 内部 capability 泄漏到前端 | `public=False` 之外增加 SSE 和 graph API masking；详细内部信息 audit-only。 |
 | Workbench 变成业务算法实现 | 明确 Workbench 只做平台画像/校验/digest，业务逻辑仍在 Skill。 |
-| Runtime loop 追加节点增加延迟 | Stage 控制在轻量、按需追加；预算不足时 fail closed 并记录诊断。 |
+| Runtime loop 追加节点增加延迟或重复 replan | Stage 控制在轻量、按需追加；预算不足、状态无法推进、同一 failure reason 重复或 input fingerprint 未变化时进入 terminal state 并记录诊断。 |
 | Direct Skill 被重复 finalizer | 默认 `direct` 不接 finalizer；需要 finalizer 必须显式 contract/policy 决策。 |
 | Runtime replan 提前/重复 finalizer | 使用新增 finalizer 或 orphan pending finalizer，不改已有依赖；pending finalizer 不得提前消费未验证 output。 |
 | Skill contract 扩展影响注册 | Phase 3 先 optional + diagnostics，成熟后再变成准入要求。 |

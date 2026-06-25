@@ -22,8 +22,8 @@
 ### In scope
 
 - policy 输入：`execution_mode`、`answer_mode`、`input_schema_count`、`schema_selector`、`output_required_fields`、`output_artifact_policy`、`resource_policy`、未来 `quality_workbench`。
-- policy 输出：`enabled`、`stages`、`finalizer_digest_mode`、`max_replans`、`max_dynamic_nodes`、`event_visibility`、`decision_reason`。
-- runtime state：已执行 stage、目标 Skill node、目标 capability、是否已有 finalizer、预算消耗摘要。
+- policy 输出：`enabled`、`stages`、`finalizer_digest_mode`、`max_replans`、`max_dynamic_nodes`、`max_same_capability_refinements`、`event_visibility`、`decision_reason`。
+- runtime state：已执行 stage、目标 Skill node、目标 capability、是否已有 finalizer、预算消耗摘要、terminal / wait state、failure reason、input fingerprint 和同能力 retry 次数；用户输入缺失必须记录为 wait state 并交给现有 interrupt / resume。
 - initial plan 预算写入：仅策略明确允许的 Skill 可提升预算；后续 revised plan 不得提升预算。
 - safe policy decision 记录：只记录安全枚举和原因，不记录 payload、path、storage key 或 raw output。
 - consumer contract tests 使用 fake Skill descriptor / contract，不依赖真实业务 Skill。
@@ -64,6 +64,7 @@ class WorkbenchPolicy:
     finalizer_digest_mode: Literal["none", "when_finalizer_exists", "required"]
     max_replans: int
     max_dynamic_nodes: int
+    max_same_capability_refinements: int = 1
     event_visibility: Literal["masked_frontend", "audit_only"]
     decision_reason: str
 ```
@@ -76,7 +77,8 @@ class WorkbenchPolicy:
 4. `answer_mode=requires_finalizer` 默认只允许 `when_finalizer_exists`。
 5. `answer_mode=none` 只有显式策略才允许 `required`。
 6. `max_replans/max_dynamic_nodes` 不能为负数。
-7. policy helper 不得读取完整用户 payload、原始文件、完整 rows、storage key 或本地路径。
+7. `max_same_capability_refinements` 默认不超过 1；提高该值必须由 contract / policy 显式声明。
+8. policy helper 不得读取完整用户 payload、原始文件、完整 rows、storage key 或本地路径。
 
 ### 3.3 WorkbenchOutputContractV1
 
@@ -110,6 +112,13 @@ class WorkbenchReplanState:
     completed_stages: tuple[WorkbenchStage, ...]
     pending_stages: tuple[WorkbenchStage, ...]
     finalizer_node_id: str | None
+    terminal_state: str | None
+    wait_state: str | None
+    last_failure_reason: str | None
+    input_fingerprints: tuple[str, ...]
+    same_capability_refinement_count: int
+    active_internal_node_ids: tuple[str, ...]
+    last_progress_marker: str | None
     budget: WorkbenchBudget
 ```
 
@@ -138,6 +147,8 @@ Decision payload 不得包含：用户原文、Skill payload、上传文件路�
 | output contract schema | required 字段缺失失败；禁止字段失败或被 sanitizer 剔除。 |
 | decision safe payload | policy decision 不包含 path、storage key、SQL、schema DDL、handler、runtime、secret。 |
 | replan state safe | Workbench state 不包含 raw output、路径、storage key 或 secret。 |
+| state monotonicity | state 能记录 completed / failed stage、terminal / wait state、failure reason、input fingerprint、active internal nodes 和 progress marker，支持停止重复 replan，并在用户输入缺失时等待 interrupt / resume。 |
+| refinement cap | 同能力 retry 默认最多 1 次，除非 policy / contract 显式提高。 |
 
 推荐命令：
 
