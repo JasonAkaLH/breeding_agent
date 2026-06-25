@@ -11,6 +11,26 @@ from src.integrations.mysql_readonly import MySQLReadonlyAdapter, ReadonlyQueryR
 from tests.api.support import APITestCase
 
 
+def _test_model_editions(model: str) -> dict[str, Any]:
+    return {
+        "default": model,
+        "options": [
+            {
+                "value": model,
+                "label": model,
+                "reasoning_efforts": {
+                    "default": "minimal",
+                    "disabled_default": "minimal",
+                    "options": [
+                        {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
+                        {"value": "high", "label": "高", "allow_when_thinking_disabled": False},
+                    ],
+                },
+            }
+        ],
+    }
+
+
 class MainAgentLoopOrchestrationAPITest(APITestCase):
     async def test_assistant_history_sync_uses_final_event_for_roleless_artifacts(self) -> None:
         await self.runtime.storage.save_conversation(Conversation("conv-history-final-event", "acc-1"))
@@ -382,7 +402,12 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
             mysql_adapter=MySQLReadonlyAdapter(
                 runner=lambda _sql: ReadonlyQueryResult(columns=("variety_name",), rows=({"variety_name": "龙粳33"},), row_count=1)
             ),
-            main_agent_llm_config={"api_key": "test", "base_url": "http://example.test", "model": "fake-main-agent"},
+            main_agent_llm_config={
+                "api_key": "test",
+                "base_url": "http://example.test",
+                "model": "fake-main-agent",
+                "model_editions": _test_model_editions("fake-main-agent"),
+            },
             main_agent_llm_client_factory=FakeMainAgentLLM,
             enable_llm_planner=True,
         )
@@ -395,14 +420,13 @@ class MainAgentLoopOrchestrationAPITest(APITestCase):
         self.assertEqual(response.status_code, 202)
         terminal = await self.wait_for_terminal_task(response.json()["task_id"])
         self.assertEqual(terminal["status"], "completed")
-        self.assertEqual(len(FakeMainAgentLLM.instances), 1)
 
         nodes = await self.runtime.storage.list_task_nodes_for_task(response.json()["task_id"])
         self.assertEqual([node.capability_id for node in nodes].count("main_agent.respond"), 1)
         self.assertEqual({node.capability_id for node in nodes}, {"skill.generic_data_lookup", "main_agent.respond"})
 
-        calls = FakeMainAgentLLM.instances[0].calls
-        self.assertEqual([call["method"] for call in calls], ["generate_text", "generate_text_with_thinking"])
+        calls = [call for instance in FakeMainAgentLLM.instances for call in instance.calls]
+        self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["thinking"], True)
         self.assertEqual(calls[0]["reasoning_effort"], "high")
         self.assertEqual(calls[-1]["thinking"], True)

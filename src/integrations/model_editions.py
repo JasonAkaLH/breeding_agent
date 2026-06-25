@@ -4,7 +4,33 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from src.core.coercion import coerce_positive_int
+from src.core.coercion import coerce_positive_int, coerce_truthy
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningEffortOption:
+    value: str
+    label: str
+    allow_when_thinking_disabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningEffortConfig:
+    default: str
+    disabled_default: str | None
+    options: tuple[ReasoningEffortOption, ...]
+
+    def option_values(self) -> tuple[str, ...]:
+        return tuple(option.value for option in self.options)
+
+    def disabled_safe_values(self) -> tuple[str, ...]:
+        return tuple(option.value for option in self.options if option.allow_when_thinking_disabled)
+
+    def has_value(self, value: str) -> bool:
+        return value in self.option_values()
+
+    def allows_when_thinking_disabled(self, value: str) -> bool:
+        return value in self.disabled_safe_values()
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +38,7 @@ class ModelEditionOption:
     value: str
     label: str
     trim_max_tokens: int | None = None
+    reasoning_efforts: ReasoningEffortConfig | None = None
 
 
 _MODEL_EDITION_CONTAINER_KEYS = (
@@ -33,8 +60,10 @@ def model_edition_options(config: Mapping[str, Any] | None = None) -> tuple[Mode
     - model_editions: [<value>, {value, label}, ...]
     - model_edition_options / allowed_model_editions with the same list forms
 
-    Legacy top-level ``model_edition`` / ``model`` remains a single-option fallback
-    for old tests and smoke scripts, but it does not define product choices.
+    Legacy top-level ``model_edition`` / ``model`` remains a single-option
+    fallback for callers that only need model labels. Product/runtime startup
+    validation still requires every resolved option to declare
+    ``reasoning_efforts``.
     """
 
     config = config or {}
@@ -57,6 +86,66 @@ def model_edition_options(config: Mapping[str, Any] | None = None) -> tuple[Mode
 
 def configured_model_editions(config: Mapping[str, Any] | None = None) -> tuple[str, ...]:
     return tuple(option.value for option in model_edition_options(config))
+
+
+def model_reasoning_effort_configs(
+    config: Mapping[str, Any] | None = None,
+    *,
+    validate: bool = True,
+) -> dict[str, ReasoningEffortConfig]:
+    options = model_edition_options(config)
+    if validate:
+        validate_model_reasoning_effort_configs(config)
+    return {
+        option.value: option.reasoning_efforts
+        for option in options
+        if option.reasoning_efforts is not None
+    }
+
+
+def model_reasoning_effort_config(
+    model_edition: str | None,
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> ReasoningEffortConfig | None:
+    selected = _clean_text(model_edition) or default_model_edition(config)
+    if not selected:
+        return None
+    return model_reasoning_effort_configs(config).get(selected)
+
+
+def validate_model_reasoning_effort_configs(config: Mapping[str, Any] | None = None) -> None:
+    config = config or {}
+    options = model_edition_options(config)
+    if not options:
+        return
+    errors: list[str] = []
+    for option in options:
+        cfg = option.reasoning_efforts
+        if cfg is None:
+            errors.append(f"{option.value}: missing reasoning_efforts")
+            continue
+        values = cfg.option_values()
+        if not values:
+            errors.append(f"{option.value}: reasoning_efforts.options must not be empty")
+            continue
+        if len(set(values)) != len(values):
+            errors.append(f"{option.value}: duplicate reasoning_efforts option value")
+        if not cfg.default or cfg.default not in values:
+            errors.append(f"{option.value}: reasoning_efforts.default must reference an option")
+        disabled_safe = set(cfg.disabled_safe_values())
+        if disabled_safe:
+            if not cfg.disabled_default or cfg.disabled_default not in disabled_safe:
+                errors.append(
+                    f"{option.value}: reasoning_efforts.disabled_default must reference a disabled-safe option"
+                )
+        elif cfg.disabled_default:
+            errors.append(f"{option.value}: disabled_default is only allowed when a disabled-safe option exists")
+        for effort in cfg.options:
+            if not effort.value:
+                errors.append(f"{option.value}: reasoning_efforts option value must not be empty")
+    if errors:
+        raise ValueError("Invalid model reasoning_efforts config: " + "; ".join(errors))
 
 
 def default_model_edition(config: Mapping[str, Any] | None = None) -> str | None:
@@ -167,11 +256,64 @@ def _parse_option(value: Any) -> ModelEditionOption | None:
             or value.get("context_window_tokens")
             or value.get("max_context_tokens")
         )
-        return ModelEditionOption(value=option_value, label=label, trim_max_tokens=trim_max_tokens)
+        reasoning_efforts = _parse_reasoning_efforts(value.get("reasoning_efforts"))
+        return ModelEditionOption(
+            value=option_value,
+            label=label,
+            trim_max_tokens=trim_max_tokens,
+            reasoning_efforts=reasoning_efforts,
+        )
     option_value = _clean_text(value)
     if not option_value:
         return None
     return ModelEditionOption(value=option_value, label=option_value)
+
+
+def _parse_reasoning_efforts(value: Any) -> ReasoningEffortConfig | None:
+    if not isinstance(value, Mapping):
+        return None
+    options = _parse_reasoning_effort_options(value.get("options"))
+    default = _clean_text(value.get("default"))
+    disabled_default = _clean_text(value.get("disabled_default"))
+    if default is None and not options:
+        return None
+    return ReasoningEffortConfig(
+        default=default or "",
+        disabled_default=disabled_default,
+        options=options,
+    )
+
+
+def _parse_reasoning_effort_options(value: Any) -> tuple[ReasoningEffortOption, ...]:
+    if isinstance(value, str):
+        candidates: Sequence[Any] = value.replace("\n", ",").split(",")
+    elif isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        candidates = value
+    else:
+        return ()
+    parsed: list[ReasoningEffortOption] = []
+    for candidate in candidates:
+        option = _parse_reasoning_effort_option(candidate)
+        if option is not None:
+            parsed.append(option)
+    return tuple(parsed)
+
+
+def _parse_reasoning_effort_option(value: Any) -> ReasoningEffortOption | None:
+    if isinstance(value, Mapping):
+        option_value = _clean_text(value.get("value") or value.get("id"))
+        if not option_value:
+            return None
+        label = _clean_text(value.get("label") or value.get("name")) or option_value
+        return ReasoningEffortOption(
+            value=option_value,
+            label=label,
+            allow_when_thinking_disabled=coerce_truthy(value.get("allow_when_thinking_disabled", False)),
+        )
+    option_value = _clean_text(value)
+    if not option_value:
+        return None
+    return ReasoningEffortOption(value=option_value, label=option_value)
 
 
 def _container_default(value: Any) -> str | None:

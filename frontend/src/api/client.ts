@@ -165,7 +165,13 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       const explicitCapabilityId = input.capabilityId ?? null;
       const capabilityId = explicitCapabilityId || mode.capabilityId;
       const deepThinking = input.deepThinking ?? false;
-      const reasoningEffort = deepThinking ? (input.reasoningEffort ?? 'minimal') : 'minimal';
+      const metadata: Record<string, unknown> = {
+        ...(input.metadata ?? {}),
+        deep_thinking: deepThinking,
+      };
+      if (input.reasoningEffort) {
+        metadata.main_agent_reasoning_effort = input.reasoningEffort;
+      }
       const body: SubmitMessageRequest = {
         conversation_id: input.conversationId,
         content: input.content,
@@ -173,11 +179,7 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
         capability_id: capabilityId,
         client_message_id: input.clientMessageId ?? null,
         ...(input.modelEdition ? { model_edition: input.modelEdition } : {}),
-        metadata: {
-          ...(input.metadata ?? {}),
-          deep_thinking: deepThinking,
-          main_agent_reasoning_effort: reasoningEffort,
-        },
+        metadata,
       };
       return request<MessageAcceptedResponse>('/api/v1/conversations/chat-messages', {
         method: 'POST',

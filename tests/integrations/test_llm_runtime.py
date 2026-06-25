@@ -6,6 +6,18 @@ from src.integrations.llm_runtime import SharedLLMRuntime
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, PromptSegment
 
 
+def _reasoning_efforts() -> dict:
+    return {
+        "default": "minimal",
+        "disabled_default": "minimal",
+        "options": [
+            {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
+            {"value": "high", "label": "高", "allow_when_thinking_disabled": False},
+            {"value": "max", "label": "最高", "allow_when_thinking_disabled": False},
+        ],
+    }
+
+
 class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_reuses_one_client_for_text_and_stream_calls(self) -> None:
         class FakeClient:
@@ -79,8 +91,18 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "model_editions": {
                     "default": "deepseek-v4-flash-260425",
                     "options": [
-                        {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
-                        {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro", "trim_max_tokens": 2048000},
+                        {
+                            "value": "deepseek-v4-flash-260425",
+                            "label": "DeepSeek V4 Flash",
+                            "trim_max_tokens": 1024000,
+                            "reasoning_efforts": _reasoning_efforts(),
+                        },
+                        {
+                            "value": "deepseek-v4-pro-260425",
+                            "label": "DeepSeek V4 Pro",
+                            "trim_max_tokens": 2048000,
+                            "reasoning_efforts": _reasoning_efforts(),
+                        },
                     ],
                 },
             },
@@ -117,7 +139,13 @@ class SharedLLMRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "trim_max_tokens": 123,
                 "model_editions": {
                     "default": "deepseek-v4-flash-260425",
-                    "options": [{"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"}],
+                    "options": [
+                        {
+                            "value": "deepseek-v4-flash-260425",
+                            "label": "DeepSeek V4 Flash",
+                            "reasoning_efforts": _reasoning_efforts(),
+                        }
+                    ],
                 },
             },
             config_source="injected_config",

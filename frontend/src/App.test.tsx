@@ -8,6 +8,35 @@ import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
 import { COMPOSER_PLACEHOLDERS } from './domain/composerPlaceholders';
 import { WELCOME_PROMPTS } from './domain/welcomePrompts';
 
+const deepseekReasoningEfforts = {
+  default: 'minimal',
+  disabled_default: 'minimal',
+  options: [
+    { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
+    { value: 'high', label: '高', allow_when_thinking_disabled: false },
+    { value: 'max', label: '最高', allow_when_thinking_disabled: false },
+  ],
+};
+
+const doubaoReasoningEfforts = {
+  default: 'minimal',
+  disabled_default: 'minimal',
+  options: [
+    { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
+    { value: 'low', label: '低', allow_when_thinking_disabled: false },
+    { value: 'medium', label: '中', allow_when_thinking_disabled: false },
+    { value: 'high', label: '高', allow_when_thinking_disabled: false },
+  ],
+};
+
+const forceThinkingReasoningEfforts = {
+  default: 'high',
+  disabled_default: null,
+  options: [
+    { value: 'high', label: '高', allow_when_thinking_disabled: false },
+  ],
+};
+
 function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     uiModes: [
@@ -27,8 +56,8 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     getModelEditions: vi.fn(async () => ({
       default_model_edition: 'deepseek-v4-flash-260425',
       options: [
-        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash' },
-        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro' },
+        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash', reasoning_efforts: deepseekReasoningEfforts },
+        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro', reasoning_efforts: deepseekReasoningEfforts },
       ],
     })),
     listConversationUploads: vi.fn(async () => ({ conversation_id: 'conv-test', uploads: [] })),
@@ -2316,6 +2345,49 @@ describe('App', () => {
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
       deepThinking: false,
       reasoningEffort: 'minimal',
+    })));
+  });
+
+  it('renders model-specific Doubao reasoning effort options', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'doubao-seed-2-1-pro-260628',
+        options: [
+          { value: 'doubao-seed-2-1-pro-260628', label: '豆包Seed 2.1 Pro', reasoning_efforts: doubaoReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    fireEvent.click(await screen.findByLabelText('深度思考'));
+    const effortSelect = screen.getAllByLabelText('思考强度')[0].closest('.ant-select') as HTMLElement;
+    fireEvent.mouseDown(effortSelect.querySelector('.ant-select-selector') as HTMLElement);
+
+    expect(await screen.findByText('低')).toBeInTheDocument();
+    expect(await screen.findByText('中')).toBeInTheDocument();
+    expect(screen.queryByText('最高')).not.toBeInTheDocument();
+  });
+
+  it('forces deep thinking when the selected model has no disabled-safe effort', async () => {
+    const api = makeApi({
+      getModelEditions: vi.fn(async () => ({
+        default_model_edition: 'force-thinking-model',
+        options: [
+          { value: 'force-thinking-model', label: 'Force Thinking', reasoning_efforts: forceThinkingReasoningEfforts },
+        ],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '打开输入功能菜单' }));
+    expect(await screen.findByLabelText('深度思考：已开启')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '强制思考' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      deepThinking: true,
+      reasoningEffort: 'high',
     })));
   });
 

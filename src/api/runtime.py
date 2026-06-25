@@ -94,13 +94,22 @@ from src.integrations.agent_skills.skill_sandbox_client import SkillSandboxGrpcC
 from src.integrations.agent_skills.skill_runtime_gates import validate_skill_runtime_artifact_provenance
 from src.integrations.llm_client import DEFAULT_CONFIG_PATH, LLMClient, ReasoningEffort, bootstrap_config_env, load_config
 from src.integrations.llm_request_options import (
+    LLMRequestOptions,
     resolve_llm_model_edition,
     resolve_llm_reasoning_effort,
     resolve_llm_request_options,
     resolve_llm_thinking_enabled,
 )
 from src.integrations.llm_runtime import SharedLLMRuntime
-from src.integrations.model_editions import config_for_model_edition, default_model_edition, model_edition_options, validate_model_edition
+from src.integrations.model_editions import (
+    ReasoningEffortConfig,
+    config_for_model_edition,
+    default_model_edition,
+    model_edition_options,
+    model_reasoning_effort_configs,
+    validate_model_edition,
+    validate_model_reasoning_effort_configs,
+)
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.integrations.rust_safety_contract import configure_safety_shadow_sink
@@ -220,7 +229,7 @@ USER_SUPPLIED_METADATA_DENYLIST = frozenset(
 _SLOT_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed"})
 _SLOT_WAITING_STATUSES = frozenset({"waiting_for_user", "collecting", "extracting", "validating"})
 _INTERRUPT_TURN_SLOT_ANSWER_CONFIDENCE = 0.78
-_INTERRUPT_TURN_LLM_METADATA = {"deep_thinking": True, "main_agent_reasoning_effort": "max"}
+_INTERRUPT_TURN_LLM_METADATA = {"deep_thinking": True}
 _INTERRUPT_OPEN_TURN_PART_KINDS = frozenset(
     {"slot_answer", "skill_question", "off_topic_guidance", "schema_switch", "ambiguous"}
 )
@@ -368,6 +377,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._mcp_runtime_state = mcp_runtime_state
         self._runtime_sidecar_client = runtime_sidecar_client
         self._model_edition_config = dict(model_edition_config or {})
+        validate_model_reasoning_effort_configs(self._model_edition_config)
+        self._model_reasoning_configs = model_reasoning_effort_configs(self._model_edition_config)
+        self._default_model_edition = default_model_edition(self._model_edition_config)
         self._runtime_sidecar_shadow_sink = _build_runtime_sidecar_shadow_diff_sink(audit_sink)
         configure_safety_shadow_sink(_build_safety_kernel_shadow_diff_sink(audit_sink))
         self._conversation_guard = ConversationSerialGuard(storage)
@@ -442,12 +454,47 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     def model_editions_payload(self) -> dict[str, Any]:
         options = model_edition_options(self._model_edition_config)
         return {
-            "default_model_edition": default_model_edition(self._model_edition_config),
-            "options": [{"value": option.value, "label": option.label} for option in options],
+            "default_model_edition": self._default_model_edition,
+            "options": [
+                {
+                    "value": option.value,
+                    "label": option.label,
+                    "reasoning_efforts": (
+                        {
+                            "default": option.reasoning_efforts.default,
+                            "disabled_default": option.reasoning_efforts.disabled_default,
+                            "options": [
+                                {
+                                    "value": effort.value,
+                                    "label": effort.label,
+                                    "allow_when_thinking_disabled": effort.allow_when_thinking_disabled,
+                                }
+                                for effort in option.reasoning_efforts.options
+                            ],
+                        }
+                        if option.reasoning_efforts is not None
+                        else None
+                    ),
+                }
+                for option in options
+            ],
         }
 
     def _validate_requested_model_edition(self, model_edition: str | None) -> str | None:
         return validate_model_edition(model_edition, config=self._model_edition_config)
+
+    def _resolve_llm_request_options(
+        self,
+        metadata: Mapping[str, Any] | None,
+        *,
+        fallback_reasoning_effort: ReasoningEffort | None = None,
+    ) -> LLMRequestOptions:
+        return resolve_llm_request_options(
+            metadata,
+            fallback_reasoning_effort=fallback_reasoning_effort,
+            model_reasoning_configs=self._model_reasoning_configs,
+            default_model_edition=self._default_model_edition,
+        )
 
     async def login_username(self, username: str):
         if self.username_token_service is None:
@@ -960,27 +1007,19 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     ) -> dict[str, object]:
         values = metadata if isinstance(metadata, Mapping) else {}
         result: dict[str, object] = {}
-        model_edition = resolve_llm_model_edition(values)
-        if model_edition:
-            selected_model_edition = self._validate_requested_model_edition(model_edition)
-            if selected_model_edition:
-                result["model_edition"] = selected_model_edition
         thinking_was_explicit = "deep_thinking" in values or "main_agent_thinking_enabled" in values
-        if include_defaults or thinking_was_explicit:
-            thinking_enabled = resolve_llm_thinking_enabled(values)
-            result["deep_thinking"] = thinking_enabled
-            result["main_agent_thinking_enabled"] = thinking_enabled
-            result["main_agent_reasoning_effort"] = resolve_llm_reasoning_effort(
-                values,
-                fallback="minimal",
-                thinking_enabled=thinking_enabled,
-            )
-        elif "main_agent_reasoning_effort" in values:
-            result["main_agent_reasoning_effort"] = resolve_llm_reasoning_effort(
-                values,
-                fallback="minimal",
-                thinking_enabled=True,
-            )
+        effort_was_explicit = "main_agent_reasoning_effort" in values
+        if include_defaults or thinking_was_explicit or effort_was_explicit or "model_edition" in values:
+            options = self._resolve_llm_request_options(values)
+            if options.model_edition:
+                result["model_edition"] = options.model_edition
+            if include_defaults or thinking_was_explicit:
+                result["deep_thinking"] = options.thinking
+                result["main_agent_thinking_enabled"] = options.thinking
+            if include_defaults or thinking_was_explicit or effort_was_explicit:
+                if options.requested_reasoning_effort is not None:
+                    result["requested_reasoning_effort"] = options.requested_reasoning_effort
+                result["main_agent_reasoning_effort"] = options.reasoning_effort
         return result
 
     async def _task_accepted_llm_metadata(self, task_id: str) -> dict[str, object]:
@@ -7450,6 +7489,8 @@ def build_api_runtime(
                     stream_generator=resolved_main_agent_stream_generator,
                     stream_metadata=main_agent_stream_metadata,
                     default_reasoning_effort=main_agent_reasoning_effort,
+                    default_model_edition=default_model_edition(main_agent_llm_runtime.config_snapshot()),
+                    model_reasoning_configs=main_agent_llm_runtime.model_reasoning_configs(),
                     skill_catalog=skill_runtime_state.active_bundle.catalog,
                     skill_catalog_resolver=skill_runtime_state.catalog_for_revision,
                     script_runner=skill_script_runner,
@@ -7933,7 +7974,7 @@ def _resolve_platform_text_generator(
         )
 
     async def generate(prompt: str, **kwargs: Any) -> str:
-        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
+        options = _resolve_runtime_llm_request_options(runtime, _metadata_from_llm_kwargs(kwargs))
         return await runtime.generate_text(
             prompt,
             thinking=options.thinking,
@@ -7956,7 +7997,7 @@ def _resolve_conversation_title_generator(
         return None
 
     async def generate(title_source: str, **kwargs: Any) -> str:
-        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
+        options = _resolve_runtime_llm_request_options(main_agent_llm_runtime, _metadata_from_llm_kwargs(kwargs))
         return await main_agent_llm_runtime.generate_text(
             build_conversation_title_prompt(title_source),
             thinking=options.thinking,
@@ -7985,7 +8026,7 @@ def _resolve_skill_input_text_generator(
         nonlocal call_ordinal
         call_ordinal += 1
         call_id = call_ordinal
-        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
+        options = _resolve_runtime_llm_request_options(main_agent_llm_runtime, _metadata_from_llm_kwargs(kwargs))
         reasoning_context = kwargs.get("reasoning_context")
         reasoning_ordinal = 0
 
@@ -8056,16 +8097,23 @@ def _resolve_conversation_memory_builder(
         return None
 
     async def generate_summary(prompt: str, **kwargs: Any) -> str:
-        model_edition = resolve_llm_model_edition(_metadata_from_llm_kwargs(kwargs))
+        summary_metadata = _metadata_from_llm_kwargs(kwargs)
+        summary_metadata.pop("main_agent_reasoning_effort", None)
+        summary_metadata.pop("main_agent_thinking_enabled", None)
+        summary_metadata["deep_thinking"] = False
+        options = _resolve_runtime_llm_request_options(
+            main_agent_llm_runtime,
+            summary_metadata,
+        )
         return await main_agent_llm_runtime.generate_text(
             prompt,
-            thinking=False,
-            reasoning_effort="minimal",
-            model_edition=model_edition,
+            thinking=options.thinking,
+            reasoning_effort=options.reasoning_effort,
+            model_edition=options.model_edition,
         )
 
     async def generate_resolution(prompt: str, **kwargs: Any) -> str:
-        options = resolve_llm_request_options(_metadata_from_llm_kwargs(kwargs))
+        options = _resolve_runtime_llm_request_options(main_agent_llm_runtime, _metadata_from_llm_kwargs(kwargs))
         request = kwargs.get("request")
         reasoning_ordinal = 0
 
@@ -8132,6 +8180,20 @@ def _metadata_from_llm_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(explicit_metadata, Mapping):
         metadata.update(explicit_metadata)
     return metadata
+
+
+def _resolve_runtime_llm_request_options(
+    runtime: SharedLLMRuntime,
+    metadata: Mapping[str, Any] | None,
+    *,
+    fallback_reasoning_effort: ReasoningEffort | None = None,
+) -> LLMRequestOptions:
+    return resolve_llm_request_options(
+        metadata,
+        fallback_reasoning_effort=fallback_reasoning_effort,
+        model_reasoning_configs=runtime.model_reasoning_configs(),
+        default_model_edition=runtime.default_model_edition(),
+    )
 
 
 def _reasoning_context_text(context: Mapping[str, Any], key: str) -> str:
@@ -8479,7 +8541,11 @@ def _resolve_planner_text_generator(
                 await maybe_result
 
         metadata = dict(request.metadata) if request is not None else {}
-        options = resolve_llm_request_options(metadata, fallback_reasoning_effort=planner_reasoning_effort)
+        options = _resolve_runtime_llm_request_options(
+            main_agent_llm_runtime,
+            metadata,
+            fallback_reasoning_effort=planner_reasoning_effort,
+        )
         reasoning_ordinal = 0
 
         async def publish_planner_reasoning(delta: str) -> None:

@@ -3,6 +3,17 @@ from __future__ import annotations
 from tests.api.support import APITestCase
 
 
+def _test_reasoning_efforts() -> dict:
+    return {
+        "default": "minimal",
+        "disabled_default": "minimal",
+        "options": [
+            {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
+            {"value": "max", "label": "最高", "allow_when_thinking_disabled": False},
+        ],
+    }
+
+
 class ConversationTitleAPITest(APITestCase):
     async def test_new_conversation_generates_title_with_minimal_non_thinking_llm(self) -> None:
         calls: list[dict[str, object]] = []
@@ -13,6 +24,16 @@ class ConversationTitleAPITest(APITestCase):
                 return "龙粳33品种查询"
 
         await self.reconfigure_runtime(
+            main_agent_llm_config={
+                "api_key": "test",
+                "base_url": "http://example.test",
+                "model_editions": {
+                    "default": "flash",
+                    "options": [
+                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts()},
+                    ],
+                },
+            },
             main_agent_llm_client_factory=lambda **_kwargs: RecordingTitleClient(),
             main_agent_stream_generator=lambda _prompt: ["已收到。"],
             enable_conversation_title_llm=True,
@@ -49,7 +70,10 @@ class ConversationTitleAPITest(APITestCase):
                 "base_url": "http://example.test",
                 "model_editions": {
                     "default": "flash",
-                    "options": [{"value": "flash", "label": "Flash"}, {"value": "pro", "label": "Pro"}],
+                    "options": [
+                        {"value": "flash", "label": "Flash", "reasoning_efforts": _test_reasoning_efforts()},
+                        {"value": "pro", "label": "Pro", "reasoning_efforts": _test_reasoning_efforts()},
+                    ],
                 },
             },
             main_agent_stream_generator=lambda _prompt: ["已收到。"],

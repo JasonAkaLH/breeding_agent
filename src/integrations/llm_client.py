@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from openai import AsyncOpenAI
 
 from src.core.coercion import coerce_truthy
-from .model_editions import default_model_edition
+from .model_editions import default_model_edition, validate_model_reasoning_effort_configs
 from .provider_cache import (
     provider_cache_capabilities_metadata,
     provider_cache_hint_status,
@@ -24,7 +24,7 @@ from src.orchestration.prompt_envelope import (
 )
 
 
-ReasoningEffort = Literal["minimal", "high", "max"]
+ReasoningEffort = str
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 CONFIG_ENV_PREFIX = "MAF_CONFIG_"
@@ -72,6 +72,7 @@ def bootstrap_config_env(
         config = yaml.safe_load(file)
     if not isinstance(config, dict):
         raise ValueError(f"LLM config must be a mapping: {path}")
+    validate_model_reasoning_effort_configs(config)
 
     if should_clear_existing:
         _clear_config_data_env()
@@ -117,6 +118,7 @@ class LLMClient:
             if config_path is not None:
                 bootstrap_config_env(config_path, override=True)
             loaded_config = load_config()
+        validate_model_reasoning_effort_configs(loaded_config)
 
         self.model = model or _resolve_model_from_config(loaded_config)
         self.temperature = temperature if temperature is not None else loaded_config.get("temperature", 0.0)

@@ -16,6 +16,7 @@ from src.orchestration.prompt_envelope import LLMMessage
 from src.orchestration.models import OrchestrationRequest
 from src.integrations.agent_skills import SkillCatalog
 from src.integrations.agent_skills.missing_input_interrupt import SLOT_COLLECTION_FIELD
+from src.integrations.model_editions import ReasoningEffortConfig, ReasoningEffortOption
 
 
 async def _collecting_streamer(prompt: str):
@@ -881,7 +882,7 @@ scripts/internal_report.py
         self.assertEqual(llm_event.payload["reasoning_effort"], "max")
         self.assertTrue(llm_event.payload["thinking_enabled"])
 
-    async def test_executor_forces_minimal_reasoning_when_thinking_is_disabled(self) -> None:
+    async def test_executor_rejects_disallowed_reasoning_when_thinking_is_disabled(self) -> None:
         seen_reasoning_efforts: list[str] = []
         seen_thinking_flags: list[bool] = []
 
@@ -897,25 +898,42 @@ scripts/internal_report.py
                 "model": "test-model",
                 "reasoning_effort": "minimal",
             },
+            default_model_edition="test-model",
+            model_reasoning_configs={
+                "test-model": ReasoningEffortConfig(
+                    default="minimal",
+                    disabled_default="minimal",
+                    options=(
+                        ReasoningEffortOption(
+                            value="minimal",
+                            label="最低",
+                            allow_when_thinking_disabled=True,
+                        ),
+                        ReasoningEffortOption(
+                            value="max",
+                            label="最高",
+                            allow_when_thinking_disabled=False,
+                        ),
+                    ),
+                )
+            },
             skill_catalog=SkillCatalog(()),
         )
 
-        result = await executor.execute(
-            CapabilityExecutionRequest(
-                capability_id="main_agent.respond",
-                conversation_id="conv-1",
-                task_id="task-1",
-                node_id="node-1",
-                input_payload={"user_message": "普通回答"},
-                metadata={"deep_thinking": False, "main_agent_reasoning_effort": "max"},
+        with self.assertRaisesRegex(ValueError, "does not allow reasoning_effort=max"):
+            await executor.execute(
+                CapabilityExecutionRequest(
+                    capability_id="main_agent.respond",
+                    conversation_id="conv-1",
+                    task_id="task-1",
+                    node_id="node-1",
+                    input_payload={"user_message": "普通回答"},
+                    metadata={"deep_thinking": False, "main_agent_reasoning_effort": "max"},
+                )
             )
-        )
 
-        self.assertEqual(seen_reasoning_efforts, ["minimal"])
-        self.assertEqual(seen_thinking_flags, [False])
-        llm_event = next(event for event in result.events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
-        self.assertFalse(llm_event.payload["thinking_enabled"])
+        self.assertEqual(seen_reasoning_efforts, [])
+        self.assertEqual(seen_thinking_flags, [])
 
     async def test_executor_records_safe_llm_metadata_on_provider_failure(self) -> None:
         async def broken_streamer(prompt: str):

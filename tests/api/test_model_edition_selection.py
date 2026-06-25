@@ -7,6 +7,31 @@ from tests.api.support import APITestCase
 
 
 class ModelEditionSelectionAPITest(APITestCase):
+    @staticmethod
+    def _deepseek_reasoning() -> dict[str, Any]:
+        return {
+            "default": "minimal",
+            "disabled_default": "minimal",
+            "options": [
+                {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
+                {"value": "high", "label": "高", "allow_when_thinking_disabled": False},
+                {"value": "max", "label": "最高", "allow_when_thinking_disabled": False},
+            ],
+        }
+
+    @staticmethod
+    def _doubao_reasoning() -> dict[str, Any]:
+        return {
+            "default": "minimal",
+            "disabled_default": "minimal",
+            "options": [
+                {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
+                {"value": "low", "label": "低", "allow_when_thinking_disabled": False},
+                {"value": "medium", "label": "中", "allow_when_thinking_disabled": False},
+                {"value": "high", "label": "高", "allow_when_thinking_disabled": False},
+            ],
+        }
+
     def _model_config(self) -> dict[str, Any]:
         return {
             "api_key": "test",
@@ -14,8 +39,24 @@ class ModelEditionSelectionAPITest(APITestCase):
             "model_editions": {
                 "default": "deepseek-v4-flash-260425",
                 "options": [
-                    {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash", "trim_max_tokens": 1024000},
-                    {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro", "trim_max_tokens": 1024000},
+                    {
+                        "value": "deepseek-v4-flash-260425",
+                        "label": "DeepSeek V4 Flash",
+                        "trim_max_tokens": 1024000,
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                    },
+                    {
+                        "value": "deepseek-v4-pro-260425",
+                        "label": "DeepSeek V4 Pro",
+                        "trim_max_tokens": 1024000,
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                    },
+                    {
+                        "value": "doubao-seed-2-1-pro-260628",
+                        "label": "豆包Seed 2.1 Pro",
+                        "trim_max_tokens": 256000,
+                        "reasoning_efforts": self._doubao_reasoning(),
+                    },
                 ],
             },
         }
@@ -31,11 +72,42 @@ class ModelEditionSelectionAPITest(APITestCase):
             {
                 "default_model_edition": "deepseek-v4-flash-260425",
                 "options": [
-                    {"value": "deepseek-v4-flash-260425", "label": "DeepSeek V4 Flash"},
-                    {"value": "deepseek-v4-pro-260425", "label": "DeepSeek V4 Pro"},
+                    {
+                        "value": "deepseek-v4-flash-260425",
+                        "label": "DeepSeek V4 Flash",
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                    },
+                    {
+                        "value": "deepseek-v4-pro-260425",
+                        "label": "DeepSeek V4 Pro",
+                        "reasoning_efforts": self._deepseek_reasoning(),
+                    },
+                    {
+                        "value": "doubao-seed-2-1-pro-260628",
+                        "label": "豆包Seed 2.1 Pro",
+                        "reasoning_efforts": self._doubao_reasoning(),
+                    },
                 ],
             },
         )
+
+    async def test_submit_message_rejects_disabled_disallowed_reasoning_effort(self) -> None:
+        await self.reconfigure_runtime(main_agent_llm_config=self._model_config())
+
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-model-invalid-effort",
+                "content": "你好",
+                "routing_mode": "auto",
+                "capability_id": None,
+                "model_edition": "doubao-seed-2-1-pro-260628",
+                "metadata": {"deep_thinking": False, "main_agent_reasoning_effort": "high"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("does not allow reasoning_effort=high", response.text)
 
     async def test_submit_message_rejects_unknown_model_edition(self) -> None:
         await self.reconfigure_runtime(main_agent_llm_config=self._model_config())
@@ -53,6 +125,23 @@ class ModelEditionSelectionAPITest(APITestCase):
         )
 
         self.assertEqual(response.status_code, 400, response.text)
+
+    async def test_runtime_rejects_configured_model_without_reasoning_efforts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing reasoning_efforts"):
+            self.build_runtime(
+                main_agent_llm_config={
+                    "api_key": "test",
+                    "base_url": "http://example.test",
+                    "model": "legacy-model-without-reasoning-config",
+                },
+                enable_conversation_memory=False,
+            )
+
+    async def test_runtime_rejects_model_edition_option_without_reasoning_efforts(self) -> None:
+        config = self._model_config()
+        config["model_editions"]["options"][0].pop("reasoning_efforts")
+        with self.assertRaisesRegex(ValueError, "missing reasoning_efforts"):
+            self.build_runtime(main_agent_llm_config=config, enable_conversation_memory=False)
 
     async def test_selected_model_edition_reaches_planner_and_main_agent_runtime(self) -> None:
         class RecordingLLM:

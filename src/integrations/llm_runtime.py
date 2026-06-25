@@ -6,7 +6,12 @@ from typing import Any
 
 from .llm_client import LLMClient, ReasoningEffort, load_config
 from .llm_stream_events import accepted_options, coerce_stream_event, coerce_text_result, iter_stream_like
-from .model_editions import config_with_model_edition, default_model_edition
+from .model_editions import (
+    ReasoningEffortConfig,
+    config_with_model_edition,
+    default_model_edition,
+    model_reasoning_effort_configs,
+)
 from .provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, render_prompt_envelope
 
@@ -39,6 +44,18 @@ class SharedLLMRuntime:
         self._config = dict(config) if config is not None else None
         self._config_source = config_source
         self.runtime_id = f"llm-runtime-{id(self):x}"
+
+    def config_snapshot(self) -> dict[str, Any]:
+        if self._config is not None:
+            return dict(self._config)
+        return load_config()
+
+    def default_model_edition(self) -> str | None:
+        config = self.config_snapshot()
+        return default_model_edition(config) or config.get("model_edition") or config.get("model")
+
+    def model_reasoning_configs(self) -> dict[str, ReasoningEffortConfig]:
+        return model_reasoning_effort_configs(self.config_snapshot())
 
     def static_metadata(
         self,

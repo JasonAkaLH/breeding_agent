@@ -112,9 +112,22 @@ class SubmitMessageRequest(StrictRequestModel):
         return value.strip() or None
 
 
+class ReasoningEffortOptionResponse(BaseModel):
+    value: str
+    label: str
+    allow_when_thinking_disabled: bool
+
+
+class ReasoningEffortConfigResponse(BaseModel):
+    default: str
+    disabled_default: str | None = None
+    options: list[ReasoningEffortOptionResponse]
+
+
 class ModelEditionOptionResponse(BaseModel):
     value: str
     label: str
+    reasoning_efforts: ReasoningEffortConfigResponse
 
 
 class ModelEditionsResponse(BaseModel):

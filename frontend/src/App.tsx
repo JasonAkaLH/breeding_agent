@@ -183,11 +183,39 @@ const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
 const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
-const REASONING_EFFORT_OPTIONS: { label: string; value: ReasoningEffort }[] = [
-  { label: '最低', value: 'minimal' },
-  { label: '高', value: 'high' },
-  { label: '最高', value: 'max' },
-];
+function validReasoningConfig(option: ModelEditionOption | null | undefined): option is ModelEditionOption {
+  return Boolean(
+    option?.reasoning_efforts
+    && Array.isArray(option.reasoning_efforts.options)
+    && option.reasoning_efforts.options.length > 0
+    && option.reasoning_efforts.options.some((effort) => effort.value === option.reasoning_efforts.default),
+  );
+}
+
+function disabledSafeReasoningEfforts(option: ModelEditionOption | null | undefined) {
+  if (!validReasoningConfig(option)) return [];
+  return option.reasoning_efforts.options.filter((effort) => effort.allow_when_thinking_disabled);
+}
+
+function forceDeepThinking(option: ModelEditionOption | null | undefined): boolean {
+  return validReasoningConfig(option) && disabledSafeReasoningEfforts(option).length === 0;
+}
+
+function resolveEffectiveReasoningEffort(
+  option: ModelEditionOption | null | undefined,
+  current: ReasoningEffort,
+  thinkingEnabled: boolean,
+): ReasoningEffort {
+  if (!validReasoningConfig(option)) return current;
+  const values = new Set(option.reasoning_efforts.options.map((effort) => effort.value));
+  if (thinkingEnabled) {
+    return values.has(current) ? current : option.reasoning_efforts.default;
+  }
+  const disabledSafe = disabledSafeReasoningEfforts(option);
+  const disabledValues = new Set(disabledSafe.map((effort) => effort.value));
+  if (disabledValues.has(current)) return current;
+  return option.reasoning_efforts.disabled_default ?? disabledSafe[0]?.value ?? option.reasoning_efforts.default;
+}
 const AGRICULTURE_THEME: ThemeConfig = {
   algorithm: theme.defaultAlgorithm,
   token: {
@@ -239,6 +267,21 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [modelEdition, setModelEdition] = useState<ModelEdition | null>(null);
   const [deepThinking, setDeepThinking] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('minimal');
+  const selectedModelEdition = useMemo(
+    () => modelEditionOptions.find((option) => option.value === modelEdition) ?? null,
+    [modelEdition, modelEditionOptions],
+  );
+  const selectedModelReasoningConfigValid = modelEdition === null || validReasoningConfig(selectedModelEdition);
+  const selectedModelForcesThinking = forceDeepThinking(selectedModelEdition);
+  const effectiveDeepThinking = selectedModelForcesThinking ? true : deepThinking;
+  const effectiveReasoningEffort = resolveEffectiveReasoningEffort(
+    selectedModelEdition,
+    reasoningEffort,
+    effectiveDeepThinking,
+  );
+  const reasoningEffortOptions = validReasoningConfig(selectedModelEdition)
+    ? selectedModelEdition.reasoning_efforts.options.map((option) => ({ label: option.label, value: option.value }))
+    : [];
   const [input, setInput] = useState('');
   const composerPlaceholder = useMemo(() => pickComposerPlaceholder(), [conversationId]);
   const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([]);
@@ -416,6 +459,17 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mounted = false;
     };
   }, [api, authUser]);
+
+  useEffect(() => {
+    if (!selectedModelEdition || !validReasoningConfig(selectedModelEdition)) return;
+    if (selectedModelForcesThinking && !deepThinking) {
+      setDeepThinking(true);
+      return;
+    }
+    if (effectiveReasoningEffort !== reasoningEffort) {
+      setReasoningEffort(effectiveReasoningEffort);
+    }
+  }, [deepThinking, effectiveReasoningEffort, reasoningEffort, selectedModelEdition, selectedModelForcesThinking]);
 
   useEffect(() => {
     if (!transientNotice) return undefined;
@@ -988,7 +1042,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const savedFileCount = pendingUploads.length;
   const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && draftAttachments.length > 0;
   const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
-  const canSubmitComposer = !slashInputBlocked && (
+  const canSubmitComposer = selectedModelReasoningConfigValid && !slashInputBlocked && (
     Boolean(input.trim())
     || selectedSkillCommand !== null
     || directSlashParse.kind === 'matched'
@@ -1107,7 +1161,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       role: 'assistant',
       content: '',
       mode,
-      reasoningRequested: deepThinking,
+      reasoningRequested: effectiveDeepThinking,
       activityText: taskProgressDisplayText(createSubmittingTaskState()),
     };
     setMessages((current) => [...(refreshedMessages ?? current), userMessage, applyPendingAssistantPatch(assistantMessage)]);
@@ -1121,8 +1175,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         content,
         mode,
         modelEdition: modelEdition ?? undefined,
-        deepThinking,
-        reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
+        deepThinking: effectiveDeepThinking,
+        reasoningEffort: effectiveReasoningEffort,
         capabilityId: forcedCapabilityId,
         metadata: {
           ...(uploadedDrafts.length > 0 ? { upload_ids: uploadedDrafts.map((item) => item.upload.upload_id) } : {}),
@@ -1348,7 +1402,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       role: 'assistant',
       content: '',
       mode: interrupt.mode,
-      reasoningRequested: deepThinking,
+      reasoningRequested: effectiveDeepThinking,
       activityText: resumeProgressText,
     };
     setMessages((current) => [...(refreshedMessages ?? current), userMessage, applyPendingAssistantPatch(assistantMessage)]);
@@ -1369,8 +1423,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         content,
         mode: interrupt.mode,
         modelEdition: modelEdition ?? undefined,
-        deepThinking,
-        reasoningEffort: deepThinking ? reasoningEffort : 'minimal',
+        deepThinking: effectiveDeepThinking,
+        reasoningEffort: effectiveReasoningEffort,
         clientMessageId: userMessage.id,
         metadata: interruptSubmitMetadata(interrupt, uploads, selectedSheets),
       });
@@ -1915,33 +1969,44 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           style={{ width: 176 }}
         />
       </Space>
+      {!selectedModelReasoningConfigValid ? (
+        <Alert
+          type="error"
+          showIcon
+          message="模型 reasoning_efforts 配置缺失或非法，请刷新或联系管理员。"
+        />
+      ) : null}
       <Space size="small" align="center" className="composer-menu-row">
         <Typography.Text type="secondary">思考强度</Typography.Text>
         <Select
           aria-label="思考强度"
-          value={reasoningEffort}
-          options={REASONING_EFFORT_OPTIONS}
+          value={effectiveReasoningEffort}
+          options={reasoningEffortOptions}
           onChange={setReasoningEffort}
-          disabled={interactionLocked || !deepThinking}
+          disabled={interactionLocked || !effectiveDeepThinking || reasoningEffortOptions.length === 0}
           size="small"
           style={{ width: 104 }}
         />
       </Space>
       <Space size="small" align="center" className="composer-menu-row">
         <Typography.Text type="secondary">深度思考</Typography.Text>
-        <Switch
-          aria-label="深度思考"
-          checked={deepThinking}
-          onChange={(checked) => {
-            setDeepThinking(checked);
-            if (!checked) {
-              setReasoningEffort('minimal');
-            }
-          }}
-          checkedChildren="开"
-          unCheckedChildren="关"
-          disabled={interactionLocked}
-        />
+        {selectedModelForcesThinking ? (
+          <Typography.Text aria-label="深度思考：已开启">已开启</Typography.Text>
+        ) : (
+          <Switch
+            aria-label="深度思考"
+            checked={effectiveDeepThinking}
+            onChange={(checked) => {
+              setDeepThinking(checked);
+              if (!checked) {
+                setReasoningEffort(resolveEffectiveReasoningEffort(selectedModelEdition, reasoningEffort, false));
+              }
+            }}
+            checkedChildren="开"
+            unCheckedChildren="关"
+            disabled={interactionLocked || !selectedModelReasoningConfigValid}
+          />
+        )}
       </Space>
       {active && currentTaskId ? (
         <Button

@@ -9,11 +9,35 @@ from unittest.mock import patch
 
 from tests.api.support import APITestCase
 from src.api.runtime import _resolve_conversation_memory_builder, _resolve_skill_input_text_generator
-from src.core.enums import MessageRole
-from src.core.models import Conversation, Message
+from src.core.enums import MessageRole, TaskStatus
+from src.core.models import Conversation, Message, Task
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.orchestration.models import OrchestrationRequest
 from src.orchestration.prompt_envelope import LLMMessage
+
+
+def _test_reasoning_efforts() -> dict:
+    return {
+        "default": "minimal",
+        "disabled_default": "minimal",
+        "options": [
+            {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
+            {"value": "max", "label": "最高", "allow_when_thinking_disabled": False},
+        ],
+    }
+
+
+def _test_model_editions(model: str) -> dict:
+    return {
+        "default": model,
+        "options": [
+            {
+                "value": model,
+                "label": model,
+                "reasoning_efforts": _test_reasoning_efforts(),
+            }
+        ],
+    }
 
 
 class MainAgentLLMAPITest(APITestCase):
@@ -168,6 +192,7 @@ class MainAgentLLMAPITest(APITestCase):
                 "api_key": "secret-test-key",
                 "base_url": "https://example.test/v1",
                 "model": "fake-planner-model",
+                "model_editions": _test_model_editions("fake-planner-model"),
             },
             planner_llm_client_factory=FakePlannerLLMClient,
             skill_roots=None,
@@ -353,6 +378,103 @@ class MainAgentLLMAPITest(APITestCase):
         self.assertEqual(published[0].payload["delta"], "记忆解析:max")
         self.assertEqual(published[0].payload["stage"], "conversation_memory_resolution")
         self.assertEqual(published[0].visibility.value, "frontend")
+
+    async def test_conversation_memory_summary_uses_disabled_default_when_request_effort_requires_thinking(self) -> None:
+        calls: list[dict[str, object]] = []
+        model_config = {
+            "api_key": "secret-test-key",
+            "base_url": "https://example.test/v1",
+            "model": "fake-memory-model",
+            "model_editions": _test_model_editions("fake-memory-model"),
+            "trim_max_tokens": 1000,
+            "conversation_memory_recent_turns": 1,
+        }
+
+        class FakeMemoryLLMClient:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            async def generate_text(
+                self,
+                _prompt: str,
+                *,
+                thinking: bool = False,
+                reasoning_effort: str = "minimal",
+            ) -> str:
+                calls.append({"thinking": thinking, "reasoning_effort": reasoning_effort})
+                return "忠实摘要：历史查询龙粳33。"
+
+        builder = _resolve_conversation_memory_builder(
+            storage=self.runtime.storage,
+            conversation_memory_builder=None,
+            main_agent_llm_runtime=SharedLLMRuntime(client_factory=FakeMemoryLLMClient, config=model_config),
+            enable_conversation_memory=True,
+            resolution_generator=None,
+            enable_resolution_llm=False,
+            reasoning_event_publisher=None,
+            model_edition_config=model_config,
+        )
+        self.assertIsNotNone(builder)
+        assert builder is not None
+
+        await self.runtime.storage.save_conversation(Conversation("conv-memory-summary", "acc-1"))
+        for index in range(4):
+            task_id = f"task-memory-summary-{index}"
+            await self.runtime.storage.save_task(
+                Task(task_id, "conv-memory-summary", root_message_id=f"msg-memory-summary-{index}", status=TaskStatus.COMPLETED)
+            )
+            await self.runtime.storage.save_message(
+                Message(
+                    f"msg-memory-summary-{index}",
+                    "conv-memory-summary",
+                    MessageRole.USER,
+                    "查询龙粳33。" + ("长上下文" * 300),
+                    task_id=task_id,
+                    created_at=datetime(2026, 6, 11, 1, index, 0),
+                )
+            )
+            await self.runtime.storage.save_message(
+                Message(
+                    f"{task_id}:assistant",
+                    "conv-memory-summary",
+                    MessageRole.ASSISTANT,
+                    "龙粳33答复。" + ("历史答复" * 80),
+                    task_id=task_id,
+                    created_at=datetime(2026, 6, 11, 1, index, 30),
+                )
+            )
+        await self.runtime.storage.save_task(
+            Task("task-memory-summary-current", "conv-memory-summary", root_message_id="msg-memory-summary-current", status=TaskStatus.ACCEPTED)
+        )
+        await self.runtime.storage.save_message(
+            Message(
+                "msg-memory-summary-current",
+                "conv-memory-summary",
+                MessageRole.USER,
+                "继续",
+                task_id="task-memory-summary-current",
+                created_at=datetime(2026, 6, 11, 1, 10, 0),
+            )
+        )
+
+        context = await builder.build(
+            OrchestrationRequest(
+                task_id="task-memory-summary-current",
+                conversation_id="conv-memory-summary",
+                root_message_id="msg-memory-summary-current",
+                user_message="继续",
+                metadata={
+                    "deep_thinking": True,
+                    "main_agent_reasoning_effort": "max",
+                    "model_edition": "fake-memory-model",
+                },
+            ),
+            username="acc-1",
+        )
+
+        self.assertEqual(calls, [{"thinking": False, "reasoning_effort": "minimal"}])
+        self.assertEqual(context.history_summary, "忠实摘要：历史查询龙粳33。")
+        self.assertNotEqual(context.fallback_reason, "summary_llm_failed")
 
     async def test_prompt_envelope_shadow_audit_is_not_frontend_visible(self) -> None:
         release_stream = asyncio.Event()
@@ -720,9 +842,10 @@ class MainAgentLLMAPITest(APITestCase):
                 "api_key": "secret-test-key",
                 "base_url": "https://example.test/v1",
                 "model": "fake-planner-model",
+                "model_editions": _test_model_editions("fake-planner-model"),
             },
             planner_llm_client_factory=FakePlannerLLMClient,
-            planner_reasoning_effort="max",
+            planner_reasoning_effort="minimal",
             skill_roots=None,
         )
         response = await self.submit_message(
@@ -814,9 +937,10 @@ triggers:
                 "api_key": "secret-test-key",
                 "base_url": "https://example.test/v1",
                 "model": "fake-main-agent-model",
+                "model_editions": _test_model_editions("fake-main-agent-model"),
             },
             main_agent_llm_client_factory=FakeLLMClient,
-            main_agent_reasoning_effort="max",
+            main_agent_reasoning_effort="minimal",
             skill_roots=None,
         )
 
@@ -874,6 +998,7 @@ triggers:
                 "api_key": "secret-test-key",
                 "base_url": "https://example.test/v1",
                 "model": "fake-main-agent-model",
+                "model_editions": _test_model_editions("fake-main-agent-model"),
             },
             main_agent_llm_client_factory=FakeLLMClient,
             main_agent_reasoning_effort="minimal",
@@ -902,7 +1027,7 @@ triggers:
         self.assertEqual(llm_event.payload["reasoning_effort"], "max")
         self.assertTrue(llm_event.payload["thinking_enabled"])
 
-    async def test_metadata_forces_minimal_reasoning_when_thinking_is_disabled(self) -> None:
+    async def test_metadata_rejects_disallowed_reasoning_when_thinking_is_disabled(self) -> None:
         reasoning_efforts: list[str] = []
         thinking_flags: list[bool] = []
 
@@ -928,17 +1053,10 @@ triggers:
                 "metadata": {"deep_thinking": False, "main_agent_reasoning_effort": "max"},
             },
         )
-        self.assertEqual(response.status_code, 202)
-        task_id = response.json()["task_id"]
-        terminal = await self.wait_for_terminal_task(task_id)
-        self.assertEqual(terminal["status"], "completed")
-
-        events = await self.runtime.storage.list_events_for_task(task_id)
-        llm_event = next(event for event in events if event.event_type == "main_agent.llm_call")
-        self.assertEqual(reasoning_efforts, ["minimal"])
-        self.assertEqual(thinking_flags, [False])
-        self.assertEqual(llm_event.payload["reasoning_effort"], "minimal")
-        self.assertFalse(llm_event.payload["thinking_enabled"])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("does not allow reasoning_effort=max", response.json()["detail"])
+        self.assertEqual(reasoning_efforts, [])
+        self.assertEqual(thinking_flags, [])
 
 
 if __name__ == "__main__":

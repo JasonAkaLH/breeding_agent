@@ -32,6 +32,7 @@ from src.integrations.llm_request_options import (
     resolve_llm_reasoning_effort,
     resolve_llm_thinking_enabled,
 )
+from src.integrations.model_editions import ReasoningEffortConfig
 from src.integrations.provider_cache import provider_cache_capabilities_metadata
 from src.orchestration.answer_roles import (
     ANSWER_SCOPE_METADATA_KEY,
@@ -85,6 +86,8 @@ class MainAgentRespondCapability(CapabilityContract):
         stream_generator: StreamGenerator | None = None,
         stream_metadata: Mapping[str, Any] | None = None,
         default_reasoning_effort: ReasoningEffort = "minimal",
+        default_model_edition: str | None = None,
+        model_reasoning_configs: Mapping[str, ReasoningEffortConfig] | None = None,
         skill_catalog: SkillCatalog | None = None,
         skill_catalog_resolver: Callable[[str | None], SkillCatalog] | None = None,
         script_runner: SkillScriptRunner | None = None,
@@ -96,6 +99,8 @@ class MainAgentRespondCapability(CapabilityContract):
         self._stream_generator = stream_generator
         self._stream_metadata = self._sanitize_stream_metadata(stream_metadata or {})
         self._default_reasoning_effort = default_reasoning_effort
+        self._default_model_edition = default_model_edition
+        self._model_reasoning_configs = dict(model_reasoning_configs or {})
         self._skill_catalog = skill_catalog or SkillCatalog(())
         self._skill_catalog_resolver = skill_catalog_resolver
         self._script_runner = script_runner or SkillScriptRunner()
@@ -1591,6 +1596,8 @@ class MainAgentRespondCapability(CapabilityContract):
             metadata,
             fallback=self._default_reasoning_effort,
             thinking_enabled=thinking_enabled,
+            model_edition=self._resolve_model_edition(metadata) or self._default_model_edition,
+            model_reasoning_configs=self._model_reasoning_configs or None,
         )
 
     def _resolve_thinking_enabled(self, metadata: Mapping[str, Any]) -> bool:
@@ -1806,6 +1813,8 @@ class MainAgentExecutor(ExecutorPort):
         stream_generator: StreamGenerator | None = None,
         stream_metadata: Mapping[str, Any] | None = None,
         default_reasoning_effort: ReasoningEffort = "minimal",
+        default_model_edition: str | None = None,
+        model_reasoning_configs: Mapping[str, ReasoningEffortConfig] | None = None,
         skill_catalog: SkillCatalog | None = None,
         skill_catalog_resolver: Callable[[str | None], SkillCatalog] | None = None,
         script_runner: SkillScriptRunner | None = None,
@@ -1819,6 +1828,8 @@ class MainAgentExecutor(ExecutorPort):
                 stream_generator=stream_generator,
                 stream_metadata=stream_metadata,
                 default_reasoning_effort=default_reasoning_effort,
+                default_model_edition=default_model_edition,
+                model_reasoning_configs=model_reasoning_configs,
                 skill_catalog=skill_catalog,
                 skill_catalog_resolver=skill_catalog_resolver,
                 script_runner=script_runner,

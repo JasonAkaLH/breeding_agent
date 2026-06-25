@@ -122,8 +122,12 @@
 
 ### `/api/v1/config/model-editions` 与新消息提交
 
+- `GET /api/v1/config/model-editions` 的每个模型选项新增必填 `reasoning_efforts`，包含 `default`、`disabled_default` 与 `options[].allow_when_thinking_disabled`；客户端应按当前模型动态展示 reasoning effort。
+- `metadata.main_agent_reasoning_effort` 不再是全局固定枚举；服务端按所选 `model_edition` 校验。非法 effort 或 `deep_thinking=false` 下不允许的 effort 会返回 validation error，不再自动降级。
+- 当前模型没有任何 disabled-safe effort 时，前端应显示只读“深度思考：已开启”并固定提交 `deepThinking=true`。
+
 - `model_edition` 仍使用顶层请求字段，候选值来自 `GET /api/v1/config/model-editions`；客户端不要自定义模型枚举或提交 `trim_max_tokens`。
-- `metadata.deep_thinking` 与 `metadata.main_agent_reasoning_effort` 会影响本次请求的回答模式。关闭 deep thinking 时，高推理强度会被服务端降级；历史消息只保存最终 answer content。
+- `metadata.deep_thinking` 与 `metadata.main_agent_reasoning_effort` 会影响本次请求的回答模式。历史消息只保存最终 answer content。
 
 ### `/api/v1/artifacts/{artifact_id}/download`
 

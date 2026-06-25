@@ -1,5 +1,5 @@
 export type ChatMode = 'chat';
-export type ReasoningEffort = 'minimal' | 'high' | 'max';
+export type ReasoningEffort = string;
 export type ModelEdition = string;
 
 export interface UserResponse {
@@ -18,9 +18,22 @@ export interface LogoutResponse {
   logged_out: boolean;
 }
 
+export interface ReasoningEffortOption {
+  value: ReasoningEffort;
+  label: string;
+  allow_when_thinking_disabled: boolean;
+}
+
+export interface ReasoningEffortConfig {
+  default: ReasoningEffort;
+  disabled_default: ReasoningEffort | null;
+  options: ReasoningEffortOption[];
+}
+
 export interface ModelEditionOption {
   value: ModelEdition;
   label: string;
+  reasoning_efforts: ReasoningEffortConfig;
 }
 
 export interface ModelEditionsResponse {

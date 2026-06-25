@@ -89,8 +89,32 @@ describe('createApiClient', () => {
     const response = {
       default_model_edition: 'deepseek-v4-flash-260425',
       options: [
-        { value: 'deepseek-v4-flash-260425', label: 'DeepSeek V4 Flash' },
-        { value: 'deepseek-v4-pro-260425', label: 'DeepSeek V4 Pro' },
+        {
+          value: 'deepseek-v4-flash-260425',
+          label: 'DeepSeek V4 Flash',
+          reasoning_efforts: {
+            default: 'minimal',
+            disabled_default: 'minimal',
+            options: [
+              { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
+              { value: 'high', label: '高', allow_when_thinking_disabled: false },
+              { value: 'max', label: '最高', allow_when_thinking_disabled: false },
+            ],
+          },
+        },
+        {
+          value: 'deepseek-v4-pro-260425',
+          label: 'DeepSeek V4 Pro',
+          reasoning_efforts: {
+            default: 'minimal',
+            disabled_default: 'minimal',
+            options: [
+              { value: 'minimal', label: '最低', allow_when_thinking_disabled: true },
+              { value: 'high', label: '高', allow_when_thinking_disabled: false },
+              { value: 'max', label: '最高', allow_when_thinking_disabled: false },
+            ],
+          },
+        },
       ],
     };
     const fetcher = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
@@ -157,12 +181,12 @@ describe('createApiClient', () => {
         slash_command: '/data-lookup',
         soft_skill_binding: { capability_id: 'skill.data_lookup', command: '/data-lookup' },
         deep_thinking: false,
-        main_agent_reasoning_effort: 'minimal',
       },
     });
+    expect(body.metadata).not.toHaveProperty('main_agent_reasoning_effort');
   });
 
-  it('submits deep thinking metadata with minimal reasoning by default', async () => {
+  it('omits reasoning effort when App does not provide one', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
@@ -171,11 +195,11 @@ describe('createApiClient', () => {
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
       deep_thinking: true,
-      main_agent_reasoning_effort: 'minimal',
     });
+    expect(body.metadata).not.toHaveProperty('main_agent_reasoning_effort');
   });
 
-  it('clamps reasoning effort to minimal when thinking is disabled', async () => {
+  it('passes App-provided reasoning effort even when thinking is disabled', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversation_id: 'conv-1', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' }), { status: 202 }));
     const api = createApiClient({ fetcher });
 
@@ -184,7 +208,7 @@ describe('createApiClient', () => {
     const body = JSON.parse(fetcher.mock.calls[0][1].body as string);
     expect(body.metadata).toMatchObject({
       deep_thinking: false,
-      main_agent_reasoning_effort: 'minimal',
+      main_agent_reasoning_effort: 'max',
     });
   });
 

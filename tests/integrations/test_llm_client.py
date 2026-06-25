@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 from src.integrations.llm_client import CONFIG_ENV_PREFIX, LLMClient, bootstrap_config_env, load_config
 from src.orchestration.prompt_envelope import LLMMessage, PromptEnvelope, PromptSegment
 
@@ -56,6 +58,48 @@ def _assert_single_user_prompt_message(testcase: unittest.TestCase, call: dict, 
     testcase.assertEqual([message["role"] for message in call["messages"]], ["user"])
 
 
+def _reasoning_efforts() -> dict:
+    return {
+        "default": "minimal",
+        "disabled_default": "minimal",
+        "options": [
+            {"value": "minimal", "label": "最低", "allow_when_thinking_disabled": True},
+            {"value": "high", "label": "高", "allow_when_thinking_disabled": False},
+            {"value": "max", "label": "最高", "allow_when_thinking_disabled": False},
+        ],
+    }
+
+
+def _base_config(model: str = "test-model", *, model_key: str = "model", **extra: object) -> dict:
+    config = {
+        "api_key": "test-key",
+        "base_url": "https://example.test/v1",
+        model_key: model,
+        "temperature": 0,
+        "max_retries": 0,
+        "timeout": 1,
+        "model_editions": {
+            "default": model,
+            "options": [
+                {
+                    "value": model,
+                    "label": model,
+                    "reasoning_efforts": _reasoning_efforts(),
+                }
+            ],
+        },
+    }
+    config.update(extra)
+    return config
+
+
+def _write_config(path: Path, model: str, *, model_key: str = "model", **extra: object) -> None:
+    path.write_text(
+        yaml.safe_dump(_base_config(model, model_key=model_key, **extra), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+
 @contextmanager
 def _isolated_config_env():
     saved = {key: value for key, value in os.environ.items() if key.startswith(CONFIG_ENV_PREFIX)}
@@ -73,16 +117,7 @@ def _isolated_config_env():
 
 class LLMClientTest(unittest.TestCase):
     def make_client(self) -> LLMClient:
-        return LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-            }
-        )
+        return LLMClient(config=_base_config())
 
     def test_load_config_requires_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -95,20 +130,7 @@ class LLMClientTest(unittest.TestCase):
     def test_bootstrap_config_env_loads_yaml_once_for_default_client(self) -> None:
         with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.yaml"
-            path.write_text(
-                "\n".join(
-                    [
-                        "api_key: test-key",
-                        "base_url: https://example.test/v1",
-                        "model_edition: env-model",
-                        "temperature: 0",
-                        "max_retries: 0",
-                        "timeout: 1",
-                        "trim_max_tokens: 123",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(path, "env-model", model_key="model_edition", trim_max_tokens=123)
 
             bootstrap_config_env(path, override=True)
             self.assertEqual(os.environ["MAF_CONFIG_MODEL_EDITION"], "env-model")
@@ -122,27 +144,15 @@ class LLMClientTest(unittest.TestCase):
     def test_explicit_config_overrides_bootstrapped_environment(self) -> None:
         with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.yaml"
-            path.write_text(
-                "\n".join(
-                    [
-                        "api_key: env-key",
-                        "base_url: https://env.example.test/v1",
-                        "model: env-model",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(path, "env-model", api_key="env-key", base_url="https://env.example.test/v1")
             bootstrap_config_env(path, override=True)
 
             client = LLMClient(
-                config={
-                    "api_key": "injected-key",
-                    "base_url": "https://injected.example.test/v1",
-                    "model": "injected-model",
-                    "temperature": 0,
-                    "max_retries": 0,
-                    "timeout": 1,
-                }
+                config=_base_config(
+                    "injected-model",
+                    api_key="injected-key",
+                    base_url="https://injected.example.test/v1",
+                )
             )
 
         self.assertEqual(client.model, "injected-model")
@@ -150,28 +160,9 @@ class LLMClientTest(unittest.TestCase):
     def test_bootstrap_config_env_clears_stale_values_when_source_changes(self) -> None:
         with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
             first_path = Path(tmpdir) / "first.yaml"
-            first_path.write_text(
-                "\n".join(
-                    [
-                        "api_key: first-key",
-                        "base_url: https://first.example.test/v1",
-                        "model: first-model",
-                        "trim_max_tokens: 123",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(first_path, "first-model", api_key="first-key", base_url="https://first.example.test/v1", trim_max_tokens=123)
             second_path = Path(tmpdir) / "second.yaml"
-            second_path.write_text(
-                "\n".join(
-                    [
-                        "api_key: second-key",
-                        "base_url: https://second.example.test/v1",
-                        "model: second-model",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(second_path, "second-model", api_key="second-key", base_url="https://second.example.test/v1")
 
             bootstrap_config_env(first_path, override=True)
             self.assertEqual(load_config()["trim_max_tokens"], 123)
@@ -187,27 +178,9 @@ class LLMClientTest(unittest.TestCase):
     def test_llm_client_config_path_switches_to_requested_file(self) -> None:
         with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
             first_path = Path(tmpdir) / "first.yaml"
-            first_path.write_text(
-                "\n".join(
-                    [
-                        "api_key: first-key",
-                        "base_url: https://first.example.test/v1",
-                        "model: first-model",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(first_path, "first-model", api_key="first-key", base_url="https://first.example.test/v1")
             second_path = Path(tmpdir) / "second.yaml"
-            second_path.write_text(
-                "\n".join(
-                    [
-                        "api_key: second-key",
-                        "base_url: https://second.example.test/v1",
-                        "model: second-model",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(second_path, "second-model", api_key="second-key", base_url="https://second.example.test/v1")
 
             first_client = LLMClient(config_path=first_path)
             second_client = LLMClient(config_path=second_path)
@@ -218,29 +191,10 @@ class LLMClientTest(unittest.TestCase):
     def test_llm_client_config_path_overrides_rewritten_same_source(self) -> None:
         with _isolated_config_env(), tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.yaml"
-            path.write_text(
-                "\n".join(
-                    [
-                        "api_key: first-key",
-                        "base_url: https://first.example.test/v1",
-                        "model: first-model",
-                        "trim_max_tokens: 123",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(path, "first-model", api_key="first-key", base_url="https://first.example.test/v1", trim_max_tokens=123)
             first_client = LLMClient(config_path=path)
 
-            path.write_text(
-                "\n".join(
-                    [
-                        "api_key: second-key",
-                        "base_url: https://second.example.test/v1",
-                        "model: second-model",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _write_config(path, "second-model", api_key="second-key", base_url="https://second.example.test/v1")
             second_client = LLMClient(config_path=path)
             loaded_config = load_config()
 
@@ -372,17 +326,7 @@ class LLMClientTest(unittest.TestCase):
         _assert_single_user_prompt_message(self, call)
 
     def test_generate_text_accepts_messages_and_falls_back_unsupported_roles_deterministically(self) -> None:
-        client = LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-                "provider_role_capabilities": {"roles": ["system", "user"]},
-            }
-        )
+        client = LLMClient(config=_base_config(provider_role_capabilities={"roles": ["system", "user"]}))
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
 
@@ -423,15 +367,7 @@ class LLMClientTest(unittest.TestCase):
 
     def test_generate_text_preserves_configured_extended_roles_when_provider_declares_support(self) -> None:
         client = LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-                "provider_role_capabilities": {"roles": ["system", "developer", "user", "tool"]},
-            }
+            config=_base_config(provider_role_capabilities={"roles": ["system", "developer", "user", "tool"]})
         )
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -452,15 +388,7 @@ class LLMClientTest(unittest.TestCase):
 
     def test_generate_text_collapses_messages_to_single_user_block_when_messages_are_disabled(self) -> None:
         client = LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-                "provider_role_capabilities": {"supports_messages": False, "roles": ["system", "user"]},
-            }
+            config=_base_config(provider_role_capabilities={"supports_messages": False, "roles": ["system", "user"]})
         )
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -493,18 +421,12 @@ class LLMClientTest(unittest.TestCase):
 
     def test_provider_feature_capabilities_can_omit_thinking_and_reasoning_options(self) -> None:
         client = LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-                "provider_feature_capabilities": {
+            config=_base_config(
+                provider_feature_capabilities={
                     "supports_thinking": False,
                     "supports_reasoning_effort": False,
-                },
-            }
+                }
+            )
         )
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -532,19 +454,13 @@ class LLMClientTest(unittest.TestCase):
 
     def test_provider_cache_hint_unsupported_provider_noops_when_enabled(self) -> None:
         client = LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-                "provider_cache_capabilities": {
+            config=_base_config(
+                provider_cache_capabilities={
                     "supports_prompt_cache": False,
                     "prompt_cache_hint_enabled": True,
                     "prompt_cache_hint": {"type": "ephemeral"},
-                },
-            }
+                }
+            )
         )
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -562,19 +478,13 @@ class LLMClientTest(unittest.TestCase):
 
     def test_provider_cache_hint_supported_provider_adds_configured_hint(self) -> None:
         client = LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-                "provider_cache_capabilities": {
+            config=_base_config(
+                provider_cache_capabilities={
                     "supports_prompt_cache": True,
                     "prompt_cache_hint_enabled": True,
                     "prompt_cache_hint": {"type": "ephemeral", "scope": "cacheable_prefix"},
-                },
-            }
+                }
+            )
         )
         fake_completions = _FakeCompletions(response=_completion("OK"))
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -591,19 +501,13 @@ class LLMClientTest(unittest.TestCase):
 
     def test_provider_cache_hint_supported_provider_also_applies_to_streaming(self) -> None:
         client = LLMClient(
-            config={
-                "api_key": "test-key",
-                "base_url": "https://example.test/v1",
-                "model": "test-model",
-                "temperature": 0,
-                "max_retries": 0,
-                "timeout": 1,
-                "provider_cache_capabilities": {
+            config=_base_config(
+                provider_cache_capabilities={
                     "supports_prompt_cache": True,
                     "prompt_cache_hint_enabled": True,
                     "prompt_cache_hint": {"type": "ephemeral"},
-                },
-            }
+                }
+            )
         )
         fake_completions = _FakeCompletions([_chunk(answer="OK")])
         client.client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
