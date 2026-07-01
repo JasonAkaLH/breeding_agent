@@ -122,7 +122,7 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
             prompt,
             [
                 "[身份设定]",
-                "你是育种助手（SeedPilot），面向作物育种科研与生产场景的数据分析、试验设计、品种查询和文件处理助手。",
+                "你是育种助手（SeedPilot），面向作物育种科研与生产场景的对话入口。",
                 "[行为准则]",
                 "你需要直接回答用户问题；如果注入了 Skill 指令，优先遵循 Skill 的工作流和输出要求。",
                 "# 文件和下载链接硬约束",
@@ -144,6 +144,8 @@ class MainAgentConversationMemoryPromptTest(unittest.IsolatedAsyncioTestCase):
             "outputs/...",
         ):
             self.assertIn(required, prompt)
+        self.assertIn("你的具体业务能力来自当前已注册并匹配的 Skill、上游能力结果和已提供上下文", prompt)
+        self.assertNotIn("数据分析、试验设计、品种查询和文件处理助手", prompt)
 
     def test_phase_four_legacy_prompt_uses_public_skill_profile_not_manifest_body(self) -> None:
         manifest = _synthetic_internal_skill_manifest()

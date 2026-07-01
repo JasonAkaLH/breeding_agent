@@ -8,6 +8,29 @@ from tests.api.support import APITestCase
 
 
 class SkillOutputArtifactsAPITest(APITestCase):
+    @staticmethod
+    def _main_agent_llm_config() -> dict:
+        return {
+            "api_key": "test-key",
+            "model": "test-model",
+            "model_editions": {
+                "default": "test-model",
+                "options": [
+                    {
+                        "value": "test-model",
+                        "label": "Test Model",
+                        "reasoning_efforts": {
+                            "default": "minimal",
+                            "disabled_default": "minimal",
+                            "options": [
+                                {"value": "minimal", "label": "Minimal", "allow_when_thinking_disabled": True},
+                            ],
+                        },
+                    }
+                ],
+            },
+        }
+
     def _write_skill(self, *, script_body: str) -> Path:
         root = self.workspace / "skills" / "file_skill"
         scripts = root / "scripts"
@@ -37,6 +60,7 @@ outputs:
         await self.reconfigure_runtime(
             skill_roots=(roots,),
             main_agent_stream_generator=lambda prompt: "主代理回答：文件已处理。",
+            main_agent_llm_config=self._main_agent_llm_config(),
             enable_conversation_memory=False,
         )
 
@@ -90,6 +114,7 @@ print(json.dumps({'answer': 'second', 'output_files': [{'path': 'outputs/second.
         await self.reconfigure_runtime(
             skill_roots=(root.parent,),
             main_agent_stream_generator=lambda prompt: "主代理回答：文件已处理。",
+            main_agent_llm_config=self._main_agent_llm_config(),
             enable_conversation_memory=False,
         )
 
@@ -352,6 +377,7 @@ print(json.dumps({'answer': 'ok', 'output_files': [{'path': 'outputs/result.txt'
         await self.reconfigure_runtime(
             skill_roots=(self.workspace / "skills",),
             main_agent_stream_generator=broken_streamer,
+            main_agent_llm_config=self._main_agent_llm_config(),
             enable_conversation_memory=False,
         )
         second = await self.submit_message(conversation_id="conv-llm-fail-artifact", content="请生成文件 第二版", capability_id=None)

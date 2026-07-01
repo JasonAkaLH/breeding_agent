@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, markWaitingInputRequired, taskProgressDisplayText } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, taskProgressDisplayText } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -265,10 +265,54 @@ describe('applyTaskEvent', () => {
     expect(state.reasoningText).toBe('### 规划思考\n先规划\n\n### 回答思考\n再回答');
   });
 
+  it('stores sanitized capability fallback notices from SSE events', () => {
+    const state = applyTaskEvent(createInitialTaskEventState(), event('capability.missing_fallback', {
+      enabled: true,
+      scope: 'full',
+      reason_code: 'skill_missing',
+      missing_capability_summary: '缺少田间图 Skill',
+      fallback_content_scope: '只能给出手工建议',
+      artifact_generation_allowed: false,
+      disclosure_required: true,
+      handler: 'must-not-leak',
+    }, 'fallback-notice'));
+
+    expect(state.fallbackNotice?.reasonCode).toBe('skill_missing');
+    expect(state.fallbackNotice?.missingCapabilitySummary).toBe('缺少田间图 Skill');
+    expect(JSON.stringify(state.fallbackNotice)).not.toContain('handler');
+  });
+
+  it('parses assistant history fallback metadata and rejects invalid payloads', () => {
+    expect(parseCapabilityFallbackNotice({
+      capability_missing_fallback: {
+        enabled: true,
+        scope: 'partial',
+        reason_code: 'capability_missing',
+        missing_capability_summary: '缺少绘图能力',
+        attempted_capability_summary: '已完成数据查询',
+        fallback_content_scope: '只补充绘图建议',
+        artifact_generation_allowed: false,
+        disclosure_required: true,
+      },
+    })?.scope).toBe('partial');
+    expect(parseCapabilityFallbackNotice({ enabled: true, scope: 'full' })).toBeNull();
+  });
+
   it('moves to artifact loading when the task completes', () => {
     const state = applyTaskEvent(createInitialTaskEventState(), event('task.completed'));
     expect(state.phase).toBe('loading_artifacts');
     expect(state.statusText).toContain('整理结果');
+    expect(isTaskActive(state.phase)).toBe(false);
+  });
+
+  it('maps missing required skill failures to a concrete user-facing message', () => {
+    const state = applyTaskEvent(
+      createInitialTaskEventState(),
+      event('task.failed', { code: 'required_skill_missing' }, 'missing-skill-failed'),
+    );
+
+    expect(state.phase).toBe('failed');
+    expect(state.errorMessage).toContain('没有可用 Skill');
   });
 
   it('marks waiting-input tasks as a resumable clarification state', () => {

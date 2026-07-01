@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import Protocol
 
+from .answer_roles import AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY
+from .capability_fallback import CAPABILITY_MISSING_FALLBACK_KEY
 from .models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from .planner_contract import (
     PlannerOutputError,
@@ -178,11 +180,22 @@ class LLMWorkflowProvider:
         payload_policies: Mapping[str, CapabilityPayloadPolicy],
     ) -> WorkflowPlan:
         payload_policy = PlannerPayloadPolicy(payload_policies)
-        nodes = tuple(payload_policy.apply(node, request=request) for node in plan.nodes)
+        plan_fallback_metadata = plan.metadata.get(CAPABILITY_MISSING_FALLBACK_KEY)
+        nodes = tuple(
+            self._apply_top_level_fallback_metadata(
+                self._disable_auto_skill_matching_for_fallback(payload_policy.apply(node, request=request)),
+                fallback_metadata=plan_fallback_metadata,
+            )
+            for node in plan.nodes
+        )
         nodes, finalizer_added, finalizer_rewired = self._ensure_final_main_agent(
             nodes,
             request=request,
             payload_policy=payload_policy,
+        )
+        nodes = tuple(
+            self._apply_top_level_fallback_metadata(node, fallback_metadata=plan_fallback_metadata)
+            for node in nodes
         )
         return WorkflowPlan(
             task_id=plan.task_id,
@@ -196,6 +209,30 @@ class LLMWorkflowProvider:
             max_replans=plan.max_replans,
             max_dynamic_nodes=plan.max_dynamic_nodes,
         )
+
+    @staticmethod
+    def _disable_auto_skill_matching_for_fallback(node: WorkflowNodePlan) -> WorkflowNodePlan:
+        if CAPABILITY_MISSING_FALLBACK_KEY not in node.metadata:
+            return node
+        metadata = dict(node.metadata)
+        metadata[AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY] = False
+        return replace(node, metadata=metadata)
+
+    @staticmethod
+    def _apply_top_level_fallback_metadata(
+        node: WorkflowNodePlan,
+        *,
+        fallback_metadata: object,
+    ) -> WorkflowNodePlan:
+        if fallback_metadata is None or node.capability_id != "main_agent.respond":
+            return node
+        if CAPABILITY_MISSING_FALLBACK_KEY in node.metadata:
+            return node
+        metadata = dict(node.metadata)
+        metadata[CAPABILITY_MISSING_FALLBACK_KEY] = fallback_metadata
+        metadata[AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY] = False
+        return replace(node, metadata=metadata)
+
 
     def _ensure_final_main_agent(
         self,

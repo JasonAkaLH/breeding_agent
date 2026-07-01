@@ -78,6 +78,62 @@ class PlannerContractTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(PlannerOutputError, "node object"):
             parse_planner_output('{"nodes": ["bad"]}', task_id="task-1")
 
+    def test_parse_preserves_sanitized_capability_missing_fallback_metadata(self) -> None:
+        plan = parse_planner_output(
+            """
+            {
+              "metadata": {
+                "capability_missing_fallback": {
+                  "enabled": true,
+                  "scope": "full",
+                  "reason_code": "skill_missing",
+                  "missing_capability_summary": "缺少田间图生成 Skill",
+                  "fallback_content_scope": "只能给出手工建议",
+                  "llm_fallback_allowed": true,
+                  "artifact_generation_allowed": false,
+                  "disclosure_required": true,
+                  "memory_context_used": false,
+                  "source_message_count": 1,
+                  "handler": "must-not-survive"
+                }
+              },
+              "nodes": [
+                {
+                  "node_id": "answer",
+                  "capability_id": "main_agent.respond",
+                  "metadata": {
+                    "capability_missing_fallback": {
+                      "enabled": true,
+                      "scope": "full",
+                      "reason_code": "capability_missing",
+                      "missing_capability_summary": "缺少业务能力",
+                      "fallback_content_scope": "只能解释",
+                      "llm_fallback_allowed": true,
+                      "artifact_generation_allowed": false,
+                      "disclosure_required": true,
+                      "memory_context_used": false,
+                      "source_message_count": 1
+                    }
+                  }
+                }
+              ]
+            }
+            """,
+            task_id="task-fallback",
+        )
+
+        fallback = plan.metadata["capability_missing_fallback"]
+        self.assertEqual(fallback["reason_code"], "skill_missing")
+        self.assertNotIn("handler", fallback)
+        self.assertEqual(plan.nodes[0].metadata["capability_missing_fallback"]["missing_capability_summary"], "缺少业务能力")
+
+    def test_parse_rejects_unknown_metadata_container_keys(self) -> None:
+        with self.assertRaisesRegex(PlannerOutputError, "Unknown keys"):
+            parse_planner_output(
+                '{"metadata":{"raw_prompt":"x"},"nodes":[{"node_id":"answer","capability_id":"main_agent.respond"}]}',
+                task_id="task-bad-metadata",
+            )
+
     def test_planner_prompt_includes_skill_path_but_not_skill_body(self) -> None:
         prompt = build_planner_prompt(
             OrchestrationRequest(

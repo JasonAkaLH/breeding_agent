@@ -91,12 +91,60 @@ class SoftSkillBindingAPITest(APITestCase):
                 "content": "执行",
                 "routing_mode": "force_capability",
                 "capability_id": "main_agent.respond",
-                "metadata": {"soft_skill_binding": {"capability_id": "skill.unknown"}},
+                "metadata": {"soft_skill_binding": {"capability_id": "not-a-skill"}},
             },
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("Unsupported soft_skill_binding capability_id", response.text)
+        self.assertIn("public skill capability", response.text)
+
+    async def test_missing_soft_skill_binding_falls_back_with_disclosure_and_history_metadata(self) -> None:
+        response = await self.client.post(
+            "/api/v1/conversations/chat-messages",
+            json={
+                "conversation_id": "conv-stale-soft",
+                "content": "执行这个已删除 Skill 并生成文件",
+                "routing_mode": "force_capability",
+                "capability_id": "main_agent.respond",
+                "metadata": {
+                    "soft_skill_binding": {
+                        "capability_id": "skill.deleted_demo",
+                        "command": "/deleted-demo",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        task_id = response.json()["task_id"]
+        terminal = await self.wait_for_terminal_task(task_id)
+        self.assertEqual(terminal["status"], "completed")
+
+        nodes = await self.runtime.storage.list_task_nodes_for_task(task_id)
+        self.assertEqual([node.capability_id for node in nodes], ["main_agent.respond"])
+        artifacts = await self.runtime.storage.list_artifacts_for_task(task_id)
+        self.assertTrue(artifacts)
+        self.assertTrue(all(artifact.producer_node_id.endswith("main_agent.respond") for artifact in artifacts))
+
+        events = await self.runtime.storage.list_events_for_task(task_id)
+        event_types = [event.event_type for event in events]
+        self.assertIn("capability.missing_fallback", event_types)
+        self.assertNotIn("skill.execution_completed", event_types)
+        self.assertNotIn("task.replan_started", event_types)
+        fallback_event = next(event for event in events if event.event_type == "capability.missing_fallback")
+        self.assertEqual(fallback_event.payload["reason_code"], "skill_missing")
+        self.assertFalse(fallback_event.payload["artifact_generation_allowed"])
+        serialized = str(fallback_event.payload)
+        self.assertNotIn("SKILL.md", serialized)
+        self.assertNotIn("source_path", serialized)
+
+        messages_response = await self.client.get("/api/v1/conversations/conv-stale-soft/messages")
+        self.assertEqual(messages_response.status_code, 200, messages_response.text)
+        assistant = [item for item in messages_response.json()["messages"] if item["role"] == "assistant"][-1]
+        fallback_metadata = assistant["metadata"]["capability_missing_fallback"]
+        self.assertEqual(fallback_metadata["reason_code"], "skill_missing")
+        self.assertNotIn("handler", str(fallback_metadata))
+        self.assertIn("【能力缺口说明】", assistant["content"])
 
     async def test_soft_skill_binding_answer_streams_output_deltas(self) -> None:
         async def streamer(_prompt: str, *, stage: str | None = None, **_kwargs):

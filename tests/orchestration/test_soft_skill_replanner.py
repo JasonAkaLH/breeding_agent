@@ -74,6 +74,94 @@ class SoftSkillBindingReplannerTest(unittest.TestCase):
         skill_node = next(node for node in decision.plan.nodes if node.capability_id == "skill.demo")
         self.assertIn("task-1:main_agent.respond", skill_node.depends_on)
 
+    def test_missing_bound_skill_adds_main_agent_fallback_without_skill_node(self) -> None:
+        registry = CapabilityRegistry()
+        registry.register(CapabilityDescriptor("main_agent.respond", "main", "main"))
+        replanner = SoftSkillBindingReplanner(
+            capability_registry=registry,
+            macro_providers={},
+        )
+        plan = WorkflowPlan(
+            task_id="task-1",
+            nodes=(WorkflowNodePlan("main", "main_agent.respond"),),
+            max_replans=1,
+            max_dynamic_nodes=4,
+        )
+        context = RuntimeReplanContext(
+            request=OrchestrationRequest(
+                task_id="task-1",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="请执行已删除 Skill",
+                metadata={"soft_skill_binding": {"capability_id": "skill.deleted_demo"}},
+            ),
+            plan=plan,
+            nodes={"main": TaskNode("main", "task-1", "main_agent.respond", status=NodeStatus.COMPLETED)},
+            node_outputs={"main": {"soft_skill_decision": {"decision": "execute", "target_capability_id": "skill.deleted_demo"}}},
+            completion_status=CompletionStatus.RUNNING,
+            replan_count=0,
+            dynamic_node_count=0,
+            unresolved_interrupt=False,
+        )
+
+        decision = replanner.build_replan(context)
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.reason, "soft_skill_missing_fallback")
+        self.assertNotIn("skill.deleted_demo", [node.capability_id for node in decision.plan.nodes])
+        fallback_node = decision.plan.nodes[-1]
+        self.assertEqual(fallback_node.capability_id, "main_agent.respond")
+        self.assertEqual(fallback_node.depends_on, ("main",))
+        fallback_metadata = fallback_node.metadata["capability_missing_fallback"]
+        self.assertEqual(fallback_metadata["reason_code"], "skill_missing")
+        self.assertFalse(fallback_metadata["artifact_generation_allowed"])
+
+    def test_missing_bound_skill_after_business_result_adds_partial_fallback(self) -> None:
+        registry = CapabilityRegistry()
+        registry.register(CapabilityDescriptor("main_agent.respond", "main", "main"))
+        replanner = SoftSkillBindingReplanner(capability_registry=registry, macro_providers={})
+        plan = WorkflowPlan(
+            task_id="task-1",
+            nodes=(
+                WorkflowNodePlan("query", "skill.generic_data_lookup"),
+                WorkflowNodePlan("main", "main_agent.respond", depends_on=("query",)),
+            ),
+            max_replans=1,
+            max_dynamic_nodes=4,
+        )
+        context = RuntimeReplanContext(
+            request=OrchestrationRequest(
+                task_id="task-1",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="先查数据，再执行已删除 Skill",
+                metadata={"soft_skill_binding": {"capability_id": "skill.deleted_demo"}},
+            ),
+            plan=plan,
+            nodes={
+                "query": TaskNode("query", "task-1", "skill.generic_data_lookup", status=NodeStatus.COMPLETED),
+                "main": TaskNode("main", "task-1", "main_agent.respond", status=NodeStatus.COMPLETED),
+            },
+            node_outputs={
+                "query": {"summary": "已查询龙粳33"},
+                "main": {"soft_skill_decision": {"decision": "execute", "target_capability_id": "skill.deleted_demo"}},
+            },
+            completion_status=CompletionStatus.RUNNING,
+            replan_count=0,
+            dynamic_node_count=0,
+            unresolved_interrupt=False,
+        )
+
+        decision = replanner.build_replan(context)
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        fallback_metadata = decision.plan.nodes[-1].metadata["capability_missing_fallback"]
+        self.assertEqual(decision.plan.nodes[-1].depends_on, ("main", "query"))
+        self.assertEqual(fallback_metadata["scope"], "partial")
+        self.assertIn("已先执行", fallback_metadata["attempted_capability_summary"])
+
     def test_target_mismatch_is_rejected(self) -> None:
         registry = CapabilityRegistry()
         registry.register(CapabilityDescriptor("main_agent.respond", "main", "main"))

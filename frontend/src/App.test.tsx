@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
+import App, { mergeHistoryWithLiveFallbackNotices } from './App';
 import type { ApiClient } from './api/client';
 import type { ConversationMessagesResponse, DeleteConversationResponse, TaskEventEnvelope } from './api/types';
 import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
@@ -213,6 +213,28 @@ async function expectComposerFocused() {
 }
 
 describe('App', () => {
+  it('merges live fallback notices only onto matching assistant task history', () => {
+    const notice = {
+      scope: 'full' as const,
+      reasonCode: 'skill_missing',
+      missingCapabilitySummary: '缺少绘图 Skill',
+      fallbackContentScope: '只能给出手工建议',
+    };
+
+    const merged = mergeHistoryWithLiveFallbackNotices(
+      [
+        { id: 'assistant-other', kind: 'chat', role: 'assistant', content: '其它回答', mode: 'chat', taskId: 'task-other' },
+        { id: 'assistant-target', kind: 'chat', role: 'assistant', content: '目标回答', mode: 'chat', taskId: 'task-target' },
+      ],
+      [
+        { id: 'live', kind: 'chat', role: 'assistant', content: 'live', mode: 'chat', taskId: 'task-target', fallbackNotice: notice },
+      ],
+    );
+
+    expect(merged[0].fallbackNotice).toBeUndefined();
+    expect(merged[1].fallbackNotice).toEqual(notice);
+  });
+
   afterEach(() => {
     localStorage.clear();
     vi.useRealTimers();
@@ -580,6 +602,58 @@ describe('App', () => {
         delete (navigator as { clipboard?: unknown }).clipboard;
       }
     }
+  });
+
+  it('restores capability fallback notice from assistant history metadata', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-fallback-history',
+          username: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: '能力缺口历史',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-fallback-history',
+        messages: [
+          { message_id: 'msg-user', conversation_id: 'conv-fallback-history', role: 'user', content: '生成田间图文件', task_id: 'task-fallback', stream_status: null, created_at: null },
+          {
+            message_id: 'msg-assistant',
+            conversation_id: 'conv-fallback-history',
+            role: 'assistant',
+            content: '【能力缺口说明】缺少田间图 Skill。以下是手工建议。',
+            task_id: 'task-fallback',
+            stream_status: 'complete',
+            created_at: null,
+            metadata: {
+              capability_missing_fallback: {
+                enabled: true,
+                scope: 'full',
+                reason_code: 'skill_missing',
+                missing_capability_summary: '缺少田间图 Skill',
+                fallback_content_scope: '只能给出手工建议',
+                artifact_generation_allowed: false,
+                disclosure_required: true,
+                handler: 'must-not-render',
+              },
+            },
+          },
+        ],
+      })),
+    });
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '能力缺口历史' }));
+
+    expect(await screen.findByText('能力缺口')).toBeInTheDocument();
+    expect(screen.getAllByText(/缺少田间图 Skill/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/只能给出手工建议/)).toBeInTheDocument();
+    expect(screen.queryByText(/must-not-render/)).not.toBeInTheDocument();
   });
 
   it('falls back to document copy when clipboard write is rejected', async () => {

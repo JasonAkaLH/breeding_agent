@@ -974,6 +974,131 @@ scripts/internal_report.py
         self.assertNotIn("https://example.test/v1", str(fallback_event.payload))
         self.assertNotIn("不要把 prompt 泄露到 audit", str(fallback_event.payload))
 
+    async def test_executor_does_not_classify_generic_execution_intent_as_fallback(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "可以手工准备随机区组设计表。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "请用上传材料表生成随机区组田间种植图文件"},
+            )
+        )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("Skill 能力缺口披露要求", prompts[0])
+        self.assertEqual(result.output_payload["response_source"], "llm")
+        self.assertNotIn("capability_missing_fallback", result.output_payload)
+        self.assertEqual(result.output_payload["response_text"], "可以手工准备随机区组设计表。")
+        event_types = [event.event_type for event in result.events]
+        self.assertNotIn("capability.missing_fallback", event_types)
+
+    async def test_executor_discloses_fallback_when_forced_skill_is_missing(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "文件已生成，请点击下载。可以手工准备随机区组设计表。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "请用上传材料表生成随机区组田间种植图文件"},
+                metadata={
+                    "forced_skill_capability_id": "skill.mini_breedstat_rcbd",
+                    "forced_skill_name": "mini-breedstat-rcbd",
+                    "forced_skill_source": "planner",
+                },
+            )
+        )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Skill 能力缺口披露要求", prompts[0])
+        fallback_metadata = result.output_payload["capability_missing_fallback"]
+        self.assertEqual(fallback_metadata["reason_code"], "forced_skill_missing")
+        self.assertFalse(fallback_metadata["artifact_generation_allowed"])
+        self.assertIn("【能力缺口说明】", result.output_payload["response_text"])
+        self.assertNotIn("文件已生成", result.output_payload["response_text"])
+        self.assertNotIn("点击下载", result.output_payload["response_text"])
+        event_types = [event.event_type for event in result.events]
+        self.assertIn("skill.match_fallback", event_types)
+        self.assertIn("skill.unmatched_disclosure_required", event_types)
+        self.assertIn("capability.missing_fallback", event_types)
+
+    async def test_executor_preserves_partial_fallback_when_dependency_outputs_exist(self) -> None:
+        async def streamer(prompt: str):
+            yield "只能补充未覆盖部分。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "补充缺失 Skill 说明"},
+                dependency_outputs={"query": {"summary": "已查询龙粳33"}},
+                metadata={
+                    "capability_missing_fallback": {
+                        "enabled": True,
+                        "scope": "partial",
+                        "reason_code": "skill_missing",
+                        "missing_capability_summary": "缺少绘图 Skill",
+                        "attempted_capability_summary": "已先执行数据查询",
+                        "fallback_content_scope": "只能补充绘图建议",
+                        "llm_fallback_allowed": True,
+                        "artifact_generation_allowed": False,
+                        "disclosure_required": True,
+                        "memory_context_used": False,
+                        "source_message_count": 1,
+                    }
+                },
+            )
+        )
+
+        fallback_metadata = result.output_payload["capability_missing_fallback"]
+        self.assertEqual(fallback_metadata["scope"], "partial")
+        self.assertIn("已先执行数据查询", result.output_payload["response_text"])
+
+    async def test_executor_allows_ambiguous_followup_without_current_execution_intent(self) -> None:
+        prompts: list[str] = []
+
+        async def streamer(prompt: str):
+            prompts.append(prompt)
+            yield "请说明你需要哪个文件或重新发起生成请求。"
+
+        executor = MainAgentExecutor(stream_generator=streamer, skill_catalog=SkillCatalog(()))
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="main_agent.respond",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"user_message": "文件呢？"},
+            )
+        )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(result.output_payload["response_source"], "llm")
+
     async def test_prompt_includes_matched_skill_public_profile_without_raw_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_dir = Path(tmpdir) / "report"

@@ -19,7 +19,9 @@ import {
   markTaskCompleted,
   markTaskFailed,
   markWaitingInputRequired,
+  parseCapabilityFallbackNotice,
   taskProgressDisplayText,
+  type CapabilityFallbackNotice,
   type SkillStatusLine,
   type TaskEventState,
 } from './domain/taskEvents';
@@ -47,12 +49,14 @@ interface ConversationMessage {
   role: MessageRole;
   content: string;
   mode: ChatMode;
+  taskId?: string;
   metadata?: Record<string, unknown>;
   reasoningRequested?: boolean;
   reasoningComplete?: boolean;
   reasoningContent?: string;
   activityText?: string;
   activityStatus?: ActivityNoticeStatus;
+  fallbackNotice?: CapabilityFallbackNotice;
   skillStatuses?: SkillStatusLine[];
   artifactDisplays?: CapabilityArtifactDisplay[];
   finalContentLoaded?: boolean;
@@ -60,7 +64,7 @@ interface ConversationMessage {
   interruptPrompt?: PendingInterrupt;
 }
 
-type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
+type AssistantMessagePatch = Partial<Pick<ConversationMessage, 'content' | 'mode' | 'taskId' | 'reasoningRequested' | 'reasoningComplete' | 'reasoningContent' | 'activityText' | 'activityStatus' | 'fallbackNotice' | 'skillStatuses' | 'artifactDisplays' | 'finalContentLoaded' | 'replyCompleted' | 'interruptPrompt'>>;
 type FileArtifactResult = Extract<CapabilityArtifactDisplay, { kind: 'file' }>['result'];
 
 interface PendingInterrupt {
@@ -693,7 +697,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       const loadedMessages = await loadConversationMessages(targetConversationId);
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-      setMessages(loadedMessages);
+      setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
       await restoreCurrentConversationTask(summary, generation);
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       setRestoredWorkspaceConversationId(targetConversationId);
@@ -839,7 +843,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         try {
           const loadedMessages = await loadConversationMessages(targetConversationId);
           if (isCurrentRestoreGeneration(generation, targetConversationId)) {
-            setMessages(loadedMessages);
+            setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
           }
         } catch {
           if (isCurrentRestoreGeneration(generation, targetConversationId)) {
@@ -1185,6 +1189,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       });
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(accepted.task_id, mode);
+      updateAssistantMessage(assistantMessage.id, { taskId: accepted.task_id });
       updateCurrentTaskId(accepted.task_id);
       markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
       setSelectedSkillCommand(null);
@@ -1319,7 +1324,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       await api.deleteConversationUpload(conversationId, upload.upload_id);
       setPendingUploads((current) => current.filter((item) => item.upload_id !== upload.upload_id));
       const loadedMessages = await loadConversationMessages(conversationId).catch(() => null);
-      if (loadedMessages) setMessages(loadedMessages);
+      if (loadedMessages) setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
@@ -1445,6 +1450,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           }),
         );
         const keepOpenTaskId = response.task_id || interrupt.taskId;
+        updateAssistantMessage(assistantMessage.id, { taskId: keepOpenTaskId });
         let refreshedInterrupt = interrupt;
         try {
           const interrupts = await api.listInterrupts(keepOpenTaskId);
@@ -1474,6 +1480,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       const resumedTaskId = response.task_id || interrupt.taskId;
       taskPresentationModesRef.current.set(resumedTaskId, interrupt.mode);
+      updateAssistantMessage(assistantMessage.id, { taskId: resumedTaskId });
       markDraftAttachmentsSent(draftSnapshot, uploadedDrafts);
       setPendingInterrupt(null);
       updateCurrentTaskId(resumedTaskId);
@@ -1546,6 +1553,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       if (next.reasoningText !== previous.reasoningText) {
         updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
+      }
+      if (next.fallbackNotice !== previous.fallbackNotice) {
+        updateAssistantMessage(assistantId, { fallbackNotice: next.fallbackNotice ?? undefined, taskId });
       }
       if (next.phase === 'failed') {
         updateAssistantMessage(assistantId, {
@@ -1765,7 +1775,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
         try {
           const loadedMessages = await loadConversationMessages(targetConversationId);
           if (conversationIdRef.current === targetConversationId) {
-            setMessages(loadedMessages);
+            setMessages((current) => mergeHistoryWithLiveFallbackNotices(loadedMessages, current));
           }
         } catch {
           showTransientNotice('任务已完成，但历史消息刷新失败，请稍后重试。');
@@ -1776,6 +1786,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       localTaskRuntimeActiveRef.current = false;
       taskPhaseRef.current = 'completed';
       setTaskState((state) => markTaskCompleted(state, '任务已完成，但结果加载失败'));
+      updateCurrentTaskId(null);
+      taskPresentationModesRef.current.delete(taskId);
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
       showTransientNotice('结果加载失败，可稍后重试。');
     }
   }
@@ -2884,6 +2898,23 @@ function assistantActivityText(state: TaskEventState, progressText: string): str
   return progressText;
 }
 
+
+function CapabilityFallbackNoticeView({ notice }: { notice: CapabilityFallbackNotice }) {
+  const scopeLabel = notice.scope === 'partial' ? '部分能力缺口' : '能力缺口';
+  const description = notice.scope === 'partial' && notice.attemptedCapabilitySummary
+    ? `${notice.attemptedCapabilitySummary}；${notice.missingCapabilitySummary}。${notice.fallbackContentScope}`
+    : `${notice.missingCapabilitySummary}。${notice.fallbackContentScope}`;
+  return (
+    <Alert
+      className="capability-fallback-notice"
+      type="warning"
+      showIcon
+      message={scopeLabel}
+      description={`${description}。本次不会生成可下载文件。`}
+    />
+  );
+}
+
 function MessageBubble({
   message,
   onDownloadArtifact,
@@ -2905,6 +2936,7 @@ function MessageBubble({
         {shouldShowReasoning ? (
           <ReasoningBox content={message.reasoningContent ?? ''} complete={message.reasoningComplete} />
         ) : null}
+        {message.fallbackNotice ? <CapabilityFallbackNoticeView notice={message.fallbackNotice} /> : null}
         {message.interruptPrompt ? (
           <InterruptQuestionText interrupt={message.interruptPrompt} />
         ) : shouldShowContent || message.artifactDisplays?.length ? (
@@ -3136,16 +3168,37 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
   const artifactDisplays = message.role === 'assistant'
     ? parseCapabilityArtifactDisplays(message.artifacts ?? [])
     : [];
+  const fallbackNotice = message.role === 'assistant'
+    ? parseCapabilityFallbackNotice(message.metadata)
+    : null;
   return {
     id: message.message_id,
     kind: 'chat',
     role: message.role,
     content: message.content,
     mode: 'chat',
+    taskId: message.task_id ?? undefined,
     finalContentLoaded: assistantReplyCompleted || undefined,
     replyCompleted: assistantReplyCompleted || undefined,
+    fallbackNotice: fallbackNotice ?? undefined,
     artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
   };
+}
+
+export function mergeHistoryWithLiveFallbackNotices(
+  loadedMessages: ConversationMessage[],
+  currentMessages: ConversationMessage[],
+): ConversationMessage[] {
+  const liveFallbacks = currentMessages
+    .filter((message) => message.role === 'assistant' && message.fallbackNotice && message.taskId)
+    .map((message) => ({ taskId: message.taskId as string, notice: message.fallbackNotice as CapabilityFallbackNotice }));
+  if (liveFallbacks.length === 0) return loadedMessages;
+  const noticeByTaskId = new Map(liveFallbacks.map((item) => [item.taskId, item.notice]));
+  return loadedMessages.map((message) => (
+    message.role === 'assistant' && message.taskId && !message.fallbackNotice && noticeByTaskId.has(message.taskId)
+      ? { ...message, fallbackNotice: noticeByTaskId.get(message.taskId) }
+      : message
+  ));
 }
 
 function safeFileUploadHistoryMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {

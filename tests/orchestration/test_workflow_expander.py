@@ -36,15 +36,32 @@ class WorkflowExpanderTest(unittest.TestCase):
         (skill_dir / "SKILL.md").write_text(
             f"""---
 name: {skill_name}
-capability_id: {capability_id}
 description: 通过平台服务执行 DataLookup
-execution:
-  mode: platform_service
-  handler: skill.data_lookup.platform_handler
-  answer_mode: requires_finalizer
 ---
 
 # DataLookup Skill
+""",
+            encoding="utf-8",
+        )
+        (skill_dir / "skill.contract.yaml").write_text(
+            f"""contract_version: '2'
+capability:
+  id: {capability_id}
+  display_name: {skill_name}
+  description: 通过平台服务执行 DataLookup
+runtime:
+  mode: platform_service
+  trust_scope: project
+  handler: skill.data_lookup.platform_handler
+  answer_mode: requires_finalizer
+entrypoints:
+  query:
+    runtime: platform_service
+    handler: skill.data_lookup.platform_handler
+    answer_mode: requires_finalizer
+outputs:
+  query_output:
+    required: [summary]
 """,
             encoding="utf-8",
         )
@@ -144,14 +161,24 @@ execution:
                 """---
 name: scripted
 description: 处理文本
-scripts:
-  - name: echo
-    path: scripts/echo.py
-    runtime: python
 ---
 
 # Scripted
 运行脚本。
+""",
+                encoding="utf-8",
+            )
+            (skill_dir / "skill.contract.yaml").write_text(
+                """contract_version: '2'
+capability:
+  id: skill.scripted
+  display_name: Scripted
+runtime:
+  mode: python_subprocess
+  answer_mode: requires_finalizer
+entrypoints:
+  run:
+    path: scripts/echo.py
 """,
                 encoding="utf-8",
             )
@@ -430,16 +457,24 @@ scripts:
                 """---
 name: direct
 description: 直接回答
-scripts:
-  - name: echo
-    path: scripts/echo.py
-    runtime: python
-execution:
-  answer_mode: direct
 ---
 
 # Direct
 直接回答。
+""",
+                encoding="utf-8",
+            )
+            (skill_dir / "skill.contract.yaml").write_text(
+                """contract_version: '2'
+capability:
+  id: skill.direct
+  display_name: Direct
+runtime:
+  mode: python_subprocess
+  answer_mode: direct
+entrypoints:
+  run:
+    path: scripts/echo.py
 """,
                 encoding="utf-8",
             )

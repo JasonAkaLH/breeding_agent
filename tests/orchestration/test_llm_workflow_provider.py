@@ -72,6 +72,156 @@ class LLMWorkflowProviderTest(unittest.IsolatedAsyncioTestCase):
             payload_policies=payload_policies,
         )
 
+    async def test_planner_explicit_capability_missing_metadata_becomes_disclosed_fallback(self) -> None:
+        async def planner(_prompt: str) -> str:
+            return json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "node_id": "answer",
+                            "capability_id": "main_agent.respond",
+                            "metadata": {
+                                "capability_missing_fallback": {
+                                    "enabled": True,
+                                    "scope": "full",
+                                    "reason_code": "capability_missing",
+                                    "missing_capability_summary": "缺少田间图生成能力",
+                                    "fallback_content_scope": "只能给出手工建议",
+                                    "llm_fallback_allowed": True,
+                                    "artifact_generation_allowed": False,
+                                    "disclosure_required": True,
+                                    "memory_context_used": False,
+                                    "source_message_count": 1,
+                                }
+                            },
+                        }
+                    ]
+                }
+            )
+
+        provider = LLMWorkflowProvider(
+            capability_registry=self.registry,
+            fallback_provider=self.fallback_provider,
+            macro_providers={"skill.generic_data_lookup": self.skill_provider},
+            text_generator=planner,
+            max_repair_attempts=0,
+        )
+
+        plan = await provider.build_plan(
+            OrchestrationRequest(
+                task_id="task-missing",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="请生成田间图文件",
+            )
+        )
+
+        self.assertEqual([node.capability_id for node in plan.nodes], ["main_agent.respond"])
+        fallback_metadata = plan.nodes[0].metadata["capability_missing_fallback"]
+        self.assertEqual(fallback_metadata["reason_code"], "capability_missing")
+        self.assertFalse(fallback_metadata["artifact_generation_allowed"])
+        self.assertFalse(plan.nodes[0].metadata["auto_skill_matching_enabled"])
+
+    async def test_planner_top_level_capability_missing_metadata_is_applied_to_main_node(self) -> None:
+        async def planner(_prompt: str) -> str:
+            return json.dumps(
+                {
+                    "metadata": {
+                        "capability_missing_fallback": {
+                            "enabled": True,
+                            "scope": "full",
+                            "reason_code": "capability_missing",
+                            "missing_capability_summary": "缺少田间图生成能力",
+                            "fallback_content_scope": "只能给出手工建议",
+                            "llm_fallback_allowed": True,
+                            "artifact_generation_allowed": False,
+                            "disclosure_required": True,
+                            "memory_context_used": False,
+                            "source_message_count": 1,
+                        }
+                    },
+                    "nodes": [{"node_id": "answer", "capability_id": "main_agent.respond"}],
+                }
+            )
+
+        plan = await self.make_provider(planner).build_plan(
+            OrchestrationRequest(
+                task_id="task-top-fallback",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="请生成田间图文件",
+            )
+        )
+
+        self.assertEqual(plan.nodes[0].metadata["capability_missing_fallback"]["reason_code"], "capability_missing")
+        self.assertFalse(plan.nodes[0].metadata["auto_skill_matching_enabled"])
+
+    async def test_top_level_capability_missing_metadata_is_applied_to_synthesized_finalizer(self) -> None:
+        self.registry.register(
+            CapabilityDescriptor("field_map.generate", "Field Map", "Generate field map.", public=True)
+        )
+
+        async def planner(_prompt: str) -> str:
+            return json.dumps(
+                {
+                    "metadata": {
+                        "capability_missing_fallback": {
+                            "enabled": True,
+                            "scope": "partial",
+                            "reason_code": "capability_missing",
+                            "missing_capability_summary": "缺少绘图能力",
+                            "attempted_capability_summary": "已查询基础数据",
+                            "fallback_content_scope": "只能给出手工绘图建议",
+                            "llm_fallback_allowed": True,
+                            "artifact_generation_allowed": False,
+                            "disclosure_required": True,
+                            "memory_context_used": False,
+                            "source_message_count": 1,
+                        }
+                    },
+                    "nodes": [{"node_id": "draw", "capability_id": "field_map.generate"}],
+                }
+            )
+
+        plan = await self.make_provider(planner).build_plan(
+            OrchestrationRequest(
+                task_id="task-top-finalizer-fallback",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="查询龙粳33后生成田间图",
+            )
+        )
+
+        finalizer = plan.nodes[-1]
+        self.assertEqual(finalizer.capability_id, "main_agent.respond")
+        self.assertTrue(plan.metadata["planner_finalizer_added"])
+        self.assertEqual(finalizer.metadata["capability_missing_fallback"]["scope"], "partial")
+        self.assertFalse(finalizer.metadata["auto_skill_matching_enabled"])
+
+    async def test_unknown_planner_capability_fails_instead_of_deterministic_fallback(self) -> None:
+        async def planner(_prompt: str) -> str:
+            return json.dumps({"nodes": [{"node_id": "draw", "capability_id": "skill.deleted_drawer"}]})
+
+        provider = LLMWorkflowProvider(
+            capability_registry=self.registry,
+            fallback_provider=self.fallback_provider,
+            macro_providers={"skill.generic_data_lookup": self.skill_provider},
+            text_generator=planner,
+            max_repair_attempts=0,
+        )
+
+        with self.assertRaises(WorkflowPlanningError) as raised:
+            await provider.build_plan(
+                OrchestrationRequest(
+                    task_id="task-missing",
+                    conversation_id="conv-1",
+                    root_message_id="msg-1",
+                    user_message="请生成田间图文件",
+                )
+            )
+
+        self.assertEqual(raised.exception.reason, "WorkflowPlanValidationError")
+
     async def test_llm_generic_data_lookup_plan_is_validated_expanded_and_enriched(self) -> None:
         prompts: list[str] = []
 

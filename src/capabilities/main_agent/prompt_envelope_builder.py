@@ -76,6 +76,7 @@ def build_main_agent_rendered_prompt(
     answer_scope: str | None = None,
     model_edition: str | None = None,
     trim_max_tokens: int | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
     token_estimator: TokenEstimator | None = None,
     token_estimator_is_fallback: bool = False,
 ) -> RenderedPrompt:
@@ -90,6 +91,7 @@ def build_main_agent_rendered_prompt(
         answer_scope=answer_scope,
         model_edition=model_edition,
         trim_max_tokens=trim_max_tokens,
+        capability_gap_context=capability_gap_context,
     )
     return render_prompt_envelope(
         envelope,
@@ -111,6 +113,7 @@ def build_main_agent_rendered_messages(
     model_edition: str | None = None,
     trim_max_tokens: int | None = None,
     role_capabilities: Mapping[str, Any] | tuple[str, ...] | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
     token_estimator: TokenEstimator | None = None,
     token_estimator_is_fallback: bool = False,
 ) -> RenderedMessages:
@@ -125,6 +128,7 @@ def build_main_agent_rendered_messages(
         answer_scope=answer_scope,
         model_edition=model_edition,
         trim_max_tokens=trim_max_tokens,
+        capability_gap_context=capability_gap_context,
     )
     return render_prompt_envelope_messages(
         envelope,
@@ -146,6 +150,7 @@ def build_main_agent_prompt_envelope(
     answer_scope: str | None = None,
     model_edition: str | None = None,
     trim_max_tokens: int | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
 ) -> PromptEnvelope:
     segments: list[PromptSegment] = [
         PromptSegment(
@@ -171,6 +176,27 @@ def build_main_agent_prompt_envelope(
     ]
 
     public_skill_profiles = build_selected_public_skill_profiles(skill_matches)
+    if capability_gap_context:
+        segments.append(
+            PromptSegment(
+                name="capability_gap_disclosure",
+                role="system",
+                content=(
+                    "# Skill 能力缺口披露要求\n"
+                    "当前请求没有匹配到可执行 Skill 或点名的 Skill 不可用。你仍然可以基于通用语言模型能力给出解释、草案、建议或可手工复核的内容，"
+                    "但必须在回答开头明确告知用户：本次回答没有调用 Skill，因为 Skill 能力库中没有匹配的能力。\n"
+                    "不得声称已经执行 Skill、运行工具、后台处理中、生成文件、生成下载入口或完成真实产物。"
+                    "如果用户请求的是文件、表格、报告、图或其它可下载产物，必须明确说明当前无法由系统生成该产物，需要先注册或启用对应 Skill。\n"
+                    "能力缺口诊断：\n"
+                    + json.dumps(dict(capability_gap_context), ensure_ascii=False, indent=2, default=str)
+                ),
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="active_note",
+            )
+        )
     if public_skill_profiles:
         segments.append(
             PromptSegment(
@@ -313,6 +339,7 @@ def resolve_main_agent_prompt_for_mode(
     metadata: Mapping[str, Any] | None = None,
     stream_metadata: Mapping[str, Any] | None = None,
     mode: str | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
     token_estimator: TokenEstimator | None = None,
 ) -> MainAgentPromptResolution:
     requested_mode = resolve_main_agent_prompt_envelope_mode(mode)
@@ -325,6 +352,7 @@ def resolve_main_agent_prompt_for_mode(
         memory_context=memory_context,
         response_role=response_role,
         answer_scope=answer_scope,
+        capability_gap_context=capability_gap_context,
     )
     if requested_mode == "off":
         return MainAgentPromptResolution(
@@ -358,6 +386,7 @@ def resolve_main_agent_prompt_for_mode(
                 model_edition=model_edition,
                 trim_max_tokens=trim_max_tokens,
                 role_capabilities=role_capabilities,
+                capability_gap_context=capability_gap_context,
                 token_estimator=token_estimator,
                 token_estimator_is_fallback=token_estimator is None,
             )
@@ -373,6 +402,7 @@ def resolve_main_agent_prompt_for_mode(
                 answer_scope=answer_scope,
                 model_edition=model_edition,
                 trim_max_tokens=trim_max_tokens,
+                capability_gap_context=capability_gap_context,
                 token_estimator=token_estimator,
                 token_estimator_is_fallback=token_estimator is None,
             )

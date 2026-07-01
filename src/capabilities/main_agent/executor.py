@@ -41,6 +41,13 @@ from src.orchestration.answer_roles import (
     auto_skill_matching_enabled,
     response_role_from_metadata,
 )
+from src.orchestration.capability_fallback import (
+    CAPABILITY_MISSING_FALLBACK_EVENT,
+    CAPABILITY_MISSING_FALLBACK_KEY,
+    build_capability_missing_fallback_metadata,
+    ensure_fallback_disclosure,
+    sanitize_capability_missing_fallback_metadata,
+)
 from src.orchestration.conversation_memory import sanitize_memory_prompt_payload
 from src.orchestration.prompt_envelope import PromptEnvelopeRenderError, PromptSegment
 from src.orchestration.prompt_profiles import (
@@ -130,13 +137,26 @@ class MainAgentRespondCapability(CapabilityContract):
         )
         if soft_binding_result is not None:
             return soft_binding_result
-        skill_matches, forced_skill_events = self._resolve_skill_matches(request, user_message)
-        script_results, script_events, script_artifacts, missing_interrupt = await self._run_auto_scripts(
-            request,
-            user_message,
-            artifact_context,
-            skill_matches,
+        capability_gap_context = sanitize_capability_missing_fallback_metadata(
+            request.metadata.get(CAPABILITY_MISSING_FALLBACK_KEY),
+            mode="history",
+            has_executed_business_result=bool(dependency_context),
         )
+        if capability_gap_context is not None:
+            skill_matches = []
+            forced_skill_events = []
+            script_results = []
+            script_events = []
+            script_artifacts = []
+            missing_interrupt = None
+        else:
+            skill_matches, forced_skill_events = self._resolve_skill_matches(request, user_message)
+            script_results, script_events, script_artifacts, missing_interrupt = await self._run_auto_scripts(
+                request,
+                user_message,
+                artifact_context,
+                skill_matches,
+            )
 
         events = [*forced_skill_events, *script_events]
         for match in skill_matches:
@@ -157,6 +177,20 @@ class MainAgentRespondCapability(CapabilityContract):
                     visibility=EventVisibility.AUDIT_ONLY,
                 )
             )
+            if capability_gap_context is None:
+                capability_gap_context = self._capability_gap_disclosure_payload(
+                    user_message=user_message,
+                    forced_skill_events=forced_skill_events,
+                )
+            if capability_gap_context is not None:
+                events.append(
+                    make_event(
+                        request,
+                        event_type="skill.unmatched_disclosure_required",
+                        payload=capability_gap_context,
+                        visibility=EventVisibility.AUDIT_ONLY,
+                    )
+                )
 
         if missing_interrupt is not None:
             return CapabilityExecutionResult(
@@ -189,6 +223,7 @@ class MainAgentRespondCapability(CapabilityContract):
                 model_edition=model_edition,
                 metadata=request.metadata,
                 stream_metadata=self._stream_metadata,
+                capability_gap_context=capability_gap_context,
             )
         except PromptEnvelopeRenderError as exc:
             prompt_error_payload = self._prompt_envelope_error_payload(exc)
@@ -385,6 +420,21 @@ class MainAgentRespondCapability(CapabilityContract):
             )
 
         response_text = "".join(chunks)
+        fallback_metadata = sanitize_capability_missing_fallback_metadata(
+            capability_gap_context,
+            mode="history",
+            has_executed_business_result=bool(dependency_context),
+        )
+        if fallback_metadata is not None:
+            response_text = ensure_fallback_disclosure(response_text, fallback_metadata)
+            events.append(
+                make_event(
+                    request,
+                    event_type=CAPABILITY_MISSING_FALLBACK_EVENT,
+                    payload=fallback_metadata,
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
         duration_ms = int((time.monotonic() - started_at) * 1000)
         final_event = make_event(
             request,
@@ -411,6 +461,7 @@ class MainAgentRespondCapability(CapabilityContract):
                     "prompt_recorded": False,
                     "duration_ms": duration_ms,
                     "matched_skill_count": len(skill_matches),
+                    "capability_gap_disclosure_required": capability_gap_context is not None,
                     "uploaded_artifact_count": len(artifact_context),
                     "dependency_context_count": len(dependency_context),
                     **({"prompt_envelope": prompt_resolution.llm_call_payload} if prompt_resolution.llm_call_payload else {}),
@@ -434,6 +485,8 @@ class MainAgentRespondCapability(CapabilityContract):
                 "response_source": "llm",
                 "matched_skills": [match.manifest.name for match in skill_matches],
                 "script_results": script_results,
+                **({"capability_gap": capability_gap_context} if capability_gap_context else {}),
+                **({CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata} if fallback_metadata else {}),
                 "prompt_recorded": False,
                 **response_role_payload,
             },
@@ -459,11 +512,26 @@ class MainAgentRespondCapability(CapabilityContract):
         revision = str(soft_binding.get("skill_bundle_revision") or self._skill_bundle_revision(request) or "").strip() or None
         manifest = self._resolve_skill_manifest_by_capability_id(capability_id, revision)
         if manifest is None:
+            fallback_metadata = sanitize_capability_missing_fallback_metadata(
+                request.metadata.get(CAPABILITY_MISSING_FALLBACK_KEY),
+                mode="history",
+            ) or build_capability_missing_fallback_metadata(
+                reason_code="skill_missing",
+                scope="full",
+                missing_capability_summary=f"点名的 Skill 当前未注册或不可用：{capability_id}",
+                fallback_content_scope="仅说明该 Skill 缺口并给出可手工复核的通用建议，不执行 Skill 或生成下载文件。",
+            )
             return self._soft_binding_answer_result(
                 request=request,
-                answer="这个 Skill 当前不可用，请刷新 Skill 列表后重试。",
-                decision={"decision": "answer", "reason_code": "skill_unavailable", "target_capability_id": capability_id},
+                answer="这个 Skill 当前不可用；我可以先基于通用知识说明可行做法，但不会声称已经执行该 Skill。",
+                decision={
+                    "decision": "answer",
+                    "reason_code": "skill_unavailable",
+                    "target_capability_id": capability_id,
+                    CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata,
+                },
                 response_role_payload=response_role_payload,
+                fallback_metadata=fallback_metadata,
             )
 
         profile = build_public_skill_profile(manifest, capability_id=capability_id).to_dict()
@@ -1155,7 +1223,11 @@ class MainAgentRespondCapability(CapabilityContract):
         reasoning_char_count: int = 0,
         duration_ms: int = 0,
         additional_events: tuple[Any, ...] = (),
+        fallback_metadata: Mapping[str, Any] | None = None,
     ) -> CapabilityExecutionResult:
+        fallback_metadata = sanitize_capability_missing_fallback_metadata(fallback_metadata, mode="history")
+        if fallback_metadata is not None:
+            answer = ensure_fallback_disclosure(answer, fallback_metadata)
         final_event = make_event(
             request,
             event_type="main_agent.output_final",
@@ -1183,12 +1255,25 @@ class MainAgentRespondCapability(CapabilityContract):
             output_payload={
                 "response_text": answer,
                 "response_source": "llm",
+                **({CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata} if fallback_metadata else {}),
                 "prompt_recorded": False,
                 **response_role_payload,
             },
             artifacts=(artifact,),
             events=(
                 *additional_events,
+                *(
+                    (
+                        make_event(
+                            request,
+                            event_type=CAPABILITY_MISSING_FALLBACK_EVENT,
+                            payload=fallback_metadata,
+                            visibility=EventVisibility.FRONTEND,
+                        ),
+                    )
+                    if fallback_metadata is not None
+                    else ()
+                ),
                 make_event(
                     request,
                     event_type="soft_skill_binding.decision",
@@ -1318,6 +1403,56 @@ class MainAgentRespondCapability(CapabilityContract):
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         ]
+
+    def _capability_gap_disclosure_payload(
+        self,
+        *,
+        user_message: str,
+        forced_skill_events: list[Any],
+    ) -> dict[str, Any] | None:
+        missing_payload = self._missing_required_skill_payload(
+            user_message=user_message,
+            forced_skill_events=forced_skill_events,
+        )
+        if missing_payload is None:
+            return None
+        reason_code = "forced_skill_missing" if missing_payload.get("reason_code") == "forced_skill_missing" else "skill_missing"
+        missing_summary = str(missing_payload.get("message") or "当前没有匹配到可执行 Skill。")
+        skill_name = str(missing_payload.get("skill_name") or "").strip()
+        capability_id = str(missing_payload.get("capability_id") or "").strip()
+        if skill_name or capability_id:
+            missing_summary = f"点名的 Skill 当前未注册或不可用：{skill_name or capability_id}"
+        return build_capability_missing_fallback_metadata(
+            reason_code=reason_code,
+            scope="full",
+            missing_capability_summary=missing_summary,
+            fallback_content_scope="仅覆盖缺失 Skill/业务能力无法执行部分的说明、草案或可手工复核建议。",
+        )
+
+
+    @classmethod
+    def _missing_required_skill_payload(
+        cls,
+        *,
+        user_message: str,
+        forced_skill_events: list[Any],
+    ) -> dict[str, Any] | None:
+        forced_missing = next(
+            (
+                event
+                for event in forced_skill_events
+                if getattr(event, "event_type", "") in {"skill.forced_missing", "skill.bundle_missing"}
+            ),
+            None,
+        )
+        if forced_missing is not None:
+            payload = dict(getattr(forced_missing, "payload", {}) or {})
+            return {
+                "reason_code": "forced_skill_missing",
+                "message": "当前点名的 Skill 未注册或不可用，无法执行该请求。",
+                **payload,
+            }
+        return None
 
     @staticmethod
     def _response_role_payload(*, response_role: str | None, answer_scope: str | None) -> dict[str, str]:

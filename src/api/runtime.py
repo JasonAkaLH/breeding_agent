@@ -117,6 +117,13 @@ from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.interrupt_service import InterruptService
 from src.orchestration.answer_selection import select_final_text_artifact
+from src.orchestration.capability_fallback import (
+    CAPABILITY_MISSING_FALLBACK_EVENT,
+    CAPABILITY_MISSING_FALLBACK_KEY,
+    build_capability_missing_fallback_metadata,
+    merge_capability_missing_fallback_metadata,
+    sanitize_capability_missing_fallback_metadata,
+)
 from src.orchestration.backpressure import DEFAULT_MAX_ACTIVE_TASKS, BackpressureGuard
 from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
@@ -911,6 +918,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             metadata[SOFT_SKILL_BINDING_METADATA_KEY] = soft_skill_binding
             metadata["soft_skill_binding_source"] = "slash_command"
             metadata["soft_skill_binding_requested_capability_id"] = requested_capability_id
+            fallback_metadata = sanitize_capability_missing_fallback_metadata(
+                soft_skill_binding.get(CAPABILITY_MISSING_FALLBACK_KEY),
+                mode="history",
+            )
+            if fallback_metadata is not None:
+                metadata[CAPABILITY_MISSING_FALLBACK_KEY] = fallback_metadata
         if selected_model_edition:
             metadata["model_edition"] = selected_model_edition
         else:
@@ -1051,21 +1064,27 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if not capability_id or not capability_id.startswith("skill."):
             raise ValueError("metadata.soft_skill_binding.capability_id must be a public skill capability")
         descriptor = self.capability_registry.get(capability_id)
-        if descriptor is None or not descriptor.public or not _is_skill_descriptor(descriptor):
-            raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
+        unavailable = descriptor is None or not descriptor.public or not _is_skill_descriptor(descriptor)
         contract = None
+        revision = ""
         if self._skill_runtime_state is not None:
             bundle = self._skill_runtime_state.active_bundle
-            if capability_id not in bundle.skill_capabilities.skill_name_by_capability_id:
-                raise ValueError(f"Unsupported soft_skill_binding capability_id: {capability_id}")
             revision = bundle.revision
-            contract = bundle.contract_by_capability_id.get(capability_id)
-        else:
-            revision = ""
+            if capability_id not in bundle.skill_capabilities.skill_name_by_capability_id:
+                unavailable = True
+            else:
+                contract = bundle.contract_by_capability_id.get(capability_id)
         command = self._metadata_text(raw.get("command")) or self._metadata_text(metadata.get("slash_command")) or ""
         normalized = {
             "capability_id": capability_id,
         }
+        if unavailable:
+            normalized[CAPABILITY_MISSING_FALLBACK_KEY] = build_capability_missing_fallback_metadata(
+                reason_code="skill_missing",
+                scope="full",
+                missing_capability_summary=f"点名的 Skill 当前未注册或不可用：{capability_id}",
+                fallback_content_scope="仅说明该 Skill 缺口并给出可手工复核的通用建议，不执行 Skill 或生成下载文件。",
+            )
         if contract is not None:
             normalized.update(self._soft_skill_file_selection_metadata(contract))
         if command:
@@ -1997,6 +2016,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             return
         artifacts = await self.storage.list_artifacts_for_task(task_id)
         events = await self._list_final_answer_events(task_id)
+        fallback_metadata = await self._assistant_history_fallback_metadata(task_id)
         text_artifact = select_final_text_artifact(artifacts, events=events)
         if text_artifact is None:
             return
@@ -2008,6 +2028,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             task_id=task_id,
             stream_status="complete",
             created_at=self._utcnow_naive(),
+            metadata={CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata} if fallback_metadata is not None else {},
         )
         try:
             await self.storage.save_message(message)
@@ -2015,6 +2036,28 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             if await self.storage.get_message(message_id) is not None:
                 return
             raise
+
+    async def _assistant_history_fallback_metadata(self, task_id: str) -> dict[str, Any] | None:
+        filtered_reader = getattr(self.storage, "list_events_for_task_filtered", None)
+        try:
+            if callable(filtered_reader):
+                events = await filtered_reader(
+                    task_id,
+                    event_types={CAPABILITY_MISSING_FALLBACK_EVENT},
+                    visibility=EventVisibility.FRONTEND,
+                    limit=32,
+                )
+            else:
+                events = await self.storage.list_events_for_task(task_id)
+        except Exception:
+            return None
+        values = [
+            event.payload
+            for event in events
+            if event.event_type == CAPABILITY_MISSING_FALLBACK_EVENT
+        ]
+        return merge_capability_missing_fallback_metadata(values, mode="history")
+
 
     async def _list_final_answer_events(self, task_id: str) -> Iterable[EventRecord]:
         filtered_reader = getattr(self.storage, "list_events_for_task_filtered", None)

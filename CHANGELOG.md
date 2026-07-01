@@ -8,7 +8,17 @@
 
 ## [Unreleased]
 
+### 2026-07-01
+
+- 能力缺失 LLM fallback 披露完成代码落地：新增 `src/orchestration/capability_fallback.py` 作为 canonical sanitizer/披露前缀；Planner schema/parser 支持顶层与节点 `metadata.capability_missing_fallback`，LLM planner unknown public capability 转为 `main_agent.respond` fallback；soft skill stale binding 不再 400，而是 completed fallback、`capability.missing_fallback` frontend event、assistant history metadata allowlist 与无下载 artifact；MainAgent prompt/envelope、后处理和 Replanner missing skill 分支同步使用 backend-guaranteed disclosure；前端 `TaskEventState`、SSE reducer、assistant bubble 与 history restore 增加安全 `CapabilityFallbackNotice`。新增/更新 backend/frontend 回归覆盖 parser、planner fallback、soft binding stale fallback、Replanner fallback、MainAgent disclosure、history metadata restore 与 no-leak/no-artifact 边界。License Requirement：代码/测试/文档索引变更，无新增依赖/许可变更。
+
 ### 2026-06-25
+
+- 能力缺失 LLM fallback 披露 Phase PRD 经 document-perfectization review 后补强为交付级代码设计口径：修正目录级置信标准，明确正文披露、event、assistant metadata、前端 notice 的阶段门禁；Phase 2 补齐显式缺失 Skill/MCP/soft binding fallback、public-only capability 摘要和截断/敏感字段收敛验收；Phase 3 补齐前端状态模型与 history metadata 安全解析；Phase 4 补齐 Replanner full/partial scope 判定。License Requirement：文档加固与索引既有入口保持，无依赖/许可变更。
+
+- 能力缺失 LLM fallback 披露 PRD 已拆分为 Phase 实施目录：新增 `docs/prd/backend/capability-missing-fallback/`，包含 README、分步总纲和 Phase 0 至 Phase 4 PRD，按现状清理、Plan metadata 契约、后端 full fallback completed 闭环、前端 `CapabilityFallbackNotice`/history 恢复、partial fallback/Replanner 审计硬化拆解父入口 `docs/prd/backend/23-能力缺失LLMFallback披露PRD.md`；同步 PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
+
+- 能力缺失 LLM fallback 披露 PRD 已成文并完成 document-perfectization 加固：新增 `docs/prd/backend/23-能力缺失LLMFallback披露PRD.md`，定义无匹配 Skill/MCP/capability 时由 Planner/Replanner 标记 `capability_missing_fallback`、任务以 `completed` 停止 Workbench、assistant 正文与前端 `CapabilityFallbackNotice` 双重披露、`capability.missing_fallback` 使用单条 frontend 事件兼作审计证据、assistant message metadata 历史恢复、平台文件 artifact 禁止边界、schema/repair/prompt/后处理和测试矩阵。License Requirement：文档 PRD/索引变更，无依赖/许可变更。
 
 - Skill 运行闭环 Workbench PRD 经 document-perfectization 决策后收敛为 runtime replan 主线：`docs/prd/backend/skill-workbench/` 目录新增/更新 README、目录总纲，以及 Policy/runtime state、内部 capability/executor、runtime loop/finalizer digest、事件 graph prompt 脱敏、contract 质量策略与健康诊断五份实施 PRD；补齐 terminal / wait state、progress marker、pending node gate、stage placement、同能力 refinement retry 上限与 input fingerprint 停止条件，明确 preflight 只能 initial expansion 前置插入、同能力 retry 由 public-only SkillRefinementRuntimeReplanner 追加 public `skill.*`，防止能力不适配时无限 replan；用户输入缺失复用现有 interrupt / resume，不作为最终失败；同步父总纲、PRD 索引、后端总览和 Future Work。License Requirement：文档拆分与索引更新，无依赖/许可变更。
 

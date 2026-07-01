@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from src.core.enums import NodeStatus
+from src.core.enums import NodeCriticality, NodeStatus
 
+from .answer_roles import AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY
+from .capability_fallback import CAPABILITY_MISSING_FALLBACK_KEY, build_capability_missing_fallback_metadata
 from .models import OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from .runtime_replanner import RuntimeReplanContext, RuntimeReplanDecision
 from .workflow_expander import WorkflowExpander, WorkflowExpansionError
@@ -50,7 +52,11 @@ class SoftSkillBindingReplanner:
                 return None
         descriptor = self._capability_registry.get(target_capability_id)
         if descriptor is None or not descriptor.public or not target_capability_id.startswith("skill."):
-            return None
+            return self._missing_capability_fallback_decision(
+                context,
+                source_node_id=source_node_id,
+                target_capability_id=target_capability_id,
+            )
 
         public_plan = self._public_execute_plan(
             context,
@@ -81,6 +87,75 @@ class SoftSkillBindingReplanner:
                 "target_capability_id": target_capability_id,
             },
         )
+
+    @staticmethod
+    def _missing_capability_fallback_decision(
+        context: RuntimeReplanContext,
+        *,
+        source_node_id: str,
+        target_capability_id: str,
+    ) -> RuntimeReplanDecision | None:
+        if any(CAPABILITY_MISSING_FALLBACK_KEY in node.metadata for node in context.plan.nodes):
+            return None
+        existing_nodes = tuple(context.plan.nodes)
+        existing_ids = {node.node_id for node in existing_nodes}
+        fallback_node_id = "soft_skill_missing_fallback"
+        suffix = 2
+        while fallback_node_id in existing_ids:
+            fallback_node_id = f"soft_skill_missing_fallback_{suffix}"
+            suffix += 1
+        business_dependency_ids = tuple(
+            node_id
+            for node_id, node in context.nodes.items()
+            if node.status == NodeStatus.COMPLETED
+            and node.capability_id != "main_agent.respond"
+            and isinstance(context.node_outputs.get(node_id), Mapping)
+            and bool(context.node_outputs.get(node_id))
+        )
+        has_business_result = bool(business_dependency_ids)
+        depends_on = tuple(dict.fromkeys((source_node_id, *business_dependency_ids)))
+        fallback_metadata = build_capability_missing_fallback_metadata(
+            reason_code="skill_missing",
+            scope="partial" if has_business_result else "full",
+            missing_capability_summary=f"软绑定请求的 Skill 当前未注册或不可用：{target_capability_id}",
+            attempted_capability_summary="已先执行并保留可用业务能力结果" if has_business_result else None,
+            fallback_content_scope="仅说明该 Skill 缺口并给出可手工复核的通用建议，不执行 Skill 或生成下载文件。",
+        )
+        fallback_node = WorkflowNodePlan(
+            node_id=fallback_node_id,
+            capability_id="main_agent.respond",
+            input_payload={"user_message": context.request.effective_user_message},
+            metadata={
+                CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata,
+                AUTO_SKILL_MATCHING_ENABLED_METADATA_KEY: False,
+            },
+            depends_on=depends_on,
+            criticality=NodeCriticality.REQUIRED,
+            retry_policy={"max_attempts": 1},
+            timeout_policy={"seconds": 60},
+        )
+        return RuntimeReplanDecision(
+            plan=WorkflowPlan(
+                task_id=context.plan.task_id,
+                nodes=(*existing_nodes, fallback_node),
+                metadata={
+                    **dict(context.plan.metadata),
+                    "runtime_replan_source": "soft_skill_binding",
+                    "runtime_replan_reason": "soft_skill_missing_fallback",
+                    "soft_skill_binding_capability_id": target_capability_id,
+                    CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata,
+                },
+                max_replans=context.plan.max_replans,
+                max_dynamic_nodes=context.plan.max_dynamic_nodes,
+            ),
+            reason="soft_skill_missing_fallback",
+            metadata={
+                "replan_source": "soft_skill_binding",
+                "target_capability_id": target_capability_id,
+                CAPABILITY_MISSING_FALLBACK_KEY: fallback_metadata,
+            },
+        )
+
 
     @staticmethod
     def _find_execute_signal(context: RuntimeReplanContext) -> tuple[str, str] | None:

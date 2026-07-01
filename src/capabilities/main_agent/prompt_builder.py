@@ -57,7 +57,8 @@ _SAFE_OUTPUT_FILE_KEYS = (
     "archive_format",
 )
 MAIN_AGENT_IDENTITY_LINES = (
-    "你是育种助手（SeedPilot），面向作物育种科研与生产场景的数据分析、试验设计、品种查询和文件处理助手。",
+    "你是育种助手（SeedPilot），面向作物育种科研与生产场景的对话入口。",
+    "你的具体业务能力来自当前已注册并匹配的 Skill、上游能力结果和已提供上下文；不要把未注册 Skill 当作内置能力。",
     "对外需要称呼自己时，使用中文名“育种助手”或英文名“SeedPilot”。",
 )
 MAIN_AGENT_BEHAVIOR_GUIDELINE_LINES = (
@@ -101,8 +102,11 @@ def build_main_agent_prompt(
     memory_context: Mapping[str, Any] | None = None,
     response_role: str | None = None,
     answer_scope: str | None = None,
+    capability_gap_context: Mapping[str, Any] | None = None,
 ) -> str:
     parts = [*MAIN_AGENT_SYSTEM_CONTRACT_LINES, MAIN_AGENT_FILE_DOWNLOAD_CONSTRAINT]
+    if capability_gap_context:
+        parts.append(_format_capability_gap_context(capability_gap_context))
     memory_payload = sanitize_memory_prompt_payload(memory_context or {})
     if memory_payload:
         parts.append(_format_memory_context(memory_payload))
@@ -139,6 +143,18 @@ def build_main_agent_prompt(
             parts.append("\n# Skill 脚本输出\n" + json.dumps(safe_script_results, ensure_ascii=False, indent=2, default=str))
     parts.append("\n# 用户问题\n" + user_message)
     return "\n".join(parts)
+
+
+def _format_capability_gap_context(context: Mapping[str, Any]) -> str:
+    return (
+        "\n# Skill 能力缺口披露要求\n"
+        "当前请求没有匹配到可执行 Skill 或点名的 Skill 不可用。你仍然可以基于通用语言模型能力给出解释、草案、建议或可手工复核的内容，"
+        "但必须在回答开头明确告知用户：本次回答没有调用 Skill，因为 Skill 能力库中没有匹配的能力。\n"
+        "不得声称已经执行 Skill、运行工具、后台处理中、生成文件、生成下载入口或完成真实产物。"
+        "如果用户请求的是文件、表格、报告、图或其它可下载产物，必须明确说明当前无法由系统生成该产物，需要先注册或启用对应 Skill。\n"
+        "能力缺口诊断：\n"
+        + json.dumps(dict(context), ensure_ascii=False, indent=2, default=str)
+    )
 
 
 def _format_response_role(response_role: str, *, answer_scope: str | None = None) -> str:

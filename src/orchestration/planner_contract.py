@@ -6,6 +6,10 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Iterable
 
+from .capability_fallback import (
+    CAPABILITY_MISSING_FALLBACK_KEY,
+    sanitize_capability_missing_fallback_metadata,
+)
 from .models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
 from .prompt_envelope import PromptSegment
 from .prompt_profiles import (
@@ -22,11 +26,54 @@ _PLANNER_TEMPLATE_ID = "planner"
 _PLANNER_REPAIR_TEMPLATE_ID = "planner_repair"
 
 
+_CAPABILITY_MISSING_FALLBACK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "enabled",
+        "scope",
+        "reason_code",
+        "missing_capability_summary",
+        "fallback_content_scope",
+        "llm_fallback_allowed",
+        "artifact_generation_allowed",
+        "disclosure_required",
+        "memory_context_used",
+        "source_message_count",
+    ],
+    "properties": {
+        "enabled": {"const": True},
+        "scope": {"type": "string", "enum": ["full", "partial"]},
+        "reason_code": {
+            "type": "string",
+            "enum": ["capability_missing", "skill_missing", "forced_skill_missing", "mcp_missing"],
+        },
+        "missing_capability_summary": {"type": "string", "minLength": 1},
+        "attempted_capability_summary": {"type": "string"},
+        "fallback_content_scope": {"type": "string", "minLength": 1},
+        "llm_fallback_allowed": {"type": "boolean"},
+        "artifact_generation_allowed": {"const": False},
+        "disclosure_required": {"const": True},
+        "memory_context_used": {"type": "boolean"},
+        "source_message_count": {"type": "integer", "minimum": 0},
+        "source_message_ids": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+_PLANNER_METADATA_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        CAPABILITY_MISSING_FALLBACK_KEY: _CAPABILITY_MISSING_FALLBACK_SCHEMA,
+    },
+}
+
 PLANNER_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["nodes"],
     "properties": {
+        "metadata": _PLANNER_METADATA_SCHEMA,
         "nodes": {
             "type": "array",
             "minItems": 1,
@@ -39,6 +86,7 @@ PLANNER_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
                     "capability_id": {"type": "string", "minLength": 1},
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                     "input_payload": {"type": "object"},
+                    "metadata": _PLANNER_METADATA_SCHEMA,
                 },
             },
         }
@@ -180,6 +228,9 @@ def build_planner_prompt(
         "只返回 JSON。请选择最小且有用的无环 DAG。"
         "只能使用下面列出的 public capability。"
         "禁止输出任何内部 capability 或低层实现节点。"
+        "如果用户请求明显需要业务 Skill/MCP/文件生成能力，但 public capability 列表没有匹配能力，请规划 main_agent.respond，"
+        "并在顶层或该节点 metadata.capability_missing_fallback 中填写 enabled=true、scope、reason_code、missing_capability_summary、fallback_content_scope、"
+        "llm_fallback_allowed=true、artifact_generation_allowed=false、disclosure_required=true、memory_context_used 和 source_message_count。"
         "对于数据库 / 数据查询问题，如果 public capability 列表中存在匹配的 skill.* 能力，优先规划对应 skill.* capability；"
         "对于明确匹配公开 Skill 的任务，优先规划对应 skill.* capability；"
         "对于追问、参数调整、继续上次任务等请求，必须结合对话记忆判断是否继续调用上一轮相关 public capability；"
@@ -220,6 +271,8 @@ def build_planner_profile_resolution(
                 "除非用户请求已经显式指定某个 capability，否则所有路由和 DAG 编排都由你基于上下文决定。"
                 "只返回 JSON。请选择最小且有用的无环 DAG。只能使用列出的 public capability。"
                 "禁止输出任何内部 capability 或低层实现节点。"
+                "当用户目标需要缺失的业务 Skill/MCP/文件生成能力时，仍返回 main_agent.respond，"
+                "并携带 metadata.capability_missing_fallback；普通解释/闲聊不得携带该 metadata。"
                 "数据库 / 数据查询或明确匹配公开 Skill 的任务优先规划对应 skill.* capability；"
                 "追问、参数调整、继续上次任务必须结合对话记忆判断；兜底对话、解释、汇总使用 main_agent.respond。"
             ),
@@ -498,7 +551,8 @@ def parse_planner_output(raw_output: str, *, task_id: str) -> WorkflowPlan:
     nodes_payload = payload.get("nodes")
     if not isinstance(nodes_payload, list) or not nodes_payload:
         raise PlannerOutputError("Planner output must include a non-empty nodes array.")
-    _reject_unknown_keys(payload, {"nodes"}, "planner output")
+    _reject_unknown_keys(payload, {"nodes", "metadata"}, "planner output")
+    plan_metadata = _parse_planner_metadata(payload.get("metadata", {}), "planner output metadata")
 
     nodes: list[WorkflowNodePlan] = []
     for index, node_payload in enumerate(nodes_payload):
@@ -506,7 +560,7 @@ def parse_planner_output(raw_output: str, *, task_id: str) -> WorkflowPlan:
             raise PlannerOutputError(f"Planner node at index {index} must be a node object.")
         _reject_unknown_keys(
             node_payload,
-            {"node_id", "capability_id", "depends_on", "input_payload"},
+            {"node_id", "capability_id", "depends_on", "input_payload", "metadata"},
             f"planner node at index {index}",
         )
         node_id = node_payload.get("node_id")
@@ -525,6 +579,10 @@ def parse_planner_output(raw_output: str, *, task_id: str) -> WorkflowPlan:
         input_payload = node_payload.get("input_payload", {})
         if not isinstance(input_payload, dict):
             raise PlannerOutputError(f"Planner node {node_id} input_payload must be an object.")
+        node_metadata = _parse_planner_metadata(
+            node_payload.get("metadata", {}),
+            f"planner node {node_id} metadata",
+        )
 
         nodes.append(
             WorkflowNodePlan(
@@ -532,16 +590,35 @@ def parse_planner_output(raw_output: str, *, task_id: str) -> WorkflowPlan:
                 capability_id=capability_id,
                 depends_on=tuple(depends_on_payload),
                 input_payload=dict(input_payload),
+                metadata=node_metadata,
             )
         )
 
     return WorkflowPlan(
         task_id=task_id,
         nodes=tuple(nodes),
-        metadata={"source": "llm_planner_output"},
+        metadata={"source": "llm_planner_output", **plan_metadata},
         max_replans=0,
         max_dynamic_nodes=0,
     )
+
+
+def _parse_planner_metadata(value: Any, context: str) -> dict[str, Any]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise PlannerOutputError(f"{context} must be an object.")
+    _reject_unknown_keys(value, {CAPABILITY_MISSING_FALLBACK_KEY}, context)
+    metadata: dict[str, Any] = {}
+    if CAPABILITY_MISSING_FALLBACK_KEY in value:
+        sanitized = sanitize_capability_missing_fallback_metadata(
+            value.get(CAPABILITY_MISSING_FALLBACK_KEY),
+            mode="history",
+        )
+        if sanitized is None:
+            raise PlannerOutputError(f"{context}.{CAPABILITY_MISSING_FALLBACK_KEY} must be enabled fallback metadata.")
+        metadata[CAPABILITY_MISSING_FALLBACK_KEY] = sanitized
+    return metadata
 
 
 _JSON_CODE_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*(?P<body>.*?)\s*```\s*$", re.DOTALL)

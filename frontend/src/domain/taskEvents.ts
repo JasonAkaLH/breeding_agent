@@ -22,6 +22,15 @@ export interface SkillStatusLine {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'blocked';
 }
 
+export interface CapabilityFallbackNotice {
+  scope: 'full' | 'partial';
+  reasonCode: 'capability_missing' | 'skill_missing' | 'forced_skill_missing' | 'mcp_missing';
+  missingCapabilitySummary: string;
+  attemptedCapabilitySummary?: string;
+  fallbackContentScope: string;
+  artifactGenerationAllowed: false;
+}
+
 export interface TaskEventState {
   phase: TaskPhase;
   statusText: string;
@@ -37,6 +46,7 @@ export interface TaskEventState {
   skillReasoningText: string;
   answerReasoningText: string;
   errorMessage: string | null;
+  fallbackNotice: CapabilityFallbackNotice | null;
   seenEventIds: string[];
 }
 
@@ -56,6 +66,7 @@ export function createInitialTaskEventState(): TaskEventState {
     skillReasoningText: '',
     answerReasoningText: '',
     errorMessage: null,
+    fallbackNotice: null,
     seenEventIds: [],
   };
 }
@@ -100,7 +111,7 @@ export function markWaitingInputRequired(state: TaskEventState): TaskEventState 
 }
 
 export function isTaskActive(phase: TaskPhase): boolean {
-  return ['submitting', 'accepted', 'running', 'streaming', 'loading_artifacts', 'cancelling'].includes(phase);
+  return ['submitting', 'accepted', 'running', 'streaming', 'cancelling'].includes(phase);
 }
 
 export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
@@ -271,6 +282,17 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     case 'main_agent.output_final':
       if (!isVisibleMainAgentResponse(event.payload)) return withEvent;
       return { ...withEvent, phase: state.phase === 'idle' ? 'running' : state.phase, statusText: '回答生成完成，正在收尾', currentActivityText: null, errorMessage: null };
+    case 'capability.missing_fallback': {
+      const fallbackNotice = parseCapabilityFallbackNotice(event.payload);
+      if (!fallbackNotice) return withEvent;
+      return {
+        ...withEvent,
+        fallbackNotice,
+        statusText: '已切换为能力缺口 LLM 回答',
+        currentActivityText: state.assistantText ? null : '当前没有匹配能力，正在生成带披露的 LLM 回答',
+        errorMessage: null,
+      };
+    }
     case 'task.completed':
       return {
         ...withEvent,
@@ -547,6 +569,7 @@ function failureMessage(payload: Record<string, unknown>, nodeId: string | null)
   }
   if (code === 'guard_token_missing') return '查询安全校验未通过，请调整问题后重试。';
   if (code === 'db_transient_error') return '数据库暂时不可用，请稍后重试。';
+  if (code === 'required_skill_missing') return '当前没有可用 Skill 执行该请求，请先启用或注册对应 Skill。';
   if (code === 'data_access_deadline_exceeded') return '数据库查询超时，请稍后重试或缩小查询范围。';
   if (code === 'data_access_result_too_large' || code === 'data_access_column_limit_exceeded') return '查询结果内容过大，请缩小查询范围后重试。';
   return '本次任务未完成，请调整问题后重试。';
@@ -562,4 +585,44 @@ function isSqlQueryFailure(payload: Record<string, unknown>, nodeId: string | nu
     || skillName === sqlSkillName
     || domainKind === 'sql_query'
     || Boolean(nodeId?.includes(sqlCapabilityId));
+}
+
+
+export function parseCapabilityFallbackNotice(input: unknown): CapabilityFallbackNotice | null {
+  const root = isRecord(input) && isRecord(input.capability_missing_fallback)
+    ? input.capability_missing_fallback
+    : input;
+  if (!isRecord(root) || root.enabled !== true) return null;
+  const scope = root.scope === 'partial' ? 'partial' : root.scope === 'full' ? 'full' : null;
+  const reasonCode = isReasonCode(root.reason_code) ? root.reason_code : null;
+  const missingCapabilitySummary = typeof root.missing_capability_summary === 'string'
+    ? root.missing_capability_summary.trim()
+    : '';
+  const fallbackContentScope = typeof root.fallback_content_scope === 'string'
+    ? root.fallback_content_scope.trim()
+    : '';
+  if (!scope || !reasonCode || !missingCapabilitySummary || !fallbackContentScope) return null;
+  if (root.artifact_generation_allowed !== false || root.disclosure_required !== true) return null;
+  const attemptedCapabilitySummary = typeof root.attempted_capability_summary === 'string'
+    ? root.attempted_capability_summary.trim()
+    : '';
+  return {
+    scope,
+    reasonCode,
+    missingCapabilitySummary,
+    ...(attemptedCapabilitySummary ? { attemptedCapabilitySummary } : {}),
+    fallbackContentScope,
+    artifactGenerationAllowed: false,
+  };
+}
+
+function isReasonCode(value: unknown): value is CapabilityFallbackNotice['reasonCode'] {
+  return value === 'capability_missing'
+    || value === 'skill_missing'
+    || value === 'forced_skill_missing'
+    || value === 'mcp_missing';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
