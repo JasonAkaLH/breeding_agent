@@ -1786,13 +1786,13 @@ describe('App', () => {
     expect(document.activeElement).toBe(refreshButton);
   });
 
-  it('submits long composer input without a character cap', async () => {
+  it('submits composer input within the 10000 character cap', async () => {
     const api = makeApi();
     await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
 
     const input = screen.getByLabelText('请输入问题');
     const longPrompt = `请完整分析以下长文本：${'不要截断这段输入。'.repeat(800)}`;
-    expect(input).not.toHaveAttribute('maxlength');
+    expect(input).toHaveAttribute('maxlength', '10000');
     expect(input).toHaveAttribute('wrap', 'soft');
 
     fireEvent.change(input, { target: { value: longPrompt } });

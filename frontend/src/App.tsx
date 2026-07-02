@@ -33,6 +33,7 @@ import './styles.css';
 const INPUT_MENU_BUTTON_IMAGE = '/pics/input-menu-plus-button.svg';
 const SEND_BUTTON_IMAGE = '/pics/send-up-arrow-button.svg?v=20260511-arrow-balanced';
 const ACCOUNT_SETTINGS_BUTTON_IMAGE = '/pics/account-settings-gear-button.svg?v=20260511-gear-visible';
+const COMPOSER_MAX_LENGTH = 10000;
 
 interface AppProps {
   apiClient?: ApiClient;
@@ -2188,6 +2189,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                           }
                         }}
                         placeholder={inputPlaceholder}
+                        maxLength={COMPOSER_MAX_LENGTH}
                         autoSize={{ minRows: 1, maxRows: 5 }}
                         wrap="soft"
                         disabled={composerDisabled}

@@ -10,6 +10,10 @@
 
 ## [Unreleased]
 
+### 2026-07-02
+
+- 前端发送框增加 10000 字符上限：主输入 `Input.TextArea` 设置 `maxLength=10000`，并用前端回归锁定 `maxlength` 属性与长文本提交行为。License Requirement：前端代码/测试变更，无新增依赖/许可变更。
+
 ### 2026-07-01
 
 - 能力缺失 LLM fallback 披露完成代码落地：新增 `src/orchestration/capability_fallback.py` 作为 canonical sanitizer/披露前缀；Planner schema/parser 支持顶层与节点 `metadata.capability_missing_fallback`，LLM planner unknown public capability 转为 `main_agent.respond` fallback；soft skill stale binding 不再 400，而是 completed fallback、`capability.missing_fallback` frontend event、assistant history metadata allowlist 与无下载 artifact；MainAgent prompt/envelope、后处理和 Replanner missing skill 分支同步使用 backend-guaranteed disclosure；前端 `TaskEventState`、SSE reducer、assistant bubble 与 history restore 增加安全 `CapabilityFallbackNotice`。新增/更新 backend/frontend 回归覆盖 parser、planner fallback、soft binding stale fallback、Replanner fallback、MainAgent disclosure、history metadata restore 与 no-leak/no-artifact 边界。License Requirement：代码/测试/文档索引变更，无新增依赖/许可变更。
