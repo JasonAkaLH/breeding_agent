@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+### 2026-07-02
+
+- Docker 正式环境镜像版本提升到 `0.1.23`：按当前 `prod` 工作树构建并推送 backend / frontend 到 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.23`，用于发布前端发送框 10000 字符输入上限；远端 manifest 已验证：backend `sha256:12c3cf0949c8c621199d7056406d1ade3e74d68a898a79fa9f82d79a2ec2c793`，frontend `sha256:c7b47aca3ca2c0c8ca9b40ccfd3f0094df5537ed4261bab905a237fb755133b2`；本地忽略文件 `docker_cmd.md` 已同步为仅生产环境部署命令并使用环境变量承载敏感值。License Requirement：镜像发布/运维文档变更，无依赖/许可变更，未触发 cargo-deny 风险。
+- 前端发送框新增单次输入长度上限：`Input.TextArea` 设置 `maxLength=10000`，按 10000 个中文字符的产品口径限制普通输入，并更新 App 回归测试锁定 maxlength 属性与上限内长文本提交行为。License Requirement：无依赖/许可变更，未触发 cargo-deny 风险。
+
 ### 2026-06-24
 
 - Docker 正式环境镜像版本提升到 `0.1.22`：按当前工作树构建并推送 backend / frontend 到 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-*:0.1.22`，用于发布本轮并发阈值 30 与前端输入框随机占位符更新；远端 manifest 已验证：backend `sha256:975351768ef48fb6e8b3a89812e6adc58e5e43eb951b098e99358bcdce056cf7`，frontend `sha256:d925442d05285a3551eaf182e5a864e453d0a6cbf2bb31f1dedc80a857040840`；`docker_cmd.md` 生产启动命令同步改为 `0.1.22`。License Requirement：镜像发布/运维文档变更，无依赖/许可变更，未触发 cargo-deny 风险。
