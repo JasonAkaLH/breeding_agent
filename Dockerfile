@@ -65,12 +65,11 @@ COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY src ./src
-COPY skill ./skill
 COPY docs/api ./docs/api
 COPY config.yaml ./config.yaml
 
-RUN mkdir -p runtime \
-    && chmod 755 runtime
+RUN mkdir -p runtime skill \
+    && chmod 755 runtime skill
 
 EXPOSE 8000
 
