@@ -1,0 +1,102 @@
+contract_version: '2'
+capability:
+  id: skill.germplasm_mcp
+  display_name: 种质资源 MCP 查询
+  description: 通过种质资源 MCP 查询作物、作物性状、扩展字段并分页搜索种质资源。
+  version: 1.0.0
+routing:
+  triggers:
+    - 种质 MCP
+    - 种质资源查询
+    - 查询种质
+    - 搜索种质
+    - 查询作物列表
+    - 作物性状
+    - 种质扩展字段
+    - germ_search
+    - germ_query_org_crops
+  intent_aliases:
+    - /germplasm-mcp
+    - /种质资源
+    - /种质查询
+  examples:
+    - /germplasm-mcp 查询当前租户有哪些作物
+    - /germplasm-mcp 查询作物 12 的可检索性状
+    - /germplasm-mcp 按名称搜索种质 ABC，第一页 10 条
+    - /germplasm-mcp 查询 accession_name 包含 test 的种质
+runtime:
+  mode: delegated_main_agent
+  answer_mode: direct
+entrypoints:
+  run:
+    runtime: delegated_main_agent
+    input_schema: germ_search
+input_schemas:
+  list_crops:
+    path: schemas/list-crops.input.yaml
+    title: 查询作物列表
+    description: 查询当前 MCP 上下文租户机构下可用的作物列表。
+    entrypoint: run
+    aliases:
+      - 作物列表
+      - 当前租户有哪些作物
+      - 可用作物
+      - germ_query_org_crops
+  list_traits:
+    path: schemas/list-traits.input.yaml
+    title: 查询作物性状
+    description: 根据 cropId 查询该作物可用于种质检索的性状定义。
+    entrypoint: run
+    aliases:
+      - 作物性状
+      - 性状编码
+      - traitCode
+      - germ_query_org_crop_traits
+  list_fields:
+    path: schemas/list-fields.input.yaml
+    title: 查询扩展字段
+    description: 查询种质信息可用于扩展字段检索的字段定义。
+    entrypoint: run
+    aliases:
+      - 扩展字段
+      - 字段定义
+      - searchFieldData
+      - germ_query_germ_fields
+  germ_search:
+    path: schemas/germ-search.input.yaml
+    title: 搜索种质资源
+    description: 按作物、种质名称、动态性状或扩展字段分页搜索种质信息。
+    entrypoint: run
+    aliases:
+      - 搜索种质
+      - 查询种质
+      - 种质检索
+      - germ_search
+schema_selector:
+  strategy: deterministic_then_llm
+  min_confidence: 0.65
+resources:
+  tool_guide:
+    path: references/tool-guide.md
+    title: MCP tool 使用指南
+    description: 四个种质 MCP tools 的用途、输入参数和推荐调用顺序。
+    audience: [main_agent, slot_question]
+  search_examples:
+    path: references/search-examples.md
+    title: germ_search 参数示例
+    description: 种质分页检索的默认参数、名称查询、性状查询和扩展字段查询示例。
+    audience: [main_agent, slot_question]
+  context_and_errors:
+    path: references/context-and-errors.md
+    title: 上下文和错误处理
+    description: 租户上下文缺失、MCP 错误和安全边界处理规则。
+    audience: [main_agent]
+resource_policy:
+  default_audience: [main_agent]
+  max_bytes: 20000
+  deny_paths:
+    - scripts
+    - runtime
+    - native
+    - configs
+    - .env

@@ -10,6 +10,12 @@
 
 ## [Unreleased]
 
+### 2026-07-07
+
+- 恢复 `sql-query` 与 `ocr` 两个历史项目级 v2 Skill 到当前 `skill/` 目录：从仓库可找到的最新保留版本（2026-06-18）恢复 SQLQuery platform-service bundle 与 OCR python_subprocess bundle；SQLQuery 自带 LLM runtime 测试配置同步补齐当前主仓库要求的 `reasoning_efforts`，保持运行逻辑不变。License Requirement：Skill bundle/测试恢复与兼容性测试配置变更，无新增运行时依赖/许可变更。
+
+- 新增 `germplasm-mcp` 项目级 v2 Skill：以 `delegated_main_agent` 形式封装种质资源 MCP 的作物列表、作物性状、扩展字段与分页种质检索使用流程，补齐 `SKILL.md`、`skill.contract.yaml`、4 个输入 schema、3 份 prompt-facing reference 和 schema 选择回归测试，明确 `germ_search` JSON 字符串参数、租户上下文缺失处理和只读安全边界。License Requirement：Skill 文档/契约/schema/测试变更，无新增运行时依赖/许可变更。
+
 ### 2026-07-02
 
 - 前端发送框增加 10000 字符上限：主输入 `Input.TextArea` 设置 `maxLength=10000`，并用前端回归锁定 `maxlength` 属性与长文本提交行为。License Requirement：前端代码/测试变更，无新增依赖/许可变更。

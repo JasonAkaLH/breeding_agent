@@ -1,0 +1,19 @@
+schema_version: '1'
+schema_id: list_crops
+title: 查询作物列表
+description: 查询当前 MCP 上下文租户机构下可用的作物列表。
+inputs:
+  query:
+    type: string
+    required: false
+    title: 用户问题
+    description: 用户关于作物列表的自然语言问题。
+    source:
+      allowed: [query, current_user_message, resolved_user_message, recent_user_message, text]
+    aliases: [问题, 查询]
+    patterns:
+      - '.*作物.*'
+      - '.*crop.*'
+slot_policy:
+  max_rounds: 1
+entrypoint_mapping: run
