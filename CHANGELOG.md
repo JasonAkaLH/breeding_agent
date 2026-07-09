@@ -12,6 +12,8 @@
 
 ### 2026-07-09
 
+- 开发环境 Skill 挂载路径与生产约定对齐：`docker-compose.yml`、`docker_cmd.md` 与 README 统一使用独立 Skill 仓库 `/data/peihai/vibe-skill` 的 `skills/` 子目录，并只读挂载到后端容器 `/app/skill`，明确 runtime 扫描 `/app/skill/**/SKILL.md`，避免 `/srv/vibe-breeding` 与生产路径并存造成误用。License Requirement：Docker/文档变更，无新增依赖/许可变更。
+
 - 根 `AGENTS.md` 新增环境与分支约束：生产环境代码以 `prod` 分支为准，开发环境代码以 `main` 分支为准；涉及部署、镜像、Skill 挂载或环境差异排查时需先确认当前分支与目标环境一致。License Requirement：文档规则变更，无新增依赖/许可变更。
 
 ### 2026-07-07
