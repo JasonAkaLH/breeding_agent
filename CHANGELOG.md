@@ -10,6 +10,10 @@
 
 ## [Unreleased]
 
+### 2026-07-09
+
+- 根 `AGENTS.md` 新增环境与分支约束：生产环境代码以 `prod` 分支为准，开发环境代码以 `main` 分支为准；涉及部署、镜像、Skill 挂载或环境差异排查时需先确认当前分支与目标环境一致。License Requirement：文档规则变更，无新增依赖/许可变更。
+
 ### 2026-07-07
 
 - 恢复 `sql-query` 与 `ocr` 两个历史项目级 v2 Skill 到当前 `skill/` 目录：从仓库可找到的最新保留版本（2026-06-18）恢复 SQLQuery platform-service bundle 与 OCR python_subprocess bundle；SQLQuery 自带 LLM runtime 测试配置同步补齐当前主仓库要求的 `reasoning_efforts`，保持运行逻辑不变。License Requirement：Skill bundle/测试恢复与兼容性测试配置变更，无新增运行时依赖/许可变更。
