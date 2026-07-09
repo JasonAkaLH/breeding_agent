@@ -14,11 +14,11 @@
 - `src/orchestration/`：能力注册、调度、workflow plan、planner、router、validator、expander 等编排逻辑。
 - `src/capabilities/`：主代理与各类后端 capability 的业务实现入口。
 - `src/integrations/`：LLM、数据库、审计、Skill runtime、外部服务与适配层。
-- `skill/`：历史内置 Skill bundles 目录；生产部署不再追踪/打包该目录，改为把独立 Skill 仓库（默认 `/data/peihai/vibe-skill/skills`）挂载到容器 `/app/skill`。
+- `skill/`：项目级 Skill bundles；每个子目录通常包含 `SKILL.md`、契约、schema、references 与脚本。
 - `frontend/`：React + TypeScript + Vite 前端，对话台、API/SSE client、组件与前端测试。
 - `native/`：Rust workspace、runtime/kernel/sidecar/安全 facade 与相关 proto。
 - `tests/`：后端分层回归测试，目录大体对应 `src/` 的模块边界。
-- `docs/`：PRD、API 文档、runbook、设计记录与 checkpoint 文档。
+- `docs/`：PRD、API 文档、runbook、设计记录与 checkpoint 文档；未完成的 Future work 参考 `docs/AGENTS.md`。
 - `scripts/`、`docker/`：本地验证、维护脚本、Docker 与部署辅助入口。
 - `runtime/`：本地运行产物、日志、artifact 与调试 prompt；通常不作为业务源码入口。
 
@@ -28,6 +28,10 @@
 - 每次完成代码、文档或目录结构修改后，都要检查本次变更是否影响对应目录的 `AGENTS.md` 索引或规则说明；如果模块职责、入口文件、目录结构、测试入口或关键约束发生变化，应及时同步更新相应层级的 `AGENTS.md` 和 `CHANGELOG.md`。
 
 - 每次完成大规模修改后，都应及时创建一次 Git commit，作为可回滚检查点；commit 内容应保持范围清晰、可审阅，并符合当前提交信息规范。
+
+## 环境与分支约束
+
+- 生产环境代码以 `prod` 分支为准；开发环境代码以 `main` 分支为准。涉及部署、镜像、Skill 挂载或环境差异排查时，必须先确认当前分支与目标环境一致，避免把生产约束误套到开发分支，或把开发配置误发布到生产分支。
 
 ## 1. 编码前先思考
 
