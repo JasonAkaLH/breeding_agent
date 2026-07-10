@@ -16,6 +16,8 @@
 
 ### 2026-07-10
 
+- 全面重写 `docs/api/API更新日志.md`：以 `main@bd0fd2d` 与 `prod@e7ede32` 的独立 OpenAPI、路由、DTO、SSE、运行时、存储、前端 client、Nginx 和回归测试为基线，确认业务 endpoint path/method 无差异，系统记录模型级 reasoning effort、历史文件消息、会话文件选择、上传一致性、能力缺失 fallback 以及 SeedPilot API 文档代理的全部参数/schema/行为差异，并提供客户端迁移与发布验证清单。License Requirement：API 文档与全局变更日志更新，无新增依赖/许可变更。
+
 - `main` 补回 SeedPilot public 图片子路径适配：三个按钮 SVG 统一通过 Vite `BASE_URL` 生成地址，生产构建请求 `/seedpilot/pics/*`，本地根路径开发继续请求 `/pics/*`；保持 nginx 根路径隔离规则不变。License Requirement：前端与文档变更，无新增依赖/许可变更。
 
 - Docker 开发环境镜像发布为 `0.1.23`：已从 `main` 分支提交 `2de4ce8` 构建并推送 backend/frontend 开发镜像；远端 OCI manifest 已验证为 `linux/amd64`，backend digest 为 `sha256:c48ae44d4d615629ae83682e63417b7cb843c3f683143ff54e07f51642921372`，frontend digest 为 `sha256:236d54352c77adc04745b460f3f62bf3001f809d799102cfdc03a9d19277bc9f`；后端 SQLite 隔离启动与前端 nginx/静态产物 smoke 通过，开发启动命令已更新到 `0.1.23`。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。

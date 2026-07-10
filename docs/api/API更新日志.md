@@ -1,239 +1,535 @@
-# API 更新日志
+# API 更新日志：`main` 与 `prod` 全量差异扫描
 
-## 2026-06-24
+> 扫描日期：2026-07-10
+>
+> 比较基线：`main@bd0fd2d` 对 `prod@e7ede32`
+>
+> 比较方向：本文默认描述“`main` 相对 `prod`”的变化；反向差异会单独标注。
+>
+> 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
-### 更新摘要
+## 1. 执行摘要
 
-本次扩展会话文件上传白名单，允许 TSV 表格作为 Skill 输入文件。接口路径、请求体结构和响应 schema 不变；TSV 归入现有 CSV-family 表格处理，响应仍使用 `file_type=csv`。
+本次扫描以两个分支的 FastAPI 路由、Pydantic DTO、OpenAPI 文档、SSE 事件、运行时逻辑、持久化实现、前端 API client 和回归测试为依据，替换本文件原有的增量历史记录。
 
-### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+### 1.1 总体结论
 
-- 上传白名单新增 `.tsv`、`text/tab-separated-values` 与 `text/tsv`。TSV 按 CSV-family 表格解析，preview 返回表头、行数、编码和 `normalized_content_type=text/csv`。
-- TSV 的 `original_filename` 保留 `.tsv`，执行通道兼容字段 `skill_artifacts[].content` 使用归一化 CSV 文本；新 Skill 仍应优先通过 `resource_manifest_path` 读取 `files[].mount_path` 中的原始 TSV 文件副本。
-- Prompt-safe response / `uploaded_artifacts` 继续不返回完整 `content`、`content_base64` 或原始行数据。
-
-## 2026-06-19
-
-### 前端接入结论
-
-这次文件历史与自然语言选文件能力 **没有新增 API endpoint，也没有要求前端新增请求参数**。前端主要需要处理两件事：
-
-1. 历史消息里可能出现 `message_type=file_upload` 的文件上传卡片。
-2. 用户自然语言提到文件时，后端可能用现有 interrupt 追问，前端按原来的 interrupt 流程提交下一条输入即可。
-
-### 变化清单
-
-| 问题 | 结论 | 前端怎么做 |
+| 检查维度 | 结论 | 兼容性判断 |
 |---|---|---|
-| 是否新增接口 | 没有 | 继续使用现有上传、删除、历史、消息提交和 interrupt 接口。 |
-| 请求参数是否变化 | 没有新增必填参数 | 显式引用文件仍放 `metadata.upload_ids`；sheet 选择仍放 `metadata.upload_sheet_selections`；回答 interrupt 仍放 `metadata.interrupt_id`。 |
-| 响应是否变化 | 历史消息可能多一种公开 system message | `GET /api/v1/conversations/{conversation_id}/messages` 可能返回 `role=system` + `message_type=file_upload`。这类消息展示成文件上传卡片。 |
-| 调用时机是否变化 | 上传 / 删除主流程不变 | 上传或删除后，继续刷新 uploads 列表；需要展示聊天历史时刷新 messages。 |
-| 调用逻辑是否变化 | 文件选择可由后端自然语言处理 | 用户说“刚才那个文件 / materials.csv / 第一份表 / upl-xxxx”时，不需要前端新增点选控件；后端会自动选择或发起 interrupt。 |
-| deleted 文件怎么处理 | 可展示，不可复用 | `metadata.file_status=deleted` 的 file_upload 卡片只做历史展示，不要重新放入发送附件或任务附件。 |
+| HTTP endpoint 路径 | 无新增、无删除、无改名 | 兼容 |
+| HTTP method | 无变化 | 兼容 |
+| 请求体顶层字段 | OpenAPI 无变化 | 兼容 |
+| query / path / form 参数 | OpenAPI 无变化 | 兼容 |
+| 响应 schema | 2 个公开响应模型发生变化 | 需要客户端适配 |
+| SSE | 新增 `capability.missing_fallback` 前端事件 | 加法兼容；建议处理 |
+| 消息提交行为 | 新增模型级 reasoning effort 校验、会话文件智能选择、能力缺失 fallback | 行为变化 |
+| 上传与删除行为 | schema 不变；一致性、补偿、历史投影和错误处理增强 | 行为变化 |
+| SeedPilot 外部路径 | API 代理路径一致；`prod` 的 API 文档页比 `main` 多 Nginx 内容重写 | `main` 存在文档页子路径风险 |
 
-### 继续使用的接口
+### 1.2 需要优先处理的客户端变化
 
-- 上传：`POST /api/v1/conversations/uploads`
-- 文件列表：`GET /api/v1/conversations/{conversation_id}/uploads`
-- 删除上传：`DELETE /api/v1/conversations/uploads`
-- 读取历史：`GET /api/v1/conversations/{conversation_id}/messages`
-- 提交新消息 / 回答 interrupt：`POST /api/v1/conversations/chat-messages`
+1. `GET /api/v1/config/model-editions` 的 `options[]` 新增**必填** `reasoning_efforts`。
+2. `GET /api/v1/conversations/{conversation_id}/messages` 的每条消息新增 `message_type`、`metadata`、`updated_at`；客户端需要识别 `role=system` 且 `message_type=file_upload` 的公开文件历史消息。
+3. SSE 客户端应识别 `capability.missing_fallback`，并明确展示“当前回答未调用缺失能力、不会生成可下载文件”。
+4. 客户端不得继续把 reasoning effort 写死为全局枚举；必须使用所选模型返回的 `reasoning_efforts.options`。
 
-### 前端只需要注意
+---
 
-- 只展示 `file_upload` metadata 中的安全字段：`filename`、`upload_id`、`description_summary`、`description_status`、`file_status`。
-- 继续隐藏其他 internal system message。
-- 文件选择澄清仍按普通 interrupt 展示 `question`，用户下一条输入继续提交到 `chat-messages`。
-- 不要展示或依赖路径、`storage_key`、完整文件内容、`content_base64`、selector 审计细节。
+## 2. 扫描范围与判定方法
 
-## 2026-06-17
+### 2.1 已扫描范围
 
-### 更新摘要
+- `src/api/`：路由、DTO、SSE、上传、文件选择和 runtime 装配。
+- `src/core/`、`src/storage/`：消息模型、会话文件资源、SQLite 持久化和一致性操作。
+- `src/orchestration/`：Planner / Replanner、能力缺失 fallback、会话记忆和工作流行为。
+- `src/integrations/`：模型版本、reasoning effort、LLM 请求选项和 Skill 文件契约。
+- `frontend/src/api/`、`frontend/src/domain/`：请求参数、响应类型、SSE reducer 和历史恢复。
+- `docker/nginx.conf`：`/seedpilot` 外部访问路径。
+- `tests/api/`、`tests/orchestration/`、`tests/integrations/`：公开行为和失败边界。
 
-本次只调整前端文件附加体验和调用时机，API 契约不变：未新增 endpoint，未修改上传、列表、删除或消息提交接口的路径、method、必填参数、请求体结构和响应 schema。
+### 2.2 OpenAPI 结构化比较结果
 
-### 上传文件与消息提交
+由两个分支的独立归档快照分别生成 OpenAPI，并比较 `paths`、operations 和 `components.schemas`：
 
-- 外部系统仍可沿用既有接入方式：先调用 `POST /api/v1/conversations/uploads` 获取 `upload_id`，再在 `POST /api/v1/conversations/chat-messages` 的 `metadata.upload_ids` 中引用。
-- 新前端选择或拖拽文件后会先保存在浏览器草稿状态，用户发送消息时才调用同一个上传 API；这是客户端调用时机变化，不是服务端 API 变化。
-- 右侧文件面板只读取已经保存到后端的 conversation 文件资源，仍使用 `GET /api/v1/conversations/{conversation_id}/uploads` 和 `DELETE /api/v1/conversations/uploads`。
+- 新增路径：0
+- 删除路径：0
+- method 变化：0
+- 新增公开 schema：
+  - `ReasoningEffortConfigResponse`
+  - `ReasoningEffortOptionResponse`
+- 已有 schema 的字段变化：
+  - `ModelEditionOptionResponse` 新增必填 `reasoning_efforts`
+  - `MessageResponse` 新增 `message_type`、`metadata`、`updated_at`
+- 删除公开 schema 或字段：0
+
+> 注意：`SubmitMessageRequest.metadata` 是开放字典。部分新增行为通过其中的可选键触发，因此不会表现为 OpenAPI 顶层字段变化。
+
+---
+
+## 3. Endpoint 与 method 全量结论
+
+以下公开接口在 `main` 与 `prod` 中路径和 method 相同。
+
+### 3.1 鉴权
+
+| Method | Path | 差异结论 |
+|---|---|---|
+| `POST` | `/api/v1/auth/login` | 无公开契约差异 |
+| `GET` | `/api/v1/auth/me` | 无公开契约差异 |
+| `POST` | `/api/v1/auth/logout` | 无公开契约差异 |
+| `POST` | `/api/v1/auth/refresh-token` | 无公开契约差异 |
+
+### 3.2 会话与消息
+
+| Method | Path | 差异结论 |
+|---|---|---|
+| `POST` | `/api/v1/conversations/chat-messages` | 路径/schema 不变；模型、选文件、fallback 行为变化 |
+| `GET` | `/api/v1/conversations` | 无公开契约差异 |
+| `PATCH` | `/api/v1/conversations` | 无公开契约差异 |
+| `DELETE` | `/api/v1/conversations` | 无公开契约差异 |
+| `GET` | `/api/v1/conversations/{conversation_id}/messages` | `MessageResponse` 增加字段和公开文件历史消息 |
+| `GET` | `/api/v1/conversations/{conversation_id}/tasks` | 无公开契约差异 |
+
+### 3.3 会话文件
+
+| Method | Path | 差异结论 |
+|---|---|---|
+| `POST` | `/api/v1/conversations/uploads` | form/schema 不变；保存一致性和历史投影增强 |
+| `GET` | `/api/v1/conversations/{conversation_id}/uploads` | query/schema 不变；读取前增加索引修复 |
+| `DELETE` | `/api/v1/conversations/uploads` | body/schema 不变；删除一致性增强，新增 400 映射 |
+
+### 3.4 任务、interrupt 与 artifact
+
+| Method | Path | 差异结论 |
+|---|---|---|
+| `GET` | `/api/v1/tasks/{task_id}` | 无 schema 差异 |
+| `GET` | `/api/v1/tasks/{task_id}/events` | 新增 SSE 事件 `capability.missing_fallback` |
+| `POST` | `/api/v1/tasks/cancel` | 无公开契约差异 |
+| `GET` | `/api/v1/tasks/{task_id}/interrupts` | schema 不变；文件选择复用现有 interrupt 流程 |
+| `GET` | `/api/v1/tasks/{task_id}/graph` | 无公开契约差异 |
+| `GET` | `/api/v1/tasks/{task_id}/artifacts` | 无公开契约差异 |
+| `GET` | `/api/v1/artifacts/{artifact_id}/download` | 无公开契约差异 |
+
+### 3.5 能力与配置
+
+| Method | Path | 差异结论 |
+|---|---|---|
+| `GET` | `/api/v1/capabilities` | 最终实现一致；两分支都会在返回列表前刷新 Skill |
+| `GET` | `/api/v1/config/model-editions` | `options[].reasoning_efforts` 成为必填响应字段 |
+
+开发者文档路由 `/api-doc`、`/api-doc/API更新日志.md`、`/api-doc/api-changelog.md` 在两个分支中也保持一致；FastAPI 的 `/openapi.json`、`/docs`、`/redoc` 应用路由没有业务 schema 差异。
+
+---
 
-## 2026-06-16
+## 4. 详细差异
+
+## 4.1 模型选项与 reasoning effort
+
+### 影响接口
+
+- `GET /api/v1/config/model-editions`
+- `POST /api/v1/conversations/chat-messages`
+
+### 响应变化
 
-### 更新摘要
+`prod` 中的模型选项只有：
+
+```json
+{
+  "value": "model-a",
+  "label": "Model A"
+}
+```
 
-对话上传文件已从临时上传升级为 conversation-scoped 本地文件资源。客户端现有上传、列表、删除和消息提交方式保持兼容；新增字段均可忽略。Skill 运行时会通过后端受控 workspace 挂载文件，客户端不接触本地真实路径。
+`main` 中每个模型选项必须返回：
 
-### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+```json
+{
+  "value": "model-a",
+  "label": "Model A",
+  "reasoning_efforts": {
+    "default": "medium",
+    "disabled_default": "minimal",
+    "options": [
+      {
+        "value": "minimal",
+        "label": "Minimal",
+        "allow_when_thinking_disabled": true
+      },
+      {
+        "value": "medium",
+        "label": "Medium",
+        "allow_when_thinking_disabled": false
+      }
+    ]
+  }
+}
+```
+
+字段含义：
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `default` | `string` | 开启深度思考且客户端未指定 effort 时使用；必须引用 `options[].value` |
+| `disabled_default` | `string \| null` | 关闭深度思考时的默认值；非空时必须引用 disabled-safe option |
+| `options[].value` | `string` | 当前模型自己的 effort 值；不再是全局固定枚举 |
+| `options[].label` | `string` | 客户端展示文本 |
+| `options[].allow_when_thinking_disabled` | `boolean` | `deep_thinking=false` 时是否允许使用 |
+
+### 请求行为变化
+
+`SubmitMessageRequest` 顶层结构不变：
+
+```json
+{
+  "conversation_id": "conv-1",
+  "content": "请分析这份数据",
+  "model_edition": "model-a",
+  "metadata": {
+    "deep_thinking": true,
+    "main_agent_reasoning_effort": "medium"
+  }
+}
+```
+
+`main` 的校验逻辑：
+
+- `model_edition` 仍是顶层可选字段，值必须来自模型配置接口。
+- `metadata.main_agent_reasoning_effort` 按所选模型校验，不再使用全局 `minimal | high | max` 假设。
+- `deep_thinking=true` 且未显式提供 effort 时，使用该模型的 `default`。
+- `deep_thinking=false` 且未显式提供 effort 时，使用该模型的 `disabled_default`。
+- `deep_thinking=false` 时显式提交非 disabled-safe effort，返回 HTTP 400。
+- 模型没有 disabled-safe option 时，不允许关闭深度思考；客户端应将开关固定为开启。
+- 多模型配置下，无法确定所选模型时会 fail closed，而不是静默套用其他模型默认值。
+- 后端启动时会验证所有模型的 `reasoning_efforts`：缺失、重复值、无效 default 或无效 disabled default 都会阻止错误配置进入运行态。
+
+### 客户端迁移要求
+
+- 不要写死 effort 列表。
+- 切换模型时同步切换 effort 选项和默认值。
+- 未由用户显式选择 effort 时可以省略 `metadata.main_agent_reasoning_effort`，让服务端使用模型默认值。
+- 严格响应解码器必须把 `reasoning_efforts` 加入 `ModelEditionOptionResponse`。
+
+兼容性：**响应模型对严格客户端属于破坏性变化；请求字段本身保持兼容。**
+
+## 4.2 历史消息响应与文件上传历史
+
+### 影响接口
 
-- 上传接口仍使用 `multipart/form-data` 的 `conversation_id` 与 `file` 字段；保留原响应字段。
-- 上传成功后服务端会把原始文件保存到本地 conversation 文件目录，并维护该 conversation 的文件索引 `index.md`。
-- `UploadFileResponse` 新增可选 `status` 与 `description_status`；旧客户端可忽略。
-- 文件列表支持可选 `limit`、`cursor`、`include_deleted` 查询参数；默认仍只返回 active 文件。
-- 删除单个 upload 时，服务端会标记 DB 状态并物理删除对应本地文件资源目录；删除响应仍为 `{ upload_id, deleted }`。
-- 客户端仍通过消息 `metadata.upload_ids` 引用文件；不要提交或依赖服务端本地路径。
+`GET /api/v1/conversations/{conversation_id}/messages`
 
-### Skill 文件输入提示
+### `MessageResponse` 字段变化
 
-- 新 Skill 应通过运行时 payload 中的 `resource_manifest_path` 读取 `files[].mount_path`，由脚本操作 workspace 中的真实文件副本。
-- `uploaded_artifacts[].content` / `content_base64` 仍保留用于旧 Skill 兼容，但不再是新 Skill 文件输入的主接口。
+| 字段 | `prod` | `main` | 说明 |
+|---|---|---|---|
+| `message_type` | 不存在 | `string`，默认 `chat` | 区分普通聊天和 `file_upload` |
+| `metadata` | 不存在 | `object`，默认 `{}` | 公开、安全的消息元数据 |
+| `updated_at` | 不存在 | `datetime \| null` | 支持文件状态更新等历史投影 |
+| 其他字段 | 已存在 | 保持 | `artifacts` 等原字段不变 |
 
-## 2026-06-09
+### 公开消息过滤逻辑
 
-### 更新摘要
+`main` 只返回以下历史消息：
 
-本次更新重点影响客户端的 interrupt 续接、历史消息恢复、上传文件类型和模型选项传递。字段定义以 `/api-doc` 与 `/openapi.json` 为准；这里只记录需要客户端关注的 API 行为变化。
+1. `message_type=chat` 且 `role=user | assistant`；
+2. `message_type=file_upload`、`role=system`，并且消息 ID 中包含有效稳定 `upload_id`。
 
-### `/api/v1/conversations/chat-messages`
+其他内部 `system` 消息仍不对客户端公开。
 
-- 同一端点同时处理普通新消息和 open interrupt 下的继续输入：目标会话存在 open interrupt 时优先作为 interrupt turn 处理，不创建新 task；没有 open interrupt 时按普通新消息创建 task。
-- 回答 interrupt 时在 `metadata.interrupt_id` 指定目标 interrupt；只有一个 open interrupt 时可省略，存在多个 open interrupt 且未指定会返回 400。
-- 上传引用继续放在 `metadata.upload_ids`；多 sheet 选择继续放在 `metadata.upload_sheet_selections`。客户端不要提交业务字段形 payload（例如 `design=...`、`ncols=...`）或内部 resume 字段。
-- `client_message_id` 是本轮 interrupt turn 的幂等键；服务端响应中的 `answer_payload.client_request_id` 可用于前端/外部系统关联本次回答处理结果；同一 key 重复提交会返回同一份处理摘要，不会重复恢复任务。
-- `MessageAcceptedResponse.action` 用于区分结果：
-  - `task_accepted`：创建新任务。
-  - `interrupt_resumed`：补参已接受并恢复原 task。
-  - `interrupt_clarification_answer`：只回答了用户的追问或澄清，interrupt 仍保持 open。
-  - `interrupt_mixed_processed`：同一条消息同时包含补参和追问/引导。
-  - `interrupt_schema_switched`：当前 Skill 内切换了 input schema。
-- 当响应包含 `assistant_message`、`answer_payload.will_resume=false` 或 `answer_payload.requires_confirmation=true` 时，客户端应继续展示 interrupt 输入态，并等待用户下一条回复；`will_resume=true` 表示补充信息已接受并恢复原任务。
+### 文件历史消息示例
 
-### `/api/v1/tasks/interrupts`
+```json
+{
+  "message_id": "file_upload:upl-0123456789ab",
+  "conversation_id": "conv-1",
+  "role": "system",
+  "content": "文件上传：materials.csv\n- upload_id: upl-0123456789ab\n- 状态: active\n- 描述状态: ready",
+  "task_id": null,
+  "stream_status": "complete",
+  "created_at": "2026-07-10T08:00:00Z",
+  "message_type": "file_upload",
+  "metadata": {
+    "schema_version": 1,
+    "upload_id": "upl-0123456789ab",
+    "filename": "materials.csv",
+    "description_status": "ready",
+    "description_summary": "材料信息表",
+    "file_type": "csv",
+    "content_type": "text/csv",
+    "size_bytes": 1024,
+    "file_status": "active",
+    "uploaded_at": "2026-07-10T08:00:00Z"
+  },
+  "updated_at": "2026-07-10T08:00:01Z",
+  "artifacts": []
+}
+```
 
-- interrupt 列表仍用于读取当前 open interrupt；新的回答入口统一使用 `POST /api/v1/conversations/chat-messages`。
-- v2 Skill 的 `Interrupt.required_fields` 只提供前端展示所需的 `_slot_collection_ref` 摘要；其中 slot collection 以 `collection_id + revision` 标识当前补槽状态版本，客户端不得修改、回传或把它当作可编辑参数表。
-- `question` 是前端应展示给用户的追问文本；聊天历史保存用户原话，不应展示内部键值形式。
+`file_upload.metadata` 只允许以下字段通过 API 边界：
 
-### `/api/v1/tasks/{task_id}/events`
+- `schema_version`、`upload_id`、`filename`
+- `description_summary`、`description_status`
+- `file_type`、`content_type`、`size_bytes`、`sha256`
+- `file_status`、`uploaded_at`、`description_updated_at`
+- `selected_sheet`、`requires_sheet_selection`
+- `row_count`、`column_count`、`sheet_names`
 
-- interrupt 正式恢复后，客户端继续订阅原 `task_id` 的 SSE，并以 `node.ready_to_resume`、`node.resuming` 和任务终态作为恢复/完成依据。
-- `task.interrupt_answered`、节点恢复事件和任务终态只包含客户端安全字段；客户端只应依赖 `/api-doc` 声明的事件字段。
+路径、`storage_key`、完整 `content`、`content_base64`、provider 原始 payload、token、secret、authorization 等字段不会公开。
 
-### `/api/v1/conversations/{conversation_id}/messages`
+删除文件后，同一稳定消息会更新为 `metadata.file_status=deleted`。客户端可以保留历史展示，但不得把已删除文件重新作为任务附件。
 
-- `MessageResponse` 新增可选 `artifacts` 数组。读取历史消息时，assistant 消息可能带回可展示 artifact，用于 History Recall 场景恢复数据查询表格卡片、OCR 原文卡片和仍 active 的文件下载卡片。
-- 实时任务展示仍以 SSE 和 `/api/v1/tasks/{task_id}/artifacts` 为主；`messages[].artifacts` 主要用于刷新或切换历史会话后的展示恢复。
+## 4.3 会话文件上传、列表与删除的一致性
 
-### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+### 公开参数与 schema
 
-- 上传白名单新增 `.vcf` 与 `.vcf.gz`；响应 `file_type=vcf`。文本类上传继续返回 `file_type=text` 并在 preview 中提供 `char_count` / `line_count`。`.vcf.gz` 按复合扩展名识别，普通 `.gz` 不会仅因 `application/gzip` 被接受。
-- VCF / VCF.GZ 按二进制文件处理，不做 CSV / JSON / Excel 预览解码；客户端只应依赖返回的文件元数据和后续 Skill 结果。
+以下内容在两个分支间不变：
 
-### `/api/v1/config/model-editions` 与新消息提交
+- 上传仍使用 `multipart/form-data`：`conversation_id` + `file`。
+- 列表 query 仍是 `limit`、`cursor`、`include_deleted`。
+- 删除请求仍是 `{ "conversation_id": "...", "upload_id": "..." }`。
+- `UploadFileResponse`、`UploadListResponse`、`DeleteUploadResponse` 字段无 OpenAPI 差异。
+- TSV 支持在两个最终分支均已存在，不属于本次分支差异。
 
-- `GET /api/v1/config/model-editions` 的每个模型选项新增必填 `reasoning_efforts`，包含 `default`、`disabled_default` 与 `options[].allow_when_thinking_disabled`；客户端应按当前模型动态展示 reasoning effort。
-- `metadata.main_agent_reasoning_effort` 不再是全局固定枚举；服务端按所选 `model_edition` 校验。非法 effort 或 `deep_thinking=false` 下不允许的 effort 会返回 validation error，不再自动降级。
-- 当前模型没有任何 disabled-safe effort 时，前端应显示只读“深度思考：已开启”并固定提交 `deepThinking=true`。
+### `main` 的行为增强
 
-- `model_edition` 仍使用顶层请求字段，候选值来自 `GET /api/v1/config/model-editions`；客户端不要自定义模型枚举或提交 `trim_max_tokens`。
-- `metadata.deep_thinking` 与 `metadata.main_agent_reasoning_effort` 会影响本次请求的回答模式。历史消息只保存最终 answer content。
+#### 上传
 
-### `/api/v1/artifacts/{artifact_id}/download`
+- 上传成功会同时保存 conversation-scoped 文件资源，并创建或更新稳定的 `file_upload:<upload_id>` 历史消息。
+- 文件资源与历史投影采用组合持久化语义，避免“文件成功但历史消息缺失”。
+- 本地文件、描述文件、数据库组合写入或索引写入失败时，接口 fail closed，不返回部分成功。
+- 对可恢复的索引写入失败进行重试；持续失败时记录 repair marker 并补偿本轮上传。
+- 补偿会清理本轮产生的数据库状态、本地文件和内存态；补偿本身失败会留下可审计修复标记。
 
-- 下载接口需要 Authorization；客户端下载应使用 artifact descriptor 中的 `download_url` 并通过带 Bearer token 的请求发起。
-- 不要把 assistant 正文里的链接当作下载入口；前端应优先展示 artifact 下载卡片或下载按钮。
+#### 列表
 
-## 2026-06-05
+- 读取会话文件前会尝试处理到期的 index repair marker。
+- DB 中的文件资源状态是权威事实，`index.md` 不作为 API 返回的唯一事实源。
 
-### 更新摘要
+#### 删除
 
-Skill 后端接入切换为 v2-only Skill Contract：公开能力只从 `skill.contract.yaml` 注册；`SKILL.md` 只保留轻量说明；执行输入由 `schemas/*.input.yaml` 和 slot_collection v2 驱动；主代理答疑只能通过 `SkillResourceService` 按需读取 prompt-facing resources。
+- 删除会原子更新文件资源状态与对应文件历史消息，再重写索引并清理本地目录。
+- 即使索引重写或本地目录清理失败，数据库中的 `deleted` 事实仍保持，不会把文件重新暴露为 active。
+- `main` 新增 `UploadValidationError -> HTTP 400` 映射；`prod` 的删除路由只显式处理权限/不存在场景。
 
-### `/api/v1/capabilities`
+兼容性：**响应 schema 兼容，但失败时机和错误码更严格；调用方不得把超时或 400 当作已成功删除/上传。**
 
-- `skill.*` capability 只来自同 bundle 的 v2 contract；无 contract、contract invalid、旧 frontmatter-only Skill 不注册、不进入能力列表。
-- 能力发现只暴露 capability/display/routing 摘要和相对 `source_path`；不会暴露脚本路径、handler、runtime、service、内部配置或 secret。
+## 4.4 会话文件智能选择
 
-### `/api/v1/conversations/chat-messages`
+### 影响接口
 
-- 外部 direct `capability_id=skill.*` 仍 fail closed，错误码为 `direct_skill_execution_disabled`。
-- slash / API 点名 Skill 仍使用 `main_agent.respond + metadata.soft_skill_binding`；自然语言规划继续推荐 `capability_id=null`。
-- v2 Skill 缺参 interrupt 的 `_slot_collection.schema_version=2`，包含 `selected_schema_id`、`selected_entrypoint`、`invalid`、`resource_hints`，客户端不得伪造内部 resume 字段。
+- `POST /api/v1/conversations/chat-messages`
+- `GET /api/v1/tasks/{task_id}/interrupts`
+- `GET /api/v1/tasks/{task_id}/events`
 
-### Skill ResourceService
+没有新增 endpoint，也没有新增顶层必填参数。
 
-- 主代理只可读取 contract 授权给 `main_agent` audience 的 prompt-facing resources；不得读取 `scripts/`、`runtime/`、`schemas/`、`native/`、`configs/`、`config.yaml`、`.env`、`.git` 或 secret/token/credential 路径原文。
-- 资源读取会产生 audit-only `skill.resource_read` 事件，事件 payload 不包含原文内容。
+### 选择模式
 
-> 维护口径：这里记录 API 的外部行为和客户端迁移提醒；字段级细节、请求 / 响应 schema、事件 payload 与错误码以 `/api-doc` 正式接口文档为准。API 行为变化追加到本文件顶部。
+由服务端环境变量 `MAF_CONVERSATION_FILE_SELECTOR_MODE` 控制：
 
-## 2026-06-01
+| 模式 | 行为 |
+|---|---|
+| `disabled` | 默认值；不运行智能选择 |
+| `shadow` | 生成选择决策和审计证据，但不自动绑定或改变用户流程 |
+| `enforce_narrow` | 只对可验证的窄引用自动绑定，否则澄清 |
+| `enforce_guarded_multi` | 在窄引用基础上，按 Skill profile 或明确多文件语义处理多选 |
 
-### 更新摘要
+旧的笼统值 `enforce` 不被接受；未知值会降级为 `disabled` 并记录配置审计事件。
 
-表格上传编码兼容与表头规范化已从 PRD 进入后端与前端行为：上传层统一处理 CSV / JSON 多编码、技术性表头清洗与 Excel spreadsheet metadata；多 sheet Excel 不再交给 LLM 猜测，而是通过结构化 interrupt 让用户选择 sheet。
+### 参数与优先级
 
-### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+1. `metadata.upload_ids` 仍是最高优先级的显式文件引用；存在时跳过智能 selector。
+2. 未显式提供 upload ID 时，服务端可以根据消息文本、稳定 `upload_id`、原始文件名、明确的文件序号和近期任务附件使用记录匹配文件。
+3. 启用 selector 且进入选择路径时，`metadata.file_selection` 或 `metadata.file_requirement_profile` 可提供可选 profile；`metadata.soft_skill_binding` 中也接受同名 profile。
 
-- CSV / JSON 上传支持 `utf-8-sig`、`utf-8`、`gb18030`、`big5`、`shift_jis`、`cp932` 等确定性编码候选；解码必须完整成功，不使用 ignore / replace 静默吞错。
-- 表头 / JSON 顶层 key 会清理 BOM、零宽字符、不可见控制字符、全角空格与外层成对引号；不会做业务语义列名映射。
-- Excel `.xlsx` / `.xls` 上传返回 `file_type=spreadsheet`。单有效 sheet 自动生成执行用 UTF-8 CSV；多有效 sheet 返回 `requires_sheet_selection=true`、`excel_sheets`、`excel_sheet_count`。
-- `UploadPreviewResponse` 新增 `source_encoding`、`original_columns`、`column_normalizations`、`column_count`、`columns_truncated`、`normalized_content_type`、`char_count`、`line_count`、`size_bytes`、`file_type`、`requires_sheet_selection`、`selected_sheet`、`excel_sheets`、`excel_sheet_count`、`excel_sheets_truncated` 等字段。
-- Prompt-safe 上传摘要仍不返回完整 `content`、`content_base64` 或原始行数据；宽表 / 多 sheet 摘要通过 `*_truncated` 与 count 字段说明裁剪。
-- `application/vnd.ms-excel` 若没有 Excel 后缀或 Excel magic bytes，仍按 CSV 兼容处理。
+profile 支持：
 
-### `/api/v1/conversations/chat-messages` 与 `/api/v1/tasks/interrupts`
+```json
+{
+  "required": true,
+  "allow_multiple": false,
+  "expected_content": ["材料编号", "性状数据"],
+  "supported_file_types": ["csv", "spreadsheet"],
+  "helpful_columns": ["material_id", "trait"],
+  "disambiguation_hint": "优先选择材料信息表"
+}
+```
 
-- 任务引用未选择 sheet 的多 sheet Excel upload 时，会先进入 `sheet_selection_required` open interrupt，不会把未确定 sheet 的内容传给 Skill。
-- `required_fields.upload_sheet_selections` 使用 `required_upload_ids`、`options_by_upload_id`、`labels_by_upload_id` 的稳定结构，前端可为每个 upload 渲染独立 sheet 选择控件。
-- 回答时通过 `chat-messages` 提交 `metadata.upload_sheet_selections={upload_id: sheet_name}`；服务端校验 upload 归属、sheet allowlist 与任务作用域，合法后 resume 当前任务并使用所选 sheet 的规范化 CSV。
-- `metadata.upload_ids` 中任一 upload 缺失、过期或不属于当前会话时，消息提交返回 400，且不会创建 message / task。
-- `sheet_selection_required` 回答若引用缺失 / 过期 upload 或非法 sheet，返回 400，并保持原 interrupt open、node waiting_for_input，不保存无效 answer。
+运行时还支持 `source`、`user_file_reference`、`context_notes`，但普通客户端通常无需提交这些后端推导字段。
 
-### `/api/v1/tasks/cancel`
+以下旧字段在 selector 校验路径中会被拒绝并返回 HTTP 400：
 
-- 取消后如果后端节点晚返回或晚抛错，任务终态仍保持 `cancelled`；晚到结果不会再把任务覆盖成 `failed` / `completed`。
+- `metadata.file_intent`
+- profile 内的 `needs_file`、`intent`、`accepted_file_types`、`expected_inputs`
+- `requires_file`、`required_file`、`default_allow_multiple` 等旧别名
+- 未知 profile 字段或非法 `source`
 
+### 决策行为
 
-## 2026-05-28 至 2026-05-29
+- 明确引用有效单文件：自动绑定。
+- 明确请求多文件，且 profile 允许或文本明确表达比较/合并：可绑定多个文件。
+- 文件必需但会话没有 active 文件：创建现有 interrupt，要求上传或补充文件。
+- 重名文件、低置信度、无效 selector JSON、未知 upload ID、数量不匹配：创建或保持 interrupt，不猜测绑定。
+- 删除文件、跨会话文件、伪造或不存在的精确 upload ID：在 LLM selector 和任务执行前 fail closed。
+- 替换上传后继续沿用 interrupt provenance；多 sheet 文件继续复用既有 sheet-selection interrupt。
+- 传给 selector 的候选只包含 prompt-safe metadata，不包含文件正文、真实路径或 `storage_key`。
 
-### 更新摘要
+## 4.5 能力缺失 LLM fallback
 
-主要收口 Skill 外部调用入口、缺参 interrupt 续接、文件下载判定和恢复类 no-op 行为。
+### 影响接口与事件
 
-### `/api/v1/conversations/chat-messages`
+- `POST /api/v1/conversations/chat-messages`
+- `GET /api/v1/tasks/{task_id}/events`
+- `GET /api/v1/conversations/{conversation_id}/messages`
 
-- 外部客户端不要再直接提交 `capability_id=skill.*`。直接提交会返回 400，错误包含 `direct_skill_execution_disabled`，且不会创建任务或消息。
-- Slash command 或 API 点名 Skill 时，统一提交：
-  - `capability_id=main_agent.respond`
-  - `metadata.soft_skill_binding.capability_id=<目标 skill.*>`
-  - 可选 `metadata.soft_skill_binding.command=<slash command>`
-- 服务端会先由主代理判断“答疑 / 追问缺参 / 内部执行 Skill”，目标 Skill 只作为内部节点参与任务图，不再作为外部消息提交入口。
-- Soft-bound Skill 的追问会带入同一会话历史；用户连续追问时不需要重复完整上下文。
-- Prompt Envelope 路径已接入 final token preflight：最终输入预算按 `floor(trim_max_tokens * 0.75)` 计算，失败后最多尝试一次历史压缩，再失败 fail closed。对外 REST / SSE schema 不变。
+### `main` 的新行为
 
-### `/api/v1/tasks/{task_id}/events`
+当 Planner / Replanner 或 soft Skill binding 指向已经下线、未注册或不可用的能力时，`main` 可以把本轮收敛为受约束的 `main_agent.respond`：
 
-- Soft-bound Skill 判断为答疑时，会通过 transient SSE `main_agent.output_delta` 流式输出。
-- `main_agent.output_delta` 只用于当前实时连接展示，不入库、不 replay；刷新后的历史展示应以最终 assistant message / final 事件为准。
-- Prompt Envelope、profile、token preflight 等渲染观测事件属于 audit-only，不进入前端 SSE。
+- 对可 fallback 的缺失能力，不再仅因能力消失而直接失败。
+- assistant 正文必须以 `【能力缺口说明】` 明示当前缺口。
+- 回答只能提供通用说明、草案或可手工复核建议。
+- 不执行缺失 Skill / MCP，不得声称已经调用成功。
+- `artifact_generation_allowed` 固定为 `false`，不得生成可下载文件。
+- full fallback 不进入无意义的重复 replan；partial fallback 会说明已完成能力和未覆盖能力。
 
-### `/api/v1/tasks/interrupts`
+直接从外部请求提交不允许的 `capability_id=skill.*` 仍可能在任务创建前返回 HTTP 400；新增 fallback 主要覆盖合法编排流程中的缺失能力，以及已保存但现已失效的 soft binding。
 
-- Skill 缺参统一表现为 open interrupt；当前前端直接展示 interrupt 的 `question` 文本，`required_fields` 仅用于展示补参上下文、上传引用和 sheet 选择。
-- 回答 interrupt 后，服务端复用原 interrupted Skill 节点和原 finalizer，任务 root 保持稳定；客户端消息 metadata 中伪造的内部 resume 字段会被忽略。
-- 同一任务内多轮补参会合并已接受的历史 answer payload 与上传 artifact metadata。用户先上传文件、再补标量参数时，不需要重复上传文件。
+### 新 SSE 事件
 
-### `/api/v1/conversations/{conversation_id}/tasks`
+事件类型：`capability.missing_fallback`
 
-- 查询不存在的 conversation task 列表时返回 200 空集合：`tasks=[]`。
-- 前端恢复 / 轮询流程可以把该结果视为“没有可恢复任务”，不需要按错误弹窗处理。
+```json
+{
+  "event_type": "capability.missing_fallback",
+  "payload": {
+    "enabled": true,
+    "scope": "full",
+    "reason_code": "skill_missing",
+    "missing_capability_summary": "点名的 Skill 当前未注册或不可用",
+    "fallback_content_scope": "仅提供可手工复核的通用建议",
+    "llm_fallback_allowed": true,
+    "artifact_generation_allowed": false,
+    "disclosure_required": true,
+    "memory_context_used": false,
+    "source_message_count": 1
+  }
+}
+```
 
-### `/api/v1/conversations/uploads` 与 `/api/v1/conversations/{conversation_id}/uploads`
+枚举约束：
 
-- 查询不存在的 conversation upload 列表时返回 200 空集合：`uploads=[]`。
-- 删除未知 upload 返回 200，`deleted=false`，用于幂等清理。
-- 上传列表只返回文件元数据，不返回 `content` / `content_base64`。
-- 已删除 upload 再被消息引用时，会进入 `missing_upload_ids`，不会作为可用 uploaded artifact 进入执行阶段。
+- `scope`: `full | partial`
+- `reason_code`: `capability_missing | skill_missing | forced_skill_missing | mcp_missing`
+- `attempted_capability_summary`: 仅 partial fallback 时可出现
+- `source_message_ids`: 可选、受长度和数量限制
 
-### `/api/v1/artifacts/{artifact_id}/download`
+assistant 历史消息会在 `metadata.capability_missing_fallback` 中持久化同一份安全摘要。前端应同时支持实时 SSE 和历史 metadata 恢复，并忽略未列入契约的字段。
 
-- 文件下载只信任平台 artifact descriptor 中的 `download_url=/api/v1/artifacts/{artifact_id}/download`。
-- 客户端不要从 assistant 文本中提取 `sandbox:/mnt/data`、`file://`、`/mnt/data`、本地绝对路径或 `outputs/...` 作为下载链接。
-- 如果任务没有 file artifact 或 artifact 缺少合法 `download_url`，前端应展示普通文本、失败说明或补充信息卡片，而不是下载按钮。
+## 4.6 SeedPilot 外部路径与 Nginx 差异
 
-### `/api/v1/capabilities`
+### API 代理路径
 
-- `source_path` 以相对 Skill root 的路径返回，例如 `field-design/SKILL.md`，不带项目级 `skill/` 前缀。
-- `skill.*` capability 只用于能力发现和系统内部编排；外部消息提交仍按 `main_agent.respond + metadata.soft_skill_binding` 进入。
+两个分支都支持：
+
+- `/seedpilot/api/*` 重写到后端 `/api/*`
+- `/seedpilot/openapi.json` 重写到 `/openapi.json`
+- `/seedpilot/api-doc` 和 `/seedpilot/api-doc/*` 代理到后端 API 文档路由
+- `/seedpilot/docs`、`/seedpilot/redoc` 代理到 FastAPI 文档页
+
+因此本文前述 `/api/v1/*` 是后端 canonical path；部署在 SeedPilot 子路径下时，外部调用地址为 `/seedpilot/api/v1/*`。
+
+### `prod` 相对 `main` 的反向差异
+
+`prod` 在 `/seedpilot/api-doc` 和 `/seedpilot/api-doc/*` location 中额外配置：
+
+- 清空上游 `Accept-Encoding`
+- `sub_filter_once off`
+- 把响应正文中的 `/api-doc/` 改为 `/seedpilot/api-doc/`
+- 把 `/openapi.json` 改为 `/seedpilot/openapi.json`
+
+`main` 当前缺少这组 API 文档页内容重写。业务 JSON API 代理不受影响，但 API 文档 HTML 中使用根路径的链接时，可能落到被 Nginx 隔离的站点根路径并返回 404。合并或发布时应保留 `prod` 的这组 Nginx 规则。
+
+---
+
+## 5. 明确没有差异的事项
+
+为避免把提交历史误判为最终分支差异，以下事项在两个最终分支中等价：
+
+- 所有 FastAPI 业务 endpoint 的 path 和 method。
+- 鉴权请求与响应 schema。
+- `SubmitMessageRequest` 顶层字段。
+- 上传 form 字段、上传/列表/删除 response schema。
+- TSV 作为 CSV-family 输入的支持。
+- `GET /api/v1/capabilities` 返回前刷新 Skill 列表的行为。
+- task summary、graph、interrupt 列表、artifact 列表与下载接口的公开 schema。
+- SeedPilot 业务 API 的 `/seedpilot/api/* -> /api/*` 代理路径。
+
+---
+
+## 6. 客户端迁移清单
+
+### 必须完成
+
+- [ ] 更新 `ModelEditionOptionResponse`，把 `reasoning_efforts` 视为必填。
+- [ ] reasoning effort UI 按当前模型动态渲染，不使用全局常量。
+- [ ] 关闭深度思考前检查 `allow_when_thinking_disabled` 和 `disabled_default`。
+- [ ] 更新 `MessageResponse` 类型，接收 `message_type`、`metadata`、`updated_at`。
+- [ ] 历史列表支持 `role=system` + `message_type=file_upload`，同时继续隐藏其他 system message。
+- [ ] `file_status=deleted` 的文件只作历史展示，不重新附加。
+
+### 强烈建议
+
+- [ ] 处理 SSE `capability.missing_fallback` 并显示能力缺口提示。
+- [ ] 从 assistant history 的 `metadata.capability_missing_fallback` 恢复同一提示。
+- [ ] 遇到文件选择 interrupt 时沿用既有 interrupt 提交流程，不新建任务。
+- [ ] 对上传/删除失败执行列表刷新或状态核对，不推断部分成功。
+- [ ] SeedPilot 部署保留 `prod` 的 `/api-doc` 和 `/openapi.json` `sub_filter`。
+
+### 不应执行
+
+- [ ] 不要提交服务端真实路径、`storage_key`、完整文件内容或 `content_base64`。
+- [ ] 不要继续使用 `metadata.file_intent` 或旧 file requirement 字段。
+- [ ] 不要把能力缺失 fallback 当作 Skill 已执行成功或文件已生成。
+- [ ] 不要把 assistant 正文中的普通文本链接当作 artifact 下载凭证。
+
+---
+
+## 7. 回归验证建议
+
+### 契约验证
+
+1. 分别生成 `main` 和 `prod` 的 `/openapi.json`，比较 paths、methods 和 schemas。
+2. 对模型配置响应执行严格 JSON schema 解码。
+3. 对历史消息执行旧 `chat` 消息、新 `file_upload` 消息和内部 system message 过滤测试。
+
+### 行为验证
+
+1. 对每个模型验证默认 effort、disabled-safe effort、非法 effort 和未知模型。
+2. 验证显式 `metadata.upload_ids`、文件名引用、重名文件、删除文件、跨会话文件和多文件选择。
+3. 注入上传 DB、描述文件、索引和本地清理失败，确认接口不会返回部分成功。
+4. 模拟 stale soft Skill binding，确认任务完成、正文有披露、SSE/历史 metadata 可恢复且没有下载 artifact。
+
+### 部署验证
+
+在 SeedPilot 前缀下至少 smoke：
+
+- `/seedpilot/api/v1/config/model-editions`
+- `/seedpilot/openapi.json`
+- `/seedpilot/api-doc`
+- `/seedpilot/api-doc/API更新日志.md`
+- `/seedpilot/docs`
+- `/seedpilot/redoc`
+
+---
+
+## 8. 发布建议
+
+本次 `main -> prod` API 合并可按以下优先级执行：
+
+1. 先升级客户端类型和模型 reasoning effort UI。
+2. 再部署后端模型契约、消息历史、文件一致性和 fallback 逻辑。
+3. 保留 `prod` 已有的 SeedPilot API 文档 `sub_filter`，不要用 `main` 的较弱 Nginx location 覆盖。
+4. 完成 OpenAPI diff、关键 API 回归、SSE 回放和 SeedPilot 子路径 smoke 后再切换流量。
+
+> 维护口径：从本次扫描起，本文件只描述 `main` 与 `prod` 当前基线的 API 差异，不再保留已经同步完成的旧增量条目。字段级最终真值仍以目标分支实际生成的 `/openapi.json`、SSE 实现和发布镜像 smoke 结果为准。
