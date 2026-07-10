@@ -5,7 +5,7 @@
 ## 背景
 
 生产前端部署在 `/seedpilot/`，Vite 构建产物复制到 nginx 的
-`/usr/share/nginx/html/seedpilot/`。当前 `main` 在 `frontend/src/App.tsx`
+`/usr/share/nginx/html/seedpilot/`。修复前，`main` 在 `frontend/src/App.tsx`
 中把三个按钮图片写成根路径 `/pics/*`，浏览器因此绕过 `/seedpilot/`
 请求资源，并被 nginx 的根路径 404 规则拒绝。
 
@@ -84,5 +84,5 @@
 
 ## 文档影响
 
-实现完成后更新根 `CHANGELOG.md`。本次修改不改变目录职责或入口索引，
+根 `CHANGELOG.md` 已更新。本次修改不改变目录职责或入口索引，
 无需调整根目录、`frontend/` 或 `docs/` 下的 `AGENTS.md`。
