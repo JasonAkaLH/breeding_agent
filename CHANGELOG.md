@@ -16,6 +16,8 @@
 
 ### 2026-07-10
 
+- `main` 补回 SeedPilot public 图片子路径适配：三个按钮 SVG 统一通过 Vite `BASE_URL` 生成地址，生产构建请求 `/seedpilot/pics/*`，本地根路径开发继续请求 `/pics/*`；保持 nginx 根路径隔离规则不变。License Requirement：前端与文档变更，无新增依赖/许可变更。
+
 - Docker 开发环境镜像发布为 `0.1.23`：已从 `main` 分支提交 `2de4ce8` 构建并推送 backend/frontend 开发镜像；远端 OCI manifest 已验证为 `linux/amd64`，backend digest 为 `sha256:c48ae44d4d615629ae83682e63417b7cb843c3f683143ff54e07f51642921372`，frontend digest 为 `sha256:236d54352c77adc04745b460f3f62bf3001f809d799102cfdc03a9d19277bc9f`；后端 SQLite 隔离启动与前端 nginx/静态产物 smoke 通过，开发启动命令已更新到 `0.1.23`。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。
 
 ### 2026-07-09
