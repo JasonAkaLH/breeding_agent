@@ -2,6 +2,8 @@
 
 本文件是 **breeding_agent 仓库的总变更记录**，面向人类开发者与 AI 编码助手，用于快速理解当前工程状态、最近进展与后续入口。
 
+- Docker 开发环境镜像发布为 `0.1.23`：已从 `main` 分支提交 `2de4ce8` 构建并推送 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.23` 与 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.23`；远端 OCI manifest 已验证为 `linux/amd64`，backend digest 为 `sha256:c48ae44d4d615629ae83682e63417b7cb843c3f683143ff54e07f51642921372`，frontend digest 为 `sha256:236d54352c77adc04745b460f3f62bf3001f809d799102cfdc03a9d19277bc9f`；远端镜像 smoke 已通过后端 SQLite 隔离启动、前端 nginx 配置与 `/seedpilot/` 静态产物检查，`docker_cmd.md` 开发环境启动命令同步改为 `0.1.23`。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。
+
 - Docker 开发环境镜像发布为 `0.1.22`：已构建并推送 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.22` 与 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.22`；远端 manifest 已验证：backend `sha256:2216c7f01dc99e9a133541f4488ed645bf4512eddc19a0a0cd5ac8555d47063d`，frontend `sha256:79ed7eb3a00b3b1a5334c28f4b55f6132c96714f52a1faf65f5e55729f1df020`；`docker_cmd.md` 开发环境启动命令同步改为 `0.1.22`，且 `AUTH_SECRET_FILE` 不再每次部署自动轮换，避免重复部署导致旧登录 token 失效。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。
 
 - Docker 开发环境镜像发布为 `0.1.21`：用于交付能力缺失 LLM fallback 明示披露功能，已构建并推送 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-backend-dev:0.1.21` 与 `registry.cn-hangzhou.aliyuncs.com/biobin/breeding-agent-frontend-dev:0.1.21`；远端 manifest 已验证：backend `sha256:265485c3d8347b2cd829af3982b4e16cc66de5c293966b8c0de7e7ff72e93b16`，frontend `sha256:f28db42d317adf9202398421a1a97cd7da4c4838180506b508726b78872a179a`；`docker_cmd.md` 开发环境启动命令同步改为 `0.1.21`。Dockerfile 同步适配外部 Skill repo 挂载：镜像内创建空 `/app/skill`，不再要求仓库内存在已下线的 `skill/` 目录。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。
@@ -11,6 +13,10 @@
 ---
 
 ## [Unreleased]
+
+### 2026-07-10
+
+- Docker 开发环境镜像发布为 `0.1.23`：已从 `main` 分支提交 `2de4ce8` 构建并推送 backend/frontend 开发镜像；远端 OCI manifest 已验证为 `linux/amd64`，backend digest 为 `sha256:c48ae44d4d615629ae83682e63417b7cb843c3f683143ff54e07f51642921372`，frontend digest 为 `sha256:236d54352c77adc04745b460f3f62bf3001f809d799102cfdc03a9d19277bc9f`；后端 SQLite 隔离启动与前端 nginx/静态产物 smoke 通过，开发启动命令已更新到 `0.1.23`。License Requirement：镜像发布/运维文档变更，无新增依赖/许可变更。
 
 ### 2026-07-09
 
