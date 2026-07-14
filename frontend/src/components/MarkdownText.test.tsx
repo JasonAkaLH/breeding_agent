@@ -121,6 +121,26 @@ describe('MarkdownText', () => {
     expect(container.textContent?.match(/\$a\*\*b\*\*c\$/g)).toHaveLength(1);
   });
 
+  it('keeps a formula with strong-like markers inside an outer strong span', () => {
+    const { container } = render(<MarkdownText content={'**outer $a**b**c$ end**'} />);
+
+    const formula = screen.getByTestId('formula');
+    const strong = container.querySelector('strong');
+    expect(formula).toHaveAttribute('data-source', 'a**b**c');
+    expect(strong).toContainElement(formula);
+    expect(strong).toHaveTextContent('outer $a**b**c$ end');
+  });
+
+  it('counts a compositional strong formula only once toward the render budget', () => {
+    const remainingFormulas = Array.from({ length: 100 }, (_, index) => `$x_${index}$`);
+    render(<MarkdownText content={['**outer $a**b**c$ end**', ...remainingFormulas].join(' ')} />);
+
+    const formulas = screen.getAllByTestId('formula');
+    expect(formulas).toHaveLength(formulaParser.MAX_FORMULAS_PER_RENDER);
+    expect(formulas[0]).toHaveAttribute('data-source', 'a**b**c');
+    expect(formulas.at(-1)).toHaveAttribute('data-source', 'x_98');
+  });
+
   it('parses multiline block candidates once and skips parsing after the source limit', () => {
     const parseBlockFormula = vi.mocked(formulaParser.parseBlockFormula);
     const formulaLines = Array.from({ length: 200 }, () => 'x');

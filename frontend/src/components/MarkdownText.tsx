@@ -8,6 +8,7 @@ import {
   scanInlineFormulaSpans,
   scanInlineFormulas,
   type FormulaToken,
+  type InlineFormulaSpan,
 } from './mathFormulaParser';
 
 interface MarkdownTextProps {
@@ -263,37 +264,14 @@ function renderInline(text: string, context: FormulaParseContext): ReactNode[] {
   const nodes: ReactNode[] = [];
   const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
   const formulaSpans = scanInlineFormulaSpans(text);
-  let formulaSpanIndex = 0;
+  const structuralText = maskFormulaStrongMarkers(text, formulaSpans);
   let cursor = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = pattern.exec(text)) !== null) {
-    const token = match[0];
+  while ((match = pattern.exec(structuralText)) !== null) {
     const matchIndex = match.index;
+    const token = text.slice(matchIndex, pattern.lastIndex);
     const key = `inline-${matchIndex}-${nodes.length}`;
-
-    if (token.startsWith('**') && token.endsWith('**')) {
-      while (formulaSpans[formulaSpanIndex]?.end <= matchIndex) formulaSpanIndex += 1;
-      const containingFormula = formulaSpans[formulaSpanIndex];
-      const strongIsInsideFormula = containingFormula && (
-        containingFormula.start >= cursor
-        && containingFormula.start < matchIndex
-        && containingFormula.end > matchIndex
-      );
-      if (strongIsInsideFormula) {
-        if (containingFormula.start > cursor) {
-          nodes.push(...renderFormulaAwareText(text.slice(cursor, containingFormula.start), context, cursor));
-        }
-        nodes.push(...renderFormulaAwareText(
-          text.slice(containingFormula.start, containingFormula.end),
-          context,
-          containingFormula.start,
-        ));
-        cursor = containingFormula.end;
-        pattern.lastIndex = cursor;
-        continue;
-      }
-    }
 
     if (matchIndex > cursor) {
       nodes.push(...renderFormulaAwareText(text.slice(cursor, matchIndex), context, cursor));
@@ -324,6 +302,41 @@ function renderInline(text: string, context: FormulaParseContext): ReactNode[] {
     nodes.push(...renderFormulaAwareText(text.slice(cursor), context, cursor));
   }
   return nodes;
+}
+
+interface InlineRange {
+  start: number;
+  end: number;
+}
+
+function maskFormulaStrongMarkers(text: string, formulaSpans: InlineFormulaSpan[]): string {
+  const protectedRanges = collectProtectedInlineRanges(text);
+  let protectedIndex = 0;
+  let characters: string[] | null = null;
+
+  for (const formulaSpan of formulaSpans) {
+    while (protectedRanges[protectedIndex]?.end <= formulaSpan.start) protectedIndex += 1;
+    const protectedRange = protectedRanges[protectedIndex];
+    if (protectedRange && protectedRange.start < formulaSpan.end) continue;
+
+    for (let index = formulaSpan.start; index < formulaSpan.end; index += 1) {
+      if (text[index] !== '*') continue;
+      characters ??= text.split('');
+      characters[index] = ' ';
+    }
+  }
+
+  return characters?.join('') ?? text;
+}
+
+function collectProtectedInlineRanges(text: string): InlineRange[] {
+  const ranges: InlineRange[] = [];
+  const pattern = /`[^`]+`|\[[^\]]+\]\([^)]+\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    ranges.push({ start: match.index, end: pattern.lastIndex });
+  }
+  return ranges;
 }
 
 function renderFormulaAwareText(text: string, context: FormulaParseContext, offset: number): ReactNode[] {
