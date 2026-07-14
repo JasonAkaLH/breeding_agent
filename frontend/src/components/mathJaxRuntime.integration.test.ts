@@ -94,6 +94,13 @@ describe.each(['/' as const, '/seedpilot/' as const])('real MathJax engine at %s
     expect(mathml.querySelector('svg')).not.toBeNull();
     expect(tex.querySelector('mjx-assistive-mml')).not.toBeNull();
     expect(mathml.querySelector('mjx-assistive-mml')).not.toBeNull();
+    for (const output of [tex, mathml]) {
+      const svg = output.querySelector('svg');
+      expect(svg).toHaveAttribute('aria-hidden', 'true');
+      expect(svg).toHaveAttribute('focusable', 'false');
+      expect(svg).toHaveAttribute('role', 'img');
+      expect(output.querySelector('mjx-assistive-mml math')).not.toBeNull();
+    }
     expect(requests.length).toBeGreaterThanOrEqual(3);
     expect(requests.some((request) => request.endsWith('/svg/dynamic/double-struck.js'))).toBe(true);
     expect(requests.every((request) => new URL(request).origin === 'https://app.test')).toBe(true);
@@ -103,18 +110,71 @@ describe.each(['/' as const, '/seedpilot/' as const])('real MathJax engine at %s
     dom.window.close();
   });
 
-  it('filters formula-supplied URLs, styles, classes, and IDs', async () => {
+  it('filters every denied URL scheme plus formula-supplied styles, classes, and IDs', async () => {
     const { dom, requests, mathJax } = await loadRealMathJax(basePath);
-    const output = await mathJax.mathml2svgPromise(
-      '<math xmlns="http://www.w3.org/1998/Math/MathML" href="https://outside.example/"><mi class="evil" id="evil" style="color:red">x</mi></math>',
-      { display: false },
-    );
+    for (const url of ['javascript:alert(1)', 'data:text/html,unsafe', 'file:///etc/passwd']) {
+      const output = await mathJax.mathml2svgPromise(
+        `<math xmlns="http://www.w3.org/1998/Math/MathML" href="${url}"><mi class="evil" id="evil" style="color:red">x</mi></math>`,
+        { display: false },
+      );
 
-    expect(output.outerHTML).not.toContain('outside.example');
-    expect(output.outerHTML).not.toContain('class="evil"');
-    expect(output.outerHTML).not.toContain('id="evil"');
-    expect(output.outerHTML).not.toContain('color:red');
+      expect(output.outerHTML).not.toContain(url);
+      expect(output.outerHTML).not.toContain('class="evil"');
+      expect(output.outerHTML).not.toContain('id="evil"');
+      expect(output.outerHTML).not.toContain('color:red');
+    }
     expect(requests.every((request) => new URL(request).origin === 'https://app.test')).toBe(true);
+
+    dom.window.close();
+  });
+
+  it('does not render HTML embedded in MathML token nodes', async () => {
+    const { dom, requests, mathJax } = await loadRealMathJax(basePath);
+    const startupRequestCount = requests.length;
+
+    await expect(mathJax.mathml2svgPromise(
+      '<math xmlns="http://www.w3.org/1998/Math/MathML"><mtext><span xmlns="http://www.w3.org/1999/xhtml">unsafe</span>safe</mtext></math>',
+      { display: false },
+    )).rejects.toThrow('Unknown node type "span"');
+    expect(requests).toHaveLength(startupRequestCount);
+
+    dom.window.close();
+  });
+
+  it('does not load TeX components for require, autoload, or HTML commands', async () => {
+    const { dom, requests, mathJax } = await loadRealMathJax(basePath);
+    const startupRequestCount = requests.length;
+
+    for (const source of [
+      '\\require{color}x',
+      '\\cancel{x}',
+      '\\htmlClass{evil}{x}',
+    ]) {
+      const output = await mathJax.tex2svgPromise(source, { display: false });
+      expect(output.querySelector('script, style, iframe')).toBeNull();
+    }
+
+    expect(requests).toHaveLength(startupRequestCount);
+    expect(requests.some((request) => /extensions|autoload|require|texhtml|html/.test(request))).toBe(false);
+
+    dom.window.close();
+  });
+
+  it('keeps failed component and font requests local without alternate-origin fallback', async () => {
+    const { dom, requests, mathJax } = await loadRealMathJax(basePath);
+    const urls = getMathJaxAssetUrls(basePath, 'https://app.test');
+    const missingAssets = [
+      new URL('input/tex/extensions/missing.js', urls.mathJaxRoot).href,
+      new URL('svg/dynamic/missing.js', urls.fontRoot).href,
+    ];
+
+    for (const assetUrl of missingAssets) {
+      await expect(mathJax.asyncLoad?.(assetUrl)).rejects.toThrow('Dynamic MathJax asset failed');
+    }
+
+    for (const assetUrl of missingAssets) expect(requests).toContain(assetUrl);
+    expect(requests.every((request) => new URL(request).origin === 'https://app.test')).toBe(true);
+    expect(requests.every((request) => new URL(request).pathname.startsWith(`${basePath}vendor/`.replace(/\/+/g, '/')))).toBe(true);
 
     dom.window.close();
   });

@@ -32,22 +32,50 @@ interface MathMlCandidate {
 }
 
 const MATHML_NAMESPACE = 'http://www.w3.org/1998/Math/MathML';
-const CONTENT_MATHML_ELEMENTS = new Set([
-  'apply',
-  'bind',
-  'bvar',
-  'ci',
-  'cn',
-  'condition',
-  'cs',
-  'csymbol',
-  'declare',
-  'domainofapplication',
-  'lambda',
-  'otherwise',
-  'piece',
-  'piecewise',
-  'reln',
+const PRESENTATION_MATHML_ELEMENTS = new Set([
+  'annotation',
+  'annotation-xml',
+  'maction',
+  'maligngroup',
+  'malignmark',
+  'menclose',
+  'merror',
+  'mfenced',
+  'mfrac',
+  'mglyph',
+  'mi',
+  'mlabeledtr',
+  'mlongdiv',
+  'mmultiscripts',
+  'mn',
+  'mo',
+  'mover',
+  'mpadded',
+  'mphantom',
+  'mprescripts',
+  'mroot',
+  'mrow',
+  'ms',
+  'mscarries',
+  'mscarry',
+  'msgroup',
+  'msline',
+  'mspace',
+  'msqrt',
+  'msrow',
+  'mstack',
+  'mstyle',
+  'msub',
+  'msubsup',
+  'msup',
+  'mtable',
+  'mtd',
+  'mtext',
+  'mtr',
+  'munder',
+  'munderover',
+  'none',
+  'semantics',
 ]);
 
 export function createFormulaParseContext(): FormulaParseContext {
@@ -74,30 +102,11 @@ export function parseBlockFormula(source: string, options: FormulaParseOptions =
   const trimmed = source.trim();
   if (!trimmed) return null;
 
-  if (
-    trimmed.startsWith('$$')
-    && trimmed.endsWith('$$')
-    && trimmed.length > 4
-    && !isEscapedAt(trimmed, trimmed.length - 2)
-  ) {
-    const formulaSource = trimmed.slice(2, -2).trim();
-    if (!formulaSource) return null;
-    return acceptFormula({
-      type: 'formula',
-      language: 'tex',
-      source: formulaSource,
-      display: true,
-      fallbackSource: source,
-    }, options);
-  }
-
-  if (
-    trimmed.startsWith('\\[')
-    && trimmed.endsWith('\\]')
-    && trimmed.length > 4
-    && !isEscapedAt(trimmed, trimmed.length - 2)
-  ) {
-    const formulaSource = trimmed.slice(2, -2).trim();
+  for (const [opening, closing] of [['$$', '$$'], ['\\[', '\\]']] as const) {
+    if (!trimmed.startsWith(opening)) continue;
+    const closingIndex = findUnescapedDelimiter(trimmed, opening.length, closing);
+    if (closingIndex < 0 || trimmed.slice(closingIndex + closing.length).trim()) return null;
+    const formulaSource = trimmed.slice(opening.length, closingIndex).trim();
     if (!formulaSource) return null;
     return acceptFormula({
       type: 'formula',
@@ -289,6 +298,15 @@ function findBackslashClose(source: string, start: number, delimiter: '\\)'): nu
   return -1;
 }
 
+function findUnescapedDelimiter(source: string, start: number, delimiter: '$$' | '\\]'): number {
+  let index = source.indexOf(delimiter, start);
+  while (index >= 0) {
+    if (!isEscapedAt(source, index)) return index;
+    index = source.indexOf(delimiter, index + delimiter.length);
+  }
+  return -1;
+}
+
 function backslashDelimiterAt(source: string, index: number): '\\(' | '\\)' | '\\[' | '\\]' | null {
   for (const delimiter of ['\\(', '\\)', '\\[', '\\]'] as const) {
     if (source.startsWith(delimiter, index)) return delimiter;
@@ -366,7 +384,7 @@ function validateMathMl(source: string): { valid: boolean; display: boolean } {
   for (const element of Array.from(root.getElementsByTagName('*'))) {
     if (element.prefix) return { valid: false, display: false };
     if (element.namespaceURI && element.namespaceURI !== MATHML_NAMESPACE) return { valid: false, display: false };
-    if (CONTENT_MATHML_ELEMENTS.has(element.localName)) return { valid: false, display: false };
+    if (!PRESENTATION_MATHML_ELEMENTS.has(element.localName)) return { valid: false, display: false };
   }
   return { valid: true, display: root.getAttribute('display') === 'block' };
 }

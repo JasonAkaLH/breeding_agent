@@ -51,6 +51,10 @@ describe('mathFormulaParser', () => {
     expect(parseBlockFormula('\\[\na+b\n\\]')).toEqual(expect.objectContaining({ source: 'a+b', display: true }));
     expect(parseBlockFormula('prose $$x$$')).toBeNull();
     expect(parseBlockFormula('$$x$$ trailing')).toBeNull();
+    expect(parseBlockFormula('$$x$$ trailing $$')).toBeNull();
+    expect(parseBlockFormula('\\[x\\] trailing \\]')).toBeNull();
+    expect(parseBlockFormula('$$x\\$$ + y$$')).toEqual(expect.objectContaining({ source: 'x\\$$ + y' }));
+    expect(parseBlockFormula('\\[x\\\\] + y\\]')).toEqual(expect.objectContaining({ source: 'x\\\\] + y' }));
     expect(parseBlockFormula('$$ incomplete')).toBeNull();
     expect(parseBlockFormula('$$x\\$$')).toBeNull();
     expect(parseBlockFormula('\\[x\\\\]')).toBeNull();
@@ -82,14 +86,20 @@ describe('mathFormulaParser', () => {
     expect(parseBlockFormula(inline)).toEqual(expect.objectContaining({ language: 'mathml', display: true }));
   });
 
-  it('rejects malformed, nested, prefixed, foreign-namespace, and Content MathML', () => {
+  it('rejects malformed, nested, prefixed, foreign, and non-Presentation MathML', () => {
     const invalidSources = [
       '<math><mi>x</math>',
       '<math><math><mi>x</mi></math></math>',
       '<m:math xmlns:m="http://www.w3.org/1998/Math/MathML"><m:mi>x</m:mi></m:math>',
       '<math xmlns="https://example.test/not-mathml"><mi>x</mi></math>',
       '<math><apply><plus/><ci>x</ci><cn>1</cn></apply></math>',
+      '<math><plus/></math>',
+      '<math><eq/></math>',
+      '<math><ci>x</ci></math>',
       '<math><mrow xmlns="https://example.test/foreign"><mi>x</mi></mrow></math>',
+      '<math><mtext><span xmlns="http://www.w3.org/1999/xhtml">x</span></mtext></math>',
+      '<math><div>x</div></math>',
+      '<math><svg xmlns="http://www.w3.org/2000/svg"><text>x</text></svg></math>',
       '<math><mi>x</mi> $not-inline$',
     ];
     for (const source of invalidSources) {
