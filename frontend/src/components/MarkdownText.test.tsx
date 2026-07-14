@@ -8,6 +8,8 @@ vi.mock('./mathFormulaParser', async (importOriginal) => {
   return {
     ...actual,
     parseBlockFormula: vi.fn(actual.parseBlockFormula),
+    scanInlineFormulaSpans: vi.fn(actual.scanInlineFormulaSpans),
+    scanInlineFormulas: vi.fn(actual.scanInlineFormulas),
   };
 });
 
@@ -164,6 +166,31 @@ describe('MarkdownText', () => {
       expect(container).toHaveTextContent(oversizedSource);
       expect(parseBlockFormula).not.toHaveBeenCalled();
     }
+  });
+
+  it('consumes consecutive malformed block candidates once without inline reinterpretation', () => {
+    const malformedSources = [
+      Array.from({ length: 200 }, () => '<math>').join('\n'),
+      Array.from({ length: 200 }, () => '$$').join('\n'),
+      Array.from({ length: 200 }, () => '\\[').join('\n'),
+    ];
+    const parseBlockFormula = vi.mocked(formulaParser.parseBlockFormula);
+    const scanInlineFormulaSpans = vi.mocked(formulaParser.scanInlineFormulaSpans);
+    const scanInlineFormulas = vi.mocked(formulaParser.scanInlineFormulas);
+    parseBlockFormula.mockClear();
+    scanInlineFormulaSpans.mockClear();
+    scanInlineFormulas.mockClear();
+
+    const { container } = render(<MarkdownText content={`${malformedSources.join('\n\n')}\n\n## after`} />);
+
+    expect(screen.queryByTestId('formula')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'after' })).toBeInTheDocument();
+    expect(Array.from(container.querySelectorAll('p'), (node) => node.textContent)).toEqual(malformedSources);
+    expect(parseBlockFormula).toHaveBeenCalledTimes(1);
+    expect(scanInlineFormulaSpans).toHaveBeenCalledTimes(1);
+    expect(scanInlineFormulaSpans).toHaveBeenCalledWith('after');
+    expect(scanInlineFormulas).toHaveBeenCalledTimes(1);
+    expect(scanInlineFormulas.mock.calls[0]?.[0]).toBe('after');
   });
 
   it('renders complete display formulas and formula fences while leaving incomplete source readable', () => {

@@ -63,11 +63,13 @@ function parseBlocks(content: string, context: FormulaParseContext): ReactNode[]
 
     if (isBlockFormulaCandidate(line)) {
       const formulaBlock = parseBlockFormulaAt(lines, index, context);
-      if (formulaBlock) {
+      if (formulaBlock.token) {
         blocks.push(renderFormulaToken(formulaBlock.token, `block-${blocks.length}`));
-        index = formulaBlock.end;
-        continue;
+      } else {
+        blocks.push(<p key={`formula-source-${blocks.length}`}>{formulaBlock.source}</p>);
       }
+      index = formulaBlock.end;
+      continue;
     }
 
     const heading = line.match(/^(#{1,3})\s+(.+)$/);
@@ -152,37 +154,45 @@ function parseBlockFormulaAt(
   lines: string[],
   index: number,
   context: FormulaParseContext,
-): { token: FormulaToken; end: number } | null {
+): { token: FormulaToken | null; end: number; source: string } {
   const candidateLines: string[] = [];
   const length = createTrimmedLengthTracker();
   const opening = lines[index].match(/^\s*(\$\$|\\\[)/);
   const closing = opening?.[1] === '$$' ? '$$' : opening ? '\\]' : null;
+  let candidateCanClose = true;
   let end = index;
 
   while (end < lines.length && (end === index || lines[end].trim())) {
     const line = lines[end];
-    const searchStart = end === index && opening ? opening[0].length : 0;
+    candidateLines.push(line);
+    end += 1;
+
+    if (!candidateCanClose) continue;
+
+    const searchStart = end === index + 1 && opening ? opening[0].length : 0;
     const closingIndex = closing
       ? findUnescapedDelimiterInLine(line, searchStart, closing)
       : line.indexOf('</math>', searchStart);
-
-    if (end > index) appendTrimmedLength(length, '\n');
+    if (end > index + 1) appendTrimmedLength(length, '\n');
     const sourceEnd = closingIndex < 0
       ? line.length
       : closing
         ? closingIndex
         : closingIndex + '</math>'.length;
     appendTrimmedLength(length, line.slice(searchStart, sourceEnd));
-    if (trimmedLength(length) > MAX_FORMULA_SOURCE_LENGTH) return null;
+    if (trimmedLength(length) > MAX_FORMULA_SOURCE_LENGTH) {
+      candidateCanClose = false;
+      continue;
+    }
 
-    candidateLines.push(line);
-    end += 1;
     if (closingIndex >= 0) {
-      const token = parseBlockFormula(candidateLines.join('\n'), { context });
-      return token ? { token, end } : null;
+      const source = candidateLines.join('\n');
+      const token = parseBlockFormula(source, { context });
+      if (token) return { token, end, source };
+      candidateCanClose = false;
     }
   }
-  return null;
+  return { token: null, end, source: candidateLines.join('\n') };
 }
 
 interface TrimmedLengthTracker {
