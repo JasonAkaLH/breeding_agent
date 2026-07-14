@@ -96,6 +96,7 @@ build.ninja
 /frontend/node_modules/
 /frontend/dist/
 /frontend/coverage/
+/frontend/public/vendor/
 
 # Local runtime data
 /runtime/
