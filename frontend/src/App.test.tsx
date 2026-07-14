@@ -8,6 +8,24 @@ import type { EventSourceFactory, TaskEventHandlers } from './api/taskEvents';
 import { COMPOSER_PLACEHOLDERS } from './domain/composerPlaceholders';
 import { WELCOME_PROMPTS } from './domain/welcomePrompts';
 
+vi.mock('./components/MathFormula', () => ({
+  MathFormula: ({ language, source, display, fallbackSource }: {
+    language: string;
+    source: string;
+    display: boolean;
+    fallbackSource: string;
+  }) => (
+    <span
+      data-testid="app-formula"
+      data-language={language}
+      data-display={String(display)}
+      data-source={source}
+    >
+      {fallbackSource}
+    </span>
+  ),
+}));
+
 const deepseekReasoningEfforts = {
   default: 'minimal',
   disabled_default: 'minimal',
@@ -1540,6 +1558,52 @@ describe('App', () => {
     await screen.findByText(/已接通。/);
   });
 
+  it('renders formulas in user, reasoning, and streamed assistant surfaces while copying source', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    let streamHandlers: TaskEventHandlers | null = null;
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close: vi.fn() };
+    };
+
+    try {
+      await renderAuthed(<App apiClient={makeApi()} eventSourceFactory={eventSourceFactory} />);
+      fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '用户 $u$' } });
+      fireEvent.click(screen.getByRole('button', { name: '发送' }));
+      await waitFor(() => expect(streamHandlers).not.toBeNull());
+      expect(await screen.findByTestId('app-formula')).toHaveAttribute('data-source', 'u');
+
+      await act(async () => {
+        streamHandlers?.onMessage(event('main_agent.reasoning_delta', { delta: '推理 $r$', ordinal: 1 }, 'formula-reasoning'));
+        streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '答案 $a', ordinal: 1 }, 'formula-open'));
+      });
+      expect(screen.getByText(/答案 \$a/)).toBeInTheDocument();
+      expect(screen.getAllByTestId('app-formula').map((formula) => formula.dataset.source)).toEqual(['u', 'r']);
+
+      await act(async () => {
+        streamHandlers?.onMessage(event('main_agent.output_delta', { delta: '$', ordinal: 2 }, 'formula-close'));
+        streamHandlers?.onMessage(event('task.completed', {}, 'formula-complete'));
+      });
+      await waitFor(() => expect(screen.getAllByTestId('app-formula').map((formula) => formula.dataset.source)).toEqual(['u', 'r', 'a']));
+
+      const assistantFormula = screen.getAllByTestId('app-formula').find((formula) => formula.dataset.source === 'a') as HTMLElement;
+      const assistantBubble = assistantFormula.closest('.message-assistant') as HTMLElement;
+      fireEvent.click(await within(assistantBubble).findByRole('button', { name: '复制' }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('答案 $a$'));
+    } finally {
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        delete (navigator as { clipboard?: unknown }).clipboard;
+      }
+    }
+  });
+
   it('composer safe autofocus focuses the composer after task completion', async () => {
     let streamHandlers: TaskEventHandlers | null = null;
     const api = makeApi();
@@ -2959,7 +3023,7 @@ describe('App', () => {
           conversation_id: 'conv-test',
           task_id: 'task-1',
           node_id: 'task-1:skill_data_query',
-          question: '请补充要查询的作物类型。',
+          question: '请补充要查询的作物类型 $q$。',
           reason_code: 'crop_not_resolved',
           required_fields: { crop: { options: ['corn', 'rice', 'cotton', 'wheat', 'soybean'] } },
           status: 'open',
@@ -3002,9 +3066,10 @@ describe('App', () => {
     expect(within(composer).getByText(/下一条消息将继续当前任务/)).toBeInTheDocument();
     expect(document.querySelector('.interrupt-input-banner')).not.toBeInTheDocument();
     expect(document.querySelector('.interrupt-composer-status')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('请补充要查询的作物类型。')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请补充要查询的作物类型 $q$。')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '结束任务' })).toBeInTheDocument();
     expect(await screen.findByText(/请补充要查询的作物类型/)).toBeInTheDocument();
+    expect(screen.getByTestId('app-formula')).toHaveAttribute('data-source', 'q');
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '水稻' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({

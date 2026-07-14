@@ -643,6 +643,34 @@ body {
   background: rgba(255, 255, 255, 0.2);
 }
 
+.math-formula {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  color: currentColor;
+}
+
+.math-formula--inline {
+  display: inline-flex;
+  vertical-align: -0.15em;
+}
+
+.math-formula--display {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  text-align: center;
+}
+
+.math-formula__fallback {
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.math-formula svg {
+  color: currentColor;
+}
+
 .reasoning-box {
   position: relative;
   isolation: isolate;

@@ -1,6 +1,24 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MarkdownText } from './MarkdownText';
+
+vi.mock('./MathFormula', () => ({
+  MathFormula: ({ language, source, display, fallbackSource }: {
+    language: string;
+    source: string;
+    display: boolean;
+    fallbackSource: string;
+  }) => (
+    <span
+      data-testid="formula"
+      data-language={language}
+      data-display={String(display)}
+      data-source={source}
+    >
+      {fallbackSource}
+    </span>
+  ),
+}));
 
 describe('MarkdownText', () => {
   it('renders common markdown blocks and inline marks safely', () => {
@@ -40,6 +58,57 @@ describe('MarkdownText', () => {
     expect(screen.getByRole('table')).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: 'r' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'A001' })).toBeInTheDocument();
+  });
+
+  it('preserves literal formula-like source in code and ordinary currency text', () => {
+    const { container } = render(
+      <MarkdownText
+        content={'行内 `$x^2$` 保持代码，价格 $100 与 $200 保持文本。\n\n```text\n$$not a formula$$\n```'}
+      />,
+    );
+
+    expect(screen.getByText('$x^2$').tagName.toLowerCase()).toBe('code');
+    expect(screen.getByText(/价格 \$100 与 \$200 保持文本/)).toBeInTheDocument();
+    expect(screen.getByText('$$not a formula$$').tagName.toLowerCase()).toBe('code');
+    expect(container.querySelectorAll('.markdown-code-block')).toHaveLength(1);
+  });
+
+  it('preserves multiline paragraph source and safe link labels', () => {
+    render(<MarkdownText content={'第一行\\$literal\n第二行 [说明](mailto:test@example.test)'} />);
+
+    const paragraph = screen.getByText(/第一行/).closest('p');
+    expect(paragraph).toHaveTextContent('第一行$literal 第二行 说明');
+    expect(screen.getByRole('link', { name: '说明' })).toHaveAttribute('href', 'mailto:test@example.test');
+  });
+
+  it('routes complete inline formulas through headings, lists, tables, strong text, and link labels', () => {
+    render(
+      <MarkdownText
+        content={'## 标题 $h$\n\n- 列表 \\(l\\)\n\n| 指标 | 值 |\n| --- | --- |\n| **平方 $x^2$** | [公式 $y$](https://example.test/$literal$) |'}
+      />,
+    );
+
+    const formulas = screen.getAllByTestId('formula');
+    expect(formulas).toHaveLength(4);
+    expect(formulas.map((formula) => formula.getAttribute('data-source'))).toEqual(['h', 'l', 'x^2', 'y']);
+    expect(screen.getByRole('link', { name: /公式/ })).toHaveAttribute('href', 'https://example.test/$literal$');
+  });
+
+  it('renders complete display formulas and formula fences while leaving incomplete source readable', () => {
+    const { rerender } = render(
+      <MarkdownText content={'$$\nx^2 + y^2\n$$\n\n```latex\n\\frac{a}{b}\n```\n\n<math><mi>x</mi></math>'} />,
+    );
+
+    const formulas = screen.getAllByTestId('formula');
+    expect(formulas).toHaveLength(3);
+    expect(formulas.every((formula) => formula.dataset.display === 'true')).toBe(true);
+    expect(formulas[0]).toHaveAttribute('data-language', 'tex');
+    expect(formulas[2]).toHaveAttribute('data-language', 'mathml');
+
+    rerender(<MarkdownText content={'未完成 $x 与 \\(y\n\n```math\nz^2'} />);
+    expect(screen.queryByTestId('formula')).not.toBeInTheDocument();
+    expect(screen.getByText(/未完成 \$x/)).toBeInTheDocument();
+    expect(screen.getByText('z^2').tagName.toLowerCase()).toBe('code');
   });
 
 });

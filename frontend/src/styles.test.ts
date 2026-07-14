@@ -27,3 +27,20 @@ describe('sidebar history layout styles', () => {
     expect(styles).not.toContain('.history-row:focus-within .history-actions');
   });
 });
+
+describe('formula layout styles', () => {
+  it('contains oversized formula output inside the message width', () => {
+    expect(cssRule('.math-formula')).toContain('max-width: 100%;');
+    expect(cssRule('.math-formula')).toContain('overflow-x: auto;');
+    expect(cssRule('.math-formula--display')).toContain('width: 100%;');
+    expect(cssRule('.math-formula--display')).toContain('text-align: center;');
+  });
+
+  it('inherits message color and keeps source fallback selectable', () => {
+    expect(cssRule('.math-formula')).toContain('color: currentColor;');
+    expect(cssRule('.math-formula svg')).toContain('color: currentColor;');
+    expect(cssRule('.math-formula__fallback')).toContain('white-space: pre-wrap;');
+    expect(cssRule('.math-formula__fallback')).toContain('user-select: text;');
+    expect(styles).not.toMatch(/mjx-container|mjx-assistive-mml/);
+  });
+});

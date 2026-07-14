@@ -14,6 +14,8 @@
 
 ## [Unreleased]
 
+- 前端聊天内容新增安全公式展示链路：统一在 `MarkdownText` 中识别受支持的 TeX/LaTeX 与 Presentation MathML，并通过延迟加载、同源自托管的 MathJax 4.1.3 SVG runtime 渲染用户消息、助手回复、思考内容与 interrupt 问题；保留代码/链接/金额文本、流式未闭合原文、助手复制源文本、失败降级和窄屏横向滚动行为。MathJax 资源通过 allowlist 脚本生成且不使用 CDN，公式输入限制为单式 10,000 UTF-16 code units、单次 Markdown 渲染 100 个完整公式。License Requirement：新增精确固定 `mathjax@4.1.3` 及其 Apache-2.0 NewCM 字体运行时依赖，自托管派生资源不提交 Git。
+
 ### 2026-07-10
 
 - 全面重写 `docs/api/API更新日志.md`：以 `main@bd0fd2d` 与 `prod@e7ede32` 的独立 OpenAPI、路由、DTO、SSE、运行时、存储、前端 client、Nginx 和回归测试为基线，确认业务 endpoint path/method 无差异，系统记录模型级 reasoning effort、历史文件消息、会话文件选择、上传一致性、能力缺失 fallback 以及 SeedPilot API 文档代理的全部参数/schema/行为差异，并提供客户端迁移与发布验证清单。License Requirement：API 文档与全局变更日志更新，无新增依赖/许可变更。

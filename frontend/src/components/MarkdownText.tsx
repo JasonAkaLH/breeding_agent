@@ -1,4 +1,12 @@
 import type { ReactNode } from 'react';
+import { MathFormula } from './MathFormula';
+import {
+  createFormulaParseContext,
+  parseBlockFormula,
+  parseFormulaFence,
+  scanInlineFormulas,
+  type FormulaToken,
+} from './mathFormulaParser';
 
 interface MarkdownTextProps {
   content: string;
@@ -7,11 +15,14 @@ interface MarkdownTextProps {
 type ListKind = 'ul' | 'ol';
 
 export function MarkdownText({ content }: MarkdownTextProps) {
-  const blocks = parseBlocks(content);
+  const context = createFormulaParseContext();
+  const blocks = parseBlocks(content, context);
   return <div className="markdown-content">{blocks}</div>;
 }
 
-function parseBlocks(content: string): ReactNode[] {
+type FormulaParseContext = ReturnType<typeof createFormulaParseContext>;
+
+function parseBlocks(content: string, context: FormulaParseContext): ReactNode[] {
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   const blocks: ReactNode[] = [];
   let index = 0;
@@ -32,7 +43,13 @@ function parseBlocks(content: string): ReactNode[] {
         codeLines.push(lines[index]);
         index += 1;
       }
-      if (index < lines.length) index += 1;
+      const closed = index < lines.length;
+      if (closed) index += 1;
+      const formula = parseFormulaFence(language, codeLines.join('\n'), closed, { context });
+      if (formula) {
+        blocks.push(renderFormulaToken(formula, `fence-${blocks.length}`));
+        continue;
+      }
       blocks.push(
         <pre key={`code-${blocks.length}`} className="markdown-code-block">
           <code className={language ? `language-${language}` : undefined}>{codeLines.join('\n')}</code>
@@ -41,11 +58,20 @@ function parseBlocks(content: string): ReactNode[] {
       continue;
     }
 
+    if (isBlockFormulaCandidate(line)) {
+      const formulaBlock = parseBlockFormulaAt(lines, index, context);
+      if (formulaBlock) {
+        blocks.push(renderFormulaToken(formulaBlock.token, `block-${blocks.length}`));
+        index = formulaBlock.end;
+        continue;
+      }
+    }
+
     const heading = line.match(/^(#{1,3})\s+(.+)$/);
     if (heading) {
       const level = heading[1].length;
       const Tag = (`h${Math.min(level + 2, 5)}`) as 'h3' | 'h4' | 'h5';
-      blocks.push(<Tag key={`heading-${blocks.length}`}>{renderInline(heading[2])}</Tag>);
+      blocks.push(<Tag key={`heading-${blocks.length}`}>{renderInline(heading[2], context)}</Tag>);
       index += 1;
       continue;
     }
@@ -62,12 +88,12 @@ function parseBlocks(content: string): ReactNode[] {
         <div key={`table-${blocks.length}`} className="markdown-table-wrapper">
           <table className="markdown-table">
             <thead>
-              <tr>{headers.map((header, columnIndex) => <th key={`header-${columnIndex}`}>{renderInline(header)}</th>)}</tr>
+              <tr>{headers.map((header, columnIndex) => <th key={`header-${columnIndex}`}>{renderInline(header, context)}</th>)}</tr>
             </thead>
             <tbody>
               {rows.map((row, rowIndex) => (
                 <tr key={`row-${rowIndex}`}>
-                  {row.map((cell, columnIndex) => <td key={`cell-${rowIndex}-${columnIndex}`}>{renderInline(cell)}</td>)}
+                  {row.map((cell, columnIndex) => <td key={`cell-${rowIndex}-${columnIndex}`}>{renderInline(cell, context)}</td>)}
                 </tr>
               ))}
             </tbody>
@@ -85,7 +111,7 @@ function parseBlocks(content: string): ReactNode[] {
       while (index < lines.length) {
         const itemMatch = listKind === 'ul' ? lines[index].match(/^\s*[-*]\s+(.+)$/) : lines[index].match(/^\s*\d+\.\s+(.+)$/);
         if (!itemMatch) break;
-        items.push(<li key={`item-${index}`}>{renderInline(itemMatch[1])}</li>);
+        items.push(<li key={`item-${index}`}>{renderInline(itemMatch[1], context)}</li>);
         index += 1;
       }
       const ListTag = listKind;
@@ -99,7 +125,7 @@ function parseBlocks(content: string): ReactNode[] {
       paragraphLines.push(lines[index].trim());
       index += 1;
     }
-    blocks.push(<p key={`paragraph-${blocks.length}`}>{renderInline(paragraphLines.join('\n'))}</p>);
+    blocks.push(<p key={`paragraph-${blocks.length}`}>{renderInline(paragraphLines.join('\n'), context)}</p>);
   }
 
   return blocks;
@@ -111,7 +137,27 @@ function isSpecialBlockStart(lines: string[], index: number): boolean {
     || /^(#{1,3})\s+/.test(line)
     || /^\s*[-*]\s+/.test(line)
     || /^\s*\d+\.\s+/.test(line)
+    || isBlockFormulaCandidate(line)
     || isTableStart(lines, index);
+}
+
+function isBlockFormulaCandidate(line: string): boolean {
+  return /^\s*(?:\$\$|\\\[|<math(?:\s|>|\/))/.test(line);
+}
+
+function parseBlockFormulaAt(
+  lines: string[],
+  index: number,
+  context: FormulaParseContext,
+): { token: FormulaToken; end: number } | null {
+  let end = index + 1;
+  while (end <= lines.length) {
+    const token = parseBlockFormula(lines.slice(index, end).join('\n'), { context });
+    if (token) return { token, end };
+    if (end === lines.length || !lines[end].trim()) return null;
+    end += 1;
+  }
+  return null;
 }
 
 function isTableStart(lines: string[], index: number): boolean {
@@ -148,7 +194,7 @@ function normalizeTableRow(cells: string[], expectedLength: number): string[] {
   return normalized;
 }
 
-function renderInline(text: string): ReactNode[] {
+function renderInline(text: string, context: FormulaParseContext): ReactNode[] {
   const nodes: ReactNode[] = [];
   const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
   let cursor = 0;
@@ -156,13 +202,13 @@ function renderInline(text: string): ReactNode[] {
 
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > cursor) {
-      nodes.push(text.slice(cursor, match.index));
+      nodes.push(...renderFormulaAwareText(text.slice(cursor, match.index), context, cursor));
     }
     const token = match[0];
     const key = `inline-${match.index}-${nodes.length}`;
 
     if (token.startsWith('**') && token.endsWith('**')) {
-      nodes.push(<strong key={key}>{renderInline(token.slice(2, -2))}</strong>);
+      nodes.push(<strong key={key}>{renderInline(token.slice(2, -2), context)}</strong>);
     } else if (token.startsWith('`') && token.endsWith('`')) {
       nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
     } else {
@@ -170,11 +216,11 @@ function renderInline(text: string): ReactNode[] {
       if (link && isSafeUrl(link[2])) {
         nodes.push(
           <a key={key} href={link[2]} target="_blank" rel="noreferrer">
-            {renderInline(link[1])}
+            {renderInline(link[1], context)}
           </a>,
         );
       } else if (link) {
-        nodes.push(<span key={key}>{renderInline(link[1])}</span>);
+        nodes.push(<span key={key}>{renderInline(link[1], context)}</span>);
       } else {
         nodes.push(token);
       }
@@ -183,9 +229,38 @@ function renderInline(text: string): ReactNode[] {
   }
 
   if (cursor < text.length) {
-    nodes.push(text.slice(cursor));
+    nodes.push(...renderFormulaAwareText(text.slice(cursor), context, cursor));
   }
   return nodes;
+}
+
+function renderFormulaAwareText(text: string, context: FormulaParseContext, offset: number): ReactNode[] {
+  return scanInlineFormulas(text, { context }).map((token, tokenIndex) => {
+    if (token.type === 'text') return token.source;
+    return renderFormulaToken(token, `inline-${offset}-${tokenIndex}-${formulaTokenHash(token)}`);
+  });
+}
+
+function renderFormulaToken(token: FormulaToken, key: string): ReactNode {
+  return (
+    <MathFormula
+      key={key}
+      language={token.language}
+      source={token.source}
+      display={token.display}
+      fallbackSource={token.fallbackSource}
+    />
+  );
+}
+
+function formulaTokenHash(token: FormulaToken): string {
+  const value = `${token.language}:${token.display ? 'display' : 'inline'}:${token.fallbackSource}`;
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function isSafeUrl(value: string): boolean {
