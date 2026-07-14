@@ -304,11 +304,6 @@ function renderInline(text: string, context: FormulaParseContext): ReactNode[] {
   return nodes;
 }
 
-interface InlineRange {
-  start: number;
-  end: number;
-}
-
 function maskFormulaStrongMarkers(text: string, formulaSpans: InlineFormulaSpan[]): string {
   const protectedRanges = collectProtectedInlineRanges(text);
   let protectedIndex = 0;
@@ -329,8 +324,8 @@ function maskFormulaStrongMarkers(text: string, formulaSpans: InlineFormulaSpan[
   return characters?.join('') ?? text;
 }
 
-function collectProtectedInlineRanges(text: string): InlineRange[] {
-  const ranges: InlineRange[] = [];
+function collectProtectedInlineRanges(text: string): InlineFormulaSpan[] {
+  const ranges: InlineFormulaSpan[] = [];
   const pattern = /`[^`]+`|\[[^\]]+\]\([^)]+\)/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
