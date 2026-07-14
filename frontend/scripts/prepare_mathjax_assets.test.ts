@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -19,7 +19,6 @@ afterEach(async () => {
 });
 
 async function makeFixture() {
-  const { mkdtemp } = await import('node:fs/promises');
   const root = await mkdtemp(path.join(os.tmpdir(), 'mathjax-assets-'));
   temporaryDirectories.push(root);
   const nodeModules = path.join(root, 'node_modules');

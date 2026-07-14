@@ -12,12 +12,9 @@ type FormulaState = 'loading' | 'rendered' | 'fallback';
 
 export function MathFormula({ language, source, display, fallbackSource }: MathFormulaProps) {
   const mountRef = useRef<HTMLSpanElement>(null);
-  const generationRef = useRef(0);
   const [state, setState] = useState<FormulaState>('loading');
 
   useEffect(() => {
-    const generation = generationRef.current + 1;
-    generationRef.current = generation;
     let active = true;
     const mount = mountRef.current;
     mount?.replaceChildren();
@@ -25,12 +22,12 @@ export function MathFormula({ language, source, display, fallbackSource }: MathF
 
     void renderFormula(source, language, display).then(
       (node) => {
-        if (!active || generationRef.current !== generation || !mountRef.current) return;
-        mountRef.current.replaceChildren(node);
+        if (!active || !mount) return;
+        mount.replaceChildren(node);
         setState('rendered');
       },
       (error: unknown) => {
-        if (!active || generationRef.current !== generation) return;
+        if (!active) return;
         console.warn('Formula conversion failed', {
           language,
           category: error instanceof Error ? error.name : 'unknown',
