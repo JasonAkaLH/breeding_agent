@@ -1,6 +1,15 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MarkdownText } from './MarkdownText';
+import * as formulaParser from './mathFormulaParser';
+
+vi.mock('./mathFormulaParser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./mathFormulaParser')>();
+  return {
+    ...actual,
+    parseBlockFormula: vi.fn(actual.parseBlockFormula),
+  };
+});
 
 vi.mock('./MathFormula', () => ({
   MathFormula: ({ language, source, display, fallbackSource }: {
@@ -92,6 +101,49 @@ describe('MarkdownText', () => {
     expect(formulas).toHaveLength(4);
     expect(formulas.map((formula) => formula.getAttribute('data-source'))).toEqual(['h', 'l', 'x^2', 'y']);
     expect(screen.getByRole('link', { name: /公式/ })).toHaveAttribute('href', 'https://example.test/$literal$');
+  });
+
+  it('keeps strong-like markers inside complete TeX while protecting code and link destinations', () => {
+    const { container } = render(
+      <MarkdownText
+        content={'$a**b**c$ **外层 $x$** `$code$` [标签 $y$](https://example.test/$destination$)'}
+      />,
+    );
+
+    const formulas = screen.getAllByTestId('formula');
+    expect(formulas.map((formula) => formula.getAttribute('data-source'))).toEqual(['a**b**c', 'x', 'y']);
+    expect(screen.getByText('$code$').tagName.toLowerCase()).toBe('code');
+    expect(screen.getByRole('link', { name: /标签/ })).toHaveAttribute(
+      'href',
+      'https://example.test/$destination$',
+    );
+    expect(screen.getByText('外层').closest('strong')).toContainElement(formulas[1]);
+    expect(container.textContent?.match(/\$a\*\*b\*\*c\$/g)).toHaveLength(1);
+  });
+
+  it('parses multiline block candidates once and skips parsing after the source limit', () => {
+    const parseBlockFormula = vi.mocked(formulaParser.parseBlockFormula);
+    const formulaLines = Array.from({ length: 200 }, () => 'x');
+    parseBlockFormula.mockClear();
+
+    const { container, rerender } = render(<MarkdownText content={`$$\n${formulaLines.join('\n')}\n$$`} />);
+
+    expect(screen.getByTestId('formula')).toHaveAttribute('data-source', formulaLines.join('\n'));
+    expect(parseBlockFormula).toHaveBeenCalledTimes(1);
+
+    const oversizedSource = 'x'.repeat(formulaParser.MAX_FORMULA_SOURCE_LENGTH + 1);
+    for (const content of [
+      `$$\n${oversizedSource}\n$$`,
+      `\\[\n${oversizedSource}\n\\]`,
+      `<math><mtext>${oversizedSource}</mtext></math>`,
+    ]) {
+      parseBlockFormula.mockClear();
+      rerender(<MarkdownText content={content} />);
+
+      expect(screen.queryByTestId('formula')).not.toBeInTheDocument();
+      expect(container).toHaveTextContent(oversizedSource);
+      expect(parseBlockFormula).not.toHaveBeenCalled();
+    }
   });
 
   it('renders complete display formulas and formula fences while leaving incomplete source readable', () => {

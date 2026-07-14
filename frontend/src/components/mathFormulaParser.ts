@@ -31,6 +31,11 @@ interface MathMlCandidate {
   display: boolean;
 }
 
+export interface InlineFormulaSpan {
+  start: number;
+  end: number;
+}
+
 const MATHML_NAMESPACE = 'http://www.w3.org/1998/Math/MathML';
 const PRESENTATION_MATHML_ELEMENTS = new Set([
   'annotation',
@@ -132,6 +137,20 @@ export function scanInlineFormulas(
   source: string,
   options: FormulaParseOptions = {},
 ): InlineFormulaToken[] {
+  return scanInlineFormulasInternal(source, options);
+}
+
+export function scanInlineFormulaSpans(source: string): InlineFormulaSpan[] {
+  const spans: InlineFormulaSpan[] = [];
+  scanInlineFormulasInternal(source, {}, (start, end) => spans.push({ start, end }));
+  return spans;
+}
+
+function scanInlineFormulasInternal(
+  source: string,
+  options: FormulaParseOptions,
+  onFormula?: (start: number, end: number) => void,
+): InlineFormulaToken[] {
   if (!source) return [];
   const tokens: InlineFormulaToken[] = [];
   let text = '';
@@ -166,6 +185,7 @@ export function scanInlineFormulas(
       if (token) {
         flushText();
         tokens.push(token);
+        onFormula?.(index, mathMl.end);
       } else {
         text += mathMl.source;
       }
@@ -202,6 +222,7 @@ export function scanInlineFormulas(
         if (token) {
           flushText();
           tokens.push(token);
+          onFormula?.(index, closingIndex + 1);
         } else {
           text += fallbackSource;
         }
@@ -232,6 +253,7 @@ export function scanInlineFormulas(
         if (token) {
           flushText();
           tokens.push(token);
+          onFormula?.(index, closingIndex + 2);
         } else {
           text += fallbackSource;
         }

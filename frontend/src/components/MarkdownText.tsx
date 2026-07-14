@@ -2,8 +2,10 @@ import type { ReactNode } from 'react';
 import { MathFormula } from './MathFormula';
 import {
   createFormulaParseContext,
+  MAX_FORMULA_SOURCE_LENGTH,
   parseBlockFormula,
   parseFormulaFence,
+  scanInlineFormulaSpans,
   scanInlineFormulas,
   type FormulaToken,
 } from './mathFormulaParser';
@@ -150,14 +152,77 @@ function parseBlockFormulaAt(
   index: number,
   context: FormulaParseContext,
 ): { token: FormulaToken; end: number } | null {
-  let end = index + 1;
-  while (end <= lines.length) {
-    const token = parseBlockFormula(lines.slice(index, end).join('\n'), { context });
-    if (token) return { token, end };
-    if (end === lines.length || !lines[end].trim()) return null;
+  const candidateLines: string[] = [];
+  const length = createTrimmedLengthTracker();
+  const opening = lines[index].match(/^\s*(\$\$|\\\[)/);
+  const closing = opening?.[1] === '$$' ? '$$' : opening ? '\\]' : null;
+  let end = index;
+
+  while (end < lines.length && (end === index || lines[end].trim())) {
+    const line = lines[end];
+    const searchStart = end === index && opening ? opening[0].length : 0;
+    const closingIndex = closing
+      ? findUnescapedDelimiterInLine(line, searchStart, closing)
+      : line.indexOf('</math>', searchStart);
+
+    if (end > index) appendTrimmedLength(length, '\n');
+    const sourceEnd = closingIndex < 0
+      ? line.length
+      : closing
+        ? closingIndex
+        : closingIndex + '</math>'.length;
+    appendTrimmedLength(length, line.slice(searchStart, sourceEnd));
+    if (trimmedLength(length) > MAX_FORMULA_SOURCE_LENGTH) return null;
+
+    candidateLines.push(line);
     end += 1;
+    if (closingIndex >= 0) {
+      const token = parseBlockFormula(candidateLines.join('\n'), { context });
+      return token ? { token, end } : null;
+    }
   }
   return null;
+}
+
+interface TrimmedLengthTracker {
+  total: number;
+  leadingWhitespace: number;
+  trailingWhitespace: number;
+  sawNonWhitespace: boolean;
+}
+
+function createTrimmedLengthTracker(): TrimmedLengthTracker {
+  return { total: 0, leadingWhitespace: 0, trailingWhitespace: 0, sawNonWhitespace: false };
+}
+
+function appendTrimmedLength(tracker: TrimmedLengthTracker, source: string) {
+  for (const character of source) {
+    tracker.total += character.length;
+    if (/\s/.test(character)) {
+      if (!tracker.sawNonWhitespace) tracker.leadingWhitespace += character.length;
+      tracker.trailingWhitespace += character.length;
+    } else {
+      tracker.sawNonWhitespace = true;
+      tracker.trailingWhitespace = 0;
+    }
+  }
+}
+
+function trimmedLength(tracker: TrimmedLengthTracker): number {
+  return tracker.total - tracker.leadingWhitespace - tracker.trailingWhitespace;
+}
+
+function findUnescapedDelimiterInLine(line: string, start: number, delimiter: '$$' | '\\]'): number {
+  let index = line.indexOf(delimiter, start);
+  while (index >= 0) {
+    let backslashCount = 0;
+    for (let cursor = index - 1; cursor >= 0 && line[cursor] === '\\'; cursor -= 1) {
+      backslashCount += 1;
+    }
+    if (backslashCount % 2 === 0) return index;
+    index = line.indexOf(delimiter, index + delimiter.length);
+  }
+  return -1;
 }
 
 function isTableStart(lines: string[], index: number): boolean {
@@ -197,15 +262,42 @@ function normalizeTableRow(cells: string[], expectedLength: number): string[] {
 function renderInline(text: string, context: FormulaParseContext): ReactNode[] {
   const nodes: ReactNode[] = [];
   const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
+  const formulaSpans = scanInlineFormulaSpans(text);
+  let formulaSpanIndex = 0;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(text)) !== null) {
-    if (match.index > cursor) {
-      nodes.push(...renderFormulaAwareText(text.slice(cursor, match.index), context, cursor));
-    }
     const token = match[0];
-    const key = `inline-${match.index}-${nodes.length}`;
+    const matchIndex = match.index;
+    const key = `inline-${matchIndex}-${nodes.length}`;
+
+    if (token.startsWith('**') && token.endsWith('**')) {
+      while (formulaSpans[formulaSpanIndex]?.end <= matchIndex) formulaSpanIndex += 1;
+      const containingFormula = formulaSpans[formulaSpanIndex];
+      const strongIsInsideFormula = containingFormula && (
+        containingFormula.start >= cursor
+        && containingFormula.start < matchIndex
+        && containingFormula.end > matchIndex
+      );
+      if (strongIsInsideFormula) {
+        if (containingFormula.start > cursor) {
+          nodes.push(...renderFormulaAwareText(text.slice(cursor, containingFormula.start), context, cursor));
+        }
+        nodes.push(...renderFormulaAwareText(
+          text.slice(containingFormula.start, containingFormula.end),
+          context,
+          containingFormula.start,
+        ));
+        cursor = containingFormula.end;
+        pattern.lastIndex = cursor;
+        continue;
+      }
+    }
+
+    if (matchIndex > cursor) {
+      nodes.push(...renderFormulaAwareText(text.slice(cursor, matchIndex), context, cursor));
+    }
 
     if (token.startsWith('**') && token.endsWith('**')) {
       nodes.push(<strong key={key}>{renderInline(token.slice(2, -2), context)}</strong>);
