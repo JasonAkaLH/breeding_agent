@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from src.integrations.agent_skills import load_input_schemas_for_contract, parse_skill_file, select_input_schema
 
 
 class GermplasmMCPSkillTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.manifest = parse_skill_file("skill/germplasm-mcp/SKILL.md")
+        skill_file = Path("skill/germplasm-mcp/SKILL.md")
+        if not skill_file.exists():
+            self.skipTest("external germplasm-mcp skill is not present")
+        self.manifest = parse_skill_file(skill_file)
         assert self.manifest.contract is not None
         self.contract = self.manifest.contract
         self.schemas = load_input_schemas_for_contract(self.contract)

@@ -16,9 +16,8 @@ AGENTS.md
 # Local deployment commands (may contain private DSNs/secrets)
 /docker_cmd.md
 
-# Skill runtime artifacts
-/skill/**/outputs/
-/skill/ocr/config.yaml
+# External Skill compatibility checkout; canonical bundles live in the independent repository.
+/skill/
 
 # Local report drafts
 /本周工作周报.md

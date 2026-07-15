@@ -1,4 +1,0 @@
-schema_id: readonly_query
-title: 只读自然语言查询
-inputs:
-  query: {type: string, required: true, aliases: [query, 问题, 查询], validation: {min_length: 1, max_length: 2000}}

@@ -19,7 +19,9 @@ from src.integrations.agent_skills.parameters import SkillParameterSpec
 
 def _field_design_manifest():
     catalog = SkillCatalog.from_roots(["skill"])
-    manifest = next(manifest for manifest in catalog.skills if manifest.name == "field-design")
+    manifest = next((manifest for manifest in catalog.skills if manifest.name == "field-design"), None)
+    if manifest is None:
+        raise unittest.SkipTest("external field-design skill is not present")
     assert manifest.contract is not None
     return manifest
 

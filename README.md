@@ -11,7 +11,7 @@
 | `requirements.txt` | `multi_agent` Conda 环境依赖快照。 |
 | `docs/prd/` | PRD 总目录；后端 PRD 在 `docs/prd/backend/`，前端 PRD 在 `docs/prd/frontend/`。 |
 | `docs/` 其他文件 | Capability 接入指南、Agent 基础设施优化建议、Skill prompt 模板、架构图与状态流转图；历史阶段文档已收口到 `docs/prd/` 与 `CHANGELOG.md`。 |
-| `skill/` | 历史内置 Skill 目录；当前 Docker 镜像不再依赖该目录作为默认 Skill 来源。后端 runtime 默认扫描容器内 `/app/skill/**/SKILL.md`，部署 / 开发时应把独立 Skill 仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录只读挂载到 `/app/skill`。`GET /api/v1/capabilities` 会在返回前执行受控 Skill refresh check，方便用户打开 Skill 列表时看到最新公开 Skill。 |
+| `skill/` | 本仓库不再跟踪该目录；仅可作为本地、Git-ignored 的外部 Skill 兼容检出目录。后端 runtime 默认扫描容器内 `/app/skill/**/SKILL.md`，开发部署应把独立 Skill 仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录只读挂载到 `/app/skill`。`GET /api/v1/capabilities` 会在返回前执行受控 Skill refresh check。 |
 | `src/api/` | FastAPI app、DTO、SSE、runtime 装配与 API routes。 |
 | `src/core/` | 跨模块共享 contract、模型、枚举与基础错误。 |
 | `src/storage/` | 状态存储抽象与 SQLite 实现。 |

@@ -16,8 +16,12 @@ def _schema(text: str):
 
 class InputSchemaValidationTest(unittest.TestCase):
     def test_field_design_diagonal_and_interval_require_ncols_from_schema(self) -> None:
-        diagonal = parse_input_schema_file("skill/field-design/schemas/diagonal.input.yaml")
-        interval = parse_input_schema_file("skill/field-design/schemas/interval.input.yaml")
+        diagonal_path = Path("skill/field-design/schemas/diagonal.input.yaml")
+        interval_path = Path("skill/field-design/schemas/interval.input.yaml")
+        if not diagonal_path.exists() or not interval_path.exists():
+            self.skipTest("external field-design skill is not present")
+        diagonal = parse_input_schema_file(diagonal_path)
+        interval = parse_input_schema_file(interval_path)
 
         self.assertTrue(diagonal.inputs["ncols"].required)
         self.assertTrue(interval.inputs["ncols"].required)
