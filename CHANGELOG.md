@@ -14,6 +14,8 @@
 
 ## [Unreleased]
 
+- `docker_cmd.md` 分支感知安全切换设计已落入 `docs/superpowers/specs/2026-07-16-docker-cmd-branch-aware-switch-design.md`：在文件保持本地且不进入 Git 的前提下，采用仓库外 main/prod profile、受控切换器、本地 post-checkout 守卫、切换前 `0600` 快照、环境标记门禁、原子替换与阻断状态，解决单工作树切换分支时上一环境命令残留的问题；当前仅完成设计，尚未实现。License Requirement：设计文档与索引变更，无新增依赖/许可变更。
+
 - `docker_cmd.md` 安全边界完成收口：从 `main`、`prod` 及本地 Git 历史/原始引用/reflog 中移除该敏感路径，本地文件以 `0600` 权限恢复并继续由根目录 `.gitignore` 排除；根目录 `AGENTS.md` 新增不可删除、不可输出、不可跟踪/提交/推送的绝对指令，并新增仓库门禁脚本与 GitHub Actions，阻止该路径被重新加入版本控制。License Requirement：安全规则、脚本、CI 与文档变更，无新增依赖/许可变更。
 
 - 前端聊天内容新增安全公式展示链路：统一在 `MarkdownText` 中识别受支持的 TeX/LaTeX 与 Presentation MathML，并通过延迟加载、同源自托管的 MathJax 4.1.3 SVG runtime 渲染用户消息、助手回复、思考内容与 interrupt 问题；保留代码/链接/金额文本、流式未闭合原文、助手复制源文本、失败降级和窄屏横向滚动行为。MathJax 资源通过 allowlist 脚本生成且不使用 CDN，公式输入限制为单式 10,000 UTF-16 code units、单次 Markdown 渲染 100 个完整公式。License Requirement：新增精确固定 `mathjax@4.1.3` 及其 Apache-2.0 NewCM 字体运行时依赖，自托管派生资源不提交 Git。
