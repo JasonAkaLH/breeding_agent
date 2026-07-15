@@ -18,6 +18,8 @@
 
 ### 2026-07-15
 
+- 开发环境 Skill 仓库路径统一为 `/data/peihai/vibe-breeding-dev`：`docker_cmd.md`、`docker-compose.yml` 与 README 均只读挂载其 `skills/` 子目录到 `/app/skill`，并同步 clone、测试与更新命令，避免继续引用旧的共享 `/data/peihai/vibe-skill` 路径。License Requirement：部署配置与文档变更，无新增依赖/许可变更。
+
 - 个人桌面长任务 Agent 总体设计总纲已落入 `docs/个人桌面长任务Agent总体设计总纲.md`：产品范围从服务端收敛为 macOS、Windows、Linux 三平台桌面工作台；确定 Rust daemon 唯一可信控制 runtime、持久 Agent Loop、事件/checkpoint 恢复、严格不可关闭沙箱、Workspace 授权、网络白名单 Broker、Change Journal/加密备份、受控子 Agent、组合式完成门禁、本地加密和一次性替换/旧历史只读迁移等契约。当前仅完成设计，尚未开始实现。License Requirement：文档与索引变更，无新增依赖/许可变更。
 
 ### 2026-07-10
