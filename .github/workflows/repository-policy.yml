@@ -1,0 +1,16 @@
+name: Repository policy
+
+on:
+  pull_request:
+  push:
+    branches: [main, prod]
+  workflow_dispatch:
+
+jobs:
+  docker-cmd-local-only:
+    name: docker_cmd.md remains local-only
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify docker_cmd.md policy
+        run: bash scripts/check_docker_cmd_policy.sh

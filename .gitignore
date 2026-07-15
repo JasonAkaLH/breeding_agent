@@ -110,4 +110,4 @@ native/target/
 /mcp_test.json
 
 # Local deployment commands may contain environment-specific secrets.
-docker_cmd.md
+/docker_cmd.md

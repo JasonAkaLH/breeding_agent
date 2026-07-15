@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+- `docker_cmd.md` 安全边界完成收口：从 `main`、`prod` 及本地 Git 历史/原始引用/reflog 中移除该敏感路径，本地文件以 `0600` 权限恢复并继续由根目录 `.gitignore` 排除；根目录 `AGENTS.md` 新增不可删除、不可输出、不可跟踪/提交/推送的绝对指令，并新增仓库门禁脚本与 GitHub Actions，阻止该路径被重新加入版本控制。License Requirement：安全规则、脚本、CI 与文档变更，无新增依赖/许可变更。
+
 ### 2026-07-15
 
 - 生产环境 Skill 仓库路径统一为 `/data/peihai/vibe-breeding-main`：`docker-compose.yml` 只读挂载其 `skills/` 子目录到 `/app/skill`，README 同步 clone、测试和部署说明，避免继续与开发环境共用旧的 `/data/peihai/vibe-skill` 路径。License Requirement：部署配置与文档变更，无新增依赖/许可变更。
