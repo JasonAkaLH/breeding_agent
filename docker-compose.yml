@@ -18,7 +18,7 @@ services:
       MAF_RUST_SKILL_RUNTIME_MODE: "off"
     volumes:
       - breeding-agent-runtime:/app/runtime
-      - /data/peihai/vibe-skill/skills:/app/skill:ro
+      - /data/peihai/vibe-breeding-main/skills:/app/skill:ro
     ports:
       - "51888:8000"
     healthcheck:

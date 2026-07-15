@@ -12,6 +12,10 @@
 
 ## [Unreleased]
 
+### 2026-07-15
+
+- 生产环境 Skill 仓库路径统一为 `/data/peihai/vibe-breeding-main`：`docker-compose.yml` 只读挂载其 `skills/` 子目录到 `/app/skill`，README 同步 clone、测试和部署说明，避免继续与开发环境共用旧的 `/data/peihai/vibe-skill` 路径。License Requirement：部署配置与文档变更，无新增依赖/许可变更。
+
 ### 2026-07-10
 
 - `prod` 分支将 `docker_cmd.md` 从 Git 跟踪中移除并继续沿用已有 `.gitignore` 规则，使包含环境专用命令和明文凭据的部署文件只保留在本地。License Requirement：版本控制与运维文档变更，无新增依赖/许可变更。

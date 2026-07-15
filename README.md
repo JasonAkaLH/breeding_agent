@@ -21,7 +21,7 @@
 | `src/capabilities/main_agent/` | `main_agent.respond` 主代理 capability、prompt 构造与 streaming 输出。 |
 | `src/integrations/` | LLM client、MySQL readonly adapter、audit logger、Skill 兼容层、MCP Python facade、LLM 上下文 token 计数等外部适配/运行时辅助能力。 |
 | `native/` | Rust workspace；当前包含 Core/Lifecycle、Runtime Store/Event/Dispatcher、RuntimeSidecar service kernel + tonic/prost gRPC binding + `maf-runtime-sidecar` 二进制入口、RuntimeSidecar SQLite durable adapter、Skill Runtime policy / SkillSandboxService + tonic gRPC binding + `maf-skill-sandbox` 二进制入口与受限进程执行基线（client version / handler allowlist、相对 argv、sandbox root、timeout、stdin 上限、stdout/stderr 并发有界 drain、`env_clear` 最小环境、process-group cleanup）、MCP Runtime sidecar contract/kernel + `maf-mcp-runtime-sidecar` 二进制入口、Artifact/Auth/DataAccess/Audit 等 Rust contract/kernel crates 与 sidecar proto。部分 Python facade 已消费 Rust contract resource limits；Core/Lifecycle、Skill Runtime policy 与 Artifact/Auth/DataAccess/Audit safety kernels 已具备预构建 PyO3 module 加载 facade、Rust JSON bridge、`maturin` wheel build/import smoke 路径；RuntimeSidecar Python h2c / mTLS gRPC client 与 SkillSandbox Python h2c gRPC client 已可连接外部 Rust sidecar binary 做 runtime store/event/dispatcher RPC 与 Skill policy/sandbox RPC；MCP Runtime 目前仍是 Phase 0/1 sidecar contract/facade + evidence gate，MCP tool 真实执行仍走 Python legacy client，Phase 2-5 canonical runtime operations 待完成；RuntimeSidecar、Skill Runtime 与 MCP Runtime 均具备 artifact provenance / benchmark / promotion / ops / decommission gate + Python fail-closed validator；真实 production shadow / benchmark / ops drill / allowlist promotion evidence 仍按 PRD phase 门禁推进。 |
-| `/data/peihai/vibe-skill/skills` | 推荐的服务器 Skill 仓库挂载源；由 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 目录提供，容器内挂载到 `/app/skill`。 |
+| `/data/peihai/vibe-breeding-main/skills` | 生产服务器 Skill 仓库挂载源；由 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 目录提供，容器内挂载到 `/app/skill`。 |
 | `scripts/` | 显式手工 smoke / 维护脚本，包含主代理真实 LLM smoke 与全栈开发启动脚本。 |
 | `tests/` | 后端分层 unittest 回归，包括 core、storage、lifecycle、orchestration、integrations、capabilities、api、e2e、observability。 |
 | `frontend/` | React + TypeScript + Vite + Ant Design 前端业务对话台，含 API/SSE client、状态 reducer、通用 data-query / file artifact 渲染与 Vitest 测试。 |
@@ -40,7 +40,7 @@ conda run -n multi_agent python -m unittest discover -s tests/orchestration -p '
 conda run -n multi_agent python -m unittest discover -s tests/integrations -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/capabilities/main_agent -p 'test_*.py'
 # 项目级可移除 Skill 自测：在独立 Skill 仓库对应 bundle 目录下运行其 tests/ 目录
-(cd /data/peihai/vibe-skill/skills/<skill-name> && conda run -n multi_agent python -m unittest discover -s tests -p 'test_*.py')
+(cd /data/peihai/vibe-breeding-main/skills/<skill-name> && conda run -n multi_agent python -m unittest discover -s tests -p 'test_*.py')
 conda run -n multi_agent python -m unittest discover -s tests/api -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/e2e -p 'test_*.py'
 conda run -n multi_agent python -m unittest discover -s tests/observability -p 'test_*.py'
@@ -119,10 +119,10 @@ docker compose up
 部署前先在服务器准备独立 Skill 仓库，并保持 bundle 位于仓库的 `skills/` 目录：
 
 ```bash
-git clone git@gitee.com:wellionx/vibe-breeding.git /data/peihai/vibe-skill
+git clone git@gitee.com:wellionx/vibe-breeding.git /data/peihai/vibe-breeding-main
 ```
 
-Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/seedpilot/api/`、`/seedpilot/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999/seedpilot/`，经前端 nginx 访问 API 文档 `http://127.0.0.1:51999/seedpilot/api-doc`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`，Skill bundle 通过 `/data/peihai/vibe-skill/skills:/app/skill:ro` 只读挂载进入 backend 容器。
+Compose 会构建两个 `linux/amd64` 本地镜像：`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/seedpilot/api/`、`/seedpilot/api-doc` 到 backend）。默认宿主机端口：前端 `http://127.0.0.1:51999/seedpilot/`，经前端 nginx 访问 API 文档 `http://127.0.0.1:51999/seedpilot/api-doc`，后端直连 `http://127.0.0.1:51888`；运行时 SQLite / audit / artifact 数据通过 named volume `breeding-agent-runtime` 挂载到 `/app/runtime`，Skill bundle 通过 `/data/peihai/vibe-breeding-main/skills:/app/skill:ro` 只读挂载进入 backend 容器。
 
 `.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
 
