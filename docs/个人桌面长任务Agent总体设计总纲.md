@@ -1,9 +1,10 @@
 # 个人桌面长任务 Agent 总体设计总纲
 
-- 日期：2026-07-15
+- 日期：2026-07-17
 - 状态：设计已确认；实现尚未开始
 - 目标平台：macOS、Windows、Linux
 - 产品形态：个人本地桌面工作台
+- 产品主旨：主 Agent 能够通过 Runtime 受控 spawn 子 Agent，将长任务拆分为可独立调度、取消和恢复的 Child Run；所有权限、上下文和交接都由主 Agent 决策并由 Runtime 仲裁
 - 核心决策：Rust daemon 是唯一可信控制 runtime；模型决定下一步，Runtime 决定是否以及如何执行
 
 ## 1. 背景
@@ -12,22 +13,25 @@
 
 本设计不再扩展服务端产品，而是一次性转向安装在个人电脑上的桌面 Agent。用户不默认使用 Git，因此任务状态、差异、恢复和历史不能依赖 Git 仓库。产品必须支持本地文件、后台长任务、显式 Workspace 授权、严格且不可关闭的沙箱、本地加密历史、可逆文件修改，以及未来受控接入 Skill、Plugin 和 MCP 的稳定边界。
 
+受控多 Agent 协作是产品的核心能力，而不是可选扩展。主 Agent 可以按目标、角色和边界拆分工作并请求 spawn 子 Agent；Runtime 负责验权、调度、隔离、持久化和恢复。子 Agent 之间不直接通信或移交权限、上下文和任务，所有交接必须回到主 Agent 决策，再由 Runtime 验证并投递。
+
 ## 2. 设计目标
 
 1. 让 Agent 在安全且持续产生可验证进展时自动运行到完成，不以固定轮数作为正常停止条件。
-2. UI 关闭、daemon 崩溃或系统重启后，未完成任务能够从持久状态恢复。
-3. 模型只能提出动作；所有文件、进程、网络、权限、完成和恢复决策由 Rust Runtime 裁决。
-4. 首版只允许官方打包并签名的工具，同时为未来 Skill、Plugin、MCP 保留进程隔离和版本化协议。
-5. 沙箱严格且不可关闭；三平台必须提供一致的安全语义，不能静默降级。
-6. Agent 引起的文件修改必须可审计、可恢复，且备份失败时禁止修改真实文件。
-7. 任务、事件、备份和 artifact 默认只在本地加密保存；不默认上传遥测或历史。
-8. 不绑定 Git、GitHub、服务器账号或云端执行环境。
+2. 将受控子 Agent spawn 作为核心产品能力：每次成功 spawn 都产生可独立调度、取消和恢复的 Child Run，权限只能缩小，上下文最小化，任何跨子 Agent 交接必须经主 Agent 决策和 Runtime 仲裁。
+3. UI 关闭、daemon 崩溃或系统重启后，未完成任务能够从持久状态恢复。
+4. 模型只能提出动作；所有文件、进程、网络、权限、完成和恢复决策由 Rust Runtime 裁决。
+5. 首版只允许官方打包并签名的工具，同时为未来 Skill、Plugin、MCP 保留进程隔离和版本化协议。
+6. 沙箱严格且不可关闭；三平台必须提供一致的安全语义，不能静默降级。
+7. Agent 引起的文件修改必须可审计、可恢复，且备份失败时禁止修改真实文件。
+8. 任务、事件、备份和 artifact 默认只在本地加密保存；不默认上传遥测或历史。
+9. 不绑定 Git、GitHub、服务器账号或云端执行环境。
 
 ## 3. 非目标
 
 - 不设计服务端 Agent runtime、云端任务调度或远程 Workspace。
 - 不保留 FastAPI 作为个人版的本地后台，也不维护新旧 API 双轨兼容。
-- 首版不开放第三方 Skill、Plugin、MCP 或用户脚本扫描。
+- 首版不开放第三方 Skill、Plugin、MCP，也不支持自动发现、注册和调用用户自定义脚本。
 - 首版不提供 Git commit、branch、push、PR 等内建操作。
 - 工作台不替代完整 IDE，只提供任务执行所需的轻量文件、diff、artifact 和 PTY 视图。
 - 不允许 Full Access、关闭沙箱、任意网络或读取操作系统密钥。
@@ -64,7 +68,7 @@ Tauri Desktop 负责工作台 UI、系统文件选择器、托盘、通知、升
 - `agent-core`：Agent Loop、上下文、计划、反思和完成提议。
 - `runtime-authority`：Run 状态机、取消、恢复、审批、完成门禁和审计。
 - `model-gateway`：云端与本地模型适配；没有文件、进程和工具权限。
-- `execution-coordinator`：工具调用、并发、资源和子 Agent 调度。
+- `execution-coordinator`：工具调用、并发、资源、子 Agent spawn、交接和生命周期调度。
 - `event-store`：append-only event、checkpoint、snapshot、replay。
 - `policy-engine`：风险等级、权限子集和 capability lease。
 - `sandbox-core`：三平台统一的文件、进程和网络安全语义。
@@ -134,7 +138,11 @@ PlanUpdated
 ToolProposed / ToolAuthorized / ToolStarted
 ToolCompleted / ToolFailed / ToolOutcomeUnknown
 CheckpointCreated
-SubAgentSpawned / SubAgentCompleted
+SubAgentSpawnProposed / SubAgentSpawnAuthorized / SubAgentSpawnRejected
+SubAgentSpawned / SubAgentPaused / SubAgentResumed
+SubAgentCompleted / SubAgentFailed / SubAgentCancelled
+ContextEnvelopeCreated / ContextRequested / ContextEnvelopeUpdated
+HandoffProposed / HandoffAccepted / HandoffRejected / HandoffDelivered
 ApprovalRequested / ApprovalResolved
 RunPaused / RunResumed
 CompletionProposed / CompletionVerified
@@ -339,15 +347,41 @@ Backup Store 位于 Workspace 外，内容寻址、分块、去重并本地加�
 
 任务和 ChangeSet 元数据可长期只读保留；过期且未 pinned 的大体积内容可按策略清理。
 
-## 9. 受控子 Agent
+## 9. 受控多 Agent 协作
 
-Child Run 是 daemon 内持久化的独立逻辑执行单元，拥有独立上下文、计划、事件、checkpoint 和取消令牌，但不拥有新的可信 runtime。父 Agent 创建子任务时必须给出 objective、acceptance criteria、workspace scope、allowed tools、write scope、context/artifact 引用、风险限制和资源预算。
+### 9.1 产品能力与信任模型
 
-子 Agent 默认只读。可写子 Agent 必须获得父权限的明确路径子集；两个活跃 Child Run 不能持有重叠写 lease。修改先形成候选 ChangeSet，再经过统一备份、hash 和冲突门禁。首版只允许 `Main Agent → Child Agent` 一层关系，不允许孙 Agent、任意 peer-to-peer 通信或共享可写任务板。
+子 Agent spawn 是首版核心产品能力，不能退化为主 Agent 内的一次普通模型调用。每次获准 spawn 都创建 daemon 内持久化的独立 `Child Run`，拥有独立模型上下文、计划、事件、checkpoint、资源预算和取消令牌，能够被独立调度、暂停、取消和崩溃恢复，但不拥有新的可信 runtime。首版只允许 `Main Agent → Child Agent` 一层关系；只有主 Agent 可以请求 spawn，子 Agent 不能创建孙 Agent。
 
-子 Agent 返回结构化 status、claims、evidence、artifact、候选 ChangeSet、unresolved 和 next actions。Child 完成不等于父任务完成。并发数量由 Runtime 根据 CPU、内存、磁盘、Provider 配额、写冲突、优先级和成本决定，模型只能请求并发。
+### 9.2 Spawn 契约
 
-取消 Parent 默认取消全部 Child；Child 失败只向父任务返回结构化失败。审批统一路由到父 Run 和工作台。daemon 重启后各 Child 独立恢复，Parent 完成前必须回收、取消或明确分离所有 Child。
+主 Agent 通过结构化 `ChildSpawnProposal` 请求创建子 Agent，至少包含 parent Run、objective、acceptance criteria、agent role、expected output、workspace scope、allowed tools、write scope、context/artifact 引用、prohibited actions、风险上限、资源/成本预算和幂等键。Runtime 在启动子 Agent 前必须验证父 Run 状态、角色与工具签名、权限子集、上下文引用完整性、写 lease 冲突、预算和平台能力，并先写入 spawn 意图事件。
+
+验证通过后，Runtime 分配 Child Run ID、生成 capability lease 和 Context Envelope，再启动独立子 Agent loop；验证失败或资源不足时返回结构化拒绝或延迟原因，不创建半初始化 Child Run。模型只能请求角色和并发，不能指定绕过政策的执行方式，也不能声称子 Agent 已经启动。
+
+### 9.3 权限投影与写入边界
+
+子 Agent 的有效权限是父 Run 当前有效权限、spawn 请求范围、角色上限和 Runtime policy 的交集，只能缩小，不能在创建、恢复、交接或审批过程中扩大。子 Agent 默认只读；可写子 Agent 必须获得明确路径子集，两个活跃 Child Run 不能持有重叠写 lease。子 Agent 不接收 daemon 根密钥、Provider 凭据、父 capability token 或未授权环境变量。
+
+子 Agent 需要新增权限时只能提交结构化请求，由主 Agent 决定是否继续，再由 Runtime 按正常风险和审批流程裁决。修改先形成候选 ChangeSet，再经过统一备份、hash 和冲突门禁；Child Run 不直接提交或覆盖其他 Run 的修改。
+
+### 9.4 Context Envelope
+
+Runtime 为每个 Child Run 生成版本化、带来源和完整性校验的最小必要 `Context Envelope`。信封包含目标、验收条件、角色、禁止事项、已接受决策、必要事实、授权范围以及只读的 context/artifact 引用；默认不复制父会话完整历史、其他子 Agent 上下文、未接受的推测或无关 Workspace 内容。
+
+子 Agent 不能读取 sibling context 或共享可变记忆。执行中缺少上下文时只能向主 Agent 提交 `ContextRequest`；主 Agent 选择是否补充，Runtime 重新校验引用和权限并发布新版本信封。所有信封版本及其来源写入 Event Log，保证恢复和审计时能够重建子 Agent 实际看到的内容。
+
+### 9.5 主 Agent 中介交接
+
+子 Agent 之间不建立直接通信或任务移交通道。子 Agent 只能向主 Agent 提交结构化 `HandoffProposal`，包含 status、claims、evidence、artifact、候选 ChangeSet、unresolved、建议的接手角色、后续目标和所需上下文。主 Agent 负责接受、拒绝、合并或重新分派；Runtime 校验 proposal 来源、artifact/hash、权限和幂等键，并记录对应 handoff 事件。
+
+重新分派时，主 Agent 必须提交新的 `ChildSpawnProposal`，引用已接受的 handoff artifact。Runtime 据此创建新的 Child Run 或新版本 Context Envelope；只有 `HandoffDelivered` 事件落盘后，接手子 Agent 才能看到交接内容。禁止 Child-to-Child 消息、直接指定 sibling 为接收者、共享 capability、共享可写任务板、直接转交完整上下文或绕过主 Agent 修改任务所有权。
+
+### 9.6 调度、完成与恢复
+
+子 Agent 返回结构化 status、claims、evidence、artifact、候选 ChangeSet、unresolved 和 next actions。Child 完成不等于父任务完成；主 Agent 必须审查和吸收结果。并发数量由 Runtime 根据 CPU、内存、磁盘、Provider 配额、写冲突、优先级和成本决定。
+
+取消 Parent 默认取消全部 Child；Child 失败只向主 Agent 返回结构化失败。审批统一路由到父 Run 和工作台。daemon 重启后分别恢复 Parent、Child、Context Envelope、handoff 状态和未完成 lease；重复 spawn 或 handoff 通过幂等键去重。Parent 完成前必须回收或取消全部 Child，不得存在运行中、尚未审查完成或已接受但尚未投递的交接。
 
 ## 10. 完成门禁、持续执行与故障恢复
 
@@ -402,7 +436,7 @@ UI 通过 `subscribe(after_event_seq)` 订阅事件；断线后从最后确认 c
 
 ### 11.3 工作台
 
-工作台包含会话/任务列表、对话、计划和验收条件、长任务时间线、工具与错误、Workspace 授权、审批、文件 diff/ChangeSet、备份恢复、artifact、轻量 PTY、子 Agent、模型费用和资源状态。
+工作台包含会话/任务列表、对话、计划和验收条件、长任务时间线、工具与错误、Workspace 授权、审批、文件 diff/ChangeSet、备份恢复、artifact、轻量 PTY、子 Agent、模型费用和资源状态。子 Agent 视图必须展示 Parent/Child 树、spawn 请求与裁决、角色、权限差异、Context Envelope 来源和版本、资源预算、产物以及 handoff 的 proposed/accepted/rejected/delivered 状态。
 
 Workspace root、读写范围、网络白名单、活跃 lease 和子 Agent 权限始终可见。收回授权后相关 Run 立即暂停，历史保持只读。
 
@@ -485,7 +519,7 @@ crates/platform-integration/
 
 ### 14.1 单元与属性测试
 
-覆盖 Run 状态机、event replay、checkpoint 兼容、capability 子集、路径规范化、diff/三方冲突、backup 去重与恢复、模型 schema、完成门禁和无进展检测。
+覆盖 Run 状态机、event replay、checkpoint 兼容、capability 子集、路径规范化、diff/三方冲突、backup 去重与恢复、模型 schema、完成门禁和无进展检测；子 Agent 额外覆盖 spawn 幂等、权限投影、角色/工具门禁、Context Envelope 最小化与完整性、ContextRequest 补充、handoff 仲裁和重复投递去重。
 
 ### 14.2 故障注入
 
@@ -493,11 +527,11 @@ crates/platform-integration/
 
 ### 14.3 Sandbox Conformance
 
-三平台统一测试路径逃逸、symlink/junction、子进程逃逸、环境凭据、raw socket、DNS 重绑定、本机/局域网、子 Agent 权限扩大、IPC 冒充和 worker 脱离进程树。关键用例失败时该能力不得发布。
+三平台统一测试路径逃逸、symlink/junction、子进程逃逸、环境凭据、raw socket、DNS 重绑定、本机/局域网、子 Agent 权限扩大、sibling context 泄漏、伪造或越权 handoff、直接 Child-to-Child 通信、IPC 冒充和 worker 脱离进程树。关键用例失败时该能力不得发布。
 
 ### 14.4 端到端与长时间测试
 
-覆盖 UI 关闭后继续、daemon/系统恢复、多轮失败后换方案、多次上下文压缩、子 Agent 并发与写冲突、修改/恢复/撤销恢复、外部编辑冲突、Verifier 驳回后继续、网络白名单与临时授权，以及多小时运行、反复 Provider 重连、UI 重启和 backup 清理。
+覆盖 UI 关闭后继续、daemon/系统恢复、多轮失败后换方案、多次上下文压缩、子 Agent spawn/暂停/取消/恢复、并发与写冲突、主 Agent 中介交接及拒绝/重派、修改/恢复/撤销恢复、外部编辑冲突、Verifier 驳回后继续、网络白名单与临时授权，以及多小时运行、反复 Provider 重连、UI 重启和 backup 清理。
 
 ### 14.5 发布条件
 
@@ -520,7 +554,7 @@ crates/platform-integration/
 8. 数据纯本地加密保存，预留端到端加密同步契约。
 9. 不绑定 Git/GitHub；Change Journal 提供差异、历史和恢复。
 10. 文件修改前必须有备份，恢复本身也可撤销。
-11. 支持一层受控子 Agent，权限只能缩小。
+11. 受控子 Agent spawn 是核心产品能力；每次 spawn 创建可独立调度、取消和恢复的 Child Run，权限只能缩小，上下文最小化，所有跨子 Agent 交接必须经主 Agent 决策和 Runtime 仲裁，禁止直接 Child-to-Child 通信。
 12. 使用风险分级授权和组合式完成门禁。
 13. 只要有安全、可验证的进展路径，Agent 尽量运行到完成。
 14. 新 runtime 一次性替换旧架构；旧历史只读导入。

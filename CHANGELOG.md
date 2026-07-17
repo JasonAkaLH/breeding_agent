@@ -14,6 +14,8 @@
 
 ## [Unreleased]
 
+- 个人桌面长任务 Agent 总纲将受控子 Agent spawn 提升为核心产品主旨：每次获准 spawn 必须创建可独立调度、取消和恢复的 Child Run，子权限仅为父权限子集，Context Envelope 按最小必要原则投递；子 Agent 之间禁止直接通信和任务/权限/上下文转交，所有 handoff 必须由主 Agent 决定并由 Rust Runtime 验权、持久化和投递。同步补齐 spawn/handoff 事件、工作台可见性、恢复与三平台安全/端到端验证门禁。License Requirement：设计总纲、文档索引与变更日志更新，无新增依赖/许可变更。
+
 - `docker_cmd.md` 安全边界完成收口：从 `main`、`prod` 及本地 Git 历史/原始引用/reflog 中移除该敏感路径，本地文件以 `0600` 权限恢复并继续由根目录 `.gitignore` 排除；根目录 `AGENTS.md` 新增不可删除、不可输出、不可跟踪/提交/推送的绝对指令，并新增仓库门禁脚本与 GitHub Actions，阻止该路径被重新加入版本控制。License Requirement：安全规则、脚本、CI 与文档变更，无新增依赖/许可变更。
 
 - 前端聊天内容新增安全公式展示链路：统一在 `MarkdownText` 中识别受支持的 TeX/LaTeX 与 Presentation MathML，并通过延迟加载、同源自托管的 MathJax 4.1.3 SVG runtime 渲染用户消息、助手回复、思考内容与 interrupt 问题；保留代码/链接/金额文本、流式未闭合原文、助手复制源文本、失败降级和窄屏横向滚动行为。MathJax 资源通过 allowlist 脚本生成且不使用 CDN，公式输入限制为单式 10,000 UTF-16 code units、单次 Markdown 渲染 100 个完整公式。License Requirement：新增精确固定 `mathjax@4.1.3` 及其 Apache-2.0 NewCM 字体运行时依赖，自托管派生资源不提交 Git。
