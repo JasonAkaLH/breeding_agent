@@ -20,6 +20,133 @@ GENERIC_DATA_SKILL_ID = "skill.generic_data_lookup"
 GENERIC_DATA_SKILL_NAME = "generic-data-lookup"
 
 
+class InMemoryTaskRuntimeSidecar:
+    """Small Task/TaskNode authority used by canonical MCP rollout API tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.tasks: dict[str, dict[str, object]] = {}
+        self.nodes: dict[str, dict[str, object]] = {}
+
+    async def submit_task(self, **payload: object) -> dict[str, object]:
+        task_id = str(payload["task_id"])
+        task = dict(payload["task"])  # type: ignore[arg-type]
+        self.calls.append(("task_submit", dict(payload)))
+        self.tasks[task_id] = task
+        return {
+            "operation": "task_submit",
+            "task_id": task_id,
+            "duplicate": False,
+            "task": task,
+            "error": None,
+        }
+
+    async def get_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_get", {"task_id": task_id}))
+        task = self.tasks.get(task_id)
+        return {
+            "operation": "task_get",
+            "found": task is not None,
+            "task": task,
+            "error": None,
+        }
+
+    async def list_tasks_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+        statuses: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "task_list_for_conversation",
+                {"conversation_id": conversation_id, "statuses": statuses},
+            )
+        )
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task["conversation_id"] == conversation_id
+            and (not statuses or task["status"] in statuses)
+        ]
+        tasks.sort(
+            key=lambda task: (str(task.get("created_at") or ""), str(task["task_id"])),
+            reverse=True,
+        )
+        return {
+            "operation": "task_list_for_conversation",
+            "tasks": tasks,
+            "error": None,
+        }
+
+    async def get_active_task_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            ("task_get_active_for_conversation", {"conversation_id": conversation_id})
+        )
+        active_statuses = {"accepted", "planning", "running", "cancelling"}
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task["conversation_id"] == conversation_id
+            and task["status"] in active_statuses
+        ]
+        tasks.sort(
+            key=lambda task: (str(task.get("created_at") or ""), str(task["task_id"])),
+            reverse=True,
+        )
+        task = tasks[0] if tasks else None
+        return {
+            "operation": "task_get_active_for_conversation",
+            "found": task is not None,
+            "task": task,
+            "error": None,
+        }
+
+    async def transition_node(self, **payload: object) -> dict[str, object]:
+        node_id = str(payload["node_id"])
+        node = payload.get("node")
+        self.calls.append(("node_state_transition", dict(payload)))
+        if isinstance(node, dict):
+            self.nodes[node_id] = dict(node)
+        return {
+            "operation": "node_state_transition",
+            "node_id": node_id,
+            "status": str(payload["to_status"]),
+            "node": node,
+            "error": None,
+        }
+
+    async def get_task_node(self, *, node_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_get", {"node_id": node_id}))
+        node = self.nodes.get(node_id)
+        return {
+            "operation": "task_node_get",
+            "found": node is not None,
+            "node": node,
+            "error": None,
+        }
+
+    async def list_task_nodes_for_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_list", {"task_id": task_id}))
+        nodes = sorted(
+            (
+                node
+                for node in self.nodes.values()
+                if node["task_id"] == task_id
+            ),
+            key=lambda node: str(node["node_id"]),
+        )
+        return {
+            "operation": "task_node_list",
+            "nodes": nodes,
+            "error": None,
+        }
+
+
 def blocking_mysql_adapter() -> tuple[MySQLReadonlyAdapter, threading.Event]:
     release = threading.Event()
 

@@ -28,8 +28,26 @@ class PostgresSchemaReconcilerTest(unittest.TestCase):
         manifest = build_postgres_fresh_cutover_schema_manifest()
         inspection = SchemaInspection.from_manifest(manifest)
         plan = plan_postgres_schema_reconciliation(manifest, inspection)
-        self.assertFalse(plan.actions)
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            ["backfill_mcp_remote_task_publication"],
+        )
         self.assertFalse(plan.operator_only_actions)
+
+    def test_remote_task_publication_column_adds_and_backfills_only_proven_rows(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        columns = dict(inspection.tables["mcp_remote_task_binding"])
+        columns.pop("published_at")
+        inspection = inspection.with_table_columns("mcp_remote_task_binding", columns)
+
+        sql = plan_postgres_schema_reconciliation(manifest, inspection).sql_script()
+
+        self.assertIn(
+            "ALTER TABLE mcp_remote_task_binding ADD COLUMN published_at", sql
+        )
+        self.assertIn("SET published_at = COALESCE(next_poll_at, terminal_at, updated_at)", sql)
+        self.assertIn("next_poll_at IS NOT NULL OR terminal_at IS NOT NULL", sql)
 
     def test_missing_additive_column_is_safe_alter(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()

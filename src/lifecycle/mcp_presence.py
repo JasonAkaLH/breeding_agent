@@ -11,6 +11,7 @@ from src.core.models import MCPConnectionLease
 
 
 MCPPresenceCancellation = Callable[[str, str, str], Awaitable[None]]
+MCPPresenceLeaseExpiredObserver = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,7 @@ class MCPTaskPresenceService:
         instance_id: str = "local",
         lease_ttl_seconds: float = 45.0,
         now_fn: Callable[[], datetime] | None = None,
+        lease_expired_observer: MCPPresenceLeaseExpiredObserver | None = None,
     ) -> None:
         if grace_period_seconds < 0:
             raise ValueError("grace_period_seconds must be non-negative")
@@ -42,11 +44,18 @@ class MCPTaskPresenceService:
         self._instance_id = instance_id
         self._lease_ttl_seconds = lease_ttl_seconds
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+        self._lease_expired_observer = lease_expired_observer
         self._connections: dict[str, MCPPresenceConnection] = {}
         self._task_connections: dict[tuple[str, str], set[str]] = defaultdict(set)
         self._grace_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
+
+    def configure_lease_expired_observer(
+        self,
+        observer: MCPPresenceLeaseExpiredObserver | None,
+    ) -> None:
+        self._lease_expired_observer = observer
 
     async def connect(self, connection: MCPPresenceConnection) -> None:
         key = (connection.owner_user_id, connection.task_id)
@@ -200,6 +209,11 @@ class MCPTaskPresenceService:
                 if current is not asyncio.current_task():
                     return
                 self._grace_tasks.pop(key, None)
+            if self._lease_expired_observer is not None:
+                try:
+                    await self._lease_expired_observer()
+                except Exception:
+                    pass
             await self._cancel_mcp_task(owner_user_id, task_id, "offline_grace_expired")
         except asyncio.CancelledError:
             raise

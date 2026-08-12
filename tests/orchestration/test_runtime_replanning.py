@@ -153,8 +153,21 @@ class RuntimeReplanningTest(OrchestrationSQLiteTestCase):
         )
 
     def test_required_failure_can_be_replanned_to_replacement_nodes(self) -> None:
+        replanned_snapshots: list[dict] = []
+
+        def repair_handler(request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
+            replanned_snapshots.append(
+                dict(request.metadata["mcp_remote_task_continuation_plan"])
+            )
+            return replace(
+                success_result(output_payload={"ok": True}),
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+            )
+
         service = self._service(
-            executor=FakeExecutor({"cap.fail": error_result(code="boom", message="failed"), "cap.repair": success_result(output_payload={"ok": True})}),
+            executor=FakeExecutor({"cap.fail": error_result(code="boom", message="failed"), "cap.repair": repair_handler}),
             runtime_replanner=_FailureRepairReplanner(),
         )
         request = OrchestrationRequest(task_id="task-repair", conversation_id="conv-1", root_message_id="msg-1", user_message="repair it")
@@ -174,6 +187,10 @@ class RuntimeReplanningTest(OrchestrationSQLiteTestCase):
         self.assertEqual(nodes["repair"].status, NodeStatus.COMPLETED)
         self.assertTrue(any(event.event_type == "task.replanned" for event in events))
         self.assertTrue(any(event.event_type == "task.graph_updated" for event in events))
+        self.assertEqual(
+            [node["node_id"] for node in replanned_snapshots[0]["nodes"]],
+            ["repair"],
+        )
 
     def test_completed_but_unsatisfied_result_can_append_more_nodes_before_task_completion(self) -> None:
         def probe_handler(request: CapabilityExecutionRequest) -> CapabilityExecutionResult:

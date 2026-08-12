@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
-from .enums import EventVisibility, TaskStatus
+from .enums import EventVisibility, NodeStatus, TaskStatus
 from .models import (
     Artifact,
     AuthUserToken,
@@ -23,7 +23,20 @@ from .models import (
     MCPBranchRecord,
     MCPCallRecord,
     MCPConnectionLease,
+    MCPLegacyMigrationBatchResult,
+    MCPLegacyMigrationRecord,
     MCPRemoteTaskBinding,
+    MCPRemoteTaskOutbox,
+    MCPRolloutBlockResolution,
+    MCPRolloutDeploymentActivation,
+    MCPRolloutDrillObservation,
+    MCPRolloutEvidenceSnapshot,
+    MCPRolloutGateScope,
+    MCPRolloutInstanceConfigLease,
+    MCPRolloutMetricBucket,
+    MCPShadowAuditSample,
+    MCPRolloutPromotionBlock,
+    MCPRolloutStageApproval,
     MCPSealedState,
     Message,
     PendingSkillContext,
@@ -89,6 +102,26 @@ class StoragePort(Protocol):
         server: UserMCPServer,
         credential: UserMCPCredentialRecord | None = None,
     ) -> UserMCPServer: ...
+
+    async def create_user_mcp_servers_atomic(
+        self,
+        candidates: Sequence[tuple[UserMCPServer, UserMCPCredentialRecord | None]],
+    ) -> list[UserMCPServer]: ...
+
+    async def apply_legacy_mcp_migration_atomic(
+        self,
+        candidates: Sequence[
+            tuple[
+                UserMCPServer,
+                UserMCPCredentialRecord | None,
+                MCPLegacyMigrationRecord,
+            ]
+        ],
+    ) -> MCPLegacyMigrationBatchResult: ...
+
+    async def get_mcp_legacy_migration_record(
+        self, migration_id: str
+    ) -> MCPLegacyMigrationRecord | None: ...
 
     async def update_user_mcp_server(
         self,
@@ -276,13 +309,254 @@ class StoragePort(Protocol):
         self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
     ) -> MCPRemoteTaskBinding | None: ...
 
+    async def get_mcp_remote_task_binding_for_call(
+        self, owner_user_id: str, task_id: str, call_ref: str
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def publish_mcp_remote_task_binding(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        published_at: datetime,
+        continuation_plan: Mapping[str, Any] | None = None,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def reconcile_unpublished_mcp_remote_task_bindings(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int: ...
+
     async def list_due_mcp_remote_task_bindings(
         self, *, now: datetime, limit: int = 100
     ) -> list[MCPRemoteTaskBinding]: ...
 
+    async def claim_due_mcp_remote_task_bindings(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskBinding]: ...
+
+    async def renew_mcp_remote_task_binding_claim(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def release_mcp_remote_task_binding_claim(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def update_mcp_remote_task_binding_status(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        last_status: str,
+        next_poll_at: datetime | None,
+        updated_at: datetime,
+        terminal_at: datetime | None = None,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def finish_mcp_remote_task_binding(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        remote_status: str,
+        call_status: str,
+        terminal_at: datetime,
+        result_ref: str | None = None,
+        safe_error_code: str | None = None,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def claim_mcp_remote_task_outbox(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]: ...
+
+    async def claim_abandoned_mcp_remote_task_controls(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]: ...
+
+    async def pause_mcp_remote_task_for_input(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        input_requests: Mapping[str, Any],
+        conversation_id: str,
+        source_message_id: str,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def enqueue_mcp_remote_task_control(
+        self,
+        answer: InterruptAnswer,
+        *,
+        action: str,
+        input_responses: Mapping[str, Any],
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def apply_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def get_mcp_remote_task_outbox(
+        self, outbox_id: str
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def admit_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        admitted_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def mark_mcp_remote_task_continuation_dispatched(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        dispatched_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def claim_mcp_remote_task_continuations(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]: ...
+
+    async def begin_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        started_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def abandon_expired_mcp_remote_task_continuations(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[MCPRemoteTaskOutbox]: ...
+
+    async def complete_abandoned_mcp_remote_task_continuation(
+        self, outbox_id: str, *, expected_revision: int, completed_at: datetime
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def renew_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        node_ids: tuple[str, ...] | None = None,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def begin_mcp_remote_task_control_delivery(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def complete_mcp_remote_task_outbox(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        completed_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
+    async def complete_mcp_remote_task_control(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        outcome: str,
+        completed_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None: ...
+
     async def delete_mcp_remote_task_binding(
         self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
     ) -> bool: ...
+
+    async def converge_dispatched_mcp_calls_to_unknown(
+        self, *, now: datetime, limit: int = 1000
+    ) -> list[MCPCallRecord]: ...
+
+    async def count_active_mcp_remote_task_bindings(
+        self, *, rollout_config_version: str, protocol_version: str
+    ) -> int: ...
 
     async def save_mcp_sealed_state(self, state: MCPSealedState) -> MCPSealedState: ...
 
@@ -317,6 +591,124 @@ class StoragePort(Protocol):
     async def delete_expired_mcp_audit_events(
         self, *, now: datetime, limit: int = 1000
     ) -> int: ...
+
+    async def ensure_mcp_rollout_gate_scope(
+        self, scope: MCPRolloutGateScope
+    ) -> MCPRolloutGateScope: ...
+
+    async def append_mcp_rollout_drill_observation(
+        self, observation: MCPRolloutDrillObservation
+    ) -> MCPRolloutDrillObservation: ...
+
+    async def list_mcp_rollout_drill_observations(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPRolloutDrillObservation]: ...
+
+    async def upsert_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket: ...
+
+    async def set_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket: ...
+
+    async def list_mcp_rollout_metric_buckets(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPRolloutMetricBucket]: ...
+
+    async def save_mcp_shadow_audit_sample(
+        self, sample: MCPShadowAuditSample
+    ) -> MCPShadowAuditSample: ...
+
+    async def list_mcp_shadow_audit_samples(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPShadowAuditSample]: ...
+
+    async def delete_expired_mcp_shadow_audit_samples(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int: ...
+
+    async def produce_mcp_shadow_evidence_snapshot(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        builder: Callable[
+            [list[MCPShadowAuditSample], list[MCPRolloutMetricBucket]],
+            MCPRolloutEvidenceSnapshot,
+        ],
+    ) -> MCPRolloutEvidenceSnapshot: ...
+
+    async def append_mcp_rollout_evidence_snapshot(
+        self, snapshot: MCPRolloutEvidenceSnapshot
+    ) -> MCPRolloutEvidenceSnapshot: ...
+
+    async def get_mcp_rollout_evidence_snapshot(
+        self, evidence_id: str
+    ) -> MCPRolloutEvidenceSnapshot | None: ...
+
+    async def list_mcp_rollout_evidence_snapshots(
+        self, environment_id: str, deployment_id: str, stage: str
+    ) -> list[MCPRolloutEvidenceSnapshot]: ...
+
+    async def append_mcp_rollout_stage_approval(
+        self, approval: MCPRolloutStageApproval
+    ) -> MCPRolloutStageApproval: ...
+
+    async def activate_mcp_rollout_deployment(
+        self, activation: MCPRolloutDeploymentActivation
+    ) -> MCPRolloutDeploymentActivation: ...
+
+    async def get_mcp_rollout_deployment_activation(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        config_fingerprint: str,
+    ) -> MCPRolloutDeploymentActivation | None: ...
+
+    async def append_mcp_rollout_promotion_block(
+        self, block: MCPRolloutPromotionBlock
+    ) -> MCPRolloutPromotionBlock: ...
+
+    async def list_active_mcp_rollout_promotion_blocks(
+        self, environment_id: str, *, rollout_program: str = "user_mcp_phase3"
+    ) -> list[MCPRolloutPromotionBlock]: ...
+
+    async def append_mcp_rollout_block_resolution(
+        self, resolution: MCPRolloutBlockResolution
+    ) -> MCPRolloutBlockResolution: ...
+
+    async def save_mcp_rollout_instance_config_lease(
+        self, lease: MCPRolloutInstanceConfigLease
+    ) -> MCPRolloutInstanceConfigLease: ...
+
+    async def list_mcp_rollout_instance_config_leases(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> list[MCPRolloutInstanceConfigLease]: ...
 
     async def create_or_get_mcp_credential_key_validation(
         self, record: MCPCredentialKeyValidation
@@ -561,7 +953,13 @@ class StoragePort(Protocol):
         deleted_at: datetime,
     ) -> Message | None: ...
 
-    async def save_task(self, task: Task) -> Task: ...
+    async def save_task(
+        self, task: Task, *, expected_from_status: TaskStatus | None = None
+    ) -> Task: ...
+
+    async def compare_and_set_task(
+        self, task: Task, *, expected_from_status: TaskStatus
+    ) -> Task | None: ...
 
     async def get_task(self, task_id: str) -> Task | None: ...
 
@@ -569,7 +967,13 @@ class StoragePort(Protocol):
 
     async def list_tasks_for_conversation(self, conversation_id: str, statuses: Iterable[TaskStatus] | None = None) -> list[Task]: ...
 
-    async def save_task_node(self, node: TaskNode) -> TaskNode: ...
+    async def save_task_node(
+        self, node: TaskNode, *, expected_from_status: NodeStatus | None = None
+    ) -> TaskNode: ...
+
+    async def compare_and_set_task_node(
+        self, node: TaskNode, *, expected_from_status: NodeStatus
+    ) -> TaskNode | None: ...
 
     async def get_task_node(self, node_id: str) -> TaskNode | None: ...
 

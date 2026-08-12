@@ -43,7 +43,7 @@ from src.capabilities.mcp_dispatch import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
+from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus, UserMCPTransport
 from src.core.models import (
     Conversation,
     ConversationFileResource,
@@ -51,6 +51,8 @@ from src.core.models import (
     Interrupt,
     InterruptAnswer,
     Message,
+    MCPShadowAuditSample,
+    MCPRolloutInstanceConfigLease,
     PendingSkillContext,
     SlotCollection,
     SlotEvent,
@@ -119,12 +121,73 @@ from src.integrations.model_editions import (
     validate_model_reasoning_effort_configs,
 )
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
-from src.integrations.mcp.credentials import CredentialCipher
+from src.integrations.mcp.credentials import CredentialCipher, MCPRecoveryService
 from src.integrations.mcp.audit import MCPAuditService
 from src.integrations.mcp.endpoint_policy import EndpointAllowlist, EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
-from src.integrations.mcp.dispatch_coordinator import UserMCPDispatchCoordinator
+from src.integrations.mcp.dispatch_coordinator import (
+    MCPDispatchMetricContext,
+    UserMCPDispatchCoordinator,
+)
 from src.integrations.mcp.health import MCPHealthRunner
+from src.integrations.mcp.recovery_worker import (
+    MCPContinuationAdmissionResult,
+    MCPRemoteTaskRecoveryWorker,
+    MCPRemoteTaskTerminalMetricSample,
+)
+from src.integrations.mcp.shadow_compare import (
+    MCPShadowRuntimeObserver,
+    RuntimeShadowMappingResolution,
+    ShadowManifestError,
+    ShadowComparison,
+    ShadowOutcome,
+    ShadowScenario,
+    VerifiedShadowScenarioManifest,
+    approved_shadow_mapping_set_fingerprint,
+    compare_live_shadow_sample,
+    derive_shadow_catalog_digest_key,
+    load_signed_shadow_manifest_file,
+    migration_target_credential_digest,
+    resolve_approved_migration_mapping,
+    shadow_fixture_bindings_fingerprint,
+)
+from src.integrations.mcp.shadow_evidence import (
+    MCP_SHADOW_SAMPLE_RETENTION,
+    seal_shadow_audit_sample,
+)
+from src.integrations.mcp.rollout import (
+    MCPExecutionPath,
+    MCPRoutingMode,
+    MCPRolloutConfig,
+    mcp_rollout_env_is_configured,
+)
+from src.integrations.mcp.observability import (
+    MCPRolloutMetricContext,
+    MCPRolloutMetricRecorder,
+)
+from src.integrations.mcp.safety_detectors import (
+    AuthoritativeMCPSafetyDetectorRegistry,
+    MCPSafetyMetricGap,
+    register_authoritative_mcp_safety_detectors,
+)
+from src.integrations.mcp.protocol import (
+    MCP_PROTOCOL_VERSION_2025_11_25,
+    MCP_PROTOCOL_VERSION_2026_07_28,
+)
+from src.integrations.mcp.rollout_evidence import (
+    MCPCallKind,
+    MCPMetricAdapter,
+    MCPMetricErrorCategory,
+    MCPMetricExecutionPath,
+    MCPMetricLabels,
+    MCPMetricName,
+    MCPMetricProtocolVersion,
+    MCPMetricResultCategory,
+    MCPMetricRoutingMode,
+    MCPMetricTransport,
+    MCPRolloutStage,
+    MCPSafetyRedLine,
+)
 from src.integrations.mcp.invalidation import (
     CompositeMCPInvalidationPublisher,
     InMemoryMCPInvalidationBus,
@@ -164,6 +227,7 @@ from src.orchestration.models import (
     OrchestrationRunResult,
     UserMCPServerProfile,
     WorkflowPlan,
+    WorkflowNodePlan,
 )
 from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
@@ -177,9 +241,14 @@ from src.orchestration.soft_skill_replanner import SoftSkillBindingReplanner
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
 from src.orchestration.workflow_router import WorkflowRouter
 from src.storage import StoragePort
-from src.storage.rust_contract import error_policy, mode_for_component as runtime_sidecar_mode_for_component
+from src.storage.rust_contract import (
+    error_policy,
+    migration_policy,
+    mode_for_component as runtime_sidecar_mode_for_component,
+)
 from src.storage.runtime_sidecar_facade import (
     ensure_sidecar_write_allowed,
+    load_runtime_sidecar_migration_evidence_artifact,
     validate_runtime_sidecar_artifact_provenance,
     validate_runtime_sidecar_response,
 )
@@ -187,6 +256,7 @@ from src.storage.runtime_sidecar_grpc_client import RuntimeSidecarGrpcClient
 from src.storage.runtime_sidecar_shadow import record_runtime_sidecar_shadow_write_sync
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
 from src.storage.postgres import PostgreSQLStorage, bootstrap_postgres_database, create_postgres_engine, create_postgres_session_factory
+from src.storage.postgres.session import validate_mcp_rollout_connection_role
 from src.auth.postgres_invalidation_bus import PostgresAuthInvalidationBus
 from src.state.runtime_factory import StatePlatformBackend, build_state_platform_runtime_config
 from src.storage.artifact_files import LocalArtifactFileStore, parse_file_storage_ref, is_active_skill_output_file
@@ -258,8 +328,68 @@ SYSTEM_MANAGED_METADATA_KEYS = frozenset(
         "artifacts",
         "conversation_memory",
         "memory_context",
+        "mcp_execution_mode",
+        "mcp_shadow_enabled",
+        "mcp_rollout_config_version",
+        "mcp_route_reason_code",
+        "mcp_rollout_mode",
     }
 )
+
+
+async def _mark_remote_continuation_dispatched(
+    storage: StoragePort,
+    outbox,
+    dispatched_at: datetime,
+):
+    if outbox.continuation_dispatched_at is not None:
+        return outbox
+    dispatched = await storage.mark_mcp_remote_task_continuation_dispatched(
+        outbox.outbox_id,
+        claim_owner=str(outbox.continuation_claim_owner or ""),
+        claim_token=str(outbox.continuation_claim_token or ""),
+        expected_revision=outbox.continuation_revision,
+        dispatched_at=dispatched_at,
+    )
+    if dispatched is None:
+        raise RuntimeError("mcp_continuation_dispatch_receipt_lost")
+    return dispatched
+
+
+def _deserialize_mcp_continuation_plan(payload: Mapping[str, Any]) -> WorkflowPlan:
+    raw_nodes = payload.get("nodes")
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise RuntimeError("mcp_continuation_plan_missing")
+    nodes: list[WorkflowNodePlan] = []
+    for raw in raw_nodes:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("mcp_continuation_plan_invalid")
+        nodes.append(
+            WorkflowNodePlan(
+                node_id=str(raw.get("node_id") or ""),
+                capability_id=str(raw.get("capability_id") or ""),
+                input_payload=dict(raw.get("input_payload") or {}),
+                metadata=dict(raw.get("metadata") or {}),
+                depends_on=tuple(str(item) for item in raw.get("depends_on") or ()),
+                criticality=NodeCriticality(
+                    str(raw.get("criticality") or NodeCriticality.REQUIRED.value)
+                ),
+                retry_policy=dict(raw.get("retry_policy") or {}),
+                timeout_policy=dict(raw.get("timeout_policy") or {}),
+                resource_class=(
+                    str(raw["resource_class"])
+                    if raw.get("resource_class") is not None
+                    else None
+                ),
+            )
+        )
+    return WorkflowPlan(
+        task_id=str(payload.get("task_id") or ""),
+        nodes=tuple(nodes),
+        metadata=dict(payload.get("metadata") or {}),
+        max_replans=int(payload.get("max_replans") or 0),
+        max_dynamic_nodes=int(payload.get("max_dynamic_nodes") or 0),
+    )
 USER_SUPPLIED_METADATA_DENYLIST = frozenset(
     {
         *PENDING_SKILL_METADATA_KEYS,
@@ -363,6 +493,33 @@ class _PendingSkillMissingInput:
     source_node_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _MCPRolloutInstanceAdmission:
+    environment_id: str
+    deployment_id: str
+    stage: str
+    activation_id: str
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _MCPShadowNodeObservation:
+    node_id: str
+    scenario: ShadowScenario
+    binding: Any
+    legacy_transport: str
+    mapping_resolution: RuntimeShadowMappingResolution
+    task: asyncio.Task[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _MCPShadowExecutionHandle:
+    request: OrchestrationRequest
+    owner_user_id: str
+    approved_mappings: tuple[Any, ...]
+    observations: tuple[_MCPShadowNodeObservation, ...]
+
+
 class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     def __init__(
         self,
@@ -397,15 +554,25 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         user_mcp_health_runner: MCPHealthRunner | None = None,
         user_mcp_gateway: MCPGateway | None = None,
         mcp_credential_cipher: CredentialCipher | None = None,
+        mcp_remote_task_recovery_worker: MCPRemoteTaskRecoveryWorker | None = None,
         mcp_invalidation_bus: InMemoryMCPInvalidationBus | None = None,
         postgres_mcp_invalidation_bus: PostgresMCPInvalidationBus | None = None,
         user_mcp_result_store: MCPTemporaryResultStore | None = None,
         user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
         user_mcp_presence_service: MCPTaskPresenceService | None = None,
         user_mcp_audit_service: MCPAuditService | None = None,
+        mcp_shadow_observer: MCPShadowRuntimeObserver | None = None,
+        mcp_shadow_manifest: VerifiedShadowScenarioManifest | None = None,
+        mcp_shadow_scenario_bindings: Mapping[str, ShadowScenario] | None = None,
+        mcp_shadow_manifest_gap_reason: str | None = None,
         user_mcp_routing_enabled: bool = False,
+        mcp_rollout_config: MCPRolloutConfig | None = None,
+        mcp_rollout_instance_admission: _MCPRolloutInstanceAdmission | None = None,
+        mcp_rollout_metric_recorder: MCPRolloutMetricRecorder | None = None,
+        mcp_rollout_engine: Engine | None = None,
     ) -> None:
         self._engine = engine
+        self._mcp_rollout_engine = mcp_rollout_engine
         self.storage = storage
         self.capability_registry = capability_registry
         self.instance_registry = instance_registry
@@ -423,13 +590,31 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self.user_mcp_health_runner = user_mcp_health_runner
         self.user_mcp_gateway = user_mcp_gateway
         self.mcp_credential_cipher = mcp_credential_cipher
+        self.mcp_remote_task_recovery_worker = mcp_remote_task_recovery_worker
         self.mcp_invalidation_bus = mcp_invalidation_bus
         self.postgres_mcp_invalidation_bus = postgres_mcp_invalidation_bus
         self.user_mcp_result_store = user_mcp_result_store
         self.user_mcp_result_janitor = user_mcp_result_janitor
         self.user_mcp_presence_service = user_mcp_presence_service
         self.user_mcp_audit_service = user_mcp_audit_service
+        self.mcp_shadow_observer = mcp_shadow_observer
+        self._mcp_shadow_manifest = mcp_shadow_manifest
+        self._mcp_shadow_scenario_bindings = dict(
+            mcp_shadow_scenario_bindings or {}
+        )
+        self._mcp_shadow_manifest_gap_reason = mcp_shadow_manifest_gap_reason
+        self._mcp_shadow_terminal_timeout_seconds = 5.0
         self.user_mcp_routing_enabled = user_mcp_routing_enabled
+        self.mcp_rollout_config = mcp_rollout_config or MCPRolloutConfig.from_env({})
+        self._mcp_rollout_instance_admission = mcp_rollout_instance_admission
+        self._mcp_rollout_metric_recorder = mcp_rollout_metric_recorder
+        self._mcp_rollout_zero_series_task: asyncio.Task[None] | None = None
+        self._mcp_rollout_instance_lease_created_at: datetime | None = None
+        self._mcp_rollout_instance_lease_valid_until: datetime | None = None
+        self._mcp_rollout_instance_admission_error: str | None = None
+        self._mcp_rollout_instance_lease_task: asyncio.Task[None] | None = None
+        self._mcp_rollout_lease_duration_seconds = 60
+        self._mcp_rollout_lease_renew_interval_seconds = 20
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
@@ -452,6 +637,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._conversation_delete_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
         self._locally_cancelled_task_ids = local_cancelled_task_ids if local_cancelled_task_ids is not None else set()
         self._running_title_tasks: set[asyncio.Task[None]] = set()
+        self._running_mcp_shadow_tasks: set[asyncio.Task[None]] = set()
         self._task_skill_bundle_revisions: dict[str, str] = {}
         self._task_mcp_bundle_revisions: dict[str, str] = {}
         self._task_sheet_selection_resume_metadata: dict[str, dict[str, Any]] = {}
@@ -461,6 +647,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._mcp_auth_invalidation_queue = None
         self._mcp_auth_invalidation_task: asyncio.Task[None] | None = None
         self._mcp_audit_retention_task: asyncio.Task[None] | None = None
+        self._mcp_continuation_consumer_task: asyncio.Task[None] | None = None
+        self._mcp_continuation_consumer_id = f"api-continuation:{uuid4().hex}"
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
         self._mcp_refresh_lock = asyncio.Lock()
@@ -774,7 +962,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     "mcp_tool_approval must be allow_once, always_allow, or deny"
                 )
             return {"mcp_tool_approval": decision}
-        if interrupt.reason_code == "mcp_input_required":
+        if interrupt.reason_code in {
+            "mcp_input_required",
+            "mcp_remote_task_input_required",
+        }:
+            if (
+                interrupt.reason_code == "mcp_remote_task_input_required"
+                and request.metadata.get("mcp_remote_task_cancel") is True
+            ):
+                return {"mcp_remote_task_cancel": True}
             responses = request.metadata.get("mcp_input_responses")
             if not isinstance(responses, Mapping):
                 raise ValueError("mcp_input_responses must be an object")
@@ -848,6 +1044,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     ) -> tuple[Message, Task]:
         if authenticated_username is None:
             raise ValueError("authenticated_username is required")
+        self._ensure_mcp_rollout_instance_admitted()
         selected_model_edition = self._validate_requested_model_edition(request.model_edition)
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if (
@@ -859,7 +1056,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
             raise PermissionError(f"Conversation is not available: {conversation_id}")
         await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
-        await self._refresh_mcp_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._conversation_guard.ensure_conversation_available(conversation_id)
         routing_mode = self._routing_mode(request.routing_mode)
         if routing_mode == RoutingMode.FORCE_CAPABILITY and not request.capability_id:
@@ -891,6 +1087,32 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             if continued_pending_context is not None:
                 requested_capability_id = continued_pending_context.capability_id
                 self._ensure_supported_capability(requested_capability_id)
+        requested_descriptor = (
+            self.capability_registry.get(requested_capability_id)
+            if requested_capability_id is not None
+            else None
+        )
+        explicit_legacy_capability = (
+            requested_descriptor is not None
+            and _is_mcp_descriptor(requested_descriptor)
+        )
+        has_user_scoped_server = bool(
+            await self.storage.list_user_mcp_servers(authenticated_username)
+        )
+        mcp_assignment = self.mcp_rollout_config.assign_authenticated_user(
+            authenticated_username,
+            has_user_scoped_server=has_user_scoped_server,
+            explicit_legacy_capability=explicit_legacy_capability,
+        )
+        if mcp_assignment.real_path is MCPExecutionPath.LEGACY:
+            await self._refresh_mcp_for_new_conversation_if_needed(
+                conversation_id,
+                existing_conversation,
+            )
+        self._ensure_mcp_capability_matches_assignment(
+            requested_capability_id,
+            execution_mode=mcp_assignment.real_path.value,
+        )
 
         upload_context = await self.resolve_uploads_for_message(
             conversation_id,
@@ -955,8 +1177,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             summary=request.content,
             created_at=now,
             updated_at=now,
+            mcp_execution_mode=mcp_assignment.real_path.value,
+            mcp_shadow_enabled=mcp_assignment.shadow_enabled,
+            mcp_rollout_config_version=mcp_assignment.config_version,
+            mcp_route_reason_code=mcp_assignment.reason_code.value,
+            mcp_rollout_mode=mcp_assignment.routing_mode.value,
         )
         await self.storage.save_task(task)
+        await self._record_mcp_route_assignment_metric(task)
         await self._record_event(
             self._make_event(
                 task_id=task_id,
@@ -974,6 +1202,48 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 created_at=now,
             )
         )
+        await self._record_event(
+            self._make_event(
+                task_id=task_id,
+                conversation_id=conversation_id,
+                event_type="mcp.rollout.route_assigned",
+                payload={
+                    **(
+                        {
+                            "safe_owner_ref": self.mcp_credential_cipher.safe_owner_reference(
+                                authenticated_username,
+                                context=mcp_assignment.config_version,
+                            )
+                        }
+                        if self.mcp_credential_cipher is not None
+                        else {}
+                    ),
+                    "safe_task_ref": hashlib.sha256(
+                        f"{mcp_assignment.config_version}:{task_id}".encode("utf-8")
+                    ).hexdigest(),
+                    "real_path": mcp_assignment.real_path.value,
+                    "shadow_enabled": mcp_assignment.shadow_enabled,
+                    "config_version": mcp_assignment.config_version,
+                    "reason_code": mcp_assignment.reason_code.value,
+                    "rollout_mode": mcp_assignment.routing_mode.value,
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+                created_at=now,
+            )
+        )
+        if mcp_assignment.real_path is MCPExecutionPath.UNAVAILABLE:
+            await self._record_event(
+                self._make_event(
+                    task_id=task_id,
+                    conversation_id=conversation_id,
+                    event_type="mcp.runtime_unavailable",
+                    payload={
+                        "status": "unavailable",
+                        "reason_code": mcp_assignment.reason_code.value,
+                    },
+                    created_at=now,
+                )
+            )
         if superseded_pending_count:
             await self._record_event(
                 self._make_event(
@@ -1020,7 +1290,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             metadata["defer_task_completed_until_pending_skill_context_processed"] = True
         if self._skill_runtime_state is not None:
             metadata["skill_bundle_revision"] = self._skill_runtime_state.active_revision
-        if self._mcp_runtime_state is not None:
+        metadata.update(self._mcp_task_assignment_metadata(task))
+        if (
+            task.mcp_execution_mode == MCPExecutionPath.LEGACY.value
+            and self._mcp_runtime_state is not None
+        ):
             metadata["mcp_bundle_revision"] = self._mcp_runtime_state.active_revision
         upload_ids = request.metadata.get("upload_ids") or ()
         explicit_upload_ids = self._normalize_upload_ids(upload_ids)
@@ -1063,16 +1337,76 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             current_user_message=current_user_message,
             resolved_user_message=resolved_user_message,
             available_mcp_servers=await self.available_user_mcp_server_profiles(
-                authenticated_username
+                authenticated_username,
+                execution_mode=task.mcp_execution_mode,
             ),
         )
         await self._schedule_execution(orchestration_request)
         return message, task
 
+    async def _record_mcp_route_assignment_metric(self, task: Task) -> None:
+        recorder = self._mcp_rollout_metric_recorder
+        if recorder is None:
+            return
+        try:
+            execution_path = MCPMetricExecutionPath(
+                task.mcp_execution_mode or MCPExecutionPath.UNAVAILABLE.value
+            )
+            routing_mode = MCPMetricRoutingMode(
+                task.mcp_rollout_mode or MCPRoutingMode.OFF.value
+            )
+            result_category = (
+                MCPMetricResultCategory.FAILED
+                if execution_path is MCPMetricExecutionPath.UNAVAILABLE
+                else MCPMetricResultCategory.SUCCEEDED
+            )
+            observed_at = task.created_at or self._utcnow_naive()
+            observed_at = (
+                observed_at.replace(tzinfo=timezone.utc)
+                if observed_at.tzinfo is None
+                else observed_at.astimezone(timezone.utc)
+            )
+            bucket_started_at = observed_at.replace(second=0, microsecond=0)
+            await recorder.record_count(
+                MCPMetricName.ROUTE_REQUESTS_TOTAL,
+                labels=MCPMetricLabels(
+                    execution_path=execution_path,
+                    routing_mode=routing_mode,
+                    result_category=result_category,
+                    error_category=(
+                        MCPMetricErrorCategory.UNKNOWN
+                        if result_category is MCPMetricResultCategory.FAILED
+                        else MCPMetricErrorCategory.NONE
+                    ),
+                ),
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_started_at + timedelta(minutes=1),
+            )
+        except Exception:
+            if self._audit_sink is None:
+                return
+            try:
+                self._audit_sink.record_sync(
+                    "mcp.rollout_metric_gap",
+                    {
+                        "metric_family": "route_assignment",
+                        "gap_reason": "route_assignment_recording_failed",
+                    },
+                )
+            except Exception:
+                return
+
     async def available_user_mcp_server_profiles(
         self,
         owner_user_id: str,
+        *,
+        execution_mode: str | None = None,
     ) -> tuple[UserMCPServerProfile, ...]:
+        if (
+            execution_mode is not None
+            and execution_mode != MCPExecutionPath.USER_SCOPED.value
+        ):
+            return ()
         if not self.user_mcp_routing_enabled or self.user_mcp_config_service is None:
             return ()
         servers = await self.user_mcp_config_service.list_servers(owner_user_id)
@@ -1088,6 +1422,667 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             and str(server.health_status) == "available"
             and not server.deletion_pending
         )
+
+    async def _begin_mcp_shadow_observation(
+        self,
+        *,
+        request: OrchestrationRequest,
+        plan: WorkflowPlan,
+    ) -> _MCPShadowExecutionHandle | None:
+        if (
+            request.metadata.get("mcp_shadow_enabled") is not True
+            or request.metadata.get("mcp_execution_mode")
+            != MCPExecutionPath.LEGACY.value
+        ):
+            return None
+        if self._mcp_shadow_manifest is None:
+            await self._record_mcp_shadow_setup_failure(
+                request,
+                reason_code=(
+                    self._mcp_shadow_manifest_gap_reason
+                    or "shadow_verified_manifest_missing"
+                ),
+            )
+            return None
+        if (
+            self.mcp_shadow_observer is None
+            or self._mcp_runtime_state is None
+            or self.user_mcp_config_service is None
+        ):
+            await self._record_mcp_shadow_setup_failure(
+                request,
+                reason_code="shadow_runtime_unavailable",
+            )
+            return None
+        revision = str(
+            request.metadata.get("mcp_bundle_revision") or ""
+        ).strip()
+        if not revision:
+            await self._record_mcp_shadow_setup_failure(
+                request,
+                reason_code="shadow_pinned_revision_missing",
+            )
+            return None
+        try:
+            bundle = self._mcp_runtime_state.bundle_for_revision(revision)
+            selected_nodes = tuple(
+                node for node in plan.nodes if node.capability_id in bundle.bindings
+            )
+            if not selected_nodes:
+                return None
+            legacy_server_configs = tuple(self._mcp_runtime_state.config.servers)
+        except Exception:
+            await self._record_mcp_shadow_setup_failure(
+                request,
+                reason_code="shadow_pinned_revision_unavailable",
+            )
+            return None
+        try:
+            task = await self.storage.get_task(request.task_id)
+            conversation = await self.storage.get_conversation(
+                request.conversation_id
+            )
+            if (
+                task is None
+                or task.conversation_id != request.conversation_id
+                or task.mcp_shadow_enabled is not True
+                or task.mcp_execution_mode != MCPExecutionPath.LEGACY.value
+                or task.mcp_rollout_mode != MCPRoutingMode.SHADOW.value
+                or request.metadata.get("mcp_rollout_config_version")
+                != task.mcp_rollout_config_version
+                or conversation is None
+                or not conversation.username
+            ):
+                return None
+            user_servers = tuple(
+                await self.user_mcp_config_service.list_servers(
+                    conversation.username
+                )
+            )
+            target_credential_digests = await self._mcp_shadow_credential_digests(
+                user_servers
+            )
+            profiles = tuple(
+                UserMCPServerProfile(
+                    server_id=server.server_id,
+                    display_name=server.display_name,
+                    routing_description=server.routing_description,
+                    transport=str(server.transport),
+                )
+                for server in user_servers
+                if server.enabled
+                and str(server.health_status) == "available"
+                and not server.deletion_pending
+            )
+            legacy_servers = {
+                server.server_id: server
+                for server in legacy_server_configs
+            }
+            config_fingerprint = self._mcp_shadow_manifest.manifest.config_fingerprint
+            all_mapping_resolutions: dict[str, RuntimeShadowMappingResolution] = {}
+            for legacy_server in legacy_server_configs:
+                all_mapping_resolutions[legacy_server.server_id] = (
+                    resolve_approved_migration_mapping(
+                        legacy_server_id=legacy_server.server_id,
+                        owner_user_id=conversation.username,
+                        legacy_server=legacy_server,
+                        user_servers=user_servers,
+                        target_credential_digests=target_credential_digests,
+                        config_fingerprint=config_fingerprint,
+                    )
+                )
+            approved_mappings = tuple(
+                resolution.mapping
+                for resolution in all_mapping_resolutions.values()
+                if resolution.mapping is not None
+            )
+            if (
+                approved_shadow_mapping_set_fingerprint(approved_mappings)
+                != self._mcp_shadow_manifest.manifest.mapping_fingerprint
+            ):
+                await self._record_mcp_shadow_setup_failure(
+                    request,
+                    reason_code="shadow_mapping_set_fingerprint_mismatch",
+                )
+                return None
+            observations: list[_MCPShadowNodeObservation] = []
+            for node in selected_nodes:
+                scenario = self._mcp_shadow_scenario_bindings.get(
+                    node.capability_id
+                )
+                if not isinstance(scenario, ShadowScenario):
+                    await self._record_mcp_shadow_setup_failure(
+                        request,
+                        reason_code="shadow_scenario_binding_missing",
+                    )
+                    continue
+                binding = bundle.bindings[node.capability_id]
+                legacy_server = legacy_servers.get(binding.server_id)
+                mapping_resolution = all_mapping_resolutions.get(
+                    binding.server_id,
+                    RuntimeShadowMappingResolution(
+                        None,
+                        ("legacy_source_config_missing",),
+                    ),
+                )
+                legacy_transport = (
+                    legacy_server.transport
+                    if legacy_server is not None
+                    else "not_applicable"
+                )
+                observer_task = asyncio.create_task(
+                    self.mcp_shadow_observer.compare_task(
+                        owner_user_id=conversation.username,
+                        task_id=task.task_id,
+                        user_request=request.effective_user_message,
+                        profiles=profiles,
+                        legacy_binding=binding,
+                        legacy_server_bindings=tuple(
+                            candidate
+                            for candidate in bundle.bindings.values()
+                            if candidate.server_id == binding.server_id
+                        ),
+                        legacy_transport=legacy_transport,
+                        legacy_endpoint_url=(
+                            legacy_server.endpoint
+                            if legacy_server is not None
+                            else None
+                        ),
+                        mapping=mapping_resolution.mapping,
+                        config_fingerprint=config_fingerprint,
+                        mapping_blockers=mapping_resolution.blockers,
+                    ),
+                    name=f"mcp-shadow-observe:{request.task_id}:{node.node_id}",
+                )
+                self._running_mcp_shadow_tasks.add(observer_task)
+                observer_task.add_done_callback(
+                    self._running_mcp_shadow_tasks.discard
+                )
+                observations.append(
+                    _MCPShadowNodeObservation(
+                        node_id=node.node_id,
+                        scenario=scenario,
+                        binding=binding,
+                        legacy_transport=legacy_transport,
+                        mapping_resolution=mapping_resolution,
+                        task=observer_task,
+                    )
+                )
+            if not observations:
+                return None
+            await asyncio.sleep(0)
+            return _MCPShadowExecutionHandle(
+                request=request,
+                owner_user_id=conversation.username,
+                approved_mappings=approved_mappings,
+                observations=tuple(observations),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Shadow is observational: planner/executor output remains authoritative.
+            await self._record_mcp_shadow_setup_failure(
+                request,
+                reason_code="shadow_observation_setup_failed",
+            )
+            return None
+
+    async def _finish_mcp_shadow_observation(
+        self,
+        handle: _MCPShadowExecutionHandle | None,
+        result: OrchestrationRunResult | None,
+    ) -> None:
+        if handle is None:
+            return
+        tasks = tuple(item.task for item in handle.observations)
+        try:
+            observed = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=self._mcp_shadow_terminal_timeout_seconds,
+            )
+        except TimeoutError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._record_mcp_shadow_setup_failure(
+                handle.request,
+                reason_code="shadow_observation_timeout",
+            )
+            return
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        terminal_nodes = {
+            str(getattr(node, "node_id", "")): node
+            for node in (() if result is None else result.nodes)
+        }
+        for context, shadow_result in zip(
+            handle.observations, observed, strict=True
+        ):
+            if isinstance(shadow_result, BaseException):
+                await self._record_mcp_shadow_setup_failure(
+                    handle.request,
+                    reason_code="shadow_observer_failed",
+                )
+                continue
+            await self._record_terminal_mcp_shadow_sample(
+                handle=handle,
+                context=context,
+                shadow_result=shadow_result,
+                terminal_node=terminal_nodes.get(context.node_id),
+            )
+
+    async def _record_terminal_mcp_shadow_sample(
+        self,
+        *,
+        handle: _MCPShadowExecutionHandle,
+        context: _MCPShadowNodeObservation,
+        shadow_result: Any,
+        terminal_node: Any | None,
+    ) -> None:
+        manifest = self._mcp_shadow_manifest
+        audit_service = self.user_mcp_audit_service
+        observation = getattr(shadow_result, "observation", None)
+        legacy_summary = getattr(shadow_result, "legacy_summary", None)
+        if (
+            manifest is None
+            or audit_service is None
+        ):
+            await self._record_mcp_shadow_setup_failure(
+                handle.request,
+                reason_code="shadow_terminal_evidence_incomplete",
+            )
+            return
+        if observation is None or legacy_summary is None:
+            comparison = getattr(
+                shadow_result,
+                "comparison",
+                ShadowComparison.NOT_COMPARABLE,
+            )
+            blockers = tuple(getattr(shadow_result, "blockers", ()))
+            await self._record_mcp_shadow_terminal_comparison_event(
+                handle.request,
+                node_id=context.node_id,
+                comparison=comparison,
+                blockers=blockers,
+                result_category=comparison.value,
+            )
+            await self._record_mcp_shadow_setup_failure(
+                handle.request,
+                reason_code="shadow_terminal_evidence_incomplete",
+            )
+            return
+
+        expected = manifest.manifest.expectation_for(context.scenario)
+        legacy_outcome, terminal = await self._mcp_shadow_legacy_outcome(
+            handle.request.task_id,
+            context.node_id,
+            terminal_node,
+            excluded_fallback=expected.legacy_outcome,
+        )
+        nonce = hashlib.sha256(
+            (
+                f"{manifest.fingerprint}:{handle.request.task_id}:"
+                f"{context.node_id}"
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            compared = compare_live_shadow_sample(
+                verified_manifest=manifest,
+                scenario=context.scenario,
+                nonce=nonce,
+                legacy_outcome=legacy_outcome,
+                observation=observation,
+                legacy_summary=legacy_summary,
+                legacy_route=str(
+                    getattr(context.binding, "server_id", "") or ""
+                ),
+                mapping=getattr(shadow_result, "mapping", None),
+                approved_mappings=handle.approved_mappings,
+                terminal=terminal,
+            )
+        except Exception:
+            await self._record_mcp_shadow_setup_failure(
+                handle.request,
+                reason_code="shadow_terminal_comparison_failed",
+            )
+            return
+
+        observed_at = datetime.now(timezone.utc)
+        sample_id = "mcp-shadow-" + hashlib.sha256(
+            (
+                f"{manifest.fingerprint}:{handle.request.task_id}:"
+                f"{context.node_id}:{nonce}"
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        admission = self._mcp_rollout_instance_admission
+        transport = str(observation.summary.transport or "").strip()
+        endpoint_policy = str(
+            observation.summary.endpoint_policy or ""
+        ).strip()
+        if (
+            admission is None
+            or admission.stage != "internal_shadow"
+            or not transport
+            or not endpoint_policy
+        ):
+            await self._record_mcp_shadow_setup_failure(
+                handle.request,
+                reason_code="shadow_audit_scope_unavailable",
+            )
+            return
+        sample = seal_shadow_audit_sample(
+            MCPShadowAuditSample(
+                sample_id=sample_id,
+                environment_id=admission.environment_id,
+                deployment_id=admission.deployment_id,
+                stage=admission.stage,
+                config_fingerprint=manifest.manifest.config_fingerprint,
+                manifest_fingerprint=manifest.fingerprint,
+                fixture_fingerprint=manifest.manifest.fixture_fingerprint,
+                mapping_fingerprint=manifest.manifest.mapping_fingerprint,
+                scenario=context.scenario.value,
+                nonce=nonce,
+                legacy_outcome=legacy_outcome.value,
+                shadow_outcome=observation.outcome.value,
+                transport=transport,
+                endpoint_policy=endpoint_policy,
+                comparison=compared.result.comparison.value,
+                blockers=compared.result.blockers,
+                payload_digest="",
+                observed_at=observed_at,
+                recorded_at=observed_at,
+                expires_at=observed_at + MCP_SHADOW_SAMPLE_RETENTION,
+                safe_owner_ref=None,
+                safe_task_ref=None,
+            )
+        )
+        await self._record_mcp_shadow_terminal_comparison_event(
+            handle.request,
+            node_id=context.node_id,
+            comparison=compared.result.comparison,
+            blockers=compared.result.blockers,
+            result_category=observation.outcome.value,
+        )
+        try:
+            await audit_service.record_shadow_sample(sample)
+        except Exception:
+            await self._record_mcp_shadow_setup_failure(
+                handle.request,
+                reason_code="shadow_sample_persistence_failed",
+            )
+            return
+
+    async def _mcp_shadow_legacy_outcome(
+        self,
+        task_id: str,
+        node_id: str,
+        terminal_node: Any | None,
+        *,
+        excluded_fallback: ShadowOutcome,
+    ) -> tuple[ShadowOutcome, bool]:
+        if terminal_node is None:
+            return excluded_fallback, False
+        status = getattr(terminal_node, "status", None)
+        try:
+            events = await self.storage.list_events_for_task_filtered(
+                task_id,
+                event_types={
+                    "mcp.tool_call_completed",
+                    "mcp.tool_call_failed",
+                },
+                node_id=node_id,
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        except Exception:
+            return excluded_fallback, False
+        if len(events) != 1:
+            return excluded_fallback, False
+        event = events[0]
+        if status == NodeStatus.COMPLETED and event.event_type == "mcp.tool_call_completed":
+            output_size = event.payload.get("output_size_bytes")
+            truncated = event.payload.get("truncated")
+            if (
+                isinstance(output_size, int)
+                and output_size >= 0
+                and truncated is True
+            ):
+                return ShadowOutcome.TOOL_CALL_SUCCEEDED_LARGE_RESULT, True
+            return ShadowOutcome.TOOL_CALL_SUCCEEDED, True
+        if status != NodeStatus.FAILED:
+            return excluded_fallback, False
+        error_code = str(event.payload.get("error_code") or "").strip()
+        closed_errors = {
+            "mcp_auth_required": ShadowOutcome.AUTHENTICATION_FAILED,
+            "mcp_timeout": ShadowOutcome.TIMEOUT,
+            "mcp_permission_denied": ShadowOutcome.PERMISSION_DENIED_SUPPRESSED,
+        }
+        outcome = closed_errors.get(error_code)
+        if outcome is not None:
+            return outcome, True
+        # Generic error_type/status values are not closed terminal evidence.
+        return excluded_fallback, False
+
+    async def _record_mcp_shadow_terminal_comparison_event(
+        self,
+        request: OrchestrationRequest,
+        *,
+        node_id: str,
+        comparison: ShadowComparison,
+        blockers: tuple[str, ...],
+        result_category: str,
+    ) -> None:
+        metric_recorded = True
+        if comparison is ShadowComparison.MISMATCHED:
+            metric_recorded = await self._record_mcp_shadow_mismatch_metric()
+        payload: dict[str, Any] = {
+            "safe_task_ref": hashlib.sha256(
+                f"{self.mcp_rollout_config.fingerprint}:{request.task_id}".encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "config_version": self.mcp_rollout_config.fingerprint,
+            "rollout_mode": MCPRoutingMode.SHADOW.value,
+            "diff_category": comparison.value,
+            "result_category": result_category,
+            "status": comparison.value,
+        }
+        if blockers:
+            payload["reason_code"] = blockers[0]
+        try:
+            await self._record_event(
+                self._make_event(
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    node_id=node_id,
+                    event_type="mcp.rollout.shadow_compared",
+                    payload=payload,
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        except Exception:
+            self._record_mcp_shadow_audit_fallback(payload)
+        if comparison is ShadowComparison.MISMATCHED and not metric_recorded:
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_mismatch_recording_failed"
+            )
+
+    async def _mcp_shadow_credential_digests(
+        self,
+        user_servers: tuple[Any, ...],
+    ) -> dict[str, str]:
+        cipher = self.mcp_credential_cipher
+        if cipher is None:
+            return {}
+        digests: dict[str, str] = {}
+        for server in user_servers:
+            metadata = getattr(server, "auth_metadata", {})
+            provenance = (
+                metadata.get("migration_provenance")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if not isinstance(provenance, Mapping):
+                continue
+            source_fingerprint = str(
+                provenance.get("source_fingerprint") or ""
+            ).strip()
+            try:
+                credential = await self.storage.get_user_mcp_credential(
+                    server.owner_user_id,
+                    server.server_id,
+                )
+            except Exception:
+                continue
+            digest = migration_target_credential_digest(
+                cipher,
+                server=server,
+                credential_record=credential,
+                source_fingerprint=source_fingerprint,
+            )
+            if digest is not None:
+                digests[server.server_id] = digest
+        return digests
+
+    async def _compare_and_record_mcp_shadow_route(
+        self,
+        *,
+        request: OrchestrationRequest,
+        task: Task,
+        node_id: str,
+        owner_user_id: str,
+        profiles: tuple[UserMCPServerProfile, ...],
+        binding: Any,
+        server_bindings: tuple[Any, ...],
+        legacy_transport: str,
+        legacy_endpoint_url: str | None = None,
+        mapping_resolution: RuntimeShadowMappingResolution,
+        config_fingerprint: str,
+    ) -> None:
+        try:
+            result = await self.mcp_shadow_observer.compare_task(
+                owner_user_id=owner_user_id,
+                task_id=task.task_id,
+                user_request=request.effective_user_message,
+                profiles=profiles,
+                legacy_binding=binding,
+                legacy_server_bindings=server_bindings,
+                legacy_transport=legacy_transport,
+                legacy_endpoint_url=legacy_endpoint_url,
+                mapping=mapping_resolution.mapping,
+                config_fingerprint=config_fingerprint,
+                mapping_blockers=mapping_resolution.blockers,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_observer_failed"
+            )
+            return
+
+        metric_recorded = True
+        if result.comparison is ShadowComparison.MISMATCHED:
+            metric_recorded = await self._record_mcp_shadow_mismatch_metric()
+        observation = result.observation
+        result_category = (
+            observation.outcome.value
+            if observation is not None
+            else result.comparison.value
+        )
+        reason_code = result.blockers[0] if result.blockers else None
+        error_code = (
+            observation.error_code
+            if observation is not None and observation.error_code
+            else reason_code
+        )
+        payload: dict[str, Any] = {
+            "safe_task_ref": hashlib.sha256(
+                f"{config_fingerprint}:{task.task_id}".encode("utf-8")
+            ).hexdigest(),
+            "config_version": config_fingerprint,
+            "rollout_mode": task.mcp_rollout_mode,
+            "diff_category": result.comparison.value,
+            "result_category": result_category,
+            "status": result.comparison.value,
+        }
+        if reason_code:
+            payload["reason_code"] = reason_code
+        if error_code:
+            payload["error_code"] = error_code
+        try:
+            await self._record_event(
+                self._make_event(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    node_id=node_id,
+                    event_type="mcp.rollout.shadow_compared",
+                    payload=payload,
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        except Exception:
+            self._record_mcp_shadow_audit_fallback(
+                payload,
+            )
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_comparison_event_recording_failed"
+            )
+        if result.comparison is ShadowComparison.MISMATCHED and not metric_recorded:
+            await self._record_mcp_shadow_metric_gap(
+                reason_code="shadow_mismatch_recording_failed"
+            )
+
+    async def _record_mcp_shadow_setup_failure(
+        self,
+        request: OrchestrationRequest,
+        *,
+        reason_code: str,
+    ) -> None:
+        del request
+        await self._record_mcp_shadow_metric_gap(reason_code=reason_code)
+
+    async def _record_mcp_shadow_mismatch_metric(self) -> bool:
+        recorder = self._mcp_rollout_metric_recorder
+        if recorder is None:
+            return False
+        try:
+            await recorder.record_shadow_mismatch()
+        except Exception:
+            return False
+        return True
+
+    def _record_mcp_shadow_audit_fallback(
+        self,
+        payload: Mapping[str, Any],
+    ) -> None:
+        if self._audit_sink is None:
+            return
+        fallback = dict(payload)
+        try:
+            self._audit_sink.record_sync(
+                "mcp.rollout.shadow_compared",
+                fallback,
+            )
+        except Exception:
+            return
+
+    async def _record_mcp_shadow_metric_gap(self, *, reason_code: str) -> None:
+        if self._audit_sink is None:
+            return
+        try:
+            self._audit_sink.record_sync(
+                "mcp.rollout_metric_gap",
+                {
+                    "metric_family": "route_shadow_mismatch",
+                    "gap_reason": reason_code,
+                },
+            )
+        except Exception:
+            return
 
     @staticmethod
     def _drop_user_supplied_system_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -1838,21 +2833,43 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 replace(conversation, title=title, updated_at=self._utcnow_naive())
             )
 
-    async def _schedule_execution(self, request: OrchestrationRequest) -> None:
+    async def _schedule_execution(
+        self, request: OrchestrationRequest
+    ) -> asyncio.Task[None]:
         self._retain_task_skill_revision(request)
         self._retain_task_mcp_revision(request)
         async with self._lock:
             active_task_count = len(self._running_tasks)
             handle = asyncio.create_task(self._run_execution(request, active_task_count=active_task_count))
             self._running_tasks[request.task_id] = handle
+            return handle
 
     async def _run_execution(self, request: OrchestrationRequest, *, active_task_count: int) -> None:
+        shadow_handle: _MCPShadowExecutionHandle | None = None
+        shadow_finalize_cancelled: asyncio.CancelledError | None = None
+        result: OrchestrationRunResult | None = None
         try:
             request = await self._scrub_deleted_file_context_for_execution(request)
             request = await self._attach_conversation_memory(request)
-            plan_result = self.workflow_provider.build_plan(request)
-            plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
+            persisted_continuation_plan = request.metadata.get(
+                "mcp_remote_task_continuation_plan"
+            )
+            if isinstance(persisted_continuation_plan, Mapping):
+                plan = _deserialize_mcp_continuation_plan(
+                    persisted_continuation_plan
+                )
+            else:
+                plan_result = self.workflow_provider.build_plan(request)
+                plan = (
+                    await plan_result
+                    if inspect.isawaitable(plan_result)
+                    else plan_result
+                )
             await self._record_plan_built(request, plan)
+            shadow_handle = await self._begin_mcp_shadow_observation(
+                request=request,
+                plan=plan,
+            )
             result = await self.orchestration_service.execute_request(request, plan, active_task_count=active_task_count)
             restored_cancelled_task = await self._restore_cancelled_task_if_requested(
                 request.task_id,
@@ -1876,6 +2893,46 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             await self._mark_task_failed(request, exc)
         finally:
             try:
+                try:
+                    await self._finish_mcp_shadow_observation(
+                        shadow_handle,
+                        result,
+                    )
+                except asyncio.CancelledError as exc:
+                    shadow_finalize_cancelled = exc
+                    if shadow_handle is not None:
+                        pending = tuple(
+                            item.task
+                            for item in shadow_handle.observations
+                            if not item.task.done()
+                        )
+                        for pending_task in pending:
+                            pending_task.cancel()
+                        if pending:
+                            await asyncio.gather(
+                                *pending,
+                                return_exceptions=True,
+                            )
+                except Exception:
+                    await self._record_mcp_shadow_setup_failure(
+                        request,
+                        reason_code="shadow_terminal_finalize_failed",
+                    )
+                    # Shadow is fail-open, but its readonly sessions must finish
+                    # before gateway task scope and pinned revisions are released.
+                    if shadow_handle is not None:
+                        pending = tuple(
+                            item.task
+                            for item in shadow_handle.observations
+                            if not item.task.done()
+                        )
+                        for pending_task in pending:
+                            pending_task.cancel()
+                        if pending:
+                            await asyncio.gather(
+                                *pending,
+                                return_exceptions=True,
+                            )
                 await self._clear_conversation_current_task(request.conversation_id, request.task_id)
                 if self.user_mcp_gateway is not None:
                     try:
@@ -1897,6 +2954,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 self._locally_cancelled_task_ids.discard(request.task_id)
                 async with self._lock:
                     self._running_tasks.pop(request.task_id, None)
+        if shadow_finalize_cancelled is not None:
+            raise shadow_finalize_cancelled
 
     async def _scrub_deleted_file_context_for_execution(self, request: OrchestrationRequest) -> OrchestrationRequest:
         await self._fail_if_effective_uploads_inactive_for_execution(request)
@@ -2452,7 +3511,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         existing_task = await self.storage.get_task(task_id)
         if existing_task is not None and existing_task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
             self._locally_cancelled_task_ids.add(task_id)
-        if existing_task is not None and self._mcp_runtime_state is not None:
+        if (
+            existing_task is not None
+            and existing_task.mcp_execution_mode == MCPExecutionPath.LEGACY.value
+            and self._mcp_runtime_state is not None
+        ):
             try:
                 for envelope in await self._mcp_runtime_state.cancel_platform_task(task_id):
                     await self._record_event(
@@ -2466,7 +3529,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             except Exception:
                 pass
         task = await self.cancellation_service.cancel_task_context(task_id)
-        if existing_task is not None and self.user_mcp_gateway is not None:
+        if (
+            existing_task is not None
+            and existing_task.mcp_execution_mode == MCPExecutionPath.USER_SCOPED.value
+            and self.user_mcp_gateway is not None
+        ):
             try:
                 await self.user_mcp_gateway.close_task(task_id, "task_cancelled")
             except Exception:
@@ -2903,6 +3970,53 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         interrupt = await self.storage.get_interrupt(interrupt_id)
         if interrupt is None or interrupt.task_id != task_id:
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
+        if interrupt.reason_code == "mcp_remote_task_input_required":
+            responses = answer_payload.get("mcp_input_responses")
+            cancel_requested = answer_payload.get("mcp_remote_task_cancel") is True
+            if not cancel_requested and not isinstance(responses, Mapping):
+                raise ValueError(
+                    "mcp_input_responses must be an object for remote task input"
+                )
+            answer = InterruptAnswer(
+                interrupt_answer_id=self._make_id("interrupt-answer"),
+                interrupt_id=interrupt_id,
+                answer_payload=dict(answer_payload),
+                source_message_id=source_message_id or self._make_id("msg"),
+                accepted=True,
+                created_at=self._utcnow_naive(),
+                accepted_at=self._utcnow_naive(),
+            )
+            command = await self.interrupt_service.record_mcp_remote_task_control(
+                answer,
+                action="cancel" if cancel_requested else "update",
+                input_responses=(
+                    {} if cancel_requested else dict(responses or {})
+                ),
+                now=self._utcnow_naive(),
+            )
+            await self._record_event(
+                self._make_event(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    node_id=interrupt.node_id,
+                    event_type="mcp.input_submitted",
+                    payload={
+                        "interrupt_id": interrupt_id,
+                        "action": command.kind,
+                    },
+                )
+            )
+            if self.mcp_remote_task_recovery_worker is not None:
+                await self.mcp_remote_task_recovery_worker.run_once()
+            return {
+                "task_id": task.task_id,
+                "action": (
+                    "mcp_remote_task_cancel_submitted"
+                    if cancel_requested
+                    else "mcp_remote_task_input_submitted"
+                ),
+                "interrupt_id": interrupt_id,
+            }
         if interrupt.reason_code == "sheet_selection_required":
             self._validate_sheet_selection_answer(interrupt, answer_payload)
         if interrupt.reason_code == "file_selection_ambiguous":
@@ -3052,6 +4166,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         owner_conversation = await self.storage.get_conversation(task.conversation_id)
         if owner_conversation is None:
             raise ValueError(f"Unknown conversation: {task.conversation_id}")
+        resume_metadata.update(self._mcp_task_assignment_metadata(task))
         await self._schedule_execution(
             OrchestrationRequest(
                 task_id=task.task_id,
@@ -3061,7 +4176,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 requested_capability_id=resume_capability_id,
                 metadata=resume_metadata,
                 available_mcp_servers=await self.available_user_mcp_server_profiles(
-                    owner_conversation.username
+                    owner_conversation.username,
+                    execution_mode=task.mcp_execution_mode,
                 ),
             )
         )
@@ -4774,6 +5890,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         }
         resume_metadata.update(await self._conversation_file_context_metadata_for_task(task))
         resume_metadata.update(await self._resume_llm_metadata(task, request_metadata))
+        resume_metadata.update(self._mcp_task_assignment_metadata(task))
         resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupt.node_id)
         if resume_finalizer_node_id:
             resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
@@ -4783,6 +5900,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             resume_capability_id = interrupted_node.capability_id
         elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
             resume_capability_id = interrupt.source_agent
+        owner_conversation = await self.storage.get_conversation(task.conversation_id)
+        if owner_conversation is None:
+            raise ValueError(f"Unknown conversation: {task.conversation_id}")
         await self._schedule_execution(
             OrchestrationRequest(
                 task_id=task.task_id,
@@ -4794,6 +5914,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 ),
                 requested_capability_id=resume_capability_id,
                 metadata=resume_metadata,
+                available_mcp_servers=await self.available_user_mcp_server_profiles(
+                    owner_conversation.username,
+                    execution_mode=task.mcp_execution_mode,
+                ),
             )
         )
 
@@ -6649,7 +7773,191 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             subscription.close()
 
 
+    async def _run_mcp_continuation_commands_forever(self) -> None:
+        while True:
+            try:
+                await self._run_mcp_continuation_commands_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(0.25)
+                continue
+            await asyncio.sleep(0.1)
+
+    async def _run_mcp_continuation_commands_once(self) -> int:
+        now = self._utcnow_naive()
+        for abandoned in await self.storage.abandon_expired_mcp_remote_task_continuations(
+            now=now, limit=100
+        ):
+            await self._converge_abandoned_mcp_continuation(abandoned, now=now)
+            completed = await self.storage.complete_abandoned_mcp_remote_task_continuation(
+                abandoned.outbox_id,
+                expected_revision=abandoned.continuation_revision,
+                completed_at=now,
+            )
+            if completed is None:
+                raise RuntimeError("mcp_continuation_abandonment_completion_lost")
+        claim_token = uuid4().hex
+        commands = await self.storage.claim_mcp_remote_task_continuations(
+            claim_owner=self._mcp_continuation_consumer_id,
+            claim_token=claim_token,
+            now=now,
+            lease_expires_at=now + timedelta(seconds=30),
+            limit=100,
+        )
+        for command in commands:
+            await self._consume_mcp_continuation_command(command, now=now)
+        return len(commands)
+
+    async def _consume_mcp_continuation_command(self, command, *, now: datetime) -> None:
+        running = await self.storage.begin_mcp_remote_task_continuation(
+            command.outbox_id,
+            claim_owner=str(command.continuation_claim_owner or ""),
+            claim_token=str(command.continuation_claim_token or ""),
+            expected_revision=command.continuation_revision,
+            started_at=now,
+        )
+        if running is None:
+            return
+        if str(running.payload.get("call_status") or "") != "completed":
+            await _mark_remote_continuation_dispatched(
+                self.storage, running, self._utcnow_naive()
+            )
+            return
+        task = await self.storage.get_task(running.task_id)
+        if task is None or task.status != TaskStatus.RUNNING:
+            await _mark_remote_continuation_dispatched(
+                self.storage, running, self._utcnow_naive()
+            )
+            return
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        root_message = await self.storage.get_message(task.root_message_id)
+        if conversation is None:
+            raise RuntimeError("mcp_continuation_conversation_missing")
+        raw_plan = running.payload.get("continuation_plan")
+        if not isinstance(raw_plan, Mapping):
+            raise RuntimeError("mcp_continuation_plan_missing")
+        persisted_plan = _deserialize_mcp_continuation_plan(raw_plan)
+        if persisted_plan.task_id != task.task_id:
+            raise RuntimeError("mcp_continuation_plan_task_mismatch")
+        result_ref = str(running.payload.get("result_ref") or "").strip()
+        if not result_ref or self.user_mcp_result_store is None:
+            raise RuntimeError("mcp_continuation_result_missing")
+        result_descriptor = self.user_mcp_result_store.resolve_ref(result_ref)
+        result_bytes = b"".join(
+            [
+                chunk
+                async for chunk in self.user_mcp_result_store.iter_bytes(
+                    result_descriptor
+                )
+            ]
+        )
+        continuation_result = json.loads(result_bytes)
+        if not isinstance(continuation_result, dict):
+            raise RuntimeError("mcp_continuation_result_invalid")
+        owned_node_ids = tuple(
+            sorted(
+                node.node_id
+                for node in await self.storage.list_task_nodes_for_task(task.task_id)
+                if node.node_id != running.node_id
+                and node.status
+                not in {
+                    NodeStatus.COMPLETED,
+                    NodeStatus.FAILED,
+                    NodeStatus.CANCELLED,
+                    NodeStatus.BLOCKED_BY_CANCELLATION,
+                    NodeStatus.ORPHANED,
+                }
+            )
+        )
+        scoped = await self.storage.renew_mcp_remote_task_continuation(
+            running.outbox_id,
+            claim_owner=str(running.continuation_claim_owner or ""),
+            claim_token=str(running.continuation_claim_token or ""),
+            expected_revision=running.continuation_revision,
+            lease_expires_at=self._utcnow_naive() + timedelta(seconds=30),
+            node_ids=owned_node_ids,
+            updated_at=self._utcnow_naive(),
+        )
+        if scoped is None:
+            raise RuntimeError("mcp_continuation_scope_claim_lost")
+        running = scoped
+        handle = await self._schedule_execution(
+            OrchestrationRequest(
+                task_id=task.task_id,
+                conversation_id=task.conversation_id,
+                root_message_id=task.root_message_id,
+                user_message=(
+                    root_message.content if root_message is not None else task.summary or ""
+                ),
+                requested_capability_id=task.requested_capability_id,
+                metadata={
+                    **self._mcp_task_assignment_metadata(task),
+                    "mcp_remote_task_continuation_id": running.outbox_id,
+                    "mcp_remote_task_continuation_claim_token": (
+                        running.continuation_claim_token
+                    ),
+                    "mcp_remote_task_source_node_id": running.node_id,
+                    "mcp_remote_task_result_ref": result_ref,
+                    "mcp_remote_task_result": continuation_result,
+                    "mcp_remote_task_continuation_plan": dict(raw_plan),
+                },
+                available_mcp_servers=await self.available_user_mcp_server_profiles(
+                    conversation.username,
+                    execution_mode=task.mcp_execution_mode,
+                ),
+            )
+        )
+        while not handle.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(handle), timeout=10)
+            except asyncio.TimeoutError:
+                renewed_at = self._utcnow_naive()
+                renewed = await self.storage.renew_mcp_remote_task_continuation(
+                    running.outbox_id,
+                    claim_owner=str(running.continuation_claim_owner or ""),
+                    claim_token=str(running.continuation_claim_token or ""),
+                    expected_revision=running.continuation_revision,
+                    lease_expires_at=renewed_at + timedelta(seconds=30),
+                    updated_at=renewed_at,
+                )
+                if renewed is None:
+                    raise RuntimeError("mcp_continuation_lease_lost")
+                running = renewed
+        await asyncio.shield(handle)
+        await _mark_remote_continuation_dispatched(
+            self.storage, running, self._utcnow_naive()
+        )
+
+    async def _converge_abandoned_mcp_continuation(self, command, *, now: datetime) -> None:
+        owned_node_ids = set(command.continuation_node_ids)
+        for node in await self.storage.list_task_nodes_for_task(command.task_id):
+            if node.node_id in owned_node_ids and node.status == NodeStatus.RUNNING:
+                saved_node = await self.storage.compare_and_set_task_node(
+                    replace(node, status=NodeStatus.FAILED, finished_at=node.finished_at or now),
+                    expected_from_status=NodeStatus.RUNNING,
+                )
+                if saved_node is None:
+                    current_node = await self.storage.get_task_node(node.node_id)
+                    if current_node is None or current_node.status != NodeStatus.FAILED:
+                        raise RuntimeError(
+                            "mcp_continuation_abandonment_node_convergence_lost"
+                        )
+        task = await self.storage.get_task(command.task_id)
+        if task is not None and task.status == TaskStatus.RUNNING:
+            saved_task = await self.storage.compare_and_set_task(
+                replace(task, status=TaskStatus.FAILED, updated_at=now),
+                expected_from_status=TaskStatus.RUNNING,
+            )
+            if saved_task is None:
+                current_task = await self.storage.get_task(command.task_id)
+                if current_task is None or current_task.status != TaskStatus.FAILED:
+                    raise RuntimeError(
+                        "mcp_continuation_abandonment_task_convergence_lost"
+                    )
+
     async def start(self) -> None:
+        await self._admit_mcp_rollout_instance()
         if self.user_mcp_audit_service is not None:
             self._mcp_audit_retention_task = asyncio.create_task(
                 self.user_mcp_audit_service.run_retention_forever(),
@@ -6663,6 +7971,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
         if self.mcp_credential_cipher is not None:
             await self.mcp_credential_cipher.create_or_verify_sentinel(self.storage)
+        if self.mcp_remote_task_recovery_worker is not None:
+            await self._recover_user_mcp_calls()
+            await self.mcp_remote_task_recovery_worker.start()
+            self._mcp_continuation_consumer_task = asyncio.create_task(
+                self._run_mcp_continuation_commands_forever(),
+                name="mcp-continuation-consumer",
+            )
         if self.user_mcp_health_runner is not None:
             await self.user_mcp_health_runner.start()
         if self.user_mcp_gateway is not None:
@@ -6681,6 +7996,119 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if self.postgres_auth_invalidation_bus is not None:
             await self.postgres_auth_invalidation_bus.start()
         await self.recover_deleting_conversations()
+        if (
+            self._mcp_rollout_metric_recorder is not None
+            and self._mcp_rollout_zero_series_task is None
+        ):
+            self._mcp_rollout_zero_series_task = asyncio.create_task(
+                self._mcp_rollout_metric_recorder.run_continuous_zero_series(),
+                name="mcp-rollout-zero-series",
+            )
+
+    async def _admit_mcp_rollout_instance(self) -> None:
+        admission = self._mcp_rollout_instance_admission
+        if admission is None:
+            return
+        now = self._utcnow_naive()
+        if self._mcp_rollout_instance_lease_created_at is None:
+            self._mcp_rollout_instance_lease_created_at = now
+        await self._save_mcp_rollout_instance_lease(now=now)
+        self._mcp_rollout_instance_admission_error = None
+        if (
+            self._mcp_rollout_instance_lease_task is None
+            or self._mcp_rollout_instance_lease_task.done()
+        ):
+            self._mcp_rollout_instance_lease_task = asyncio.create_task(
+                self._run_mcp_rollout_instance_lease_renewal(),
+                name="mcp-rollout-instance-lease-renewal",
+            )
+
+    async def _save_mcp_rollout_instance_lease(self, *, now: datetime) -> None:
+        admission = self._mcp_rollout_instance_admission
+        created_at = self._mcp_rollout_instance_lease_created_at
+        if admission is None or created_at is None:
+            raise RuntimeError("mcp_rollout_instance_admission_not_initialized")
+        lease_expires_at = now + timedelta(
+            seconds=self._mcp_rollout_lease_duration_seconds
+        )
+        await self.storage.save_mcp_rollout_instance_config_lease(
+            MCPRolloutInstanceConfigLease(
+                instance_config_id=(
+                    f"mcp-rollout-instance:{admission.environment_id}:"
+                    f"{admission.deployment_id}:{admission.instance_id}"
+                ),
+                environment_id=admission.environment_id,
+                deployment_id=admission.deployment_id,
+                instance_id=admission.instance_id,
+                stage=admission.stage,
+                config_fingerprint=self.mcp_rollout_config.fingerprint,
+                activation_id=admission.activation_id,
+                lease_expires_at=lease_expires_at,
+                created_at=created_at,
+                updated_at=now,
+            )
+        )
+        self._mcp_rollout_instance_lease_valid_until = lease_expires_at
+
+    async def _run_mcp_rollout_instance_lease_renewal(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._mcp_rollout_lease_renew_interval_seconds)
+                await self._save_mcp_rollout_instance_lease(now=self._utcnow_naive())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._mcp_rollout_instance_admission_error = "lease_renewal_failed"
+            self._record_mcp_rollout_instance_admission_event(
+                status="lost",
+                reason_code="lease_renewal_failed",
+            )
+
+    def _ensure_mcp_rollout_instance_admitted(self) -> None:
+        if self._mcp_rollout_instance_admission is None:
+            return
+        now = self._utcnow_naive()
+        valid_until = self._mcp_rollout_instance_lease_valid_until
+        reason_code = self._mcp_rollout_instance_admission_error
+        if reason_code is None and (valid_until is None or now >= valid_until):
+            reason_code = "lease_expired"
+            self._mcp_rollout_instance_admission_error = reason_code
+        if reason_code is None:
+            return
+        self._record_mcp_rollout_instance_admission_event(
+            status="rejected",
+            reason_code=reason_code,
+        )
+        raise RuntimeError("mcp_rollout_instance_admission_lost")
+
+    def _record_mcp_rollout_instance_admission_event(
+        self,
+        *,
+        status: str,
+        reason_code: str,
+    ) -> None:
+        admission = self._mcp_rollout_instance_admission
+        if admission is None or self._audit_sink is None:
+            return
+        try:
+            self._audit_sink.record_sync(
+                "mcp.rollout.instance_admission_lost",
+                {
+                    "status": status,
+                    "reason_code": reason_code,
+                    "stage": admission.stage,
+                },
+            )
+        except Exception:
+            pass
+
+    async def _stop_mcp_rollout_instance_lease_renewal(self) -> None:
+        task = self._mcp_rollout_instance_lease_task
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._mcp_rollout_instance_lease_task = None
 
     async def recover_deleting_conversations(self) -> None:
         for conversation in await self.storage.list_deleting_conversations():
@@ -6695,8 +8123,187 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
             self._track_conversation_delete_task(conversation.conversation_id, task)
 
+    async def _recover_user_mcp_calls(self) -> None:
+        await self.storage.reconcile_unpublished_mcp_remote_task_bindings(
+            now=self._utcnow_naive(),
+            limit=1000,
+        )
+        while True:
+            converged = await self.storage.converge_dispatched_mcp_calls_to_unknown(
+                now=self._utcnow_naive(),
+                limit=1000,
+            )
+            for call in converged:
+                task = await self.storage.get_task(call.task_id)
+                if task is None:
+                    continue
+                try:
+                    await self._record_recovered_unknown_metrics(call, task)
+                except Exception:
+                    await self._record_mcp_metric_gap_best_effort(
+                        task=task,
+                        call=call,
+                        metric_family="ordinary_restart_unknown",
+                    )
+                await self._record_event(
+                    self._make_event(
+                        task_id=call.task_id,
+                        conversation_id=task.conversation_id,
+                        node_id=call.node_id,
+                        event_type="mcp.execution_status_unknown",
+                        payload={
+                            "safe_call_ref": call.call_ref,
+                            "status": "unknown",
+                            "error_code": "execution_status_unknown",
+                        },
+                    )
+                )
+            if len(converged) < 1000:
+                return
+
+    async def _record_recovered_unknown_metrics(self, call, task) -> None:
+        recorder = self._mcp_rollout_metric_recorder
+        if recorder is None:
+            return
+        if (
+            task.mcp_execution_mode != MCPExecutionPath.USER_SCOPED.value
+            or task.mcp_rollout_mode != MCPRoutingMode.ENFORCE.value
+            or task.mcp_rollout_config_version
+            != self.mcp_rollout_config.config_version
+        ):
+            raise RuntimeError("mcp_unknown_metric_assignment_mismatch")
+        server = await self.storage.get_user_mcp_server(
+            call.owner_user_id, call.server_id
+        )
+        if (
+            server is None
+            or call.server_security_version != server.security_version
+            or call.protocol_version is None
+        ):
+            raise RuntimeError("mcp_unknown_metric_security_version_mismatch")
+        transport = {
+            UserMCPTransport.STREAMABLE_HTTP: MCPMetricTransport.STREAMABLE_HTTP,
+            UserMCPTransport.LEGACY_HTTP_SSE: MCPMetricTransport.LEGACY_HTTP_SSE,
+        }[server.transport]
+        protocol_version = MCPMetricProtocolVersion(call.protocol_version)
+        adapter = (
+            MCPMetricAdapter.PYTHON_2026
+            if protocol_version is MCPMetricProtocolVersion.V2026_07_28
+            else MCPMetricAdapter.PYTHON_LEGACY
+        )
+        labels = MCPMetricLabels(
+            execution_path=MCPMetricExecutionPath.USER_SCOPED,
+            routing_mode=MCPMetricRoutingMode.ENFORCE,
+            transport=transport,
+            protocol_version=protocol_version,
+            adapter=adapter,
+            result_category=MCPMetricResultCategory.UNKNOWN,
+            error_category=MCPMetricErrorCategory.UNKNOWN,
+            call_kind=MCPCallKind.ORDINARY,
+        )
+        terminal_at = call.terminal_at or self._utcnow_naive()
+        terminal_at = (
+            terminal_at.replace(tzinfo=timezone.utc)
+            if terminal_at.tzinfo is None
+            else terminal_at.astimezone(timezone.utc)
+        )
+        bucket_started_at = terminal_at.replace(second=0, microsecond=0)
+        bucket_ended_at = bucket_started_at + timedelta(minutes=1)
+        created_at = call.created_at or terminal_at
+        created_at = (
+            created_at.replace(tzinfo=timezone.utc)
+            if created_at.tzinfo is None
+            else created_at.astimezone(timezone.utc)
+        )
+        writes = (
+            (
+                "ordinary_restart_unknown_total",
+                lambda: recorder.record_count(
+                    MCPMetricName.TOOL_CALLS_TOTAL,
+                    labels=labels,
+                    bucket_started_at=bucket_started_at,
+                    bucket_ended_at=bucket_ended_at,
+                ),
+            ),
+            (
+                "ordinary_restart_unknown_counter",
+                lambda: recorder.record_count(
+                    MCPMetricName.TOOL_CALL_UNKNOWN_TOTAL,
+                    labels=labels,
+                    bucket_started_at=bucket_started_at,
+                    bucket_ended_at=bucket_ended_at,
+                ),
+            ),
+            (
+                "ordinary_restart_unknown_duration",
+                lambda: recorder.record_latency(
+                    MCPMetricName.TOOL_CALL_DURATION_SECONDS,
+                    duration_seconds=max(
+                        0.0,
+                        (terminal_at - created_at).total_seconds(),
+                    ),
+                    labels=labels,
+                    bucket_started_at=bucket_started_at,
+                    bucket_ended_at=bucket_ended_at,
+                ),
+            ),
+        )
+        for metric_family, write in writes:
+            try:
+                await write()
+            except Exception:
+                await self._record_mcp_metric_gap_best_effort(
+                    task=task,
+                    call=call,
+                    metric_family=metric_family,
+                )
+
+    async def _record_mcp_metric_gap_best_effort(
+        self,
+        *,
+        task: Task,
+        call: Any,
+        metric_family: str,
+    ) -> None:
+        try:
+            await self._record_event(
+                self._make_event(
+                    task_id=call.task_id,
+                    conversation_id=task.conversation_id,
+                    node_id=call.node_id,
+                    event_type="mcp.rollout_metric_gap",
+                    payload={
+                        "safe_call_ref": call.call_ref,
+                        "metric_family": metric_family,
+                        "gap_reason": "metric_recording_failed",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+        except Exception:
+            return
+
     async def shutdown(self) -> None:
-        pending = [*self._running_tasks.values(), *self._running_title_tasks, *self._conversation_delete_tasks.values()]
+        await self._stop_mcp_rollout_instance_lease_renewal()
+        if self._mcp_continuation_consumer_task is not None:
+            self._mcp_continuation_consumer_task.cancel()
+            await asyncio.gather(
+                self._mcp_continuation_consumer_task, return_exceptions=True
+            )
+            self._mcp_continuation_consumer_task = None
+        if self._mcp_rollout_zero_series_task is not None:
+            self._mcp_rollout_zero_series_task.cancel()
+            await asyncio.gather(
+                self._mcp_rollout_zero_series_task,
+                return_exceptions=True,
+            )
+            self._mcp_rollout_zero_series_task = None
+        pending = [
+            *self._running_tasks.values(),
+            *self._running_title_tasks,
+            *self._running_mcp_shadow_tasks,
+            *self._conversation_delete_tasks.values(),
+        ]
         if pending:
             try:
                 await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2)
@@ -6719,6 +8326,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             self._mcp_auth_invalidation_queue = None
         if self.user_mcp_config_service is not None:
             await self.user_mcp_config_service.aclose()
+        if self.mcp_remote_task_recovery_worker is not None:
+            await self.mcp_remote_task_recovery_worker.aclose()
         if self.user_mcp_presence_service is not None:
             await self.user_mcp_presence_service.aclose()
         if self.user_mcp_health_runner is not None:
@@ -6731,6 +8340,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             await self._mcp_runtime_state.aclose()
         if self.postgres_auth_invalidation_bus is not None:
             await self.postgres_auth_invalidation_bus.aclose()
+        if self._mcp_rollout_engine is not None:
+            await asyncio.to_thread(self._mcp_rollout_engine.dispose)
         await asyncio.to_thread(self._engine.dispose)
 
     async def _run_mcp_auth_invalidation_listener(self) -> None:
@@ -6781,6 +8392,51 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if descriptor is not None and descriptor.public:
             return
         raise ValueError(f"Unsupported capability_id: {capability_id}")
+
+    def _ensure_mcp_capability_matches_assignment(
+        self,
+        capability_id: str | None,
+        *,
+        execution_mode: str,
+    ) -> None:
+        if capability_id is None:
+            return
+        descriptor = self.capability_registry.get(capability_id)
+        is_user_scoped = capability_id == "mcp.dispatch"
+        is_legacy = descriptor is not None and _is_mcp_descriptor(descriptor)
+        if not is_user_scoped and not is_legacy:
+            return
+        expected_mode = (
+            MCPExecutionPath.USER_SCOPED.value
+            if is_user_scoped
+            else MCPExecutionPath.LEGACY.value
+        )
+        if execution_mode != expected_mode:
+            raise ValueError(
+                "mcp_route_assignment_mismatch: requested MCP capability does not "
+                "match the task execution path"
+            )
+
+    @staticmethod
+    def _mcp_task_assignment_metadata(task: Task) -> dict[str, object]:
+        values = (
+            task.mcp_execution_mode,
+            task.mcp_shadow_enabled,
+            task.mcp_rollout_config_version,
+            task.mcp_route_reason_code,
+            task.mcp_rollout_mode,
+        )
+        if all(value is None for value in values):
+            return {}
+        if any(value is None for value in values):
+            raise ValueError("mcp_task_route_assignment_corrupt")
+        return {
+            "mcp_execution_mode": task.mcp_execution_mode,
+            "mcp_shadow_enabled": task.mcp_shadow_enabled,
+            "mcp_rollout_config_version": task.mcp_rollout_config_version,
+            "mcp_route_reason_code": task.mcp_route_reason_code,
+            "mcp_rollout_mode": task.mcp_rollout_mode,
+        }
 
     async def _refresh_skills_for_new_conversation_if_needed(
         self,
@@ -7048,7 +8704,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         )
 
     def _retain_task_mcp_revision(self, request: OrchestrationRequest) -> None:
-        if self._mcp_runtime_state is None or request.task_id in self._task_mcp_bundle_revisions:
+        if (
+            request.metadata.get("mcp_execution_mode")
+            != MCPExecutionPath.LEGACY.value
+            or self._mcp_runtime_state is None
+            or request.task_id in self._task_mcp_bundle_revisions
+        ):
             return
         raw_revision = request.metadata.get("mcp_bundle_revision") or self._mcp_runtime_state.active_revision
         revision = str(raw_revision).strip()
@@ -7377,6 +9038,312 @@ def _positive_required_env_int(name: str, *, allow_default: int | None = None) -
     return value
 
 
+def _resolve_postgres_mcp_rollout_app_runtime(
+    *,
+    rollout_ledger_active: bool,
+    env: Mapping[str, str],
+) -> tuple[Engine, Any] | None:
+    if not rollout_ledger_active:
+        return None
+
+    forbidden_dsn_names = tuple(
+        name
+        for name in (
+            "MAF_MCP_ROLLOUT_SNAPSHOT_DSN",
+            "MAF_MCP_ROLLOUT_EVALUATOR_DSN",
+            "MAF_MCP_ROLLOUT_OPERATOR_DSN",
+            "MAF_MCP_ROLLOUT_DRILL_DSN",
+            "MAF_MCP_LEGACY_MIGRATION_DSN",
+        )
+        if str(env.get(name) or "").strip()
+    )
+    if forbidden_dsn_names:
+        raise ValueError(
+            "API runtime must not receive MCP rollout privileged role credentials: "
+            + ", ".join(forbidden_dsn_names)
+        )
+
+    raw_dsn = env.get("MAF_MCP_ROLLOUT_APP_DSN")
+    if raw_dsn is None or not raw_dsn.strip():
+        raise ValueError(
+            "MAF_MCP_ROLLOUT_APP_DSN is required for canonical MCP rollout on PostgreSQL"
+        )
+    if raw_dsn != raw_dsn.strip():
+        raise ValueError("MAF_MCP_ROLLOUT_APP_DSN is invalid")
+
+    rollout_engine: Engine | None = None
+    try:
+        rollout_engine = create_postgres_engine(raw_dsn)
+        validate_mcp_rollout_connection_role(rollout_engine, "app")
+        return rollout_engine, create_postgres_session_factory(rollout_engine)
+    except Exception:
+        if rollout_engine is not None:
+            try:
+                rollout_engine.dispose()
+            except Exception:
+                pass
+        raise RuntimeError(
+            "MCP rollout PostgreSQL app role is invalid or unavailable"
+        ) from None
+
+
+def _mcp_rollout_ledger_is_active(
+    *,
+    config: MCPRolloutConfig,
+    deployment_env: str,
+    env: Mapping[str, str],
+) -> bool:
+    if (
+        deployment_env in {"prod", "production"}
+        and config.routing_mode is not MCPRoutingMode.OFF
+    ):
+        return True
+    return any(
+        str(env.get(name) or "").strip()
+        for name in (
+            "MCP_ROLLOUT_ENVIRONMENT_ID",
+            "MCP_ROLLOUT_DEPLOYMENT_ID",
+            "MCP_ROLLOUT_STAGE",
+            "MCP_ROLLOUT_ACTIVATION_ID",
+        )
+    )
+
+
+def _resolve_user_mcp_rollout_config(
+    *,
+    enable_user_mcp: bool | None,
+    enable_user_mcp_routing: bool | None,
+    env: Mapping[str, str],
+) -> tuple[MCPRolloutConfig, bool]:
+    """Resolve canonical rollout config without inferring enforce from env flags."""
+
+    canonical_configured = mcp_rollout_env_is_configured(env)
+    deprecated_gateway = _optional_deprecated_bool(
+        env.get("MAF_USER_MCP_ENABLED"), "MAF_USER_MCP_ENABLED"
+    )
+    deprecated_routing = _optional_deprecated_bool(
+        env.get("MAF_USER_MCP_ROUTING_ENABLED"),
+        "MAF_USER_MCP_ROUTING_ENABLED",
+    )
+    if canonical_configured:
+        config = MCPRolloutConfig.from_env(env)
+        if enable_user_mcp is not None and enable_user_mcp != config.gateway_enabled:
+            raise ValueError(
+                "enable_user_mcp conflicts with MCP_USER_SCOPED_GATEWAY_ENABLED"
+            )
+        if deprecated_gateway is not None and deprecated_gateway != config.gateway_enabled:
+            raise ValueError(
+                "MAF_USER_MCP_ENABLED conflicts with MCP_USER_SCOPED_GATEWAY_ENABLED"
+            )
+        routing_enabled = config.routing_mode is not MCPRoutingMode.OFF
+        if (
+            enable_user_mcp_routing is not None
+            and enable_user_mcp_routing != routing_enabled
+        ):
+            raise ValueError("enable_user_mcp_routing conflicts with MCP_ROUTING_MODE")
+        if deprecated_routing is not None and deprecated_routing != routing_enabled:
+            raise ValueError(
+                "MAF_USER_MCP_ROUTING_ENABLED conflicts with MCP_ROUTING_MODE"
+            )
+        return config, config.gateway_enabled
+
+    if deprecated_routing:
+        raise ValueError(
+            "MAF_USER_MCP_ROUTING_ENABLED=true requires an explicit MCP_ROUTING_MODE"
+        )
+    subsystem_enabled = (
+        enable_user_mcp if enable_user_mcp is not None else bool(deprecated_gateway)
+    )
+    routing_enabled = bool(enable_user_mcp_routing)
+    if routing_enabled and not subsystem_enabled:
+        raise ValueError("User-scoped MCP routing requires the user MCP subsystem")
+    if routing_enabled:
+        # Explicit Python arguments are retained for local/test compatibility;
+        # deployment environment flags must use the canonical closed contract.
+        return (
+            MCPRolloutConfig(
+                gateway_enabled=True,
+                routing_mode=MCPRoutingMode.ENFORCE,
+                legacy_enabled=True,
+                enforce_percent=100,
+                enforce_hash_salt="programmatic-compat-v1",
+            ),
+            True,
+        )
+    return MCPRolloutConfig.from_env({}), subsystem_enabled
+
+
+def _optional_deprecated_bool(raw: str | None, name: str) -> bool | None:
+    if raw is None or not raw.strip():
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
+def _resolve_mcp_rollout_instance_admission(
+    *,
+    config: MCPRolloutConfig,
+    deployment_env: str,
+    instance_id: str | None,
+    env: Mapping[str, str],
+) -> _MCPRolloutInstanceAdmission | None:
+    names = (
+        "MCP_ROLLOUT_ENVIRONMENT_ID",
+        "MCP_ROLLOUT_DEPLOYMENT_ID",
+        "MCP_ROLLOUT_STAGE",
+        "MCP_ROLLOUT_ACTIVATION_ID",
+    )
+    values = {name: str(env.get(name) or "").strip() for name in names}
+    configured = any(values.values())
+    required = (
+        deployment_env in {"prod", "production"}
+        and config.routing_mode is not MCPRoutingMode.OFF
+    )
+    if not configured and not required:
+        return None
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        raise ValueError(
+            "MCP rollout instance admission requires: " + ", ".join(missing)
+        )
+    if instance_id is None:
+        raise ValueError("MCP rollout instance admission requires the user MCP gateway")
+    stage = values["MCP_ROLLOUT_STAGE"]
+    if config.routing_mode is MCPRoutingMode.SHADOW and stage != "internal_shadow":
+        raise ValueError("MCP_ROUTING_MODE=shadow requires MCP_ROLLOUT_STAGE=internal_shadow")
+    if config.routing_mode is MCPRoutingMode.ENFORCE:
+        allowed = {
+            "internal_enforce",
+            "cohort_enforce",
+            "full_enforce",
+            "legacy_assembly_off",
+        }
+        if stage not in allowed:
+            raise ValueError("MCP_ROUTING_MODE=enforce requires an enforce rollout stage")
+        if not config.legacy_enabled and stage != "legacy_assembly_off":
+            raise ValueError(
+                "legacy assembly disabled requires MCP_ROLLOUT_STAGE=legacy_assembly_off"
+            )
+        if config.legacy_enabled and stage == "legacy_assembly_off":
+            raise ValueError(
+                "legacy_assembly_off stage requires MCP_LEGACY_GLOBAL_RUNTIME_ENABLED=false"
+            )
+    resolved_instance_id = str(env.get("MCP_ROLLOUT_INSTANCE_ID") or instance_id).strip()
+    if not resolved_instance_id:
+        raise ValueError("MCP_ROLLOUT_INSTANCE_ID must not be empty")
+    return _MCPRolloutInstanceAdmission(
+        environment_id=values["MCP_ROLLOUT_ENVIRONMENT_ID"],
+        deployment_id=values["MCP_ROLLOUT_DEPLOYMENT_ID"],
+        stage=stage,
+        activation_id=values["MCP_ROLLOUT_ACTIVATION_ID"],
+        instance_id=resolved_instance_id,
+    )
+
+
+def _load_mcp_shadow_runtime_contract(
+    *,
+    config: MCPRolloutConfig,
+    admission: _MCPRolloutInstanceAdmission | None,
+    env: Mapping[str, str],
+) -> tuple[
+    VerifiedShadowScenarioManifest | None,
+    Mapping[str, ShadowScenario],
+    str | None,
+]:
+    if (
+        config.routing_mode is not MCPRoutingMode.SHADOW
+        or admission is None
+        or admission.stage != "internal_shadow"
+    ):
+        return None, {}, None
+    manifest_path = str(env.get("MAF_MCP_SHADOW_MANIFEST_PATH") or "").strip()
+    keyring_path = str(
+        env.get("MAF_MCP_ROLLOUT_ATTESTATION_KEYRING_PATH") or ""
+    ).strip()
+    raw_bindings = str(
+        env.get("MAF_MCP_SHADOW_SCENARIO_BINDINGS_JSON") or ""
+    ).strip()
+    if not all(
+        (
+            manifest_path,
+            keyring_path,
+            raw_bindings,
+        )
+    ):
+        return None, {}, "shadow_verified_manifest_missing"
+    try:
+        keyring_file = Path(keyring_path)
+        keyring_stat = keyring_file.lstat()
+        if (
+            not keyring_file.is_file()
+            or keyring_file.is_symlink()
+            or keyring_stat.st_size > 64 * 1024
+            or (keyring_stat.st_mode & 0o777) & ~0o440
+        ):
+            raise ValueError("unsafe shadow keyring file")
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate shadow contract key")
+                result[key] = value
+            return result
+
+        keyring_raw = json.loads(
+            keyring_file.read_text(encoding="utf-8"),
+            object_pairs_hook=unique_object,
+        )
+        if (
+            not isinstance(keyring_raw, dict)
+            or set(keyring_raw) != {"schema", "keys"}
+            or keyring_raw.get("schema")
+            != "maf.user_mcp_phase3_attestation_keyring.v1"
+            or not isinstance(keyring_raw.get("keys"), dict)
+        ):
+            raise ValueError("invalid shadow keyring")
+        trusted_keys: dict[str, bytes] = {}
+        for key_id, encoded in keyring_raw["keys"].items():
+            if not isinstance(key_id, str) or not isinstance(encoded, str):
+                raise ValueError("invalid shadow keyring entry")
+            decoded = base64.b64decode(encoded, validate=True)
+            if base64.b64encode(decoded).decode("ascii") != encoded:
+                raise ValueError("non-canonical shadow key")
+            trusted_keys[key_id] = decoded
+        binding_document = json.loads(
+            raw_bindings,
+            object_pairs_hook=unique_object,
+        )
+        if not isinstance(binding_document, dict) or not binding_document:
+            raise ValueError("invalid shadow scenario bindings")
+        bindings = {
+            str(capability_id): ShadowScenario(str(scenario))
+            for capability_id, scenario in binding_document.items()
+            if isinstance(capability_id, str) and capability_id.strip()
+        }
+        if len(bindings) != len(binding_document):
+            raise ValueError("invalid shadow scenario binding")
+        fixture_fingerprint = shadow_fixture_bindings_fingerprint(bindings)
+        raw_mapping_fingerprint = str(
+            env.get("MAF_MCP_SHADOW_MAPPING_SET_FINGERPRINT") or ""
+        ).strip()
+        if not raw_mapping_fingerprint:
+            raise ValueError("shadow mapping-set fingerprint missing")
+        manifest = load_signed_shadow_manifest_file(
+            manifest_path,
+            trusted_attestation_keys=trusted_keys,
+            expected_config_fingerprint=config.fingerprint,
+            expected_fixture_fingerprint=fixture_fingerprint,
+            expected_mapping_fingerprint=raw_mapping_fingerprint,
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, ShadowManifestError):
+        return None, {}, "shadow_verified_manifest_invalid"
+    return manifest, bindings, None
+
+
 def build_api_runtime(
     *,
     database_path: str | Path,
@@ -7467,17 +9434,14 @@ def build_api_runtime(
     if token_secret_required and not token_secret:
         raise AuthTokenValidationError("Auth token hash secret is required.", code="token_secret_required")
 
-    user_mcp_enabled = (
-        enable_user_mcp
-        if enable_user_mcp is not None
-        else os.environ.get("MAF_USER_MCP_ENABLED", "").strip().lower()
-        in {"1", "true", "yes", "on"}
+    canonical_mcp_rollout_configured = mcp_rollout_env_is_configured(os.environ)
+    mcp_rollout_config, user_mcp_enabled = _resolve_user_mcp_rollout_config(
+        enable_user_mcp=enable_user_mcp,
+        enable_user_mcp_routing=enable_user_mcp_routing,
+        env=os.environ,
     )
     user_mcp_routing_enabled = user_mcp_enabled and (
-        enable_user_mcp_routing
-        if enable_user_mcp_routing is not None
-        else os.environ.get("MAF_USER_MCP_ROUTING_ENABLED", "").strip().lower()
-        in {"1", "true", "yes", "on"}
+        mcp_rollout_config.routing_mode in {MCPRoutingMode.SHADOW, MCPRoutingMode.ENFORCE}
     )
     mcp_credential_cipher = (
         CredentialCipher.from_key_file(
@@ -7503,18 +9467,86 @@ def build_api_runtime(
         env=os.environ,
         require_driver=True,
     )
-    resolved_runtime_sidecar_client = runtime_sidecar_client or _resolve_runtime_sidecar_client_from_env()
+    canonical_task_authority_mode = runtime_sidecar_mode_for_component(
+        "runtime_store"
+    )
+    if canonical_task_authority_mode == "enforce":
+        migration_contract = migration_policy()
+        evidence_path_value = os.environ.get(
+            migration_contract["task_authority_evidence_path_env"], ""
+        ).strip()
+        key_path_value = os.environ.get(
+            migration_contract["task_authority_hmac_key_path_env"], ""
+        ).strip()
+        if not evidence_path_value or not key_path_value:
+            raise RuntimeError(
+                "runtime_store_migration_blocked: Rust runtime sidecar enforce authority "
+                "requires authenticated Task migration evidence"
+            )
+        load_runtime_sidecar_migration_evidence_artifact(
+            Path(evidence_path_value),
+            authentication_key_path=Path(key_path_value),
+        )
+    resolved_runtime_sidecar_client = runtime_sidecar_client or _resolve_runtime_sidecar_client_from_env(
+        require_runtime_store_attestation=(
+            canonical_task_authority_mode == "enforce"
+            or (
+                canonical_mcp_rollout_configured
+                and mcp_rollout_config.routing_mode is MCPRoutingMode.ENFORCE
+            )
+        )
+    )
+    if (
+        (
+            canonical_task_authority_mode in {"shadow", "enforce"}
+            or (
+                canonical_mcp_rollout_configured
+                and mcp_rollout_config.routing_mode
+                in {MCPRoutingMode.SHADOW, MCPRoutingMode.ENFORCE}
+            )
+        )
+        and resolved_runtime_sidecar_client is None
+    ):
+        configured_mode = (
+            f"MAF_RUST_RUNTIME_STORE_MODE={canonical_task_authority_mode}"
+            if canonical_task_authority_mode in {"shadow", "enforce"}
+            else f"MCP_ROUTING_MODE={mcp_rollout_config.routing_mode.value}"
+        )
+        raise RuntimeError(
+            "runtime_store_unavailable: "
+            f"{configured_mode} requires a Rust runtime sidecar client"
+        )
     audit_sink = JsonlAuditSink(audit_log_path)
     auth_generation_cache = AuthGenerationCache()
     auth_invalidation_bus = InMemoryAuthInvalidationBus()
     postgres_auth_invalidation_bus = None
+    mcp_rollout_engine: Engine | None = None
     if state_config.backend == StatePlatformBackend.POSTGRESQL:
         engine = create_postgres_engine(state_config.dsn or "")
         bootstrap_postgres_database(engine)
+        mcp_rollout_runtime = (
+            _resolve_postgres_mcp_rollout_app_runtime(
+                rollout_ledger_active=_mcp_rollout_ledger_is_active(
+                    config=mcp_rollout_config,
+                    deployment_env=deployment_env,
+                    env=os.environ,
+                ),
+                env=os.environ,
+            )
+        )
+        mcp_rollout_storage_kwargs: dict[str, Any] = {}
+        if mcp_rollout_runtime is not None:
+            mcp_rollout_engine, mcp_rollout_session_factory = mcp_rollout_runtime
+            mcp_rollout_storage_kwargs = {
+                "mcp_rollout_session_factory": mcp_rollout_session_factory,
+                "mcp_rollout_role": "app",
+            }
         storage = PostgreSQLStorage(
             create_postgres_session_factory(engine),
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
+            mcp_task_authority_mode=canonical_task_authority_mode,
+            **mcp_rollout_storage_kwargs,
         )
         if isinstance(engine, Engine):
             postgres_auth_invalidation_bus = PostgresAuthInvalidationBus(engine, auth_generation_cache)
@@ -7531,6 +9563,7 @@ def build_api_runtime(
             create_sqlite_session_factory(engine),
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
+            mcp_task_authority_mode=canonical_task_authority_mode,
         )
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
         conversation_file_store = LocalConversationFileStore(
@@ -7546,6 +9579,8 @@ def build_api_runtime(
     user_mcp_result_janitor = None
     user_mcp_presence_service = None
     user_mcp_audit_service = None
+    mcp_remote_task_recovery_worker = None
+    user_mcp_instance_id = None
     if user_mcp_enabled:
         assert mcp_credential_cipher is not None
         assert user_mcp_capacity_values is not None
@@ -7555,9 +9590,64 @@ def build_api_runtime(
                 cidrs=_split_env_values(os.environ.get("MAF_USER_MCP_ALLOWLIST_CIDRS")),
             )
         )
-        user_client_factory = UserMCPClientFactory(endpoint_policy)
         credential_resolver = UserMCPCredentialResolver(storage, mcp_credential_cipher)
+        recovery_service = MCPRecoveryService(storage, mcp_credential_cipher)
+        user_client_factory = UserMCPClientFactory(
+            endpoint_policy,
+            recovery_service=recovery_service,
+        )
         instance_id = f"mcp-instance-{uuid4().hex}"
+        user_mcp_instance_id = instance_id
+
+        async def load_remote_task_recovery_server(binding):
+            server = await storage.get_user_mcp_server(
+                binding.owner_user_id,
+                binding.server_id,
+            )
+            if server is None:
+                raise RuntimeError("mcp_recovery_server_unavailable")
+            call = await storage.get_mcp_call_record(
+                binding.owner_user_id,
+                binding.task_id,
+                binding.call_ref,
+            )
+            if (
+                call is None
+                or call.server_id != binding.server_id
+                or call.protocol_version != binding.protocol_version
+                or call.server_security_version != server.security_version
+            ):
+                raise RuntimeError("mcp_recovery_server_security_version_changed")
+            return server
+
+        async def create_remote_task_recovery_client(binding):
+            server = await load_remote_task_recovery_server(binding)
+            request_headers = await credential_resolver.request_headers_for(server)
+            return await user_client_factory.create_task_recovery(
+                server,
+                request_headers,
+                protocol_version=binding.protocol_version,
+            )
+
+        async def record_remote_task_recovery_event(binding, status: str) -> None:
+            task = await storage.get_task(binding.task_id)
+            if task is None:
+                return
+            await record_live_event(
+                EventRecord(
+                    event_id=f"evt-{uuid4().hex[:12]}",
+                    conversation_id=task.conversation_id,
+                    task_id=binding.task_id,
+                    node_id=binding.node_id,
+                    event_type="mcp.remote_task_status_changed",
+                    payload={
+                        "safe_remote_task_ref": binding.safe_remote_task_ref,
+                        "status": status,
+                    },
+                    visibility=EventVisibility.FRONTEND,
+                )
+            )
+
         result_root = Path(
             os.environ.get("MAF_USER_MCP_TEMPORARY_RESULT_ROOT")
             or (Path(database_path).parent / "user_mcp_results")
@@ -7594,6 +9684,9 @@ def build_api_runtime(
             credential_loader=credential_resolver.request_headers_for,
             client_factory=user_client_factory.create,
             endpoint_revalidator=user_client_factory.revalidate_endpoint,
+            readonly_shadow_client_factory=(
+                user_client_factory.create_readonly_shadow
+            ),
             result_store=user_mcp_result_store,
             capacity=capacity,
             now_fn=ApiRuntime._utcnow_naive,
@@ -7654,6 +9747,21 @@ def build_api_runtime(
             storage=storage,
             now_fn=ApiRuntime._utcnow_naive,
         )
+    mcp_rollout_instance_admission = _resolve_mcp_rollout_instance_admission(
+        config=mcp_rollout_config,
+        deployment_env=deployment_env,
+        instance_id=user_mcp_instance_id,
+        env=os.environ,
+    )
+    (
+        mcp_shadow_manifest,
+        mcp_shadow_scenario_bindings,
+        mcp_shadow_manifest_gap_reason,
+    ) = _load_mcp_shadow_runtime_contract(
+        config=mcp_rollout_config,
+        admission=mcp_rollout_instance_admission,
+        env=os.environ,
+    )
     username_token_service = UsernameTokenService(
         storage,
         now_fn=ApiRuntime._utcnow_naive,
@@ -7685,13 +9793,17 @@ def build_api_runtime(
     _sync_skill_capability_registry(capability_registry, instance_registry, skill_runtime_state)
 
     _record_skill_capability_startup_audit(audit_sink, skill_runtime_state.active_bundle.skill_capabilities)
-    resolved_mcp_runtime_state = mcp_runtime_state or MCPRuntimeState(
-        config=_resolve_mcp_runtime_config(mcp_config),
-        client_factory=mcp_client_factory,
-        sidecar_client=mcp_sidecar_client,
-        reserved_capability_ids=[descriptor.capability_id for descriptor in capability_registry.list()],
-    )
-    if resolved_mcp_runtime_state.config.enabled:
+    if not mcp_rollout_config.legacy_enabled and mcp_runtime_state is not None and mcp_runtime_state.config.enabled:
+        raise RuntimeError("MCP legacy runtime was supplied while legacy assembly is disabled")
+    resolved_mcp_runtime_state = None
+    if mcp_rollout_config.legacy_enabled:
+        resolved_mcp_runtime_state = mcp_runtime_state or MCPRuntimeState(
+            config=_resolve_mcp_runtime_config(mcp_config),
+            client_factory=mcp_client_factory,
+            sidecar_client=mcp_sidecar_client,
+            reserved_capability_ids=[descriptor.capability_id for descriptor in capability_registry.list()],
+        )
+    if resolved_mcp_runtime_state is not None and resolved_mcp_runtime_state.config.enabled:
         audit_sink.record_sync(
             "mcp.server_discovery_started",
             {
@@ -7877,23 +9989,329 @@ def build_api_runtime(
     )
     mcp_dispatch_executor = None
     mcp_dispatch_workflow_provider = None
+    mcp_shadow_observer = None
+    mcp_rollout_metric_recorder = None
+    mcp_dispatch_metric_context = None
+    mcp_safety_detectors = None
+    if mcp_rollout_instance_admission is not None:
+        mcp_rollout_metric_recorder = MCPRolloutMetricRecorder(
+            storage,
+            MCPRolloutMetricContext(
+                environment_id=mcp_rollout_instance_admission.environment_id,
+                deployment_id=mcp_rollout_instance_admission.deployment_id,
+                stage=MCPRolloutStage(mcp_rollout_instance_admission.stage),
+                config_fingerprint=mcp_rollout_config.fingerprint,
+            ),
+        )
+        mcp_dispatch_metric_context = MCPDispatchMetricContext(
+            routing_mode=MCPMetricRoutingMode(mcp_rollout_config.routing_mode.value)
+        )
+        if user_mcp_audit_service is None or user_mcp_gateway is None:
+            raise RuntimeError(
+                "MCP rollout safety detectors require audit and Gateway boundaries"
+            )
+
+        async def record_mcp_safety_metric_gap(gap: MCPSafetyMetricGap) -> None:
+            red_line = None if gap.red_line is None else gap.red_line.value
+            await user_mcp_audit_service.record(
+                owner_user_id="rollout-system",
+                event_type="mcp.rollout_metric_gap",
+                occurred_at=gap.bucket_ended_at,
+                safe_payload={
+                    "metric_family": "safety_red_line",
+                    "gap_reason": gap.reason_code,
+                    **({"reason": red_line} if red_line is not None else {}),
+                },
+                source_ref=(
+                    "mcp-safety-gap:"
+                    f"{gap.bucket_started_at.isoformat()}:"
+                    f"{gap.bucket_ended_at.isoformat()}:"
+                    f"{gap.reason_code}:{red_line or 'all'}"
+                ),
+            )
+
+        mcp_safety_registry = AuthoritativeMCPSafetyDetectorRegistry(
+            mcp_rollout_metric_recorder,
+            gap_sink=record_mcp_safety_metric_gap,
+            routing_mode=mcp_dispatch_metric_context.routing_mode,
+        )
+        mcp_safety_detectors = register_authoritative_mcp_safety_detectors(
+            mcp_safety_registry
+        )
+        mcp_rollout_metric_recorder.configure_safety_detector_registry(
+            mcp_safety_registry
+        )
+        user_mcp_gateway.configure_safety_detectors(mcp_safety_detectors)
+        user_mcp_audit_service.configure_safety_detector(
+            mcp_safety_detectors[MCPSafetyRedLine.SECRET_EXPOSURE]
+        )
+        if user_mcp_gateway is not None:
+            user_mcp_gateway.configure_rollout_metrics(
+                mcp_rollout_metric_recorder,
+                mcp_dispatch_metric_context.routing_mode,
+            )
+        if user_mcp_presence_service is not None:
+            async def record_disconnect_lease_expired_metric() -> None:
+                observed_at = datetime.now(timezone.utc)
+                bucket_started_at = observed_at.replace(second=0, microsecond=0)
+                await mcp_rollout_metric_recorder.record_count(
+                    MCPMetricName.DISCONNECT_LEASE_EXPIRED_TOTAL,
+                    labels=MCPMetricLabels(
+                        execution_path=MCPMetricExecutionPath.USER_SCOPED,
+                        routing_mode=mcp_dispatch_metric_context.routing_mode,
+                        result_category=MCPMetricResultCategory.CANCELLED,
+                        error_category=MCPMetricErrorCategory.NONE,
+                    ),
+                    bucket_started_at=bucket_started_at,
+                    bucket_ended_at=bucket_started_at + timedelta(minutes=1),
+                )
+
+            user_mcp_presence_service.configure_lease_expired_observer(
+                record_disconnect_lease_expired_metric
+            )
+    if user_mcp_enabled:
+        mcp_runtime_holder: dict[str, ApiRuntime] = {}
+
+        async def persist_remote_task_result(
+            binding,
+            result: Mapping[str, Any],
+        ) -> str:
+            if user_mcp_result_store is None:
+                raise RuntimeError("mcp_remote_task_result_store_unavailable")
+            sink = user_mcp_result_store.create_sink(binding.task_id, durable=True)
+            try:
+                encoded = json.dumps(
+                    dict(result),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                await sink.write(encoded)
+                persisted = await sink.finalize()
+            except BaseException:
+                await sink.abort()
+                raise
+            return persisted.ref
+
+        async def continue_remote_task(
+            outbox,
+        ) -> MCPContinuationAdmissionResult:
+            runtime = mcp_runtime_holder.get("runtime")
+            if runtime is None:
+                raise RuntimeError("mcp_continuation_runtime_unavailable")
+            admitted = outbox
+            admission_status = "already_admitted"
+            if outbox.continuation_admitted_at is None:
+                admitted = await storage.admit_mcp_remote_task_continuation(
+                    outbox.outbox_id,
+                    claim_owner=str(outbox.claim_owner or ""),
+                    claim_token=str(outbox.claim_token or ""),
+                    expected_revision=outbox.revision,
+                    admitted_at=runtime._utcnow_naive(),
+                )
+                if admitted is None:
+                    raise RuntimeError("mcp_continuation_admission_lost")
+                admission_status = "admitted_new"
+            # Admission is the durable hand-off boundary. The recovery worker
+            # never invokes orchestration directly; ApiRuntime's supervised
+            # command consumer owns scheduling and restart reconciliation.
+            return MCPContinuationAdmissionResult(admission_status, admitted)
+
+        async def record_remote_task_terminal_metric(
+            sample: MCPRemoteTaskTerminalMetricSample,
+        ) -> None:
+            if mcp_rollout_metric_recorder is None:
+                return
+            task = await storage.get_task(sample.binding.task_id)
+            if (
+                task is None
+                or task.mcp_execution_mode != MCPExecutionPath.USER_SCOPED.value
+                or task.mcp_rollout_mode != MCPRoutingMode.ENFORCE.value
+                or task.mcp_rollout_config_version != mcp_rollout_config.config_version
+            ):
+                raise RuntimeError("mcp_remote_task_metric_assignment_mismatch")
+            server = await load_remote_task_recovery_server(sample.binding)
+            transport = {
+                UserMCPTransport.STREAMABLE_HTTP: MCPMetricTransport.STREAMABLE_HTTP,
+                UserMCPTransport.LEGACY_HTTP_SSE: MCPMetricTransport.LEGACY_HTTP_SSE,
+            }[server.transport]
+            protocol_version = MCPMetricProtocolVersion(
+                sample.binding.protocol_version
+            )
+            adapter = (
+                MCPMetricAdapter.PYTHON_2026
+                if protocol_version is MCPMetricProtocolVersion.V2026_07_28
+                else MCPMetricAdapter.PYTHON_LEGACY
+            )
+            labels = MCPMetricLabels(
+                execution_path=MCPMetricExecutionPath.USER_SCOPED,
+                routing_mode=MCPMetricRoutingMode.ENFORCE,
+                transport=transport,
+                protocol_version=protocol_version,
+                adapter=adapter,
+                result_category=sample.result_category,
+                error_category=sample.error_category,
+                call_kind=MCPCallKind.REMOTE_TASK,
+            )
+            terminal_at = (
+                sample.terminal_at.replace(tzinfo=timezone.utc)
+                if sample.terminal_at.tzinfo is None
+                else sample.terminal_at.astimezone(timezone.utc)
+            )
+            bucket_started_at = terminal_at.replace(second=0, microsecond=0)
+            bucket_ended_at = bucket_started_at + timedelta(minutes=1)
+            await mcp_rollout_metric_recorder.record_count(
+                MCPMetricName.TOOL_CALLS_TOTAL,
+                labels=labels,
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_ended_at,
+            )
+            if sample.result_category is MCPMetricResultCategory.UNKNOWN:
+                await mcp_rollout_metric_recorder.record_count(
+                    MCPMetricName.TOOL_CALL_UNKNOWN_TOTAL,
+                    labels=labels,
+                    bucket_started_at=bucket_started_at,
+                    bucket_ended_at=bucket_ended_at,
+                )
+            await mcp_rollout_metric_recorder.record_latency(
+                MCPMetricName.TOOL_CALL_DURATION_SECONDS,
+                duration_seconds=sample.duration_seconds,
+                labels=labels,
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_ended_at,
+            )
+
+        async def record_remote_task_metric_gap(binding, reason: str) -> None:
+            task = await storage.get_task(binding.task_id)
+            if task is None:
+                return
+            await record_live_event(
+                EventRecord(
+                    event_id=f"evt-{uuid4().hex[:12]}",
+                    conversation_id=task.conversation_id,
+                    task_id=binding.task_id,
+                    node_id=binding.node_id,
+                    event_type="mcp.rollout_metric_gap",
+                    payload={
+                        "safe_call_ref": binding.call_ref,
+                        "metric_family": "remote_task_terminal",
+                        "gap_reason": reason,
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                )
+            )
+
+        async def record_remote_tasks_active_metric() -> None:
+            if mcp_rollout_metric_recorder is None:
+                return
+            observed_at = datetime.now(timezone.utc)
+            bucket_started_at = observed_at.replace(second=0, microsecond=0)
+            for raw_version, metric_version, adapter in (
+                (
+                    MCP_PROTOCOL_VERSION_2025_11_25,
+                    MCPMetricProtocolVersion.V2025_11_25,
+                    MCPMetricAdapter.PYTHON_LEGACY,
+                ),
+                (
+                    MCP_PROTOCOL_VERSION_2026_07_28,
+                    MCPMetricProtocolVersion.V2026_07_28,
+                    MCPMetricAdapter.PYTHON_2026,
+                ),
+            ):
+                active_count = await storage.count_active_mcp_remote_task_bindings(
+                    rollout_config_version=mcp_rollout_config.config_version,
+                    protocol_version=raw_version,
+                )
+                await mcp_rollout_metric_recorder.record_gauge(
+                    MCPMetricName.REMOTE_TASKS_ACTIVE,
+                    labels=MCPMetricLabels(
+                        execution_path=MCPMetricExecutionPath.USER_SCOPED,
+                        routing_mode=MCPMetricRoutingMode.ENFORCE,
+                        transport=MCPMetricTransport.STREAMABLE_HTTP,
+                        protocol_version=metric_version,
+                        adapter=adapter,
+                        call_kind=MCPCallKind.REMOTE_TASK,
+                    ),
+                    bucket_started_at=bucket_started_at,
+                    bucket_ended_at=bucket_started_at + timedelta(minutes=1),
+                    value=active_count,
+                )
+
+        async def record_remote_task_global_metric_gap(reason: str) -> None:
+            if audit_sink is None:
+                return
+            try:
+                audit_sink.record_sync(
+                    "mcp.rollout_metric_gap",
+                    {
+                        "metric_family": "remote_tasks_active",
+                        "gap_reason": reason,
+                    },
+                )
+            except Exception:
+                return
+
+        mcp_remote_task_recovery_worker = MCPRemoteTaskRecoveryWorker(
+            storage=storage,
+            client_factory=create_remote_task_recovery_client,
+            instance_id=instance_id,
+            event_sink=record_remote_task_recovery_event,
+            terminal_metric_sink=record_remote_task_terminal_metric,
+            metric_gap_sink=record_remote_task_metric_gap,
+            active_metric_sink=record_remote_tasks_active_metric,
+            global_metric_gap_sink=record_remote_task_global_metric_gap,
+            result_persister=persist_remote_task_result,
+            continuation_sink=continue_remote_task,
+            now_fn=ApiRuntime._utcnow_naive,
+        )
+        if user_mcp_gateway is not None:
+            user_mcp_gateway.configure_remote_task_canceller(
+                mcp_remote_task_recovery_worker.cancel_remote_task
+            )
     if user_mcp_routing_enabled:
         if user_mcp_gateway is None:
             raise RuntimeError("User-scoped MCP routing requires the user MCP Gateway")
         if resolved_planner_text_generator is None:
             raise RuntimeError("User-scoped MCP routing requires the LLM planner")
+        mcp_tool_selector = MCPToolSelector(
+            text_generator=resolved_planner_text_generator
+        )
+        mcp_server_router = MCPServerRouter(
+            text_generator=resolved_planner_text_generator
+        )
         mcp_dispatch_coordinator = UserMCPDispatchCoordinator(
             storage=storage,
             gateway=user_mcp_gateway,
-            selector=MCPToolSelector(text_generator=resolved_planner_text_generator),
-            server_router=MCPServerRouter(text_generator=resolved_planner_text_generator),
+            selector=mcp_tool_selector,
+            server_router=mcp_server_router,
             live_event_recorder=record_live_event,
             now_fn=ApiRuntime._utcnow_naive,
+            metric_recorder=mcp_rollout_metric_recorder,
+            metric_context=mcp_dispatch_metric_context,
+            safety_detectors=mcp_safety_detectors,
         )
+        if mcp_rollout_metric_recorder is not None:
+            mcp_rollout_metric_recorder.configure_safety_interval_probes(
+                user_mcp_audit_service.attest_safety_interval,
+                user_mcp_gateway.attest_safety_interval,
+                mcp_dispatch_coordinator.attest_safety_interval,
+            )
         mcp_dispatch_executor = MCPDispatchExecutor(
             coordinator=mcp_dispatch_coordinator
         )
         mcp_dispatch_workflow_provider = MCPDispatchWorkflowProvider()
+        if mcp_rollout_config.routing_mode is MCPRoutingMode.SHADOW:
+            assert mcp_credential_cipher is not None
+            mcp_shadow_observer = MCPShadowRuntimeObserver(
+                storage=storage,
+                gateway=user_mcp_gateway,
+                server_router=mcp_server_router,
+                selector=mcp_tool_selector,
+                endpoint_policy=endpoint_policy,
+                digest_key=derive_shadow_catalog_digest_key(
+                    mcp_credential_cipher,
+                    config_fingerprint=mcp_rollout_config.fingerprint,
+                ),
+            )
     default_workflow_provider = LLMWorkflowProvider(
         capability_registry=capability_registry,
         fallback_provider=auto_workflow_provider,
@@ -7955,7 +10373,22 @@ def build_api_runtime(
                     service_registry=resolved_skill_service_registry,
                 ),
                 *([mcp_dispatch_executor] if mcp_dispatch_executor is not None else []),
-                MCPToolExecutor(runtime_state=resolved_mcp_runtime_state, live_event_recorder=record_live_event),
+                *(
+                    [
+                        MCPToolExecutor(
+                            runtime_state=resolved_mcp_runtime_state,
+                            live_event_recorder=record_live_event,
+                            metric_recorder=mcp_rollout_metric_recorder,
+                            metric_routing_mode=(
+                                None
+                                if mcp_dispatch_metric_context is None
+                                else mcp_dispatch_metric_context.routing_mode
+                            ),
+                        )
+                    ]
+                    if resolved_mcp_runtime_state is not None
+                    else []
+                ),
             ]
         ),
         completion_policy=CompletionPolicy(),
@@ -7964,7 +10397,7 @@ def build_api_runtime(
         runtime_replanner=resolved_runtime_replanner,
     )
 
-    return ApiRuntime(
+    runtime = ApiRuntime(
         engine=engine,
         storage=storage,
         capability_registry=capability_registry,
@@ -8004,14 +10437,26 @@ def build_api_runtime(
         user_mcp_health_runner=user_mcp_health_runner,
         user_mcp_gateway=user_mcp_gateway,
         mcp_credential_cipher=mcp_credential_cipher,
+        mcp_remote_task_recovery_worker=mcp_remote_task_recovery_worker,
         mcp_invalidation_bus=mcp_invalidation_bus,
         postgres_mcp_invalidation_bus=postgres_mcp_invalidation_bus,
         user_mcp_result_store=user_mcp_result_store,
         user_mcp_result_janitor=user_mcp_result_janitor,
         user_mcp_presence_service=user_mcp_presence_service,
         user_mcp_audit_service=user_mcp_audit_service,
+        mcp_shadow_observer=mcp_shadow_observer,
+        mcp_shadow_manifest=mcp_shadow_manifest,
+        mcp_shadow_scenario_bindings=mcp_shadow_scenario_bindings,
+        mcp_shadow_manifest_gap_reason=mcp_shadow_manifest_gap_reason,
         user_mcp_routing_enabled=user_mcp_routing_enabled,
+        mcp_rollout_config=mcp_rollout_config,
+        mcp_rollout_instance_admission=mcp_rollout_instance_admission,
+        mcp_rollout_metric_recorder=mcp_rollout_metric_recorder,
+        mcp_rollout_engine=mcp_rollout_engine,
     )
+    if user_mcp_enabled:
+        mcp_runtime_holder["runtime"] = runtime
+    return runtime
 
 
 def _resolve_model_edition_config(
@@ -8128,12 +10573,17 @@ def _set_env_from_config(key: str, value: object | None) -> None:
         return
     os.environ[key] = str(value)
 
-def _resolve_runtime_sidecar_client_from_env() -> RuntimeSidecarGrpcClient | None:
+def _resolve_runtime_sidecar_client_from_env(
+    *,
+    require_runtime_store_attestation: bool = False,
+) -> RuntimeSidecarGrpcClient | None:
     endpoint = os.environ.get("MAF_RUNTIME_SIDECAR_ENDPOINT", "").strip()
     if not endpoint:
         return None
     artifact_provenance, allowed_artifact_checksums, allowed_cargo_lock_digests = (
-        _resolve_runtime_sidecar_artifact_trust_from_env()
+        _resolve_runtime_sidecar_artifact_trust_from_env(
+            require_runtime_store_attestation=require_runtime_store_attestation,
+        )
     )
     allowed_hosts = tuple(
         host.strip()
@@ -8161,11 +10611,16 @@ def _resolve_runtime_sidecar_client_from_env() -> RuntimeSidecarGrpcClient | Non
     )
 
 
-def _resolve_runtime_sidecar_artifact_trust_from_env() -> tuple[dict[str, Any] | None, tuple[str, ...], tuple[str, ...]]:
+def _resolve_runtime_sidecar_artifact_trust_from_env(
+    *,
+    require_runtime_store_attestation: bool = False,
+) -> tuple[dict[str, Any] | None, tuple[str, ...], tuple[str, ...]]:
     manifest_path = os.environ.get("MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH", "").strip()
     allowlist_path = os.environ.get("MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH", "").strip()
     if not manifest_path and not allowlist_path:
-        if _runtime_sidecar_enforce_enabled():
+        if _runtime_sidecar_enforce_enabled(
+            require_runtime_store_attestation=require_runtime_store_attestation,
+        ):
             _raise_runtime_sidecar_artifact_untrusted(
                 "Rust runtime sidecar enforce mode requires an artifact manifest and allowlist"
             )
@@ -8200,8 +10655,11 @@ def _resolve_runtime_sidecar_artifact_trust_from_env() -> tuple[dict[str, Any] |
     return metadata, allowed_checksums, allowed_cargo_lock_digests
 
 
-def _runtime_sidecar_enforce_enabled() -> bool:
-    return any(
+def _runtime_sidecar_enforce_enabled(
+    *,
+    require_runtime_store_attestation: bool = False,
+) -> bool:
+    return require_runtime_store_attestation or any(
         runtime_sidecar_mode_for_component(component) == "enforce"
         for component in ("runtime_store", "event_log", "task_dispatcher")
     )

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import inspect, text
 
-from src.core.models import AuthUserToken, Conversation
+from src.core.models import AuthUserToken, Conversation, MCPRolloutMetricBucket
 from src.core.contracts import StoragePort as CoreStoragePort
 from src.storage.interfaces import StoragePort
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
@@ -15,6 +17,231 @@ from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteBootstrapTest(SQLiteStorageTestCase):
+    def test_legacy_remote_task_publication_columns_are_added_and_proven_rows_backfilled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-remote-task.sqlite3")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_remote_task_binding ("
+                        "safe_remote_task_ref TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, "
+                        "task_id TEXT NOT NULL, node_id TEXT NOT NULL, call_ref TEXT NOT NULL, "
+                        "server_id TEXT NOT NULL, protocol_version TEXT NOT NULL, "
+                        "remote_task_ciphertext BLOB NOT NULL, remote_task_nonce BLOB NOT NULL, "
+                        "encryption_version INTEGER NOT NULL, last_status TEXT NOT NULL, "
+                        "next_poll_at TEXT, created_at TEXT, updated_at TEXT, terminal_at TEXT, "
+                        "claim_owner TEXT, claim_token TEXT, lease_expires_at TEXT, revision INTEGER DEFAULT 0)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_remote_task_binding VALUES "
+                        "('published','alice','task-a','node-a','call-a','server','2026-07-28',"
+                        "X'01',X'02',1,'working','2026-08-13 08:00:00',NULL,'2026-08-13 07:59:00',NULL,NULL,NULL,NULL,0),"
+                        "('unpublished','alice','task-b','node-b','call-b','server','2026-07-28',"
+                        "X'01',X'02',1,'working',NULL,NULL,'2026-08-13 07:59:00',NULL,NULL,NULL,NULL,0)"
+                    )
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("mcp_remote_task_binding")
+            }
+            self.assertIn("published_at", columns)
+            self.assertIn("continuation_plan", columns)
+            with engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT safe_remote_task_ref, published_at "
+                        "FROM mcp_remote_task_binding ORDER BY safe_remote_task_ref"
+                    )
+                ).all()
+            self.assertEqual(rows[0], ("published", "2026-08-13 08:00:00"))
+            self.assertEqual(rows[1], ("unpublished", None))
+            storage = SQLiteStorage(create_sqlite_session_factory(engine))
+            self.assertIsNotNone(
+                asyncio.run(
+                    storage.get_mcp_remote_task_binding("alice", "task-a", "published")
+                )
+            )
+
+    def test_bootstrap_expands_task_route_reason_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = create_sqlite_engine(Path(temp_dir) / "legacy-task-reasons.db")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE task ("
+                        "task_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, "
+                        "root_message_id TEXT NOT NULL, status TEXT NOT NULL, "
+                        "routing_mode TEXT NOT NULL, requested_capability_id TEXT, "
+                        "root_node_id TEXT, summary TEXT, cancel_requested_at TEXT, "
+                        "created_at TEXT, updated_at TEXT, mcp_execution_mode TEXT, "
+                        "mcp_shadow_enabled BOOLEAN, mcp_rollout_config_version TEXT, "
+                        "mcp_route_reason_code TEXT CHECK (mcp_route_reason_code IS NULL OR "
+                        "mcp_route_reason_code IN ('routing_off', 'shadow_enabled', "
+                        "'enforce_selected', 'cohort_not_selected', "
+                        "'percent_not_selected', 'no_execution_path')), "
+                        "mcp_rollout_mode TEXT)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO task (task_id, conversation_id, root_message_id, "
+                        "status, routing_mode, mcp_execution_mode, mcp_shadow_enabled, "
+                        "mcp_rollout_config_version, mcp_route_reason_code, mcp_rollout_mode) "
+                        "VALUES ('task-history', 'conv-history', 'msg-history', "
+                        "'completed', 'auto', 'legacy', 0, 'v1', 'routing_off', 'off')"
+                    )
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            with engine.begin() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        text(
+                            "SELECT mcp_route_reason_code FROM task "
+                            "WHERE task_id = 'task-history'"
+                        )
+                    ).scalar_one(),
+                    "routing_off",
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO task (task_id, conversation_id, root_message_id, "
+                        "status, routing_mode, mcp_execution_mode, mcp_shadow_enabled, "
+                        "mcp_rollout_config_version, mcp_route_reason_code, mcp_rollout_mode) "
+                        "VALUES ('task-new', 'conv-new', 'msg-new', 'accepted', 'auto', "
+                        "'unavailable', 0, 'v2', 'user_server_rollout_unavailable', 'off')"
+                    )
+                )
+
+    def test_bootstrap_expands_legacy_rollout_block_reason_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = create_sqlite_engine(Path(temp_dir) / "legacy-block.db")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_rollout_promotion_block ("
+                        "block_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL, "
+                        "rollout_program TEXT NOT NULL, deployment_id TEXT NOT NULL, "
+                        "stage TEXT NOT NULL, config_fingerprint TEXT NOT NULL, "
+                        "evidence_id TEXT NOT NULL, reason_code TEXT NOT NULL "
+                        "CHECK (reason_code IN ('digest_invalid')), created_at TEXT NOT NULL)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_rollout_promotion_block VALUES ("
+                        "'legacy-block', 'staging', 'user_mcp_phase3', 'deploy-a', "
+                        "'internal_shadow', :fingerprint, 'evidence-a', "
+                        "'digest_invalid', :created_at)"
+                    ),
+                    {
+                        "fingerprint": "b" * 64,
+                        "created_at": "2026-08-13T01:00:01Z",
+                    },
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            with engine.begin() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        text(
+                            "SELECT reason_code FROM mcp_rollout_promotion_block "
+                            "WHERE block_id = 'legacy-block'"
+                        )
+                    ).scalar_one(),
+                    "digest_invalid",
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_rollout_promotion_block VALUES ("
+                        "'new-block', 'staging', 'user_mcp_phase3', 'deploy-a', "
+                        "'internal_shadow', :fingerprint, 'evidence-b', "
+                        "'attestation_invalid', :created_at)"
+                    ),
+                    {
+                        "fingerprint": "b" * 64,
+                        "created_at": "2026-08-13T01:00:02Z",
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_rollout_promotion_block VALUES ("
+                        "'red-line-block', 'staging', 'user_mcp_phase3', 'deploy-a', "
+                        "'internal_shadow', :fingerprint, 'evidence-c', "
+                        "'safety_red_line_nonzero', :created_at)"
+                    ),
+                    {
+                        "fingerprint": "b" * 64,
+                        "created_at": "2026-08-13T01:00:03Z",
+                    },
+                )
+
+    def test_bootstrap_adds_nullable_attestation_columns_to_legacy_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = create_sqlite_engine(Path(temp_dir) / "legacy-evidence.db")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_rollout_evidence_snapshot ("
+                        "evidence_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL, "
+                        "rollout_program TEXT NOT NULL, git_sha TEXT NOT NULL, "
+                        "deployment_id TEXT NOT NULL, stage TEXT NOT NULL, "
+                        "config_fingerprint TEXT NOT NULL, window_started_at TEXT NOT NULL, "
+                        "window_ended_at TEXT NOT NULL, recorded_at TEXT NOT NULL, "
+                        "producer TEXT NOT NULL, source TEXT NOT NULL, snapshot_id INTEGER NOT NULL, "
+                        "nonce TEXT NOT NULL, evidence_kind TEXT NOT NULL, payload TEXT NOT NULL, "
+                        "payload_digest TEXT NOT NULL)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_rollout_evidence_snapshot VALUES ("
+                        "'legacy-prod', 'staging', 'user_mcp_phase3', :git_sha, "
+                        "'deploy-a', 'internal_shadow', :fingerprint, :started, :ended, "
+                        ":recorded, 'production_snapshot_producer', 'production', 1, "
+                        "'legacy-nonce', 'internal_shadow', '{}', :digest)"
+                    ),
+                    {
+                        "git_sha": "a" * 40,
+                        "fingerprint": "b" * 64,
+                        "started": "2026-08-13T00:00:00Z",
+                        "ended": "2026-08-13T01:00:00Z",
+                        "recorded": "2026-08-13T01:00:01Z",
+                        "digest": "c" * 64,
+                    },
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            columns = {
+                column["name"]
+                for column in inspect(engine).get_columns(
+                    "mcp_rollout_evidence_snapshot"
+                )
+            }
+            self.assertTrue(
+                {"attestation_key_id", "attestation_signature"}.issubset(columns)
+            )
+            with engine.connect() as connection:
+                row = connection.execute(
+                    text(
+                        "SELECT evidence_id, attestation_key_id, attestation_signature "
+                        "FROM mcp_rollout_evidence_snapshot"
+                    )
+                ).one()
+            self.assertEqual(tuple(row), ("legacy-prod", None, None))
+
     def test_storage_interface_reexports_canonical_protocol(self) -> None:
         self.assertIs(StoragePort, CoreStoragePort)
 
@@ -44,9 +271,11 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                 "mcp_branch_record",
                 "mcp_call_record",
                 "mcp_remote_task_binding",
+                "mcp_remote_task_outbox",
                 "mcp_sealed_state",
                 "mcp_connection_lease",
                 "mcp_audit_event",
+                "mcp_legacy_migration_record",
             }.issubset(table_names)
         )
 
@@ -206,5 +435,218 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                         connection.execute(text("SELECT COUNT(*) FROM user_mcp_tool_grant")).scalar_one(),
                         1,
                     )
+            finally:
+                engine.dispose()
+
+    def test_bootstrap_adds_task_mcp_assignment_columns_without_losing_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-task.sqlite3")
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "CREATE TABLE task ("
+                            "task_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, "
+                            "root_message_id TEXT NOT NULL, status TEXT NOT NULL, "
+                            "routing_mode TEXT NOT NULL, requested_capability_id TEXT, "
+                            "root_node_id TEXT, summary TEXT, cancel_requested_at TEXT, "
+                            "created_at TEXT, updated_at TEXT)"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO task "
+                            "(task_id, conversation_id, root_message_id, status, routing_mode) "
+                            "VALUES ('task-history', 'conv-history', 'msg-history', 'completed', 'auto')"
+                        )
+                    )
+
+                bootstrap_sqlite_database(engine)
+
+                columns = {column["name"] for column in inspect(engine).get_columns("task")}
+                self.assertTrue(
+                    {
+                        "mcp_execution_mode",
+                        "mcp_shadow_enabled",
+                        "mcp_rollout_config_version",
+                        "mcp_route_reason_code",
+                        "mcp_rollout_mode",
+                    }.issubset(columns)
+                )
+                session_factory = create_sqlite_session_factory(engine)
+                loaded = asyncio.run(SQLiteStorage(session_factory).get_task("task-history"))
+                self.assertIsNotNone(loaded)
+                assert loaded is not None
+                self.assertIsNone(loaded.mcp_execution_mode)
+                self.assertIsNone(loaded.mcp_rollout_mode)
+            finally:
+                engine.dispose()
+
+    def test_bootstrap_adds_remote_task_claim_columns_without_losing_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-mcp-task.sqlite3")
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "CREATE TABLE mcp_remote_task_binding ("
+                            "safe_remote_task_ref TEXT PRIMARY KEY, "
+                            "owner_user_id TEXT NOT NULL, task_id TEXT NOT NULL, "
+                            "node_id TEXT NOT NULL, call_ref TEXT NOT NULL, "
+                            "server_id TEXT NOT NULL, protocol_version TEXT NOT NULL, "
+                            "remote_task_ciphertext BLOB NOT NULL, remote_task_nonce BLOB NOT NULL, "
+                            "encryption_version INTEGER NOT NULL, last_status TEXT NOT NULL, "
+                            "next_poll_at TEXT, created_at TEXT, updated_at TEXT, terminal_at TEXT)"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO mcp_remote_task_binding VALUES ("
+                            "'remote-a', 'alice', 'task-a', 'node-a', 'call-a', 'server-a', "
+                            "'2026-07-28', X'01', X'02', 1, 'working', NULL, NULL, NULL, NULL)"
+                        )
+                    )
+
+                bootstrap_sqlite_database(engine)
+
+                columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns("mcp_remote_task_binding")
+                }
+                self.assertTrue(
+                    {"claim_owner", "claim_token", "lease_expires_at", "revision"}.issubset(
+                        columns
+                    )
+                )
+                with engine.connect() as connection:
+                    row = connection.execute(
+                        text(
+                            "SELECT safe_remote_task_ref, revision "
+                            "FROM mcp_remote_task_binding"
+                        )
+                    ).one()
+                self.assertEqual(row, ("remote-a", 0))
+            finally:
+                engine.dispose()
+
+    def test_bootstrap_adds_rollout_red_line_identity_without_losing_buckets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-rollout-metric.sqlite3")
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "CREATE TABLE mcp_rollout_metric_bucket ("
+                            "metric_bucket_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL, "
+                            "rollout_program TEXT NOT NULL, deployment_id TEXT NOT NULL, "
+                            "stage TEXT NOT NULL, config_fingerprint TEXT NOT NULL, "
+                            "metric_name TEXT NOT NULL, bucket_started_at TEXT NOT NULL, "
+                            "bucket_ended_at TEXT NOT NULL, execution_path TEXT NOT NULL, "
+                            "routing_mode TEXT NOT NULL, transport TEXT NOT NULL, "
+                            "protocol_version TEXT NOT NULL, adapter TEXT NOT NULL, "
+                            "result_category TEXT NOT NULL, error_category TEXT NOT NULL, "
+                            "call_kind TEXT NOT NULL, latency_bucket TEXT NOT NULL, "
+                            "value BIGINT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                            "CONSTRAINT uq_mcp_rollout_metric_series_bucket UNIQUE ("
+                            "environment_id, deployment_id, stage, config_fingerprint, metric_name, "
+                            "bucket_started_at, bucket_ended_at, execution_path, routing_mode, transport, "
+                            "protocol_version, adapter, result_category, error_category, call_kind, "
+                            "latency_bucket))"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "CREATE INDEX idx_mcp_rollout_metric_window "
+                            "ON mcp_rollout_metric_bucket "
+                            "(environment_id, deployment_id, stage, bucket_started_at)"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO mcp_rollout_metric_bucket VALUES ("
+                            "'legacy-bucket', 'staging', 'user_mcp_phase3', 'deploy-a', "
+                            "'internal_shadow', 'fingerprint-a', 'mcp_route_requests_total', "
+                            "'2026-08-13T08:00:00+00:00', '2026-08-13T08:01:00+00:00', "
+                            "'legacy', 'shadow', 'streamable_http', '2026-07-28', "
+                            "'python_2026', 'succeeded', 'none', 'not_applicable', "
+                            "'not_applicable', 2, '2026-08-13T08:00:00+00:00', "
+                            "'2026-08-13T08:00:00+00:00')"
+                        )
+                    )
+
+                bootstrap_sqlite_database(engine)
+
+                columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns(
+                        "mcp_rollout_metric_bucket"
+                    )
+                }
+                self.assertIn("red_line", columns)
+                unique_constraints = inspect(engine).get_unique_constraints(
+                    "mcp_rollout_metric_bucket"
+                )
+                identity = next(
+                    constraint
+                    for constraint in unique_constraints
+                    if constraint["name"] == "uq_mcp_rollout_metric_series_bucket"
+                )
+                self.assertIn("red_line", identity["column_names"])
+                with engine.connect() as connection:
+                    preserved = connection.execute(
+                        text(
+                            "SELECT metric_bucket_id, red_line, value "
+                            "FROM mcp_rollout_metric_bucket"
+                        )
+                    ).one()
+                self.assertEqual(preserved, ("legacy-bucket", "not_applicable", 2))
+
+                now = datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc)
+                storage = SQLiteStorage(create_sqlite_session_factory(engine))
+                red_line_bucket = MCPRolloutMetricBucket(
+                    metric_bucket_id="red-line-a",
+                    environment_id="staging",
+                    deployment_id="deploy-a",
+                    stage="internal_shadow",
+                    config_fingerprint="fingerprint-a",
+                    metric_name="mcp_safety_red_line_total",
+                    bucket_started_at=now,
+                    bucket_ended_at=now + timedelta(minutes=1),
+                    execution_path="legacy",
+                    routing_mode="shadow",
+                    transport="streamable_http",
+                    protocol_version="2026-07-28",
+                    adapter="python_2026",
+                    result_category="succeeded",
+                    error_category="none",
+                    latency_bucket="not_applicable",
+                    value=0,
+                    red_line="cross_user_access",
+                    created_at=now,
+                    updated_at=now,
+                )
+                asyncio.run(storage.upsert_mcp_rollout_metric_bucket(red_line_bucket))
+                asyncio.run(
+                    storage.upsert_mcp_rollout_metric_bucket(
+                        replace(
+                            red_line_bucket,
+                            metric_bucket_id="red-line-b",
+                            red_line="secret_exposure",
+                        )
+                    )
+                )
+                listed = asyncio.run(
+                    storage.list_mcp_rollout_metric_buckets(
+                        "staging",
+                        "deploy-a",
+                        "internal_shadow",
+                        window_started_at=now,
+                        window_ended_at=now + timedelta(minutes=1),
+                    )
+                )
+                self.assertEqual(
+                    {item.red_line for item in listed},
+                    {None, "cross_user_access", "secret_exposure"},
+                )
             finally:
                 engine.dispose()

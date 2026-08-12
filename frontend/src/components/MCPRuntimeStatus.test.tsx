@@ -23,6 +23,7 @@ describe('MCPRuntimeStatus', () => {
       }],
       input: null,
       remoteTask: null,
+      availability: null,
     };
 
     render(<MCPRuntimeStatus taskId="task-1" mcp={mcp} onContinue={onContinue} onCancel={onCancel} />);
@@ -34,5 +35,23 @@ describe('MCPRuntimeStatus', () => {
     fireEvent.click(screen.getByRole('button', { name: '停止当前工具' }));
     expect(onContinue).toHaveBeenCalledWith('task-1', 'call-safe-1');
     expect(onCancel).toHaveBeenCalledWith('task-1', 'call-safe-1');
+  });
+
+  it('explains unavailable rollout routing without implying fallback or retry', () => {
+    const mcp: MCPTaskState = {
+      serverDisplayName: null,
+      discovery: null,
+      queue: null,
+      approval: null,
+      calls: [],
+      input: null,
+      remoteTask: null,
+      availability: { status: 'unavailable', reasonCode: 'no_execution_path' },
+    };
+
+    render(<MCPRuntimeStatus taskId="task-unavailable" mcp={mcp} />);
+
+    expect(screen.getAllByText('当前任务的 MCP 暂不可用')).toHaveLength(2);
+    expect(screen.getByText(/不会切换到另一条 MCP 链路或自动重试/)).toBeInTheDocument();
   });
 });

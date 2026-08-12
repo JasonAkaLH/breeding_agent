@@ -17,6 +17,13 @@ def bootstrap_sqlite_database(engine: Engine) -> None:
     _migrate_username_owner_columns(engine)
     _migrate_message_public_columns(engine)
     _migrate_user_mcp_grant_invalidation_columns(engine)
+    _migrate_mcp_remote_task_claim_columns(engine)
+    _migrate_mcp_continuation_command_columns(engine)
+    _migrate_mcp_rollout_metric_red_line(engine)
+    _migrate_mcp_rollout_evidence_attestation_columns(engine)
+    _migrate_mcp_rollout_promotion_block_reasons(engine)
+    _migrate_task_mcp_assignment_columns(engine)
+    _migrate_task_mcp_route_reasons(engine)
     _drop_legacy_auth_tables(engine)
     SQLiteBase.metadata.create_all(engine)
 
@@ -124,6 +131,363 @@ def _migrate_user_mcp_grant_invalidation_columns(engine: Engine) -> None:
                         f"ADD COLUMN {_quote(connection, column_name)} TEXT"
                     )
                 )
+
+
+def _migrate_mcp_remote_task_claim_columns(engine: Engine) -> None:
+    """Add the Phase-3 recovery-worker lease fields to existing local stores."""
+
+    with engine.begin() as connection:
+        existing_tables = set(inspect(connection).get_table_names())
+        if "mcp_remote_task_binding" not in existing_tables:
+            return
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("mcp_remote_task_binding")
+        }
+        quoted_table = _quote(connection, "mcp_remote_task_binding")
+        nullable_text_columns = ("claim_owner", "claim_token", "lease_expires_at")
+        for column_name in nullable_text_columns:
+            if column_name not in columns:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {quoted_table} "
+                        f"ADD COLUMN {_quote(connection, column_name)} TEXT"
+                    )
+                )
+        if "revision" not in columns:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {quoted_table} "
+                    f"ADD COLUMN {_quote(connection, 'revision')} INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+        if "continuation_plan" not in columns:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {quoted_table} "
+                    f"ADD COLUMN {_quote(connection, 'continuation_plan')} TEXT"
+                )
+            )
+        if "published_at" not in columns:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {quoted_table} "
+                    f"ADD COLUMN {_quote(connection, 'published_at')} TEXT"
+                )
+            )
+        # A legacy due timestamp (or terminal timestamp) proves the binding was
+        # exposed to recovery. Null/active rows remain unpublished and are
+        # reconciled through the authoritative TaskNode startup path.
+        connection.execute(
+            text(
+                f"UPDATE {quoted_table} "
+                f"SET {_quote(connection, 'published_at')} = "
+                f"COALESCE({_quote(connection, 'next_poll_at')}, "
+                f"{_quote(connection, 'terminal_at')}, {_quote(connection, 'updated_at')}) "
+                f"WHERE {_quote(connection, 'published_at')} IS NULL AND "
+                f"({_quote(connection, 'next_poll_at')} IS NOT NULL OR "
+                f"{_quote(connection, 'terminal_at')} IS NOT NULL)"
+            )
+        )
+
+
+def _migrate_mcp_continuation_command_columns(engine: Engine) -> None:
+    """Add the durable platform-continuation command state to existing stores."""
+
+    with engine.begin() as connection:
+        if "mcp_remote_task_outbox" not in set(inspect(connection).get_table_names()):
+            return
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("mcp_remote_task_outbox")
+        }
+        quoted_table = _quote(connection, "mcp_remote_task_outbox")
+        nullable_text_columns = (
+            "continuation_admitted_at",
+            "continuation_dispatched_at",
+            "continuation_status",
+            "continuation_claim_owner",
+            "continuation_claim_token",
+            "continuation_lease_expires_at",
+            "continuation_safe_error_code",
+            "continuation_node_ids",
+        )
+        for column_name in nullable_text_columns:
+            if column_name not in columns:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {quoted_table} "
+                        f"ADD COLUMN {_quote(connection, column_name)} TEXT"
+                    )
+                )
+        if "continuation_revision" not in columns:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {quoted_table} "
+                    f"ADD COLUMN {_quote(connection, 'continuation_revision')} "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+
+
+def _migrate_mcp_rollout_metric_red_line(engine: Engine) -> None:
+    """Add the closed red-line label and update the metric-series identity."""
+
+    table_name = "mcp_rollout_metric_bucket"
+    constraint_name = "uq_mcp_rollout_metric_series_bucket"
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        if table_name not in set(inspector.get_table_names()):
+            return
+        existing_columns = {
+            column["name"] for column in inspector.get_columns(table_name)
+        }
+        unique_constraints = inspector.get_unique_constraints(table_name)
+        identity_has_red_line = any(
+            constraint.get("name") == constraint_name
+            and "red_line" in (constraint.get("column_names") or ())
+            for constraint in unique_constraints
+        )
+        if "red_line" in existing_columns and identity_has_red_line:
+            return
+
+        target_table = SQLiteBase.metadata.tables[table_name]
+        missing_required = [
+            column.name
+            for column in target_table.columns
+            if column.name not in existing_columns
+            and column.name != "red_line"
+            and not column.nullable
+            and column.default is None
+            and column.server_default is None
+        ]
+        if missing_required:
+            raise RuntimeError(
+                "SQLite MCP rollout metric migration cannot rebuild table; "
+                f"missing required columns: {', '.join(missing_required)}"
+            )
+
+        temp_table_name = "__maf_legacy_mcp_rollout_metric_bucket"
+        quoted_table = _quote(connection, table_name)
+        quoted_temp_table = _quote(connection, temp_table_name)
+        old_row_count = _table_row_count(connection, table_name)
+        connection.execute(text(f"DROP TABLE IF EXISTS {quoted_temp_table}"))
+        connection.execute(
+            text(f"ALTER TABLE {quoted_table} RENAME TO {quoted_temp_table}")
+        )
+        _drop_indexes_for_table(connection, temp_table_name)
+        target_table.create(bind=connection, checkfirst=False)
+
+        target_columns = [column.name for column in target_table.columns]
+        insert_columns = ", ".join(
+            _quote(connection, column_name) for column_name in target_columns
+        )
+        select_expressions: list[str] = []
+        for column_name in target_columns:
+            if column_name == "red_line":
+                if column_name in existing_columns:
+                    quoted_column = _quote(connection, column_name)
+                    select_expressions.append(
+                        f"COALESCE({quoted_column}, 'not_applicable')"
+                    )
+                else:
+                    select_expressions.append("'not_applicable'")
+                continue
+            select_expressions.append(_quote(connection, column_name))
+        connection.execute(
+            text(
+                f"INSERT INTO {quoted_table} ({insert_columns}) "
+                f"SELECT {', '.join(select_expressions)} FROM {quoted_temp_table}"
+            )
+        )
+        new_row_count = _table_row_count(connection, table_name)
+        if new_row_count != old_row_count:
+            raise RuntimeError(
+                "SQLite MCP rollout metric migration copied "
+                f"{new_row_count} rows; expected {old_row_count}"
+            )
+        connection.execute(text(f"DROP TABLE {quoted_temp_table}"))
+
+
+def _migrate_mcp_rollout_evidence_attestation_columns(engine: Engine) -> None:
+    """Preserve legacy evidence while adding persisted attestation material.
+
+    Existing production rows remain nullable and therefore fail closed when
+    independently revalidated. New writes enforce the source-specific contract
+    in the repository; fresh databases also receive the table check constraint.
+    """
+
+    table_name = "mcp_rollout_evidence_snapshot"
+    with engine.begin() as connection:
+        if table_name not in set(inspect(connection).get_table_names()):
+            return
+        columns = {
+            column["name"] for column in inspect(connection).get_columns(table_name)
+        }
+        quoted_table = _quote(connection, table_name)
+        for column_name in ("attestation_key_id", "attestation_signature"):
+            if column_name not in columns:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {quoted_table} "
+                        f"ADD COLUMN {_quote(connection, column_name)} TEXT"
+                    )
+                )
+
+
+def _migrate_mcp_rollout_promotion_block_reasons(engine: Engine) -> None:
+    """Expand the closed promotion-block reason set without losing history."""
+
+    table_name = "mcp_rollout_promotion_block"
+    required_reasons = {
+        "attestation_missing",
+        "attestation_invalid",
+        "metric_series_missing",
+        "metric_summary_mismatch",
+        "safety_red_line_nonzero",
+    }
+    with engine.begin() as connection:
+        if table_name not in set(inspect(connection).get_table_names()):
+            return
+        table_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = :table_name"
+            ),
+            {"table_name": table_name},
+        ).scalar_one()
+        if all(reason in table_sql for reason in required_reasons):
+            return
+
+        target_table = SQLiteBase.metadata.tables[table_name]
+        existing_columns = {
+            column["name"] for column in inspect(connection).get_columns(table_name)
+        }
+        target_columns = [column.name for column in target_table.columns]
+        missing_columns = set(target_columns) - existing_columns
+        if missing_columns:
+            raise RuntimeError(
+                "SQLite MCP rollout promotion-block migration cannot rebuild table; "
+                f"missing columns: {', '.join(sorted(missing_columns))}"
+            )
+        temp_table_name = "__maf_legacy_mcp_rollout_promotion_block"
+        quoted_table = _quote(connection, table_name)
+        quoted_temp_table = _quote(connection, temp_table_name)
+        old_row_count = _table_row_count(connection, table_name)
+        connection.execute(text(f"DROP TABLE IF EXISTS {quoted_temp_table}"))
+        connection.execute(
+            text(f"ALTER TABLE {quoted_table} RENAME TO {quoted_temp_table}")
+        )
+        _drop_indexes_for_table(connection, temp_table_name)
+        target_table.create(bind=connection, checkfirst=False)
+        rendered_columns = ", ".join(
+            _quote(connection, column_name) for column_name in target_columns
+        )
+        connection.execute(
+            text(
+                f"INSERT INTO {quoted_table} ({rendered_columns}) "
+                f"SELECT {rendered_columns} FROM {quoted_temp_table}"
+            )
+        )
+        new_row_count = _table_row_count(connection, table_name)
+        if new_row_count != old_row_count:
+            raise RuntimeError(
+                "SQLite MCP rollout promotion-block migration copied "
+                f"{new_row_count} rows; expected {old_row_count}"
+            )
+        connection.execute(text(f"DROP TABLE {quoted_temp_table}"))
+
+
+def _migrate_task_mcp_assignment_columns(engine: Engine) -> None:
+    """Add nullable task-level MCP route assignment fields to existing stores."""
+
+    with engine.begin() as connection:
+        existing_tables = set(inspect(connection).get_table_names())
+        if "task" not in existing_tables:
+            return
+        columns = {column["name"] for column in inspect(connection).get_columns("task")}
+        quoted_table = _quote(connection, "task")
+        column_types = {
+            "mcp_execution_mode": "TEXT",
+            "mcp_shadow_enabled": "BOOLEAN",
+            "mcp_rollout_config_version": "TEXT",
+            "mcp_route_reason_code": "TEXT",
+            "mcp_rollout_mode": "TEXT",
+        }
+        for column_name, column_type in column_types.items():
+            if column_name not in columns:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {quoted_table} "
+                        f"ADD COLUMN {_quote(connection, column_name)} {column_type}"
+                    )
+                )
+
+
+def _migrate_task_mcp_route_reasons(engine: Engine) -> None:
+    """Expand the closed task route reasons without changing persisted assignments."""
+
+    table_name = "task"
+    required_reasons = {
+        "explicit_legacy_capability",
+        "user_server_rollout_unavailable",
+    }
+    with engine.begin() as connection:
+        if table_name not in set(inspect(connection).get_table_names()):
+            return
+        table_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = :table_name"
+            ),
+            {"table_name": table_name},
+        ).scalar_one()
+        if all(reason in table_sql for reason in required_reasons):
+            return
+        if "mcp_route_reason_code IN" not in table_sql:
+            return
+
+        target_table = SQLiteBase.metadata.tables[table_name]
+        existing_columns = {
+            column["name"] for column in inspect(connection).get_columns(table_name)
+        }
+        target_columns = [column.name for column in target_table.columns]
+        missing_columns = set(target_columns) - existing_columns
+        if missing_columns:
+            raise RuntimeError(
+                "SQLite task route-reason migration cannot rebuild table; "
+                f"missing columns: {', '.join(sorted(missing_columns))}"
+            )
+        temp_table_name = "__maf_legacy_task_route_reasons"
+        quoted_table = _quote(connection, table_name)
+        quoted_temp_table = _quote(connection, temp_table_name)
+        old_row_count = _table_row_count(connection, table_name)
+        connection.execute(text("PRAGMA legacy_alter_table = ON"))
+        try:
+            connection.execute(text(f"DROP TABLE IF EXISTS {quoted_temp_table}"))
+            connection.execute(
+                text(f"ALTER TABLE {quoted_table} RENAME TO {quoted_temp_table}")
+            )
+            _drop_indexes_for_table(connection, temp_table_name)
+            target_table.create(bind=connection, checkfirst=False)
+            rendered_columns = ", ".join(
+                _quote(connection, column_name) for column_name in target_columns
+            )
+            connection.execute(
+                text(
+                    f"INSERT INTO {quoted_table} ({rendered_columns}) "
+                    f"SELECT {rendered_columns} FROM {quoted_temp_table}"
+                )
+            )
+            new_row_count = _table_row_count(connection, table_name)
+            if new_row_count != old_row_count:
+                raise RuntimeError(
+                    "SQLite task route-reason migration copied "
+                    f"{new_row_count} rows; expected {old_row_count}"
+                )
+            connection.execute(text(f"DROP TABLE {quoted_temp_table}"))
+        finally:
+            connection.execute(text("PRAGMA legacy_alter_table = OFF"))
 
 
 def _rebuild_table_without_legacy_owner(connection: Connection, table_name: str, old_column: str) -> None:

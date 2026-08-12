@@ -1,4 +1,12 @@
 from .adapter import MCPAdapterDiagnostic, MCPClientAdapter, PythonLegacyMCPClientAdapter
+from .adapter_2025_tasks import (
+    MCP2025TaskCancelAck,
+    MCP2025TaskCreatedOutcome,
+    MCP2025TaskRecoveryClient,
+    MCP2025TaskResult,
+    MCP2025TaskState,
+    MCP2025TasksAdapter,
+)
 from .adapter_2026 import (
     MCP2026Adapter,
     MCPCallOutcome,
@@ -19,6 +27,7 @@ from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig, load_mcp_s
 from .protocol import (
     DEFAULT_MCP_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_2025_11_25,
     MCP_PROTOCOL_VERSION_2026_07_28,
     MCPCompatibilityStatus,
     MCPNegotiatedSession,
@@ -52,12 +61,19 @@ from .transport_legacy_http_sse import LegacyHTTPSSETransport
 
 __all__ = [
     "MCP_PROTOCOL_VERSION",
+    "MCP_PROTOCOL_VERSION_2025_11_25",
     "MCP_PROTOCOL_VERSION_2026_07_28",
     "DEFAULT_MCP_PROTOCOL_VERSION",
     "SUPPORTED_MCP_PROTOCOL_VERSION_ORDER",
     "SUPPORTED_MCP_PROTOCOL_VERSIONS",
     "MCPCompatibilityStatus",
     "MCPAdapterDiagnostic",
+    "MCP2025TaskCancelAck",
+    "MCP2025TaskCreatedOutcome",
+    "MCP2025TaskRecoveryClient",
+    "MCP2025TaskResult",
+    "MCP2025TaskState",
+    "MCP2025TasksAdapter",
     "MCP2026Adapter",
     "MCPCallOutcome",
     "MCPCompletedOutcome",

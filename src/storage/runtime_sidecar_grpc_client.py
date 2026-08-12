@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import ssl
 import struct
@@ -15,6 +16,7 @@ from src.storage.runtime_sidecar_facade import (
     validate_runtime_sidecar_endpoint,
     validate_runtime_sidecar_handshake,
     validate_runtime_sidecar_response,
+    validate_runtime_sidecar_task_record,
 )
 
 
@@ -189,12 +191,26 @@ class RuntimeSidecarGrpcClient:
         task_id: str,
         conversation_id: str,
         idempotency_key: str,
+        task: Mapping[str, Any] | None = None,
+        expected_from_status: str | None = None,
         owner: str = "python-runtime",
         timeout_seconds: float = 5,
     ) -> dict[str, Any]:
         self._ensure_compatible(timeout_seconds=timeout_seconds)
+        if task is not None:
+            validate_runtime_sidecar_task_record(task)
+            _ensure_task_identity(
+                task,
+                task_id=task_id,
+                conversation_id=conversation_id,
+                context="task_submit request",
+            )
         idempotency = _field_string(1, idempotency_key) + _field_string(2, owner) + _field_varint(3, 0)
         request = _field_string(1, task_id) + _field_string(2, conversation_id) + _field_bytes(3, idempotency)
+        if task is not None:
+            request += _field_bytes(4, _task_record(task))
+        if expected_from_status is not None:
+            request += _field_string(5, expected_from_status)
         payload = self._unary("SubmitTask", request, timeout_seconds=timeout_seconds)
         fields = _decode_message(payload)
         response = {
@@ -202,8 +218,89 @@ class RuntimeSidecarGrpcClient:
             "task_id": _first_string(fields, 1),
             "duplicate": _first_bool(fields, 2, default=False),
             "error": _optional_typed_error(fields, 3),
+            "task": _optional_task_record(fields, 4),
         }
         _consume_response("task_submit", response)
+        if task is not None and response["task"] is None:
+            _raise_task_identity_invalid("task_submit response omitted the requested TaskRecord")
+        if response["task"] is not None:
+            _ensure_task_identity(
+                response["task"],
+                task_id=task_id,
+                conversation_id=conversation_id,
+                context="task_submit response",
+            )
+            if response["task_id"] != response["task"]["task_id"]:
+                _raise_task_identity_invalid("task_submit response top-level task_id differs from TaskRecord")
+        return response
+
+    def get_task(self, *, task_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary("GetTask", _field_string(1, task_id), timeout_seconds=timeout_seconds)
+        fields = _decode_message(payload)
+        response = {
+            "operation": "task_get",
+            "task": _optional_task_record(fields, 1),
+            "found": _first_bool(fields, 2, default=False),
+            "error": _optional_typed_error(fields, 3),
+        }
+        if response["error"] is not None:
+            _raise_typed_error(response["error"])
+        if response["found"] != (response["task"] is not None):
+            raise RuntimeError("runtime_store_response_invalid: Rust runtime sidecar task_get response is inconsistent")
+        if response["task"] is not None and response["task"]["task_id"] != task_id:
+            _raise_task_identity_invalid("task_get response TaskRecord differs from requested task_id")
+        return response
+
+    def list_tasks_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+        statuses: tuple[str, ...] = (),
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        request = _field_string(1, conversation_id) + b"".join(
+            _field_string(2, status) for status in statuses
+        )
+        payload = self._unary("ListTasksForConversation", request, timeout_seconds=timeout_seconds)
+        fields = _decode_message(payload)
+        response = {
+            "operation": "task_list_for_conversation",
+            "tasks": [_decode_task_record(value) for value in fields.get(1, [])],
+            "error": _optional_typed_error(fields, 2),
+        }
+        _consume_response("task_list_for_conversation", response)
+        if any(task["conversation_id"] != conversation_id for task in response["tasks"]):
+            _raise_task_identity_invalid(
+                "task_list_for_conversation response contains a different conversation_id"
+            )
+        return response
+
+    def get_active_task_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary(
+            "GetActiveTaskForConversation",
+            _field_string(1, conversation_id),
+            timeout_seconds=timeout_seconds,
+        )
+        fields = _decode_message(payload)
+        response = {
+            "operation": "task_get_active_for_conversation",
+            "task": _optional_task_record(fields, 1),
+            "found": _first_bool(fields, 2, default=False),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("task_get_active_for_conversation", response)
+        if response["task"] is not None and response["task"]["conversation_id"] != conversation_id:
+            _raise_task_identity_invalid(
+                "task_get_active_for_conversation response contains a different conversation_id"
+            )
         return response
 
     def transition_node(
@@ -212,7 +309,9 @@ class RuntimeSidecarGrpcClient:
         task_id: str,
         node_id: str,
         to_status: str,
+        expected_from_status: str,
         idempotency_key: str,
+        node: Mapping[str, Any] | None = None,
         owner: str = "python-runtime",
         timeout_seconds: float = 5,
     ) -> dict[str, Any]:
@@ -221,9 +320,12 @@ class RuntimeSidecarGrpcClient:
         request = (
             _field_string(1, task_id)
             + _field_string(2, node_id)
+            + _field_string(3, expected_from_status)
             + _field_string(4, to_status)
             + _field_bytes(5, idempotency)
         )
+        if node is not None:
+            request += _field_bytes(6, _task_node_record(node))
         payload = self._unary("TransitionNode", request, timeout_seconds=timeout_seconds)
         fields = _decode_message(payload)
         response = {
@@ -231,8 +333,40 @@ class RuntimeSidecarGrpcClient:
             "node_id": _first_string(fields, 1),
             "status": _first_string(fields, 2),
             "error": _optional_typed_error(fields, 3),
+            "node": _optional_task_node_record(fields, 4),
         }
         _consume_response("node_state_transition", response)
+        return response
+
+    def get_task_node(self, *, node_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary("GetTaskNode", _field_string(1, node_id), timeout_seconds=timeout_seconds)
+        fields = _decode_message(payload)
+        response = {
+            "operation": "task_node_get",
+            "node": _optional_task_node_record(fields, 1),
+            "found": _first_bool(fields, 2, default=False),
+            "error": _optional_typed_error(fields, 3),
+        }
+        _consume_response("task_node_get", response)
+        if response["node"] is not None and response["node"]["node_id"] != node_id:
+            _raise_task_identity_invalid("task_node_get response differs from requested node_id")
+        return response
+
+    def list_task_nodes_for_task(self, *, task_id: str, timeout_seconds: float = 5) -> dict[str, Any]:
+        self._ensure_compatible(timeout_seconds=timeout_seconds)
+        payload = self._unary(
+            "ListTaskNodesForTask", _field_string(1, task_id), timeout_seconds=timeout_seconds
+        )
+        fields = _decode_message(payload)
+        response = {
+            "operation": "task_node_list",
+            "nodes": [_decode_task_node_record(value) for value in fields.get(1, [])],
+            "error": _optional_typed_error(fields, 2),
+        }
+        _consume_response("task_node_list", response)
+        if any(node["task_id"] != task_id for node in response["nodes"]):
+            _raise_task_identity_invalid("task_node_list response contains a different task_id")
         return response
 
     def save_task_edge(
@@ -755,6 +889,148 @@ def _optional_event_cursor(fields: dict[int, list[Any]], field_number: int) -> d
     return _decode_event_cursor(values[0]) if values else None
 
 
+def _task_route_assignment(assignment: Mapping[str, Any]) -> bytes:
+    payload = b"".join(
+        _field_string(number, str(assignment[name]))
+        for number, name in enumerate(
+            ("route_mode", "real_path", "shadow_path", "config_version", "reason_code"), start=1
+        )
+    )
+    for number, name in ((6, "cohort_id"), (7, "assignment_key_hash"), (8, "assigned_at")):
+        if assignment.get(name) is not None:
+            payload += _field_string(number, str(assignment[name]))
+    return payload
+
+
+def _task_record(task: Mapping[str, Any]) -> bytes:
+    payload = b"".join(
+        [
+            _field_string(1, str(task["task_id"])),
+            _field_string(2, str(task["conversation_id"])),
+            _field_string(3, str(task["root_message_id"])),
+            _field_string(4, str(task["status"])),
+            _field_string(5, str(task["routing_mode"])),
+        ]
+    )
+    for number, name in (
+        (6, "requested_capability_id"),
+        (7, "root_node_id"),
+        (8, "summary"),
+        (9, "cancel_requested_at"),
+        (10, "created_at"),
+        (11, "updated_at"),
+    ):
+        if task.get(name) is not None:
+            payload += _field_string(number, str(task[name]))
+    if task.get("assignment") is not None:
+        payload += _field_bytes(12, _task_route_assignment(task["assignment"]))
+    return payload
+
+
+def _decode_task_route_assignment(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    return {
+        "route_mode": _first_string(fields, 1),
+        "real_path": _first_string(fields, 2),
+        "shadow_path": _first_string(fields, 3),
+        "config_version": _first_string(fields, 4),
+        "reason_code": _first_string(fields, 5),
+        "cohort_id": _optional_string(fields, 6),
+        "assignment_key_hash": _optional_string(fields, 7),
+        "assigned_at": _optional_string(fields, 8),
+    }
+
+
+def _decode_task_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    assignment = _first_message(fields, 12)
+    return {
+        "task_id": _first_string(fields, 1),
+        "conversation_id": _first_string(fields, 2),
+        "root_message_id": _first_string(fields, 3),
+        "status": _first_string(fields, 4),
+        "routing_mode": _first_string(fields, 5),
+        "requested_capability_id": _optional_string(fields, 6),
+        "root_node_id": _optional_string(fields, 7),
+        "summary": _optional_string(fields, 8),
+        "cancel_requested_at": _optional_string(fields, 9),
+        "created_at": _optional_string(fields, 10),
+        "updated_at": _optional_string(fields, 11),
+        "assignment": _decode_task_route_assignment(assignment) if assignment else None,
+    }
+
+
+def _optional_task_record(fields: dict[int, list[Any]], field_number: int) -> dict[str, Any] | None:
+    payload = _first_message(fields, field_number)
+    return _decode_task_record(payload) if payload else None
+
+
+def _task_node_record(node: Mapping[str, Any]) -> bytes:
+    payload = b"".join(
+        [
+            _field_string(1, str(node["node_id"])),
+            _field_string(2, str(node["task_id"])),
+            _field_string(3, str(node["capability_id"])),
+            _field_string(5, str(node["status"])),
+            _field_string(6, str(node["criticality"])),
+            _field_string(7, str(node["dependency_type"])),
+            _field_bytes(8, json.dumps(node["retry_policy"], sort_keys=True, separators=(",", ":")).encode()),
+            _field_bytes(9, json.dumps(node["timeout_policy"], sort_keys=True, separators=(",", ":")).encode()),
+        ]
+    )
+    for number, name in ((4, "assigned_instance_id"), (10, "resource_class"), (13, "started_at"), (14, "finished_at")):
+        if node.get(name) is not None:
+            payload += _field_string(number, str(node[name]))
+    payload += b"".join(_field_string(11, str(value)) for value in node["input_refs"])
+    payload += b"".join(_field_string(12, str(value)) for value in node["output_refs"])
+    return payload
+
+
+def _decode_task_node_record(payload: bytes) -> dict[str, Any]:
+    fields = _decode_message(payload)
+    try:
+        retry_policy = json.loads(_first_message(fields, 8) or b"{}")
+        timeout_policy = json.loads(_first_message(fields, 9) or b"{}")
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("runtime_store_response_invalid: TaskNodeRecord policy JSON is invalid") from exc
+    return {
+        "node_id": _first_string(fields, 1),
+        "task_id": _first_string(fields, 2),
+        "capability_id": _first_string(fields, 3),
+        "assigned_instance_id": _optional_string(fields, 4),
+        "status": _first_string(fields, 5),
+        "criticality": _first_string(fields, 6),
+        "dependency_type": _first_string(fields, 7),
+        "retry_policy": retry_policy,
+        "timeout_policy": timeout_policy,
+        "resource_class": _optional_string(fields, 10),
+        "input_refs": _all_strings(fields, 11),
+        "output_refs": _all_strings(fields, 12),
+        "started_at": _optional_string(fields, 13),
+        "finished_at": _optional_string(fields, 14),
+    }
+
+
+def _optional_task_node_record(fields: dict[int, list[Any]], field_number: int) -> dict[str, Any] | None:
+    payload = _first_message(fields, field_number)
+    return _decode_task_node_record(payload) if payload else None
+
+
+def _ensure_task_identity(
+    task: Mapping[str, Any],
+    *,
+    task_id: str,
+    conversation_id: str,
+    context: str,
+) -> None:
+    if task.get("task_id") != task_id or task.get("conversation_id") != conversation_id:
+        _raise_task_identity_invalid(f"{context} identity differs from request envelope")
+
+
+def _raise_task_identity_invalid(message: str) -> None:
+    raise RuntimeError(f"runtime_store_response_invalid: {message}")
+
+
 def _task_edge_record(
     *,
     task_id: str,
@@ -883,6 +1159,11 @@ def _optional_typed_error(fields: dict[int, list[Any]], field_number: int) -> di
 def _first_string(fields: dict[int, list[Any]], field_number: int) -> str:
     values = fields.get(field_number, [])
     return bytes(values[0]).decode("utf-8") if values else ""
+
+
+def _optional_string(fields: dict[int, list[Any]], field_number: int) -> str | None:
+    values = fields.get(field_number, [])
+    return bytes(values[0]).decode("utf-8") if values else None
 
 
 def _first_int(fields: dict[int, list[Any]], field_number: int) -> int:

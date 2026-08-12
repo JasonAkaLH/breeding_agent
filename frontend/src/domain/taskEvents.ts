@@ -82,6 +82,11 @@ export interface MCPRemoteTaskState {
   toolDisplayName: string;
 }
 
+export interface MCPAvailabilityState {
+  status: 'unavailable';
+  reasonCode: string | null;
+}
+
 export interface MCPTaskState {
   serverDisplayName: string | null;
   discovery: MCPDiscoveryState | null;
@@ -90,6 +95,7 @@ export interface MCPTaskState {
   calls: MCPCallState[];
   input: MCPInputState | null;
   remoteTask: MCPRemoteTaskState | null;
+  availability: MCPAvailabilityState | null;
 }
 
 export interface TaskEventState {
@@ -137,6 +143,7 @@ export function createInitialTaskEventState(): TaskEventState {
       calls: [],
       input: null,
       remoteTask: null,
+      availability: null,
     },
     seenEventIds: [],
   };
@@ -397,6 +404,19 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
       return applyMCPInputEvent(withEvent, event);
     case 'mcp.remote_task_status_changed':
       return applyMCPRemoteTaskEvent(withEvent, event);
+    case 'mcp.runtime_unavailable':
+      return {
+        ...withEvent,
+        statusText: '当前任务的 MCP 暂不可用',
+        mcp: {
+          ...withEvent.mcp,
+          availability: {
+            status: 'unavailable',
+            reasonCode: safeCode(event.payload.reason_code),
+          },
+        },
+        errorMessage: '当前灰度或回滚配置未为该任务分配 MCP 执行路径；已有任务不会改道或重放。',
+      };
     case 'task.completed':
       return {
         ...withEvent,

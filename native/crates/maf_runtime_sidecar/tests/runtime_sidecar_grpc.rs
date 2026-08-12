@@ -13,6 +13,126 @@ use tonic::Request;
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn pb_task(status: &str) -> runtime_pb::TaskRecord {
+    runtime_pb::TaskRecord {
+        task_id: "grpc-task".to_owned(),
+        conversation_id: "conv".to_owned(),
+        root_message_id: "message".to_owned(),
+        status: status.to_owned(),
+        routing_mode: "auto".to_owned(),
+        requested_capability_id: None,
+        root_node_id: None,
+        summary: None,
+        cancel_requested_at: None,
+        created_at: Some("created".to_owned()),
+        updated_at: None,
+        assignment: Some(runtime_pb::TaskRouteAssignment {
+            route_mode: "shadow".to_owned(),
+            real_path: "legacy".to_owned(),
+            shadow_path: "user_scoped".to_owned(),
+            config_version: "v1".to_owned(),
+            reason_code: "sample".to_owned(),
+            cohort_id: None,
+            assignment_key_hash: None,
+            assigned_at: None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn tonic_service_submits_and_gets_authoritative_task_record() {
+    let service = RuntimeSidecarGrpcService::new();
+    let submitted = service
+        .submit_task(Request::new(runtime_pb::SubmitTaskRequest {
+            task_id: "grpc-task".to_owned(),
+            conversation_id: "conv".to_owned(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "grpc-task-key".to_owned(),
+                owner: "test".to_owned(),
+                deadline_ms: 1,
+            }),
+            task: Some(pb_task("accepted")),
+            expected_from_status: None,
+        }))
+        .await
+        .expect("submit")
+        .into_inner();
+    assert_eq!(submitted.task.expect("record").root_message_id, "message");
+    let found = service
+        .get_task(Request::new(runtime_pb::GetTaskRequest {
+            task_id: "grpc-task".to_owned(),
+        }))
+        .await
+        .expect("get")
+        .into_inner();
+    assert!(found.found);
+    assert_eq!(
+        found
+            .task
+            .expect("task")
+            .assignment
+            .expect("assignment")
+            .config_version,
+        "v1"
+    );
+    let missing = service
+        .get_task(Request::new(runtime_pb::GetTaskRequest {
+            task_id: "missing".to_owned(),
+        }))
+        .await
+        .expect("get missing")
+        .into_inner();
+    assert!(!missing.found);
+    assert!(missing.task.is_none());
+    let listed = service
+        .list_tasks_for_conversation(Request::new(runtime_pb::ListTasksForConversationRequest {
+            conversation_id: "conv".to_owned(),
+            statuses: vec!["accepted".to_owned()],
+        }))
+        .await
+        .expect("list tasks")
+        .into_inner();
+    assert_eq!(listed.tasks.len(), 1);
+    assert_eq!(listed.tasks[0].task_id, "grpc-task");
+    let active = service
+        .get_active_task_for_conversation(Request::new(
+            runtime_pb::GetActiveTaskForConversationRequest {
+                conversation_id: "conv".to_owned(),
+            },
+        ))
+        .await
+        .expect("get active task")
+        .into_inner();
+    assert!(active.found);
+    assert_eq!(active.task.expect("active task").task_id, "grpc-task");
+}
+
+#[tokio::test]
+async fn tonic_service_rejects_conflicting_top_level_task_identity() {
+    let service = RuntimeSidecarGrpcService::new();
+    let response = service
+        .submit_task(Request::new(runtime_pb::SubmitTaskRequest {
+            task_id: "different-task".to_owned(),
+            conversation_id: "conv".to_owned(),
+            idempotency: Some(runtime_pb::Idempotency {
+                key: "conflicting-identity".to_owned(),
+                owner: "test".to_owned(),
+                deadline_ms: 1,
+            }),
+            task: Some(pb_task("accepted")),
+            expected_from_status: None,
+        }))
+        .await
+        .expect("typed write failure response")
+        .into_inner();
+
+    assert_eq!(
+        response.error.expect("identity conflict error").code,
+        "runtime_store_write_failed"
+    );
+    assert!(response.task.is_none());
+}
+
 #[tokio::test]
 async fn tonic_service_maps_pb_requests_to_rust_adapter_envelopes() {
     let service = RuntimeSidecarGrpcService::new();
@@ -117,6 +237,8 @@ async fn sqlite_backed_tonic_service_rejects_writes_after_shutdown_drain() {
                 owner: "python-runtime".to_owned(),
                 deadline_ms: 3_000,
             }),
+            task: None,
+            expected_from_status: None,
         }))
         .await
         .expect("submit rejected in envelope")

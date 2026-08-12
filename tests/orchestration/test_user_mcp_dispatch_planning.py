@@ -13,7 +13,7 @@ from src.capabilities.mcp_dispatch import (
     MCP_DISPATCH_PLANNER_PAYLOAD_POLICY,
 )
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider
-from src.orchestration.models import OrchestrationRequest, UserMCPServerProfile
+from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, UserMCPServerProfile
 from src.orchestration.registry import CapabilityRegistry
 
 
@@ -165,6 +165,59 @@ class UserMCPDispatchPlanningTest(unittest.IsolatedAsyncioTestCase):
             ["mcp.dispatch"],
         )
         self.assertEqual(MCP_DISPATCH_PLANNER_PAYLOAD_POLICY.planner_allowed_fields, ("server_id",))
+
+    def test_registry_exposes_exactly_the_task_assigned_mcp_path(self) -> None:
+        self.registry.register(
+            CapabilityDescriptor(
+                capability_id="mcp.crm.search_customer",
+                name="search_customer",
+                description="legacy MCP tool",
+                kind="mcp_tool",
+                source="mcp",
+            )
+        )
+        profiles = (UserMCPServerProfile("server-1", "CRM", "查询 CRM", "streamable_http"),)
+
+        user_scoped = self.registry.list_for_request(
+            OrchestrationRequest(
+                "task-user",
+                "conv-1",
+                "msg-user",
+                "hello",
+                metadata={"mcp_execution_mode": "user_scoped"},
+                available_mcp_servers=profiles,
+            ),
+            public_only=True,
+        )
+        legacy = self.registry.list_for_request(
+            OrchestrationRequest(
+                "task-legacy",
+                "conv-1",
+                "msg-legacy",
+                "hello",
+                metadata={"mcp_execution_mode": "legacy"},
+                available_mcp_servers=profiles,
+            ),
+            public_only=True,
+        )
+        unavailable = self.registry.list_for_request(
+            OrchestrationRequest(
+                "task-none",
+                "conv-1",
+                "msg-none",
+                "hello",
+                metadata={"mcp_execution_mode": "unavailable"},
+                available_mcp_servers=profiles,
+            ),
+            public_only=True,
+        )
+
+        self.assertIn("mcp.dispatch", {item.capability_id for item in user_scoped})
+        self.assertNotIn("mcp.crm.search_customer", {item.capability_id for item in user_scoped})
+        self.assertNotIn("mcp.dispatch", {item.capability_id for item in legacy})
+        self.assertIn("mcp.crm.search_customer", {item.capability_id for item in legacy})
+        self.assertNotIn("mcp.dispatch", {item.capability_id for item in unavailable})
+        self.assertNotIn("mcp.crm.search_customer", {item.capability_id for item in unavailable})
 
 
 if __name__ == "__main__":

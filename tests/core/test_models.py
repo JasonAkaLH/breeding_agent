@@ -132,6 +132,11 @@ class CoreModelDefinitionTest(unittest.TestCase):
                 "cancel_requested_at",
                 "created_at",
                 "updated_at",
+                "mcp_execution_mode",
+                "mcp_shadow_enabled",
+                "mcp_rollout_config_version",
+                "mcp_route_reason_code",
+                "mcp_rollout_mode",
             ],
         )
 

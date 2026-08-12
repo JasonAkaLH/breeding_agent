@@ -34,6 +34,18 @@ class MCPDispatchExecutor(ExecutorPort):
         return capability_id == MCP_DISPATCH_CAPABILITY_ID
 
     async def execute(self, request: CapabilityExecutionRequest) -> CapabilityExecutionResult:
+        execution_path = str(request.metadata.get("mcp_execution_mode") or "").strip()
+        if execution_path != "user_scoped":
+            return CapabilityExecutionResult(
+                capability_id=request.capability_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                error=CapabilityExecutionError(
+                    code="mcp_route_assignment_mismatch",
+                    message="This task is not assigned to the user-scoped MCP execution path.",
+                    retriable=False,
+                ),
+            )
         payload = dict(request.input_payload)
         server_id = payload.get("server_id")
         if set(payload) != {"server_id"} or not isinstance(server_id, str) or not server_id.strip():

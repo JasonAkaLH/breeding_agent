@@ -28,6 +28,30 @@ class _SentinelStorage:
 
 
 class UserMCPCredentialTests(unittest.IsolatedAsyncioTestCase):
+    def test_rollout_owner_reference_is_keyed_stable_and_context_bound(self) -> None:
+        first = CredentialCipher(b"a" * 32)
+        second = CredentialCipher(b"b" * 32)
+
+        reference = first.safe_owner_reference("alice", context="config-v1")
+
+        self.assertEqual(
+            reference,
+            first.safe_owner_reference("alice", context="config-v1"),
+        )
+        self.assertNotEqual(
+            reference,
+            first.safe_owner_reference("alice", context="config-v2"),
+        )
+        self.assertNotEqual(
+            reference,
+            first.safe_owner_reference("bob", context="config-v1"),
+        )
+        self.assertNotEqual(
+            reference,
+            second.safe_owner_reference("alice", context="config-v1"),
+        )
+        self.assertNotIn("alice", reference)
+
     def test_round_trip_nonce_uniqueness_and_redacted_repr(self) -> None:
         cipher = CredentialCipher(b"a" * 32)
         first = cipher.encrypt(owner_user_id="alice", server_id="server-1", auth_type="bearer", values={"token": "canary"})

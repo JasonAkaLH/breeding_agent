@@ -2,7 +2,7 @@
 
 - **阶段**：三阶段改造第 2 阶段
 - **范围**：Planner / MCP Tool Selector / 用户授权 / 任务生命周期 / 前端 / 审计
-- **状态**：核心闭环已实施；2026 MRTR / Tasks 跨重启恢复待补齐
+- **状态**：核心闭环与跨重启恢复已实施；2025 实验 Tasks 恢复只允许 `tasks/get|tasks/result|tasks/cancel`，2026 MRTR / Tasks Extension 的 recovery-only handler 只允许 `tasks/get`
 - **日期**：2026-08-12
 - **强依赖**：`01-用户级MCP配置凭据与按需GatewayPRD.md`
 - **后续阶段**：`03-按需MCP灰度切换与旧Runtime下线PRD.md`
@@ -401,12 +401,13 @@ created_at / updated_at
 ```
 
 - 远程原始 Task ID 不进入前端、Planner Prompt 或普通审计日志。
-- 重启后只执行状态查询、状态更新或协议取消，不重新发起原 `tools/call`。
+- 重启后不重新发起原 `tools/call`。2025 实验 Tasks 的恢复 handler 只允许 `tasks/get`、终态 `tasks/result` 和协议 `tasks/cancel`；2026 recovery-only handler 只允许 `tasks/get`，不得使用 `tasks/update`、`tasks/cancel` 或已移除的 `tasks/result`。
 - `2026-07-28` 只有 Client 已启用且在每请求 `clientCapabilities` 声明 Tasks Extension、Server 又通过 `server/discover` 声明支持时才启用。
 - `2026-07-28` Task 必须由 Server 返回 `resultType: task` 创建；Client 不在 `tools/call` 中发送旧版 `task` 参数。
 - 2026 Adapter 使用 `tasks/get`、`tasks/update`、`tasks/cancel`；不得调用该版本已移除的 `tasks/result`、`tasks/list`。
 - 默认按 Server 的 `pollIntervalMs` 轮询。仅在任务活跃且 Server 支持时使用 `subscriptions/listen` 接收 `notifications/tasks`，任务结束立即取消订阅，避免常驻连接。
 - `working`、`input_required`、`completed`、`failed`、`cancelled` 映射为平台任务状态；`input_required` 继续进入第 14.2 节交互闭环。
+- 2025 `CreateTaskResult` 即时返回 terminal 状态时，平台仍先持久化最小绑定并将其立即置为 due，由 query-only worker 调用 `tasks/get` 确认真实终态，仅 `completed` 再读取 `tasks/result`；不相信创建响应代替真实结果，也不重放 `tools/call`。
 - 取消是协作式请求；远端最终状态不一定是 `cancelled`，平台必须展示实际查询到的终态。
 - `2025-11-25` 实验 Tasks 与 `2026-07-28` Tasks Extension 不具备 Wire Compatibility，必须按 `protocol_version` 分派到不同 Adapter，禁止共享请求 DTO 或方法表。
 - 普通调用不伪装成可恢复 Task。
@@ -522,8 +523,8 @@ created_at / updated_at
 | MCP-USER-P2-016 | MCP 分支结束后结果作为 dependency output 供 `main_agent.respond` 生成最终回答 |
 | MCP-USER-P2-017 | `2026-07-28` MRTR 的 `requestState` 始终不透明且不泄漏；新 Request ID 重试，每轮计入 20 次上限 |
 | MCP-USER-P2-018 | “始终允许此工具”不会自动回答 elicitation；用户拒绝输入后可寻找替代方案但不绕过确认 |
-| MCP-USER-P2-019 | 2026 Tasks 仅在双向能力协商后启用，支持 get/update/cancel 与受控恢复，不调用已移除方法 |
-| MCP-USER-P2-020 | 2025 实验 Tasks 与 2026 Tasks Extension 分 Adapter 测试，任一版本请求形态不会串用到另一版本 |
+| MCP-USER-P2-019 | 2026 Tasks 仅在双向能力协商后启用；活跃执行路径支持 get/update/cancel，recovery-only handler 只允许 `tasks/get` 且不调用已移除方法 |
+| MCP-USER-P2-020 | 2025 实验 Tasks 恢复只允许 `tasks/get|tasks/result|tasks/cancel`，与 2026 Tasks Extension 分 Adapter 测试；即时 terminal CreateTask 也由 query-only worker 确认真实结果，不重放 `tools/call` |
 
 ## 20. 测试矩阵
 
@@ -557,7 +558,7 @@ created_at / updated_at
 ### 20.4 恢复与审计
 
 - 普通调用在远程已执行/未执行的不可区分情形下都不自动重放。
-- 可恢复 MCP Task 重启后只进行查询/取结果/取消。
+- 可恢复 MCP Task 按版本闭合方法表：2025 只查询/取结果/取消，2026 recovery-only 只查询；即时 terminal CreateTask 也要求 worker 确认且不重放原调用。
 - 审计事件字段 allowlist 和敏感字符扫描。
 - 30 天 TTL 分批删除与清理任务失败重试。
 

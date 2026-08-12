@@ -1,20 +1,648 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import hmac
+import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from src.api.dto import SubmitMessageRequest
 from src.api.runtime import build_api_runtime
-from src.core.enums import UserMCPHealthStatus, UserMCPTransport
-from src.core.models import UserMCPServer
+from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
+from src.core.models import Task, UserMCPServer
 from src.orchestration.models import OrchestrationRequest
 from src.integrations.mcp.credentials import CredentialSecurityError
+from tests.api.support import InMemoryTaskRuntimeSidecar
+from src.storage.rust_contract import load_runtime_sidecar_contract, migration_policy
+
+
+def _write_task_authority_migration_evidence(root: Path) -> dict[str, str]:
+    contract = load_runtime_sidecar_contract()
+    policy = migration_policy()
+    digest = "a" * 64
+    plan = {
+        "target_schema_version": contract["schema_hash"],
+        "components": {
+            component: {evidence: True for evidence in policy["required_evidence"]}
+            for component in policy["required_components"]
+        },
+        "task_authority_cutover": {
+            "backfill_import_complete": True,
+            "task_inventory": {
+                "legacy_count": 1,
+                "sidecar_count": 1,
+                "legacy_canonical_digest": digest,
+                "sidecar_canonical_digest": digest,
+            },
+            "task_node_inventory": {
+                "legacy_count": 1,
+                "sidecar_count": 1,
+                "legacy_canonical_digest": digest,
+                "sidecar_canonical_digest": digest,
+            },
+            "legacy_null_assignment_resolution": {
+                "resolution_complete": True,
+                "active_count": 0,
+                "active_canonical_digest": hashlib.sha256(b"[]").hexdigest(),
+                "terminal_historical_count": 1,
+                "terminal_historical_canonical_digest": digest,
+                "terminal_historical_remains_unassigned": True,
+            },
+        },
+    }
+    key = b"test-deployment-owned-key-32bytes!"
+    unsigned = {
+        "schema": policy["task_authority_evidence_schema"],
+        "component": contract["component"],
+        "protocol_version": contract["protocol_version"],
+        "schema_hash": contract["schema_hash"],
+        "error_code_table_hash": contract["error_code_table_hash"],
+        "key_id": "test-key-v1",
+        "migration_plan": plan,
+    }
+    signed = {
+        **unsigned,
+        "hmac_sha256": hmac.new(
+            key,
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest(),
+    }
+    evidence_path = root / "task-migration-evidence.json"
+    key_path = root / "task-migration-evidence.key"
+    evidence_path.write_text(json.dumps(signed), encoding="utf-8")
+    key_path.write_bytes(key)
+    key_path.chmod(0o600)
+    return {
+        policy["task_authority_evidence_path_env"]: str(evidence_path),
+        policy["task_authority_hmac_key_path_env"]: str(key_path),
+    }
+
+
+class _LegacyMCPClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def list_tools(self):
+        return [
+            {
+                "name": "search_customer",
+                "description": "legacy CRM lookup",
+                "inputSchema": {"type": "object", "additionalProperties": True},
+            }
+        ]
+
+    async def call_tool(self, tool_name, arguments):
+        self.calls.append((tool_name, dict(arguments)))
+        return {"content": [{"type": "text", "text": "legacy result"}]}
+
+    async def close(self) -> None:
+        return None
+
+
+_LEGACY_MCP_CONFIG = {
+    "enabled": True,
+    "servers": [
+        {
+            "server_id": "crm",
+            "endpoint": "https://legacy.invalid/mcp",
+            "tools": [
+                {
+                    "tool_name": "search_customer",
+                    "expose": True,
+                    "capability_id": "mcp.crm.search_customer",
+                    "public_name": "Legacy CRM",
+                    "public_description": "系统 CRM 查询能力",
+                    "risk_level": "read_only",
+                    "planner_allowed_fields": [],
+                }
+            ],
+        }
+    ],
+}
 
 
 class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_store_off_does_not_require_cutover_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_RUST_RUNTIME_STORE_MODE": "off",
+                "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH": "",
+                "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH": "",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
+                "MCP_ROUTING_MODE": "off",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            runtime = build_api_runtime(
+                database_path=root / "runtime.sqlite3",
+                audit_log_path=root / "audit.jsonl",
+                mcp_config={"enabled": False},
+                enable_platform_llm=False,
+                enable_llm_planner=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+            )
+            try:
+                self.assertEqual(runtime.storage._mcp_task_authority_mode, "off")
+            finally:
+                await runtime.shutdown()
+
+    def test_canonical_active_modes_require_runtime_sidecar_at_assembly(self) -> None:
+        for routing_mode in ("shadow", "enforce"):
+            with self.subTest(routing_mode=routing_mode), tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_API_ENV": "test",
+                    "MAF_RUNTIME_SIDECAR_ENDPOINT": "",
+                    "MAF_RUST_RUNTIME_STORE_MODE": "off",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                    "MCP_USER_SCOPED_GATEWAY_ENABLED": "true",
+                    "MCP_ROUTING_MODE": routing_mode,
+                    "MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "true",
+                    "MCP_ENFORCE_COHORTS": "",
+                    "MCP_ENFORCE_PERCENT": "100",
+                    "MCP_ENFORCE_HASH_SALT": "stable-test-salt",
+                    "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+                },
+                clear=False,
+            ):
+                root = Path(directory)
+                key_path = root / "mcp.key"
+                key_path.write_text(
+                    "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+                    encoding="ascii",
+                )
+                key_path.chmod(0o600)
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f"MCP_ROUTING_MODE={routing_mode} requires a Rust runtime sidecar client",
+                ):
+                    build_api_runtime(
+                        database_path=root / "runtime.sqlite3",
+                        audit_log_path=root / "audit.jsonl",
+                        user_mcp_credential_key_file=key_path,
+                        mcp_config={"enabled": False},
+                        enable_platform_llm=False,
+                        enable_llm_planner=False,
+                        enable_conversation_title_llm=False,
+                        enable_conversation_memory=False,
+                    )
+
+    async def test_runtime_store_authority_is_independent_from_rollout_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_RUNTIME_SIDECAR_ENDPOINT": "",
+                "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
+                "MCP_ROUTING_MODE": "off",
+                "MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "true",
+                "MCP_ENFORCE_COHORTS": "",
+                "MCP_ENFORCE_PERCENT": "0",
+                "MCP_ENFORCE_HASH_SALT": "",
+                "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            os.environ.update(_write_task_authority_migration_evidence(root))
+            runtime = build_api_runtime(
+                database_path=root / "runtime.sqlite3",
+                audit_log_path=root / "audit.jsonl",
+                mcp_config={"enabled": False},
+                enable_platform_llm=False,
+                enable_llm_planner=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+                runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+            )
+            task = Task(
+                task_id="task-canonical-off",
+                conversation_id="conv-canonical-off",
+                root_message_id="msg-canonical-off",
+                status=TaskStatus.ACCEPTED,
+                requested_capability_id="mcp.dispatch",
+                mcp_execution_mode="legacy",
+                mcp_shadow_enabled=False,
+                mcp_rollout_config_version="mcp-rollout-off:test",
+                mcp_route_reason_code="routing_off",
+                mcp_rollout_mode="off",
+            )
+            try:
+                self.assertEqual(runtime.storage._mcp_task_authority_mode, "enforce")
+                self.assertEqual(await runtime.storage.save_task(task), task)
+                self.assertEqual(await runtime.storage.get_task(task.task_id), task)
+            finally:
+                await runtime.shutdown()
+
+    def test_runtime_store_enforce_fails_closed_without_migration_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH": "",
+                "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH": "",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
+                "MCP_ROUTING_MODE": "off",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                build_api_runtime(
+                    database_path=root / "runtime.sqlite3",
+                    audit_log_path=root / "audit.jsonl",
+                    mcp_config={"enabled": False},
+                    enable_platform_llm=False,
+                    enable_llm_planner=False,
+                    enable_conversation_title_llm=False,
+                    enable_conversation_memory=False,
+                    runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+                )
+
+    def test_runtime_store_enforce_rejects_hostile_cutover_inventory_evidence(self) -> None:
+        for hostile_case in ("count", "digest", "active_null"):
+            with self.subTest(hostile_case=hostile_case), tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_API_ENV": "test",
+                    "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
+                    "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
+                    "MCP_ROUTING_MODE": "off",
+                },
+                clear=False,
+            ):
+                root = Path(directory)
+                evidence_env = _write_task_authority_migration_evidence(root)
+                evidence_path = Path(evidence_env["MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH"])
+                key_path = Path(evidence_env["MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH"])
+                artifact = json.loads(evidence_path.read_text(encoding="utf-8"))
+                cutover = artifact["migration_plan"]["task_authority_cutover"]
+                if hostile_case == "count":
+                    cutover["task_inventory"]["sidecar_count"] = 2
+                elif hostile_case == "digest":
+                    cutover["task_node_inventory"]["sidecar_canonical_digest"] = "f" * 64
+                else:
+                    cutover["legacy_null_assignment_resolution"]["active_count"] = 1
+                unsigned = {key: value for key, value in artifact.items() if key != "hmac_sha256"}
+                artifact["hmac_sha256"] = hmac.new(
+                    key_path.read_bytes(),
+                    json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+                    hashlib.sha256,
+                ).hexdigest()
+                evidence_path.write_text(json.dumps(artifact), encoding="utf-8")
+                os.environ.update(evidence_env)
+
+                with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                    build_api_runtime(
+                        database_path=root / "runtime.sqlite3",
+                        audit_log_path=root / "audit.jsonl",
+                        mcp_config={"enabled": False},
+                        enable_platform_llm=False,
+                        enable_llm_planner=False,
+                        enable_conversation_title_llm=False,
+                        enable_conversation_memory=False,
+                        runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+                    )
+
+    async def test_runtime_store_shadow_does_not_require_cutover_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_RUST_RUNTIME_STORE_MODE": "shadow",
+                "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH": "",
+                "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH": "",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
+                "MCP_ROUTING_MODE": "off",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            runtime = build_api_runtime(
+                database_path=root / "runtime.sqlite3",
+                audit_log_path=root / "audit.jsonl",
+                mcp_config={"enabled": False},
+                enable_platform_llm=False,
+                enable_llm_planner=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+                runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+            )
+            try:
+                self.assertEqual(runtime.storage._mcp_task_authority_mode, "shadow")
+            finally:
+                await runtime.shutdown()
+
+    async def test_custom_server_percent_miss_is_unavailable_without_legacy_fallback(self) -> None:
+        planner_prompts: list[str] = []
+        legacy_client = _LegacyMCPClient()
+
+        def planner(prompt, **_kwargs):
+            planner_prompts.append(prompt)
+            return '{"nodes":[]}'
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "true",
+                "MCP_ROUTING_MODE": "enforce",
+                "MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "true",
+                "MCP_ENFORCE_COHORTS": "",
+                "MCP_ENFORCE_PERCENT": "0",
+                "MCP_ENFORCE_HASH_SALT": "stable-test-salt",
+                "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            key_path = root / "mcp.key"
+            key_path.write_text(
+                "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+                encoding="ascii",
+            )
+            key_path.chmod(0o600)
+            runtime = build_api_runtime(
+                database_path=root / "runtime.sqlite3",
+                audit_log_path=root / "audit.jsonl",
+                user_mcp_credential_key_file=key_path,
+                mcp_config=_LEGACY_MCP_CONFIG,
+                mcp_client_factory=lambda _server: legacy_client,
+                planner_text_generator=planner,
+                main_agent_stream_generator=lambda _prompt, **_kwargs: "done",
+                main_agent_llm_config={
+                    "model_editions": {
+                        "default": "test",
+                        "options": [
+                            {
+                                "value": "test",
+                                "label": "Test",
+                                "reasoning_efforts": {
+                                    "default": "minimal",
+                                    "disabled_default": "minimal",
+                                    "options": [
+                                        {
+                                            "value": "minimal",
+                                            "label": "Minimal",
+                                            "allow_when_thinking_disabled": True,
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                },
+                enable_platform_llm=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+                runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+            )
+            now = datetime(2026, 8, 13, 12, 0, 0)
+            await runtime.storage.create_user_mcp_server(
+                UserMCPServer(
+                    server_id="custom-crm",
+                    owner_user_id="alice",
+                    display_name="Custom CRM",
+                    routing_description="系统 CRM 查询能力",
+                    endpoint_url="https://custom.invalid/mcp",
+                    transport=UserMCPTransport.STREAMABLE_HTTP,
+                    health_status=UserMCPHealthStatus.AVAILABLE,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            try:
+                _, automatic = await runtime.submit_message(
+                    "conv-auto",
+                    SubmitMessageRequest(
+                        conversation_id="conv-auto",
+                        content="查询客户",
+                    ),
+                    authenticated_username="alice",
+                )
+                automatic_handle = runtime._running_tasks.get(automatic.task_id)
+                if automatic_handle is not None:
+                    await automatic_handle
+
+                self.assertEqual(automatic.mcp_execution_mode, "unavailable")
+                self.assertEqual(
+                    automatic.mcp_route_reason_code,
+                    "user_server_rollout_unavailable",
+                )
+                self.assertEqual(legacy_client.calls, [])
+                self.assertTrue(planner_prompts)
+                self.assertNotIn("mcp.crm.search_customer", planner_prompts[-1])
+                automatic_events = await runtime.storage.list_events_for_task(
+                    automatic.task_id
+                )
+                unavailable_event = next(
+                    event
+                    for event in automatic_events
+                    if event.event_type == "mcp.runtime_unavailable"
+                )
+                self.assertEqual(unavailable_event.visibility, "frontend")
+                self.assertEqual(
+                    unavailable_event.payload,
+                    {
+                        "status": "unavailable",
+                        "reason_code": "user_server_rollout_unavailable",
+                    },
+                )
+
+                _, explicit = await runtime.submit_message(
+                    "conv-explicit",
+                    SubmitMessageRequest(
+                        conversation_id="conv-explicit",
+                        content="查询客户",
+                        routing_mode="force_capability",
+                        capability_id="mcp.crm.search_customer",
+                    ),
+                    authenticated_username="alice",
+                )
+
+                self.assertEqual(explicit.mcp_execution_mode, "legacy")
+                self.assertEqual(
+                    explicit.mcp_route_reason_code,
+                    "explicit_legacy_capability",
+                )
+            finally:
+                await runtime.shutdown()
+
+    async def test_legacy_assembly_off_builds_no_global_runtime_or_startup_discovery(self) -> None:
+        calls: list[str] = []
+
+        def forbidden_client_factory(_server):
+            calls.append("client")
+            raise AssertionError("legacy MCP client must not be constructed")
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "true",
+                "MCP_ROUTING_MODE": "enforce",
+                "MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "false",
+                "MCP_ENFORCE_COHORTS": "",
+                "MCP_ENFORCE_PERCENT": "100",
+                "MCP_ENFORCE_HASH_SALT": "stable-test-salt",
+                "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            key_path = root / "mcp.key"
+            key_path.write_text(
+                "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+                encoding="ascii",
+            )
+            key_path.chmod(0o600)
+            runtime = build_api_runtime(
+                database_path=root / "runtime.sqlite3",
+                audit_log_path=root / "audit.jsonl",
+                user_mcp_credential_key_file=key_path,
+                mcp_config={
+                    "enabled": True,
+                    "servers": [
+                        {
+                            "server_id": "legacy",
+                            "endpoint": "https://legacy.invalid/mcp",
+                        }
+                    ],
+                },
+                mcp_client_factory=forbidden_client_factory,
+                planner_text_generator=lambda _prompt, **_kwargs: '{"action":"finish"}',
+                enable_platform_llm=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+                runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+            )
+            try:
+                self.assertIsNone(runtime._mcp_runtime_state)
+                self.assertEqual(calls, [])
+                self.assertIsNotNone(runtime.capability_registry.get("mcp.dispatch"))
+                self.assertFalse(
+                    any(
+                        descriptor.kind == "mcp_tool"
+                        for descriptor in runtime.capability_registry.list()
+                    )
+                )
+            finally:
+                await runtime.shutdown()
+
+    async def test_authenticated_submission_persists_authoritative_enforce_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_API_ENV": "test",
+                "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "true",
+                "MCP_ROUTING_MODE": "enforce",
+                "MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "true",
+                "MCP_ENFORCE_COHORTS": "",
+                "MCP_ENFORCE_PERCENT": "100",
+                "MCP_ENFORCE_HASH_SALT": "stable-test-salt",
+                "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+            },
+            clear=False,
+        ):
+            root = Path(directory)
+            key_path = root / "mcp.key"
+            key_path.write_text(
+                "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+                encoding="ascii",
+            )
+            key_path.chmod(0o600)
+            runtime = build_api_runtime(
+                database_path=root / "runtime.sqlite3",
+                audit_log_path=root / "audit.jsonl",
+                user_mcp_credential_key_file=key_path,
+                mcp_config={"enabled": False},
+                planner_text_generator=lambda _prompt, **_kwargs: '{"nodes":[]}',
+                main_agent_stream_generator=lambda _prompt, **_kwargs: "done",
+                main_agent_llm_config={
+                    "model_editions": {
+                        "default": "test",
+                        "options": [
+                            {
+                                "value": "test",
+                                "label": "Test",
+                                "reasoning_efforts": {
+                                    "default": "minimal",
+                                    "disabled_default": "minimal",
+                                    "options": [
+                                        {
+                                            "value": "minimal",
+                                            "label": "Minimal",
+                                            "allow_when_thinking_disabled": True,
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                },
+                enable_platform_llm=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+                runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
+            )
+            try:
+                _, task = await runtime.submit_message(
+                    "conv-route",
+                    SubmitMessageRequest(
+                        conversation_id="conv-route",
+                        content="hello",
+                        metadata={
+                            "mcp_execution_mode": "legacy",
+                            "mcp_rollout_mode": "off",
+                        },
+                    ),
+                    authenticated_username="alice",
+                )
+                stored = await runtime.storage.get_task(task.task_id)
+
+                self.assertEqual(stored.mcp_execution_mode, "user_scoped")
+                self.assertEqual(stored.mcp_rollout_mode, "enforce")
+                self.assertFalse(stored.mcp_shadow_enabled)
+                self.assertEqual(stored.mcp_route_reason_code, "enforce_selected")
+                events = await runtime.storage.list_events_for_task(task.task_id)
+                route_event = next(
+                    event
+                    for event in events
+                    if event.event_type == "mcp.rollout.route_assigned"
+                )
+                self.assertNotIn("alice", repr(route_event.payload))
+                self.assertEqual(route_event.payload["real_path"], "user_scoped")
+            finally:
+                await runtime.shutdown()
+
     def test_enabled_feature_fails_closed_without_key_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ,

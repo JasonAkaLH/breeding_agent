@@ -9,7 +9,8 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_core_types";
 pub const CONTRACT_VERSION: &str = "core.v1";
-pub const SCHEMA_HASH: &str = "maf_core_types_core_v1_schema_20260619_auth_generation_message_public_history_file_index_repair_marker";
+pub const SCHEMA_HASH: &str =
+    "maf_core_types_core_v1_schema_20260813_auth_generation_mcp_task_route_assignment";
 pub const ERROR_CODE_TABLE_HASH: &str = "maf_core_types_error_table_v1_20260515";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +482,11 @@ pub fn model_contracts() -> BTreeMap<String, Vec<String>> {
                 "cancel_requested_at",
                 "created_at",
                 "updated_at",
+                "mcp_execution_mode",
+                "mcp_shadow_enabled",
+                "mcp_rollout_config_version",
+                "mcp_route_reason_code",
+                "mcp_rollout_mode",
             ]),
         ),
         (

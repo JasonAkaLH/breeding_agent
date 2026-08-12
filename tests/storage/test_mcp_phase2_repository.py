@@ -166,6 +166,23 @@ class MCPPhaseTwoRepositoryTest(SQLiteStorageTestCase):
             updated_at=self.now,
         )
 
+    def test_remote_task_binding_preserves_legacy_positional_field_order(self) -> None:
+        timestamps = tuple(self.now + timedelta(seconds=offset) for offset in range(4))
+        binding = MCPRemoteTaskBinding(
+            "remote-safe", "alice", "task-a", "node-a", "call-a", "server-a",
+            "2026-07-28", b"cipher-remote", b"nonce-remote", 1, "working",
+            *timestamps,
+            published_at=self.now,
+            continuation_plan={"plan_id": "plan-a"},
+        )
+
+        self.assertEqual(
+            (binding.next_poll_at, binding.created_at, binding.updated_at, binding.terminal_at),
+            timestamps,
+        )
+        self.assertEqual(binding.published_at, self.now)
+        self.assertEqual(binding.continuation_plan, {"plan_id": "plan-a"})
+
     def test_recovery_records_leases_and_audit_are_owner_scoped(self) -> None:
         remote = MCPRemoteTaskBinding(
             "remote-safe", "alice", "task-a", "node-a", "call-a", "server-a",

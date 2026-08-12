@@ -23,6 +23,13 @@ class MCPTaskPresenceServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.aclose()
 
     async def test_only_last_disconnect_starts_offline_cancellation(self) -> None:
+        expired = 0
+
+        async def observe_expiry() -> None:
+            nonlocal expired
+            expired += 1
+
+        self.service.configure_lease_expired_observer(observe_expiry)
         await self.service.connect(MCPPresenceConnection("c1", "task-1", "alice", 1))
         await self.service.connect(MCPPresenceConnection("c2", "task-1", "alice", 1))
 
@@ -33,6 +40,7 @@ class MCPTaskPresenceServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.disconnect("c2")
         await asyncio.sleep(0.03)
         self.assertEqual(self.cancelled, [("alice", "task-1", "offline_grace_expired")])
+        self.assertEqual(expired, 1)
 
     async def test_reconnect_during_grace_clears_offline_timer(self) -> None:
         await self.service.connect(MCPPresenceConnection("c1", "task-1", "alice", 1))

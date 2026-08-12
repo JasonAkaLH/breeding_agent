@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from collections.abc import Mapping
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from src.core.enums import DependencyType, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
 from src.core.evidence import (
     is_number as _is_number,
     number_at_least as _number_at_least,
@@ -67,6 +72,13 @@ def validate_runtime_sidecar_response(operation_name: str, response: Mapping[str
     return dict(response)
 
 
+def validate_runtime_sidecar_task_record(task: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a complete canonical TaskRecord outside a response envelope."""
+
+    _validate_task_record(task)
+    return dict(task)
+
+
 def _validate_typed_error(error: Any) -> None:
     if not isinstance(error, Mapping):
         _raise_response_invalid()
@@ -111,10 +123,53 @@ def _validate_success_response(operation_name: str, response: Mapping[str, Any])
     if operation_name == "task_submit":
         if not _non_empty_string(response.get("task_id")) or not isinstance(response.get("duplicate"), bool):
             _raise_response_invalid()
+        task = response.get("task")
+        if task is not None:
+            _validate_task_record(task)
+        return
+    if operation_name == "task_get":
+        found = response.get("found")
+        task = response.get("task")
+        if not isinstance(found, bool) or found != (task is not None):
+            _raise_response_invalid()
+        if task is not None:
+            _validate_task_record(task)
+        return
+    if operation_name == "task_list_for_conversation":
+        tasks = response.get("tasks")
+        if not isinstance(tasks, list):
+            _raise_response_invalid()
+        for task in tasks:
+            _validate_task_record(task)
+        return
+    if operation_name == "task_get_active_for_conversation":
+        found = response.get("found")
+        task = response.get("task")
+        if not isinstance(found, bool) or found != (task is not None):
+            _raise_response_invalid()
+        if task is not None:
+            _validate_task_record(task)
         return
     if operation_name == "node_state_transition":
         if not _non_empty_string(response.get("node_id")) or not _non_empty_string(response.get("status")):
             _raise_response_invalid()
+        if response.get("node") is not None:
+            _validate_task_node_record(response["node"])
+        return
+    if operation_name == "task_node_get":
+        found = response.get("found")
+        node = response.get("node")
+        if not isinstance(found, bool) or found != (node is not None):
+            _raise_response_invalid()
+        if node is not None:
+            _validate_task_node_record(node)
+        return
+    if operation_name == "task_node_list":
+        nodes = response.get("nodes")
+        if not isinstance(nodes, list):
+            _raise_response_invalid()
+        for node in nodes:
+            _validate_task_node_record(node)
         return
     if operation_name == "task_edge_save":
         _validate_task_edge_record(response.get("edge"))
@@ -197,6 +252,83 @@ def _validate_task_edge_record(edge: Any) -> None:
         and isinstance(edge.get("condition"), str)
     ):
         _raise_response_invalid()
+
+
+def _validate_task_record(task: Any) -> None:
+    if not isinstance(task, Mapping):
+        _raise_response_invalid()
+    if not all(
+        _non_empty_string(task.get(name))
+        for name in ("task_id", "conversation_id", "root_message_id", "status", "routing_mode")
+    ):
+        _raise_response_invalid()
+    if task.get("status") not in {str(value) for value in TaskStatus}:
+        _raise_response_invalid()
+    if task.get("routing_mode") not in {str(value) for value in RoutingMode}:
+        _raise_response_invalid()
+    for name in (
+        "requested_capability_id",
+        "root_node_id",
+        "summary",
+        "cancel_requested_at",
+        "created_at",
+        "updated_at",
+    ):
+        if task.get(name) is not None and not isinstance(task.get(name), str):
+            _raise_response_invalid()
+    assignment = task.get("assignment")
+    if assignment is None:
+        return
+    if not isinstance(assignment, Mapping):
+        _raise_response_invalid()
+    if (
+        assignment.get("route_mode") not in {"off", "shadow", "enforce"}
+        or assignment.get("real_path") not in {"legacy", "user_scoped", "unavailable"}
+        or assignment.get("shadow_path") not in {"none", "user_scoped"}
+        or not _non_empty_string(assignment.get("config_version"))
+        or assignment.get("reason_code")
+        not in {
+            "routing_off",
+            "shadow_enabled",
+            "enforce_selected",
+            "cohort_not_selected",
+            "percent_not_selected",
+            "explicit_legacy_capability",
+            "user_server_rollout_unavailable",
+            "no_execution_path",
+        }
+    ):
+        _raise_response_invalid()
+    if (assignment["route_mode"] == "shadow") != (assignment["shadow_path"] == "user_scoped"):
+        _raise_response_invalid()
+    for name in ("cohort_id", "assignment_key_hash", "assigned_at"):
+        if assignment.get(name) is not None and not isinstance(assignment.get(name), str):
+            _raise_response_invalid()
+
+
+def _validate_task_node_record(node: Any) -> None:
+    if not isinstance(node, Mapping):
+        _raise_response_invalid()
+    if not all(
+        _non_empty_string(node.get(name))
+        for name in ("node_id", "task_id", "capability_id", "status", "criticality", "dependency_type")
+    ):
+        _raise_response_invalid()
+    if (
+        node.get("status") not in {str(value) for value in NodeStatus}
+        or node.get("criticality") not in {str(value) for value in NodeCriticality}
+        or node.get("dependency_type") not in {str(value) for value in DependencyType}
+    ):
+        _raise_response_invalid()
+    if not isinstance(node.get("retry_policy"), Mapping) or not isinstance(node.get("timeout_policy"), Mapping):
+        _raise_response_invalid()
+    if not isinstance(node.get("input_refs"), list) or not all(isinstance(value, str) for value in node["input_refs"]):
+        _raise_response_invalid()
+    if not isinstance(node.get("output_refs"), list) or not all(isinstance(value, str) for value in node["output_refs"]):
+        _raise_response_invalid()
+    for name in ("assigned_instance_id", "resource_class", "started_at", "finished_at"):
+        if node.get(name) is not None and not isinstance(node.get(name), str):
+            _raise_response_invalid()
 
 
 def _validate_artifact_record(artifact: Any) -> None:
@@ -390,24 +522,171 @@ def validate_runtime_sidecar_migration_plan(plan: Mapping[str, Any]) -> dict[str
     """Validate state migration / backup / restore / replay evidence."""
 
     policy = migration_policy()
-    if not isinstance(plan, Mapping):
+    if not isinstance(plan, Mapping) or set(plan) != {
+        "target_schema_version",
+        "components",
+        "task_authority_cutover",
+    }:
         _raise_migration_blocked()
-    if policy.get("require_target_schema_version") is True and not _non_empty_string(plan.get("target_schema_version")):
+    if (
+        policy.get("require_target_schema_version") is True
+        and plan.get("target_schema_version")
+        != load_runtime_sidecar_contract()["schema_hash"]
+    ):
         _raise_migration_blocked()
     components = plan.get("components")
     if not isinstance(components, Mapping):
         _raise_migration_blocked()
     required_components = [str(component) for component in policy["required_components"]]
     required_evidence = [str(evidence) for evidence in policy["required_evidence"]]
+    if set(components) != set(required_components):
+        _raise_migration_blocked()
     for component in required_components:
         evidence = components.get(component)
-        if not isinstance(evidence, Mapping) or any(evidence.get(item) is not True for item in required_evidence):
+        if (
+            not isinstance(evidence, Mapping)
+            or set(evidence) != set(required_evidence)
+            or any(evidence.get(item) is not True for item in required_evidence)
+        ):
             _raise_migration_blocked()
+    cutover = plan.get("task_authority_cutover")
+    _validate_task_authority_cutover(cutover)
     return {
         "migration": "ready",
         "target_schema_version": str(plan["target_schema_version"]),
         "components": ",".join(required_components),
     }
+
+
+def validate_runtime_sidecar_migration_evidence_artifact(
+    artifact: Mapping[str, Any],
+    *,
+    authentication_key: bytes,
+) -> dict[str, str]:
+    """Authenticate and validate the enforce-only Task authority cutover artifact."""
+
+    contract = load_runtime_sidecar_contract()
+    policy = migration_policy()
+    expected_fields = {
+        "schema",
+        "component",
+        "protocol_version",
+        "schema_hash",
+        "error_code_table_hash",
+        "key_id",
+        "migration_plan",
+        "hmac_sha256",
+    }
+    if not isinstance(artifact, Mapping) or set(artifact) != expected_fields:
+        _raise_migration_blocked()
+    for field in ("component", "protocol_version", "schema_hash", "error_code_table_hash"):
+        if artifact.get(field) != contract[field]:
+            _raise_migration_blocked()
+    if artifact.get("schema") != policy["task_authority_evidence_schema"]:
+        _raise_migration_blocked()
+    if not _non_empty_string(artifact.get("key_id")) or len(authentication_key) < 32:
+        _raise_migration_blocked()
+    signature = artifact.get("hmac_sha256")
+    if not isinstance(signature, str) or len(signature) != 64:
+        _raise_migration_blocked()
+    signed_payload = {key: value for key, value in artifact.items() if key != "hmac_sha256"}
+    expected_signature = hmac.new(
+        authentication_key,
+        _canonical_json_bytes(signed_payload),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        _raise_migration_blocked()
+    return validate_runtime_sidecar_migration_plan(artifact["migration_plan"])
+
+
+def load_runtime_sidecar_migration_evidence_artifact(
+    evidence_path: Path,
+    *,
+    authentication_key_path: Path,
+) -> dict[str, str]:
+    """Load a configured evidence artifact and authenticate it before enforce cutover."""
+
+    try:
+        if (
+            evidence_path.is_symlink()
+            or authentication_key_path.is_symlink()
+            or not evidence_path.is_file()
+            or not authentication_key_path.is_file()
+            or authentication_key_path.stat().st_mode & 0o077
+        ):
+            _raise_migration_blocked()
+        artifact = json.loads(evidence_path.read_text(encoding="utf-8"))
+        authentication_key = authentication_key_path.read_bytes()
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _raise_migration_blocked()
+    return validate_runtime_sidecar_migration_evidence_artifact(
+        artifact,
+        authentication_key=authentication_key,
+    )
+
+
+def _validate_task_authority_cutover(cutover: Any) -> None:
+    if not isinstance(cutover, Mapping) or set(cutover) != {
+        "backfill_import_complete",
+        "task_inventory",
+        "task_node_inventory",
+        "legacy_null_assignment_resolution",
+    }:
+        _raise_migration_blocked()
+    if cutover.get("backfill_import_complete") is not True:
+        _raise_migration_blocked()
+    _validate_matching_inventory(cutover.get("task_inventory"))
+    _validate_matching_inventory(cutover.get("task_node_inventory"))
+    null_resolution = cutover.get("legacy_null_assignment_resolution")
+    if not isinstance(null_resolution, Mapping) or set(null_resolution) != {
+        "resolution_complete",
+        "active_count",
+        "active_canonical_digest",
+        "terminal_historical_count",
+        "terminal_historical_canonical_digest",
+        "terminal_historical_remains_unassigned",
+    }:
+        _raise_migration_blocked()
+    if (
+        null_resolution.get("resolution_complete") is not True
+        or null_resolution.get("active_count") != 0
+        or null_resolution.get("active_canonical_digest")
+        != hashlib.sha256(b"[]").hexdigest()
+        or null_resolution.get("terminal_historical_remains_unassigned") is not True
+        or not _non_negative_int(null_resolution.get("terminal_historical_count"))
+        or not _sha256_digest(null_resolution.get("terminal_historical_canonical_digest"))
+    ):
+        _raise_migration_blocked()
+
+
+def _validate_matching_inventory(inventory: Any) -> None:
+    if not isinstance(inventory, Mapping) or set(inventory) != {
+        "legacy_count",
+        "sidecar_count",
+        "legacy_canonical_digest",
+        "sidecar_canonical_digest",
+    }:
+        _raise_migration_blocked()
+    if (
+        not _non_negative_int(inventory.get("legacy_count"))
+        or inventory.get("sidecar_count") != inventory.get("legacy_count")
+        or not _sha256_digest(inventory.get("legacy_canonical_digest"))
+        or inventory.get("sidecar_canonical_digest") != inventory.get("legacy_canonical_digest")
+    ):
+        _raise_migration_blocked()
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _sha256_digest(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _non_negative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def validate_runtime_sidecar_ops_readiness(report: Mapping[str, Any]) -> dict[str, str]:
@@ -665,6 +944,7 @@ __all__ = [
     "RuntimeLeaseFacade",
     "build_sidecar_retry_plan",
     "ensure_sidecar_write_allowed",
+    "load_runtime_sidecar_migration_evidence_artifact",
     "runtime_sidecar_max_in_flight",
     "validate_runtime_sidecar_artifact_provenance",
     "validate_runtime_sidecar_benchmark_report",
@@ -673,7 +953,9 @@ __all__ = [
     "validate_runtime_sidecar_endpoint",
     "validate_runtime_sidecar_handshake",
     "validate_runtime_sidecar_migration_plan",
+    "validate_runtime_sidecar_migration_evidence_artifact",
     "validate_runtime_sidecar_ops_readiness",
     "validate_runtime_sidecar_promotion_readiness",
     "validate_runtime_sidecar_response",
+    "validate_runtime_sidecar_task_record",
 ]

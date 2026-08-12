@@ -50,6 +50,62 @@ class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(files), 1)
             self.assertEqual(os.stat(files[0]).st_mode & 0o777, 0o600)
 
+    async def test_durable_result_is_retrievable_after_store_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "mcp-results"
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
+            sink = store.create_sink("task-restart", durable=True)
+            await sink.write(b'{"ok":true}')
+            result = await sink.finalize()
+
+            restarted = MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
+            rebuilt = b"".join(
+                [chunk async for chunk in restarted.iter_bytes(result)]
+            )
+
+            self.assertEqual(rebuilt, b'{"ok":true}')
+            self.assertEqual(result.storage, "file")
+            self.assertEqual(len(restarted.active_task_keys()), 1)
+            await restarted.cleanup_task("task-restart")
+            janitor = MCPTemporaryResultJanitor(
+                root, safe_age_seconds=0, clock=lambda: 10**12
+            )
+            self.assertEqual(
+                await janitor.cleanup_orphans(
+                    active_task_keys=restarted.active_task_keys()
+                ),
+                (),
+            )
+            self.assertEqual(
+                b"".join([chunk async for chunk in restarted.iter_bytes(result)]),
+                b'{"ok":true}',
+            )
+
+    async def test_durable_refs_are_task_owned_and_tampering_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "mcp-results"
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
+            first_sink = store.create_sink("task-a", durable=True)
+            second_sink = store.create_sink("task-b", durable=True)
+            await first_sink.write(b'{"same":true}')
+            await second_sink.write(b'{"same":true}')
+            first = await first_sink.finalize()
+            second = await second_sink.finalize()
+
+            self.assertNotEqual(first.ref, second.ref)
+            first_file = next(
+                path for path in root.rglob(f"{first.ref}.json")
+            )
+            first_file.write_bytes(b"tampered")
+
+            restarted = MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
+            with self.assertRaises(KeyError):
+                _ = [chunk async for chunk in restarted.iter_bytes(first)]
+            self.assertEqual(
+                b"".join([chunk async for chunk in restarted.iter_bytes(second)]),
+                b'{"same":true}',
+            )
+
     async def test_abort_and_task_cleanup_remove_partial_and_completed_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "mcp-results"

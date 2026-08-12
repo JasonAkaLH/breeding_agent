@@ -23,8 +23,9 @@ async def record_runtime_sidecar_shadow_write(
     legacy_output: Mapping[str, Any],
     rust_call: Callable[[], Any],
     rust_output: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+    mode: str | None = None,
 ) -> None:
-    if mode_for_component(component) != "shadow" or runtime_sidecar_client is None or shadow_sink is None:
+    if _resolved_mode(component, mode) != "shadow" or runtime_sidecar_client is None or shadow_sink is None:
         return
 
     payload = _build_shadow_payload(
@@ -60,8 +61,9 @@ def record_runtime_sidecar_shadow_write_sync(
     legacy_output: Mapping[str, Any],
     rust_call: Callable[[], Any],
     rust_output: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+    mode: str | None = None,
 ) -> None:
-    if mode_for_component(component) != "shadow" or runtime_sidecar_client is None or shadow_sink is None:
+    if _resolved_mode(component, mode) != "shadow" or runtime_sidecar_client is None or shadow_sink is None:
         return
 
     payload = _build_shadow_payload(
@@ -195,6 +197,14 @@ def _unavailable_code_for_component(component: str) -> str:
     if component == "event_log":
         return "event_log_unavailable"
     return "runtime_store_unavailable"
+
+
+def _resolved_mode(component: str, override: str | None) -> str:
+    if override is None:
+        return mode_for_component(component)
+    if override not in {"off", "shadow", "enforce"}:
+        raise RuntimeError(f"Invalid Rust runtime sidecar mode for {component}: {override}")
+    return override
 
 
 __all__ = [

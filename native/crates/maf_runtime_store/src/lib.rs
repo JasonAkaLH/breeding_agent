@@ -6,14 +6,15 @@ use thiserror::Error;
 
 pub const COMPONENT_ID: &str = "maf_runtime_sidecar";
 pub const PROTOCOL_VERSION: &str = "maf.runtime.v1";
-pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260515_edge_artifact";
-pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_decommission_policy_20260515";
-pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260515_edge_artifact";
+pub const SCHEMA_HASH: &str = "maf_runtime_v1_schema_20260813_task_authority_cas";
+pub const ERROR_CODE_TABLE_HASH: &str = "maf_runtime_error_table_v1_idempotency_conflict_20260812";
+pub const PROTO_HASH: &str = "maf_runtime_proto_v1_20260813_expected_status_cas";
 pub const FEATURE_RUNTIME_STORE: &str = "runtime_store";
 pub const FEATURE_EVENT_LOG: &str = "event_log";
 pub const FEATURE_TASK_DISPATCHER: &str = "task_dispatcher";
 pub const FEATURE_TASK_GRAPH: &str = "task_graph";
 pub const FEATURE_ARTIFACT_METADATA: &str = "artifact_metadata";
+pub const FEATURE_TASK_READ: &str = "task_read";
 pub const MAX_IN_FLIGHT_MIN: u64 = 8;
 pub const MAX_IN_FLIGHT_CAP: u64 = 64;
 pub const MAX_IN_FLIGHT_CPU_MULTIPLIER: u64 = 4;
@@ -89,6 +90,9 @@ pub struct MigrationPolicy {
     pub required_components: Vec<String>,
     pub required_evidence: Vec<String>,
     pub require_target_schema_version: bool,
+    pub task_authority_evidence_schema: String,
+    pub task_authority_evidence_path_env: String,
+    pub task_authority_hmac_key_path_env: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +146,7 @@ pub enum RuntimeSidecarErrorCode {
     RuntimeStoreDecommissionBlocked,
     RuntimeStoreLeaseConflict,
     RuntimeStoreLeaseExpired,
+    RuntimeStoreIdempotencyConflict,
     RuntimeStoreWriteFailed,
     EventLogUnavailable,
     EventLogPayloadTooLarge,
@@ -167,6 +172,7 @@ impl RuntimeSidecarErrorCode {
             Self::RuntimeStoreDecommissionBlocked => "runtime_store_decommission_blocked",
             Self::RuntimeStoreLeaseConflict => "runtime_store_lease_conflict",
             Self::RuntimeStoreLeaseExpired => "runtime_store_lease_expired",
+            Self::RuntimeStoreIdempotencyConflict => "runtime_store_idempotency_conflict",
             Self::RuntimeStoreWriteFailed => "runtime_store_write_failed",
             Self::EventLogUnavailable => "event_log_unavailable",
             Self::EventLogPayloadTooLarge => "event_log_payload_too_large",
@@ -180,6 +186,7 @@ impl RuntimeSidecarErrorCode {
     #[must_use]
     pub const fn category(self) -> &'static str {
         match self {
+            Self::RuntimeStoreIdempotencyConflict => "internal",
             Self::RuntimeStoreProtocolIncompatible => "compatibility",
             Self::RuntimeStoreResponseInvalid => "protocol",
             Self::RuntimeStoreConfigUntrusted | Self::RuntimeStoreArtifactUntrusted => "security",
@@ -363,6 +370,11 @@ pub fn operation_policies() -> Vec<OperationPolicy> {
     .map(write_operation)
     .chain(
         [
+            "task_get",
+            "task_list_for_conversation",
+            "task_get_active_for_conversation",
+            "task_node_get",
+            "task_node_list",
             "task_edge_list",
             "artifact_get",
             "artifact_list",
@@ -395,6 +407,7 @@ pub fn error_code_table() -> Vec<ErrorCodeEntry> {
         RuntimeSidecarErrorCode::RuntimeStoreDecommissionBlocked,
         RuntimeSidecarErrorCode::RuntimeStoreLeaseConflict,
         RuntimeSidecarErrorCode::RuntimeStoreLeaseExpired,
+        RuntimeSidecarErrorCode::RuntimeStoreIdempotencyConflict,
         RuntimeSidecarErrorCode::RuntimeStoreWriteFailed,
         RuntimeSidecarErrorCode::EventLogUnavailable,
         RuntimeSidecarErrorCode::EventLogPayloadTooLarge,
@@ -588,6 +601,11 @@ pub fn migration_policy() -> MigrationPolicy {
         .map(|evidence| (*evidence).to_owned())
         .collect(),
         require_target_schema_version: true,
+        task_authority_evidence_schema: "maf.runtime_sidecar.task_authority_migration_evidence.v1"
+            .to_owned(),
+        task_authority_evidence_path_env: "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH".to_owned(),
+        task_authority_hmac_key_path_env: "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_HMAC_KEY_PATH"
+            .to_owned(),
     }
 }
 
@@ -673,6 +691,7 @@ pub fn runtime_sidecar_contract_artifact() -> RuntimeSidecarContractArtifact {
             FEATURE_TASK_DISPATCHER.to_owned(),
             FEATURE_TASK_GRAPH.to_owned(),
             FEATURE_ARTIFACT_METADATA.to_owned(),
+            FEATURE_TASK_READ.to_owned(),
         ],
         modes: vec!["off".to_owned(), "shadow".to_owned(), "enforce".to_owned()],
         mode_env: BTreeMap::from([
@@ -966,6 +985,10 @@ mod tests {
             policy
                 .required_evidence
                 .contains(&"schema_version".to_owned())
+        );
+        assert_eq!(
+            policy.task_authority_evidence_path_env,
+            "MAF_RUST_RUNTIME_MIGRATION_EVIDENCE_PATH"
         );
         assert!(
             policy

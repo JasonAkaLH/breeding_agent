@@ -8,8 +8,9 @@ use maf_event_log::EventLog;
 use maf_runtime_store::{
     ERROR_CODE_TABLE_HASH as RUNTIME_ERROR_CODE_TABLE_HASH, FEATURE_ARTIFACT_METADATA,
     FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER, FEATURE_TASK_GRAPH,
-    LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION, RuntimeSidecarError,
-    RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease, runtime_sidecar_contract_artifact,
+    FEATURE_TASK_READ, LeaseRegistry, PROTOCOL_VERSION as RUNTIME_PROTOCOL_VERSION,
+    RuntimeSidecarError, RuntimeSidecarErrorCode, SCHEMA_HASH, TaskLease,
+    runtime_sidecar_contract_artifact,
 };
 use maf_task_dispatcher::{
     TaskDispatcher, TaskSubmitRequest as DispatcherTaskSubmitRequest, TaskSubmitResult,
@@ -137,6 +138,8 @@ pub struct SubmitTaskRequest {
     pub task_id: String,
     pub conversation_id: String,
     pub idempotency: Option<Idempotency>,
+    pub task: Option<TaskRecord>,
+    pub expected_from_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,20 +147,103 @@ pub struct SubmitTaskResponse {
     pub task_id: String,
     pub duplicate: bool,
     pub error: Option<TypedErrorEnvelope>,
+    pub task: Option<TaskRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRouteAssignment {
+    pub route_mode: String,
+    pub real_path: String,
+    pub shadow_path: String,
+    pub config_version: String,
+    pub reason_code: String,
+    pub cohort_id: Option<String>,
+    pub assignment_key_hash: Option<String>,
+    pub assigned_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub task_id: String,
+    pub conversation_id: String,
+    pub root_message_id: String,
+    pub status: String,
+    pub routing_mode: String,
+    pub requested_capability_id: Option<String>,
+    pub root_node_id: Option<String>,
+    pub summary: Option<String>,
+    pub cancel_requested_at: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub assignment: Option<TaskRouteAssignment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetTaskResponse {
+    pub task: Option<TaskRecord>,
+    pub found: bool,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListTasksForConversationResponse {
+    pub tasks: Vec<TaskRecord>,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetActiveTaskForConversationResponse {
+    pub task: Option<TaskRecord>,
+    pub found: bool,
+    pub error: Option<TypedErrorEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitionNodeRequest {
     pub task_id: String,
     pub node_id: String,
+    pub from_status: String,
     pub to_status: String,
     pub idempotency: Option<Idempotency>,
+    pub node: Option<TaskNodeRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitionNodeResponse {
     pub node_id: String,
     pub status: String,
+    pub error: Option<TypedErrorEnvelope>,
+    pub node: Option<TaskNodeRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskNodeRecord {
+    pub node_id: String,
+    pub task_id: String,
+    pub capability_id: String,
+    pub assigned_instance_id: Option<String>,
+    pub status: String,
+    pub criticality: String,
+    pub dependency_type: String,
+    pub retry_policy_json: Vec<u8>,
+    pub timeout_policy_json: Vec<u8>,
+    pub resource_class: Option<String>,
+    pub input_refs: Vec<String>,
+    pub output_refs: Vec<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetTaskNodeResponse {
+    pub node: Option<TaskNodeRecord>,
+    pub found: bool,
+    pub error: Option<TypedErrorEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListTaskNodesForTaskResponse {
+    pub nodes: Vec<TaskNodeRecord>,
     pub error: Option<TypedErrorEnvelope>,
 }
 
@@ -585,12 +671,23 @@ struct BundlePin {
     released_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeTransitionReceipt {
+    task_id: String,
+    node_id: String,
+    to_status: String,
+    expected_from_status: String,
+    node: Option<TaskNodeRecord>,
+    result: NodeTransitionResult,
+}
+
 #[derive(Debug)]
 pub struct RuntimeSidecarKernel {
     dispatcher: TaskDispatcher,
     event_log: EventLog,
     leases: LeaseRegistry,
     node_statuses: BTreeMap<(String, String), String>,
+    task_nodes: BTreeMap<String, TaskNodeRecord>,
     task_edges: BTreeMap<(String, String, String), TaskEdgeRecord>,
     artifacts: BTreeMap<String, ArtifactRecord>,
     cancellation_tokens: BTreeMap<String, CancellationToken>,
@@ -598,7 +695,10 @@ pub struct RuntimeSidecarKernel {
     event_append_idempotency: BTreeMap<String, EventCursor>,
     lease_acquire_idempotency: BTreeMap<String, TaskLease>,
     task_submit_idempotency: BTreeMap<String, TaskSubmitResult>,
-    node_transition_idempotency: BTreeMap<String, NodeTransitionResult>,
+    task_record_idempotency: BTreeMap<String, TaskRecord>,
+    tasks: BTreeMap<String, TaskRecord>,
+    dispatched_task_ids: BTreeSet<String>,
+    node_transition_idempotency: BTreeMap<String, NodeTransitionReceipt>,
     task_edge_idempotency: BTreeMap<String, TaskEdgeRecord>,
     artifact_idempotency: BTreeMap<String, ArtifactRecord>,
     cancellation_idempotency: BTreeMap<String, bool>,
@@ -621,6 +721,7 @@ impl RuntimeSidecarKernel {
             event_log: EventLog::new(),
             leases: LeaseRegistry::new(),
             node_statuses: BTreeMap::new(),
+            task_nodes: BTreeMap::new(),
             task_edges: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             cancellation_tokens: BTreeMap::new(),
@@ -628,6 +729,9 @@ impl RuntimeSidecarKernel {
             event_append_idempotency: BTreeMap::new(),
             lease_acquire_idempotency: BTreeMap::new(),
             task_submit_idempotency: BTreeMap::new(),
+            task_record_idempotency: BTreeMap::new(),
+            tasks: BTreeMap::new(),
+            dispatched_task_ids: BTreeSet::new(),
             node_transition_idempotency: BTreeMap::new(),
             task_edge_idempotency: BTreeMap::new(),
             artifact_idempotency: BTreeMap::new(),
@@ -762,9 +866,91 @@ impl RuntimeSidecarKernel {
             conversation_id: conversation_id.into(),
             idempotency_key: idempotency_key.clone(),
         })?;
+        self.dispatched_task_ids.insert(result.task_id.clone());
         self.task_submit_idempotency
             .insert(idempotency_key, result.clone());
         Ok(result)
+    }
+
+    pub fn submit_task_record(
+        &mut self,
+        task: TaskRecord,
+        idempotency_key: impl Into<String>,
+        expected_from_status: Option<&str>,
+    ) -> Result<(TaskRecord, bool), RuntimeSidecarError> {
+        self.ensure_accepting_writes()?;
+        let idempotency_key = require_idempotency_key(idempotency_key)?;
+        validate_task_record(&task)?;
+        if let Some(original) = self.task_record_idempotency.get(&idempotency_key) {
+            if original != &task {
+                return Err(idempotency_conflict(
+                    "task submit idempotency key was reused with a different TaskRecord",
+                ));
+            }
+            return Ok((original.clone(), true));
+        }
+        if let Some(existing) = self.tasks.get(&task.task_id) {
+            validate_expected_status(expected_from_status, Some(&existing.status))?;
+            validate_task_update(existing, &task)?;
+        } else {
+            validate_expected_status(expected_from_status, None)?;
+        }
+        if self.dispatched_task_ids.insert(task.task_id.clone()) {
+            self.dispatcher.submit(DispatcherTaskSubmitRequest {
+                task_id: task.task_id.clone(),
+                conversation_id: task.conversation_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+            })?;
+        }
+        self.tasks.insert(task.task_id.clone(), task.clone());
+        self.task_record_idempotency
+            .insert(idempotency_key, task.clone());
+        Ok((task, false))
+    }
+
+    #[must_use]
+    pub fn get_task(&self, task_id: &str) -> Option<TaskRecord> {
+        self.tasks.get(task_id).cloned()
+    }
+
+    #[must_use]
+    pub fn list_tasks_for_conversation(
+        &self,
+        conversation_id: &str,
+        statuses: &[String],
+    ) -> Vec<TaskRecord> {
+        let status_filter = statuses.iter().collect::<BTreeSet<_>>();
+        let mut tasks = self
+            .tasks
+            .values()
+            .filter(|task| {
+                task.conversation_id == conversation_id
+                    && (status_filter.is_empty() || status_filter.contains(&task.status))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.task_id.cmp(&left.task_id))
+        });
+        tasks
+    }
+
+    #[must_use]
+    pub fn get_active_task_for_conversation(&self, conversation_id: &str) -> Option<TaskRecord> {
+        self.list_tasks_for_conversation(
+            conversation_id,
+            &[
+                "accepted".to_owned(),
+                "planning".to_owned(),
+                "running".to_owned(),
+                "cancelling".to_owned(),
+            ],
+        )
+        .into_iter()
+        .next()
     }
 
     pub fn transition_node(
@@ -772,25 +958,96 @@ impl RuntimeSidecarKernel {
         task_id: impl Into<String>,
         node_id: impl Into<String>,
         to_status: impl Into<String>,
+        expected_from_status: impl Into<String>,
         idempotency_key: impl Into<String>,
+        node: Option<TaskNodeRecord>,
     ) -> Result<NodeTransitionResult, RuntimeSidecarError> {
         self.ensure_accepting_writes()?;
         let idempotency_key = require_idempotency_key(idempotency_key)?;
-        if let Some(result) = self.node_transition_idempotency.get(&idempotency_key) {
-            return Ok(result.clone());
+        let task_id = task_id.into();
+        let node_id = node_id.into();
+        let to_status = to_status.into();
+        let expected_from_status = expected_from_status.into();
+        let requested_node = node.clone();
+        if let Some(receipt) = self.node_transition_idempotency.get(&idempotency_key) {
+            if receipt.task_id != task_id
+                || receipt.node_id != node_id
+                || receipt.to_status != to_status
+                || receipt.expected_from_status != expected_from_status
+                || receipt.node != node
+            {
+                return Err(idempotency_conflict(
+                    "node transition idempotency key was reused with a different request",
+                ));
+            }
+            return Ok(receipt.result.clone());
+        }
+        validate_expected_status(
+            Some(&expected_from_status),
+            self.task_nodes
+                .get(&node_id)
+                .map(|existing| &existing.status),
+        )?;
+        if let Some(existing) = self.task_nodes.get(&node_id) {
+            if existing.task_id != task_id {
+                return Err(write_failed("TaskNodeRecord cannot move between tasks"));
+            }
+            if node.is_none()
+                && node_status_is_terminal(&existing.status)
+                && existing.status != to_status
+            {
+                return Err(write_failed(
+                    "terminal TaskNodeRecord status cannot be changed",
+                ));
+            }
+        }
+        if let Some(node) = node {
+            validate_task_node_record(&node)?;
+            if node.task_id != task_id || node.node_id != node_id || node.status != to_status {
+                return Err(write_failed(
+                    "TransitionNode identity does not match TaskNodeRecord",
+                ));
+            }
+            if let Some(existing) = self.task_nodes.get(&node.node_id) {
+                validate_task_node_update(existing, &node)?;
+            }
+            self.task_nodes.insert(node.node_id.clone(), node.clone());
         }
         let result = NodeTransitionResult {
-            task_id: task_id.into(),
-            node_id: node_id.into(),
-            status: to_status.into(),
+            task_id: task_id.clone(),
+            node_id: node_id.clone(),
+            status: to_status.clone(),
         };
         self.node_statuses.insert(
             (result.task_id.clone(), result.node_id.clone()),
             result.status.clone(),
         );
-        self.node_transition_idempotency
-            .insert(idempotency_key, result.clone());
+        self.node_transition_idempotency.insert(
+            idempotency_key,
+            NodeTransitionReceipt {
+                task_id,
+                node_id,
+                to_status,
+                expected_from_status,
+                node: requested_node,
+                result: result.clone(),
+            },
+        );
         Ok(result)
+    }
+
+    #[must_use]
+    pub fn get_task_node(&self, node_id: &str) -> Option<TaskNodeRecord> {
+        self.task_nodes.get(node_id).cloned()
+    }
+
+    #[must_use]
+    pub fn list_task_nodes_for_task(&self, task_id: &str) -> Vec<TaskNodeRecord> {
+        self.task_nodes
+            .values()
+            .filter(|node| node.task_id == task_id)
+            .cloned()
+            .collect()
     }
 
     pub fn save_task_edge(
@@ -1123,21 +1380,76 @@ impl RuntimeSidecarService {
     }
 
     pub fn submit_task(&mut self, request: SubmitTaskRequest) -> SubmitTaskResponse {
-        match self.kernel.submit_task(
-            request.task_id,
-            request.conversation_id,
-            idempotency_key(request.idempotency),
-        ) {
-            Ok(result) => SubmitTaskResponse {
-                task_id: result.task_id,
-                duplicate: result.duplicate,
+        let idempotency_key = idempotency_key(request.idempotency);
+        let result = match request.task {
+            Some(task) => {
+                validate_submit_task_identity(&request.task_id, &request.conversation_id, &task)
+                    .and_then(|()| {
+                        self.kernel.submit_task_record(
+                            task,
+                            idempotency_key,
+                            request.expected_from_status.as_deref(),
+                        )
+                    })
+                    .map(|(task, duplicate)| (task.task_id.clone(), duplicate, Some(task)))
+            }
+            None => self
+                .kernel
+                .submit_task(request.task_id, request.conversation_id, idempotency_key)
+                .map(|result| (result.task_id, result.duplicate, None)),
+        };
+        match result {
+            Ok((task_id, duplicate, task)) => SubmitTaskResponse {
+                task_id,
+                duplicate,
                 error: None,
+                task,
             },
             Err(error) => SubmitTaskResponse {
                 task_id: String::new(),
                 duplicate: false,
                 error: Some(TypedErrorEnvelope::from(error)),
+                task: None,
             },
+        }
+    }
+
+    #[must_use]
+    pub fn get_task(&self, task_id: &str) -> GetTaskResponse {
+        let task = self.kernel.get_task(task_id);
+        GetTaskResponse {
+            found: task.is_some(),
+            task,
+            error: None,
+        }
+    }
+
+    #[must_use]
+    pub fn list_tasks_for_conversation(
+        &self,
+        conversation_id: &str,
+        statuses: &[String],
+    ) -> ListTasksForConversationResponse {
+        ListTasksForConversationResponse {
+            tasks: self
+                .kernel
+                .list_tasks_for_conversation(conversation_id, statuses),
+            error: None,
+        }
+    }
+
+    #[must_use]
+    pub fn get_active_task_for_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> GetActiveTaskForConversationResponse {
+        let task = self
+            .kernel
+            .get_active_task_for_conversation(conversation_id);
+        GetActiveTaskForConversationResponse {
+            found: task.is_some(),
+            task,
+            error: None,
         }
     }
 
@@ -1146,18 +1458,40 @@ impl RuntimeSidecarService {
             request.task_id,
             request.node_id,
             request.to_status,
+            request.from_status,
             idempotency_key(request.idempotency),
+            request.node.clone(),
         ) {
             Ok(result) => TransitionNodeResponse {
                 node_id: result.node_id,
                 status: result.status,
                 error: None,
+                node: request.node,
             },
             Err(error) => TransitionNodeResponse {
                 node_id: String::new(),
                 status: String::new(),
                 error: Some(TypedErrorEnvelope::from(error)),
+                node: None,
             },
+        }
+    }
+
+    #[must_use]
+    pub fn get_task_node(&self, node_id: &str) -> GetTaskNodeResponse {
+        let node = self.kernel.get_task_node(node_id);
+        GetTaskNodeResponse {
+            found: node.is_some(),
+            node,
+            error: None,
+        }
+    }
+
+    #[must_use]
+    pub fn list_task_nodes_for_task(&self, task_id: &str) -> ListTaskNodesForTaskResponse {
+        ListTaskNodesForTaskResponse {
+            nodes: self.kernel.list_task_nodes_for_task(task_id),
+            error: None,
         }
     }
 
@@ -1511,40 +1845,144 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
     ) -> Result<tonic::Response<runtime_pb::SubmitTaskResponse>, tonic::Status> {
         let request = request.into_inner();
         if let Some(adapter) = &self.sqlite_adapter {
-            let response = match self.run_sqlite_write(|| {
-                adapter.submit_task(
-                    &request.task_id,
-                    &request.conversation_id,
-                    &pb_idempotency_key(request.idempotency.clone()),
-                )
+            let task = request.task.clone().map(task_record_from_pb);
+            let response = match self.run_sqlite_write(|| match task {
+                Some(task) => {
+                    validate_submit_task_identity(&request.task_id, &request.conversation_id, &task)
+                        .and_then(|()| {
+                            adapter.submit_task_record(
+                                task,
+                                &pb_idempotency_key(request.idempotency.clone()),
+                                request.expected_from_status.as_deref(),
+                            )
+                        })
+                }
+                None => adapter
+                    .submit_task(
+                        &request.task_id,
+                        &request.conversation_id,
+                        &pb_idempotency_key(request.idempotency.clone()),
+                    )
+                    .map(|result| (None, result)),
             })? {
-                Ok(result) => SubmitTaskResponse {
+                Ok((task, result)) => SubmitTaskResponse {
                     task_id: result.task_id,
                     duplicate: result.duplicate,
                     error: None,
+                    task,
                 },
                 Err(error) => SubmitTaskResponse {
                     task_id: String::new(),
                     duplicate: false,
                     error: Some(TypedErrorEnvelope::from(error)),
+                    task: None,
                 },
             };
             return Ok(tonic::Response::new(runtime_pb::SubmitTaskResponse {
                 task_id: response.task_id,
                 duplicate: response.duplicate,
                 error: response.error.map(typed_error_to_pb),
+                task: response.task.map(task_record_to_pb),
             }));
         }
         let response = self.lock()?.submit_task(SubmitTaskRequest {
             task_id: request.task_id,
             conversation_id: request.conversation_id,
             idempotency: request.idempotency.map(idempotency_from_pb),
+            task: request.task.map(task_record_from_pb),
+            expected_from_status: request.expected_from_status,
         });
         Ok(tonic::Response::new(runtime_pb::SubmitTaskResponse {
             task_id: response.task_id,
             duplicate: response.duplicate,
             error: response.error.map(typed_error_to_pb),
+            task: response.task.map(task_record_to_pb),
         }))
+    }
+
+    async fn get_task(
+        &self,
+        request: tonic::Request<runtime_pb::GetTaskRequest>,
+    ) -> Result<tonic::Response<runtime_pb::GetTaskResponse>, tonic::Status> {
+        let task_id = request.into_inner().task_id;
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.get_task(&task_id) {
+                Ok(task) => GetTaskResponse {
+                    found: task.is_some(),
+                    task,
+                    error: None,
+                },
+                Err(error) => GetTaskResponse {
+                    found: false,
+                    task: None,
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            }
+        } else {
+            self.lock()?.get_task(&task_id)
+        };
+        Ok(tonic::Response::new(runtime_pb::GetTaskResponse {
+            task: response.task.map(task_record_to_pb),
+            found: response.found,
+            error: response.error.map(typed_error_to_pb),
+        }))
+    }
+
+    async fn list_tasks_for_conversation(
+        &self,
+        request: tonic::Request<runtime_pb::ListTasksForConversationRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ListTasksForConversationResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.list_tasks_for_conversation(&request.conversation_id, &request.statuses) {
+                Ok(tasks) => ListTasksForConversationResponse { tasks, error: None },
+                Err(error) => ListTasksForConversationResponse {
+                    tasks: Vec::new(),
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            }
+        } else {
+            self.lock()?
+                .list_tasks_for_conversation(&request.conversation_id, &request.statuses)
+        };
+        Ok(tonic::Response::new(
+            runtime_pb::ListTasksForConversationResponse {
+                tasks: response.tasks.into_iter().map(task_record_to_pb).collect(),
+                error: response.error.map(typed_error_to_pb),
+            },
+        ))
+    }
+
+    async fn get_active_task_for_conversation(
+        &self,
+        request: tonic::Request<runtime_pb::GetActiveTaskForConversationRequest>,
+    ) -> Result<tonic::Response<runtime_pb::GetActiveTaskForConversationResponse>, tonic::Status>
+    {
+        let conversation_id = request.into_inner().conversation_id;
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.get_active_task_for_conversation(&conversation_id) {
+                Ok(task) => GetActiveTaskForConversationResponse {
+                    found: task.is_some(),
+                    task,
+                    error: None,
+                },
+                Err(error) => GetActiveTaskForConversationResponse {
+                    found: false,
+                    task: None,
+                    error: Some(TypedErrorEnvelope::from(error)),
+                },
+            }
+        } else {
+            self.lock()?
+                .get_active_task_for_conversation(&conversation_id)
+        };
+        Ok(tonic::Response::new(
+            runtime_pb::GetActiveTaskForConversationResponse {
+                task: response.task.map(task_record_to_pb),
+                found: response.found,
+                error: response.error.map(typed_error_to_pb),
+            },
+        ))
     }
 
     async fn transition_node(
@@ -1558,37 +1996,101 @@ impl runtime_pb::runtime_sidecar_server::RuntimeSidecar for RuntimeSidecarGrpcSe
                     &request.task_id,
                     &request.node_id,
                     &request.to_status,
+                    &request.from_status,
                     &pb_idempotency_key(request.idempotency.clone()),
+                    request.node.clone().map(task_node_record_from_pb),
                 )
             })? {
                 Ok(result) => TransitionNodeResponse {
                     node_id: result.node_id,
                     status: result.status,
                     error: None,
+                    node: request.node.clone().map(task_node_record_from_pb),
                 },
                 Err(error) => TransitionNodeResponse {
                     node_id: String::new(),
                     status: String::new(),
                     error: Some(TypedErrorEnvelope::from(error)),
+                    node: None,
                 },
             };
             return Ok(tonic::Response::new(runtime_pb::TransitionNodeResponse {
                 node_id: response.node_id,
                 status: response.status,
                 error: response.error.map(typed_error_to_pb),
+                node: response.node.map(task_node_record_to_pb),
             }));
         }
         let response = self.lock()?.transition_node(TransitionNodeRequest {
             task_id: request.task_id,
             node_id: request.node_id,
             to_status: request.to_status,
+            from_status: request.from_status,
             idempotency: request.idempotency.map(idempotency_from_pb),
+            node: request.node.map(task_node_record_from_pb),
         });
         Ok(tonic::Response::new(runtime_pb::TransitionNodeResponse {
             node_id: response.node_id,
             status: response.status,
             error: response.error.map(typed_error_to_pb),
+            node: response.node.map(task_node_record_to_pb),
         }))
+    }
+
+    async fn get_task_node(
+        &self,
+        request: tonic::Request<runtime_pb::GetTaskNodeRequest>,
+    ) -> Result<tonic::Response<runtime_pb::GetTaskNodeResponse>, tonic::Status> {
+        let node_id = request.into_inner().node_id;
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.get_task_node(&node_id) {
+                Ok(node) => GetTaskNodeResponse {
+                    found: node.is_some(),
+                    node,
+                    error: None,
+                },
+                Err(error) => GetTaskNodeResponse {
+                    found: false,
+                    node: None,
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            self.lock()?.get_task_node(&node_id)
+        };
+        Ok(tonic::Response::new(runtime_pb::GetTaskNodeResponse {
+            node: response.node.map(task_node_record_to_pb),
+            found: response.found,
+            error: response.error.map(typed_error_to_pb),
+        }))
+    }
+
+    async fn list_task_nodes_for_task(
+        &self,
+        request: tonic::Request<runtime_pb::ListTaskNodesForTaskRequest>,
+    ) -> Result<tonic::Response<runtime_pb::ListTaskNodesForTaskResponse>, tonic::Status> {
+        let task_id = request.into_inner().task_id;
+        let response = if let Some(adapter) = &self.sqlite_adapter {
+            match adapter.list_task_nodes_for_task(&task_id) {
+                Ok(nodes) => ListTaskNodesForTaskResponse { nodes, error: None },
+                Err(error) => ListTaskNodesForTaskResponse {
+                    nodes: Vec::new(),
+                    error: Some(error.into()),
+                },
+            }
+        } else {
+            self.lock()?.list_task_nodes_for_task(&task_id)
+        };
+        Ok(tonic::Response::new(
+            runtime_pb::ListTaskNodesForTaskResponse {
+                nodes: response
+                    .nodes
+                    .into_iter()
+                    .map(task_node_record_to_pb)
+                    .collect(),
+                error: response.error.map(typed_error_to_pb),
+            },
+        ))
     }
 
     async fn save_task_edge(
@@ -2145,6 +2647,7 @@ pub fn supported_features() -> Vec<String> {
         FEATURE_TASK_DISPATCHER.to_owned(),
         FEATURE_TASK_GRAPH.to_owned(),
         FEATURE_ARTIFACT_METADATA.to_owned(),
+        FEATURE_TASK_READ.to_owned(),
     ]
 }
 
@@ -2245,6 +2748,104 @@ fn task_edge_from_pb(edge: runtime_pb::TaskEdgeRecord) -> TaskEdgeRecord {
         to_node_id: edge.to_node_id,
         edge_type: edge.edge_type,
         condition: edge.condition,
+    }
+}
+
+fn task_assignment_from_pb(assignment: runtime_pb::TaskRouteAssignment) -> TaskRouteAssignment {
+    TaskRouteAssignment {
+        route_mode: assignment.route_mode,
+        real_path: assignment.real_path,
+        shadow_path: assignment.shadow_path,
+        config_version: assignment.config_version,
+        reason_code: assignment.reason_code,
+        cohort_id: assignment.cohort_id,
+        assignment_key_hash: assignment.assignment_key_hash,
+        assigned_at: assignment.assigned_at,
+    }
+}
+
+fn task_assignment_to_pb(assignment: TaskRouteAssignment) -> runtime_pb::TaskRouteAssignment {
+    runtime_pb::TaskRouteAssignment {
+        route_mode: assignment.route_mode,
+        real_path: assignment.real_path,
+        shadow_path: assignment.shadow_path,
+        config_version: assignment.config_version,
+        reason_code: assignment.reason_code,
+        cohort_id: assignment.cohort_id,
+        assignment_key_hash: assignment.assignment_key_hash,
+        assigned_at: assignment.assigned_at,
+    }
+}
+
+fn task_record_from_pb(task: runtime_pb::TaskRecord) -> TaskRecord {
+    TaskRecord {
+        task_id: task.task_id,
+        conversation_id: task.conversation_id,
+        root_message_id: task.root_message_id,
+        status: task.status,
+        routing_mode: task.routing_mode,
+        requested_capability_id: task.requested_capability_id,
+        root_node_id: task.root_node_id,
+        summary: task.summary,
+        cancel_requested_at: task.cancel_requested_at,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        assignment: task.assignment.map(task_assignment_from_pb),
+    }
+}
+
+fn task_record_to_pb(task: TaskRecord) -> runtime_pb::TaskRecord {
+    runtime_pb::TaskRecord {
+        task_id: task.task_id,
+        conversation_id: task.conversation_id,
+        root_message_id: task.root_message_id,
+        status: task.status,
+        routing_mode: task.routing_mode,
+        requested_capability_id: task.requested_capability_id,
+        root_node_id: task.root_node_id,
+        summary: task.summary,
+        cancel_requested_at: task.cancel_requested_at,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        assignment: task.assignment.map(task_assignment_to_pb),
+    }
+}
+
+fn task_node_record_from_pb(node: runtime_pb::TaskNodeRecord) -> TaskNodeRecord {
+    TaskNodeRecord {
+        node_id: node.node_id,
+        task_id: node.task_id,
+        capability_id: node.capability_id,
+        assigned_instance_id: node.assigned_instance_id,
+        status: node.status,
+        criticality: node.criticality,
+        dependency_type: node.dependency_type,
+        retry_policy_json: node.retry_policy_json,
+        timeout_policy_json: node.timeout_policy_json,
+        resource_class: node.resource_class,
+        input_refs: node.input_refs,
+        output_refs: node.output_refs,
+        started_at: node.started_at,
+        finished_at: node.finished_at,
+    }
+}
+
+fn task_node_record_to_pb(node: TaskNodeRecord) -> runtime_pb::TaskNodeRecord {
+    runtime_pb::TaskNodeRecord {
+        node_id: node.node_id,
+        task_id: node.task_id,
+        capability_id: node.capability_id,
+        assigned_instance_id: node.assigned_instance_id,
+        status: node.status,
+        criticality: node.criticality,
+        dependency_type: node.dependency_type,
+        retry_policy_json: node.retry_policy_json,
+        timeout_policy_json: node.timeout_policy_json,
+        resource_class: node.resource_class,
+        input_refs: node.input_refs,
+        output_refs: node.output_refs,
+        started_at: node.started_at,
+        finished_at: node.finished_at,
     }
 }
 
@@ -2370,6 +2971,222 @@ fn require_idempotency_key(
         ));
     }
     Ok(idempotency_key)
+}
+
+pub(crate) fn validate_task_node_record(node: &TaskNodeRecord) -> Result<(), RuntimeSidecarError> {
+    if node.node_id.trim().is_empty()
+        || node.task_id.trim().is_empty()
+        || node.capability_id.trim().is_empty()
+        || node.status.trim().is_empty()
+        || node.criticality.trim().is_empty()
+        || node.dependency_type.trim().is_empty()
+    {
+        return Err(write_failed("TaskNodeRecord required fields are missing"));
+    }
+    if ![
+        "pending",
+        "ready",
+        "running",
+        "waiting_for_dependency",
+        "waiting_for_input",
+        "ready_to_resume",
+        "resuming",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled",
+        "blocked_by_cancellation",
+        "orphaned",
+    ]
+    .contains(&node.status.as_str())
+        || !["required", "optional", "fallback"].contains(&node.criticality.as_str())
+        || !["hard", "soft"].contains(&node.dependency_type.as_str())
+    {
+        return Err(write_failed(
+            "TaskNodeRecord enum value is not in the closed contract",
+        ));
+    }
+    for payload in [&node.retry_policy_json, &node.timeout_policy_json] {
+        if serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(payload).is_err() {
+            return Err(write_failed("TaskNodeRecord policy JSON must be an object"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_task_record(task: &TaskRecord) -> Result<(), RuntimeSidecarError> {
+    if task.task_id.trim().is_empty()
+        || task.conversation_id.trim().is_empty()
+        || task.root_message_id.trim().is_empty()
+    {
+        return Err(write_failed(
+            "TaskRecord requires task_id, conversation_id, and root_message_id",
+        ));
+    }
+    if !matches!(
+        task.status.as_str(),
+        "accepted" | "planning" | "running" | "cancelling" | "cancelled" | "completed" | "failed"
+    ) {
+        return Err(write_failed(
+            "TaskRecord status is not in the closed TaskStatus set",
+        ));
+    }
+    if !matches!(task.routing_mode.as_str(), "auto" | "force_capability") {
+        return Err(write_failed(
+            "TaskRecord routing_mode is not in the closed RoutingMode set",
+        ));
+    }
+    if let Some(assignment) = &task.assignment {
+        validate_task_assignment(assignment)?;
+    }
+    Ok(())
+}
+
+fn validate_task_assignment(assignment: &TaskRouteAssignment) -> Result<(), RuntimeSidecarError> {
+    let route_is_valid = matches!(assignment.route_mode.as_str(), "off" | "shadow" | "enforce");
+    let real_is_valid = matches!(
+        assignment.real_path.as_str(),
+        "legacy" | "user_scoped" | "unavailable"
+    );
+    let shadow_is_valid = matches!(assignment.shadow_path.as_str(), "none" | "user_scoped");
+    if !route_is_valid
+        || !real_is_valid
+        || !shadow_is_valid
+        || assignment.config_version.trim().is_empty()
+        || assignment.reason_code.trim().is_empty()
+    {
+        return Err(write_failed(
+            "TaskRouteAssignment is outside its closed contract",
+        ));
+    }
+    let paths_are_consistent = match assignment.route_mode.as_str() {
+        "off" => {
+            matches!(assignment.real_path.as_str(), "legacy" | "unavailable")
+                && assignment.shadow_path == "none"
+        }
+        "shadow" => assignment.real_path == "legacy" && assignment.shadow_path == "user_scoped",
+        "enforce" => assignment.shadow_path == "none",
+        _ => false,
+    };
+    if !paths_are_consistent {
+        return Err(write_failed(
+            "TaskRouteAssignment route mode and paths are inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_submit_task_identity(
+    task_id: &str,
+    conversation_id: &str,
+    task: &TaskRecord,
+) -> Result<(), RuntimeSidecarError> {
+    if task_id != task.task_id || conversation_id != task.conversation_id {
+        return Err(write_failed(
+            "SubmitTask top-level identity does not match TaskRecord",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_task_update(
+    existing: &TaskRecord,
+    replacement: &TaskRecord,
+) -> Result<(), RuntimeSidecarError> {
+    if existing.task_id != replacement.task_id
+        || existing.conversation_id != replacement.conversation_id
+        || existing.root_message_id != replacement.root_message_id
+        || existing.routing_mode != replacement.routing_mode
+        || existing.requested_capability_id != replacement.requested_capability_id
+        || existing.created_at != replacement.created_at
+    {
+        return Err(write_failed(
+            "immutable TaskRecord identity fields cannot be changed",
+        ));
+    }
+    if existing.assignment.is_none() && replacement.assignment.is_some() {
+        return Err(migration_blocked(
+            "legacy TaskRecord assignment requires an explicit audited migration",
+        ));
+    }
+    if existing.assignment.is_some() && existing.assignment != replacement.assignment {
+        return Err(idempotency_conflict(
+            "TaskRouteAssignment is write-once and cannot be changed or removed",
+        ));
+    }
+    if !task_status_transition_allowed(&existing.status, &replacement.status) {
+        return Err(write_failed("TaskRecord status transition is not allowed"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_task_node_update(
+    existing: &TaskNodeRecord,
+    replacement: &TaskNodeRecord,
+) -> Result<(), RuntimeSidecarError> {
+    if existing.node_id != replacement.node_id
+        || existing.task_id != replacement.task_id
+        || existing.capability_id != replacement.capability_id
+    {
+        return Err(write_failed(
+            "immutable TaskNodeRecord identity fields cannot be changed",
+        ));
+    }
+    if node_status_is_terminal(&existing.status) && existing.status != replacement.status {
+        return Err(write_failed(
+            "terminal TaskNodeRecord status cannot be changed",
+        ));
+    }
+    Ok(())
+}
+
+fn node_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "blocked_by_cancellation" | "orphaned"
+    )
+}
+
+fn task_status_transition_allowed(from: &str, to: &str) -> bool {
+    from == to
+        || matches!(
+            (from, to),
+            (
+                "accepted",
+                "planning" | "running" | "cancelling" | "completed" | "failed"
+            ) | (
+                "planning",
+                "running" | "cancelling" | "completed" | "failed"
+            ) | ("running", "cancelling" | "completed" | "failed")
+                | ("cancelling", "cancelled")
+        )
+}
+
+fn validate_expected_status(
+    expected: Option<&str>,
+    current: Option<&String>,
+) -> Result<(), RuntimeSidecarError> {
+    match (expected, current) {
+        (None | Some(""), None) => Ok(()),
+        (Some(expected), Some(current)) if expected == current => Ok(()),
+        _ => Err(idempotency_conflict(
+            "expected status does not match current authoritative status",
+        )),
+    }
+}
+
+pub(crate) fn idempotency_conflict(message: &str) -> RuntimeSidecarError {
+    RuntimeSidecarError::new(
+        RuntimeSidecarErrorCode::RuntimeStoreIdempotencyConflict,
+        message,
+    )
+}
+
+pub(crate) fn migration_blocked(message: &str) -> RuntimeSidecarError {
+    RuntimeSidecarError::new(
+        RuntimeSidecarErrorCode::RuntimeStoreMigrationBlocked,
+        message,
+    )
 }
 
 fn write_failed(message: &str) -> RuntimeSidecarError {

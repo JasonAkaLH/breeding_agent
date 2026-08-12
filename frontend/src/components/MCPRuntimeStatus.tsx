@@ -17,7 +17,8 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, onContinue, 
     || mcp.approval
     || mcp.calls.length
     || mcp.input
-    || mcp.remoteTask,
+    || mcp.remoteTask
+    || mcp.availability,
   );
   if (!visible) return null;
 
@@ -48,6 +49,14 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, onContinue, 
         <Typography.Paragraph>
           远程任务：<Tag>{mcp.remoteTask.status}</Tag>
         </Typography.Paragraph>
+      ) : null}
+      {mcp.availability?.status === 'unavailable' ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="当前任务的 MCP 暂不可用"
+          description="当前灰度或回滚配置未分配可用执行路径；该任务不会切换到另一条 MCP 链路或自动重试。"
+        />
       ) : null}
       <List
         size="small"
@@ -102,6 +111,7 @@ function runtimeAnnouncement(mcp: MCPTaskState): string {
   if (mcp.queue?.queued) return mcp.queue.position === null ? 'MCP 调用正在排队' : `MCP 调用排队位置 ${mcp.queue.position}`;
   if (active) return `${active.toolDisplayName || 'MCP 工具'}${callStatusLabel(active.status)}`;
   if (mcp.remoteTask) return `远程 MCP 任务状态 ${mcp.remoteTask.status}`;
+  if (mcp.availability?.status === 'unavailable') return '当前任务的 MCP 暂不可用';
   return mcp.discovery ? `MCP 工具发现${discoveryLabel(mcp.discovery.status)}` : 'MCP 已就绪';
 }
 

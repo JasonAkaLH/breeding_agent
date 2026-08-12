@@ -4,7 +4,13 @@ from datetime import datetime, timezone
 
 from src.core.contracts import AuditSink, EventSink, StoragePort
 from src.core.enums import EventVisibility
-from src.core.models import EventRecord, Interrupt, InterruptAnswer, TaskNode
+from src.core.models import (
+    EventRecord,
+    Interrupt,
+    InterruptAnswer,
+    MCPRemoteTaskOutbox,
+    TaskNode,
+)
 
 from . import task_state_machine
 
@@ -126,6 +132,53 @@ class InterruptService:
                 node_id=saved_interrupt.node_id,
             )
         return saved_interrupt
+
+    async def record_mcp_remote_task_control(
+        self,
+        answer: InterruptAnswer,
+        *,
+        action: str,
+        input_responses: dict[str, object],
+        now: datetime | None = None,
+    ) -> MCPRemoteTaskOutbox:
+        current_time = now or self._utcnow_naive()
+        command = await self._storage.enqueue_mcp_remote_task_control(
+            answer,
+            action=action,
+            input_responses=input_responses,
+            updated_at=current_time,
+        )
+        if command is None:
+            raise ValueError("MCP remote task input is no longer pending")
+        task = await self._storage.get_task(command.task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {command.task_id}")
+        await self._record_event(
+            self._make_event(
+                task_id=command.task_id,
+                conversation_id=task.conversation_id,
+                node_id=command.node_id,
+                event_type="node.waiting_for_dependency",
+                payload={
+                    "reason": "mcp_remote_task_control_pending",
+                    "outbox_id": command.outbox_id,
+                    "action": command.kind,
+                },
+                now=current_time,
+            )
+        )
+        if self._audit_sink is not None:
+            await self._audit_sink.record(
+                "lifecycle.interrupt_answered",
+                {
+                    "interrupt_id": answer.interrupt_id,
+                    "node_id": command.node_id,
+                    "mcp_control_kind": command.kind,
+                },
+                task_id=command.task_id,
+                node_id=command.node_id,
+            )
+        return command
 
     async def begin_resume(self, resume_token: str) -> TaskNode:
         checkpoint = await self._storage.get_checkpoint_by_resume_token(resume_token)

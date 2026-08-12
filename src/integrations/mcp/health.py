@@ -15,6 +15,7 @@ from .client import MCPClientError, MCPProtocolError
 
 HEALTH_ATTEMPT_TIMEOUT_SECONDS = 60.0
 HEALTH_TRANSIENT_RETRY_DELAY_SECONDS = 0.25
+HEALTH_CLEANUP_TIMEOUT_SECONDS = 1.0
 HEALTH_LEASE_TTL_SECONDS = 30.0
 HEALTH_LEASE_RENEW_INTERVAL_SECONDS = 10.0
 HEALTH_RECOVERY_INTERVAL_SECONDS = 10.0
@@ -61,6 +62,7 @@ async def run_health_discovery(
     *,
     timeout_seconds: float = HEALTH_ATTEMPT_TIMEOUT_SECONDS,
     retry_delay_seconds: float = HEALTH_TRANSIENT_RETRY_DELAY_SECONDS,
+    cleanup_timeout_seconds: float = HEALTH_CLEANUP_TIMEOUT_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> MCPHealthCheckResult:
     for ordinal in range(2):
@@ -85,7 +87,8 @@ async def run_health_discovery(
         finally:
             if client is not None:
                 try:
-                    await client.close()
+                    async with asyncio.timeout(cleanup_timeout_seconds):
+                        await client.close()
                 except Exception:
                     pass
         if ordinal == 0 and retriable:

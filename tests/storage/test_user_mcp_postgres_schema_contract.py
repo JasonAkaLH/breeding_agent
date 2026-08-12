@@ -3,7 +3,11 @@ from __future__ import annotations
 import inspect
 import unittest
 
-from src.state.postgres.runtime_schema import build_postgres_fresh_cutover_schema_manifest, build_runtime_index_schema_ddl
+from src.state.postgres.runtime_schema import (
+    build_postgres_fresh_cutover_schema_manifest,
+    build_runtime_index_schema_ddl,
+    build_runtime_table_schema_ddl,
+)
 from src.storage.postgres.repositories import PostgreSQLStorage
 
 
@@ -19,11 +23,50 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
             "mcp_branch_record",
             "mcp_call_record",
             "mcp_remote_task_binding",
+            "mcp_remote_task_outbox",
             "mcp_sealed_state",
             "mcp_connection_lease",
             "mcp_audit_event",
+            "mcp_legacy_migration_record",
+            "mcp_rollout_metric_bucket",
+            "mcp_shadow_audit_sample",
+            "mcp_rollout_evidence_snapshot",
+            "mcp_rollout_gate_scope",
+            "mcp_rollout_stage_approval",
+            "mcp_rollout_deployment_activation",
+            "mcp_rollout_promotion_block",
+            "mcp_rollout_block_resolution",
+            "mcp_rollout_instance_config",
         }
         self.assertTrue(expected.issubset(manifest.runtime_table_names))
+        self.assertEqual(
+            manifest.table_columns["mcp_rollout_metric_bucket"]["red_line"],
+            "text",
+        )
+        self.assertEqual(
+            manifest.table_columns["mcp_rollout_evidence_snapshot"][
+                "attestation_key_id"
+            ],
+            "text",
+        )
+        self.assertEqual(
+            manifest.table_columns["mcp_rollout_evidence_snapshot"][
+                "attestation_signature"
+            ],
+            "text",
+        )
+        self.assertEqual(
+            manifest.table_columns["mcp_remote_task_outbox"][
+                "continuation_status"
+            ],
+            "text",
+        )
+        self.assertEqual(
+            manifest.table_columns["mcp_remote_task_outbox"][
+                "continuation_node_ids"
+            ],
+            "jsonb",
+        )
         forbidden = {"tool_list", "input_schema", "output_schema", "session_id", "remote_task_id", "result"}
         for table_name in expected:
             self.assertFalse(forbidden.intersection(manifest.table_columns[table_name]))
@@ -34,6 +77,43 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
         self.assertIn("idx_mcp_call_owner_task", ddl)
         self.assertIn("idx_mcp_remote_task_poll", ddl)
         self.assertIn("idx_mcp_audit_expiry", ddl)
+        self.assertIn("idx_mcp_legacy_migration_plan", ddl)
+        self.assertIn("idx_mcp_rollout_metric_window", ddl)
+        self.assertIn("idx_mcp_shadow_sample_scope_window", ddl)
+        self.assertIn("idx_mcp_rollout_evidence_scope", ddl)
+        self.assertIn("idx_mcp_rollout_activation_scope", ddl)
+        self.assertIn("idx_mcp_rollout_block_scope", ddl)
+        self.assertIn("idx_mcp_rollout_instance_lease", ddl)
+
+        table_ddl = build_runtime_table_schema_ddl()
+        self.assertIn("uq_mcp_rollout_evidence_nonce", table_ddl)
+        self.assertIn("uq_mcp_shadow_sample_scope_nonce", table_ddl)
+        self.assertIn("uq_mcp_rollout_evidence_snapshot", table_ddl)
+        self.assertIn("uq_mcp_rollout_activation_approval", table_ddl)
+        self.assertIn("uq_mcp_rollout_activation_target", table_ddl)
+        self.assertIn("uq_mcp_rollout_resolution_block", table_ddl)
+        self.assertIn("user_mcp_phase3", table_ddl)
+        metric_table_ddl = _table_ddl(table_ddl, "mcp_rollout_metric_bucket")
+        self.assertIn("red_line TEXT DEFAULT 'not_applicable' NOT NULL", metric_table_ddl)
+        self.assertIn("mcp_safety_red_line_total", metric_table_ddl)
+        self.assertIn("cross_user_access", metric_table_ddl)
+        self.assertIn(
+            "error_category, call_kind, red_line, latency_bucket",
+            metric_table_ddl,
+        )
+        block_table_ddl = _table_ddl(
+            table_ddl, "mcp_rollout_promotion_block"
+        )
+        for reason in (
+            "attestation_missing",
+            "attestation_invalid",
+            "metric_series_missing",
+            "metric_summary_mismatch",
+        ):
+            self.assertIn(reason, block_table_ddl)
+        for table_name in expected:
+            if table_name.startswith("mcp_rollout_"):
+                self.assertNotIn("FOREIGN KEY", _table_ddl(table_ddl, table_name))
 
     def test_postgres_hotspots_use_explicit_row_locks(self) -> None:
         source = inspect.getsource(PostgreSQLStorage)
@@ -43,5 +123,27 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
             "complete_user_mcp_health_attempt", "acquire_user_mcp_scope_lease", "renew_user_mcp_scope_lease",
             "release_user_mcp_health_attempt", "mark_user_mcp_server_deleted", "finalize_user_mcp_server_delete",
             "reserve_mcp_call",
+            "append_mcp_rollout_evidence_snapshot",
+            "activate_mcp_rollout_deployment",
+            "append_mcp_rollout_promotion_block",
+            "append_mcp_rollout_block_resolution",
+            "save_mcp_rollout_instance_config_lease",
         ):
             self.assertIn(f"def {method}", source)
+        for function_name in (
+            "append_ci_evidence_snapshot",
+            "append_deployment_activation",
+            "append_promotion_block",
+            "append_block_resolution",
+            "upsert_instance_config_lease",
+        ):
+            self.assertIn(f"mcp_rollout_api.{function_name}", source)
+        self.assertIn("mcp_rollout_session_factory", source)
+        self.assertNotIn("MCPRolloutGateScopeRow", source)
+
+
+def _table_ddl(ddl: str, table_name: str) -> str:
+    marker = f"CREATE TABLE IF NOT EXISTS {table_name}"
+    start = ddl.index(marker)
+    next_table = ddl.find("CREATE TABLE IF NOT EXISTS", start + len(marker))
+    return ddl[start:] if next_table < 0 else ddl[start:next_table]

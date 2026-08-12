@@ -53,7 +53,19 @@ class CapabilityRegistry:
         """
 
         descriptors = self.list(public_only=public_only)
-        if request.available_mcp_servers:
+        execution_path = str(request.metadata.get("mcp_execution_mode") or "").strip()
+        if execution_path == "user_scoped":
+            descriptors = [descriptor for descriptor in descriptors if not _is_legacy_mcp_descriptor(descriptor)]
+        elif execution_path == "legacy":
+            descriptors = [descriptor for descriptor in descriptors if descriptor.capability_id != "mcp.dispatch"]
+        elif execution_path == "unavailable":
+            descriptors = [
+                descriptor
+                for descriptor in descriptors
+                if descriptor.capability_id != "mcp.dispatch" and not _is_legacy_mcp_descriptor(descriptor)
+            ]
+
+        if request.available_mcp_servers and execution_path not in {"legacy", "unavailable"}:
             return descriptors
         return [descriptor for descriptor in descriptors if descriptor.capability_id != "mcp.dispatch"]
 
@@ -73,3 +85,14 @@ class InstanceRegistry:
 
     def list(self) -> list[ExecutionInstance]:
         return list(self._instances.values())
+
+
+def _is_legacy_mcp_descriptor(descriptor: CapabilityDescriptor) -> bool:
+    return (
+        descriptor.capability_id != "mcp.dispatch"
+        and (
+            descriptor.kind == "mcp_tool"
+            or descriptor.source == "mcp"
+            or descriptor.capability_id.startswith("mcp.")
+        )
+    )

@@ -10,6 +10,11 @@ service RuntimeSidecar {
   rpc Version(VersionRequest) returns (VersionResponse);
   rpc CheckCompatibility(CompatibilityCheckRequest) returns (CompatibilityCheckResponse);
   rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+  rpc GetTask(GetTaskRequest) returns (GetTaskResponse);
+  rpc ListTasksForConversation(ListTasksForConversationRequest) returns (ListTasksForConversationResponse);
+  rpc GetActiveTaskForConversation(GetActiveTaskForConversationRequest) returns (GetActiveTaskForConversationResponse);
+  rpc GetTaskNode(GetTaskNodeRequest) returns (GetTaskNodeResponse);
+  rpc ListTaskNodesForTask(ListTaskNodesForTaskRequest) returns (ListTaskNodesForTaskResponse);
   rpc TransitionNode(TransitionNodeRequest) returns (TransitionNodeResponse);
   rpc SaveTaskEdge(SaveTaskEdgeRequest) returns (TaskEdgeResponse);
   rpc ListTaskEdges(ListTaskEdgesRequest) returns (ListTaskEdgesResponse);
@@ -80,11 +85,70 @@ message SubmitTaskRequest {
   string task_id = 1;
   string conversation_id = 2;
   Idempotency idempotency = 3;
+  TaskRecord task = 4;
+  optional string expected_from_status = 5;
 }
 
 message SubmitTaskResponse {
   string task_id = 1;
   bool duplicate = 2;
+  maf.common.v1.TypedError error = 3;
+  TaskRecord task = 4;
+}
+
+message TaskRouteAssignment {
+  string route_mode = 1;
+  string real_path = 2;
+  string shadow_path = 3;
+  string config_version = 4;
+  string reason_code = 5;
+  optional string cohort_id = 6;
+  optional string assignment_key_hash = 7;
+  optional string assigned_at = 8;
+}
+
+message TaskRecord {
+  string task_id = 1;
+  string conversation_id = 2;
+  string root_message_id = 3;
+  string status = 4;
+  string routing_mode = 5;
+  optional string requested_capability_id = 6;
+  optional string root_node_id = 7;
+  optional string summary = 8;
+  optional string cancel_requested_at = 9;
+  optional string created_at = 10;
+  optional string updated_at = 11;
+  TaskRouteAssignment assignment = 12;
+}
+
+message GetTaskRequest {
+  string task_id = 1;
+}
+
+message GetTaskResponse {
+  TaskRecord task = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+
+message ListTasksForConversationRequest {
+  string conversation_id = 1;
+  repeated string statuses = 2;
+}
+
+message ListTasksForConversationResponse {
+  repeated TaskRecord tasks = 1;
+  maf.common.v1.TypedError error = 2;
+}
+
+message GetActiveTaskForConversationRequest {
+  string conversation_id = 1;
+}
+
+message GetActiveTaskForConversationResponse {
+  TaskRecord task = 1;
+  bool found = 2;
   maf.common.v1.TypedError error = 3;
 }
 
@@ -94,12 +158,43 @@ message TransitionNodeRequest {
   string from_status = 3;
   string to_status = 4;
   Idempotency idempotency = 5;
+  TaskNodeRecord node = 6;
 }
 
 message TransitionNodeResponse {
   string node_id = 1;
   string status = 2;
   maf.common.v1.TypedError error = 3;
+  TaskNodeRecord node = 4;
+}
+
+message TaskNodeRecord {
+  string node_id = 1;
+  string task_id = 2;
+  string capability_id = 3;
+  optional string assigned_instance_id = 4;
+  string status = 5;
+  string criticality = 6;
+  string dependency_type = 7;
+  bytes retry_policy_json = 8;
+  bytes timeout_policy_json = 9;
+  optional string resource_class = 10;
+  repeated string input_refs = 11;
+  repeated string output_refs = 12;
+  optional string started_at = 13;
+  optional string finished_at = 14;
+}
+
+message GetTaskNodeRequest { string node_id = 1; }
+message GetTaskNodeResponse {
+  TaskNodeRecord node = 1;
+  bool found = 2;
+  maf.common.v1.TypedError error = 3;
+}
+message ListTaskNodesForTaskRequest { string task_id = 1; }
+message ListTaskNodesForTaskResponse {
+  repeated TaskNodeRecord nodes = 1;
+  maf.common.v1.TypedError error = 2;
 }
 
 message TaskEdgeRecord {

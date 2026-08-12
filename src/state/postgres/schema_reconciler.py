@@ -98,6 +98,17 @@ def plan_postgres_schema_reconciliation(
                 raise PostgresSchemaDriftError(
                     f"PostgreSQL schema drift for {table_name}.{column_name}: expected {expected_type}, actual {actual_type}; safe action unavailable"
                 )
+        if table_name == "mcp_remote_task_binding" and "published_at" in expected_columns:
+            actions.append(
+                SchemaAction(
+                    "backfill_mcp_remote_task_publication",
+                    "UPDATE mcp_remote_task_binding "
+                    "SET published_at = COALESCE(next_poll_at, terminal_at, updated_at) "
+                    "WHERE published_at IS NULL AND "
+                    "(next_poll_at IS NOT NULL OR terminal_at IS NOT NULL);",
+                    table_name,
+                )
+            )
     plan = SchemaReconciliationPlan(tuple(actions))
     assert_no_forbidden_schema_sql(plan.sql_script())
     return plan

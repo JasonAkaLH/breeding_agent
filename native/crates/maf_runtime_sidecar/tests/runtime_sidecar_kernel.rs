@@ -1,8 +1,313 @@
 use maf_runtime_sidecar::{
     AppendEventRequest, BundleRevisionResult, COMPONENT_ID, CompatibilityCheck,
     CompatibilityCheckRequest, HealthState, Idempotency, PROTOCOL_VERSION, ReadinessState,
-    ReplayEventsRequest, RuntimeSidecarKernel, RuntimeSidecarService,
+    ReplayEventsRequest, RuntimeSidecarKernel, RuntimeSidecarService, TaskNodeRecord, TaskRecord,
+    TaskRouteAssignment,
 };
+
+fn task_node(status: &str) -> TaskNodeRecord {
+    TaskNodeRecord {
+        node_id: "node-authority".to_owned(),
+        task_id: "task-authority".to_owned(),
+        capability_id: "main_agent.respond".to_owned(),
+        assigned_instance_id: None,
+        status: status.to_owned(),
+        criticality: "required".to_owned(),
+        dependency_type: "hard".to_owned(),
+        retry_policy_json: b"{}".to_vec(),
+        timeout_policy_json: b"{}".to_vec(),
+        resource_class: None,
+        input_refs: Vec::new(),
+        output_refs: Vec::new(),
+        started_at: None,
+        finished_at: None,
+    }
+}
+
+fn task_record(status: &str) -> TaskRecord {
+    TaskRecord {
+        task_id: "task-authority".to_owned(),
+        conversation_id: "conv".to_owned(),
+        root_message_id: "message".to_owned(),
+        status: status.to_owned(),
+        routing_mode: "auto".to_owned(),
+        requested_capability_id: None,
+        root_node_id: None,
+        summary: None,
+        cancel_requested_at: None,
+        created_at: Some("2026-08-12T00:00:00Z".to_owned()),
+        updated_at: None,
+        assignment: Some(TaskRouteAssignment {
+            route_mode: "shadow".to_owned(),
+            real_path: "legacy".to_owned(),
+            shadow_path: "user_scoped".to_owned(),
+            config_version: "config-v1".to_owned(),
+            reason_code: "shadow_sample".to_owned(),
+            cohort_id: Some("internal".to_owned()),
+            assignment_key_hash: Some("sha256:assignment".to_owned()),
+            assigned_at: Some("2026-08-12T00:00:00Z".to_owned()),
+        }),
+    }
+}
+
+#[test]
+fn task_record_is_authoritative_idempotent_and_assignment_is_write_once() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    let accepted = task_record("accepted");
+    let (stored, duplicate) = kernel
+        .submit_task_record(accepted.clone(), "task-key-1", None)
+        .expect("submit complete TaskRecord");
+    assert_eq!(stored, accepted);
+    assert!(!duplicate);
+    assert_eq!(kernel.get_task("task-authority"), Some(accepted.clone()));
+
+    let (_, duplicate) = kernel
+        .submit_task_record(accepted.clone(), "task-key-1", Some("accepted"))
+        .expect("same key and payload retries");
+    assert!(duplicate);
+    let conflict = kernel
+        .submit_task_record(task_record("running"), "task-key-1", Some("accepted"))
+        .expect_err("same key with changed payload conflicts");
+    assert_eq!(conflict.code, "runtime_store_idempotency_conflict");
+    assert!(!conflict.retriable);
+
+    let mut running = task_record("running");
+    let (_, duplicate) = kernel
+        .submit_task_record(running.clone(), "task-key-2", Some("accepted"))
+        .expect("legal status advance");
+    assert!(!duplicate);
+    running.assignment.as_mut().unwrap().config_version = "changed".to_owned();
+    let assignment_conflict = kernel
+        .submit_task_record(running, "task-key-3", Some("running"))
+        .expect_err("assignment mutation conflicts");
+    assert_eq!(
+        assignment_conflict.code,
+        "runtime_store_idempotency_conflict"
+    );
+}
+
+#[test]
+fn legacy_null_assignment_requires_an_explicit_migration() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    let mut legacy = task_record("completed");
+    legacy.assignment = None;
+    kernel
+        .submit_task_record(legacy.clone(), "legacy-null", None)
+        .expect("store legacy null assignment");
+    assert_eq!(kernel.get_task("task-authority"), Some(legacy));
+
+    let error = kernel
+        .submit_task_record(task_record("running"), "legacy-upgrade", Some("completed"))
+        .expect_err("legacy assignment upgrade must fail closed");
+    assert_eq!(error.code, "runtime_store_migration_blocked");
+}
+
+#[test]
+fn task_node_identity_and_terminal_status_are_immutable() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    kernel
+        .transition_node(
+            "task-authority",
+            "node-authority",
+            "completed",
+            "",
+            "node-complete",
+            Some(task_node("completed")),
+        )
+        .expect("store completed node");
+
+    for (key, mut replacement) in [
+        ("node-task-change", task_node("completed")),
+        ("node-capability-change", task_node("completed")),
+        ("node-reopen", task_node("running")),
+    ] {
+        if key == "node-task-change" {
+            replacement.task_id = "other-task".to_owned();
+        } else if key == "node-capability-change" {
+            replacement.capability_id = "skill.other".to_owned();
+        }
+        let task_id = replacement.task_id.clone();
+        let status = replacement.status.clone();
+        let error = kernel
+            .transition_node(
+                &task_id,
+                "node-authority",
+                &status,
+                "completed",
+                key,
+                Some(replacement),
+            )
+            .expect_err("invalid TaskNode replacement must fail");
+        assert_eq!(error.code, "runtime_store_write_failed");
+    }
+}
+
+#[test]
+fn node_transition_exact_retry_returns_the_original_result_before_cas_validation() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    let request_node = task_node("running");
+    let first = kernel
+        .transition_node(
+            "task-authority",
+            "node-authority",
+            "running",
+            "",
+            "node-response-lost",
+            Some(request_node.clone()),
+        )
+        .expect("first transition succeeds before its response is lost");
+
+    let retried = kernel
+        .transition_node(
+            "task-authority",
+            "node-authority",
+            "running",
+            "",
+            "node-response-lost",
+            Some(request_node.clone()),
+        )
+        .expect("exact retry returns the durable idempotency receipt");
+
+    assert_eq!(retried, first);
+    assert_eq!(kernel.get_task_node("node-authority"), Some(request_node));
+}
+
+#[test]
+fn node_transition_idempotency_key_rejects_request_or_node_drift() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    kernel
+        .transition_node(
+            "task-authority",
+            "node-authority",
+            "running",
+            "",
+            "node-shared-key",
+            Some(task_node("running")),
+        )
+        .expect("store original transition receipt");
+
+    let expected_status_drift = kernel
+        .transition_node(
+            "task-authority",
+            "node-authority",
+            "running",
+            "ready",
+            "node-shared-key",
+            Some(task_node("running")),
+        )
+        .expect_err("same key cannot be reused with a changed request");
+    assert_eq!(
+        expected_status_drift.code,
+        "runtime_store_idempotency_conflict"
+    );
+
+    let mut other_node = task_node("running");
+    other_node.node_id = "node-other".to_owned();
+    let node_drift = kernel
+        .transition_node(
+            "task-authority",
+            "node-other",
+            "running",
+            "",
+            "node-shared-key",
+            Some(other_node),
+        )
+        .expect_err("same key cannot borrow a receipt from another node");
+    assert_eq!(node_drift.code, "runtime_store_idempotency_conflict");
+    assert_eq!(kernel.get_task_node("node-other"), None);
+}
+
+#[test]
+fn rollout_assignment_accepts_enforce_fallback_and_unavailable_paths() {
+    for (index, real_path) in ["legacy", "user_scoped", "unavailable"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut task = task_record("accepted");
+        task.task_id = format!("task-enforce-{index}");
+        let assignment = task.assignment.as_mut().expect("assignment");
+        assignment.route_mode = "enforce".to_owned();
+        assignment.real_path = real_path.to_owned();
+        assignment.shadow_path = "none".to_owned();
+
+        RuntimeSidecarKernel::new()
+            .submit_task_record(task, format!("key-{index}"), None)
+            .expect("enforce assignment path is valid");
+    }
+}
+
+#[test]
+fn task_record_status_updates_do_not_requeue_the_same_task() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    kernel
+        .submit_task_record(task_record("accepted"), "task-status-accepted", None)
+        .expect("initial task record");
+    kernel
+        .submit_task_record(
+            task_record("running"),
+            "task-status-running",
+            Some("accepted"),
+        )
+        .expect("status update must not requeue");
+
+    for index in 0..1023 {
+        kernel
+            .submit_task(
+                format!("filler-{index}"),
+                "conv",
+                format!("filler-key-{index}"),
+            )
+            .expect("only one queue slot is consumed by the updated task");
+    }
+}
+
+#[test]
+fn stale_task_and_node_expected_statuses_do_not_mutate_authoritative_state() {
+    let mut kernel = RuntimeSidecarKernel::new();
+    kernel
+        .submit_task_record(task_record("running"), "task-running", None)
+        .expect("store running task");
+    kernel
+        .transition_node(
+            "task-authority",
+            "node-authority",
+            "running",
+            "",
+            "node-running",
+            Some(task_node("running")),
+        )
+        .expect("store running node");
+
+    assert_eq!(
+        kernel
+            .submit_task_record(task_record("completed"), "task-stale", Some("planning"),)
+            .expect_err("stale task CAS must fail")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    assert_eq!(
+        kernel
+            .transition_node(
+                "task-authority",
+                "node-authority",
+                "completed",
+                "ready",
+                "node-stale",
+                Some(task_node("completed")),
+            )
+            .expect_err("stale node CAS must fail")
+            .code,
+        "runtime_store_idempotency_conflict"
+    );
+    assert_eq!(
+        kernel.get_task("task-authority"),
+        Some(task_record("running"))
+    );
+    assert_eq!(
+        kernel.get_task_node("node-authority"),
+        Some(task_node("running"))
+    );
+}
 use maf_runtime_store::{
     ERROR_CODE_TABLE_HASH, FEATURE_EVENT_LOG, FEATURE_RUNTIME_STORE, FEATURE_TASK_DISPATCHER,
     SCHEMA_HASH,

@@ -1,15 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import inspect
+import json
 import os
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from src.core.enums import ArtifactType, NodeStatus, TaskStatus
-from src.core.models import Artifact, EventRecord, Task, TaskEdge, TaskNode
+from src.core.models import (
+    Artifact,
+    EventRecord,
+    Interrupt,
+    MCPBranchRecord,
+    MCPCallRecord,
+    MCPRemoteTaskBinding,
+    Task,
+    TaskEdge,
+    TaskNode,
+)
 from src.lifecycle.cancellation_service import CancellationService
+from src.lifecycle.interrupt_service import InterruptService
 from src.storage.rust_contract import (
     artifact_policy,
     benchmark_policy,
@@ -37,6 +53,7 @@ from src.storage.runtime_sidecar_facade import (
     validate_runtime_sidecar_endpoint,
     validate_runtime_sidecar_handshake,
     validate_runtime_sidecar_migration_plan,
+    validate_runtime_sidecar_migration_evidence_artifact,
     validate_runtime_sidecar_ops_readiness,
     validate_runtime_sidecar_promotion_readiness,
     validate_runtime_sidecar_response,
@@ -45,27 +62,143 @@ from src.storage.sqlite import SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
 
 
+def _valid_task_authority_cutover() -> dict[str, object]:
+    empty_digest = hashlib.sha256(b"[]").hexdigest()
+    inventory_digest = hashlib.sha256(b"canonical-inventory").hexdigest()
+    return {
+        "backfill_import_complete": True,
+        "task_inventory": {
+            "legacy_count": 1,
+            "sidecar_count": 1,
+            "legacy_canonical_digest": inventory_digest,
+            "sidecar_canonical_digest": inventory_digest,
+        },
+        "task_node_inventory": {
+            "legacy_count": 1,
+            "sidecar_count": 1,
+            "legacy_canonical_digest": inventory_digest,
+            "sidecar_canonical_digest": inventory_digest,
+        },
+        "legacy_null_assignment_resolution": {
+            "resolution_complete": True,
+            "active_count": 0,
+            "active_canonical_digest": empty_digest,
+            "terminal_historical_count": 1,
+            "terminal_historical_canonical_digest": inventory_digest,
+            "terminal_historical_remains_unassigned": True,
+        },
+    }
+
+
 class _RecordingRuntimeSidecarClient:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, str]]] = []
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.tasks: dict[str, dict[str, object]] = {}
         self.edges: dict[str, list[dict[str, object]]] = {}
         self.artifacts: dict[str, dict[str, object]] = {}
+        self.nodes: dict[str, dict[str, object]] = {}
 
-    async def submit_task(self, *, task_id: str, conversation_id: str, idempotency_key: str) -> dict[str, object]:
+    async def submit_task(
+        self,
+        *,
+        task_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        node: dict[str, object] | None = None,
+        task: dict[str, object],
+        expected_from_status: str | None = None,
+    ) -> dict[str, object]:
         self.calls.append(
             (
                 "task_submit",
                 {
                     "conversation_id": conversation_id,
                     "idempotency_key": idempotency_key,
+                    "task": task,
                     "task_id": task_id,
+                    "expected_from_status": expected_from_status,
                 },
             )
         )
+        current = self.tasks.get(task_id)
+        current_status = None if current is None else str(current["status"])
+        if expected_from_status != current_status:
+            return {
+                "operation": "task_submit",
+                "task_id": "",
+                "duplicate": False,
+                "task": None,
+                "error": {
+                    "code": "runtime_store_idempotency_conflict",
+                    "message": "stale expected status",
+                    "category": "internal",
+                    "retriable": False,
+                    "safe_metadata": {},
+                },
+            }
+        self.tasks[task_id] = task
         return {
             "operation": "task_submit",
             "task_id": task_id,
             "duplicate": False,
+            "task": task,
+            "error": None,
+        }
+
+    async def get_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_get", {"task_id": task_id}))
+        task = self.tasks.get(task_id)
+        return {
+            "operation": "task_get",
+            "found": task is not None,
+            "task": task,
+            "error": None,
+        }
+
+    async def list_tasks_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+        statuses: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "task_list_for_conversation",
+                {"conversation_id": conversation_id, "statuses": statuses},
+            )
+        )
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task["conversation_id"] == conversation_id
+            and (not statuses or task["status"] in statuses)
+        ]
+        tasks.sort(key=lambda task: (task.get("created_at") or "", task["task_id"]), reverse=True)
+        return {
+            "operation": "task_list_for_conversation",
+            "tasks": tasks,
+            "error": None,
+        }
+
+    async def get_active_task_for_conversation(
+        self,
+        *,
+        conversation_id: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            ("task_get_active_for_conversation", {"conversation_id": conversation_id})
+        )
+        active_statuses = ("accepted", "planning", "running", "cancelling")
+        response = await self.list_tasks_for_conversation(
+            conversation_id=conversation_id,
+            statuses=active_statuses,
+        )
+        self.calls.pop()
+        task = response["tasks"][0] if response["tasks"] else None
+        return {
+            "operation": "task_get_active_for_conversation",
+            "found": task is not None,
+            "task": task,
             "error": None,
         }
 
@@ -75,7 +208,9 @@ class _RecordingRuntimeSidecarClient:
         task_id: str,
         node_id: str,
         to_status: str,
+        expected_from_status: str,
         idempotency_key: str,
+        node: dict[str, object] | None = None,
     ) -> dict[str, object]:
         self.calls.append(
             (
@@ -85,15 +220,49 @@ class _RecordingRuntimeSidecarClient:
                     "node_id": node_id,
                     "task_id": task_id,
                     "to_status": to_status,
+                    "expected_from_status": expected_from_status,
+                    "node": node,
                 },
             )
         )
+        current = self.nodes.get(node_id)
+        current_status = "" if current is None else str(current["status"])
+        if expected_from_status != current_status:
+            return {
+                "operation": "node_state_transition",
+                "node_id": "",
+                "status": "",
+                "error": {
+                    "code": "runtime_store_idempotency_conflict",
+                    "message": "stale expected status",
+                    "category": "internal",
+                    "retriable": False,
+                    "safe_metadata": {},
+                },
+                "node": None,
+            }
+        if node is not None:
+            self.nodes[node_id] = node
         return {
             "operation": "node_state_transition",
             "node_id": node_id,
             "status": to_status,
             "error": None,
+            "node": node,
         }
+
+    async def get_task_node(self, *, node_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_get", {"node_id": node_id}))
+        node = self.nodes.get(node_id)
+        return {"operation": "task_node_get", "found": node is not None, "node": node, "error": None}
+
+    async def list_task_nodes_for_task(self, *, task_id: str) -> dict[str, object]:
+        self.calls.append(("task_node_list", {"task_id": task_id}))
+        nodes = sorted(
+            (node for node in self.nodes.values() if node["task_id"] == task_id),
+            key=lambda node: str(node["node_id"]),
+        )
+        return {"operation": "task_node_list", "nodes": nodes, "error": None}
 
     async def save_task_edge(
         self,
@@ -315,6 +484,26 @@ class _RecordingRuntimeSidecarClient:
         }
 
 
+class _MismatchedTaskNodeSidecar(_RecordingRuntimeSidecarClient):
+    async def transition_node(self, **payload: object) -> dict[str, object]:
+        response = await super().transition_node(**payload)  # type: ignore[arg-type]
+        response["node_id"] = "different-node"
+        return response
+
+    async def get_task_node(self, *, node_id: str) -> dict[str, object]:
+        response = await super().get_task_node(node_id=node_id)
+        if response["node"] is not None:
+            response["node"] = {**response["node"], "node_id": "different-node"}  # type: ignore[misc]
+        return response
+
+    async def list_task_nodes_for_task(self, *, task_id: str) -> dict[str, object]:
+        response = await super().list_task_nodes_for_task(task_id=task_id)
+        response["nodes"] = [
+            {**node, "task_id": "different-task"} for node in response["nodes"]  # type: ignore[union-attr]
+        ]
+        return response
+
+
 class _RecordingAuditSink:
     def __init__(self) -> None:
         self.records: list[tuple[str, dict[str, object]]] = []
@@ -413,6 +602,28 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             self.assertIn(name, write_ops)
             self.assertEqual(write_ops[name]["enforce_failure"], "fail_closed")
             self.assertFalse(write_ops[name]["python_legacy_write_fallback"])
+
+    def test_task_authority_contract_exposes_read_and_non_retriable_conflict(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        self.assertIn("task_read", contract["supported_features"])
+        task_get = next(operation for operation in contract["operations"] if operation["name"] == "task_get")
+        self.assertEqual(task_get["kind"], "read")
+        self.assertFalse(task_get["idempotency_required"])
+        self.assertEqual(operation_policy("task_list_for_conversation")["kind"], "read")
+        self.assertEqual(operation_policy("task_get_active_for_conversation")["kind"], "read")
+        self.assertEqual(operation_policy("task_node_get")["kind"], "read")
+        self.assertEqual(operation_policy("task_node_list")["kind"], "read")
+        conflict = next(error for error in contract["error_codes"] if error["code"] == "runtime_store_idempotency_conflict")
+        self.assertEqual(conflict["category"], "internal")
+        self.assertFalse(conflict["retriable"])
+        self.assertEqual(
+            contract["schema_hash"],
+            "maf_runtime_v1_schema_20260813_task_authority_cas",
+        )
+        self.assertEqual(
+            contract["artifact_policy"]["expected_proto_hash"],
+            "maf_runtime_proto_v1_20260813_expected_status_cas",
+        )
 
     def test_runtime_contract_accessors_drive_event_append_payload_limit(self) -> None:
         event_append = operation_policy("event_append")
@@ -660,32 +871,328 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
             saved_task = asyncio.run(storage.save_task(task))
             saved_node = asyncio.run(storage.save_task_node(node))
+            loaded_node = asyncio.run(storage.get_task_node(node.node_id))
+            listed_nodes = asyncio.run(storage.list_task_nodes_for_task(task.task_id))
 
         self.assertEqual(saved_task, task)
         self.assertEqual(saved_node, node)
+        self.assertEqual(loaded_node, node)
+        self.assertEqual(listed_nodes, [node])
         self.assertEqual(
-            sidecar.calls,
+            [call[0] for call in sidecar.calls],
             [
-                (
-                    "task_submit",
-                    {
-                        "conversation_id": "conv-sidecar-store",
-                        "idempotency_key": "task-sidecar-store",
-                        "task_id": "task-sidecar-store",
-                    },
-                ),
-                (
-                    "node_state_transition",
-                    {
-                        "idempotency_key": "node-sidecar-store:running",
-                        "node_id": "node-sidecar-store",
-                        "task_id": "task-sidecar-store",
-                        "to_status": "running",
-                    },
-                ),
+                "task_get",
+                "task_submit",
+                "task_node_get",
+                "node_state_transition",
+                "task_node_get",
+                "task_node_list",
             ],
         )
+        submit_payload = sidecar.calls[1][1]
+        self.assertEqual(submit_payload["conversation_id"], "conv-sidecar-store")
+        self.assertEqual(submit_payload["task_id"], "task-sidecar-store")
+        self.assertTrue(str(submit_payload["idempotency_key"]).startswith("task-sidecar-store:"))
+        self.assertEqual(submit_payload["task"]["root_message_id"], "msg-sidecar-store")
+        self.assertTrue(str(sidecar.calls[3][1]["idempotency_key"]).startswith("node-sidecar-store:"))
+        self.assertEqual(sidecar.calls[3][1]["node"]["capability_id"], "main_agent.respond")
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task(task.task_id)))
+        self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
+
+    def test_remote_terminal_outbox_transitions_authoritative_sidecar_node_in_enforce(self) -> None:
+        now = datetime(2026, 8, 13, 12, 0, 0)
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        task = Task("task-mcp-enforce", "conv-mcp-enforce", "msg-mcp-enforce")
+        node = TaskNode(
+            node_id="node-mcp-enforce",
+            task_id=task.task_id,
+            capability_id="mcp.dispatch",
+            status=NodeStatus.WAITING_FOR_DEPENDENCY,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            asyncio.run(storage.save_task_node(node))
+
+        asyncio.run(
+            storage.save_mcp_branch_record(
+                MCPBranchRecord(
+                    branch_id="branch-mcp-enforce",
+                    owner_user_id="alice",
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    status="ready",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        )
+        self.assertTrue(
+            asyncio.run(
+                storage.reserve_mcp_call(
+                    MCPCallRecord(
+                        call_ref="call-mcp-enforce",
+                        branch_id="branch-mcp-enforce",
+                        owner_user_id="alice",
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        server_id="server-a",
+                        tool_name="lookup",
+                        status="active",
+                        call_sequence=1,
+                        arguments_sha256="args",
+                        server_security_version=1,
+                        input_schema_sha256="schema",
+                        protocol_version="2026-07-28",
+                        may_have_dispatched=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            )
+        )
+        binding = MCPRemoteTaskBinding(
+            safe_remote_task_ref="remote-mcp-enforce",
+            owner_user_id="alice",
+            task_id=task.task_id,
+            node_id=node.node_id,
+            call_ref="call-mcp-enforce",
+            server_id="server-a",
+            protocol_version="2026-07-28",
+            remote_task_ciphertext=b"ciphertext",
+            remote_task_nonce=b"nonce",
+            encryption_version=1,
+            last_status="working",
+            next_poll_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        asyncio.run(storage.save_mcp_remote_task_binding(binding))
+        claimed_binding = asyncio.run(
+            storage.claim_due_mcp_remote_task_bindings(
+                claim_owner="worker",
+                claim_token="binding-token",
+                now=now,
+                lease_expires_at=now + timedelta(seconds=30),
+            )
+        )[0]
+        asyncio.run(
+            storage.finish_mcp_remote_task_binding(
+                "alice",
+                task.task_id,
+                binding.safe_remote_task_ref,
+                claim_owner="worker",
+                claim_token="binding-token",
+                expected_revision=claimed_binding.revision,
+                remote_status="completed",
+                call_status="completed",
+                terminal_at=now + timedelta(seconds=1),
+                result_ref="mcp-result-safe",
+            )
+        )
+        outbox = asyncio.run(
+            storage.claim_mcp_remote_task_outbox(
+                claim_owner="worker",
+                claim_token="outbox-token",
+                now=now + timedelta(seconds=1),
+                lease_expires_at=now + timedelta(seconds=31),
+            )
+        )[0]
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            applied = asyncio.run(
+                storage.apply_mcp_remote_task_continuation(
+                    outbox.outbox_id,
+                    claim_owner="worker",
+                    claim_token="outbox-token",
+                    expected_revision=outbox.revision,
+                    updated_at=now + timedelta(seconds=2),
+                )
+            )
+            authoritative = asyncio.run(storage.get_task_node(node.node_id))
+
+        self.assertIsNotNone(applied)
+        self.assertEqual(authoritative.status, NodeStatus.COMPLETED)
+        self.assertIsNone(
+            asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id))
+        )
+
+    def test_task_node_sidecar_responses_must_match_requested_identity(self) -> None:
+        sidecar = _MismatchedTaskNodeSidecar()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        node = TaskNode(
+            node_id="node-response-id",
+            task_id="task-response-id",
+            capability_id="main_agent.respond",
+            status=NodeStatus.RUNNING,
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_response_invalid"):
+                asyncio.run(storage.save_task_node(node))
+            sidecar.nodes[node.node_id] = {
+                "node_id": node.node_id,
+                "task_id": node.task_id,
+                "capability_id": node.capability_id,
+                "assigned_instance_id": None,
+                "status": str(node.status),
+                "criticality": str(node.criticality),
+                "dependency_type": str(node.dependency_type),
+                "retry_policy": {},
+                "timeout_policy": {},
+                "resource_class": None,
+                "input_refs": [],
+                "output_refs": [],
+                "started_at": None,
+                "finished_at": None,
+            }
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_response_invalid"):
+                asyncio.run(storage.get_task_node(node.node_id))
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_response_invalid"):
+                asyncio.run(storage.list_task_nodes_for_task(node.task_id))
+
+    def test_enforce_compare_and_set_rejects_competing_stale_task_and_node_updates(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-sidecar-cas",
+            conversation_id="conv-sidecar-cas",
+            root_message_id="msg-sidecar-cas",
+            status=TaskStatus.RUNNING,
+        )
+        node = TaskNode(
+            node_id="node-sidecar-cas",
+            task_id=task.task_id,
+            capability_id="main_agent.respond",
+            status=NodeStatus.RUNNING,
+        )
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            asyncio.run(storage.save_task_node(node))
+            self.assertEqual(
+                asyncio.run(
+                    storage.compare_and_set_task(
+                        replace(task, status=TaskStatus.COMPLETED),
+                        expected_from_status=TaskStatus.RUNNING,
+                    )
+                ).status,
+                TaskStatus.COMPLETED,
+            )
+            self.assertEqual(
+                asyncio.run(
+                    storage.compare_and_set_task_node(
+                        replace(node, status=NodeStatus.COMPLETED),
+                        expected_from_status=NodeStatus.RUNNING,
+                    )
+                ).status,
+                NodeStatus.COMPLETED,
+            )
+            self.assertIsNone(
+                asyncio.run(
+                    storage.compare_and_set_task(
+                        replace(task, status=TaskStatus.FAILED),
+                        expected_from_status=TaskStatus.RUNNING,
+                    )
+                )
+            )
+            self.assertIsNone(
+                asyncio.run(
+                    storage.compare_and_set_task_node(
+                        replace(node, status=NodeStatus.FAILED),
+                        expected_from_status=NodeStatus.RUNNING,
+                    )
+                )
+            )
+
+    def test_runtime_store_enforce_queries_authoritative_sidecar_without_python_task_rows(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        accepted = Task(
+            task_id="task-query-accepted",
+            conversation_id="conv-query-sidecar",
+            root_message_id="msg-accepted",
+            status=TaskStatus.ACCEPTED,
+            created_at=datetime(2026, 8, 13, 10, 0, 0),
+        )
+        completed = Task(
+            task_id="task-query-completed",
+            conversation_id="conv-query-sidecar",
+            root_message_id="msg-completed",
+            status=TaskStatus.COMPLETED,
+            created_at=datetime(2026, 8, 13, 11, 0, 0),
+        )
+
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(accepted))
+            asyncio.run(storage.save_task(completed))
+            listed = asyncio.run(storage.list_tasks_for_conversation("conv-query-sidecar"))
+            unfinished = asyncio.run(
+                storage.list_tasks_for_conversation(
+                    "conv-query-sidecar",
+                    statuses={TaskStatus.ACCEPTED, TaskStatus.RUNNING},
+                )
+            )
+            active = asyncio.run(storage.get_active_task_for_conversation("conv-query-sidecar"))
+
+        self.assertEqual([task.task_id for task in listed], [completed.task_id, accepted.task_id])
+        self.assertEqual(unfinished, [accepted])
+        self.assertEqual(active, accepted)
+        python_storage = SQLiteStorage(self.session_factory)
+        self.assertEqual(asyncio.run(python_storage.list_tasks_for_conversation("conv-query-sidecar")), [])
+        self.assertIsNone(asyncio.run(python_storage.get_active_task_for_conversation("conv-query-sidecar")))
+
+    def test_runtime_store_enforce_task_queries_fail_closed_without_sidecar(self) -> None:
+        storage = SQLiteStorage(self.session_factory)
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            for query in (
+                lambda: storage.list_tasks_for_conversation("conv-query-unavailable"),
+                lambda: storage.get_active_task_for_conversation("conv-query-unavailable"),
+                lambda: storage.get_task_node("node-query-unavailable"),
+                lambda: storage.list_task_nodes_for_task("task-query-unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_unavailable: Rust runtime sidecar enforce mode is active",
+                ):
+                    asyncio.run(query())
+
+    def test_cancel_and_interrupt_read_authoritative_sidecar_nodes_in_enforce(self) -> None:
+        sidecar = _RecordingRuntimeSidecarClient()
+        storage = SQLiteStorage(self.session_factory, runtime_sidecar_client=sidecar)
+        task = Task(
+            task_id="task-lifecycle-sidecar",
+            conversation_id="conv-lifecycle-sidecar",
+            root_message_id="msg-lifecycle-sidecar",
+            status=TaskStatus.RUNNING,
+        )
+        node = TaskNode(
+            node_id="node-lifecycle-sidecar",
+            task_id=task.task_id,
+            capability_id="skill.data_query",
+            status=NodeStatus.RUNNING,
+        )
+        interrupt = Interrupt(
+            interrupt_id="interrupt-lifecycle-sidecar",
+            conversation_id=task.conversation_id,
+            task_id=task.task_id,
+            node_id=node.node_id,
+            source_agent="skill.data-query",
+            source_message_id="mail-1",
+            question="region?",
+            reason_code="missing_region",
+        )
+        with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            asyncio.run(storage.save_task_node(node))
+            opened = asyncio.run(InterruptService(storage).open_interrupt(interrupt))
+            cancelled = asyncio.run(
+                CancellationService(storage, runtime_sidecar_client=sidecar).cancel_task_context(task.task_id)
+            )
+
+        self.assertEqual(opened.status, "open")
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertIn("task_node_get", [call[0] for call in sidecar.calls])
+        self.assertIn("task_node_list", [call[0] for call in sidecar.calls])
         self.assertIsNone(asyncio.run(SQLiteStorage(self.session_factory).get_task_node(node.node_id)))
 
     def test_runtime_store_shadow_routes_to_sidecar_and_keeps_python_visible_write(self) -> None:
@@ -712,13 +1219,41 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"}):
             saved_task = asyncio.run(storage.save_task(task))
             saved_node = asyncio.run(storage.save_task_node(node))
+            listed_tasks = asyncio.run(storage.list_tasks_for_conversation(task.conversation_id))
+            active_task = asyncio.run(storage.get_active_task_for_conversation(task.conversation_id))
+            loaded_node = asyncio.run(storage.get_task_node(node.node_id))
+            listed_nodes = asyncio.run(storage.list_task_nodes_for_task(task.task_id))
 
         self.assertEqual(saved_task, task)
         self.assertEqual(saved_node, node)
+        self.assertEqual(listed_tasks, [task])
+        self.assertEqual(active_task, task)
+        self.assertEqual(loaded_node, node)
+        self.assertEqual(listed_nodes, [node])
         self.assertIsNotNone(asyncio.run(storage.get_task(task.task_id)))
         self.assertIsNotNone(asyncio.run(storage.get_task_node(node.node_id)))
-        self.assertEqual([call[0] for call in sidecar.calls], ["task_submit", "node_state_transition"])
-        self.assertEqual([event["operation"] for event in audit_events], ["task_submit", "node_state_transition"])
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            [
+                "task_submit",
+                "node_state_transition",
+                "task_list_for_conversation",
+                "task_get_active_for_conversation",
+                "task_node_get",
+                "task_node_list",
+            ],
+        )
+        self.assertEqual(
+            [event["operation"] for event in audit_events],
+            [
+                "task_submit",
+                "node_state_transition",
+                "task_list_for_conversation",
+                "task_get_active_for_conversation",
+                "task_node_get",
+                "task_node_list",
+            ],
+        )
         self.assertTrue(all(event["rust_status"] == "ok" for event in audit_events))
 
     def test_runtime_store_enforce_mode_rejects_python_legacy_graph_writes_without_sidecar(self) -> None:
@@ -848,14 +1383,14 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             root_message_id="msg-cancel-sidecar",
             status=TaskStatus.RUNNING,
         )
-        asyncio.run(storage.save_task(task))
-
         with patch.dict(os.environ, {"MAF_RUST_RUNTIME_STORE_MODE": "enforce"}):
+            asyncio.run(storage.save_task(task))
+            sidecar.calls.clear()
             cancelled = asyncio.run(service.cancel_task_context(task.task_id))
 
         self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
-        self.assertEqual(sidecar.calls[0][0], "cancellation_token_write")
-        self.assertEqual(sidecar.calls[0][1]["task_id"], task.task_id)
+        cancellation_call = next(call for call in sidecar.calls if call[0] == "cancellation_token_write")
+        self.assertEqual(cancellation_call[1]["task_id"], task.task_id)
 
     def test_cancellation_token_shadow_records_sidecar_audit_after_legacy_write(self) -> None:
         sidecar = _RecordingRuntimeSidecarClient()
@@ -1448,12 +1983,16 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             for component in policy["required_components"]
         }
         plan = {
-            "target_schema_version": "runtime_store_schema_v2",
+            "target_schema_version": load_runtime_sidecar_contract()["schema_hash"],
             "components": component_evidence,
+            "task_authority_cutover": _valid_task_authority_cutover(),
         }
         safe = validate_runtime_sidecar_migration_plan(plan)
         self.assertEqual(safe["migration"], "ready")
-        self.assertEqual(safe["target_schema_version"], "runtime_store_schema_v2")
+        self.assertEqual(
+            safe["target_schema_version"],
+            load_runtime_sidecar_contract()["schema_hash"],
+        )
         self.assertEqual(safe["components"], ",".join(policy["required_components"]))
 
         invalid_plan = {
@@ -1468,6 +2007,81 @@ class RuntimeSidecarRustContractTest(SQLiteStorageTestCase):
             "runtime_store_migration_blocked: Rust runtime sidecar migration plan is incomplete",
         ):
             validate_runtime_sidecar_migration_plan(invalid_plan)
+
+        for hostile_cutover in (
+            {**_valid_task_authority_cutover(), "backfill_import_complete": False},
+            {
+                **_valid_task_authority_cutover(),
+                "task_inventory": {
+                    **_valid_task_authority_cutover()["task_inventory"],
+                    "sidecar_count": 2,
+                },
+            },
+            {
+                **_valid_task_authority_cutover(),
+                "task_node_inventory": {
+                    **_valid_task_authority_cutover()["task_node_inventory"],
+                    "sidecar_canonical_digest": "f" * 64,
+                },
+            },
+            {
+                **_valid_task_authority_cutover(),
+                "legacy_null_assignment_resolution": {
+                    **_valid_task_authority_cutover()["legacy_null_assignment_resolution"],
+                    "active_count": 1,
+                },
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+                validate_runtime_sidecar_migration_plan(
+                    {**plan, "task_authority_cutover": hostile_cutover}
+                )
+
+    def test_task_authority_migration_artifact_is_contract_bound_and_authenticated(self) -> None:
+        contract = load_runtime_sidecar_contract()
+        key = b"deployment-owned-migration-key-32bytes"
+        artifact = {
+            "schema": migration_policy()["task_authority_evidence_schema"],
+            "component": contract["component"],
+            "protocol_version": contract["protocol_version"],
+            "schema_hash": contract["schema_hash"],
+            "error_code_table_hash": contract["error_code_table_hash"],
+            "key_id": "deployment-key-v1",
+            "migration_plan": {
+                "target_schema_version": contract["schema_hash"],
+                "components": {
+                    component: {
+                        evidence: True
+                        for evidence in migration_policy()["required_evidence"]
+                    }
+                    for component in migration_policy()["required_components"]
+                },
+                "task_authority_cutover": _valid_task_authority_cutover(),
+            },
+        }
+        signature = hmac.new(
+            key,
+            json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        signed = {**artifact, "hmac_sha256": signature}
+        self.assertEqual(
+            validate_runtime_sidecar_migration_evidence_artifact(
+                signed, authentication_key=key
+            )["migration"],
+            "ready",
+        )
+        with self.assertRaisesRegex(RuntimeError, "runtime_store_migration_blocked"):
+            validate_runtime_sidecar_migration_evidence_artifact(
+                {
+                    **signed,
+                    "migration_plan": {
+                        **signed["migration_plan"],
+                        "target_schema_version": "tampered",
+                    },
+                },
+                authentication_key=key,
+            )
 
     def test_runtime_sidecar_ops_readiness_requires_runbooks_and_drills(self) -> None:
         self.assertEqual(error_policy("runtime_store_ops_readiness_blocked")["category"], "quality_gate")

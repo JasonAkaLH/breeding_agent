@@ -10,6 +10,11 @@ from typing import Any
 from jsonschema import Draft202012Validator, Draft7Validator, SchemaError, ValidationError
 
 from .client import MCPClientError, MCPProtocolError, MCPRemoteError
+from .credentials import (
+    CredentialSecurityError,
+    MCPRecoveryCallContext,
+    MCPRecoveryService,
+)
 from .protocol import (
     JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION_2026_07_28,
@@ -150,6 +155,8 @@ class MCP2026Adapter:
         enable_elicitation: bool = False,
         enable_tasks: bool = False,
         safe_ref_factory: Callable[[str], str] | None = None,
+        recovery_service: MCPRecoveryService | None = None,
+        recovery_only: bool = False,
     ) -> None:
         self.server_id = server_id
         self._transport = transport
@@ -162,6 +169,8 @@ class MCP2026Adapter:
         self._enable_elicitation = bool(enable_elicitation)
         self._enable_tasks = bool(enable_tasks)
         self._safe_ref_factory = safe_ref_factory or (lambda prefix: f"{prefix}:{secrets.token_urlsafe(24)}")
+        self._recovery_service = recovery_service
+        self._recovery_only = bool(recovery_only)
         self._request_id = 0
         self._closed = False
         self._discover_result: MCPDiscoverResult | None = None
@@ -173,6 +182,10 @@ class MCP2026Adapter:
     @property
     def server_capabilities(self) -> Mapping[str, Any]:
         return dict(self._discover_result.capabilities) if self._discover_result is not None else {}
+
+    @property
+    def supports_durable_recovery_context(self) -> bool:
+        return self._recovery_service is not None
 
     @property
     def negotiated_session(self) -> MCPNegotiatedSession | None:
@@ -281,6 +294,7 @@ class MCP2026Adapter:
         sealed_request_state_ref: str | None = None,
         request_registered_callback: Callable[[str | int], None] | None = None,
         result_sink: Any | None = None,
+        recovery_context: MCPRecoveryCallContext | None = None,
         **_kwargs: Any,
     ) -> MCPCallOutcome:
         self._require_tools_capability()
@@ -294,7 +308,12 @@ class MCP2026Adapter:
                 raise MCPProtocolError("inputResponses must be an object.")
             params["inputResponses"] = dict(input_responses)
             if sealed_request_state_ref is not None:
-                params["requestState"] = self._resolve_request_state(sealed_request_state_ref)
+                params["requestState"] = await self._resolve_request_state_for_call(
+                    sealed_request_state_ref,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    recovery_context=recovery_context,
+                )
         headers = _tool_parameter_headers(schema, arguments)
         result = await self._send_request(
             "tools/call",
@@ -303,26 +322,67 @@ class MCP2026Adapter:
             request_registered_callback=request_registered_callback,
             result_sink=result_sink,
         )
-        return self._normalize_call_outcome(result)
+        return await self._normalize_call_outcome(
+            result,
+            tool_name=tool_name,
+            arguments=arguments,
+            recovery_context=recovery_context,
+        )
 
-    async def tasks_get(self, safe_remote_task_ref: str) -> MCPTaskState:
+    async def tasks_get(
+        self,
+        safe_remote_task_ref: str,
+        *,
+        recovery_context: MCPRecoveryCallContext | None = None,
+    ) -> MCPTaskState:
         self._require_tasks_capability()
-        result = await self._send_request("tasks/get", {"taskId": self._resolve_task_id(safe_remote_task_ref)})
-        return self._normalize_task_state(result, safe_remote_task_ref=safe_remote_task_ref)
+        raw_task_id = await self._resolve_task_id_for_context(
+            safe_remote_task_ref,
+            recovery_context=recovery_context,
+        )
+        result = await self._send_request("tasks/get", {"taskId": raw_task_id})
+        return self._normalize_task_state(
+            result,
+            safe_remote_task_ref=safe_remote_task_ref,
+            expected_raw_task_id=raw_task_id,
+        )
 
-    async def tasks_update(self, safe_remote_task_ref: str, input_responses: Mapping[str, Any]) -> MCPCompletedOutcome:
+    async def tasks_update(
+        self,
+        safe_remote_task_ref: str,
+        input_responses: Mapping[str, Any],
+        *,
+        recovery_context: MCPRecoveryCallContext | None = None,
+    ) -> MCPCompletedOutcome:
         self._require_tasks_capability()
         if not isinstance(input_responses, Mapping):
             raise MCPProtocolError("inputResponses must be an object.")
         result = await self._send_request(
             "tasks/update",
-            {"taskId": self._resolve_task_id(safe_remote_task_ref), "inputResponses": dict(input_responses)},
+            {
+                "taskId": await self._resolve_task_id_for_context(
+                    safe_remote_task_ref,
+                    recovery_context=recovery_context,
+                ),
+                "inputResponses": dict(input_responses),
+            },
         )
         return _complete_ack(result, "tasks/update")
 
-    async def tasks_cancel(self, safe_remote_task_ref: str, *, reason: str = "") -> MCPCompletedOutcome:
+    async def tasks_cancel(
+        self,
+        safe_remote_task_ref: str,
+        *,
+        reason: str = "",
+        recovery_context: MCPRecoveryCallContext | None = None,
+    ) -> MCPCompletedOutcome:
         self._require_tasks_capability()
-        params: dict[str, Any] = {"taskId": self._resolve_task_id(safe_remote_task_ref)}
+        params: dict[str, Any] = {
+            "taskId": await self._resolve_task_id_for_context(
+                safe_remote_task_ref,
+                recovery_context=recovery_context,
+            )
+        }
         result = await self._send_request("tasks/cancel", params)
         return _complete_ack(result, "tasks/cancel")
 
@@ -349,6 +409,14 @@ class MCP2026Adapter:
     ) -> Mapping[str, Any]:
         if self._closed:
             raise MCPProtocolError("Cannot use a closed MCP 2026 adapter.")
+        if self._recovery_only and method not in {
+            "tasks/get",
+            "tasks/update",
+            "tasks/cancel",
+        }:
+            raise MCPProtocolError(
+                "MCP recovery-only client permits only task query/control methods."
+            )
         request_id = self._next_request_id()
         if request_registered_callback is not None:
             request_registered_callback(request_id)
@@ -479,7 +547,14 @@ class MCP2026Adapter:
             )
         raise MCPRemoteError(str(raw_error.get("message") or "MCP server returned an error."), remote_code=code)
 
-    def _normalize_call_outcome(self, result: Mapping[str, Any]) -> MCPCallOutcome:
+    async def _normalize_call_outcome(
+        self,
+        result: Mapping[str, Any],
+        *,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        recovery_context: MCPRecoveryCallContext | None,
+    ) -> MCPCallOutcome:
         if isinstance(result.get("_mcpResultRef"), Mapping):
             return MCPCompletedOutcome(dict(result))
         result_type = result.get("resultType")
@@ -497,6 +572,19 @@ class MCP2026Adapter:
             safe_ref = None
             if request_state is not None:
                 safe_ref = self._safe_ref_factory("mcp-request-state")
+                service = self._require_recovery_service(recovery_context)
+                try:
+                    await service.save_request_state(
+                        recovery_context,
+                        server_id=self.server_id,
+                        protocol_version=self.protocol_version,
+                        sealed_state_ref=safe_ref,
+                        request_state=request_state,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                    )
+                except CredentialSecurityError as exc:
+                    raise MCPProtocolError("MCP request state could not be sealed.") from exc
                 self._sealed_request_states[safe_ref] = request_state
             return MCPInputRequiredOutcome(input_requests=input_requests, sealed_request_state_ref=safe_ref)
         if result_type == "task":
@@ -509,16 +597,35 @@ class MCP2026Adapter:
             ttl_ms = _optional_non_negative_int(task.get("ttlMs"), "CreateTaskResult ttlMs")
             poll_interval_ms = _optional_non_negative_int(task.get("pollIntervalMs"), "CreateTaskResult pollIntervalMs")
             safe_ref = self._safe_ref_factory("mcp-task")
+            service = self._require_recovery_service(recovery_context)
+            try:
+                await service.save_remote_task(
+                    recovery_context,
+                    server_id=self.server_id,
+                    protocol_version=self.protocol_version,
+                    safe_remote_task_ref=safe_ref,
+                    remote_task_id=raw_task_id,
+                    status=status,
+                    poll_interval_ms=poll_interval_ms,
+                )
+            except CredentialSecurityError as exc:
+                raise MCPProtocolError("MCP remote task could not be bound.") from exc
             self._remote_task_ids[safe_ref] = raw_task_id
             return MCPTaskCreatedOutcome(safe_ref, status, ttl_ms, poll_interval_ms)
         raise MCPProtocolError("MCP 2026 resultType must be complete, input_required, or task.")
 
-    def _normalize_task_state(self, result: Mapping[str, Any], *, safe_remote_task_ref: str) -> MCPTaskState:
+    def _normalize_task_state(
+        self,
+        result: Mapping[str, Any],
+        *,
+        safe_remote_task_ref: str,
+        expected_raw_task_id: str,
+    ) -> MCPTaskState:
         if result.get("resultType") != "complete":
             raise MCPProtocolError("tasks/get resultType must be complete.")
         task = result.get("task") if isinstance(result.get("task"), Mapping) else result
         raw_task_id = _non_empty_string(task.get("taskId"), "Task taskId")
-        if raw_task_id != self._resolve_task_id(safe_remote_task_ref):
+        if raw_task_id != expected_raw_task_id:
             raise MCPProtocolError("Task response taskId does not match the requested task.")
         status = _task_status(task.get("status"))
         _non_empty_string(task.get("createdAt"), "Task createdAt")
@@ -557,6 +664,8 @@ class MCP2026Adapter:
     def _require_tasks_capability(self) -> None:
         if not self._enable_tasks:
             raise MCPProtocolError("MCP Tasks extension is not enabled by this client.")
+        if self._recovery_only:
+            return
         extensions = self.server_capabilities.get("extensions")
         if not isinstance(extensions, Mapping) or not isinstance(extensions.get(_TASKS_EXTENSION), Mapping):
             raise MCPProtocolError("MCP server did not declare the Tasks extension.")
@@ -572,6 +681,54 @@ class MCP2026Adapter:
             return self._remote_task_ids[safe_ref]
         except KeyError as exc:
             raise MCPProtocolError("Unknown or expired remote task reference.") from exc
+
+    async def _resolve_request_state_for_call(
+        self,
+        safe_ref: str,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        recovery_context: MCPRecoveryCallContext | None,
+    ) -> str:
+        service = self._require_recovery_service(recovery_context)
+        try:
+            return await service.resolve_request_state(
+                recovery_context,
+                server_id=self.server_id,
+                protocol_version=self.protocol_version,
+                sealed_state_ref=safe_ref,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+        except CredentialSecurityError as exc:
+            raise MCPProtocolError("Unknown or expired sealed request state reference.") from exc
+
+    async def _resolve_task_id_for_context(
+        self,
+        safe_ref: str,
+        *,
+        recovery_context: MCPRecoveryCallContext | None,
+    ) -> str:
+        service = self._require_recovery_service(recovery_context)
+        try:
+            return await service.resolve_remote_task_id(
+                recovery_context,
+                server_id=self.server_id,
+                protocol_version=self.protocol_version,
+                safe_remote_task_ref=safe_ref,
+            )
+        except CredentialSecurityError as exc:
+            raise MCPProtocolError("Unknown or expired remote task reference.") from exc
+
+    def _require_recovery_service(
+        self,
+        recovery_context: MCPRecoveryCallContext | None,
+    ) -> MCPRecoveryService:
+        if self._recovery_service is None:
+            raise MCPProtocolError("Durable MCP recovery is unavailable.")
+        if recovery_context is None:
+            raise MCPProtocolError("MCP recovery context is required.")
+        return self._recovery_service
 
     def _next_request_id(self) -> int:
         self._request_id += 1

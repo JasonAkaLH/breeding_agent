@@ -9,9 +9,26 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
-from src.core.models import Conversation, Task, UserMCPServer
+from src.core.models import Conversation, Task, UserMCPServer, UserMCPToolGrant
 from src.integrations.mcp.client import MCPClientError
-from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway
+from src.integrations.mcp.endpoint_policy import (
+    EndpointAllowlist,
+    EndpointPolicy,
+    EndpointPolicyProvenance,
+)
+from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
+from src.integrations.mcp.invalidation import (
+    MCPInvalidationAction,
+    MCPServerInvalidated,
+)
+from src.integrations.mcp.user_client import UserMCPClientFactory
+from src.integrations.mcp.rollout_evidence import (
+    MCPMetricErrorCategory,
+    MCPMetricName,
+    MCPMetricResultCategory,
+    MCPMetricRoutingMode,
+    MCPSafetyRedLine,
+)
 from src.integrations.mcp.temporary_results import (
     MCPTemporaryResultCapacity,
     MCPTemporaryResultCapacityConfig,
@@ -53,6 +70,19 @@ class _Adapter:
         self.closed = True
 
 
+class _PublicEndpointResolver:
+    def resolve(self, hostname: str, port: int):
+        del hostname, port
+        return ("8.8.8.8",)
+
+
+_ENDPOINT_POLICY = EndpointPolicy(resolver=_PublicEndpointResolver())
+
+
+def _validated_endpoint(server: UserMCPServer):
+    return _ENDPOINT_POLICY.validate(server.endpoint_url)
+
+
 class _BlockingAdapter(_Adapter):
     def __init__(self, started: asyncio.Event, release: asyncio.Event) -> None:
         super().__init__()
@@ -68,6 +98,14 @@ class _BlockingAdapter(_Adapter):
 class _TransientAdapter(_Adapter):
     async def initialize(self):
         self.initialize_count += 1
+        raise MCPClientError(
+            "temporary", code="mcp_transport_error", retriable=True
+        )
+
+
+class _TransientListAdapter(_Adapter):
+    async def list_tools(self):
+        self.list_count += 1
         raise MCPClientError(
             "temporary", code="mcp_transport_error", retriable=True
         )
@@ -123,6 +161,30 @@ class _ManualHeartbeatWaiter:
             return False
         signal.clear()
         return True
+
+
+class _SafetyDetector:
+    def __init__(self) -> None:
+        self.violations = []
+
+    async def report_violation(self, **kwargs) -> None:
+        self.violations.append(kwargs)
+
+
+class _MetricRecorder:
+    def __init__(self) -> None:
+        self.counts = []
+        self.latencies = []
+        self.gauges = []
+
+    async def record_count(self, metric_name, **kwargs):
+        self.counts.append((metric_name, kwargs))
+
+    async def record_latency(self, metric_name, **kwargs):
+        self.latencies.append((metric_name, kwargs))
+
+    async def record_gauge(self, metric_name, **kwargs):
+        self.gauges.append((metric_name, kwargs))
 
 
 class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
@@ -193,6 +255,529 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.adapters[0].list_count, 1)
         self.assertEqual(len((await self.gateway.list_tools(first)).tools), 1)
 
+    async def test_readonly_shadow_session_has_zero_durable_mutation(self) -> None:
+        grant = UserMCPToolGrant(
+            grant_id="grant-1",
+            owner_user_id="alice",
+            server_id="server-1",
+            tool_name="echo",
+            server_security_version=1,
+            input_schema_sha256="existing-schema-hash",
+            granted_at=self.now,
+        )
+        await self.storage.save_user_mcp_tool_grant(grant)
+        server_before = await self.storage.get_user_mcp_server("alice", "server-1")
+        grants_before = await self.storage.list_user_mcp_tool_grants(
+            "alice", "server-1"
+        )
+        calls = {"endpoint": 0, "credentials": 0}
+        adapters: list[_Adapter] = []
+        validated_endpoints = []
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(4, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+
+        async def endpoint_revalidator(server):
+            calls["endpoint"] += 1
+            endpoint = _validated_endpoint(server)
+            validated_endpoints.append(endpoint)
+            return endpoint
+
+        async def credential_loader(server):
+            del server
+            calls["credentials"] += 1
+            self.assertEqual(
+                await self.storage.list_live_user_mcp_scope_leases(now=self.now),
+                [],
+            )
+            return {}
+
+        async def client_factory(server, credentials):
+            del server, credentials
+            adapter = _Adapter()
+            adapters.append(adapter)
+            return adapter
+
+        async def readonly_client_factory(server, credentials, endpoint):
+            self.assertIs(endpoint, validated_endpoints[-1])
+            return await client_factory(server, credentials)
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow",
+            credential_loader=credential_loader,
+            client_factory=client_factory,
+            endpoint_revalidator=endpoint_revalidator,
+            readonly_shadow_client_factory=readonly_client_factory,
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+        )
+        try:
+            session = await gateway.open_readonly_shadow_session(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+
+            self.assertEqual(session.scope.owner_user_id, "alice")
+            self.assertEqual(session.scope.platform_task_id, "task-1")
+            self.assertEqual(session.scope.server_id, "server-1")
+            self.assertTrue(session.scope.scope_id.startswith("mcp-shadow-scope-"))
+            self.assertEqual([tool.name for tool in session.catalog.tools], ["echo"])
+            self.assertIs(
+                session.endpoint_policy_provenance,
+                EndpointPolicyProvenance.RUNTIME_ENFORCED,
+            )
+            self.assertFalse(hasattr(session, "call_tool"))
+            self.assertEqual(calls, {"endpoint": 1, "credentials": 1})
+            self.assertEqual(capacity.active_calls, 1)
+            self.assertEqual(
+                await self.storage.list_live_user_mcp_scope_leases(now=self.now),
+                [],
+            )
+            self.assertEqual(
+                await self.storage.get_user_mcp_server("alice", "server-1"),
+                server_before,
+            )
+            self.assertEqual(
+                await self.storage.list_user_mcp_tool_grants("alice", "server-1"),
+                grants_before,
+            )
+
+            await asyncio.gather(session.aclose(), session.aclose())
+            self.assertTrue(adapters[0].closed)
+            self.assertEqual(capacity.active_calls, 0)
+            await session.aclose()
+            self.assertEqual(capacity.active_calls, 0)
+        finally:
+            await gateway.aclose()
+
+    async def test_readonly_shadow_session_rejects_unverified_policy_result(
+        self,
+    ) -> None:
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(4, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-unverified-policy",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials: _Adapter(),
+            endpoint_revalidator=lambda server: server.endpoint_url,
+            readonly_shadow_client_factory=(
+                lambda server, credentials, endpoint: _Adapter()
+            ),
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+        )
+        try:
+            with self.assertRaisesRegex(Exception, "endpoint_policy_rejected"):
+                await gateway.open_readonly_shadow_session(
+                    SimpleNamespace(username="alice"), "task-1", "server-1"
+                )
+            self.assertEqual(capacity.active_calls, 0)
+        finally:
+            await gateway.aclose()
+
+    async def test_readonly_shadow_factory_uses_the_exact_validated_endpoint(
+        self,
+    ) -> None:
+        class SequenceResolver:
+            def __init__(self) -> None:
+                self.answers = [("8.8.8.8",), ("10.2.3.4",)]
+                self.calls = 0
+
+            def resolve(self, hostname: str, port: int):
+                del hostname, port
+                answer = self.answers[self.calls]
+                self.calls += 1
+                return answer
+
+        class CapturingFactory(UserMCPClientFactory):
+            def __init__(self, endpoint_policy) -> None:
+                super().__init__(endpoint_policy)
+                self.bound_endpoint = None
+
+            def _adapter_2026(
+                self,
+                server,
+                headers,
+                endpoint,
+                *,
+                recovery_only=False,
+            ):
+                del server, headers, recovery_only
+                self.bound_endpoint = endpoint
+                return _Adapter()
+
+        resolver = SequenceResolver()
+        policy = EndpointPolicy(
+            resolver=resolver,
+            allowlist=EndpointAllowlist.from_values(cidrs=("10.0.0.0/8",)),
+        )
+        factory = CapturingFactory(policy)
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(4, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-exact-endpoint",
+            credential_loader=lambda server: {},
+            client_factory=factory.create,
+            endpoint_revalidator=factory.revalidate_endpoint,
+            readonly_shadow_client_factory=factory.create_readonly_shadow,
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+        )
+        try:
+            session = await gateway.open_readonly_shadow_session(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+
+            self.assertEqual(resolver.calls, 1)
+            self.assertIsNotNone(factory.bound_endpoint)
+            self.assertEqual(factory.bound_endpoint.resolved_ips, ("8.8.8.8",))
+            self.assertIs(
+                factory.bound_endpoint.policy_provenance,
+                EndpointPolicyProvenance.RUNTIME_ENFORCED,
+            )
+            self.assertIs(
+                session.endpoint_policy_provenance,
+                factory.bound_endpoint.policy_provenance,
+            )
+            await session.aclose()
+            self.assertEqual(capacity.active_calls, 0)
+        finally:
+            await gateway.aclose()
+
+    async def test_readonly_shadow_client_pins_supplied_endpoint_without_dns(
+        self,
+    ) -> None:
+        class SequenceResolver:
+            def __init__(self) -> None:
+                self.answers = [("8.8.8.8",), ("10.2.3.4",)]
+                self.calls = 0
+
+            def resolve(self, hostname: str, port: int):
+                del hostname, port
+                answer = self.answers[self.calls]
+                self.calls += 1
+                return answer
+
+        resolver = SequenceResolver()
+        policy = EndpointPolicy(
+            resolver=resolver,
+            allowlist=EndpointAllowlist.from_values(cidrs=("10.0.0.0/8",)),
+        )
+        factory = UserMCPClientFactory(policy)
+        server = await self.storage.get_user_mcp_server("alice", "server-1")
+        self.assertIsNotNone(server)
+        endpoint = policy.validate(server.endpoint_url)
+
+        adapter = await factory.create_readonly_shadow(server, {}, endpoint)
+        try:
+            network_backend = (
+                adapter._active._transport._client._transport._pool._network_backend
+            )
+            self.assertIs(network_backend._endpoint, endpoint)
+            self.assertEqual(network_backend._endpoint.resolved_ips, ("8.8.8.8",))
+            self.assertEqual(resolver.calls, 1)
+        finally:
+            await adapter.close()
+
+    async def test_invalidation_cancels_queued_readonly_shadow_before_credentials(
+        self,
+    ) -> None:
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(1, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+        held = await capacity.acquire("holder", "held-slot")
+        queued = asyncio.Event()
+        calls = {"credentials": 0, "client": 0}
+
+        async def credential_loader(server):
+            del server
+            calls["credentials"] += 1
+            return {}
+
+        async def readonly_client_factory(server, credentials, endpoint):
+            del server, credentials, endpoint
+            calls["client"] += 1
+            return _Adapter()
+
+        async def on_queued(position: int) -> None:
+            del position
+            queued.set()
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-invalidate-queued",
+            credential_loader=credential_loader,
+            client_factory=lambda server, credentials: _Adapter(),
+            endpoint_revalidator=_validated_endpoint,
+            readonly_shadow_client_factory=readonly_client_factory,
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+        )
+        opening = asyncio.create_task(
+            gateway.open_readonly_shadow_session(
+                SimpleNamespace(username="alice"),
+                "task-1",
+                "server-1",
+                on_queue_entered=on_queued,
+            )
+        )
+        try:
+            await asyncio.wait_for(queued.wait(), timeout=1)
+            await gateway.invalidate_server(
+                MCPServerInvalidated(
+                    owner_user_id="alice",
+                    server_id="server-1",
+                    security_version=2,
+                    action=MCPInvalidationAction.SECURITY_UPDATED,
+                )
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                await opening
+            self.assertEqual(calls, {"credentials": 0, "client": 0})
+            self.assertEqual(capacity.queued_calls, 0)
+        finally:
+            await held.release()
+            await gateway.aclose()
+
+    async def test_invalidation_closes_active_readonly_shadow_session(self) -> None:
+        adapter = _Adapter()
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(1, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-invalidate-active",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials: adapter,
+            endpoint_revalidator=_validated_endpoint,
+            readonly_shadow_client_factory=(
+                lambda server, credentials, endpoint: adapter
+            ),
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+        )
+        try:
+            session = await gateway.open_readonly_shadow_session(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+            self.assertEqual(capacity.active_calls, 1)
+
+            await gateway.invalidate_server(
+                MCPServerInvalidated(
+                    owner_user_id="alice",
+                    server_id="server-1",
+                    security_version=2,
+                    action=MCPInvalidationAction.SECURITY_UPDATED,
+                )
+            )
+
+            self.assertTrue(adapter.closed)
+            self.assertEqual(capacity.active_calls, 0)
+            await session.aclose()
+        finally:
+            await gateway.aclose()
+
+    async def test_readonly_shadow_session_validates_task_owner(self) -> None:
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-owner",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials: _Adapter(),
+            endpoint_revalidator=lambda server: server.endpoint_url,
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+        )
+        try:
+            with self.assertRaisesRegex(Exception, "mcp_task_not_found"):
+                await gateway.open_readonly_shadow_session(
+                    SimpleNamespace(username="bob"), "task-1", "server-1"
+                )
+        finally:
+            await gateway.aclose()
+
+    async def test_close_task_cancels_readonly_shadow_opening(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        adapter = _BlockingAdapter(started, release)
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(4, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-race",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials: adapter,
+            endpoint_revalidator=_validated_endpoint,
+            readonly_shadow_client_factory=(
+                lambda server, credentials, endpoint: adapter
+            ),
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+        )
+        opening = asyncio.create_task(
+            gateway.open_readonly_shadow_session(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+        )
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            await gateway.close_task("task-1", "terminal")
+            self.assertTrue(opening.cancelled())
+            self.assertTrue(adapter.closed)
+            self.assertEqual(
+                await self.storage.list_live_user_mcp_scope_leases(now=self.now),
+                [],
+            )
+            self.assertEqual(capacity.active_calls, 0)
+        finally:
+            release.set()
+            if not opening.done():
+                opening.cancel()
+                await asyncio.gather(opening, return_exceptions=True)
+            await gateway.aclose()
+
+    async def test_readonly_shadow_timeout_retries_and_cleans_resources(self) -> None:
+        started = asyncio.Event()
+        never_release = asyncio.Event()
+        adapters = [
+            _BlockingAdapter(started, never_release),
+            _BlockingAdapter(started, never_release),
+        ]
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(4, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+        server_before = await self.storage.get_user_mcp_server("alice", "server-1")
+
+        async def client_factory(server, credentials):
+            del server, credentials
+            return adapters.pop(0)
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-timeout",
+            credential_loader=lambda server: {},
+            client_factory=client_factory,
+            endpoint_revalidator=_validated_endpoint,
+            readonly_shadow_client_factory=(
+                lambda server, credentials, endpoint: client_factory(
+                    server, credentials
+                )
+            ),
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+            discovery_timeout_seconds=0.01,
+            discovery_retry_delay_seconds=0,
+        )
+        created = list(adapters)
+        try:
+            with self.assertRaisesRegex(Exception, "discovery_timeout"):
+                await gateway.open_readonly_shadow_session(
+                    SimpleNamespace(username="alice"), "task-1", "server-1"
+                )
+
+            self.assertEqual([adapter.initialize_count for adapter in created], [1, 1])
+            self.assertTrue(all(adapter.closed for adapter in created))
+            self.assertEqual(capacity.active_calls, 0)
+            self.assertEqual(
+                await self.storage.list_live_user_mcp_scope_leases(now=self.now),
+                [],
+            )
+            self.assertEqual(
+                await self.storage.get_user_mcp_server("alice", "server-1"),
+                server_before,
+            )
+            self.assertEqual(
+                await self.storage.list_user_mcp_tool_grants("alice", "server-1"),
+                [],
+            )
+        finally:
+            await gateway.aclose()
+
+    async def test_gateway_shutdown_closes_readonly_shadow_after_cleanup_failure(
+        self,
+    ) -> None:
+        recorder = _MetricRecorder()
+        adapter = _Adapter()
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(4, 1),
+            storage_root=self.result_store.root,
+            free_bytes=lambda path: 10_000_000,
+        )
+
+        async def fail_close() -> None:
+            raise RuntimeError("shadow close failed")
+
+        adapter.close = fail_close
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-shadow-shutdown",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials: adapter,
+            endpoint_revalidator=_validated_endpoint,
+            readonly_shadow_client_factory=(
+                lambda server, credentials, endpoint: adapter
+            ),
+            result_store=self.result_store,
+            capacity=capacity,
+            now_fn=lambda: self.now,
+            metric_recorder=recorder,
+            metric_routing_mode=MCPMetricRoutingMode.SHADOW,
+        )
+        session = await gateway.open_readonly_shadow_session(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+        self.assertEqual(capacity.active_calls, 1)
+
+        with self.assertRaisesRegex(MCPGatewayError, "mcp_shadow_cleanup_failed"):
+            await session.aclose()
+
+        self.assertEqual(capacity.active_calls, 0)
+        cleanup = [
+            kwargs
+            for name, kwargs in recorder.counts
+            if name is MCPMetricName.RESOURCE_CLEANUP_FAILURES_TOTAL
+        ]
+        self.assertEqual(len(cleanup), 1)
+        self.assertEqual(
+            cleanup[0]["labels"].error_category,
+            MCPMetricErrorCategory.CLEANUP,
+        )
+        self.assertEqual(
+            await self.storage.list_live_user_mcp_scope_leases(now=self.now),
+            [],
+        )
+        await gateway.aclose()
+
     async def test_call_returns_opaque_ref_and_close_releases_all(self) -> None:
         scope = await self.gateway.open_scope(
             SimpleNamespace(username="alice"), "task-1", "server-1"
@@ -205,6 +790,253 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.storage.list_live_user_mcp_scope_leases(now=self.now), []
         )
+
+    async def test_persisted_assignment_guard_blocks_shadow_call_before_send(
+        self,
+    ) -> None:
+        detector = _SafetyDetector()
+        self.gateway.configure_safety_detectors(
+            {MCPSafetyRedLine.SHADOW_TOOL_CALL: detector}
+        )
+        scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+
+        with self.assertRaisesRegex(Exception, "mcp_shadow_tool_call_forbidden"):
+            await self.gateway.call_tool(
+                scope,
+                "echo",
+                {"text": "never sent"},
+                authorization_verified=True,
+            )
+
+        self.assertEqual(self.adapters[0].call_count, 0)
+        self.assertEqual(
+            detector.violations,
+            [{"reason_code": "shadow_call_blocked"}],
+        )
+
+    async def test_direct_call_without_authorization_records_red_line(self) -> None:
+        detector = _SafetyDetector()
+        self.gateway.configure_safety_detectors(
+            {MCPSafetyRedLine.UNAUTHORIZED_TOOL_CALL: detector}
+        )
+        scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+
+        with self.assertRaisesRegex(Exception, "mcp_tool_authorization_required"):
+            await self.gateway.call_tool(scope, "echo", {"text": "never sent"})
+
+        self.assertEqual(self.adapters[0].call_count, 0)
+        self.assertEqual(
+            detector.violations,
+            [{"reason_code": "permission_denied_boundary"}],
+        )
+
+    async def test_runtime_metrics_cover_gateway_lifecycle_spill_and_cleanup_failure(
+        self,
+    ) -> None:
+        recorder = _MetricRecorder()
+        self.gateway.configure_rollout_metrics(
+            recorder,
+            MCPMetricRoutingMode.ENFORCE,
+        )
+        scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+
+        await self.gateway.call_tool(scope, "echo", {"text": "large-output"})
+
+        async def fail_close() -> None:
+            raise RuntimeError("close failed")
+
+        self.adapters[0].close = fail_close
+        await self.gateway.close_scope(scope, "done")
+
+        count_names = [name for name, _ in recorder.counts]
+        latency_names = [name for name, _ in recorder.latencies]
+        self.assertIn(MCPMetricName.PROTOCOL_NEGOTIATION_TOTAL, count_names)
+        self.assertIn(MCPMetricName.TOOLS_LIST_ATTEMPTS_TOTAL, count_names)
+        self.assertIn(
+            MCPMetricName.TEMP_SPILL_BYTES,
+            [name for name, _ in recorder.gauges],
+        )
+        self.assertIn(MCPMetricName.RESOURCE_CLEANUP_FAILURES_TOTAL, count_names)
+        self.assertIn(MCPMetricName.GATEWAY_CONNECT_DURATION_SECONDS, latency_names)
+        self.assertIn(MCPMetricName.TOOLS_LIST_DURATION_SECONDS, latency_names)
+        self.assertEqual(
+            [
+                item[1]["value"]
+                for item in recorder.gauges
+                if item[0] is MCPMetricName.GATEWAY_ACTIVE_SCOPES
+            ],
+            [1, 0],
+        )
+        self.assertEqual(
+            [
+                item[1]["value"]
+                for item in recorder.gauges
+                if item[0] is MCPMetricName.TOOL_CALLS_ACTIVE
+            ],
+            [1, 0],
+        )
+        spill = next(
+            kwargs
+            for name, kwargs in recorder.gauges
+            if name is MCPMetricName.TEMP_SPILL_BYTES
+        )
+        self.assertGreater(spill["value"], 8)
+        self.assertEqual(spill["labels"].transport.value, "streamable_http")
+        self.assertEqual(spill["labels"].protocol_version.value, "2025-11-25")
+        await self.result_store.cleanup_task("task-1")
+        spill_values = [
+            kwargs["value"]
+            for name, kwargs in recorder.gauges
+            if name is MCPMetricName.TEMP_SPILL_BYTES
+        ]
+        self.assertEqual(spill_values, [spill["value"], 0])
+        cleanup = next(
+            kwargs["labels"]
+            for name, kwargs in recorder.counts
+            if name is MCPMetricName.RESOURCE_CLEANUP_FAILURES_TOTAL
+        )
+        self.assertEqual(cleanup.error_category, MCPMetricErrorCategory.CLEANUP)
+
+    async def test_temp_spill_gauge_sums_same_dimension_scopes(self) -> None:
+        recorder = _MetricRecorder()
+        self.gateway.configure_rollout_metrics(
+            recorder,
+            MCPMetricRoutingMode.ENFORCE,
+        )
+        first_scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+        second_scope_id = "scope-second"
+        self.gateway._metric_dimension_by_scope_id[second_scope_id] = (
+            self.gateway._metric_dimension_by_scope_id[first_scope.scope_id]
+        )
+
+        await self.gateway._record_temp_spill(first_scope.scope_id, 10)
+        await self.gateway._record_temp_spill(second_scope_id, 20)
+        await self.gateway._record_temp_spill(first_scope.scope_id, 0)
+        await self.gateway._record_temp_spill(second_scope_id, 0)
+
+        spill_values = [
+            kwargs["value"]
+            for name, kwargs in recorder.gauges
+            if name is MCPMetricName.TEMP_SPILL_BYTES
+        ]
+        self.assertEqual(spill_values[-4:], [10, 30, 20, 0])
+
+    async def test_failed_then_successful_negotiation_and_connect_are_both_counted(
+        self,
+    ) -> None:
+        adapters = [_TransientAdapter(), _Adapter()]
+        recorder = _MetricRecorder()
+
+        async def client_factory(server, credentials):
+            del server, credentials
+            return adapters.pop(0)
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-metrics-retry",
+            credential_loader=lambda server: {},
+            client_factory=client_factory,
+            endpoint_revalidator=lambda server: server.endpoint_url,
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+            sleep=lambda _seconds: asyncio.sleep(0),
+            metric_recorder=recorder,
+            metric_routing_mode=MCPMetricRoutingMode.ENFORCE,
+        )
+
+        scope = await gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+
+        negotiation = [
+            kwargs["labels"]
+            for name, kwargs in recorder.counts
+            if name is MCPMetricName.PROTOCOL_NEGOTIATION_TOTAL
+        ]
+        self.assertEqual(
+            [labels.result_category for labels in negotiation],
+            [MCPMetricResultCategory.FAILED, MCPMetricResultCategory.SUCCEEDED],
+        )
+        self.assertEqual(
+            negotiation[0].error_category,
+            MCPMetricErrorCategory.TRANSPORT,
+        )
+        self.assertEqual(
+            [
+                kwargs["labels"].result_category
+                for name, kwargs in recorder.latencies
+                if name is MCPMetricName.GATEWAY_CONNECT_DURATION_SECONDS
+            ],
+            [MCPMetricResultCategory.FAILED, MCPMetricResultCategory.SUCCEEDED],
+        )
+        await gateway.close_scope(scope, "done")
+        await gateway.aclose()
+
+    async def test_failed_then_successful_tools_list_attempts_are_both_counted(
+        self,
+    ) -> None:
+        adapters = [_TransientListAdapter(), _Adapter()]
+        recorder = _MetricRecorder()
+
+        async def client_factory(server, credentials):
+            del server, credentials
+            return adapters.pop(0)
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-tools-list-metrics-retry",
+            credential_loader=lambda server: {},
+            client_factory=client_factory,
+            endpoint_revalidator=lambda server: server.endpoint_url,
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+            sleep=lambda _seconds: asyncio.sleep(0),
+            metric_recorder=recorder,
+            metric_routing_mode=MCPMetricRoutingMode.ENFORCE,
+        )
+
+        scope = await gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+
+        attempts = [
+            kwargs["labels"]
+            for name, kwargs in recorder.counts
+            if name is MCPMetricName.TOOLS_LIST_ATTEMPTS_TOTAL
+        ]
+        durations = [
+            kwargs["labels"]
+            for name, kwargs in recorder.latencies
+            if name is MCPMetricName.TOOLS_LIST_DURATION_SECONDS
+        ]
+        self.assertEqual(
+            [labels.result_category for labels in attempts],
+            [MCPMetricResultCategory.FAILED, MCPMetricResultCategory.SUCCEEDED],
+        )
+        self.assertEqual(
+            [labels.result_category for labels in durations],
+            [MCPMetricResultCategory.FAILED, MCPMetricResultCategory.SUCCEEDED],
+        )
+        await gateway.close_scope(scope, "done")
+        await gateway.aclose()
 
     async def test_close_scope_preserves_completed_result_until_task_cleanup(self) -> None:
         scope = await self.gateway.open_scope(
@@ -281,14 +1113,23 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         await gateway.aclose()
 
     async def test_other_owner_cannot_open_scope(self) -> None:
+        detector = _SafetyDetector()
+        self.gateway.configure_safety_detectors(
+            {MCPSafetyRedLine.CROSS_USER_ACCESS: detector}
+        )
         with self.assertRaisesRegex(Exception, "mcp_task_not_found"):
             await self.gateway.open_scope(
                 SimpleNamespace(username="bob"), "task-1", "server-1"
             )
+        self.assertEqual(
+            detector.violations,
+            [{"reason_code": "task_owner_mismatch"}],
+        )
 
     async def test_close_task_cancels_scope_that_is_still_opening(self) -> None:
         started = asyncio.Event()
         release = asyncio.Event()
+        recorder = _MetricRecorder()
 
         async def client_factory(server, credentials):
             del server, credentials
@@ -307,6 +1148,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                 free_bytes=lambda path: 10_000_000,
             ),
             now_fn=lambda: self.now,
+            metric_recorder=recorder,
+            metric_routing_mode=MCPMetricRoutingMode.ENFORCE,
         )
         opening = asyncio.create_task(
             gateway.open_scope(
@@ -321,6 +1164,24 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             await opening
         self.assertEqual(
             await self.storage.list_live_user_mcp_scope_leases(now=self.now), []
+        )
+        connect = next(
+            kwargs
+            for name, kwargs in recorder.latencies
+            if name is MCPMetricName.GATEWAY_CONNECT_DURATION_SECONDS
+        )
+        negotiation = next(
+            kwargs
+            for name, kwargs in recorder.counts
+            if name is MCPMetricName.PROTOCOL_NEGOTIATION_TOTAL
+        )
+        self.assertEqual(
+            connect["labels"].result_category,
+            MCPMetricResultCategory.CANCELLED,
+        )
+        self.assertEqual(
+            negotiation["labels"].error_category,
+            MCPMetricErrorCategory.NONE,
         )
         release.set()
         await gateway.aclose()

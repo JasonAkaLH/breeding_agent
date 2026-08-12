@@ -1042,6 +1042,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rusqlite",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",

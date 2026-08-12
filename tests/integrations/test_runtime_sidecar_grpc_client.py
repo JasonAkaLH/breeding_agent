@@ -114,14 +114,92 @@ class RuntimeSidecarGrpcClientIntegrationTest(unittest.TestCase):
                     self.assertTrue(duplicate_submit["duplicate"])
                     self.assertEqual(duplicate_submit["task_id"], "task")
 
+                    task_record = {
+                        "task_id": "task-authority",
+                        "conversation_id": "conv",
+                        "root_message_id": "message",
+                        "status": "accepted",
+                        "routing_mode": "auto",
+                        "requested_capability_id": None,
+                        "root_node_id": None,
+                        "summary": None,
+                        "cancel_requested_at": None,
+                        "created_at": "2026-08-12T00:00:00Z",
+                        "updated_at": None,
+                        "assignment": {
+                            "route_mode": "shadow",
+                            "real_path": "legacy",
+                            "shadow_path": "user_scoped",
+                            "config_version": "config-v1",
+                            "reason_code": "shadow_enabled",
+                            "cohort_id": None,
+                            "assignment_key_hash": "sha256:assignment",
+                            "assigned_at": "2026-08-12T00:00:00Z",
+                        },
+                    }
+                    authoritative = client.submit_task(
+                        task_id="task-authority",
+                        conversation_id="conv",
+                        task=task_record,
+                        idempotency_key="submit-authority-1",
+                    )
+                    self.assertEqual(authoritative["task"], task_record)
+                    self.assertEqual(client.get_task(task_id="task-authority")["task"], task_record)
+                    self.assertFalse(client.get_task(task_id="missing")["found"])
+                    listed_tasks = client.list_tasks_for_conversation(conversation_id="conv")
+                    self.assertEqual(
+                        [task["task_id"] for task in listed_tasks["tasks"]],
+                        ["task-authority"],
+                    )
+                    filtered_tasks = client.list_tasks_for_conversation(
+                        conversation_id="conv",
+                        statuses=("running",),
+                    )
+                    self.assertEqual(filtered_tasks["tasks"], [])
+                    active_task = client.get_active_task_for_conversation(conversation_id="conv")
+                    self.assertTrue(active_task["found"])
+                    self.assertEqual(active_task["task"], task_record)
+                    self.assertFalse(
+                        client.get_active_task_for_conversation(conversation_id="missing")["found"]
+                    )
+                    conflicting = {**task_record, "status": "running"}
+                    with self.assertRaisesRegex(RuntimeError, "runtime_store_idempotency_conflict"):
+                        client.submit_task(
+                            task_id="task-authority",
+                            conversation_id="conv",
+                            task=conflicting,
+                            idempotency_key="submit-authority-1",
+                        )
+
+                    node_record = {
+                        "node_id": "node",
+                        "task_id": "task",
+                        "capability_id": "main_agent.respond",
+                        "assigned_instance_id": "instance",
+                        "status": "running",
+                        "criticality": "required",
+                        "dependency_type": "hard",
+                        "retry_policy": {"max_attempts": 2},
+                        "timeout_policy": {"seconds": 30},
+                        "resource_class": "default",
+                        "input_refs": ["input"],
+                        "output_refs": ["output"],
+                        "started_at": "2026-08-13T10:00:00Z",
+                        "finished_at": None,
+                    }
                     transitioned = client.transition_node(
                         task_id="task",
                         node_id="node",
                         to_status="running",
+                        expected_from_status="",
                         idempotency_key="node-1",
                         owner="python-runtime",
+                        node=node_record,
                     )
                     self.assertEqual(transitioned["status"], "running")
+                    self.assertEqual(transitioned["node"], node_record)
+                    self.assertEqual(client.get_task_node(node_id="node")["node"], node_record)
+                    self.assertEqual(client.list_task_nodes_for_task(task_id="task")["nodes"], [node_record])
 
                     edge = client.save_task_edge(
                         task_id="task",

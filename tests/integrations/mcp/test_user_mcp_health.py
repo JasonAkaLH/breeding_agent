@@ -80,6 +80,66 @@ class UserMCPHealthTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.error_code, "discovery_timeout")
 
+    async def test_external_cancellation_is_not_swallowed_by_cleanup(self) -> None:
+        close_started = asyncio.Event()
+
+        class BlockingCloseClient(_Client):
+            async def close(self):
+                close_started.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(
+            run_health_discovery(
+                lambda: BlockingCloseClient(
+                    capabilities={"tools": {}},
+                    tools=[{"name": "lookup", "inputSchema": {"type": "object"}}],
+                ),
+                timeout_seconds=1,
+                cleanup_timeout_seconds=10,
+            )
+        )
+        await asyncio.wait_for(close_started.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_each_retry_attempt_has_its_own_bounded_cleanup_budget(self) -> None:
+        close_calls = 0
+
+        class RetriableBlockingCloseClient(_Client):
+            async def close(self):
+                nonlocal close_calls
+                close_calls += 1
+                await asyncio.Event().wait()
+
+        clients = [
+            RetriableBlockingCloseClient(
+                error=MCPClientError(
+                    "temporary",
+                    code="mcp_transport_error",
+                    retriable=True,
+                )
+            ),
+            RetriableBlockingCloseClient(
+                error=MCPClientError(
+                    "temporary",
+                    code="mcp_transport_error",
+                    retriable=True,
+                )
+            ),
+        ]
+        result = await asyncio.wait_for(
+            run_health_discovery(
+                lambda: clients.pop(0),
+                timeout_seconds=1,
+                retry_delay_seconds=0,
+                cleanup_timeout_seconds=0.001,
+            ),
+            timeout=0.1,
+        )
+        self.assertFalse(result.available)
+        self.assertEqual(close_calls, 2)
+
     async def test_cancel_server_cancels_inflight_discovery_before_return(self) -> None:
         started = asyncio.Event()
         cancelled = asyncio.Event()

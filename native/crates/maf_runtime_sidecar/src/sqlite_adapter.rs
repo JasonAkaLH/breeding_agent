@@ -1,10 +1,12 @@
 use crate::{
     ArtifactRecord, BundleRevisionResult, CancellationToken, EventCursor, NodeTransitionResult,
-    TaskEdgeRecord, require_idempotency_key,
+    TaskEdgeRecord, TaskNodeRecord, TaskRecord, TaskRouteAssignment, idempotency_conflict,
+    migration_blocked, require_idempotency_key, validate_task_node_record,
+    validate_task_node_update, validate_task_record, validate_task_update,
 };
 use maf_runtime_store::{RuntimeSidecarError, RuntimeSidecarErrorCode, TaskLease};
 use maf_task_dispatcher::TaskSubmitResult;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, types::Value};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -86,23 +88,170 @@ impl RuntimeSidecarSqliteAdapter {
         })
     }
 
+    pub fn submit_task_record(
+        &self,
+        task: TaskRecord,
+        idempotency_key: &str,
+        expected_from_status: Option<&str>,
+    ) -> Result<(Option<TaskRecord>, TaskSubmitResult), RuntimeSidecarError> {
+        let idempotency_key = require_idempotency_key(idempotency_key)?;
+        validate_task_record(&task)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| sqlite_error("begin TaskRecord submit transaction failed", error))?;
+        if let Some(original) = task_record_for_idempotency(&transaction, &idempotency_key)? {
+            if original != task {
+                return Err(idempotency_conflict(
+                    "task submit idempotency key was reused with a different TaskRecord",
+                ));
+            }
+            transaction.commit().map_err(|error| {
+                sqlite_error("commit idempotent TaskRecord submit failed", error)
+            })?;
+            return Ok((
+                Some(original.clone()),
+                TaskSubmitResult {
+                    task_id: original.task_id,
+                    duplicate: true,
+                },
+            ));
+        }
+        if let Some(existing) = task_record_by_id(&transaction, &task.task_id)? {
+            validate_expected_status(expected_from_status, Some(&existing.status))?;
+            validate_task_update(&existing, &task)?;
+        } else if submitted_task_conversation_id(&transaction, &task.task_id)?.is_some() {
+            return Err(migration_blocked(
+                "legacy submitted task requires an explicit audited TaskRecord migration",
+            ));
+        } else {
+            validate_expected_status(expected_from_status, None)?;
+        }
+        upsert_task_record(&transaction, &task)?;
+        insert_task_record_idempotency(&transaction, &idempotency_key, &task)?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit TaskRecord submit failed", error))?;
+        Ok((
+            Some(task.clone()),
+            TaskSubmitResult {
+                task_id: task.task_id,
+                duplicate: false,
+            },
+        ))
+    }
+
+    pub fn get_task(&self, task_id: &str) -> Result<Option<TaskRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        task_record_by_id(&connection, task_id)
+    }
+
+    pub fn list_tasks_for_conversation(
+        &self,
+        conversation_id: &str,
+        statuses: &[String],
+    ) -> Result<Vec<TaskRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {TASK_RECORD_COLUMNS} FROM submitted_tasks WHERE conversation_id = ?1 AND root_message_id IS NOT NULL ORDER BY created_at DESC, task_id DESC"
+            ))
+            .map_err(|error| sqlite_error("prepare TaskRecord conversation list failed", error))?;
+        let rows = statement
+            .query_map(rusqlite::params![conversation_id], task_record_from_row)
+            .map_err(|error| sqlite_error("query TaskRecord conversation list failed", error))?;
+        let status_filter = statuses.iter().collect::<std::collections::BTreeSet<_>>();
+        let mut tasks = Vec::new();
+        for row in rows {
+            let task = row.map_err(|error| {
+                sqlite_error("decode TaskRecord conversation list failed", error)
+            })?;
+            validate_task_record(&task)?;
+            if status_filter.is_empty() || status_filter.contains(&task.status) {
+                tasks.push(task);
+            }
+        }
+        Ok(tasks)
+    }
+
+    pub fn get_active_task_for_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<TaskRecord>, RuntimeSidecarError> {
+        Ok(self
+            .list_tasks_for_conversation(
+                conversation_id,
+                &[
+                    "accepted".to_owned(),
+                    "planning".to_owned(),
+                    "running".to_owned(),
+                    "cancelling".to_owned(),
+                ],
+            )?
+            .into_iter()
+            .next())
+    }
+
     pub fn transition_node(
         &self,
         task_id: &str,
         node_id: &str,
         to_status: &str,
+        expected_from_status: &str,
         idempotency_key: &str,
+        node: Option<TaskNodeRecord>,
     ) -> Result<NodeTransitionResult, RuntimeSidecarError> {
         let idempotency_key = require_idempotency_key(idempotency_key)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction()
             .map_err(|error| sqlite_error("begin node transition transaction failed", error))?;
-        if let Some(result) = node_transition_for_idempotency(&transaction, &idempotency_key)? {
+        if let Some((result, original_node)) =
+            node_transition_for_idempotency(&transaction, &idempotency_key)?
+        {
+            if original_node != node {
+                return Err(idempotency_conflict(
+                    "node transition idempotency key was reused with a different TaskNodeRecord",
+                ));
+            }
             transaction
                 .commit()
                 .map_err(|error| sqlite_error("commit idempotent node transition failed", error))?;
             return Ok(result);
+        }
+        let existing_node = task_node_by_id(&transaction, node_id)?;
+        validate_expected_status(
+            Some(expected_from_status),
+            existing_node.as_ref().map(|existing| &existing.status),
+        )?;
+        if let Some(existing) = &existing_node {
+            if existing.task_id != task_id {
+                return Err(write_failed("TaskNodeRecord cannot move between tasks"));
+            }
+            if node.is_none() {
+                let mut replacement = existing.clone();
+                replacement.status = to_status.to_owned();
+                validate_task_node_update(existing, &replacement)?;
+            }
+        }
+        if let Some(node) = &node {
+            validate_task_node_record(node)?;
+            if node.task_id != task_id || node.node_id != node_id || node.status != to_status {
+                return Err(crate::write_failed(
+                    "TransitionNode identity does not match TaskNodeRecord",
+                ));
+            }
+            if let Some(existing) = existing_node {
+                validate_task_node_update(&existing, node)?;
+            }
+            let node_json = serde_json::to_string(node)
+                .map_err(|_| write_failed("encode TaskNodeRecord failed"))?;
+            transaction
+                .execute(
+                    "INSERT INTO task_nodes (node_id, task_id, node_json) VALUES (?1, ?2, ?3) ON CONFLICT(node_id) DO UPDATE SET task_id=excluded.task_id, node_json=excluded.node_json",
+                    rusqlite::params![node_id, task_id, node_json],
+                )
+                .map_err(|error| sqlite_error("upsert TaskNodeRecord failed", error))?;
         }
         transaction
             .execute(
@@ -122,11 +271,22 @@ impl RuntimeSidecarSqliteAdapter {
                     idempotency_key,
                     task_id,
                     node_id,
-                    status
+                    status, node_json
                 )
-                VALUES (?1, ?2, ?3, ?4)
+                VALUES (?1, ?2, ?3, ?4, ?5)
                 ",
-                rusqlite::params![&idempotency_key, task_id, node_id, to_status],
+                rusqlite::params![
+                    &idempotency_key,
+                    task_id,
+                    node_id,
+                    to_status,
+                    node.as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|_| write_failed(
+                            "encode TaskNodeRecord idempotency snapshot failed"
+                        ))?,
+                ],
             )
             .map_err(|error| {
                 sqlite_error("insert node transition idempotency key failed", error)
@@ -139,6 +299,33 @@ impl RuntimeSidecarSqliteAdapter {
             node_id: node_id.to_owned(),
             status: to_status.to_owned(),
         })
+    }
+
+    pub fn get_task_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<TaskNodeRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        task_node_by_id(&connection, node_id)
+    }
+
+    pub fn list_task_nodes_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<TaskNodeRecord>, RuntimeSidecarError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare("SELECT node_json FROM task_nodes WHERE task_id = ?1 ORDER BY node_id")
+            .map_err(|error| sqlite_error("prepare TaskNodeRecord list failed", error))?;
+        let rows = statement
+            .query_map(rusqlite::params![task_id], |row| row.get::<_, String>(0))
+            .map_err(|error| sqlite_error("query TaskNodeRecord list failed", error))?;
+        rows.map(|row| {
+            decode_task_node_json(
+                &row.map_err(|error| sqlite_error("read TaskNodeRecord list failed", error))?,
+            )
+        })
+        .collect()
     }
 
     pub fn save_task_edge(
@@ -815,11 +1002,46 @@ impl RuntimeSidecarSqliteAdapter {
                 PRAGMA foreign_keys = ON;
                 CREATE TABLE IF NOT EXISTS submitted_tasks (
                     task_id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL
+                    conversation_id TEXT NOT NULL,
+                    root_message_id TEXT,
+                    status TEXT,
+                    routing_mode TEXT,
+                    requested_capability_id TEXT,
+                    root_node_id TEXT,
+                    summary TEXT,
+                    cancel_requested_at TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    route_mode TEXT,
+                    real_path TEXT,
+                    shadow_path TEXT,
+                    config_version TEXT,
+                    reason_code TEXT,
+                    cohort_id TEXT,
+                    assignment_key_hash TEXT,
+                    assigned_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS task_submit_idempotency (
                     idempotency_key TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL
+                    task_id TEXT NOT NULL,
+                    conversation_id TEXT,
+                    root_message_id TEXT,
+                    status TEXT,
+                    routing_mode TEXT,
+                    requested_capability_id TEXT,
+                    root_node_id TEXT,
+                    summary TEXT,
+                    cancel_requested_at TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    route_mode TEXT,
+                    real_path TEXT,
+                    shadow_path TEXT,
+                    config_version TEXT,
+                    reason_code TEXT,
+                    cohort_id TEXT,
+                    assignment_key_hash TEXT,
+                    assigned_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS node_statuses (
                     task_id TEXT NOT NULL,
@@ -827,11 +1049,17 @@ impl RuntimeSidecarSqliteAdapter {
                     status TEXT NOT NULL,
                     PRIMARY KEY (task_id, node_id)
                 );
+                CREATE TABLE IF NOT EXISTS task_nodes (
+                    node_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    node_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS node_transition_idempotency (
                     idempotency_key TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,
-                    status TEXT NOT NULL
+                    status TEXT NOT NULL,
+                    node_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS task_edges (
                     task_id TEXT NOT NULL,
@@ -922,7 +1150,18 @@ impl RuntimeSidecarSqliteAdapter {
                 );
                 ",
             )
-            .map_err(|error| sqlite_error("initialize runtime sidecar SQLite schema failed", error))
+            .map_err(|error| {
+                sqlite_error("initialize runtime sidecar SQLite schema failed", error)
+            })?;
+        ensure_task_authority_columns(&connection, "submitted_tasks")?;
+        ensure_task_authority_columns(&connection, "task_submit_idempotency")?;
+        ensure_optional_column(
+            &connection,
+            "node_transition_idempotency",
+            "node_json",
+            "TEXT",
+        )?;
+        Ok(())
     }
 
     fn lock_connection(&self) -> Result<MutexGuard<'_, Connection>, RuntimeSidecarError> {
@@ -933,6 +1172,43 @@ impl RuntimeSidecarSqliteAdapter {
             )
         })
     }
+}
+
+fn validate_expected_status(
+    expected: Option<&str>,
+    current: Option<&String>,
+) -> Result<(), RuntimeSidecarError> {
+    match (expected, current) {
+        (None | Some(""), None) => Ok(()),
+        (Some(expected), Some(current)) if expected == current => Ok(()),
+        _ => Err(idempotency_conflict(
+            "expected status does not match current authoritative status",
+        )),
+    }
+}
+
+fn ensure_optional_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    kind: &str,
+) -> Result<(), RuntimeSidecarError> {
+    let exists = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            Ok(rows.filter_map(Result::ok).any(|name| name == column))
+        })
+        .map_err(|error| sqlite_error("inspect additive schema column failed", error))?;
+    if !exists {
+        connection
+            .execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
+                [],
+            )
+            .map_err(|error| sqlite_error("add additive schema column failed", error))?;
+    }
+    Ok(())
 }
 
 fn submitted_task_for_idempotency(
@@ -949,28 +1225,244 @@ fn submitted_task_for_idempotency(
         .map_err(|error| sqlite_error("select task submit idempotency key failed", error))
 }
 
+fn submitted_task_conversation_id(
+    connection: &Connection,
+    task_id: &str,
+) -> Result<Option<String>, RuntimeSidecarError> {
+    connection
+        .query_row(
+            "SELECT conversation_id FROM submitted_tasks WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("select submitted task identity failed", error))
+}
+
+const TASK_RECORD_COLUMNS: &str = "task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, root_node_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at";
+
+fn task_record_by_id(
+    connection: &Connection,
+    task_id: &str,
+) -> Result<Option<TaskRecord>, RuntimeSidecarError> {
+    let task = connection
+        .query_row(
+            &format!("SELECT {TASK_RECORD_COLUMNS} FROM submitted_tasks WHERE task_id = ?1 AND root_message_id IS NOT NULL"),
+            rusqlite::params![task_id],
+            task_record_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("select TaskRecord failed", error))?;
+    if let Some(task) = &task {
+        validate_task_record(task)?;
+    }
+    Ok(task)
+}
+
+fn task_record_for_idempotency(
+    connection: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<TaskRecord>, RuntimeSidecarError> {
+    let task = connection
+        .query_row(
+            &format!("SELECT {TASK_RECORD_COLUMNS} FROM task_submit_idempotency WHERE idempotency_key = ?1 AND root_message_id IS NOT NULL"),
+            rusqlite::params![idempotency_key],
+            task_record_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("select TaskRecord idempotency snapshot failed", error))?;
+    if let Some(task) = &task {
+        validate_task_record(task)?;
+    }
+    Ok(task)
+}
+
+fn task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
+    let route_mode: Option<String> = row.get(11)?;
+    let assignment = match route_mode {
+        Some(route_mode) => Some(TaskRouteAssignment {
+            route_mode,
+            real_path: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+            shadow_path: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+            config_version: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+            reason_code: row.get::<_, Option<String>>(15)?.unwrap_or_default(),
+            cohort_id: row.get(16)?,
+            assignment_key_hash: row.get(17)?,
+            assigned_at: row.get(18)?,
+        }),
+        None => None,
+    };
+    Ok(TaskRecord {
+        task_id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        root_message_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        status: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        routing_mode: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        requested_capability_id: row.get(5)?,
+        root_node_id: row.get(6)?,
+        summary: row.get(7)?,
+        cancel_requested_at: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        assignment,
+    })
+}
+
+fn upsert_task_record(
+    connection: &Connection,
+    task: &TaskRecord,
+) -> Result<(), RuntimeSidecarError> {
+    let assignment = task.assignment.as_ref();
+    connection.execute(
+        r"INSERT INTO submitted_tasks (task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, root_node_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+           ON CONFLICT(task_id) DO UPDATE SET root_message_id=COALESCE(submitted_tasks.root_message_id, excluded.root_message_id), status=excluded.status, routing_mode=COALESCE(submitted_tasks.routing_mode, excluded.routing_mode), requested_capability_id=COALESCE(submitted_tasks.requested_capability_id, excluded.requested_capability_id), root_node_id=excluded.root_node_id, summary=excluded.summary, cancel_requested_at=excluded.cancel_requested_at, created_at=COALESCE(submitted_tasks.created_at, excluded.created_at), updated_at=excluded.updated_at, route_mode=COALESCE(submitted_tasks.route_mode, excluded.route_mode), real_path=COALESCE(submitted_tasks.real_path, excluded.real_path), shadow_path=COALESCE(submitted_tasks.shadow_path, excluded.shadow_path), config_version=COALESCE(submitted_tasks.config_version, excluded.config_version), reason_code=COALESCE(submitted_tasks.reason_code, excluded.reason_code), cohort_id=COALESCE(submitted_tasks.cohort_id, excluded.cohort_id), assignment_key_hash=COALESCE(submitted_tasks.assignment_key_hash, excluded.assignment_key_hash), assigned_at=COALESCE(submitted_tasks.assigned_at, excluded.assigned_at)",
+        rusqlite::params_from_iter(task_values(task, assignment)),
+    ).map(|_| ()).map_err(|error| sqlite_error("upsert TaskRecord failed", error))
+}
+
+fn insert_task_record_idempotency(
+    connection: &Connection,
+    idempotency_key: &str,
+    task: &TaskRecord,
+) -> Result<(), RuntimeSidecarError> {
+    let assignment = task.assignment.as_ref();
+    let mut values = vec![Value::Text(idempotency_key.to_owned())];
+    values.extend(task_values(task, assignment));
+    connection.execute(
+        r"INSERT INTO task_submit_idempotency (idempotency_key, task_id, conversation_id, root_message_id, status, routing_mode, requested_capability_id, root_node_id, summary, cancel_requested_at, created_at, updated_at, route_mode, real_path, shadow_path, config_version, reason_code, cohort_id, assignment_key_hash, assigned_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        rusqlite::params_from_iter(values),
+    ).map(|_| ()).map_err(|error| sqlite_error("insert TaskRecord idempotency snapshot failed", error))
+}
+
+fn task_values(task: &TaskRecord, assignment: Option<&TaskRouteAssignment>) -> Vec<Value> {
+    vec![
+        text_value(&task.task_id),
+        text_value(&task.conversation_id),
+        text_value(&task.root_message_id),
+        text_value(&task.status),
+        text_value(&task.routing_mode),
+        optional_text_value(task.requested_capability_id.as_deref()),
+        optional_text_value(task.root_node_id.as_deref()),
+        optional_text_value(task.summary.as_deref()),
+        optional_text_value(task.cancel_requested_at.as_deref()),
+        optional_text_value(task.created_at.as_deref()),
+        optional_text_value(task.updated_at.as_deref()),
+        optional_text_value(assignment.map(|value| value.route_mode.as_str())),
+        optional_text_value(assignment.map(|value| value.real_path.as_str())),
+        optional_text_value(assignment.map(|value| value.shadow_path.as_str())),
+        optional_text_value(assignment.map(|value| value.config_version.as_str())),
+        optional_text_value(assignment.map(|value| value.reason_code.as_str())),
+        optional_text_value(assignment.and_then(|value| value.cohort_id.as_deref())),
+        optional_text_value(assignment.and_then(|value| value.assignment_key_hash.as_deref())),
+        optional_text_value(assignment.and_then(|value| value.assigned_at.as_deref())),
+    ]
+}
+
+fn text_value(value: &str) -> Value {
+    Value::Text(value.to_owned())
+}
+
+fn optional_text_value(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |value| Value::Text(value.to_owned()))
+}
+
+fn ensure_task_authority_columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<(), RuntimeSidecarError> {
+    let columns = [
+        ("conversation_id", "TEXT"),
+        ("root_message_id", "TEXT"),
+        ("status", "TEXT"),
+        ("routing_mode", "TEXT"),
+        ("requested_capability_id", "TEXT"),
+        ("root_node_id", "TEXT"),
+        ("summary", "TEXT"),
+        ("cancel_requested_at", "TEXT"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+        ("route_mode", "TEXT"),
+        ("real_path", "TEXT"),
+        ("shadow_path", "TEXT"),
+        ("config_version", "TEXT"),
+        ("reason_code", "TEXT"),
+        ("cohort_id", "TEXT"),
+        ("assignment_key_hash", "TEXT"),
+        ("assigned_at", "TEXT"),
+    ];
+    for (column, kind) in columns {
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {kind}");
+        if let Err(error) = connection.execute(&sql, []) {
+            let duplicate = error.to_string().contains("duplicate column name");
+            if !duplicate {
+                return Err(sqlite_error(
+                    "additive TaskRecord schema migration failed",
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn node_transition_for_idempotency(
     connection: &Connection,
     idempotency_key: &str,
-) -> Result<Option<NodeTransitionResult>, RuntimeSidecarError> {
+) -> Result<Option<(NodeTransitionResult, Option<TaskNodeRecord>)>, RuntimeSidecarError> {
     connection
         .query_row(
             r"
-            SELECT task_id, node_id, status
+            SELECT task_id, node_id, status, node_json
             FROM node_transition_idempotency
             WHERE idempotency_key = ?1
             ",
             rusqlite::params![idempotency_key],
             |row| {
-                Ok(NodeTransitionResult {
+                let result = NodeTransitionResult {
                     task_id: row.get(0)?,
                     node_id: row.get(1)?,
                     status: row.get(2)?,
-                })
+                };
+                let node_json: Option<String> = row.get(3)?;
+                Ok((result, node_json))
             },
         )
         .optional()
-        .map_err(|error| sqlite_error("select node transition idempotency key failed", error))
+        .map_err(|error| sqlite_error("select node transition idempotency key failed", error))?
+        .map(|(result, node_json)| {
+            Ok((
+                result,
+                node_json
+                    .as_deref()
+                    .map(decode_task_node_json)
+                    .transpose()?,
+            ))
+        })
+        .transpose()
+}
+
+fn task_node_by_id(
+    connection: &Connection,
+    node_id: &str,
+) -> Result<Option<TaskNodeRecord>, RuntimeSidecarError> {
+    let node_json = connection
+        .query_row(
+            "SELECT node_json FROM task_nodes WHERE node_id = ?1",
+            rusqlite::params![node_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("select TaskNodeRecord failed", error))?;
+    node_json.as_deref().map(decode_task_node_json).transpose()
+}
+
+fn decode_task_node_json(payload: &str) -> Result<TaskNodeRecord, RuntimeSidecarError> {
+    let node: TaskNodeRecord =
+        serde_json::from_str(payload).map_err(|_| write_failed("decode TaskNodeRecord failed"))?;
+    validate_task_node_record(&node)?;
+    Ok(node)
 }
 
 fn task_edge_for_idempotency(

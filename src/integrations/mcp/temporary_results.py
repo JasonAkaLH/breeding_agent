@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import errno
 import hashlib
+import json
 import os
 import secrets
 import shutil
@@ -350,6 +351,8 @@ class MCPTemporaryResultCapacity:
 class _StoredResult:
     task_key: str
     scope_id: str | None
+    size_bytes: int
+    sha256: str
     memory: bytes | None
     path: Path | None
     promoted: bool = False
@@ -365,20 +368,77 @@ class MCPTemporaryResultStore:
         self._memory_threshold_bytes = memory_threshold_bytes
         self._tasks: dict[str, str] = {}
         self._results: dict[str, _StoredResult] = {}
+        self._spill_observer: Callable[[str | None, int], Awaitable[None]] | None = None
+        self._cleanup_failure_observer: Callable[[str | None], Awaitable[None]] | None = None
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self._root, 0o700)
+        self._load_durable_results()
 
     @property
     def root(self) -> Path:
         return self._root
 
-    def create_sink(self, task_id: str, *, scope_id: str | None = None) -> MCPResultSink:
+    def configure_metric_observers(
+        self,
+        *,
+        spill_observer: Callable[[str | None, int], Awaitable[None]] | None,
+        cleanup_failure_observer: Callable[[str | None], Awaitable[None]] | None,
+    ) -> None:
+        self._spill_observer = spill_observer
+        self._cleanup_failure_observer = cleanup_failure_observer
+
+    async def _observe_spill_bytes(
+        self,
+        scope_id: str | None,
+    ) -> None:
+        if self._spill_observer is None:
+            return
+        try:
+            await self._spill_observer(
+                scope_id,
+                sum(
+                    stored.size_bytes
+                    for stored in self._results.values()
+                    if stored.scope_id == scope_id and stored.path is not None
+                ),
+            )
+        except Exception:
+            return
+
+    async def _observe_cleanup_failure(self, scope_id: str | None) -> None:
+        if self._cleanup_failure_observer is None:
+            return
+        try:
+            await self._cleanup_failure_observer(scope_id)
+        except Exception:
+            return
+
+    def create_sink(
+        self,
+        task_id: str,
+        *,
+        scope_id: str | None = None,
+        durable: bool = False,
+    ) -> MCPResultSink:
         task_key = self._task_key(task_id)
         return _MemoryToFileSink(
             store=self,
+            task_id=str(task_id),
             task_key=task_key,
             scope_id=str(scope_id) if scope_id is not None else None,
             threshold=self._memory_threshold_bytes,
+            durable=durable,
+        )
+
+    def resolve_ref(self, ref: str) -> MCPTemporaryResultRef:
+        stored = self._results.get(str(ref))
+        if stored is None:
+            raise KeyError("Unknown or expired MCP temporary result reference.")
+        return MCPTemporaryResultRef(
+            ref=str(ref),
+            size_bytes=stored.size_bytes,
+            sha256=stored.sha256,
+            storage="memory" if stored.memory is not None else "file",
         )
 
     async def iter_bytes(self, result_ref: MCPTemporaryResultRef, *, chunk_size: int = 64 * 1024) -> AsyncIterator[bytes]:
@@ -393,6 +453,12 @@ class MCPTemporaryResultStore:
             return
         if stored.path is None:
             raise KeyError("Unknown or expired MCP temporary result reference.")
+        if not await asyncio.to_thread(
+            _file_matches_result, stored.path, stored.size_bytes, stored.sha256
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result integrity verification failed."
+            )
         handle = await asyncio.to_thread(open, stored.path, "rb")
         try:
             while chunk := await asyncio.to_thread(handle.read, chunk_size):
@@ -411,25 +477,50 @@ class MCPTemporaryResultStore:
         if stored is None or stored.promoted:
             return
         if stored.path is not None:
-            await _unlink(stored.path)
+            try:
+                await _unlink(stored.path)
+            except BaseException:
+                await self._observe_cleanup_failure(stored.scope_id)
+                raise
+            await self._observe_spill_bytes(stored.scope_id)
 
     async def cleanup_scope(self, scope_id: str) -> None:
         normalized = str(scope_id)
+        removed_file = False
         for ref, stored in list(self._results.items()):
             if stored.scope_id == normalized and not stored.promoted:
                 self._results.pop(ref, None)
                 if stored.path is not None:
-                    await _unlink(stored.path)
+                    try:
+                        await _unlink(stored.path)
+                    except BaseException:
+                        await self._observe_cleanup_failure(stored.scope_id)
+                        raise
+                    removed_file = True
+        if removed_file:
+            await self._observe_spill_bytes(normalized)
 
     async def cleanup_task(self, task_id: str) -> None:
-        task_key = self._tasks.pop(str(task_id), None)
+        normalized_task_id = str(task_id)
+        task_key = self._tasks.get(normalized_task_id)
         if task_key is None:
             return
+        removed_scope_ids: set[str | None] = set()
         for ref, stored in list(self._results.items()):
             if stored.task_key == task_key and not stored.promoted:
                 self._results.pop(ref, None)
                 if stored.path is not None:
-                    await _unlink(stored.path)
+                    try:
+                        await _unlink(stored.path)
+                    except BaseException:
+                        await self._observe_cleanup_failure(stored.scope_id)
+                        raise
+                    removed_scope_ids.add(stored.scope_id)
+        for scope_id in removed_scope_ids:
+            await self._observe_spill_bytes(scope_id)
+        if any(stored.task_key == task_key for stored in self._results.values()):
+            return
+        self._tasks.pop(normalized_task_id, None)
         task_dir = self._root / task_key
         if task_dir.exists() and not any(stored.task_key == task_key for stored in self._results.values()):
             await asyncio.to_thread(shutil.rmtree, task_dir, True)
@@ -451,6 +542,39 @@ class MCPTemporaryResultStore:
     def _register(self, result: MCPTemporaryResultRef, stored: _StoredResult) -> None:
         self._results[result.ref] = stored
 
+    def _load_durable_results(self) -> None:
+        for manifest_path in self._root.glob("task-*/*.manifest.json"):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                ref = str(manifest["ref"])
+                data_path = manifest_path.with_suffix("").with_suffix(".json")
+                if not ref.startswith("mcp-result-") or not data_path.is_file():
+                    continue
+                size_bytes = int(manifest["size_bytes"])
+                sha256 = str(manifest["sha256"])
+                if len(sha256) != 64:
+                    continue
+                task_key = manifest_path.parent.name
+                task_id = str(manifest["task_id"])
+                if not task_id or data_path.stat().st_size != size_bytes:
+                    continue
+                digest = hashlib.sha256(data_path.read_bytes()).hexdigest()
+                if digest != sha256:
+                    continue
+                scope_id = manifest.get("scope_id")
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            self._results[ref] = _StoredResult(
+                task_key=task_key,
+                scope_id=str(scope_id) if scope_id is not None else None,
+                size_bytes=size_bytes,
+                sha256=sha256,
+                memory=None,
+                path=data_path,
+                promoted=True,
+            )
+            self._tasks[task_id] = task_key
+
     async def _remove_empty_task_dir(self, task_key: str) -> None:
         task_dir = self._root / task_key
         if task_dir.exists() and not any(stored.task_key == task_key for stored in self._results.values()):
@@ -458,11 +582,22 @@ class MCPTemporaryResultStore:
 
 
 class _MemoryToFileSink:
-    def __init__(self, *, store: MCPTemporaryResultStore, task_key: str, scope_id: str | None, threshold: int) -> None:
+    def __init__(
+        self,
+        *,
+        store: MCPTemporaryResultStore,
+        task_id: str,
+        task_key: str,
+        scope_id: str | None,
+        threshold: int,
+        durable: bool,
+    ) -> None:
         self._store = store
+        self._task_id = task_id
         self._task_key = task_key
         self._scope_id = scope_id
         self._threshold = threshold
+        self._durable = durable
         self._memory = bytearray()
         self._path: Path | None = None
         self._handle = None
@@ -498,9 +633,12 @@ class _MemoryToFileSink:
         if self._finished:
             raise RuntimeError("MCP result sink is already finalized or aborted.")
         try:
+            if self._durable and self._handle is None:
+                await self._spill()
             if self._handle is not None:
                 await self._flush_file_buffer()
                 await asyncio.to_thread(self._handle.flush)
+                await asyncio.to_thread(os.fsync, self._handle.fileno())
                 await asyncio.to_thread(self._handle.close)
                 self._handle = None
         except OSError as exc:
@@ -510,7 +648,11 @@ class _MemoryToFileSink:
             raise
         self._finished = True
         result = MCPTemporaryResultRef(
-            ref=f"mcp-result-{secrets.token_urlsafe(24)}",
+            ref=(
+                f"mcp-result-{self._task_key.removeprefix('task-')}-{self._digest.hexdigest()}"
+                if self._durable
+                else f"mcp-result-{secrets.token_urlsafe(24)}"
+            ),
             size_bytes=self._size,
             sha256=self._digest.hexdigest(),
             storage="file" if self._path is not None else "memory",
@@ -520,12 +662,44 @@ class _MemoryToFileSink:
             _StoredResult(
                 task_key=self._task_key,
                 scope_id=self._scope_id,
+                size_bytes=result.size_bytes,
+                sha256=result.sha256,
                 memory=None if self._path is not None else bytes(self._memory),
                 path=self._path,
+                promoted=self._durable,
             ),
         )
+        if self._durable:
+            assert self._path is not None
+            final_path = self._path.with_name(f"{result.ref}.json")
+            await asyncio.to_thread(os.replace, self._path, final_path)
+            os.chmod(final_path, 0o600)
+            await asyncio.to_thread(_fsync_path, final_path)
+            self._path = final_path
+            stored = self._store._results[result.ref]
+            stored.path = final_path
+            manifest_path = final_path.with_suffix(".manifest.json")
+            manifest_tmp = manifest_path.with_suffix(".tmp")
+            manifest_payload = json.dumps(
+                {
+                    "ref": result.ref,
+                    "size_bytes": result.size_bytes,
+                    "sha256": result.sha256,
+                    "task_id": self._task_id,
+                    "scope_id": self._scope_id,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            await asyncio.to_thread(_write_fsynced_text, manifest_tmp, manifest_payload)
+            os.chmod(manifest_tmp, 0o600)
+            await asyncio.to_thread(os.replace, manifest_tmp, manifest_path)
+            await asyncio.to_thread(_fsync_path, manifest_path)
+            await asyncio.to_thread(_fsync_directory, manifest_path.parent)
         self._memory.clear()
         self._file_buffer.clear()
+        if result.storage == "file":
+            await self._store._observe_spill_bytes(self._scope_id)
         return result
 
     async def materialize(self, *, max_bytes: int) -> bytes:
@@ -553,7 +727,11 @@ class _MemoryToFileSink:
                 await asyncio.to_thread(self._handle.close)
             self._handle = None
         if self._path is not None:
-            await _unlink(self._path)
+            try:
+                await _unlink(self._path)
+            except BaseException:
+                await self._store._observe_cleanup_failure(self._scope_id)
+                raise
 
     async def _spill(self) -> None:
         task_dir = self._store.root / self._task_key
@@ -604,6 +782,44 @@ class MCPTemporaryResultJanitor:
 def _disk_free_bytes(path: Path) -> int:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return shutil.disk_usage(path).free
+
+
+def _write_fsynced_text(path: Path, value: str) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_path(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _file_matches_result(
+    path: Path, size_bytes: int, expected_sha256: str
+) -> bool:
+    try:
+        if path.stat().st_size != size_bytes:
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(64 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest() == expected_sha256
+    except OSError:
+        return False
 
 
 async def _unlink(path: Path) -> None:

@@ -1,28 +1,63 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
-from typing import Any, Callable, Mapping, TypeVar
+import json
+from dataclasses import replace
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any, Callable, Mapping, Sequence, TypeVar
 
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.exc import DBAPIError
 
 from src.core.enums import ConversationStatus
 from src.core.models import (
     Conversation,
     MCPCallRecord,
+    MCPLegacyMigrationBatchResult,
+    MCPLegacyMigrationRecord,
+    MCPRemoteTaskBinding,
+    MCPRolloutBlockResolution,
+    MCPRolloutDeploymentActivation,
+    MCPRolloutDrillObservation,
+    MCPRolloutEvidenceSnapshot,
+    MCPRolloutGateScope,
+    MCPRolloutInstanceConfigLease,
+    MCPRolloutPromotionBlock,
+    MCPRolloutStageApproval,
+    MCPRolloutMetricBucket,
+    MCPShadowAuditSample,
     UserMCPCredentialRecord,
     UserMCPHealthAttempt,
     UserMCPScopeLease,
     UserMCPServer,
+    validate_mcp_rollout_drill_observation,
 )
+from src.integrations.mcp.rollout_evidence import is_exact_mcp_metric_bucket_window
 from src.storage.sqlite.models import (
     ConversationRow,
     MCPBranchRecordRow,
+    MCPRemoteTaskBindingRow,
     UserMCPHealthAttemptRow,
     UserMCPScopeLeaseRow,
     UserMCPServerRow,
 )
-from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage, _row_to_conversation
+from src.storage.sqlite.repositories import (
+    SQLiteStateRepository,
+    SQLiteStorage,
+    _row_to_conversation,
+    _row_to_mcp_remote_task,
+    _row_to_mcp_rollout_block_resolution,
+    _row_to_mcp_rollout_deployment_activation,
+    _row_to_mcp_rollout_drill_observation,
+    _row_to_mcp_rollout_evidence_snapshot,
+    _row_to_mcp_rollout_gate_scope,
+    _row_to_mcp_rollout_instance_config,
+    _row_to_mcp_rollout_metric_bucket,
+    _row_to_mcp_rollout_promotion_block,
+    _row_to_mcp_rollout_stage_approval,
+    _row_to_mcp_shadow_audit_sample,
+)
 
 
 _T = TypeVar("_T")
@@ -37,6 +72,298 @@ class PostgreSQLStorage(SQLiteStorage):
     set-based inside PostgreSQL and avoid pulling large task/message id lists
     into Python.
     """
+
+    def __init__(
+        self,
+        session_factory,
+        *,
+        mcp_rollout_session_factory=None,
+        mcp_rollout_role: str | None = None,
+        mcp_legacy_migration_session_factory=None,
+        mcp_legacy_migration_role: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(session_factory, **kwargs)
+        if mcp_rollout_role not in {
+            None,
+            "app",
+            "snapshot",
+            "ci",
+            "evaluator",
+            "operator",
+            "validator",
+            "drill",
+        }:
+            raise ValueError("unsupported MCP rollout PostgreSQL role")
+        self._mcp_rollout_session_factory = (
+            mcp_rollout_session_factory or session_factory
+        )
+        self._mcp_rollout_role = mcp_rollout_role
+        self._mcp_legacy_migration_session_factory = (
+            mcp_legacy_migration_session_factory
+        )
+        self._mcp_legacy_migration_role = mcp_legacy_migration_role
+
+    async def get_legacy_mcp_migration_replay_snapshot(
+        self,
+        *,
+        migration_id: str,
+        plan_fingerprint: str,
+        source_server_id: str,
+        source_fingerprint: str,
+        owner_consumer_ref: str,
+        target_server_id: str,
+    ) -> Mapping[str, Any] | None:
+        migration_session_factory = self._mcp_legacy_migration_session_factory
+        if migration_session_factory is None or not self._mcp_legacy_migration_role:
+            raise RuntimeError(
+                "dedicated MCP legacy migration PostgreSQL session is required"
+            )
+        statement = text(
+            "SELECT mcp_migration_api.read_legacy_migration_replay_snapshot("
+            ":migration_id, :plan_fingerprint, :source_server_id, "
+            ":source_fingerprint, :owner_consumer_ref, :target_server_id)"
+        )
+
+        def _sync() -> Mapping[str, Any] | None:
+            with migration_session_factory() as session:
+                value = session.scalar(
+                    statement,
+                    {
+                        "migration_id": migration_id,
+                        "plan_fingerprint": plan_fingerprint,
+                        "source_server_id": source_server_id,
+                        "source_fingerprint": source_fingerprint,
+                        "owner_consumer_ref": owner_consumer_ref,
+                        "target_server_id": target_server_id,
+                    },
+                )
+                if value is None:
+                    return None
+                if not isinstance(value, Mapping):
+                    raise RuntimeError(
+                        "legacy MCP migration replay API returned an invalid result"
+                    )
+                return dict(value)
+
+        return await asyncio.to_thread(_sync)
+
+    async def apply_legacy_mcp_migration_atomic(
+        self,
+        candidates: Sequence[
+            tuple[
+                UserMCPServer,
+                UserMCPCredentialRecord | None,
+                MCPLegacyMigrationRecord,
+            ],
+        ],
+    ) -> MCPLegacyMigrationBatchResult:
+        migration_session_factory = self._mcp_legacy_migration_session_factory
+        if migration_session_factory is None or not self._mcp_legacy_migration_role:
+            raise RuntimeError(
+                "dedicated MCP legacy migration PostgreSQL session is required"
+            )
+        batch = tuple(candidates)
+        migration_ids: set[str] = set()
+        plan_sources: set[tuple[str, str]] = set()
+        target_server_ids: set[str] = set()
+        for server, credential, record in batch:
+            SQLiteStateRepository._validate_mcp_legacy_migration_record(record)
+            if record.target_server_id != server.server_id:
+                raise ValueError("migration record target does not match MCP server")
+            if credential is not None and (
+                credential.owner_user_id != server.owner_user_id
+                or credential.server_id != server.server_id
+            ):
+                raise ValueError("credential scope does not match MCP server")
+            if server.deletion_pending or server.deleted_at is not None:
+                raise ValueError("migration MCP server deletion state is invalid")
+            plan_source = (record.plan_fingerprint, record.source_server_id)
+            if (
+                record.migration_id in migration_ids
+                or plan_source in plan_sources
+                or record.target_server_id in target_server_ids
+            ):
+                raise ValueError("duplicate legacy MCP migration candidate")
+            migration_ids.add(record.migration_id)
+            plan_sources.add(plan_source)
+            target_server_ids.add(record.target_server_id)
+
+        ordered_batch = tuple(
+            sorted(
+                batch,
+                key=lambda candidate: (
+                    candidate[2].migration_id,
+                    candidate[2].plan_fingerprint,
+                    candidate[2].source_server_id,
+                    candidate[2].target_server_id,
+                ),
+            )
+        )
+        lock_identities = tuple(
+            sorted(
+                {
+                    identity
+                    for _server, _credential, record in ordered_batch
+                    for identity in (
+                        f"migration:{record.migration_id}",
+                        "plan_source:"
+                        f"{record.plan_fingerprint}:{record.source_server_id}",
+                        f"target:{record.target_server_id}",
+                    )
+                }
+            )
+        )
+        lock_statement = text(
+            "SELECT mcp_migration_api.lock_legacy_migration_batch("
+            "CAST(:lock_identities AS text[]))"
+        )
+        statement = text(
+            """
+            SELECT mcp_migration_api.apply_legacy_migration_candidate(
+                :server_id, :owner_user_id, :display_name,
+                :routing_description, :endpoint_url, :transport,
+                :protocol_preference, :auth_type, CAST(:auth_metadata AS jsonb),
+                :enabled, :health_status, :config_version, :security_version,
+                :credential_ciphertext, :credential_nonce, :encryption_version,
+                :credential_updated_at, :last_tested_at, :last_test_error_code,
+                :created_at, :updated_at, :migration_id, :plan_fingerprint,
+                :source_server_id, :source_fingerprint, :owner_consumer_ref,
+                :target_server_id, :target_consumer_set_digest,
+                :capability_obligations_fingerprint, :catalog_fingerprint,
+                :capability_fingerprint, :validator_provenance_fingerprint,
+                :credential_digest, :occurred_at, :evidence_expires_at
+            )
+            """
+        )
+
+        def _sync() -> MCPLegacyMigrationBatchResult:
+            applied = False
+            with migration_session_factory() as session:
+                with session.begin():
+                    if lock_identities:
+                        session.execute(
+                            lock_statement,
+                            {"lock_identities": list(lock_identities)},
+                        )
+                    for server, credential, record in ordered_batch:
+                        parameters: dict[str, object | None] = {
+                            **SQLiteStateRepository._user_mcp_server_insert_values(
+                                server, credential
+                            ),
+                            **SQLiteStateRepository._mcp_legacy_migration_record_values(
+                                record
+                            ),
+                        }
+                        parameters["auth_metadata"] = json.dumps(
+                            parameters["auth_metadata"],
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                        candidate_applied = session.scalar(statement, parameters)
+                        if not isinstance(candidate_applied, bool):
+                            raise RuntimeError(
+                                "legacy MCP migration API returned an invalid result"
+                            )
+                        applied = applied or candidate_applied
+            return MCPLegacyMigrationBatchResult(
+                servers=tuple(
+                    replace(
+                        server,
+                        credential_configured=credential is not None,
+                        deletion_pending=False,
+                        deleted_at=None,
+                    )
+                    for server, credential, _record in batch
+                ),
+                records=tuple(record for _server, _credential, record in batch),
+                applied=applied,
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except DBAPIError as exc:
+            database_message = str(exc.orig)
+            if (
+                "legacy MCP migration" in database_message
+                and "conflict" in database_message
+            ):
+                raise ValueError(database_message.splitlines()[0]) from None
+            raise
+
+    async def _run_mcp_rollout_function(
+        self,
+        statement: str,
+        parameters: Mapping[str, object],
+        converter: Callable[[Any], _T],
+    ) -> _T:
+        def _sync() -> _T:
+            with self._mcp_rollout_session_factory() as session:
+                row = session.execute(text(statement), parameters).mappings().one()
+                session.commit()
+                return converter(SimpleNamespace(**row))
+
+        return await asyncio.to_thread(_sync)
+
+    @staticmethod
+    def _metric_parameters(bucket: MCPRolloutMetricBucket) -> dict[str, object]:
+        return {
+            "metric_bucket_id": bucket.metric_bucket_id,
+            "environment_id": bucket.environment_id,
+            "deployment_id": bucket.deployment_id,
+            "stage": bucket.stage,
+            "config_fingerprint": bucket.config_fingerprint,
+            "metric_name": bucket.metric_name,
+            "bucket_started_at": bucket.bucket_started_at,
+            "bucket_ended_at": bucket.bucket_ended_at,
+            "execution_path": bucket.execution_path,
+            "routing_mode": bucket.routing_mode,
+            "transport": bucket.transport,
+            "protocol_version": bucket.protocol_version,
+            "adapter": bucket.adapter,
+            "result_category": bucket.result_category,
+            "error_category": bucket.error_category,
+            "call_kind": bucket.call_kind or "not_applicable",
+            "red_line": bucket.red_line or "not_applicable",
+            "latency_bucket": bucket.latency_bucket,
+            "value": bucket.value,
+            "recorded_at": bucket.updated_at or bucket.created_at or datetime.now().astimezone(),
+        }
+
+    async def upsert_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket:
+        return await self._write_mcp_rollout_metric_bucket_via_api(bucket, additive=True)
+
+    async def set_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket:
+        return await self._write_mcp_rollout_metric_bucket_via_api(bucket, additive=False)
+
+    async def _write_mcp_rollout_metric_bucket_via_api(
+        self, bucket: MCPRolloutMetricBucket, *, additive: bool
+    ) -> MCPRolloutMetricBucket:
+        if not is_exact_mcp_metric_bucket_window(
+            bucket.bucket_started_at, bucket.bucket_ended_at
+        ):
+            raise ValueError(
+                "MCP rollout metric bucket must be one complete UTC-aligned minute"
+            )
+        function_name = "upsert_metric_bucket" if additive else "set_metric_bucket"
+        return await self._run_mcp_rollout_function(
+            f"""
+            SELECT result.*
+            FROM mcp_rollout_api.{function_name}(
+                :metric_bucket_id, :environment_id, :deployment_id, :stage,
+                :config_fingerprint, :metric_name, :bucket_started_at,
+                :bucket_ended_at, :execution_path, :routing_mode, :transport,
+                :protocol_version, :adapter, :result_category, :error_category,
+                :call_kind, :red_line, :latency_bucket, :value, :recorded_at
+            ) AS result
+            """,
+            self._metric_parameters(bucket),
+            _row_to_mcp_rollout_metric_bucket,
+        )
 
     async def _run_with_user_mcp_server_lock(
         self,
@@ -60,6 +387,476 @@ class PostgreSQLStorage(SQLiteStorage):
 
         return await asyncio.to_thread(_sync)
 
+    async def ensure_mcp_rollout_gate_scope(
+        self, scope: MCPRolloutGateScope
+    ) -> MCPRolloutGateScope:
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.ensure_gate_scope(
+                :environment_id, :created_at
+            ) AS result
+            """,
+            {
+                "environment_id": scope.environment_id,
+                "created_at": scope.created_at or datetime.now().astimezone(),
+            },
+            _row_to_mcp_rollout_gate_scope,
+        )
+
+    async def append_mcp_rollout_drill_observation(
+        self, observation: MCPRolloutDrillObservation
+    ) -> MCPRolloutDrillObservation:
+        blockers = validate_mcp_rollout_drill_observation(observation)
+        if blockers:
+            raise ValueError(
+                "MCP rollout drill observation is invalid: " + ",".join(blockers)
+            )
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.append_drill_observation(
+                :drill_observation_id, :environment_id, :deployment_id,
+                :config_fingerprint, :drill, :outcome, :observed_at,
+                :recorded_at, :expires_at, :payload_digest
+            ) AS result
+            """,
+            {
+                "drill_observation_id": observation.drill_observation_id,
+                "environment_id": observation.environment_id,
+                "deployment_id": observation.deployment_id,
+                "config_fingerprint": observation.config_fingerprint,
+                "drill": observation.drill,
+                "outcome": observation.outcome,
+                "observed_at": observation.observed_at,
+                "recorded_at": observation.recorded_at,
+                "expires_at": observation.expires_at,
+                "payload_digest": observation.payload_digest,
+            },
+            _row_to_mcp_rollout_drill_observation,
+        )
+
+    async def list_mcp_rollout_drill_observations(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPRolloutDrillObservation]:
+        if not environment_id or not deployment_id or window_ended_at <= window_started_at:
+            raise ValueError("MCP rollout drill observation query scope is invalid")
+
+        def _sync() -> list[MCPRolloutDrillObservation]:
+            with self._mcp_rollout_session_factory() as session:
+                rows = session.execute(
+                    text(
+                        """
+                        SELECT drill_observation.*
+                        FROM public.mcp_rollout_drill_observation AS drill_observation
+                        WHERE drill_observation.environment_id = :environment_id
+                          AND drill_observation.rollout_program = 'user_mcp_phase3'
+                          AND drill_observation.deployment_id = :deployment_id
+                          AND drill_observation.stage = 'internal_enforce'
+                          AND drill_observation.observed_at >= :window_started_at
+                          AND drill_observation.observed_at < :window_ended_at
+                          AND drill_observation.expires_at > :window_ended_at
+                        ORDER BY drill_observation.observed_at,
+                                 drill_observation.drill,
+                                 drill_observation.drill_observation_id
+                        """
+                    ),
+                    {
+                        "environment_id": environment_id,
+                        "deployment_id": deployment_id,
+                        "window_started_at": window_started_at,
+                        "window_ended_at": window_ended_at,
+                    },
+                ).mappings()
+                return [
+                    _row_to_mcp_rollout_drill_observation(SimpleNamespace(**row))
+                    for row in rows
+                ]
+
+        return await asyncio.to_thread(_sync)
+
+    async def append_mcp_rollout_evidence_snapshot(
+        self, snapshot: MCPRolloutEvidenceSnapshot
+    ) -> MCPRolloutEvidenceSnapshot:
+        if snapshot.source != "ci":
+            raise ValueError(
+                "production MCP rollout evidence must use the durable snapshot producer"
+            )
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.append_ci_evidence_snapshot(
+                :evidence_id, :environment_id, :git_sha, :deployment_id,
+                :stage, :config_fingerprint, :window_started_at,
+                :window_ended_at, :recorded_at, :snapshot_id, :nonce,
+                :evidence_kind, CAST(:payload AS jsonb), :payload_digest
+            ) AS result
+            """,
+            {
+                "evidence_id": snapshot.evidence_id,
+                "environment_id": snapshot.environment_id,
+                "git_sha": snapshot.git_sha,
+                "deployment_id": snapshot.deployment_id,
+                "stage": snapshot.stage,
+                "config_fingerprint": snapshot.config_fingerprint,
+                "window_started_at": snapshot.window_started_at,
+                "window_ended_at": snapshot.window_ended_at,
+                "recorded_at": snapshot.recorded_at,
+                "snapshot_id": snapshot.snapshot_id,
+                "nonce": snapshot.nonce,
+                "evidence_kind": snapshot.evidence_kind,
+                "payload": json.dumps(snapshot.payload, separators=(",", ":"), sort_keys=True),
+                "payload_digest": snapshot.payload_digest,
+            },
+            _row_to_mcp_rollout_evidence_snapshot,
+        )
+
+    async def save_mcp_shadow_audit_sample(
+        self, sample: MCPShadowAuditSample
+    ) -> MCPShadowAuditSample:
+        from src.integrations.mcp.shadow_evidence import validate_shadow_audit_sample
+
+        blockers = validate_shadow_audit_sample(sample)
+        if blockers:
+            raise ValueError(f"MCP shadow audit sample is invalid: {','.join(blockers)}")
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.append_shadow_audit_sample(
+                :sample_id, :environment_id, :deployment_id,
+                :config_fingerprint, :manifest_fingerprint,
+                :fixture_fingerprint, :mapping_fingerprint, :scenario, :nonce,
+                :safe_owner_ref, :safe_task_ref, :safe_call_ref, :legacy_outcome,
+                :shadow_outcome, :transport, :endpoint_policy, :comparison,
+                CAST(:blockers AS jsonb), :payload_digest, :observed_at,
+                :recorded_at, :expires_at
+            ) AS result
+            """,
+            {
+                "sample_id": sample.sample_id,
+                "environment_id": sample.environment_id,
+                "deployment_id": sample.deployment_id,
+                "config_fingerprint": sample.config_fingerprint,
+                "manifest_fingerprint": sample.manifest_fingerprint,
+                "fixture_fingerprint": sample.fixture_fingerprint,
+                "mapping_fingerprint": sample.mapping_fingerprint,
+                "scenario": sample.scenario,
+                "nonce": sample.nonce,
+                "safe_owner_ref": sample.safe_owner_ref,
+                "safe_task_ref": sample.safe_task_ref,
+                "safe_call_ref": sample.safe_call_ref,
+                "legacy_outcome": sample.legacy_outcome,
+                "shadow_outcome": sample.shadow_outcome,
+                "transport": sample.transport,
+                "endpoint_policy": sample.endpoint_policy,
+                "comparison": sample.comparison,
+                "blockers": json.dumps(sample.blockers, separators=(",", ":")),
+                "payload_digest": sample.payload_digest,
+                "observed_at": sample.observed_at,
+                "recorded_at": sample.recorded_at,
+                "expires_at": sample.expires_at,
+            },
+            _row_to_mcp_shadow_audit_sample,
+        )
+
+    async def delete_expired_mcp_shadow_audit_samples(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int:
+        def _sync() -> int:
+            with self._mcp_rollout_session_factory() as session:
+                result = session.scalar(
+                    text(
+                        "SELECT mcp_rollout_api.delete_expired_shadow_audit_samples("
+                        ":now, :limit)"
+                    ),
+                    {"now": now, "limit": max(1, limit)},
+                )
+                session.commit()
+                return int(result or 0)
+
+        return await asyncio.to_thread(_sync)
+
+    async def produce_mcp_shadow_evidence_snapshot(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        builder: Callable[
+            [list[MCPShadowAuditSample], list[MCPRolloutMetricBucket]],
+            MCPRolloutEvidenceSnapshot,
+        ],
+    ) -> MCPRolloutEvidenceSnapshot:
+        del environment_id, deployment_id, window_started_at, window_ended_at, builder
+        raise ValueError(
+            "PostgreSQL production evidence requires the DB-derived producer boundary"
+        )
+
+    async def produce_mcp_shadow_evidence_snapshot_db_derived(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        git_sha: str,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        attestation_key_id: str,
+        attestation_key: bytes,
+    ) -> MCPRolloutEvidenceSnapshot:
+        return await self.produce_mcp_rollout_evidence_snapshot_db_derived(
+            environment_id,
+            deployment_id,
+            git_sha=git_sha,
+            window_started_at=window_started_at,
+            window_ended_at=window_ended_at,
+            attestation_key_id=attestation_key_id,
+            attestation_key=attestation_key,
+        )
+
+    async def produce_mcp_rollout_evidence_snapshot_db_derived(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        git_sha: str,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        attestation_key_id: str,
+        attestation_key: bytes,
+    ) -> MCPRolloutEvidenceSnapshot:
+        def _sync() -> MCPRolloutEvidenceSnapshot:
+            from scripts.validate_user_mcp_phase3_evidence import parse_evidence_snapshot
+            from src.integrations.mcp.rollout_evidence import (
+                MCPEvidenceSnapshot,
+            )
+
+            with self._mcp_rollout_session_factory() as session:
+                session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+                prepared = session.execute(
+                    text(
+                        """
+                        SELECT * FROM mcp_rollout_api.prepare_production_evidence_snapshot(
+                            :environment_id, :deployment_id, :git_sha,
+                            :window_started_at, :window_ended_at
+                        )
+                        """
+                    ),
+                    {
+                        "environment_id": environment_id,
+                        "deployment_id": deployment_id,
+                        "git_sha": git_sha,
+                        "window_started_at": window_started_at,
+                        "window_ended_at": window_ended_at,
+                    },
+                ).mappings().one()
+                prepared_record = {
+                    key: value
+                    for key, value in dict(prepared).items()
+                    if key not in {"rollout_program", "evidence_kind"}
+                }
+                for timestamp_field in (
+                    "window_started_at",
+                    "window_ended_at",
+                    "recorded_at",
+                ):
+                    prepared_record[timestamp_field] = (
+                        prepared_record[timestamp_field]
+                        .astimezone(timezone.utc)
+                        .isoformat(timespec="microseconds")
+                    )
+                parsed = parse_evidence_snapshot(
+                    {
+                        **prepared_record,
+                        "attestation_key_id": None,
+                        "attestation_signature": None,
+                    }
+                )
+                sealed = MCPEvidenceSnapshot.seal(
+                    evidence_id=parsed.evidence_id,
+                    environment_id=parsed.environment_id,
+                    git_sha=parsed.git_sha,
+                    deployment_id=parsed.deployment_id,
+                    stage=parsed.stage,
+                    config_fingerprint=parsed.config_fingerprint,
+                    window_started_at=parsed.window_started_at,
+                    window_ended_at=parsed.window_ended_at,
+                    recorded_at=parsed.recorded_at,
+                    producer=parsed.producer,
+                    source=parsed.source,
+                    snapshot_id=parsed.snapshot_id,
+                    nonce=parsed.nonce,
+                    payload=parsed.payload,
+                    attestation_key_id=attestation_key_id,
+                    attestation_key=attestation_key,
+                )
+                if sealed.payload_digest != parsed.payload_digest:
+                    raise ValueError(
+                        "PostgreSQL canonical evidence digest differs from Python"
+                    )
+                saved = session.execute(
+                    text(
+                        """
+                        SELECT result.*
+                        FROM mcp_rollout_api.finalize_production_evidence_snapshot(
+                            :environment_id, :deployment_id, :git_sha,
+                            :window_started_at, :window_ended_at, :evidence_id,
+                            :payload_digest, :key_id, :signature
+                        ) AS result
+                        """
+                    ),
+                    {
+                        "environment_id": environment_id,
+                        "deployment_id": deployment_id,
+                        "git_sha": git_sha,
+                        "window_started_at": window_started_at,
+                        "window_ended_at": window_ended_at,
+                        "evidence_id": parsed.evidence_id,
+                        "payload_digest": parsed.payload_digest,
+                        "key_id": attestation_key_id,
+                        "signature": sealed.attestation_signature,
+                    },
+                ).mappings().one()
+                session.commit()
+                return _row_to_mcp_rollout_evidence_snapshot(
+                    SimpleNamespace(**saved)
+                )
+
+        return await asyncio.to_thread(_sync)
+
+    async def activate_mcp_rollout_deployment(
+        self, activation: MCPRolloutDeploymentActivation
+    ) -> MCPRolloutDeploymentActivation:
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.append_deployment_activation(
+                :activation_id, :environment_id, :deployment_id, :stage,
+                :config_fingerprint, :approval_id, :evidence_id,
+                :previous_activation_id, :operator_reason, :is_rollback,
+                :created_at
+            ) AS result
+            """,
+            {
+                "activation_id": activation.activation_id,
+                "environment_id": activation.environment_id,
+                "deployment_id": activation.deployment_id,
+                "stage": activation.stage,
+                "config_fingerprint": activation.config_fingerprint,
+                "approval_id": activation.approval_id,
+                "evidence_id": activation.evidence_id,
+                "previous_activation_id": activation.previous_activation_id,
+                "operator_reason": activation.operator_reason,
+                "is_rollback": activation.is_rollback,
+                "created_at": activation.created_at,
+            },
+            _row_to_mcp_rollout_deployment_activation,
+        )
+
+    async def append_mcp_rollout_stage_approval(
+        self, approval: MCPRolloutStageApproval
+    ) -> MCPRolloutStageApproval:
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.append_stage_approval(
+                :approval_id, :environment_id, :deployment_id, :stage,
+                :config_fingerprint, :evidence_id, :reason, :approver,
+                :created_at
+            ) AS result
+            """,
+            {
+                "approval_id": approval.approval_id,
+                "environment_id": approval.environment_id,
+                "deployment_id": approval.deployment_id,
+                "stage": approval.stage,
+                "config_fingerprint": approval.config_fingerprint,
+                "evidence_id": approval.evidence_id,
+                "reason": approval.reason,
+                "approver": approval.approver,
+                "created_at": approval.created_at,
+            },
+            _row_to_mcp_rollout_stage_approval,
+        )
+
+    async def append_mcp_rollout_promotion_block(
+        self, block: MCPRolloutPromotionBlock
+    ) -> MCPRolloutPromotionBlock:
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.append_promotion_block(
+                :block_id, :environment_id, :deployment_id, :stage,
+                :config_fingerprint, :evidence_id, :reason_code, :created_at
+            ) AS result
+            """,
+            {
+                "block_id": block.block_id,
+                "environment_id": block.environment_id,
+                "deployment_id": block.deployment_id,
+                "stage": block.stage,
+                "config_fingerprint": block.config_fingerprint,
+                "evidence_id": block.evidence_id,
+                "reason_code": block.reason_code,
+                "created_at": block.created_at,
+            },
+            _row_to_mcp_rollout_promotion_block,
+        )
+
+    async def append_mcp_rollout_block_resolution(
+        self, resolution: MCPRolloutBlockResolution
+    ) -> MCPRolloutBlockResolution:
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.append_block_resolution(
+                :resolution_id, :block_id, :approval_id, :evidence_id,
+                :reason, :approver, :created_at
+            ) AS result
+            """,
+            {
+                "resolution_id": resolution.resolution_id,
+                "block_id": resolution.block_id,
+                "approval_id": resolution.approval_id,
+                "evidence_id": resolution.evidence_id,
+                "reason": resolution.reason,
+                "approver": resolution.approver,
+                "created_at": resolution.created_at,
+            },
+            _row_to_mcp_rollout_block_resolution,
+        )
+
+    async def save_mcp_rollout_instance_config_lease(
+        self, lease: MCPRolloutInstanceConfigLease
+    ) -> MCPRolloutInstanceConfigLease:
+        return await self._run_mcp_rollout_function(
+            """
+            SELECT result.*
+            FROM mcp_rollout_api.upsert_instance_config_lease(
+                :instance_config_id, :environment_id, :deployment_id,
+                :instance_id, :stage, :config_fingerprint, :activation_id,
+                :lease_expires_at, :recorded_at
+            ) AS result
+            """,
+            {
+                "instance_config_id": lease.instance_config_id,
+                "environment_id": lease.environment_id,
+                "deployment_id": lease.deployment_id,
+                "instance_id": lease.instance_id,
+                "stage": lease.stage,
+                "config_fingerprint": lease.config_fingerprint,
+                "activation_id": lease.activation_id,
+                "lease_expires_at": lease.lease_expires_at,
+                "recorded_at": lease.updated_at,
+            },
+            _row_to_mcp_rollout_instance_config,
+        )
+
     async def reserve_mcp_call(self, record: MCPCallRecord) -> bool:
         """Serialize the per-task budget and active-call reservation on PostgreSQL."""
         def _sync() -> bool:
@@ -76,6 +873,79 @@ class PostgreSQLStorage(SQLiteStorage):
                 result = SQLiteStateRepository(session).reserve_mcp_call(record)
                 session.commit()
                 return result
+
+        return await asyncio.to_thread(_sync)
+
+    async def claim_due_mcp_remote_task_bindings(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskBinding]:
+        """Claim due remote tasks with row locks so workers never poll the same task."""
+        if not claim_owner or not claim_token:
+            raise ValueError("MCP remote task claim owner and token are required")
+        if lease_expires_at <= now:
+            raise ValueError("MCP remote task claim lease must expire after claim time")
+
+        def _sync() -> list[MCPRemoteTaskBinding]:
+            with self._session_factory() as session:
+                candidates = session.scalars(
+                    select(MCPRemoteTaskBindingRow)
+                    .where(
+                        MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                        MCPRemoteTaskBindingRow.next_poll_at.is_not(None),
+                        MCPRemoteTaskBindingRow.next_poll_at <= now,
+                        or_(
+                            MCPRemoteTaskBindingRow.lease_expires_at.is_(None),
+                            MCPRemoteTaskBindingRow.lease_expires_at <= now,
+                        ),
+                    )
+                    .order_by(
+                        MCPRemoteTaskBindingRow.next_poll_at,
+                        MCPRemoteTaskBindingRow.safe_remote_task_ref,
+                    )
+                    .with_for_update(skip_locked=True)
+                    .limit(max(1, limit))
+                ).all()
+                claimed_refs: list[str] = []
+                for candidate in candidates:
+                    revision = 0 if candidate.revision is None else int(candidate.revision)
+                    result = session.execute(
+                        update(MCPRemoteTaskBindingRow)
+                        .where(
+                            MCPRemoteTaskBindingRow.safe_remote_task_ref
+                            == candidate.safe_remote_task_ref,
+                            MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                            or_(
+                                MCPRemoteTaskBindingRow.lease_expires_at.is_(None),
+                                MCPRemoteTaskBindingRow.lease_expires_at <= now,
+                            ),
+                            func.coalesce(MCPRemoteTaskBindingRow.revision, 0) == revision,
+                        )
+                        .values(
+                            claim_owner=claim_owner,
+                            claim_token=claim_token,
+                            lease_expires_at=lease_expires_at,
+                            revision=revision + 1,
+                            updated_at=now,
+                        )
+                        .execution_options(synchronize_session=False)
+                    )
+                    if result.rowcount:
+                        claimed_refs.append(candidate.safe_remote_task_ref)
+                session.flush()
+                session.expire_all()
+                claimed = [
+                    _row_to_mcp_remote_task(row)
+                    for ref in claimed_refs
+                    if (row := session.get(MCPRemoteTaskBindingRow, ref)) is not None
+                ]
+                session.commit()
+                return claimed
 
         return await asyncio.to_thread(_sync)
 

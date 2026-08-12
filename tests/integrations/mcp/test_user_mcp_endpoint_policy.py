@@ -7,6 +7,7 @@ from src.integrations.mcp.endpoint_policy import (
     EndpointAllowlist,
     EndpointPolicy,
     EndpointPolicyError,
+    EndpointPolicyProvenance,
     IPClassification,
     classify_ip,
 )
@@ -36,6 +37,10 @@ class UserMCPEndpointPolicyTests(unittest.TestCase):
         self.assertEqual(endpoint.origin, "https://mcp.example.com:443")
         self.assertEqual(endpoint.connect_ips, ("8.8.8.8",))
         self.assertEqual(endpoint.server_hostname, "mcp.example.com")
+        self.assertIs(
+            endpoint.policy_provenance,
+            EndpointPolicyProvenance.RUNTIME_ENFORCED,
+        )
         policy.validate_connection_ip(endpoint, "8.8.8.8")
         with self.assertRaisesRegex(EndpointPolicyError, "dns_rebinding"):
             policy.validate_connection_ip(endpoint, "1.1.1.1")
@@ -52,8 +57,27 @@ class UserMCPEndpointPolicyTests(unittest.TestCase):
 
         allowlist = EndpointAllowlist.from_values(domains=["corp.example"], cidrs=["10.0.0.0/8"])
         policy = EndpointPolicy(resolver=resolver, allowlist=allowlist)
-        self.assertFalse(policy.validate("https://mcp.corp.example/rpc").plaintext_http)
-        self.assertTrue(policy.validate("http://mcp.corp.example/rpc").plaintext_http)
+        private_https = policy.validate("https://mcp.corp.example/rpc")
+        allowlisted_http = policy.validate("http://mcp.corp.example/rpc")
+        self.assertFalse(private_https.plaintext_http)
+        self.assertTrue(allowlisted_http.plaintext_http)
+        self.assertIs(
+            private_https.policy_provenance,
+            EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST,
+        )
+        self.assertIs(
+            allowlisted_http.policy_provenance,
+            EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST,
+        )
+
+        public_allowlisted = EndpointPolicy(
+            resolver=_Resolver({"public.corp.example": ["8.8.8.8"]}),
+            allowlist=allowlist,
+        ).validate("https://public.corp.example/rpc")
+        self.assertIs(
+            public_allowlisted.policy_provenance,
+            EndpointPolicyProvenance.RUNTIME_ENFORCED,
+        )
 
     def test_metadata_and_local_classes_cannot_be_allowlisted(self) -> None:
         allowlist = EndpointAllowlist.from_values(cidrs=["0.0.0.0/0", "::/0"])

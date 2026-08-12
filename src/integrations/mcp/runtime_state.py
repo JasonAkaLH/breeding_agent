@@ -23,7 +23,7 @@ from .protocol import MCP_PROTOCOL_VERSION, MCP_TRANSPORT_LEGACY_HTTP_SSE, MCP_T
 from .rust_contract import contract_value as mcp_contract_value
 from .rust_contract import status_list as mcp_status_list
 from .sidecar import MCPSidecarMode
-from .tasks import InMemoryMCPTaskRegistry, is_create_task_result, normalize_task_status, validate_related_task_result_metadata
+from .tasks import InMemoryMCPTaskRegistry, is_create_task_result, validate_related_task_result_metadata
 from .transport_http import StreamableHTTPTransport
 from .transport_legacy_http_sse import LegacyHTTPSSETransport
 
@@ -169,6 +169,26 @@ class MCPRuntimeState:
             return bundle.bindings[capability_id]
         except KeyError as exc:
             raise KeyError(f"Unknown MCP capability: {capability_id}") from exc
+
+    def metric_dimension_for_capability(
+        self,
+        capability_id: str,
+        revision: str | None = None,
+    ) -> tuple[str, str]:
+        """Return the closed transport/protocol dimension for legacy telemetry."""
+
+        binding = self.binding_for_capability(capability_id, revision)
+        server = next(
+            item
+            for item in self._config.servers
+            if item.server_id == binding.server_id
+        )
+        client = self._clients.get(binding.server_id)
+        session = getattr(client, "negotiated_session", None)
+        negotiated = str(
+            getattr(session, "negotiated_protocol_version", "") or ""
+        ).strip()
+        return server.transport, negotiated or server.protocol_version
 
     def retain_revision(self, revision: str | None) -> None:
         if not revision:

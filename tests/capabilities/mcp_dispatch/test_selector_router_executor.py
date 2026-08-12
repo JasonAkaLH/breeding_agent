@@ -179,6 +179,23 @@ class _FakeCoordinator:
 
 
 class MCPDispatchExecutorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_executor_rejects_missing_task_route_assignment(self) -> None:
+        coordinator = _FakeCoordinator()
+        executor = MCPDispatchExecutor(coordinator=coordinator)
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="mcp.dispatch",
+                conversation_id="conv-1",
+                task_id="task-missing",
+                node_id="node-1",
+                input_payload={"server_id": "server-1"},
+            )
+        )
+
+        self.assertEqual(coordinator.server_ids, [])
+        self.assertEqual(result.error.code, "mcp_route_assignment_mismatch")
+
     async def test_executor_delegates_only_exact_server_id_payload(self) -> None:
         coordinator = _FakeCoordinator()
         executor = MCPDispatchExecutor(coordinator=coordinator)
@@ -189,6 +206,7 @@ class MCPDispatchExecutorTest(unittest.IsolatedAsyncioTestCase):
                 task_id="task-1",
                 node_id="node-1",
                 input_payload={"server_id": "server-1"},
+                metadata={"mcp_execution_mode": "user_scoped"},
             )
         )
 
@@ -206,11 +224,30 @@ class MCPDispatchExecutorTest(unittest.IsolatedAsyncioTestCase):
                 task_id="task-1",
                 node_id="node-1",
                 input_payload={"server_id": "server-1", "endpoint": "https://forbidden.example"},
+                metadata={"mcp_execution_mode": "user_scoped"},
             )
         )
 
         self.assertEqual(coordinator.server_ids, [])
         self.assertEqual(result.error.code, "mcp_dispatch_payload_invalid")
+
+    async def test_executor_rejects_task_assigned_to_legacy_path(self) -> None:
+        coordinator = _FakeCoordinator()
+        executor = MCPDispatchExecutor(coordinator=coordinator)
+
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="mcp.dispatch",
+                conversation_id="conv-1",
+                task_id="task-legacy",
+                node_id="node-1",
+                input_payload={"server_id": "server-1"},
+                metadata={"mcp_execution_mode": "legacy"},
+            )
+        )
+
+        self.assertEqual(coordinator.server_ids, [])
+        self.assertEqual(result.error.code, "mcp_route_assignment_mismatch")
 
 
 class MCPDispatchWorkflowProviderTest(unittest.TestCase):

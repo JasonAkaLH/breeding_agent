@@ -10,6 +10,9 @@ from src.core.models import EventRecord, Task
 from src.orchestration.models import OrchestrationRequest
 from src.storage.rust_contract import artifact_policy, load_runtime_sidecar_contract, mode_for_component
 from tests.api.support import APITestCase
+from tests.api.test_user_mcp_runtime_wiring import (
+    _write_task_authority_migration_evidence,
+)
 
 
 class _RecordingDispatcherSidecarClient:
@@ -233,10 +236,12 @@ class RuntimeSidecarContractAPITest(APITestCase):
         )
 
     async def test_runtime_enforce_requires_allowlisted_sidecar_artifact_manifest(self) -> None:
+        migration_env = _write_task_authority_migration_evidence(self.workspace)
         with (
             patch.dict(
                 os.environ,
                 {
+                    **migration_env,
                     "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
                     "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
                     "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": "",
@@ -254,12 +259,14 @@ class RuntimeSidecarContractAPITest(APITestCase):
         client_factory.assert_not_called()
 
     async def test_runtime_enforce_validates_sidecar_artifact_allowlist_before_client_use(self) -> None:
+        migration_env = _write_task_authority_migration_evidence(self.workspace)
         sentinel_client = object()
         manifest, allowlist, metadata = self._write_runtime_sidecar_artifact_trust_files()
         with (
             patch.dict(
                 os.environ,
                 {
+                    **migration_env,
                     "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
                     "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
                     "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": str(manifest),
@@ -286,6 +293,7 @@ class RuntimeSidecarContractAPITest(APITestCase):
         )
 
     async def test_runtime_enforce_rejects_manifest_not_exactly_present_in_allowlist(self) -> None:
+        migration_env = _write_task_authority_migration_evidence(self.workspace)
         manifest, allowlist, _metadata = self._write_runtime_sidecar_artifact_trust_files(
             allowlist_overrides={"git_commit": "different-commit"}
         )
@@ -293,6 +301,7 @@ class RuntimeSidecarContractAPITest(APITestCase):
             patch.dict(
                 os.environ,
                 {
+                    **migration_env,
                     "MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:65535",
                     "MAF_RUST_RUNTIME_STORE_MODE": "enforce",
                     "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": str(manifest),

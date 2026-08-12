@@ -2,13 +2,15 @@
 
 - **阶段**：三阶段改造第 3 阶段
 - **范围**：灰度发布 / 兼容迁移 / 可观测性 / 回滚 / 旧 Runtime 下线
-- **状态**：设计已确认，待实施
+- **状态**：CP-0～CP-6 仓库实现已完成；CP-7 生产灰度观察与 CP-8 旧 Runtime 物理删除待完成
 - **日期**：2026-08-12
 - **强依赖**：`01-用户级MCP配置凭据与按需GatewayPRD.md`、`02-MCP两级路由授权与任务执行闭环PRD.md`
 
 ## 1. 一句话结论
 
 通过 `off → shadow → enforce` 三档模式，把用户 MCP 流量逐步切换到“用户级配置 + 两级路由 + 任务级按需 Gateway”。灰度期间保留旧全局 MCP Runtime 作为管理员配置的回滚路径，但任何真实工具调用只能走一条链路，绝不双执行；全量门禁通过后，删除启动时全量发现、全局工具注册、进程级 Client/Bundle 与 revision 绑定，仅保留现有协议 Client、Transport、Rust Sidecar 和安全校验能力。
+
+当前仓库完成的是开发期 CP-0～CP-6，包括闭合 8 条权威安全红线、正值红线原子阻断、PostgreSQL app/snapshot/evaluator/operator/drill 独立登录权限边界、受限 NOLOGIN definer owner、从 durable activation/sample/metric/drill 派生五个生产阶段的 snapshot，以及按 consumer × capability 验证的 legacy 迁移连续性。API Runtime 只允许持有 app DSN；migration 只允许使用独立 `MAF_MCP_LEGACY_MIGRATION_DSN` 和命名 SECURITY DEFINER API；生产 canonical ledger 和迁移使用 PostgreSQL，SQLite 仅限 local/test/CI。真实 PostgreSQL 的独立角色/权限/竞态测试与 migration atomic E2E 只是仓库实现门禁，不是 production evidence。旧 Runtime 启动期 connect/list/protocol/discovery 尚无完整同源 telemetry family，因此不得宣称新旧路径观测已完整闭环。本地测试、CI evidence 和 SQLite 演练不能替代真实生产观察。CP-7/CP-8 的准入、顺序与未完成边界以 `docs/runbooks/user-mcp-phase3-rollout.md` 为准，以下验收清单在对应生产 evidence 归档前保持未勾选。
 
 ## 2. 阶段前提
 
@@ -121,7 +123,7 @@ shadow 只比较无副作用的控制面决策：
 - 配置归属、Endpoint Policy、授权检查是否给出预期状态。
 - 任务结束后的 Client、连接、临时文件是否全部释放。
 
-当旧链路与用户级 Server 没有一一对应关系时，只记录“不可比较”，不得把它计为路由错误。
+只有完全缺少受控 mapping 时才记为未批准的 `not_comparable`；已存在但被篡改、无效或不唯一的 mapping 必须记为 `mismatched`。两者都不进入 promotion 样本并阻止进入 enforce。只有已批准且验证的 retire 项可以记为已批准 `not_comparable`，但仍不计入场景样本配额。
 
 ### 8.2 禁止比较的内容
 
@@ -195,7 +197,7 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 1. 迁移为指定服务账号拥有的用户级 Server；或
 2. 迁移为后端管理的 system-owned Server Profile，再通过显式 ACL 分配给用户或用户组。
 
-每条迁移必须指定目标 owner/ACL，重新加密凭据，生成新的 `server_id` 和 `security_version`，并写迁移审计。没有明确 owner/ACL 的配置不得迁移。
+每条迁移必须指定目标 owner/ACL，重新加密凭据，生成新的 `server_id` 和 `security_version`，并在同一数据库事务内写入不可变、精确幂等的 `mcp.legacy.config_migrated` 权威审计；本地文件只能作为提交后的非权威导出。迁移前还必须用 secret-safe fingerprint 逐项证明每个 consumer × exposed capability 的源/目标 input/output schema contract 相容；只有工具名相同不算连续。没有明确 owner/ACL、缺少源 input schema 或无法证明 contract 连续性的配置不得迁移。
 
 ### 10.3 不迁移的状态
 
@@ -245,7 +247,7 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 
 ### 12.1 安全红线
 
-以下任一事件出现一次即停止扩大灰度，并自动把新任务切回安全模式：
+以下任一正值违规出现一次，系统即自动持久化 promotion block 并停止扩大灰度，但不自动改写当前路由。授权运维必须按 Runbook 追加可证明严格降低 exposure 的 rollback activation；回滚只影响新 Task，在途 Task 继续沿固化路径完成或取消。
 
 - 跨用户读取、修改或执行 MCP 配置。
 - 凭据、Authorization Header、Cookie、API Key、Nonce 或解密明文进入前端、日志、事件、模型 Prompt 或审计明细。
@@ -312,6 +314,8 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 - `mcp_remote_tasks_active`
 
 允许使用 `protocol_version`、transport family、adapter 和结果类别等固定枚举标签。所有标签必须是低基数字段，不得用原始 URL、用户名、工具参数或凭据作为指标标签。
+
+canonical metric bucket 必须按 UTC 分钟边界对齐且恰好持续 60 秒。瞬时 counter / event histogram 先归入事件所在的完整 UTC 分钟；同一完整闭合标签 identity 不得以重复或重叠 bucket 扩大有效观察覆盖，不同闭合标签 identity 可以在同一分钟共存。
 
 ### 13.2 审计事件
 

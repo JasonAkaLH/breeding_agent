@@ -1,6 +1,18 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Boolean, Index, Integer, LargeBinary, Text, UniqueConstraint, false, text, true
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Index,
+    Integer,
+    LargeBinary,
+    Text,
+    UniqueConstraint,
+    false,
+    text,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import DateTimeText, JSONText, SQLiteBase
@@ -120,6 +132,7 @@ class MCPRemoteTaskBindingRow(SQLiteBase):
     __table_args__ = (
         Index("idx_mcp_remote_task_owner_task", "owner_user_id", "task_id"),
         Index("idx_mcp_remote_task_poll", "last_status", "next_poll_at"),
+        Index("idx_mcp_remote_task_claim", "terminal_at", "next_poll_at", "lease_expires_at"),
     )
 
     safe_remote_task_ref: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -134,9 +147,57 @@ class MCPRemoteTaskBindingRow(SQLiteBase):
     encryption_version: Mapped[int] = mapped_column(Integer, nullable=False)
     last_status: Mapped[str] = mapped_column(Text, nullable=False)
     next_poll_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    published_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    continuation_plan: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     terminal_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    claim_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True, server_default=text("0"))
+
+
+class MCPRemoteTaskOutboxRow(SQLiteBase):
+    __tablename__ = "mcp_remote_task_outbox"
+    __table_args__ = (
+        Index("idx_mcp_remote_task_outbox_claim", "status", "lease_expires_at", "created_at"),
+        Index("idx_mcp_remote_task_outbox_task", "owner_user_id", "task_id"),
+    )
+
+    outbox_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    call_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    safe_remote_task_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONText(), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    claim_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    continuation_admitted_at: Mapped[object | None] = mapped_column(
+        DateTimeText(), nullable=True
+    )
+    continuation_dispatched_at: Mapped[object | None] = mapped_column(
+        DateTimeText(), nullable=True
+    )
+    continuation_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_claim_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_lease_expires_at: Mapped[object | None] = mapped_column(
+        DateTimeText(), nullable=True
+    )
+    continuation_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    continuation_node_ids: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
+    continuation_safe_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
 class MCPSealedStateRow(SQLiteBase):
@@ -191,6 +252,565 @@ class MCPAuditEventRow(SQLiteBase):
     server_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     call_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     safe_payload: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+
+
+class MCPLegacyMigrationRecordRow(SQLiteBase):
+    __tablename__ = "mcp_legacy_migration_record"
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_fingerprint",
+            "source_server_id",
+            name="uq_mcp_legacy_migration_plan_source",
+        ),
+        UniqueConstraint(
+            "target_server_id",
+            name="uq_mcp_legacy_migration_target",
+        ),
+        CheckConstraint(
+            "event_type = 'mcp.legacy.config_migrated'",
+            name="mcp_legacy_migration_event_type",
+        ),
+        CheckConstraint(
+            "disposition = 'migrate_owner'",
+            name="mcp_legacy_migration_disposition",
+        ),
+        Index(
+            "idx_mcp_legacy_migration_plan",
+            "plan_fingerprint",
+            "source_server_id",
+        ),
+    )
+
+    migration_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    source_server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_consumer_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    target_server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    target_consumer_set_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    capability_obligations_fingerprint: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )
+    catalog_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    capability_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    validator_provenance_fingerprint: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )
+    credential_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    disposition: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    evidence_expires_at: Mapped[object] = mapped_column(
+        DateTimeText(), nullable=False
+    )
+
+
+class MCPRolloutGateScopeRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_gate_scope"
+    __table_args__ = (
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_gate_program",
+        ),
+    )
+
+    environment_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    rollout_program: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPRolloutDrillObservationRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_drill_observation"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "rollout_program",
+            "deployment_id",
+            "stage",
+            "config_fingerprint",
+            "drill",
+            "observed_at",
+            name="uq_mcp_rollout_drill_scope_observed",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_drill_program",
+        ),
+        CheckConstraint(
+            "stage = 'internal_enforce'",
+            name="mcp_rollout_drill_stage",
+        ),
+        CheckConstraint(
+            "drill IN ('cancellation', 'long_call_120_seconds', "
+            "'disconnect_five_minutes', 'restart_unknown', 'mrtr_recovery', "
+            "'tasks_recovery', 'fair_queueing', 'flag_rollback')",
+            name="mcp_rollout_drill_name",
+        ),
+        CheckConstraint(
+            "outcome IN ('passed', 'failed')",
+            name="mcp_rollout_drill_outcome",
+        ),
+        Index(
+            "idx_mcp_rollout_drill_scope_window",
+            "environment_id",
+            "deployment_id",
+            "observed_at",
+        ),
+    )
+
+    drill_observation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    drill: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class MCPRolloutMetricBucketRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_metric_bucket"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "config_fingerprint",
+            "metric_name",
+            "bucket_started_at",
+            "bucket_ended_at",
+            "execution_path",
+            "routing_mode",
+            "transport",
+            "protocol_version",
+            "adapter",
+            "result_category",
+            "error_category",
+            "call_kind",
+            "red_line",
+            "latency_bucket",
+            name="uq_mcp_rollout_metric_series_bucket",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_metric_program",
+        ),
+        CheckConstraint(
+            "stage IN ('off', 'internal_shadow', 'internal_enforce', "
+            "'cohort_enforce', 'full_enforce', 'legacy_assembly_off')",
+            name="mcp_rollout_metric_stage",
+        ),
+        CheckConstraint(
+            "metric_name IN ('mcp_route_requests_total', "
+            "'mcp_route_shadow_mismatch_total', 'mcp_gateway_active_scopes', "
+            "'mcp_gateway_connect_duration_seconds', 'mcp_tools_list_duration_seconds', "
+            "'mcp_tools_list_attempts_total', 'mcp_tool_calls_active', "
+            "'mcp_tool_calls_total', 'mcp_tool_call_duration_seconds', "
+            "'mcp_tool_call_unknown_total', "
+            "'mcp_permission_decisions_total', 'mcp_disconnect_lease_expired_total', "
+            "'mcp_temp_spill_bytes', 'mcp_resource_cleanup_failures_total', "
+            "'mcp_protocol_negotiation_total', 'mcp_server_discover_duration_seconds', "
+            "'mcp_mrtr_rounds_total', 'mcp_remote_tasks_active', "
+            "'mcp_safety_red_line_total')",
+            name="mcp_rollout_metric_name",
+        ),
+        CheckConstraint(
+            "execution_path IN ('legacy', 'user_scoped', 'unavailable', 'not_applicable')",
+            name="mcp_rollout_metric_path",
+        ),
+        CheckConstraint(
+            "routing_mode IN ('off', 'shadow', 'enforce', 'not_applicable')",
+            name="mcp_rollout_metric_mode",
+        ),
+        CheckConstraint(
+            "transport IN ('streamable_http', 'legacy_http_sse', 'not_applicable')",
+            name="mcp_rollout_metric_transport",
+        ),
+        CheckConstraint(
+            "protocol_version IN ('2024-11-05', '2025-03-26', '2025-06-18', "
+            "'2025-11-25', '2026-07-28', 'not_applicable')",
+            name="mcp_rollout_metric_protocol",
+        ),
+        CheckConstraint(
+            "adapter IN ('python_legacy', 'python_2026', 'rust_sidecar', "
+            "'legacy_global_runtime', 'not_applicable')",
+            name="mcp_rollout_metric_adapter",
+        ),
+        CheckConstraint(
+            "result_category IN ('succeeded', 'failed', 'unknown', 'cancelled', "
+            "'input_required', 'task_created', 'permission_denied', 'not_comparable', "
+            "'not_applicable')",
+            name="mcp_rollout_metric_result",
+        ),
+        CheckConstraint(
+            "error_category IN ('none', 'authentication', 'authorization', "
+            "'endpoint_policy', 'transport', 'protocol', 'server', 'timeout', "
+            "'unknown', 'validation', 'cleanup', 'not_applicable')",
+            name="mcp_rollout_metric_error",
+        ),
+        CheckConstraint(
+            "call_kind IN ('ordinary', 'remote_task', 'not_applicable')",
+            name="mcp_rollout_metric_call_kind",
+        ),
+        CheckConstraint(
+            "red_line IN ('cross_user_access', 'secret_exposure', 'dual_tool_call', "
+            "'unauthorized_tool_call', 'endpoint_policy_bypass', "
+            "'unknown_result_replay', 'shadow_tool_call', "
+            "'persistent_resource_leak', 'not_applicable')",
+            name="mcp_rollout_metric_red_line",
+        ),
+        CheckConstraint(
+            "latency_bucket IN ('le_100_ms', 'le_500_ms', 'le_1_s', 'le_5_s', "
+            "'le_30_s', 'le_120_s', 'gt_120_s', 'not_applicable')",
+            name="mcp_rollout_metric_latency",
+        ),
+        CheckConstraint("value >= 0", name="mcp_rollout_metric_value"),
+        Index(
+            "idx_mcp_rollout_metric_window",
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "bucket_started_at",
+        ),
+    )
+
+    metric_bucket_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    metric_name: Mapped[str] = mapped_column(Text, nullable=False)
+    bucket_started_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    bucket_ended_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    execution_path: Mapped[str] = mapped_column(Text, nullable=False)
+    routing_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    protocol_version: Mapped[str] = mapped_column(Text, nullable=False)
+    adapter: Mapped[str] = mapped_column(Text, nullable=False)
+    result_category: Mapped[str] = mapped_column(Text, nullable=False)
+    error_category: Mapped[str] = mapped_column(Text, nullable=False)
+    call_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    red_line: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'not_applicable'")
+    )
+    latency_bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPRolloutEvidenceSnapshotRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_evidence_snapshot"
+    __table_args__ = (
+        UniqueConstraint("nonce", name="uq_mcp_rollout_evidence_nonce"),
+        UniqueConstraint(
+            "deployment_id",
+            "stage",
+            "snapshot_id",
+            name="uq_mcp_rollout_evidence_snapshot",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_evidence_program",
+        ),
+        CheckConstraint(
+            "stage IN ('off', 'internal_shadow', 'internal_enforce', "
+            "'cohort_enforce', 'full_enforce', 'legacy_assembly_off')",
+            name="mcp_rollout_evidence_stage",
+        ),
+        CheckConstraint("source IN ('ci', 'production')", name="mcp_rollout_evidence_source"),
+        CheckConstraint(
+            "producer IN ('ci_pipeline', 'production_snapshot_producer')",
+            name="mcp_rollout_evidence_producer",
+        ),
+        CheckConstraint(
+            "evidence_kind IN ('ci_conformance', 'internal_shadow', "
+            "'internal_enforce', 'cohort_enforce', 'full_enforce', "
+            "'legacy_assembly_off', 'rollback_drill', 'resource_baseline', 'release_tag')",
+            name="mcp_rollout_evidence_kind",
+        ),
+        CheckConstraint("snapshot_id > 0", name="mcp_rollout_evidence_snapshot_id"),
+        CheckConstraint(
+            "(source = 'ci' AND attestation_key_id IS NULL AND attestation_signature IS NULL) "
+            "OR (source = 'production' AND attestation_key_id IS NOT NULL "
+            "AND attestation_signature IS NOT NULL)",
+            name="mcp_rollout_evidence_attestation",
+        ),
+        Index(
+            "idx_mcp_rollout_evidence_scope",
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "recorded_at",
+        ),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    git_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    window_started_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    window_ended_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    producer: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    nonce: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONText(), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    attestation_key_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attestation_signature: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MCPShadowAuditSampleRow(SQLiteBase):
+    __tablename__ = "mcp_shadow_audit_sample"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "config_fingerprint",
+            "nonce",
+            name="uq_mcp_shadow_sample_scope_nonce",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_shadow_sample_program",
+        ),
+        CheckConstraint(
+            "stage = 'internal_shadow'",
+            name="mcp_shadow_sample_stage",
+        ),
+        CheckConstraint(
+            "comparison IN ('matched', 'mismatched', 'not_comparable', 'excluded')",
+            name="mcp_shadow_sample_comparison",
+        ),
+        Index(
+            "idx_mcp_shadow_sample_scope_window",
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "observed_at",
+        ),
+        Index("idx_mcp_shadow_sample_expiry", "expires_at"),
+    )
+
+    sample_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    fixture_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    mapping_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    scenario: Mapped[str] = mapped_column(Text, nullable=False)
+    nonce: Mapped[str] = mapped_column(Text, nullable=False)
+    safe_owner_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_task_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_call_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    legacy_outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    shadow_outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    endpoint_policy: Mapped[str] = mapped_column(Text, nullable=False)
+    comparison: Mapped[str] = mapped_column(Text, nullable=False)
+    blockers: Mapped[list] = mapped_column(JSONText(), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPRolloutStageApprovalRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_stage_approval"
+    __table_args__ = (
+        UniqueConstraint("evidence_id", name="uq_mcp_rollout_approval_evidence"),
+        UniqueConstraint(
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "config_fingerprint",
+            name="uq_mcp_rollout_approval_target",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_approval_program",
+        ),
+        CheckConstraint(
+            "stage IN ('off', 'internal_shadow', 'internal_enforce', "
+            "'cohort_enforce', 'full_enforce', 'legacy_assembly_off')",
+            name="mcp_rollout_approval_stage",
+        ),
+    )
+
+    approval_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    approver: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPRolloutDeploymentActivationRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_deployment_activation"
+    __table_args__ = (
+        UniqueConstraint("approval_id", name="uq_mcp_rollout_activation_approval"),
+        UniqueConstraint(
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "config_fingerprint",
+            name="uq_mcp_rollout_activation_target",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_activation_program",
+        ),
+        CheckConstraint(
+            "stage IN ('off', 'internal_shadow', 'internal_enforce', "
+            "'cohort_enforce', 'full_enforce', 'legacy_assembly_off')",
+            name="mcp_rollout_activation_stage",
+        ),
+        Index(
+            "idx_mcp_rollout_activation_scope",
+            "environment_id",
+            "rollout_program",
+            "created_at",
+        ),
+    )
+
+    activation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    approval_id: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_id: Mapped[str] = mapped_column(Text, nullable=False)
+    previous_activation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operator_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    is_rollback: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPRolloutPromotionBlockRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_promotion_block"
+    __table_args__ = (
+        UniqueConstraint(
+            "evidence_id",
+            "reason_code",
+            name="uq_mcp_rollout_block_evidence_reason",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_block_program",
+        ),
+        CheckConstraint(
+            "stage IN ('off', 'internal_shadow', 'internal_enforce', "
+            "'cohort_enforce', 'full_enforce', 'legacy_assembly_off')",
+            name="mcp_rollout_block_stage",
+        ),
+        CheckConstraint(
+            "reason_code IN ('no_evidence', 'invalid_transition', 'evidence_id_replay', "
+            "'nonce_replay', 'snapshot_replay', 'snapshot_non_monotonic', "
+            "'provenance_invalid', 'digest_invalid', 'attestation_missing', "
+            "'attestation_invalid', 'evidence_scope_mismatch', "
+            "'evidence_stage_mismatch', 'evidence_kind_mismatch', "
+            "'source_policy_violation', 'payload_invalid', 'window_too_short', "
+            "'window_incomplete', 'metric_series_missing', 'metric_summary_mismatch', "
+            "'zero_denominator', 'sample_insufficient', "
+            "'scenario_sample_insufficient', 'unresolved_mismatch', 'invalid_sample', "
+            "'unapproved_not_comparable', 'required_drill_missing', "
+            "'red_line_data_missing', 'safety_red_line', 'safety_red_line_nonzero', "
+            "'baseline_missing', "
+            "'p95_latency_regressed', 'error_rate_regressed', 'ci_conformance_missing')",
+            name="mcp_rollout_block_reason",
+        ),
+        Index(
+            "idx_mcp_rollout_block_scope",
+            "environment_id",
+            "rollout_program",
+            "created_at",
+        ),
+    )
+
+    block_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPRolloutBlockResolutionRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_block_resolution"
+    __table_args__ = (
+        UniqueConstraint("block_id", name="uq_mcp_rollout_resolution_block"),
+        UniqueConstraint("approval_id", name="uq_mcp_rollout_resolution_approval"),
+    )
+
+    resolution_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    block_id: Mapped[str] = mapped_column(Text, nullable=False)
+    approval_id: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    approver: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPRolloutInstanceConfigRow(SQLiteBase):
+    __tablename__ = "mcp_rollout_instance_config"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "deployment_id",
+            "instance_id",
+            name="uq_mcp_rollout_instance_deployment",
+        ),
+        CheckConstraint(
+            "rollout_program = 'user_mcp_phase3'",
+            name="mcp_rollout_instance_program",
+        ),
+        CheckConstraint(
+            "stage IN ('off', 'internal_shadow', 'internal_enforce', "
+            "'cohort_enforce', 'full_enforce', 'legacy_assembly_off')",
+            name="mcp_rollout_instance_stage",
+        ),
+        Index(
+            "idx_mcp_rollout_instance_lease",
+            "environment_id",
+            "deployment_id",
+            "lease_expires_at",
+        ),
+    )
+
+    instance_config_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_program: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    instance_id: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    activation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    lease_expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
 
 
 class UserMCPHealthAttemptRow(SQLiteBase):
@@ -404,6 +1024,32 @@ class TaskRow(SQLiteBase):
     __table_args__ = (
         Index("idx_task_conversation_created", "conversation_id", "created_at"),
         Index("idx_task_status_updated", "status", "updated_at"),
+        CheckConstraint(
+            "mcp_execution_mode IS NULL OR "
+            "mcp_execution_mode IN ('legacy', 'user_scoped', 'unavailable')",
+            name="task_mcp_execution_mode",
+        ),
+        CheckConstraint(
+            "mcp_rollout_mode IS NULL OR mcp_rollout_mode IN ('off', 'shadow', 'enforce')",
+            name="task_mcp_rollout_mode",
+        ),
+        CheckConstraint(
+            "mcp_route_reason_code IS NULL OR mcp_route_reason_code IN "
+            "('routing_off', 'shadow_enabled', 'enforce_selected', "
+            "'cohort_not_selected', 'percent_not_selected', "
+            "'explicit_legacy_capability', 'user_server_rollout_unavailable', "
+            "'no_execution_path')",
+            name="task_mcp_route_reason_code",
+        ),
+        CheckConstraint(
+            "(mcp_execution_mode IS NULL AND mcp_shadow_enabled IS NULL AND "
+            "mcp_rollout_config_version IS NULL AND mcp_route_reason_code IS NULL AND "
+            "mcp_rollout_mode IS NULL) OR "
+            "(mcp_execution_mode IS NOT NULL AND mcp_shadow_enabled IS NOT NULL AND "
+            "mcp_rollout_config_version IS NOT NULL AND mcp_route_reason_code IS NOT NULL AND "
+            "mcp_rollout_mode IS NOT NULL)",
+            name="task_mcp_assignment_all_or_none",
+        ),
     )
 
     task_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -417,6 +1063,11 @@ class TaskRow(SQLiteBase):
     cancel_requested_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    mcp_execution_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mcp_shadow_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    mcp_rollout_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mcp_route_reason_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mcp_rollout_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TaskNodeRow(SQLiteBase):

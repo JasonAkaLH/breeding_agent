@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -116,11 +117,12 @@ def _valid_evidence() -> dict[str, Any]:
             "evidence": {item: True for item in promotion["required_evidence"]},
         },
         "migration_plan": {
-            "target_schema_version": "runtime_store_schema_v2",
+            "target_schema_version": contract["schema_hash"],
             "components": {
                 component: {item: True for item in migration["required_evidence"]}
                 for component in migration["required_components"]
             },
+            "task_authority_cutover": _valid_task_authority_cutover(),
         },
         "ops_readiness": {
             "observability": {item: True for item in ops["required_observability"]},
@@ -137,4 +139,31 @@ def _valid_evidence() -> dict[str, Any]:
             "evidence": {item: True for item in decommission["required_evidence"]},
         },
         "blockers": [],
+    }
+
+
+def _valid_task_authority_cutover() -> dict[str, Any]:
+    digest = "a" * 64
+    return {
+        "backfill_import_complete": True,
+        "task_inventory": {
+            "legacy_count": 1,
+            "sidecar_count": 1,
+            "legacy_canonical_digest": digest,
+            "sidecar_canonical_digest": digest,
+        },
+        "task_node_inventory": {
+            "legacy_count": 1,
+            "sidecar_count": 1,
+            "legacy_canonical_digest": digest,
+            "sidecar_canonical_digest": digest,
+        },
+        "legacy_null_assignment_resolution": {
+            "resolution_complete": True,
+            "active_count": 0,
+            "active_canonical_digest": hashlib.sha256(b"[]").hexdigest(),
+            "terminal_historical_count": 1,
+            "terminal_historical_canonical_digest": digest,
+            "terminal_historical_remains_unassigned": True,
+        },
     }

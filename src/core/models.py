@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hmac
+import re
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -27,6 +29,21 @@ from .enums import (
 
 
 JsonMapping = Mapping[str, Any]
+
+MCP_ROLLOUT_DRILLS = frozenset(
+    {
+        "cancellation",
+        "long_call_120_seconds",
+        "disconnect_five_minutes",
+        "restart_unknown",
+        "mrtr_recovery",
+        "tasks_recovery",
+        "fair_queueing",
+        "flag_rollback",
+    }
+)
+MCP_ROLLOUT_DRILL_OUTCOMES = frozenset({"passed", "failed"})
+_MCP_ROLLOUT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -136,6 +153,41 @@ class MCPRemoteTaskBinding:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     terminal_at: datetime | None = None
+    published_at: datetime | None = None
+    continuation_plan: JsonMapping = field(default_factory=dict)
+    claim_owner: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: datetime | None = None
+    revision: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRemoteTaskOutbox:
+    outbox_id: str
+    kind: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    safe_remote_task_ref: str
+    payload: JsonMapping = field(default_factory=dict)
+    status: str = "pending"
+    claim_owner: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: datetime | None = None
+    revision: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    continuation_admitted_at: datetime | None = None
+    continuation_dispatched_at: datetime | None = None
+    continuation_status: str | None = None
+    continuation_claim_owner: str | None = None
+    continuation_claim_token: str | None = None
+    continuation_lease_expires_at: datetime | None = None
+    continuation_revision: int = 0
+    continuation_node_ids: tuple[str, ...] = ()
+    continuation_safe_error_code: str | None = None
+    completed_at: datetime | None = None
 
 
 @dataclass(slots=True, frozen=True, repr=False)
@@ -178,6 +230,293 @@ class MCPAuditEvent:
     server_id: str | None = None
     call_ref: str | None = None
     safe_payload: JsonMapping = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyMigrationRecord:
+    migration_id: str
+    event_type: str
+    plan_fingerprint: str
+    source_server_id: str
+    source_fingerprint: str
+    owner_consumer_ref: str
+    target_server_id: str
+    target_consumer_set_digest: str
+    capability_obligations_fingerprint: str
+    catalog_fingerprint: str
+    capability_fingerprint: str
+    validator_provenance_fingerprint: str
+    credential_digest: str
+    disposition: str
+    occurred_at: datetime
+    evidence_expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyMigrationBatchResult:
+    servers: tuple[UserMCPServer, ...]
+    records: tuple[MCPLegacyMigrationRecord, ...]
+    applied: bool
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutGateScope:
+    environment_id: str
+    rollout_program: str = "user_mcp_phase3"
+    created_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutDrillObservation:
+    drill_observation_id: str
+    environment_id: str
+    deployment_id: str
+    config_fingerprint: str
+    drill: str
+    outcome: str
+    observed_at: datetime
+    recorded_at: datetime
+    expires_at: datetime
+    payload_digest: str
+    rollout_program: str = "user_mcp_phase3"
+    stage: str = "internal_enforce"
+
+
+def canonical_mcp_rollout_drill_observation_digest(
+    observation: MCPRolloutDrillObservation,
+) -> str:
+    from src.integrations.mcp.rollout_evidence import canonical_evidence_content_digest
+
+    return canonical_evidence_content_digest(
+        {
+            item.name: getattr(observation, item.name)
+            for item in fields(observation)
+            if item.name != "payload_digest"
+        }
+    )
+
+
+def seal_mcp_rollout_drill_observation(
+    observation: MCPRolloutDrillObservation,
+) -> MCPRolloutDrillObservation:
+    draft = replace(observation, payload_digest="")
+    return replace(
+        draft,
+        payload_digest=canonical_mcp_rollout_drill_observation_digest(draft),
+    )
+
+
+def validate_mcp_rollout_drill_observation(
+    observation: MCPRolloutDrillObservation,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    required = (
+        observation.drill_observation_id,
+        observation.environment_id,
+        observation.deployment_id,
+        observation.config_fingerprint,
+    )
+    if any(not isinstance(value, str) or not value.strip() for value in required):
+        blockers.append("required_field_invalid")
+    if (
+        observation.rollout_program != "user_mcp_phase3"
+        or observation.stage != "internal_enforce"
+    ):
+        blockers.append("scope_invalid")
+    if (
+        not isinstance(observation.config_fingerprint, str)
+        or _MCP_ROLLOUT_SHA256_RE.fullmatch(observation.config_fingerprint) is None
+    ):
+        blockers.append("config_fingerprint_invalid")
+    if not isinstance(observation.drill, str) or observation.drill not in MCP_ROLLOUT_DRILLS:
+        blockers.append("drill_invalid")
+    if (
+        not isinstance(observation.outcome, str)
+        or observation.outcome not in MCP_ROLLOUT_DRILL_OUTCOMES
+    ):
+        blockers.append("outcome_invalid")
+    if not all(
+        _is_aware_timestamp(value)
+        for value in (
+            observation.observed_at,
+            observation.recorded_at,
+            observation.expires_at,
+        )
+    ):
+        blockers.append("timestamp_invalid")
+    elif (
+        observation.recorded_at < observation.observed_at
+        or observation.expires_at <= observation.recorded_at
+    ):
+        blockers.append("timestamp_order_invalid")
+    if (
+        not isinstance(observation.payload_digest, str)
+        or _MCP_ROLLOUT_SHA256_RE.fullmatch(observation.payload_digest) is None
+    ):
+        blockers.append("digest_invalid")
+    else:
+        try:
+            expected_digest = canonical_mcp_rollout_drill_observation_digest(observation)
+        except (TypeError, ValueError):
+            blockers.append("digest_invalid")
+        else:
+            if not hmac.compare_digest(observation.payload_digest, expected_digest):
+                blockers.append("digest_invalid")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _is_aware_timestamp(value: object) -> bool:
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutMetricBucket:
+    metric_bucket_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    metric_name: str
+    bucket_started_at: datetime
+    bucket_ended_at: datetime
+    execution_path: str
+    routing_mode: str
+    transport: str
+    protocol_version: str
+    adapter: str
+    result_category: str
+    error_category: str
+    latency_bucket: str
+    value: int
+    call_kind: str | None = None
+    red_line: str | None = None
+    rollout_program: str = "user_mcp_phase3"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPShadowAuditSample:
+    sample_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    manifest_fingerprint: str
+    fixture_fingerprint: str
+    mapping_fingerprint: str
+    scenario: str
+    nonce: str
+    legacy_outcome: str
+    shadow_outcome: str
+    transport: str
+    endpoint_policy: str
+    comparison: str
+    blockers: tuple[str, ...]
+    payload_digest: str
+    observed_at: datetime
+    recorded_at: datetime
+    expires_at: datetime
+    safe_owner_ref: str | None = None
+    safe_task_ref: str | None = None
+    safe_call_ref: str | None = None
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutEvidenceSnapshot:
+    evidence_id: str
+    environment_id: str
+    git_sha: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    window_started_at: datetime
+    window_ended_at: datetime
+    recorded_at: datetime
+    producer: str
+    source: str
+    snapshot_id: int
+    nonce: str
+    evidence_kind: str
+    payload: JsonMapping
+    payload_digest: str
+    rollout_program: str = "user_mcp_phase3"
+    attestation_key_id: str | None = None
+    attestation_signature: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutStageApproval:
+    approval_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    evidence_id: str
+    reason: str
+    approver: str
+    created_at: datetime
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutDeploymentActivation:
+    activation_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    approval_id: str
+    evidence_id: str
+    previous_activation_id: str | None
+    operator_reason: str
+    is_rollback: bool
+    created_at: datetime
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutPromotionBlock:
+    block_id: str
+    environment_id: str
+    deployment_id: str
+    stage: str
+    config_fingerprint: str
+    evidence_id: str
+    reason_code: str
+    created_at: datetime
+    rollout_program: str = "user_mcp_phase3"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutBlockResolution:
+    resolution_id: str
+    block_id: str
+    approval_id: str
+    evidence_id: str
+    reason: str
+    approver: str
+    created_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPRolloutInstanceConfigLease:
+    instance_config_id: str
+    environment_id: str
+    deployment_id: str
+    instance_id: str
+    stage: str
+    config_fingerprint: str
+    activation_id: str
+    lease_expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    rollout_program: str = "user_mcp_phase3"
 
 
 @dataclass(slots=True, frozen=True)
@@ -341,6 +680,11 @@ class Task:
     cancel_requested_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    mcp_execution_mode: str | None = None
+    mcp_shadow_enabled: bool | None = None
+    mcp_rollout_config_version: str | None = None
+    mcp_route_reason_code: str | None = None
+    mcp_rollout_mode: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

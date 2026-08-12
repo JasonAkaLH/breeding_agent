@@ -479,4 +479,22 @@ describe('applyTaskEvent', () => {
     expect(state.mcp.remoteTask).toMatchObject({ safeTaskRef: 'task-safe-1', status: 'working' });
     expect(JSON.stringify(state.mcp)).not.toContain('must-not-leak');
   });
+
+  it('shows a recoverable unavailable state without promising cross-path fallback', () => {
+    const state = applyTaskEvent(
+      createInitialTaskEventState(),
+      event('mcp.runtime_unavailable', {
+        status: 'unavailable',
+        reason_code: 'no_execution_path',
+        owner_user_id: 'must-not-be-used',
+      }, 'mcp-unavailable'),
+    );
+
+    expect(state.mcp.availability).toEqual({
+      status: 'unavailable',
+      reasonCode: 'no_execution_path',
+    });
+    expect(state.errorMessage).toContain('不会改道或重放');
+    expect(JSON.stringify(state.mcp)).not.toContain('must-not-be-used');
+  });
 });

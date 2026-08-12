@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+from dataclasses import replace
 from datetime import datetime
 
 from src.core.enums import ArtifactType, DependencyType, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
 from src.core.models import Artifact, Task, TaskEdge, TaskInputAttachment, TaskNode
 from src.lifecycle.rust_contract import status_list
-from src.storage.sqlite.repositories import SQLiteStateRepository
+from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
 
 
@@ -77,6 +79,188 @@ class SQLiteTaskRepositoryTest(SQLiteStorageTestCase):
         self.assertEqual(loaded_node, node)
         self.assertEqual(loaded_edges, [edge])
         self.assertEqual(loaded_artifact, artifact)
+
+    def test_task_identity_and_terminal_status_are_immutable(self) -> None:
+        task = Task(
+            task_id="task-invariants",
+            conversation_id="conv-1",
+            root_message_id="msg-1",
+            status=TaskStatus.COMPLETED,
+        )
+        with self.session_factory() as session:
+            SQLiteStateRepository(session).save_task(task)
+            session.commit()
+
+        for replacement in (
+            replace(task, conversation_id="conv-2"),
+            replace(task, root_message_id="msg-2"),
+            replace(task, routing_mode=RoutingMode.FORCE_CAPABILITY),
+            replace(task, requested_capability_id="skill.other"),
+            replace(task, created_at=datetime(2026, 4, 24, 0, 0, 0)),
+            replace(task, status=TaskStatus.RUNNING),
+        ):
+            with self.session_factory() as session:
+                with self.assertRaisesRegex(ValueError, "task_.*_immutable"):
+                    SQLiteStateRepository(session).save_task(replacement)
+
+    def test_enforce_rejects_new_or_active_null_assignment_and_keeps_terminal_history_read_only(self) -> None:
+        active = Task(
+            task_id="task-null-active",
+            conversation_id="conv-null",
+            root_message_id="msg-active",
+            status=TaskStatus.RUNNING,
+        )
+        terminal = replace(
+            active,
+            task_id="task-null-terminal",
+            root_message_id="msg-terminal",
+            status=TaskStatus.COMPLETED,
+        )
+        from tests.storage.test_mcp_task_route_assignment import _TaskSidecar
+
+        sidecar = _TaskSidecar()
+        sidecar.tasks[terminal.task_id] = {
+            "task_id": terminal.task_id,
+            "conversation_id": terminal.conversation_id,
+            "root_message_id": terminal.root_message_id,
+            "status": str(terminal.status),
+            "routing_mode": str(terminal.routing_mode),
+            "requested_capability_id": None,
+            "root_node_id": None,
+            "summary": None,
+            "cancel_requested_at": None,
+            "created_at": None,
+            "updated_at": None,
+            "assignment": None,
+        }
+        storage = SQLiteStorage(
+            self.session_factory,
+            runtime_sidecar_client=sidecar,
+            mcp_task_authority_mode="enforce",
+        )
+        for candidate in (
+            replace(active, task_id="task-null-new", root_message_id="msg-new"),
+            active,
+            replace(terminal, summary="changed"),
+        ):
+            with self.assertRaisesRegex(ValueError, "migration_required"):
+                asyncio.run(storage.save_task(candidate))
+        with self.assertRaisesRegex(ValueError, "migration_required"):
+            asyncio.run(
+                storage.compare_and_set_task(
+                    active,
+                    expected_from_status=TaskStatus.RUNNING,
+                )
+            )
+        self.assertEqual(asyncio.run(storage.save_task(terminal)), terminal)
+
+    def test_task_node_identity_and_terminal_status_are_immutable(self) -> None:
+        node = TaskNode(
+            node_id="node-invariants",
+            task_id="task-1",
+            capability_id="main_agent.respond",
+            status=NodeStatus.COMPLETED,
+        )
+        with self.session_factory() as session:
+            SQLiteStateRepository(session).save_task_node(node)
+            session.commit()
+
+        for replacement in (
+            replace(node, task_id="task-2"),
+            replace(node, capability_id="skill.other"),
+            replace(node, status=NodeStatus.RUNNING),
+        ):
+            with self.session_factory() as session:
+                with self.assertRaisesRegex(ValueError, "task_node_.*_immutable"):
+                    SQLiteStateRepository(session).save_task_node(replacement)
+
+    def test_task_and_node_compare_and_set_reject_stale_status_without_mutation(self) -> None:
+        task = Task(
+            task_id="task-cas",
+            conversation_id="conv-cas",
+            root_message_id="msg-cas",
+            status=TaskStatus.RUNNING,
+        )
+        node = TaskNode(
+            node_id="node-cas",
+            task_id=task.task_id,
+            capability_id="main_agent.respond",
+            status=NodeStatus.RUNNING,
+        )
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            repo.save_task(task)
+            repo.save_task_node(node)
+            session.commit()
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            self.assertIsNone(
+                repo.compare_and_set_task(
+                    replace(task, status=TaskStatus.COMPLETED),
+                    expected_from_status=TaskStatus.PLANNING,
+                )
+            )
+            self.assertIsNone(
+                repo.compare_and_set_task_node(
+                    replace(node, status=NodeStatus.COMPLETED),
+                    expected_from_status=NodeStatus.READY,
+                )
+            )
+            session.commit()
+
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            self.assertEqual(repo.get_task(task.task_id), task)
+            self.assertEqual(repo.get_task_node(node.node_id), node)
+
+    def test_task_and_node_compare_and_set_allow_only_one_competing_transition(self) -> None:
+        task = Task(
+            task_id="task-cas-winner",
+            conversation_id="conv-cas",
+            root_message_id="msg-cas",
+            status=TaskStatus.RUNNING,
+        )
+        node = TaskNode(
+            node_id="node-cas-winner",
+            task_id=task.task_id,
+            capability_id="main_agent.respond",
+            status=NodeStatus.RUNNING,
+        )
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            repo.save_task(task)
+            repo.save_task_node(node)
+            session.commit()
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            self.assertIsNotNone(
+                repo.compare_and_set_task(
+                    replace(task, status=TaskStatus.COMPLETED),
+                    expected_from_status=TaskStatus.RUNNING,
+                )
+            )
+            self.assertIsNotNone(
+                repo.compare_and_set_task_node(
+                    replace(node, status=NodeStatus.COMPLETED),
+                    expected_from_status=NodeStatus.RUNNING,
+                )
+            )
+            session.commit()
+        with self.session_factory() as session:
+            repo = SQLiteStateRepository(session)
+            self.assertIsNone(
+                repo.compare_and_set_task(
+                    replace(task, status=TaskStatus.FAILED),
+                    expected_from_status=TaskStatus.RUNNING,
+                )
+            )
+            self.assertIsNone(
+                repo.compare_and_set_task_node(
+                    replace(node, status=NodeStatus.FAILED),
+                    expected_from_status=NodeStatus.RUNNING,
+                )
+            )
 
     def test_task_input_attachment_round_trip(self) -> None:
         attachment = TaskInputAttachment(

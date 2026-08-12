@@ -36,6 +36,11 @@ class IPClassification(str, Enum):
     METADATA = "metadata"
 
 
+class EndpointPolicyProvenance(str, Enum):
+    RUNTIME_ENFORCED = "runtime_enforced"
+    ENTERPRISE_ALLOWLIST = "allowed_by_enterprise_allowlist"
+
+
 class EndpointResolver(Protocol):
     def resolve(self, hostname: str, port: int) -> Iterable[str]: ...
 
@@ -84,6 +89,11 @@ class ValidatedEndpoint:
     resolved_ips: tuple[str, ...]
     allowed_ips: tuple[str, ...]
     plaintext_http: bool
+    policy_provenance: EndpointPolicyProvenance
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policy_provenance, EndpointPolicyProvenance):
+            raise ValueError("endpoint policy provenance must use the closed enum")
 
     @property
     def connect_ips(self) -> tuple[str, ...]:
@@ -139,6 +149,7 @@ class EndpointPolicy:
 
         domain_allowed = self._allowlist.permits_domain(hostname)
         plaintext = parsed.scheme == "http"
+        allowlist_required = plaintext
         for address in addresses:
             category = classify_ip(address)
             if category in {
@@ -152,6 +163,8 @@ class EndpointPolicy:
                 raise EndpointPolicyError("mcp_endpoint_ip_forbidden")
             if category is IPClassification.PRIVATE and not (domain_allowed or self._allowlist.permits_ip(address)):
                 raise EndpointPolicyError("mcp_endpoint_private_not_allowlisted")
+            if category is IPClassification.PRIVATE:
+                allowlist_required = True
             if plaintext and not (domain_allowed or self._allowlist.permits_ip(address)):
                 raise EndpointPolicyError("mcp_endpoint_http_not_allowlisted")
 
@@ -165,6 +178,11 @@ class EndpointPolicy:
             resolved_ips=resolved,
             allowed_ips=resolved,
             plaintext_http=plaintext,
+            policy_provenance=(
+                EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST
+                if allowlist_required
+                else EndpointPolicyProvenance.RUNTIME_ENFORCED
+            ),
         )
 
     def validate_connection_ip(self, endpoint: ValidatedEndpoint, address: str) -> None:

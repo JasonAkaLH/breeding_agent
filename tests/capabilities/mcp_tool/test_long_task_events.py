@@ -96,6 +96,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
             task_id="task-1",
             node_id="lookup",
             input_payload={"keyword": "龙粳"},
+            metadata={"mcp_execution_mode": "legacy"},
         )
 
         result = await executor.execute(request)
@@ -117,6 +118,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
             task_id="task-1",
             node_id="lookup",
             input_payload={"keyword": "龙粳"},
+            metadata={"mcp_execution_mode": "legacy"},
         )
 
         with self.assertRaises(asyncio.CancelledError):
@@ -157,6 +159,7 @@ class MCPToolLongTaskEventTests(unittest.IsolatedAsyncioTestCase):
             task_id="task-1",
             node_id="lookup",
             input_payload={"keyword": "龙粳"},
+            metadata={"mcp_execution_mode": "legacy"},
         )
 
         execution = asyncio.create_task(executor.execute(request))

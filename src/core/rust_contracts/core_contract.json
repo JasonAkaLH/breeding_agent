@@ -1,7 +1,7 @@
 {
   "component": "maf_core_types",
   "contract_version": "core.v1",
-  "schema_hash": "maf_core_types_core_v1_schema_20260619_auth_generation_message_public_history_file_index_repair_marker",
+  "schema_hash": "maf_core_types_core_v1_schema_20260813_auth_generation_mcp_task_route_assignment",
   "error_code_table_hash": "maf_core_types_error_table_v1_20260515",
   "supported_features": [
     "core_contract_artifact",
@@ -499,7 +499,12 @@
       "summary",
       "cancel_requested_at",
       "created_at",
-      "updated_at"
+      "updated_at",
+      "mcp_execution_mode",
+      "mcp_shadow_enabled",
+      "mcp_rollout_config_version",
+      "mcp_route_reason_code",
+      "mcp_rollout_mode"
     ],
     "TaskEdge": [
       "from_node_id",

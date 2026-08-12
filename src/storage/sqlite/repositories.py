@@ -4,12 +4,13 @@ import asyncio
 import hashlib
 import inspect
 import json
-from collections.abc import Callable, Iterable, Mapping
+import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
-from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
@@ -23,6 +24,10 @@ from src.core.enums import (
     EdgeType,
     EventVisibility,
     MessageRole,
+    DependencyType,
+    NodeCriticality,
+    NodeStatus,
+    RoutingMode,
     TaskStatus,
     UserMCPAuthType,
     UserMCPHealthStatus,
@@ -47,7 +52,20 @@ from src.core.models import (
     MCPBranchRecord,
     MCPCallRecord,
     MCPConnectionLease,
+    MCPLegacyMigrationBatchResult,
+    MCPLegacyMigrationRecord,
     MCPRemoteTaskBinding,
+    MCPRemoteTaskOutbox,
+    MCPRolloutBlockResolution,
+    MCPRolloutDeploymentActivation,
+    MCPRolloutDrillObservation,
+    MCPRolloutEvidenceSnapshot,
+    MCPRolloutGateScope,
+    MCPRolloutInstanceConfigLease,
+    MCPRolloutMetricBucket,
+    MCPRolloutPromotionBlock,
+    MCPRolloutStageApproval,
+    MCPShadowAuditSample,
     MCPSealedState,
     Message,
     PendingSkillContext,
@@ -63,6 +81,7 @@ from src.core.models import (
     UserMCPServer,
     UserMCPToolGrant,
     MCPCredentialKeyValidation,
+    validate_mcp_rollout_drill_observation,
 )
 from src.storage.conversation_files import (
     FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
@@ -75,6 +94,7 @@ from src.storage.conversation_files import (
 )
 from src.lifecycle.rust_contract import contract_value as lifecycle_contract_value
 from src.lifecycle.rust_contract import status_list as lifecycle_status_list
+from src.integrations.mcp.rollout_evidence import is_exact_mcp_metric_bucket_window
 from src.storage.rust_contract import error_policy as runtime_error_policy
 from src.storage.rust_contract import mode_for_component as runtime_mode_for_component
 from src.storage.rust_contract import operation_policy as runtime_operation_policy
@@ -104,7 +124,19 @@ from .models import (
     MCPBranchRecordRow,
     MCPCallRecordRow,
     MCPConnectionLeaseRow,
+    MCPLegacyMigrationRecordRow,
     MCPRemoteTaskBindingRow,
+    MCPRemoteTaskOutboxRow,
+    MCPRolloutBlockResolutionRow,
+    MCPRolloutDeploymentActivationRow,
+    MCPRolloutDrillObservationRow,
+    MCPRolloutEvidenceSnapshotRow,
+    MCPRolloutGateScopeRow,
+    MCPRolloutInstanceConfigRow,
+    MCPRolloutMetricBucketRow,
+    MCPRolloutPromotionBlockRow,
+    MCPRolloutStageApprovalRow,
+    MCPShadowAuditSampleRow,
     MCPSealedStateRow,
     MessageRow,
     PendingSkillContextRow,
@@ -123,6 +155,190 @@ from .models import (
 
 
 CONVERSATION_FILE_INDEX_REPAIR_KIND = "conversation_file_index"
+MCP_ROLLOUT_PROGRAM = "user_mcp_phase3"
+MCP_ROLLOUT_ATTESTATION_KEY_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+)
+MCP_ROLLOUT_ATTESTATION_SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
+MCP_ROLLOUT_STAGES = frozenset(
+    {
+        "off",
+        "internal_shadow",
+        "internal_enforce",
+        "cohort_enforce",
+        "full_enforce",
+        "legacy_assembly_off",
+    }
+)
+MCP_ROLLOUT_METRIC_NAMES = frozenset(
+    {
+        "mcp_route_requests_total",
+        "mcp_route_shadow_mismatch_total",
+        "mcp_gateway_active_scopes",
+        "mcp_gateway_connect_duration_seconds",
+        "mcp_tools_list_duration_seconds",
+        "mcp_tools_list_attempts_total",
+        "mcp_tool_calls_active",
+        "mcp_tool_calls_total",
+        "mcp_tool_call_duration_seconds",
+        "mcp_tool_call_unknown_total",
+        "mcp_permission_decisions_total",
+        "mcp_disconnect_lease_expired_total",
+        "mcp_temp_spill_bytes",
+        "mcp_resource_cleanup_failures_total",
+        "mcp_protocol_negotiation_total",
+        "mcp_server_discover_duration_seconds",
+        "mcp_mrtr_rounds_total",
+        "mcp_remote_tasks_active",
+        "mcp_safety_red_line_total",
+    }
+)
+MCP_ROLLOUT_LABEL_VALUES = {
+    "execution_path": frozenset({"legacy", "user_scoped", "unavailable", "not_applicable"}),
+    "routing_mode": frozenset({"off", "shadow", "enforce", "not_applicable"}),
+    "transport": frozenset({"streamable_http", "legacy_http_sse", "not_applicable"}),
+    "protocol_version": frozenset(
+        {
+            "2024-11-05",
+            "2025-03-26",
+            "2025-06-18",
+            "2025-11-25",
+            "2026-07-28",
+            "not_applicable",
+        }
+    ),
+    "adapter": frozenset(
+        {
+            "python_legacy",
+            "python_2026",
+            "rust_sidecar",
+            "legacy_global_runtime",
+            "not_applicable",
+        }
+    ),
+    "result_category": frozenset(
+        {
+            "succeeded",
+            "failed",
+            "unknown",
+            "cancelled",
+            "input_required",
+            "task_created",
+            "permission_denied",
+            "not_comparable",
+            "not_applicable",
+        }
+    ),
+    "error_category": frozenset(
+        {
+            "none",
+            "authentication",
+            "authorization",
+            "endpoint_policy",
+            "transport",
+            "protocol",
+            "server",
+            "timeout",
+            "unknown",
+            "validation",
+            "cleanup",
+            "not_applicable",
+        }
+    ),
+    "call_kind": frozenset({"ordinary", "remote_task", "not_applicable"}),
+    "red_line": frozenset(
+        {
+            "cross_user_access",
+            "secret_exposure",
+            "dual_tool_call",
+            "unauthorized_tool_call",
+            "endpoint_policy_bypass",
+            "unknown_result_replay",
+            "shadow_tool_call",
+            "persistent_resource_leak",
+            "not_applicable",
+        }
+    ),
+    "latency_bucket": frozenset(
+        {
+            "le_100_ms",
+            "le_500_ms",
+            "le_1_s",
+            "le_5_s",
+            "le_30_s",
+            "le_120_s",
+            "gt_120_s",
+            "not_applicable",
+        }
+    ),
+}
+MCP_ROLLOUT_EVIDENCE_SOURCES = frozenset({"ci", "production"})
+MCP_ROLLOUT_EVIDENCE_PRODUCERS = frozenset(
+    {"ci_pipeline", "production_snapshot_producer"}
+)
+MCP_ROLLOUT_EVIDENCE_KINDS = frozenset(
+    {
+        "ci_conformance",
+        "internal_shadow",
+        "internal_enforce",
+        "cohort_enforce",
+        "full_enforce",
+        "legacy_assembly_off",
+        "rollback_drill",
+        "resource_baseline",
+        "release_tag",
+    }
+)
+MCP_ROLLOUT_BLOCK_REASONS = frozenset(
+    {
+        "no_evidence",
+        "invalid_transition",
+        "evidence_id_replay",
+        "nonce_replay",
+        "snapshot_replay",
+        "snapshot_non_monotonic",
+        "provenance_invalid",
+        "digest_invalid",
+        "attestation_missing",
+        "attestation_invalid",
+        "evidence_scope_mismatch",
+        "evidence_stage_mismatch",
+        "evidence_kind_mismatch",
+        "source_policy_violation",
+        "payload_invalid",
+        "window_too_short",
+        "window_incomplete",
+        "metric_series_missing",
+        "metric_summary_mismatch",
+        "zero_denominator",
+        "sample_insufficient",
+        "scenario_sample_insufficient",
+        "unresolved_mismatch",
+        "invalid_sample",
+        "unapproved_not_comparable",
+        "required_drill_missing",
+        "red_line_data_missing",
+        "safety_red_line",
+        "safety_red_line_nonzero",
+        "baseline_missing",
+        "p95_latency_regressed",
+        "error_rate_regressed",
+        "ci_conformance_missing",
+    }
+)
+
+
+def _rollout_value(value: object) -> str:
+    return str(value)
+
+
+def _validate_rollout_scope(environment_id: str, rollout_program: str, stage: str) -> None:
+    if not environment_id:
+        raise ValueError("MCP rollout environment ID is required")
+    if rollout_program != MCP_ROLLOUT_PROGRAM:
+        raise ValueError("MCP rollout program is not supported")
+    if stage not in MCP_ROLLOUT_STAGES:
+        raise ValueError("MCP rollout stage is not supported")
 
 
 def _row_to_user_mcp_tool_grant(row: UserMCPToolGrantRow) -> UserMCPToolGrant:
@@ -198,9 +414,47 @@ def _row_to_mcp_remote_task(row: MCPRemoteTaskBindingRow) -> MCPRemoteTaskBindin
         encryption_version=int(row.encryption_version),
         last_status=row.last_status,
         next_poll_at=row.next_poll_at,
+        published_at=row.published_at,
+        continuation_plan=dict(row.continuation_plan or {}),
         created_at=row.created_at,
         updated_at=row.updated_at,
         terminal_at=row.terminal_at,
+        claim_owner=row.claim_owner,
+        claim_token=row.claim_token,
+        lease_expires_at=row.lease_expires_at,
+        revision=0 if row.revision is None else int(row.revision),
+    )
+
+
+def _row_to_mcp_remote_task_outbox(
+    row: MCPRemoteTaskOutboxRow,
+) -> MCPRemoteTaskOutbox:
+    return MCPRemoteTaskOutbox(
+        outbox_id=row.outbox_id,
+        kind=row.kind,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        call_ref=row.call_ref,
+        safe_remote_task_ref=row.safe_remote_task_ref,
+        payload=dict(row.payload or {}),
+        status=row.status,
+        claim_owner=row.claim_owner,
+        claim_token=row.claim_token,
+        lease_expires_at=row.lease_expires_at,
+        revision=int(row.revision or 0),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        continuation_admitted_at=row.continuation_admitted_at,
+        continuation_dispatched_at=row.continuation_dispatched_at,
+        continuation_status=row.continuation_status,
+        continuation_claim_owner=row.continuation_claim_owner,
+        continuation_claim_token=row.continuation_claim_token,
+        continuation_lease_expires_at=row.continuation_lease_expires_at,
+        continuation_revision=int(row.continuation_revision or 0),
+        continuation_node_ids=tuple(row.continuation_node_ids or ()),
+        continuation_safe_error_code=row.continuation_safe_error_code,
+        completed_at=row.completed_at,
     )
 
 
@@ -246,6 +500,226 @@ def _row_to_mcp_audit_event(row: MCPAuditEventRow) -> MCPAuditEvent:
         server_id=row.server_id,
         call_ref=row.call_ref,
         safe_payload=dict(row.safe_payload or {}),
+    )
+
+
+def _row_to_mcp_legacy_migration_record(
+    row: MCPLegacyMigrationRecordRow,
+) -> MCPLegacyMigrationRecord:
+    return MCPLegacyMigrationRecord(
+        migration_id=row.migration_id,
+        event_type=row.event_type,
+        plan_fingerprint=row.plan_fingerprint,
+        source_server_id=row.source_server_id,
+        source_fingerprint=row.source_fingerprint,
+        owner_consumer_ref=row.owner_consumer_ref,
+        target_server_id=row.target_server_id,
+        target_consumer_set_digest=row.target_consumer_set_digest,
+        capability_obligations_fingerprint=row.capability_obligations_fingerprint,
+        catalog_fingerprint=row.catalog_fingerprint,
+        capability_fingerprint=row.capability_fingerprint,
+        validator_provenance_fingerprint=row.validator_provenance_fingerprint,
+        credential_digest=row.credential_digest,
+        disposition=row.disposition,
+        occurred_at=row.occurred_at,
+        evidence_expires_at=row.evidence_expires_at,
+    )
+
+
+def _row_to_mcp_rollout_gate_scope(row: MCPRolloutGateScopeRow) -> MCPRolloutGateScope:
+    return MCPRolloutGateScope(
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        created_at=row.created_at,
+    )
+
+
+def _row_to_mcp_rollout_drill_observation(
+    row: MCPRolloutDrillObservationRow,
+) -> MCPRolloutDrillObservation:
+    return MCPRolloutDrillObservation(
+        drill_observation_id=row.drill_observation_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        deployment_id=row.deployment_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        drill=row.drill,
+        outcome=row.outcome,
+        observed_at=row.observed_at,
+        recorded_at=row.recorded_at,
+        expires_at=row.expires_at,
+        payload_digest=row.payload_digest,
+    )
+
+
+def _row_to_mcp_rollout_metric_bucket(
+    row: MCPRolloutMetricBucketRow,
+) -> MCPRolloutMetricBucket:
+    return MCPRolloutMetricBucket(
+        metric_bucket_id=row.metric_bucket_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        deployment_id=row.deployment_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        metric_name=row.metric_name,
+        bucket_started_at=row.bucket_started_at,
+        bucket_ended_at=row.bucket_ended_at,
+        execution_path=row.execution_path,
+        routing_mode=row.routing_mode,
+        transport=row.transport,
+        protocol_version=row.protocol_version,
+        adapter=row.adapter,
+        result_category=row.result_category,
+        error_category=row.error_category,
+        call_kind=None if row.call_kind == "not_applicable" else row.call_kind,
+        red_line=None if row.red_line == "not_applicable" else row.red_line,
+        latency_bucket=row.latency_bucket,
+        value=int(row.value),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_mcp_rollout_evidence_snapshot(
+    row: MCPRolloutEvidenceSnapshotRow,
+) -> MCPRolloutEvidenceSnapshot:
+    return MCPRolloutEvidenceSnapshot(
+        evidence_id=row.evidence_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        git_sha=row.git_sha,
+        deployment_id=row.deployment_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        window_started_at=row.window_started_at,
+        window_ended_at=row.window_ended_at,
+        recorded_at=row.recorded_at,
+        producer=row.producer,
+        source=row.source,
+        snapshot_id=int(row.snapshot_id),
+        nonce=row.nonce,
+        evidence_kind=row.evidence_kind,
+        payload=dict(row.payload),
+        payload_digest=row.payload_digest,
+        attestation_key_id=row.attestation_key_id,
+        attestation_signature=row.attestation_signature,
+    )
+
+
+def _row_to_mcp_shadow_audit_sample(
+    row: MCPShadowAuditSampleRow,
+) -> MCPShadowAuditSample:
+    return MCPShadowAuditSample(
+        sample_id=row.sample_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        deployment_id=row.deployment_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        manifest_fingerprint=row.manifest_fingerprint,
+        fixture_fingerprint=row.fixture_fingerprint,
+        mapping_fingerprint=row.mapping_fingerprint,
+        scenario=row.scenario,
+        nonce=row.nonce,
+        safe_owner_ref=row.safe_owner_ref,
+        safe_task_ref=row.safe_task_ref,
+        safe_call_ref=row.safe_call_ref,
+        legacy_outcome=row.legacy_outcome,
+        shadow_outcome=row.shadow_outcome,
+        transport=row.transport,
+        endpoint_policy=row.endpoint_policy,
+        comparison=row.comparison,
+        blockers=tuple(str(item) for item in row.blockers),
+        payload_digest=row.payload_digest,
+        observed_at=row.observed_at,
+        recorded_at=row.recorded_at,
+        expires_at=row.expires_at,
+    )
+
+
+def _row_to_mcp_rollout_stage_approval(
+    row: MCPRolloutStageApprovalRow,
+) -> MCPRolloutStageApproval:
+    return MCPRolloutStageApproval(
+        approval_id=row.approval_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        deployment_id=row.deployment_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        evidence_id=row.evidence_id,
+        reason=row.reason,
+        approver=row.approver,
+        created_at=row.created_at,
+    )
+
+
+def _row_to_mcp_rollout_deployment_activation(
+    row: MCPRolloutDeploymentActivationRow,
+) -> MCPRolloutDeploymentActivation:
+    return MCPRolloutDeploymentActivation(
+        activation_id=row.activation_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        deployment_id=row.deployment_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        approval_id=row.approval_id,
+        evidence_id=row.evidence_id,
+        previous_activation_id=row.previous_activation_id,
+        operator_reason=row.operator_reason,
+        is_rollback=bool(row.is_rollback),
+        created_at=row.created_at,
+    )
+
+
+def _row_to_mcp_rollout_promotion_block(
+    row: MCPRolloutPromotionBlockRow,
+) -> MCPRolloutPromotionBlock:
+    return MCPRolloutPromotionBlock(
+        block_id=row.block_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        deployment_id=row.deployment_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        evidence_id=row.evidence_id,
+        reason_code=row.reason_code,
+        created_at=row.created_at,
+    )
+
+
+def _row_to_mcp_rollout_block_resolution(
+    row: MCPRolloutBlockResolutionRow,
+) -> MCPRolloutBlockResolution:
+    return MCPRolloutBlockResolution(
+        resolution_id=row.resolution_id,
+        block_id=row.block_id,
+        approval_id=row.approval_id,
+        evidence_id=row.evidence_id,
+        reason=row.reason,
+        approver=row.approver,
+        created_at=row.created_at,
+    )
+
+
+def _row_to_mcp_rollout_instance_config(
+    row: MCPRolloutInstanceConfigRow,
+) -> MCPRolloutInstanceConfigLease:
+    return MCPRolloutInstanceConfigLease(
+        instance_config_id=row.instance_config_id,
+        environment_id=row.environment_id,
+        rollout_program=row.rollout_program,
+        deployment_id=row.deployment_id,
+        instance_id=row.instance_id,
+        stage=row.stage,
+        config_fingerprint=row.config_fingerprint,
+        activation_id=row.activation_id,
+        lease_expires_at=row.lease_expires_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -521,7 +995,90 @@ def _row_to_message(row: MessageRow) -> Message:
     )
 
 
+_MCP_EXECUTION_MODES = frozenset({"legacy", "user_scoped", "unavailable"})
+_MCP_ROLLOUT_MODES = frozenset({"off", "shadow", "enforce"})
+_MCP_ROUTE_REASON_CODES = frozenset(
+    {
+        "routing_off",
+        "shadow_enabled",
+        "enforce_selected",
+        "cohort_not_selected",
+        "percent_not_selected",
+        "explicit_legacy_capability",
+        "user_server_rollout_unavailable",
+        "no_execution_path",
+    }
+)
+_TERMINAL_TASK_STATUSES = frozenset(
+    {TaskStatus.CANCELLED, TaskStatus.COMPLETED, TaskStatus.FAILED}
+)
+_TERMINAL_NODE_STATUSES = frozenset(
+    {
+        NodeStatus.COMPLETED,
+        NodeStatus.FAILED,
+        NodeStatus.CANCELLED,
+        NodeStatus.BLOCKED_BY_CANCELLATION,
+        NodeStatus.ORPHANED,
+    }
+)
+
+
+def _validated_mcp_task_assignment(
+    *,
+    execution_mode: Any,
+    shadow_enabled: Any,
+    config_version: Any,
+    reason_code: Any,
+    rollout_mode: Any,
+) -> dict[str, Any]:
+    values = (execution_mode, shadow_enabled, config_version, reason_code, rollout_mode)
+    if all(value is None for value in values):
+        return {
+            "mcp_execution_mode": None,
+            "mcp_shadow_enabled": None,
+            "mcp_rollout_config_version": None,
+            "mcp_route_reason_code": None,
+            "mcp_rollout_mode": None,
+        }
+    if any(value is None for value in values):
+        raise ValueError("mcp_task_route_assignment_corrupt: task assignment must be all null or all non-null")
+    if execution_mode not in _MCP_EXECUTION_MODES:
+        raise ValueError("mcp_task_route_assignment_invalid: unsupported execution mode")
+    if type(shadow_enabled) is not bool:
+        raise ValueError("mcp_task_route_assignment_invalid: shadow flag must be boolean")
+    if not isinstance(config_version, str) or not config_version:
+        raise ValueError("mcp_task_route_assignment_invalid: config version must be non-empty")
+    if reason_code not in _MCP_ROUTE_REASON_CODES:
+        raise ValueError("mcp_task_route_assignment_invalid: unsupported reason code")
+    if rollout_mode not in _MCP_ROLLOUT_MODES:
+        raise ValueError("mcp_task_route_assignment_invalid: unsupported rollout mode")
+    return {
+        "mcp_execution_mode": execution_mode,
+        "mcp_shadow_enabled": shadow_enabled,
+        "mcp_rollout_config_version": config_version,
+        "mcp_route_reason_code": reason_code,
+        "mcp_rollout_mode": rollout_mode,
+    }
+
+
+def _task_mcp_assignment(task: Task) -> dict[str, Any]:
+    return _validated_mcp_task_assignment(
+        execution_mode=task.mcp_execution_mode,
+        shadow_enabled=task.mcp_shadow_enabled,
+        config_version=task.mcp_rollout_config_version,
+        reason_code=task.mcp_route_reason_code,
+        rollout_mode=task.mcp_rollout_mode,
+    )
+
+
 def _row_to_task(row: TaskRow) -> Task:
+    assignment = _validated_mcp_task_assignment(
+        execution_mode=row.mcp_execution_mode,
+        shadow_enabled=row.mcp_shadow_enabled,
+        config_version=row.mcp_rollout_config_version,
+        reason_code=row.mcp_route_reason_code,
+        rollout_mode=row.mcp_rollout_mode,
+    )
     return Task(
         task_id=row.task_id,
         conversation_id=row.conversation_id,
@@ -534,6 +1091,7 @@ def _row_to_task(row: TaskRow) -> Task:
         cancel_requested_at=row.cancel_requested_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        **assignment,
     )
 
 
@@ -822,7 +1380,18 @@ def _ensure_event_replay_page_within_rust_contract(events: list[EventRecord], ev
         raise ValueError(f"{error_code}: event replay exceeds Rust runtime sidecar page limit")
 
 
-def _ensure_runtime_store_write_allowed_by_rust_contract(operation_name: str) -> None:
+def _ensure_runtime_store_write_allowed_by_rust_contract(
+    operation_name: str,
+    *,
+    task_authority_mode: str | None = None,
+) -> None:
+    if task_authority_mode in {"off", "shadow"}:
+        return
+    if task_authority_mode == "enforce":
+        raise RuntimeError(
+            "runtime_store_unavailable: MCP Task enforce authority is active "
+            "but the Python store write path was reached"
+        )
     ensure_sidecar_write_allowed(
         component="runtime_store",
         operation_name=operation_name,
@@ -831,8 +1400,14 @@ def _ensure_runtime_store_write_allowed_by_rust_contract(operation_name: str) ->
 
 
 class SQLiteStateRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        task_authority_mode: str | None = None,
+    ) -> None:
         self._session = session
+        self._task_authority_mode = task_authority_mode
 
     def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken:
         at = token.updated_at or token.auth_generation_updated_at or _utcnow_naive()
@@ -1349,6 +1924,7 @@ class SQLiteStateRepository:
             "event_record": 0,
             "artifact": 0,
             "task_input_attachment": 0,
+            "mcp_remote_task_outbox": 0,
             "mcp_remote_task_binding": 0,
             "mcp_sealed_state": 0,
             "mcp_call_record": 0,
@@ -1383,6 +1959,12 @@ class SQLiteStateRepository:
             _delete(
                 "task_input_attachment",
                 delete(TaskInputAttachmentRow).where(TaskInputAttachmentRow.task_id.in_(task_ids)),
+            )
+            _delete(
+                "mcp_remote_task_outbox",
+                delete(MCPRemoteTaskOutboxRow).where(
+                    MCPRemoteTaskOutboxRow.task_id.in_(task_ids)
+                ),
             )
             _delete(
                 "mcp_remote_task_binding",
@@ -1945,7 +2527,60 @@ class SQLiteStateRepository:
         return _row_to_event_record(merged)
 
     def save_task(self, task: Task) -> Task:
-        _ensure_runtime_store_write_allowed_by_rust_contract("task_submit")
+        _ensure_runtime_store_write_allowed_by_rust_contract(
+            "task_submit",
+            task_authority_mode=self._task_authority_mode,
+        )
+        assignment = _task_mcp_assignment(task)
+        existing = self._session.get(TaskRow, task.task_id)
+        if existing is not None:
+            if (
+                existing.conversation_id != task.conversation_id
+                or existing.root_message_id != task.root_message_id
+                or existing.routing_mode != task.routing_mode
+                or existing.requested_capability_id != task.requested_capability_id
+                or existing.created_at != task.created_at
+            ):
+                raise ValueError(
+                    "task_identity_immutable: canonical Task identity fields cannot be changed"
+                )
+            if existing.status in _TERMINAL_TASK_STATUSES and existing.status != task.status:
+                raise ValueError(
+                    "task_terminal_status_immutable: terminal Task status cannot be changed"
+                )
+            existing_assignment = _validated_mcp_task_assignment(
+                execution_mode=existing.mcp_execution_mode,
+                shadow_enabled=existing.mcp_shadow_enabled,
+                config_version=existing.mcp_rollout_config_version,
+                reason_code=existing.mcp_route_reason_code,
+                rollout_mode=existing.mcp_rollout_mode,
+            )
+            existing_is_assigned = any(
+                value is not None for value in existing_assignment.values()
+            )
+            replacement_is_assigned = any(value is not None for value in assignment.values())
+            if (
+                self._task_authority_mode == "enforce"
+                and not existing_is_assigned
+            ):
+                existing_task = _row_to_task(existing)
+                if existing.status not in _TERMINAL_TASK_STATUSES or task != existing_task:
+                    raise ValueError(
+                        "mcp_task_route_assignment_migration_required: terminal legacy null assignment is read-only"
+                    )
+                return existing_task
+            if not existing_is_assigned and replacement_is_assigned:
+                raise ValueError(
+                    "mcp_task_route_assignment_migration_required: legacy all-null assignment cannot become executable"
+                )
+            if existing_is_assigned and assignment != existing_assignment:
+                raise ValueError("mcp_task_route_assignment_immutable: task assignment cannot be changed or removed")
+        elif self._task_authority_mode == "enforce" and not any(
+            value is not None for value in assignment.values()
+        ):
+            raise ValueError(
+                "mcp_task_route_assignment_migration_required: enforce authority requires a canonical assignment"
+            )
         row = TaskRow(
             task_id=task.task_id,
             conversation_id=task.conversation_id,
@@ -1958,6 +2593,7 @@ class SQLiteStateRepository:
             cancel_requested_at=task.cancel_requested_at,
             created_at=task.created_at,
             updated_at=task.updated_at,
+            **assignment,
         )
         merged = self._session.merge(row)
         self._session.flush()
@@ -1966,6 +2602,70 @@ class SQLiteStateRepository:
     def get_task(self, task_id: str) -> Task | None:
         row = self._session.get(TaskRow, task_id)
         return None if row is None else _row_to_task(row)
+
+    def compare_and_set_task(
+        self, task: Task, *, expected_from_status: TaskStatus
+    ) -> Task | None:
+        existing = self._session.get(TaskRow, task.task_id)
+        if existing is None or existing.status != expected_from_status:
+            return None
+        if (
+            existing.conversation_id != task.conversation_id
+            or existing.root_message_id != task.root_message_id
+            or existing.routing_mode != task.routing_mode
+            or existing.requested_capability_id != task.requested_capability_id
+            or existing.created_at != task.created_at
+        ):
+            raise ValueError(
+                "task_identity_immutable: canonical Task identity fields cannot be changed"
+            )
+        if existing.status in _TERMINAL_TASK_STATUSES and existing.status != task.status:
+            raise ValueError(
+                "task_terminal_status_immutable: terminal Task status cannot be changed"
+            )
+        assignment = _task_mcp_assignment(task)
+        existing_assignment = _validated_mcp_task_assignment(
+            execution_mode=existing.mcp_execution_mode,
+            shadow_enabled=existing.mcp_shadow_enabled,
+            config_version=existing.mcp_rollout_config_version,
+            reason_code=existing.mcp_route_reason_code,
+            rollout_mode=existing.mcp_rollout_mode,
+        )
+        if self._task_authority_mode == "enforce" and not any(
+            value is not None for value in existing_assignment.values()
+        ):
+            existing_task = _row_to_task(existing)
+            if existing.status in _TERMINAL_TASK_STATUSES and task == existing_task:
+                return existing_task
+            raise ValueError(
+                "mcp_task_route_assignment_migration_required: terminal legacy null assignment is read-only"
+            )
+        if assignment != existing_assignment:
+            raise ValueError(
+                "mcp_task_route_assignment_immutable: task assignment cannot be changed or removed"
+            )
+        result = self._session.execute(
+            update(TaskRow)
+            .where(
+                TaskRow.task_id == task.task_id,
+                TaskRow.status == str(expected_from_status),
+            )
+            .values(
+                status=str(task.status),
+                routing_mode=str(task.routing_mode),
+                requested_capability_id=task.requested_capability_id,
+                root_node_id=task.root_node_id,
+                summary=task.summary,
+                cancel_requested_at=task.cancel_requested_at,
+                created_at=task.created_at,
+                updated_at=task.updated_at,
+            )
+        )
+        if result.rowcount != 1:
+            self._session.rollback()
+            return None
+        self._session.flush()
+        return self.get_task(task.task_id)
 
     def get_active_task_for_conversation(self, conversation_id: str) -> Task | None:
         row = self._session.scalar(
@@ -1990,7 +2690,20 @@ class SQLiteStateRepository:
         return [_row_to_task(row) for row in rows]
 
     def save_task_node(self, node: TaskNode) -> TaskNode:
-        _ensure_runtime_store_write_allowed_by_rust_contract("node_state_transition")
+        _ensure_runtime_store_write_allowed_by_rust_contract(
+            "node_state_transition",
+            task_authority_mode=self._task_authority_mode,
+        )
+        existing = self._session.get(TaskNodeRow, node.node_id)
+        if existing is not None:
+            if existing.task_id != node.task_id or existing.capability_id != node.capability_id:
+                raise ValueError(
+                    "task_node_identity_immutable: task_id and capability_id cannot be changed"
+                )
+            if existing.status in _TERMINAL_NODE_STATUSES and existing.status != node.status:
+                raise ValueError(
+                    "task_node_terminal_status_immutable: terminal TaskNode status cannot be changed"
+                )
         row = TaskNodeRow(
             node_id=node.node_id,
             task_id=node.task_id,
@@ -2014,6 +2727,42 @@ class SQLiteStateRepository:
     def get_task_node(self, node_id: str) -> TaskNode | None:
         row = self._session.get(TaskNodeRow, node_id)
         return None if row is None else _row_to_task_node(row)
+
+    def compare_and_set_task_node(
+        self, node: TaskNode, *, expected_from_status: NodeStatus
+    ) -> TaskNode | None:
+        existing = self._session.get(TaskNodeRow, node.node_id)
+        if existing is None or existing.status != expected_from_status:
+            return None
+        if existing.task_id != node.task_id or existing.capability_id != node.capability_id:
+            raise ValueError(
+                "task_node_identity_immutable: task_id and capability_id cannot be changed"
+            )
+        result = self._session.execute(
+            update(TaskNodeRow)
+            .where(
+                TaskNodeRow.node_id == node.node_id,
+                TaskNodeRow.status == str(expected_from_status),
+            )
+            .values(
+                assigned_instance_id=node.assigned_instance_id,
+                status=str(node.status),
+                criticality=str(node.criticality),
+                dependency_type=str(node.dependency_type),
+                retry_policy=dict(node.retry_policy),
+                timeout_policy=dict(node.timeout_policy),
+                resource_class=node.resource_class,
+                input_refs=list(node.input_refs),
+                output_refs=list(node.output_refs),
+                started_at=node.started_at,
+                finished_at=node.finished_at,
+            )
+        )
+        if result.rowcount != 1:
+            self._session.rollback()
+            return None
+        self._session.flush()
+        return self.get_task_node(node.node_id)
 
     def list_task_nodes_for_task(self, task_id: str) -> list[TaskNode]:
         rows = self._session.scalars(
@@ -2184,6 +2933,300 @@ class SQLiteStateRepository:
         self._session.add(row)
         self._session.flush()
         return _row_to_user_mcp_server(row)
+
+    def create_user_mcp_servers_atomic(
+        self,
+        candidates: Sequence[tuple[UserMCPServer, UserMCPCredentialRecord | None]],
+    ) -> list[UserMCPServer]:
+        batch = tuple(candidates)
+        identities: set[tuple[str, str]] = set()
+        for server, credential in batch:
+            identity = (server.owner_user_id, server.server_id)
+            if identity in identities:
+                raise ValueError("duplicate MCP server identity in atomic create batch")
+            identities.add(identity)
+            if credential is not None and (
+                credential.owner_user_id != server.owner_user_id
+                or credential.server_id != server.server_id
+            ):
+                raise ValueError("credential scope does not match MCP server")
+
+        existing_by_id: dict[str, UserMCPServerRow] = {}
+        for server, credential in batch:
+            existing = self._session.get(UserMCPServerRow, server.server_id)
+            if existing is None:
+                continue
+            self._validate_user_mcp_server_atomic_replay(existing, server, credential)
+            existing_by_id[server.server_id] = existing
+
+        insert_statement = (
+            postgresql_insert(UserMCPServerRow)
+            if self._session.bind is not None
+            and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(UserMCPServerRow)
+        )
+        for server, credential in batch:
+            if server.server_id in existing_by_id:
+                continue
+            self._session.execute(
+                insert_statement.values(
+                    **self._user_mcp_server_insert_values(server, credential)
+                ).on_conflict_do_nothing()
+            )
+        self._session.flush()
+        self._session.expire_all()
+
+        stored: list[UserMCPServer] = []
+        for server, credential in batch:
+            row = self._session.get(UserMCPServerRow, server.server_id)
+            if row is None:
+                raise RuntimeError("atomic MCP server create did not persist candidate")
+            self._validate_user_mcp_server_atomic_replay(row, server, credential)
+            stored.append(_row_to_user_mcp_server(row))
+        return stored
+
+    def get_mcp_legacy_migration_record(
+        self, migration_id: str
+    ) -> MCPLegacyMigrationRecord | None:
+        row = self._session.get(MCPLegacyMigrationRecordRow, migration_id)
+        return None if row is None else _row_to_mcp_legacy_migration_record(row)
+
+    def apply_legacy_mcp_migration_atomic(
+        self,
+        candidates: Sequence[
+            tuple[
+                UserMCPServer,
+                UserMCPCredentialRecord | None,
+                MCPLegacyMigrationRecord,
+            ]
+        ],
+    ) -> MCPLegacyMigrationBatchResult:
+        batch = tuple(candidates)
+        migration_ids: set[str] = set()
+        plan_sources: set[tuple[str, str]] = set()
+        target_server_ids: set[str] = set()
+        server_candidates: list[
+            tuple[UserMCPServer, UserMCPCredentialRecord | None]
+        ] = []
+        records: list[MCPLegacyMigrationRecord] = []
+        for server, credential, record in batch:
+            self._validate_mcp_legacy_migration_record(record)
+            if record.target_server_id != server.server_id:
+                raise ValueError("migration record target does not match MCP server")
+            plan_source = (record.plan_fingerprint, record.source_server_id)
+            if (
+                record.migration_id in migration_ids
+                or plan_source in plan_sources
+                or record.target_server_id in target_server_ids
+            ):
+                raise ValueError("duplicate legacy MCP migration candidate")
+            migration_ids.add(record.migration_id)
+            plan_sources.add(plan_source)
+            target_server_ids.add(record.target_server_id)
+            server_candidates.append((server, credential))
+            records.append(record)
+
+        missing_server = any(
+            self._session.get(UserMCPServerRow, server.server_id) is None
+            for server, _credential in server_candidates
+        )
+        missing_record = any(
+            self._session.get(MCPLegacyMigrationRecordRow, record.migration_id)
+            is None
+            for record in records
+        )
+        servers = tuple(self.create_user_mcp_servers_atomic(server_candidates))
+        stored_records = tuple(
+            self._persist_mcp_legacy_migration_records_atomic(records)
+        )
+        return MCPLegacyMigrationBatchResult(
+            servers=servers,
+            records=stored_records,
+            applied=missing_server or missing_record,
+        )
+
+    def _persist_mcp_legacy_migration_records_atomic(
+        self, records: Sequence[MCPLegacyMigrationRecord]
+    ) -> list[MCPLegacyMigrationRecord]:
+        insert_statement = (
+            postgresql_insert(MCPLegacyMigrationRecordRow)
+            if self._session.bind is not None
+            and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(MCPLegacyMigrationRecordRow)
+        )
+        for record in records:
+            existing = self._find_mcp_legacy_migration_record(record)
+            if existing is not None:
+                self._validate_mcp_legacy_migration_replay(existing, record)
+                continue
+            self._session.execute(
+                insert_statement.values(
+                    **self._mcp_legacy_migration_record_values(record)
+                ).on_conflict_do_nothing()
+            )
+        self._session.flush()
+        self._session.expire_all()
+
+        stored: list[MCPLegacyMigrationRecord] = []
+        for record in records:
+            row = self._find_mcp_legacy_migration_record(record)
+            if row is None:
+                raise RuntimeError(
+                    "atomic legacy MCP migration did not persist audit record"
+                )
+            self._validate_mcp_legacy_migration_replay(row, record)
+            stored.append(_row_to_mcp_legacy_migration_record(row))
+        return stored
+
+    def _find_mcp_legacy_migration_record(
+        self, record: MCPLegacyMigrationRecord
+    ) -> MCPLegacyMigrationRecordRow | None:
+        by_id = self._session.get(MCPLegacyMigrationRecordRow, record.migration_id)
+        by_plan_source = self._session.scalar(
+            select(MCPLegacyMigrationRecordRow).where(
+                MCPLegacyMigrationRecordRow.plan_fingerprint
+                == record.plan_fingerprint,
+                MCPLegacyMigrationRecordRow.source_server_id
+                == record.source_server_id,
+            )
+        )
+        by_target = self._session.scalar(
+            select(MCPLegacyMigrationRecordRow).where(
+                MCPLegacyMigrationRecordRow.target_server_id
+                == record.target_server_id
+            )
+        )
+        existing = by_id or by_plan_source or by_target
+        if any(value is not None and value is not existing for value in (
+            by_id,
+            by_plan_source,
+            by_target,
+        )):
+            raise ValueError("legacy MCP migration identity conflicts")
+        return existing
+
+    @staticmethod
+    def _validate_mcp_legacy_migration_record(
+        record: MCPLegacyMigrationRecord,
+    ) -> None:
+        if record.event_type != "mcp.legacy.config_migrated":
+            raise ValueError("legacy MCP migration event type is invalid")
+        if record.disposition != "migrate_owner":
+            raise ValueError("legacy MCP migration disposition is invalid")
+        if not record.source_server_id.strip() or not record.target_server_id.strip():
+            raise ValueError("legacy MCP migration server identity is invalid")
+        sha_values = (
+            record.migration_id,
+            record.plan_fingerprint,
+            record.source_fingerprint,
+            record.target_consumer_set_digest,
+            record.capability_obligations_fingerprint,
+            record.catalog_fingerprint,
+            record.capability_fingerprint,
+            record.validator_provenance_fingerprint,
+        )
+        if any(re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in sha_values):
+            raise ValueError("legacy MCP migration fingerprint is invalid")
+        hmac_values = (record.owner_consumer_ref, record.credential_digest)
+        if any(
+            re.fullmatch(r"hmac-sha256:[0-9a-f]{64}", value) is None
+            for value in hmac_values
+        ):
+            raise ValueError("legacy MCP migration safe reference is invalid")
+        if record.occurred_at >= record.evidence_expires_at:
+            raise ValueError("legacy MCP migration evidence window is invalid")
+
+    @staticmethod
+    def _mcp_legacy_migration_record_values(
+        record: MCPLegacyMigrationRecord,
+    ) -> dict[str, object]:
+        return {
+            "migration_id": record.migration_id,
+            "event_type": record.event_type,
+            "plan_fingerprint": record.plan_fingerprint,
+            "source_server_id": record.source_server_id,
+            "source_fingerprint": record.source_fingerprint,
+            "owner_consumer_ref": record.owner_consumer_ref,
+            "target_server_id": record.target_server_id,
+            "target_consumer_set_digest": record.target_consumer_set_digest,
+            "capability_obligations_fingerprint": (
+                record.capability_obligations_fingerprint
+            ),
+            "catalog_fingerprint": record.catalog_fingerprint,
+            "capability_fingerprint": record.capability_fingerprint,
+            "validator_provenance_fingerprint": (
+                record.validator_provenance_fingerprint
+            ),
+            "credential_digest": record.credential_digest,
+            "disposition": record.disposition,
+            "occurred_at": record.occurred_at,
+            "evidence_expires_at": record.evidence_expires_at,
+        }
+
+    @classmethod
+    def _validate_mcp_legacy_migration_replay(
+        cls,
+        row: MCPLegacyMigrationRecordRow,
+        record: MCPLegacyMigrationRecord,
+    ) -> None:
+        if cls._mcp_legacy_migration_record_values(
+            _row_to_mcp_legacy_migration_record(row)
+        ) != cls._mcp_legacy_migration_record_values(record):
+            raise ValueError("legacy MCP migration record conflicts")
+
+    @staticmethod
+    def _user_mcp_server_insert_values(
+        server: UserMCPServer,
+        credential: UserMCPCredentialRecord | None,
+    ) -> dict[str, object | None]:
+        return {
+            "server_id": server.server_id,
+            "owner_user_id": server.owner_user_id,
+            "display_name": server.display_name,
+            "routing_description": server.routing_description,
+            "endpoint_url": server.endpoint_url,
+            "transport": str(server.transport),
+            "protocol_preference": str(server.protocol_preference),
+            "auth_type": str(server.auth_type),
+            "auth_metadata": dict(server.auth_metadata),
+            "enabled": server.enabled,
+            "health_status": str(server.health_status),
+            "config_version": max(1, int(server.config_version)),
+            "security_version": max(1, int(server.security_version)),
+            "credential_ciphertext": (
+                None if credential is None else credential.credential_ciphertext
+            ),
+            "credential_nonce": None if credential is None else credential.credential_nonce,
+            "encryption_version": (
+                None if credential is None else credential.encryption_version
+            ),
+            "credential_updated_at": (
+                None if credential is None else credential.credential_updated_at
+            ),
+            "last_tested_at": server.last_tested_at,
+            "last_test_error_code": server.last_test_error_code,
+            "deletion_pending": False,
+            "deleted_at": None,
+            "created_at": server.created_at,
+            "updated_at": server.updated_at,
+        }
+
+    @classmethod
+    def _validate_user_mcp_server_atomic_replay(
+        cls,
+        row: UserMCPServerRow,
+        server: UserMCPServer,
+        credential: UserMCPCredentialRecord | None,
+    ) -> None:
+        expected = cls._user_mcp_server_insert_values(server, credential)
+        actual = {
+            key: getattr(row, key)
+            for key in expected
+        }
+        if actual != expected:
+            raise ValueError(
+                f"MCP server {server.server_id!r} conflicts with existing record"
+            )
 
     def update_user_mcp_server(
         self,
@@ -2708,6 +3751,14 @@ class SQLiteStateRepository:
             existing.owner_user_id != record.owner_user_id or existing.task_id != record.task_id
         ):
             raise ValueError("MCP branch scope does not match existing record")
+        if (
+            existing is not None
+            and existing.terminal_at is not None
+            and record.terminal_at is None
+        ):
+            # A delayed waiting publication must never resurrect a branch that
+            # the recovery transaction has already converged terminal.
+            return _row_to_mcp_branch(existing)
         row = MCPBranchRecordRow(
             branch_id=record.branch_id,
             owner_user_id=record.owner_user_id,
@@ -2904,40 +3955,233 @@ class SQLiteStateRepository:
         self._session.flush()
         return _row_to_mcp_call(row)
 
+    def converge_dispatched_mcp_calls_to_unknown(
+        self, *, now: datetime, limit: int = 1000
+    ) -> list[MCPCallRecord]:
+        terminal_call = select(MCPCallRecordRow.call_ref).where(
+            MCPCallRecordRow.call_ref == MCPSealedStateRow.call_ref,
+            MCPCallRecordRow.owner_user_id == MCPSealedStateRow.owner_user_id,
+            MCPCallRecordRow.task_id == MCPSealedStateRow.task_id,
+            MCPCallRecordRow.terminal_at.is_not(None),
+        ).exists()
+        open_mrtr_interrupt = select(InterruptRow.interrupt_id).where(
+            InterruptRow.task_id == MCPSealedStateRow.task_id,
+            InterruptRow.node_id == MCPSealedStateRow.node_id,
+            InterruptRow.reason_code == "mcp_input_required",
+            InterruptRow.status == "open",
+        ).exists()
+        self._session.execute(
+            delete(MCPSealedStateRow).where(terminal_call, ~open_mrtr_interrupt)
+        )
+        has_remote_binding = select(MCPRemoteTaskBindingRow.safe_remote_task_ref).where(
+            MCPRemoteTaskBindingRow.owner_user_id == MCPCallRecordRow.owner_user_id,
+            MCPRemoteTaskBindingRow.task_id == MCPCallRecordRow.task_id,
+            MCPRemoteTaskBindingRow.call_ref == MCPCallRecordRow.call_ref,
+        ).exists()
+        candidates = self._session.scalars(
+            select(MCPCallRecordRow)
+            .where(
+                MCPCallRecordRow.may_have_dispatched.is_(True),
+                MCPCallRecordRow.terminal_at.is_(None),
+                ~has_remote_binding,
+            )
+            .order_by(MCPCallRecordRow.created_at, MCPCallRecordRow.call_ref)
+            .limit(max(1, limit))
+        ).all()
+        converged_refs: list[str] = []
+        for candidate in candidates:
+            result = self._session.execute(
+                update(MCPCallRecordRow)
+                .where(
+                    MCPCallRecordRow.call_ref == candidate.call_ref,
+                    MCPCallRecordRow.owner_user_id == candidate.owner_user_id,
+                    MCPCallRecordRow.task_id == candidate.task_id,
+                    MCPCallRecordRow.may_have_dispatched.is_(True),
+                    MCPCallRecordRow.terminal_at.is_(None),
+                    ~has_remote_binding,
+                )
+                .values(
+                    status="unknown",
+                    safe_error_code="execution_status_unknown",
+                    updated_at=now,
+                    terminal_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if not result.rowcount:
+                continue
+            converged_refs.append(candidate.call_ref)
+            self._session.execute(
+                update(MCPBranchRecordRow)
+                .where(
+                    MCPBranchRecordRow.branch_id == candidate.branch_id,
+                    MCPBranchRecordRow.owner_user_id == candidate.owner_user_id,
+                    MCPBranchRecordRow.task_id == candidate.task_id,
+                    MCPBranchRecordRow.active_call_ref == candidate.call_ref,
+                )
+                .values(active_call_ref=None, updated_at=now)
+            )
+            self._session.execute(
+                delete(MCPSealedStateRow).where(
+                    MCPSealedStateRow.owner_user_id == candidate.owner_user_id,
+                    MCPSealedStateRow.task_id == candidate.task_id,
+                    MCPSealedStateRow.call_ref == candidate.call_ref,
+                    ~select(InterruptRow.interrupt_id).where(
+                        InterruptRow.task_id == MCPSealedStateRow.task_id,
+                        InterruptRow.node_id == MCPSealedStateRow.node_id,
+                        InterruptRow.reason_code == "mcp_input_required",
+                        InterruptRow.status == "open",
+                    ).exists(),
+                )
+            )
+        self._session.flush()
+        self._session.expire_all()
+        return [
+            _row_to_mcp_call(row)
+            for ref in converged_refs
+            if (row := self._session.get(MCPCallRecordRow, ref)) is not None
+        ]
+
+    def count_active_mcp_remote_task_bindings(
+        self, *, rollout_config_version: str, protocol_version: str
+    ) -> int:
+        count = self._session.scalar(
+            select(func.count(MCPRemoteTaskBindingRow.safe_remote_task_ref))
+            .select_from(MCPRemoteTaskBindingRow)
+            .join(
+                MCPCallRecordRow,
+                (
+                    MCPCallRecordRow.owner_user_id
+                    == MCPRemoteTaskBindingRow.owner_user_id
+                )
+                & (MCPCallRecordRow.task_id == MCPRemoteTaskBindingRow.task_id)
+                & (MCPCallRecordRow.call_ref == MCPRemoteTaskBindingRow.call_ref)
+                & (MCPCallRecordRow.server_id == MCPRemoteTaskBindingRow.server_id)
+                & (
+                    MCPCallRecordRow.protocol_version
+                    == MCPRemoteTaskBindingRow.protocol_version
+                ),
+            )
+            .join(TaskRow, TaskRow.task_id == MCPRemoteTaskBindingRow.task_id)
+            .join(
+                UserMCPServerRow,
+                (UserMCPServerRow.owner_user_id == MCPRemoteTaskBindingRow.owner_user_id)
+                & (UserMCPServerRow.server_id == MCPRemoteTaskBindingRow.server_id),
+            )
+            .where(
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.protocol_version == protocol_version,
+                TaskRow.mcp_execution_mode == "user_scoped",
+                TaskRow.mcp_rollout_mode == "enforce",
+                TaskRow.mcp_rollout_config_version == rollout_config_version,
+                MCPCallRecordRow.server_security_version
+                == UserMCPServerRow.security_version,
+                UserMCPServerRow.deleted_at.is_(None),
+                UserMCPServerRow.deletion_pending.is_(False),
+            )
+        )
+        return int(count or 0)
+
+    def list_active_mcp_remote_task_binding_task_ids(
+        self,
+        *,
+        protocol_version: str,
+    ) -> list[str]:
+        rows = self._session.scalars(
+            select(MCPRemoteTaskBindingRow.task_id)
+            .select_from(MCPRemoteTaskBindingRow)
+            .join(
+                MCPCallRecordRow,
+                (
+                    MCPCallRecordRow.owner_user_id
+                    == MCPRemoteTaskBindingRow.owner_user_id
+                )
+                & (MCPCallRecordRow.task_id == MCPRemoteTaskBindingRow.task_id)
+                & (MCPCallRecordRow.call_ref == MCPRemoteTaskBindingRow.call_ref)
+                & (MCPCallRecordRow.server_id == MCPRemoteTaskBindingRow.server_id)
+                & (
+                    MCPCallRecordRow.protocol_version
+                    == MCPRemoteTaskBindingRow.protocol_version
+                ),
+            )
+            .join(
+                UserMCPServerRow,
+                (UserMCPServerRow.owner_user_id == MCPRemoteTaskBindingRow.owner_user_id)
+                & (UserMCPServerRow.server_id == MCPRemoteTaskBindingRow.server_id),
+            )
+            .where(
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.protocol_version == protocol_version,
+                MCPCallRecordRow.server_security_version
+                == UserMCPServerRow.security_version,
+                UserMCPServerRow.deleted_at.is_(None),
+                UserMCPServerRow.deletion_pending.is_(False),
+            )
+        ).all()
+        return [str(task_id) for task_id in rows]
+
     def save_mcp_remote_task_binding(
         self, binding: MCPRemoteTaskBinding
     ) -> MCPRemoteTaskBinding:
-        existing = self._session.get(MCPRemoteTaskBindingRow, binding.safe_remote_task_ref)
-        if existing is not None and (
-            existing.owner_user_id != binding.owner_user_id
-            or existing.task_id != binding.task_id
-            or existing.node_id != binding.node_id
-            or existing.call_ref != binding.call_ref
-            or existing.server_id != binding.server_id
-            or existing.protocol_version != binding.protocol_version
-        ):
-            raise ValueError("MCP remote task scope does not match existing binding")
-        merged = self._session.merge(
-            MCPRemoteTaskBindingRow(
-                safe_remote_task_ref=binding.safe_remote_task_ref,
-                owner_user_id=binding.owner_user_id,
-                task_id=binding.task_id,
-                node_id=binding.node_id,
-                call_ref=binding.call_ref,
-                server_id=binding.server_id,
-                protocol_version=binding.protocol_version,
-                remote_task_ciphertext=binding.remote_task_ciphertext,
-                remote_task_nonce=binding.remote_task_nonce,
-                encryption_version=binding.encryption_version,
-                last_status=binding.last_status,
-                next_poll_at=binding.next_poll_at,
-                created_at=binding.created_at,
-                updated_at=binding.updated_at,
-                terminal_at=binding.terminal_at,
-            )
+        values = {
+            "safe_remote_task_ref": binding.safe_remote_task_ref,
+            "owner_user_id": binding.owner_user_id,
+            "task_id": binding.task_id,
+            "node_id": binding.node_id,
+            "call_ref": binding.call_ref,
+            "server_id": binding.server_id,
+            "protocol_version": binding.protocol_version,
+            "remote_task_ciphertext": binding.remote_task_ciphertext,
+            "remote_task_nonce": binding.remote_task_nonce,
+            "encryption_version": binding.encryption_version,
+            "last_status": binding.last_status,
+            "next_poll_at": binding.next_poll_at,
+            "published_at": binding.published_at,
+            "continuation_plan": dict(binding.continuation_plan),
+            "created_at": binding.created_at,
+            "updated_at": binding.updated_at,
+            "terminal_at": binding.terminal_at,
+            "claim_owner": None,
+            "claim_token": None,
+            "lease_expires_at": None,
+            "revision": 0,
+        }
+        insert_statement = (
+            postgresql_insert(MCPRemoteTaskBindingRow)
+            if self._session.bind is not None and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(MCPRemoteTaskBindingRow)
         )
+        self._session.execute(insert_statement.values(**values).on_conflict_do_nothing())
         self._session.flush()
-        return _row_to_mcp_remote_task(merged)
+        self._session.expire_all()
+        existing = self._session.get(MCPRemoteTaskBindingRow, binding.safe_remote_task_ref)
+        if existing is None:
+            raise RuntimeError("MCP remote task binding insert did not persist")
+        immutable_values = (
+            existing.owner_user_id,
+            existing.task_id,
+            existing.node_id,
+            existing.call_ref,
+            existing.server_id,
+            existing.protocol_version,
+            existing.remote_task_ciphertext,
+            existing.remote_task_nonce,
+            int(existing.encryption_version),
+        )
+        incoming_values = (
+            binding.owner_user_id,
+            binding.task_id,
+            binding.node_id,
+            binding.call_ref,
+            binding.server_id,
+            binding.protocol_version,
+            binding.remote_task_ciphertext,
+            binding.remote_task_nonce,
+            binding.encryption_version,
+        )
+        if immutable_values != incoming_values:
+            raise ValueError("MCP remote task immutable identity or ciphertext does not match existing binding")
+        return _row_to_mcp_remote_task(existing)
 
     def get_mcp_remote_task_binding(
         self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
@@ -2950,6 +4194,104 @@ class SQLiteStateRepository:
             )
         )
         return None if row is None else _row_to_mcp_remote_task(row)
+
+    def get_mcp_remote_task_binding_for_call(
+        self, owner_user_id: str, task_id: str, call_ref: str
+    ) -> MCPRemoteTaskBinding | None:
+        row = self._session.scalar(
+            select(MCPRemoteTaskBindingRow).where(
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+                MCPRemoteTaskBindingRow.call_ref == call_ref,
+            )
+        )
+        return None if row is None else _row_to_mcp_remote_task(row)
+
+    def publish_mcp_remote_task_binding(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        published_at: datetime,
+        continuation_plan: Mapping[str, Any] | None = None,
+    ) -> MCPRemoteTaskBinding | None:
+        publish_values: dict[str, Any] = {
+            "next_poll_at": published_at,
+            "published_at": published_at,
+            "updated_at": published_at,
+        }
+        if continuation_plan is not None:
+            publish_values["continuation_plan"] = dict(continuation_plan)
+        result = self._session.execute(
+            update(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.published_at.is_(None),
+            )
+            .values(**publish_values)
+        )
+        if not result.rowcount:
+            row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+            if row is None or row.published_at is None:
+                return None
+            return _row_to_mcp_remote_task(row)
+        self._session.flush()
+        row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+        return None if row is None else _row_to_mcp_remote_task(row)
+
+    def list_unpublished_mcp_remote_task_bindings(
+        self, *, limit: int = 1000
+    ) -> list[MCPRemoteTaskBinding]:
+        rows = self._session.scalars(
+            select(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.published_at.is_(None),
+            )
+            .order_by(MCPRemoteTaskBindingRow.created_at)
+            .limit(max(1, limit))
+        ).all()
+        return [_row_to_mcp_remote_task(row) for row in rows]
+
+    def fail_unpublished_mcp_remote_task_binding(
+        self, binding: MCPRemoteTaskBinding, *, terminal_at: datetime
+    ) -> MCPRemoteTaskBinding | None:
+        claim_owner = "mcp-publication-recovery"
+        claim_token = f"publication:{binding.call_ref}"
+        revision = int(binding.revision or 0)
+        result = self._session.execute(
+            update(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == binding.safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.published_at.is_(None),
+                func.coalesce(MCPRemoteTaskBindingRow.revision, 0) == revision,
+            )
+            .values(
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                lease_expires_at=terminal_at + timedelta(seconds=1),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        return self.finish_mcp_remote_task_binding(
+            binding.owner_user_id,
+            binding.task_id,
+            binding.safe_remote_task_ref,
+            claim_owner=claim_owner,
+            claim_token=claim_token,
+            expected_revision=revision,
+            remote_status="unknown",
+            call_status="unknown",
+            terminal_at=terminal_at,
+            safe_error_code="execution_status_unknown",
+        )
 
     def list_due_mcp_remote_task_bindings(
         self, *, now: datetime, limit: int = 100
@@ -2966,6 +4308,1041 @@ class SQLiteStateRepository:
         ).all()
         return [_row_to_mcp_remote_task(row) for row in rows]
 
+    def claim_due_mcp_remote_task_bindings(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskBinding]:
+        if not claim_owner or not claim_token:
+            raise ValueError("MCP remote task claim owner and token are required")
+        if lease_expires_at <= now:
+            raise ValueError("MCP remote task claim lease must expire after claim time")
+        candidates = self._session.scalars(
+            select(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.next_poll_at.is_not(None),
+                MCPRemoteTaskBindingRow.next_poll_at <= now,
+                or_(
+                    MCPRemoteTaskBindingRow.lease_expires_at.is_(None),
+                    MCPRemoteTaskBindingRow.lease_expires_at <= now,
+                ),
+            )
+            .order_by(MCPRemoteTaskBindingRow.next_poll_at, MCPRemoteTaskBindingRow.safe_remote_task_ref)
+            .limit(max(1, limit))
+        ).all()
+        claimed_refs: list[str] = []
+        for candidate in candidates:
+            revision = 0 if candidate.revision is None else int(candidate.revision)
+            result = self._session.execute(
+                update(MCPRemoteTaskBindingRow)
+                .where(
+                    MCPRemoteTaskBindingRow.safe_remote_task_ref == candidate.safe_remote_task_ref,
+                    MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                    MCPRemoteTaskBindingRow.next_poll_at.is_not(None),
+                    MCPRemoteTaskBindingRow.next_poll_at <= now,
+                    or_(
+                        MCPRemoteTaskBindingRow.lease_expires_at.is_(None),
+                        MCPRemoteTaskBindingRow.lease_expires_at <= now,
+                    ),
+                    func.coalesce(MCPRemoteTaskBindingRow.revision, 0) == revision,
+                )
+                .values(
+                    claim_owner=claim_owner,
+                    claim_token=claim_token,
+                    lease_expires_at=lease_expires_at,
+                    revision=revision + 1,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount:
+                claimed_refs.append(candidate.safe_remote_task_ref)
+        self._session.flush()
+        self._session.expire_all()
+        return [
+            _row_to_mcp_remote_task(row)
+            for ref in claimed_refs
+            if (row := self._session.get(MCPRemoteTaskBindingRow, ref)) is not None
+        ]
+
+    def renew_mcp_remote_task_binding_claim(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        if lease_expires_at <= updated_at:
+            raise ValueError("MCP remote task claim lease must expire after renewal time")
+        result = self._session.execute(
+            update(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.claim_owner == claim_owner,
+                MCPRemoteTaskBindingRow.claim_token == claim_token,
+                MCPRemoteTaskBindingRow.lease_expires_at > updated_at,
+                func.coalesce(MCPRemoteTaskBindingRow.revision, 0) == expected_revision,
+            )
+            .values(
+                lease_expires_at=lease_expires_at,
+                revision=expected_revision + 1,
+                updated_at=updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+        return None if row is None else _row_to_mcp_remote_task(row)
+
+    def release_mcp_remote_task_binding_claim(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.claim_owner == claim_owner,
+                MCPRemoteTaskBindingRow.claim_token == claim_token,
+                func.coalesce(MCPRemoteTaskBindingRow.revision, 0) == expected_revision,
+            )
+            .values(
+                claim_owner=None,
+                claim_token=None,
+                lease_expires_at=None,
+                revision=expected_revision + 1,
+                updated_at=updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+        return None if row is None else _row_to_mcp_remote_task(row)
+
+    def update_mcp_remote_task_binding_status(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        last_status: str,
+        next_poll_at: datetime | None,
+        updated_at: datetime,
+        terminal_at: datetime | None = None,
+    ) -> MCPRemoteTaskBinding | None:
+        values: dict[str, object | None] = {
+            "last_status": last_status,
+            "next_poll_at": None if terminal_at is not None else next_poll_at,
+            "updated_at": updated_at,
+            "terminal_at": terminal_at,
+            "revision": expected_revision + 1,
+        }
+        if terminal_at is not None:
+            values.update(claim_owner=None, claim_token=None, lease_expires_at=None)
+        result = self._session.execute(
+            update(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.claim_owner == claim_owner,
+                MCPRemoteTaskBindingRow.claim_token == claim_token,
+                MCPRemoteTaskBindingRow.lease_expires_at > updated_at,
+                func.coalesce(MCPRemoteTaskBindingRow.revision, 0) == expected_revision,
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+        return None if row is None else _row_to_mcp_remote_task(row)
+
+    def finish_mcp_remote_task_binding(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        remote_status: str,
+        call_status: str,
+        terminal_at: datetime,
+        result_ref: str | None = None,
+        safe_error_code: str | None = None,
+    ) -> MCPRemoteTaskBinding | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.claim_owner == claim_owner,
+                MCPRemoteTaskBindingRow.claim_token == claim_token,
+                MCPRemoteTaskBindingRow.lease_expires_at > terminal_at,
+                func.coalesce(MCPRemoteTaskBindingRow.revision, 0) == expected_revision,
+            )
+            .values(
+                last_status=remote_status,
+                next_poll_at=None,
+                updated_at=terminal_at,
+                terminal_at=terminal_at,
+                claim_owner=None,
+                claim_token=None,
+                lease_expires_at=None,
+                revision=expected_revision + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        binding_row = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+        if binding_row is None:
+            raise RuntimeError("MCP remote task binding terminal update did not persist")
+        call_row = self._session.scalar(
+            select(MCPCallRecordRow).where(
+                MCPCallRecordRow.call_ref == binding_row.call_ref,
+                MCPCallRecordRow.owner_user_id == owner_user_id,
+                MCPCallRecordRow.task_id == task_id,
+            )
+        )
+        if call_row is not None and call_row.terminal_at is None:
+            call_row.status = call_status
+            call_row.result_ref = result_ref
+            call_row.output_size_bytes = None
+            call_row.safe_error_code = safe_error_code
+            call_row.updated_at = terminal_at
+            call_row.terminal_at = terminal_at
+            self._session.execute(
+                update(MCPBranchRecordRow)
+                .where(
+                    MCPBranchRecordRow.branch_id == call_row.branch_id,
+                    MCPBranchRecordRow.owner_user_id == owner_user_id,
+                    MCPBranchRecordRow.task_id == task_id,
+                    MCPBranchRecordRow.active_call_ref == call_row.call_ref,
+                )
+                .values(
+                    active_call_ref=None,
+                    status=call_status,
+                    result_ref=result_ref,
+                    safe_summary=(
+                        "The MCP remote task completed."
+                        if call_status == "completed"
+                        else "The MCP remote task ended without a completed result."
+                    ),
+                    updated_at=terminal_at,
+                    terminal_at=terminal_at,
+                )
+            )
+            outbox_id = f"mcp-remote-terminal:{call_row.call_ref}"
+            insert_statement = (
+                postgresql_insert(MCPRemoteTaskOutboxRow)
+                if self._session.bind is not None
+                and self._session.bind.dialect.name == "postgresql"
+                else sqlite_insert(MCPRemoteTaskOutboxRow)
+            )
+            self._session.execute(
+                insert_statement.values(
+                    outbox_id=outbox_id,
+                    kind="terminal_continuation",
+                    owner_user_id=owner_user_id,
+                    task_id=task_id,
+                    node_id=call_row.node_id,
+                    call_ref=call_row.call_ref,
+                    safe_remote_task_ref=safe_remote_task_ref,
+                    payload={
+                        "call_status": call_status,
+                        "result_ref": result_ref,
+                        "safe_error_code": safe_error_code,
+                        "continuation_plan": dict(binding_row.continuation_plan or {}),
+                    },
+                    status="pending",
+                    revision=0,
+                    created_at=terminal_at,
+                    updated_at=terminal_at,
+                ).on_conflict_do_nothing()
+            )
+        self._session.flush()
+        self._session.expire_all()
+        persisted = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+        return None if persisted is None else _row_to_mcp_remote_task(persisted)
+
+    def claim_mcp_remote_task_outbox(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]:
+        candidates = self._session.scalars(
+            select(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.completed_at.is_(None),
+                MCPRemoteTaskOutboxRow.kind.in_(
+                    ["terminal_continuation", "control_update", "control_cancel"]
+                ),
+                or_(
+                    and_(
+                        MCPRemoteTaskOutboxRow.kind == "terminal_continuation",
+                        or_(
+                            MCPRemoteTaskOutboxRow.status == "pending",
+                            MCPRemoteTaskOutboxRow.lease_expires_at.is_(None),
+                            MCPRemoteTaskOutboxRow.lease_expires_at <= now,
+                        ),
+                    ),
+                    and_(
+                        MCPRemoteTaskOutboxRow.kind.in_(["control_update", "control_cancel"]),
+                        or_(
+                            MCPRemoteTaskOutboxRow.status == "pending",
+                            and_(
+                                MCPRemoteTaskOutboxRow.status == "claimed",
+                                MCPRemoteTaskOutboxRow.lease_expires_at <= now,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            .order_by(MCPRemoteTaskOutboxRow.created_at, MCPRemoteTaskOutboxRow.outbox_id)
+            .limit(max(1, limit))
+        ).all()
+        claimed: list[MCPRemoteTaskOutbox] = []
+        for candidate in candidates:
+            revision = int(candidate.revision or 0)
+            result = self._session.execute(
+                update(MCPRemoteTaskOutboxRow)
+                .where(
+                    MCPRemoteTaskOutboxRow.outbox_id == candidate.outbox_id,
+                    MCPRemoteTaskOutboxRow.completed_at.is_(None),
+                    MCPRemoteTaskOutboxRow.revision == revision,
+                    or_(
+                        and_(
+                            MCPRemoteTaskOutboxRow.kind == "terminal_continuation",
+                            or_(
+                                MCPRemoteTaskOutboxRow.status == "pending",
+                                MCPRemoteTaskOutboxRow.lease_expires_at.is_(None),
+                                MCPRemoteTaskOutboxRow.lease_expires_at <= now,
+                            ),
+                        ),
+                        and_(
+                            MCPRemoteTaskOutboxRow.kind.in_(["control_update", "control_cancel"]),
+                            or_(
+                                MCPRemoteTaskOutboxRow.status == "pending",
+                                and_(
+                                    MCPRemoteTaskOutboxRow.status == "claimed",
+                                    MCPRemoteTaskOutboxRow.lease_expires_at <= now,
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+                .values(
+                    status="claimed",
+                    claim_owner=claim_owner,
+                    claim_token=claim_token,
+                    lease_expires_at=lease_expires_at,
+                    revision=revision + 1,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount:
+                self._session.flush()
+                self._session.expire_all()
+                row = self._session.get(MCPRemoteTaskOutboxRow, candidate.outbox_id)
+                if row is not None:
+                    claimed.append(_row_to_mcp_remote_task_outbox(row))
+        return claimed
+
+    def claim_abandoned_mcp_remote_task_controls(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]:
+        candidates = self._session.scalars(
+            select(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.kind.in_(["control_update", "control_cancel"]),
+                MCPRemoteTaskOutboxRow.status.in_(["sending", "abandoning"]),
+                MCPRemoteTaskOutboxRow.completed_at.is_(None),
+                MCPRemoteTaskOutboxRow.lease_expires_at <= now,
+            )
+            .order_by(MCPRemoteTaskOutboxRow.updated_at, MCPRemoteTaskOutboxRow.outbox_id)
+            .limit(max(1, limit))
+        ).all()
+        claimed: list[MCPRemoteTaskOutbox] = []
+        for candidate in candidates:
+            revision = int(candidate.revision or 0)
+            result = self._session.execute(
+                update(MCPRemoteTaskOutboxRow)
+                .where(
+                    MCPRemoteTaskOutboxRow.outbox_id == candidate.outbox_id,
+                    MCPRemoteTaskOutboxRow.status.in_(["sending", "abandoning"]),
+                    MCPRemoteTaskOutboxRow.revision == revision,
+                    MCPRemoteTaskOutboxRow.completed_at.is_(None),
+                    MCPRemoteTaskOutboxRow.lease_expires_at <= now,
+                )
+                .values(
+                    status="abandoning",
+                    claim_owner=claim_owner,
+                    claim_token=claim_token,
+                    revision=revision + 1,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount:
+                self._session.flush()
+                self._session.expire_all()
+                row = self._session.get(MCPRemoteTaskOutboxRow, candidate.outbox_id)
+                if row is not None:
+                    claimed.append(_row_to_mcp_remote_task_outbox(row))
+        return claimed
+
+    def begin_mcp_remote_task_control_delivery(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.kind.in_(["control_update", "control_cancel"]),
+                MCPRemoteTaskOutboxRow.status == "claimed",
+                MCPRemoteTaskOutboxRow.claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.revision == expected_revision,
+                MCPRemoteTaskOutboxRow.completed_at.is_(None),
+            )
+            .values(
+                status="sending",
+                lease_expires_at=lease_expires_at,
+                revision=expected_revision + 1,
+                updated_at=updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def pause_mcp_remote_task_for_input(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        input_requests: Mapping[str, Any],
+        conversation_id: str,
+        source_message_id: str,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        binding = self._session.scalar(
+            select(MCPRemoteTaskBindingRow).where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+                MCPRemoteTaskBindingRow.claim_owner == claim_owner,
+                MCPRemoteTaskBindingRow.claim_token == claim_token,
+                MCPRemoteTaskBindingRow.revision == expected_revision,
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+            )
+        )
+        if binding is None:
+            return None
+        binding.last_status = "input_required"
+        binding.next_poll_at = None
+        binding.updated_at = updated_at
+        binding.claim_owner = None
+        binding.claim_token = None
+        binding.lease_expires_at = None
+        binding.revision = expected_revision + 1
+        interrupt_id = f"mcp-remote-input:{binding.call_ref}"
+        interrupt_values = {
+            "interrupt_id": interrupt_id,
+            "conversation_id": conversation_id,
+            "task_id": task_id,
+            "node_id": binding.node_id,
+            "source_agent": "mcp.remote_task",
+            "source_message_id": source_message_id,
+            "question": "The MCP remote task requires additional input.",
+            "reason_code": "mcp_remote_task_input_required",
+            "required_fields": {
+                "mcp_input_responses": dict(input_requests),
+                "safe_remote_task_ref": safe_remote_task_ref,
+                "server_id": binding.server_id,
+                "protocol_version": binding.protocol_version,
+            },
+            "status": "open",
+            "created_at": updated_at,
+        }
+        insert_interrupt = (
+            postgresql_insert(InterruptRow)
+            if self._session.bind is not None
+            and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(InterruptRow)
+        )
+        self._session.execute(
+            insert_interrupt.values(**interrupt_values).on_conflict_do_nothing()
+        )
+        outbox_id = f"mcp-remote-input:{binding.call_ref}"
+        insert_outbox = (
+            postgresql_insert(MCPRemoteTaskOutboxRow)
+            if self._session.bind is not None
+            and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(MCPRemoteTaskOutboxRow)
+        )
+        self._session.execute(
+            insert_outbox.values(
+                outbox_id=outbox_id,
+                kind="awaiting_input",
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                node_id=binding.node_id,
+                call_ref=binding.call_ref,
+                safe_remote_task_ref=safe_remote_task_ref,
+                payload={"input_requests": dict(input_requests)},
+                status="awaiting_input",
+                revision=0,
+                created_at=updated_at,
+                updated_at=updated_at,
+            ).on_conflict_do_nothing()
+        )
+        self._session.flush()
+        return _row_to_mcp_remote_task(binding)
+
+    def enqueue_mcp_remote_task_control(
+        self,
+        answer: InterruptAnswer,
+        *,
+        action: str,
+        input_responses: Mapping[str, Any],
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        if action not in {"update", "cancel"}:
+            raise ValueError("MCP remote task control action is invalid")
+        interrupt = self._session.get(InterruptRow, answer.interrupt_id)
+        if (
+            interrupt is None
+            or interrupt.reason_code != "mcp_remote_task_input_required"
+            or str(interrupt.status) != "open"
+        ):
+            return None
+        safe_ref = str(
+            (interrupt.required_fields or {}).get("safe_remote_task_ref") or ""
+        ).strip()
+        binding = self._session.get(MCPRemoteTaskBindingRow, safe_ref)
+        if (
+            binding is None
+            or binding.task_id != interrupt.task_id
+            or binding.protocol_version != "2026-07-28"
+            or binding.last_status != "input_required"
+            or binding.terminal_at is not None
+        ):
+            return None
+        outbox_id = f"mcp-remote-input:{binding.call_ref}"
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        if row is None or row.kind != "awaiting_input" or row.status != "awaiting_input":
+            return None
+        self._session.merge(
+            InterruptAnswerRow(
+                interrupt_answer_id=answer.interrupt_answer_id,
+                interrupt_id=answer.interrupt_id,
+                answer_payload=dict(answer.answer_payload),
+                source_message_id=answer.source_message_id,
+                accepted=True,
+                created_at=answer.created_at or updated_at,
+                accepted_at=updated_at,
+            )
+        )
+        interrupt.status = "answered"
+        interrupt.answered_at = updated_at
+        row.kind = "control_update" if action == "update" else "control_cancel"
+        row.payload = (
+            {"input_responses": dict(input_responses)}
+            if action == "update"
+            else {"reason": "user_cancelled_remote_input"}
+        )
+        row.status = "pending"
+        row.updated_at = updated_at
+        row.revision = int(row.revision or 0) + 1
+        self._session.flush()
+        return _row_to_mcp_remote_task_outbox(row)
+
+    def apply_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        row = self._session.scalar(
+            select(MCPRemoteTaskOutboxRow).where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.revision == expected_revision,
+                MCPRemoteTaskOutboxRow.completed_at.is_(None),
+            )
+        )
+        if row is None or row.kind != "terminal_continuation":
+            return None
+        row.status = "applied"
+        row.updated_at = updated_at
+        row.revision = expected_revision + 1
+        self._session.flush()
+        return _row_to_mcp_remote_task_outbox(row)
+
+    def get_mcp_remote_task_outbox(
+        self, outbox_id: str
+    ) -> MCPRemoteTaskOutbox | None:
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def admit_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        admitted_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.kind == "terminal_continuation",
+                MCPRemoteTaskOutboxRow.claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.revision == expected_revision,
+                MCPRemoteTaskOutboxRow.continuation_admitted_at.is_(None),
+                MCPRemoteTaskOutboxRow.completed_at.is_(None),
+            )
+            .values(
+                continuation_admitted_at=admitted_at,
+                continuation_status="pending",
+                revision=expected_revision + 1,
+                updated_at=admitted_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def claim_mcp_remote_task_continuations(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]:
+        candidates = self._session.scalars(
+            select(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.kind == "terminal_continuation",
+                MCPRemoteTaskOutboxRow.continuation_admitted_at.is_not(None),
+                MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+                or_(
+                    MCPRemoteTaskOutboxRow.continuation_status == "pending",
+                    and_(
+                        MCPRemoteTaskOutboxRow.continuation_status == "claimed",
+                        MCPRemoteTaskOutboxRow.continuation_lease_expires_at <= now,
+                    ),
+                ),
+            )
+            .order_by(MCPRemoteTaskOutboxRow.created_at, MCPRemoteTaskOutboxRow.outbox_id)
+            .limit(max(1, limit))
+        ).all()
+        claimed: list[MCPRemoteTaskOutbox] = []
+        for candidate in candidates:
+            command_revision = int(candidate.continuation_revision or 0)
+            result = self._session.execute(
+                update(MCPRemoteTaskOutboxRow)
+                .where(
+                    MCPRemoteTaskOutboxRow.outbox_id == candidate.outbox_id,
+                    MCPRemoteTaskOutboxRow.continuation_revision == command_revision,
+                    MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+                    or_(
+                        MCPRemoteTaskOutboxRow.continuation_status == "pending",
+                        and_(
+                            MCPRemoteTaskOutboxRow.continuation_status == "claimed",
+                            MCPRemoteTaskOutboxRow.continuation_lease_expires_at <= now,
+                        ),
+                    ),
+                )
+                .values(
+                    continuation_status="claimed",
+                    continuation_claim_owner=claim_owner,
+                    continuation_claim_token=claim_token,
+                    continuation_lease_expires_at=lease_expires_at,
+                    continuation_revision=command_revision + 1,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount:
+                self._session.flush()
+                self._session.expire_all()
+                row = self._session.get(MCPRemoteTaskOutboxRow, candidate.outbox_id)
+                if row is not None:
+                    claimed.append(_row_to_mcp_remote_task_outbox(row))
+        return claimed
+
+    def begin_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        started_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.continuation_status == "claimed",
+                MCPRemoteTaskOutboxRow.continuation_claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.continuation_claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.continuation_revision == expected_revision,
+                MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+            )
+            .values(
+                continuation_status="running",
+                continuation_revision=expected_revision + 1,
+                updated_at=started_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def abandon_expired_mcp_remote_task_continuations(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[MCPRemoteTaskOutbox]:
+        candidates = self._session.scalars(
+            select(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.kind == "terminal_continuation",
+                MCPRemoteTaskOutboxRow.continuation_status.in_(["running", "abandoning"]),
+                MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+                or_(
+                    MCPRemoteTaskOutboxRow.continuation_status == "abandoning",
+                    MCPRemoteTaskOutboxRow.continuation_lease_expires_at <= now,
+                ),
+            )
+            .order_by(MCPRemoteTaskOutboxRow.created_at, MCPRemoteTaskOutboxRow.outbox_id)
+            .limit(max(1, limit))
+        ).all()
+        abandoned: list[MCPRemoteTaskOutbox] = []
+        for candidate in candidates:
+            command_revision = int(candidate.continuation_revision or 0)
+            result = self._session.execute(
+                update(MCPRemoteTaskOutboxRow)
+                .where(
+                    MCPRemoteTaskOutboxRow.outbox_id == candidate.outbox_id,
+                    MCPRemoteTaskOutboxRow.continuation_status.in_(["running", "abandoning"]),
+                    MCPRemoteTaskOutboxRow.continuation_revision == command_revision,
+                    MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+                )
+                .values(
+                    continuation_status="abandoning",
+                    continuation_safe_error_code="mcp_continuation_execution_unknown",
+                    continuation_revision=command_revision + 1,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount:
+                self._session.flush()
+                self._session.expire_all()
+                row = self._session.get(MCPRemoteTaskOutboxRow, candidate.outbox_id)
+                if row is not None:
+                    abandoned.append(_row_to_mcp_remote_task_outbox(row))
+        return abandoned
+
+    def complete_abandoned_mcp_remote_task_continuation(
+        self, outbox_id: str, *, expected_revision: int, completed_at: datetime
+    ) -> MCPRemoteTaskOutbox | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.continuation_status == "abandoning",
+                MCPRemoteTaskOutboxRow.continuation_revision == expected_revision,
+                MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+            )
+            .values(
+                continuation_status="failed",
+                continuation_dispatched_at=completed_at,
+                continuation_revision=expected_revision + 1,
+                updated_at=completed_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def renew_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        node_ids: tuple[str, ...] | None,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        values: dict[str, Any] = {
+            "continuation_lease_expires_at": lease_expires_at,
+            "continuation_revision": expected_revision + 1,
+            "updated_at": updated_at,
+        }
+        if node_ids is not None:
+            values["continuation_node_ids"] = list(node_ids)
+        result = self._session.execute(
+            update(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.continuation_status == "running",
+                MCPRemoteTaskOutboxRow.continuation_claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.continuation_claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.continuation_revision == expected_revision,
+                MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def mark_mcp_remote_task_continuation_dispatched(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        dispatched_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.kind == "terminal_continuation",
+                MCPRemoteTaskOutboxRow.continuation_claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.continuation_claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.continuation_revision == expected_revision,
+                MCPRemoteTaskOutboxRow.continuation_status == "running",
+                MCPRemoteTaskOutboxRow.continuation_admitted_at.is_not(None),
+                MCPRemoteTaskOutboxRow.continuation_dispatched_at.is_(None),
+            )
+            .values(
+                continuation_dispatched_at=dispatched_at,
+                continuation_status="completed",
+                continuation_claim_owner=None,
+                continuation_claim_token=None,
+                continuation_lease_expires_at=None,
+                continuation_revision=expected_revision + 1,
+                updated_at=dispatched_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def complete_mcp_remote_task_outbox(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        completed_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        result = self._session.execute(
+            update(MCPRemoteTaskOutboxRow)
+            .where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.revision == expected_revision,
+                MCPRemoteTaskOutboxRow.completed_at.is_(None),
+            )
+            .values(
+                status="completed",
+                completed_at=completed_at,
+                updated_at=completed_at,
+                claim_owner=None,
+                claim_token=None,
+                lease_expires_at=None,
+                revision=expected_revision + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        self._session.expire_all()
+        row = self._session.get(MCPRemoteTaskOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_remote_task_outbox(row)
+
+    def complete_mcp_remote_task_control(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        outcome: str,
+        completed_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        if outcome not in {"delivered", "ambiguous"}:
+            raise ValueError("MCP remote task control outcome is invalid")
+        row = self._session.scalar(
+            select(MCPRemoteTaskOutboxRow).where(
+                MCPRemoteTaskOutboxRow.outbox_id == outbox_id,
+                MCPRemoteTaskOutboxRow.claim_owner == claim_owner,
+                MCPRemoteTaskOutboxRow.claim_token == claim_token,
+                MCPRemoteTaskOutboxRow.revision == expected_revision,
+                MCPRemoteTaskOutboxRow.completed_at.is_(None),
+            )
+        )
+        if row is None or row.kind not in {"control_update", "control_cancel"}:
+            return None
+        binding = self._session.get(
+            MCPRemoteTaskBindingRow, row.safe_remote_task_ref
+        )
+        if binding is None or binding.terminal_at is not None:
+            return None
+        if outcome == "delivered" and row.kind == "control_update":
+            binding.last_status = "working"
+            binding.next_poll_at = completed_at
+            binding.updated_at = completed_at
+            binding.revision = int(binding.revision or 0) + 1
+        else:
+            call_status = (
+                "cancelled"
+                if outcome == "delivered" and row.kind == "control_cancel"
+                else "unknown"
+            )
+            safe_error_code = (
+                "mcp_remote_task_cancelled"
+                if call_status == "cancelled"
+                else "execution_status_unknown"
+            )
+            binding.last_status = call_status
+            binding.next_poll_at = None
+            binding.updated_at = completed_at
+            binding.terminal_at = completed_at
+            binding.revision = int(binding.revision or 0) + 1
+            call = self._session.get(MCPCallRecordRow, row.call_ref)
+            if call is not None and call.terminal_at is None:
+                call.status = call_status
+                call.safe_error_code = safe_error_code
+                call.updated_at = completed_at
+                call.terminal_at = completed_at
+                self._session.execute(
+                    update(MCPBranchRecordRow)
+                    .where(MCPBranchRecordRow.branch_id == call.branch_id)
+                    .values(
+                        status=call_status,
+                        active_call_ref=None,
+                        safe_summary="The MCP remote task control outcome is terminal.",
+                        updated_at=completed_at,
+                        terminal_at=completed_at,
+                    )
+                )
+        row.status = "completed"
+        row.completed_at = completed_at
+        row.updated_at = completed_at
+        row.claim_owner = None
+        row.claim_token = None
+        row.lease_expires_at = None
+        row.revision = expected_revision + 1
+        self._session.flush()
+        return _row_to_mcp_remote_task_outbox(row)
+
     def delete_mcp_remote_task_binding(
         self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
     ) -> bool:
@@ -2979,32 +5356,53 @@ class SQLiteStateRepository:
         return bool(result.rowcount)
 
     def save_mcp_sealed_state(self, state: MCPSealedState) -> MCPSealedState:
-        existing = self._session.get(MCPSealedStateRow, state.sealed_state_ref)
-        if existing is not None and (
-            existing.owner_user_id != state.owner_user_id
-            or existing.task_id != state.task_id
-            or existing.node_id != state.node_id
-            or existing.call_ref != state.call_ref
-            or existing.state_kind != state.state_kind
-        ):
-            raise ValueError("MCP sealed state scope does not match existing record")
-        merged = self._session.merge(
-            MCPSealedStateRow(
-                sealed_state_ref=state.sealed_state_ref,
-                owner_user_id=state.owner_user_id,
-                task_id=state.task_id,
-                node_id=state.node_id,
-                call_ref=state.call_ref,
-                state_kind=state.state_kind,
-                ciphertext=state.ciphertext,
-                nonce=state.nonce,
-                encryption_version=state.encryption_version,
-                created_at=state.created_at,
-                updated_at=state.updated_at,
-            )
+        values = {
+            "sealed_state_ref": state.sealed_state_ref,
+            "owner_user_id": state.owner_user_id,
+            "task_id": state.task_id,
+            "node_id": state.node_id,
+            "call_ref": state.call_ref,
+            "state_kind": state.state_kind,
+            "ciphertext": state.ciphertext,
+            "nonce": state.nonce,
+            "encryption_version": state.encryption_version,
+            "created_at": state.created_at,
+            "updated_at": state.updated_at,
+        }
+        insert_statement = (
+            postgresql_insert(MCPSealedStateRow)
+            if self._session.bind is not None and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(MCPSealedStateRow)
         )
+        self._session.execute(insert_statement.values(**values).on_conflict_do_nothing())
         self._session.flush()
-        return _row_to_mcp_sealed_state(merged)
+        self._session.expire_all()
+        existing = self._session.get(MCPSealedStateRow, state.sealed_state_ref)
+        if existing is None:
+            raise RuntimeError("MCP sealed state insert did not persist")
+        immutable_values = (
+            existing.owner_user_id,
+            existing.task_id,
+            existing.node_id,
+            existing.call_ref,
+            existing.state_kind,
+            existing.ciphertext,
+            existing.nonce,
+            int(existing.encryption_version),
+        )
+        incoming_values = (
+            state.owner_user_id,
+            state.task_id,
+            state.node_id,
+            state.call_ref,
+            state.state_kind,
+            state.ciphertext,
+            state.nonce,
+            state.encryption_version,
+        )
+        if immutable_values != incoming_values:
+            raise ValueError("MCP sealed state immutable scope or ciphertext does not match existing record")
+        return _row_to_mcp_sealed_state(existing)
 
     def get_mcp_sealed_state(
         self, owner_user_id: str, task_id: str, sealed_state_ref: str
@@ -3143,6 +5541,1077 @@ class SQLiteStateRepository:
             delete(MCPAuditEventRow).where(MCPAuditEventRow.audit_event_id.in_(ids))
         )
         return len(ids)
+
+    def ensure_mcp_rollout_gate_scope(
+        self, scope: MCPRolloutGateScope
+    ) -> MCPRolloutGateScope:
+        if not scope.environment_id:
+            raise ValueError("MCP rollout environment ID is required")
+        if scope.rollout_program != MCP_ROLLOUT_PROGRAM:
+            raise ValueError("MCP rollout program is not supported")
+        created_at = scope.created_at or datetime.now(timezone.utc)
+        values = {
+            "environment_id": scope.environment_id,
+            "rollout_program": scope.rollout_program,
+            "created_at": created_at,
+        }
+        insert_statement = (
+            postgresql_insert(MCPRolloutGateScopeRow)
+            if self._session.bind is not None
+            and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(MCPRolloutGateScopeRow)
+        )
+        self._session.execute(
+            insert_statement.values(**values).on_conflict_do_nothing(
+                index_elements=["environment_id", "rollout_program"]
+            )
+        )
+        self._session.flush()
+        row = self._session.get(
+            MCPRolloutGateScopeRow,
+            (scope.environment_id, scope.rollout_program),
+        )
+        if row is None:
+            raise RuntimeError("MCP rollout gate scope insert did not persist")
+        return _row_to_mcp_rollout_gate_scope(row)
+
+    def append_mcp_rollout_drill_observation(
+        self, observation: MCPRolloutDrillObservation
+    ) -> MCPRolloutDrillObservation:
+        blockers = validate_mcp_rollout_drill_observation(observation)
+        if blockers:
+            raise ValueError(
+                "MCP rollout drill observation is invalid: " + ",".join(blockers)
+            )
+        existing = self._session.get(
+            MCPRolloutDrillObservationRow,
+            observation.drill_observation_id,
+        )
+        if existing is not None:
+            persisted = _row_to_mcp_rollout_drill_observation(existing)
+            if persisted == observation:
+                return persisted
+            raise ValueError("MCP rollout drill observation ID payload conflict")
+        scope_owner = self._session.scalar(
+            select(MCPRolloutDrillObservationRow.drill_observation_id).where(
+                MCPRolloutDrillObservationRow.environment_id
+                == observation.environment_id,
+                MCPRolloutDrillObservationRow.rollout_program
+                == observation.rollout_program,
+                MCPRolloutDrillObservationRow.deployment_id
+                == observation.deployment_id,
+                MCPRolloutDrillObservationRow.stage == observation.stage,
+                MCPRolloutDrillObservationRow.config_fingerprint
+                == observation.config_fingerprint,
+                MCPRolloutDrillObservationRow.drill == observation.drill,
+                MCPRolloutDrillObservationRow.observed_at == observation.observed_at,
+            )
+        )
+        if scope_owner is not None:
+            raise ValueError("MCP rollout drill observation scope replay")
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=observation.environment_id,
+                rollout_program=observation.rollout_program,
+                created_at=observation.recorded_at,
+            )
+        )
+        row = MCPRolloutDrillObservationRow(
+            drill_observation_id=observation.drill_observation_id,
+            environment_id=observation.environment_id,
+            rollout_program=observation.rollout_program,
+            deployment_id=observation.deployment_id,
+            stage=observation.stage,
+            config_fingerprint=observation.config_fingerprint,
+            drill=observation.drill,
+            outcome=observation.outcome,
+            observed_at=observation.observed_at,
+            recorded_at=observation.recorded_at,
+            expires_at=observation.expires_at,
+            payload_digest=observation.payload_digest,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_drill_observation(row)
+
+    def list_mcp_rollout_drill_observations(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPRolloutDrillObservation]:
+        _validate_rollout_scope(
+            environment_id,
+            MCP_ROLLOUT_PROGRAM,
+            "internal_enforce",
+        )
+        if not deployment_id or window_ended_at <= window_started_at:
+            raise ValueError("MCP rollout drill observation query scope is invalid")
+        rows = self._session.scalars(
+            select(MCPRolloutDrillObservationRow)
+            .where(
+                MCPRolloutDrillObservationRow.environment_id == environment_id,
+                MCPRolloutDrillObservationRow.rollout_program
+                == MCP_ROLLOUT_PROGRAM,
+                MCPRolloutDrillObservationRow.deployment_id == deployment_id,
+                MCPRolloutDrillObservationRow.stage == "internal_enforce",
+                MCPRolloutDrillObservationRow.observed_at >= window_started_at,
+                MCPRolloutDrillObservationRow.observed_at < window_ended_at,
+                MCPRolloutDrillObservationRow.expires_at > window_ended_at,
+            )
+            .order_by(
+                MCPRolloutDrillObservationRow.observed_at,
+                MCPRolloutDrillObservationRow.drill,
+                MCPRolloutDrillObservationRow.drill_observation_id,
+            )
+        ).all()
+        return [_row_to_mcp_rollout_drill_observation(row) for row in rows]
+
+    def upsert_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket:
+        return self._write_mcp_rollout_metric_bucket(bucket, additive=True)
+
+    def set_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket:
+        return self._write_mcp_rollout_metric_bucket(bucket, additive=False)
+
+    def _write_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket, *, additive: bool
+    ) -> MCPRolloutMetricBucket:
+        stage = _rollout_value(bucket.stage)
+        metric_name = _rollout_value(bucket.metric_name)
+        _validate_rollout_scope(bucket.environment_id, bucket.rollout_program, stage)
+        if metric_name not in MCP_ROLLOUT_METRIC_NAMES:
+            raise ValueError("MCP rollout metric name is not supported")
+        if not is_exact_mcp_metric_bucket_window(
+            bucket.bucket_started_at, bucket.bucket_ended_at
+        ):
+            raise ValueError(
+                "MCP rollout metric bucket must be one complete UTC-aligned minute"
+            )
+        if isinstance(bucket.value, bool) or bucket.value < 0:
+            raise ValueError("MCP rollout metric bucket value must be non-negative")
+        labels = {
+            "execution_path": _rollout_value(bucket.execution_path),
+            "routing_mode": _rollout_value(bucket.routing_mode),
+            "transport": _rollout_value(bucket.transport),
+            "protocol_version": _rollout_value(bucket.protocol_version),
+            "adapter": _rollout_value(bucket.adapter),
+            "result_category": _rollout_value(bucket.result_category),
+            "error_category": _rollout_value(bucket.error_category),
+            "call_kind": "not_applicable"
+            if bucket.call_kind is None
+            else _rollout_value(bucket.call_kind),
+            "red_line": "not_applicable"
+            if bucket.red_line is None
+            else _rollout_value(bucket.red_line),
+            "latency_bucket": _rollout_value(bucket.latency_bucket),
+        }
+        for label_name, label_value in labels.items():
+            if label_value not in MCP_ROLLOUT_LABEL_VALUES[label_name]:
+                raise ValueError(f"MCP rollout metric label {label_name} is not supported")
+        if metric_name == "mcp_safety_red_line_total":
+            if labels["red_line"] == "not_applicable":
+                raise ValueError("MCP safety red-line metric requires a red-line label")
+        elif labels["red_line"] != "not_applicable":
+            raise ValueError("MCP red-line label is reserved for the safety metric")
+        created_at = bucket.created_at or datetime.now(timezone.utc)
+        updated_at = bucket.updated_at or created_at
+        values = {
+            "metric_bucket_id": bucket.metric_bucket_id,
+            "environment_id": bucket.environment_id,
+            "rollout_program": bucket.rollout_program,
+            "deployment_id": bucket.deployment_id,
+            "stage": stage,
+            "config_fingerprint": bucket.config_fingerprint,
+            "metric_name": metric_name,
+            "bucket_started_at": bucket.bucket_started_at,
+            "bucket_ended_at": bucket.bucket_ended_at,
+            **labels,
+            "value": bucket.value,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+        identity_columns = [
+            "environment_id",
+            "deployment_id",
+            "stage",
+            "config_fingerprint",
+            "metric_name",
+            "bucket_started_at",
+            "bucket_ended_at",
+            "execution_path",
+            "routing_mode",
+            "transport",
+            "protocol_version",
+            "adapter",
+            "result_category",
+            "error_category",
+            "call_kind",
+            "red_line",
+            "latency_bucket",
+        ]
+        insert_statement = (
+            postgresql_insert(MCPRolloutMetricBucketRow)
+            if self._session.bind is not None
+            and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(MCPRolloutMetricBucketRow)
+        )
+        conflict_value = (
+            MCPRolloutMetricBucketRow.value + bucket.value
+            if additive
+            else bucket.value
+        )
+        self._session.execute(
+            insert_statement.values(**values).on_conflict_do_update(
+                index_elements=identity_columns,
+                set_={
+                    "value": conflict_value,
+                    "updated_at": updated_at,
+                },
+            )
+        )
+        self._session.flush()
+        row = self._session.scalar(
+            select(MCPRolloutMetricBucketRow).where(
+                *[
+                    getattr(MCPRolloutMetricBucketRow, name) == values[name]
+                    for name in identity_columns
+                ]
+            )
+        )
+        if row is None:
+            raise RuntimeError("MCP rollout metric bucket upsert did not persist")
+        if metric_name == "mcp_safety_red_line_total" and bucket.value > 0:
+            self._derive_mcp_safety_red_line_promotion_block(
+                bucket,
+                stage=stage,
+                created_at=updated_at,
+            )
+        return _row_to_mcp_rollout_metric_bucket(row)
+
+    def _derive_mcp_safety_red_line_promotion_block(
+        self,
+        bucket: MCPRolloutMetricBucket,
+        *,
+        stage: str,
+        created_at: datetime,
+    ) -> MCPRolloutPromotionBlock:
+        activation = self._session.scalar(
+            select(MCPRolloutDeploymentActivationRow).where(
+                MCPRolloutDeploymentActivationRow.environment_id
+                == bucket.environment_id,
+                MCPRolloutDeploymentActivationRow.rollout_program
+                == bucket.rollout_program,
+                MCPRolloutDeploymentActivationRow.deployment_id
+                == bucket.deployment_id,
+                MCPRolloutDeploymentActivationRow.stage == stage,
+                MCPRolloutDeploymentActivationRow.config_fingerprint
+                == bucket.config_fingerprint,
+            )
+        )
+        if activation is None:
+            raise ValueError(
+                "positive MCP safety red-line metric requires an exact activation"
+            )
+        reason_code = "safety_red_line_nonzero"
+        identity = "\0".join(
+            (
+                bucket.environment_id,
+                bucket.rollout_program,
+                bucket.deployment_id,
+                stage,
+                bucket.config_fingerprint,
+                activation.evidence_id,
+                reason_code,
+            )
+        )
+        block_id = f"mcp-safety-block-{hashlib.sha256(identity.encode()).hexdigest()}"
+        existing = self._session.scalar(
+            select(MCPRolloutPromotionBlockRow).where(
+                MCPRolloutPromotionBlockRow.evidence_id == activation.evidence_id,
+                MCPRolloutPromotionBlockRow.reason_code == reason_code,
+            )
+        )
+        if existing is not None:
+            expected = (
+                block_id,
+                bucket.environment_id,
+                bucket.rollout_program,
+                bucket.deployment_id,
+                stage,
+                bucket.config_fingerprint,
+                activation.evidence_id,
+                reason_code,
+            )
+            actual = (
+                existing.block_id,
+                existing.environment_id,
+                existing.rollout_program,
+                existing.deployment_id,
+                existing.stage,
+                existing.config_fingerprint,
+                existing.evidence_id,
+                existing.reason_code,
+            )
+            if actual != expected:
+                raise ValueError("MCP safety red-line promotion block identity conflict")
+            return _row_to_mcp_rollout_promotion_block(existing)
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=bucket.environment_id,
+                rollout_program=bucket.rollout_program,
+                created_at=created_at,
+            )
+        )
+        row = MCPRolloutPromotionBlockRow(
+            block_id=block_id,
+            environment_id=bucket.environment_id,
+            rollout_program=bucket.rollout_program,
+            deployment_id=bucket.deployment_id,
+            stage=stage,
+            config_fingerprint=bucket.config_fingerprint,
+            evidence_id=activation.evidence_id,
+            reason_code=reason_code,
+            created_at=created_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_promotion_block(row)
+
+    def list_mcp_rollout_metric_buckets(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPRolloutMetricBucket]:
+        normalized_stage = _rollout_value(stage)
+        _validate_rollout_scope(environment_id, MCP_ROLLOUT_PROGRAM, normalized_stage)
+        if window_ended_at <= window_started_at:
+            raise ValueError("MCP rollout metric query window is invalid")
+        rows = self._session.scalars(
+            select(MCPRolloutMetricBucketRow)
+            .where(
+                MCPRolloutMetricBucketRow.environment_id == environment_id,
+                MCPRolloutMetricBucketRow.rollout_program == MCP_ROLLOUT_PROGRAM,
+                MCPRolloutMetricBucketRow.deployment_id == deployment_id,
+                MCPRolloutMetricBucketRow.stage == normalized_stage,
+                MCPRolloutMetricBucketRow.bucket_started_at >= window_started_at,
+                MCPRolloutMetricBucketRow.bucket_ended_at <= window_ended_at,
+            )
+            .order_by(
+                MCPRolloutMetricBucketRow.bucket_started_at,
+                MCPRolloutMetricBucketRow.metric_name,
+                MCPRolloutMetricBucketRow.metric_bucket_id,
+            )
+        ).all()
+        return [_row_to_mcp_rollout_metric_bucket(row) for row in rows]
+
+    def save_mcp_shadow_audit_sample(
+        self, sample: MCPShadowAuditSample
+    ) -> MCPShadowAuditSample:
+        from src.integrations.mcp.shadow_evidence import validate_shadow_audit_sample
+
+        blockers = validate_shadow_audit_sample(sample)
+        if blockers:
+            raise ValueError(f"MCP shadow audit sample is invalid: {','.join(blockers)}")
+        existing = self._session.get(MCPShadowAuditSampleRow, sample.sample_id)
+        if existing is not None:
+            persisted = _row_to_mcp_shadow_audit_sample(existing)
+            if persisted == sample:
+                return persisted
+            raise ValueError("MCP shadow audit sample ID payload conflict")
+        nonce_owner = self._session.scalar(
+            select(MCPShadowAuditSampleRow.sample_id).where(
+                MCPShadowAuditSampleRow.environment_id == sample.environment_id,
+                MCPShadowAuditSampleRow.deployment_id == sample.deployment_id,
+                MCPShadowAuditSampleRow.stage == sample.stage,
+                MCPShadowAuditSampleRow.config_fingerprint == sample.config_fingerprint,
+                MCPShadowAuditSampleRow.nonce == sample.nonce,
+            )
+        )
+        if nonce_owner is not None:
+            raise ValueError("MCP shadow audit sample nonce replay")
+        row = MCPShadowAuditSampleRow(
+            sample_id=sample.sample_id,
+            environment_id=sample.environment_id,
+            rollout_program=sample.rollout_program,
+            deployment_id=sample.deployment_id,
+            stage=sample.stage,
+            config_fingerprint=sample.config_fingerprint,
+            manifest_fingerprint=sample.manifest_fingerprint,
+            fixture_fingerprint=sample.fixture_fingerprint,
+            mapping_fingerprint=sample.mapping_fingerprint,
+            scenario=sample.scenario,
+            nonce=sample.nonce,
+            safe_owner_ref=sample.safe_owner_ref,
+            safe_task_ref=sample.safe_task_ref,
+            safe_call_ref=sample.safe_call_ref,
+            legacy_outcome=sample.legacy_outcome,
+            shadow_outcome=sample.shadow_outcome,
+            transport=sample.transport,
+            endpoint_policy=sample.endpoint_policy,
+            comparison=sample.comparison,
+            blockers=list(sample.blockers),
+            payload_digest=sample.payload_digest,
+            observed_at=sample.observed_at,
+            recorded_at=sample.recorded_at,
+            expires_at=sample.expires_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_shadow_audit_sample(row)
+
+    def list_mcp_shadow_audit_samples(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPShadowAuditSample]:
+        _validate_rollout_scope(environment_id, MCP_ROLLOUT_PROGRAM, stage)
+        if stage != "internal_shadow" or window_ended_at <= window_started_at:
+            raise ValueError("MCP shadow audit sample query scope is invalid")
+        rows = self._session.scalars(
+            select(MCPShadowAuditSampleRow)
+            .where(
+                MCPShadowAuditSampleRow.environment_id == environment_id,
+                MCPShadowAuditSampleRow.rollout_program == MCP_ROLLOUT_PROGRAM,
+                MCPShadowAuditSampleRow.deployment_id == deployment_id,
+                MCPShadowAuditSampleRow.stage == stage,
+                MCPShadowAuditSampleRow.observed_at >= window_started_at,
+                MCPShadowAuditSampleRow.observed_at < window_ended_at,
+                MCPShadowAuditSampleRow.expires_at > window_ended_at,
+            )
+            .order_by(MCPShadowAuditSampleRow.observed_at, MCPShadowAuditSampleRow.sample_id)
+        ).all()
+        return [_row_to_mcp_shadow_audit_sample(row) for row in rows]
+
+    def delete_expired_mcp_shadow_audit_samples(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int:
+        ids = self._session.scalars(
+            select(MCPShadowAuditSampleRow.sample_id)
+            .where(MCPShadowAuditSampleRow.expires_at <= now)
+            .order_by(MCPShadowAuditSampleRow.expires_at, MCPShadowAuditSampleRow.sample_id)
+            .limit(max(1, limit))
+        ).all()
+        if not ids:
+            return 0
+        self._session.execute(
+            delete(MCPShadowAuditSampleRow).where(MCPShadowAuditSampleRow.sample_id.in_(ids))
+        )
+        return len(ids)
+
+    def append_mcp_rollout_evidence_snapshot(
+        self, snapshot: MCPRolloutEvidenceSnapshot
+    ) -> MCPRolloutEvidenceSnapshot:
+        stage = _rollout_value(snapshot.stage)
+        source = _rollout_value(snapshot.source)
+        producer = _rollout_value(snapshot.producer)
+        evidence_kind = _rollout_value(snapshot.evidence_kind)
+        _validate_rollout_scope(snapshot.environment_id, snapshot.rollout_program, stage)
+        if source not in MCP_ROLLOUT_EVIDENCE_SOURCES:
+            raise ValueError("MCP rollout evidence source is not supported")
+        if producer not in MCP_ROLLOUT_EVIDENCE_PRODUCERS:
+            raise ValueError("MCP rollout evidence producer is not supported")
+        if (source, producer) not in {
+            ("ci", "ci_pipeline"),
+            ("production", "production_snapshot_producer"),
+        }:
+            raise ValueError("MCP rollout evidence provenance is invalid")
+        if source == "ci":
+            if (
+                snapshot.attestation_key_id is not None
+                or snapshot.attestation_signature is not None
+            ):
+                raise ValueError("CI MCP rollout evidence cannot be attested")
+        elif (
+            not isinstance(snapshot.attestation_key_id, str)
+            or MCP_ROLLOUT_ATTESTATION_KEY_ID_RE.fullmatch(
+                snapshot.attestation_key_id
+            )
+            is None
+            or not isinstance(snapshot.attestation_signature, str)
+            or MCP_ROLLOUT_ATTESTATION_SIGNATURE_RE.fullmatch(
+                snapshot.attestation_signature
+            )
+            is None
+        ):
+            raise ValueError("production MCP rollout evidence attestation is required")
+        if evidence_kind not in MCP_ROLLOUT_EVIDENCE_KINDS:
+            raise ValueError("MCP rollout evidence kind is not supported")
+        if isinstance(snapshot.snapshot_id, bool) or snapshot.snapshot_id <= 0:
+            raise ValueError("MCP rollout evidence snapshot ID must be positive")
+        if snapshot.window_ended_at <= snapshot.window_started_at:
+            raise ValueError("MCP rollout evidence window is invalid")
+        if snapshot.recorded_at < snapshot.window_ended_at:
+            raise ValueError("MCP rollout evidence cannot predate its observation window")
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=snapshot.environment_id,
+                rollout_program=snapshot.rollout_program,
+                created_at=snapshot.recorded_at,
+            )
+        )
+        if self._session.get(MCPRolloutEvidenceSnapshotRow, snapshot.evidence_id) is not None:
+            raise ValueError("MCP rollout evidence ID replay is not allowed")
+        if self._session.scalar(
+            select(MCPRolloutEvidenceSnapshotRow.evidence_id).where(
+                MCPRolloutEvidenceSnapshotRow.nonce == snapshot.nonce
+            )
+        ) is not None:
+            raise ValueError("MCP rollout evidence nonce replay is not allowed")
+        if self._session.scalar(
+            select(MCPRolloutEvidenceSnapshotRow.evidence_id).where(
+                MCPRolloutEvidenceSnapshotRow.deployment_id == snapshot.deployment_id,
+                MCPRolloutEvidenceSnapshotRow.stage == stage,
+                MCPRolloutEvidenceSnapshotRow.snapshot_id == snapshot.snapshot_id,
+            )
+        ) is not None:
+            raise ValueError("MCP rollout evidence snapshot replay is not allowed")
+        previous = self._session.scalar(
+            select(MCPRolloutEvidenceSnapshotRow)
+            .where(
+                MCPRolloutEvidenceSnapshotRow.environment_id == snapshot.environment_id,
+                MCPRolloutEvidenceSnapshotRow.rollout_program == snapshot.rollout_program,
+                MCPRolloutEvidenceSnapshotRow.deployment_id == snapshot.deployment_id,
+                MCPRolloutEvidenceSnapshotRow.stage == stage,
+            )
+            .order_by(
+                MCPRolloutEvidenceSnapshotRow.snapshot_id.desc(),
+                MCPRolloutEvidenceSnapshotRow.recorded_at.desc(),
+            )
+            .limit(1)
+        )
+        if previous is not None:
+            if snapshot.snapshot_id <= int(previous.snapshot_id):
+                raise ValueError("MCP rollout evidence snapshot ID must be monotonic")
+            if snapshot.recorded_at <= previous.recorded_at:
+                raise ValueError("MCP rollout evidence recorded time must be monotonic")
+            if snapshot.window_ended_at <= previous.window_ended_at:
+                raise ValueError("MCP rollout evidence window must advance monotonically")
+            if snapshot.window_started_at > previous.window_ended_at:
+                raise ValueError("MCP rollout evidence window must remain continuous")
+            if snapshot.config_fingerprint != previous.config_fingerprint:
+                raise ValueError("MCP rollout evidence config fingerprint changed within a stage")
+        row = MCPRolloutEvidenceSnapshotRow(
+            evidence_id=snapshot.evidence_id,
+            environment_id=snapshot.environment_id,
+            rollout_program=snapshot.rollout_program,
+            git_sha=snapshot.git_sha,
+            deployment_id=snapshot.deployment_id,
+            stage=stage,
+            config_fingerprint=snapshot.config_fingerprint,
+            window_started_at=snapshot.window_started_at,
+            window_ended_at=snapshot.window_ended_at,
+            recorded_at=snapshot.recorded_at,
+            producer=producer,
+            source=source,
+            snapshot_id=snapshot.snapshot_id,
+            nonce=snapshot.nonce,
+            evidence_kind=evidence_kind,
+            payload=dict(snapshot.payload),
+            payload_digest=snapshot.payload_digest,
+            attestation_key_id=snapshot.attestation_key_id,
+            attestation_signature=snapshot.attestation_signature,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_evidence_snapshot(row)
+
+    def get_mcp_rollout_evidence_snapshot(
+        self, evidence_id: str
+    ) -> MCPRolloutEvidenceSnapshot | None:
+        row = self._session.get(MCPRolloutEvidenceSnapshotRow, evidence_id)
+        return None if row is None else _row_to_mcp_rollout_evidence_snapshot(row)
+
+    def list_mcp_rollout_evidence_snapshots(
+        self, environment_id: str, deployment_id: str, stage: str
+    ) -> list[MCPRolloutEvidenceSnapshot]:
+        normalized_stage = _rollout_value(stage)
+        _validate_rollout_scope(environment_id, MCP_ROLLOUT_PROGRAM, normalized_stage)
+        rows = self._session.scalars(
+            select(MCPRolloutEvidenceSnapshotRow)
+            .where(
+                MCPRolloutEvidenceSnapshotRow.environment_id == environment_id,
+                MCPRolloutEvidenceSnapshotRow.rollout_program == MCP_ROLLOUT_PROGRAM,
+                MCPRolloutEvidenceSnapshotRow.deployment_id == deployment_id,
+                MCPRolloutEvidenceSnapshotRow.stage == normalized_stage,
+            )
+            .order_by(
+                MCPRolloutEvidenceSnapshotRow.snapshot_id,
+                MCPRolloutEvidenceSnapshotRow.evidence_id,
+            )
+        ).all()
+        return [_row_to_mcp_rollout_evidence_snapshot(row) for row in rows]
+
+    def append_mcp_rollout_stage_approval(
+        self, approval: MCPRolloutStageApproval
+    ) -> MCPRolloutStageApproval:
+        stage = _rollout_value(approval.stage)
+        _validate_rollout_scope(approval.environment_id, approval.rollout_program, stage)
+        if not approval.reason or not approval.approver:
+            raise ValueError("MCP rollout approval reason and approver are required")
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=approval.environment_id,
+                rollout_program=approval.rollout_program,
+                created_at=approval.created_at,
+            )
+        )
+        evidence = self._session.get(MCPRolloutEvidenceSnapshotRow, approval.evidence_id)
+        if evidence is None:
+            raise ValueError("MCP rollout approval evidence does not exist")
+        if (
+            evidence.environment_id != approval.environment_id
+            or evidence.rollout_program != approval.rollout_program
+        ):
+            raise ValueError("MCP rollout approval evidence scope does not match")
+        if self._session.get(MCPRolloutStageApprovalRow, approval.approval_id) is not None:
+            raise ValueError("MCP rollout approval replay is not allowed")
+        if self._session.scalar(
+            select(MCPRolloutStageApprovalRow.approval_id).where(
+                or_(
+                    MCPRolloutStageApprovalRow.evidence_id == approval.evidence_id,
+                    and_(
+                        MCPRolloutStageApprovalRow.environment_id == approval.environment_id,
+                        MCPRolloutStageApprovalRow.deployment_id == approval.deployment_id,
+                        MCPRolloutStageApprovalRow.stage == stage,
+                        MCPRolloutStageApprovalRow.config_fingerprint
+                        == approval.config_fingerprint,
+                    ),
+                )
+            )
+        ) is not None:
+            raise ValueError("MCP rollout approval logical target was already approved")
+        row = MCPRolloutStageApprovalRow(
+            approval_id=approval.approval_id,
+            environment_id=approval.environment_id,
+            rollout_program=approval.rollout_program,
+            deployment_id=approval.deployment_id,
+            stage=stage,
+            config_fingerprint=approval.config_fingerprint,
+            evidence_id=approval.evidence_id,
+            reason=approval.reason,
+            approver=approval.approver,
+            created_at=approval.created_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_stage_approval(row)
+
+    def activate_mcp_rollout_deployment(
+        self, activation: MCPRolloutDeploymentActivation
+    ) -> MCPRolloutDeploymentActivation:
+        stage = _rollout_value(activation.stage)
+        _validate_rollout_scope(activation.environment_id, activation.rollout_program, stage)
+        if not activation.operator_reason:
+            raise ValueError("MCP rollout activation operator reason is required")
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=activation.environment_id,
+                rollout_program=activation.rollout_program,
+                created_at=activation.created_at,
+            )
+        )
+        if not activation.is_rollback and self._has_active_mcp_rollout_blocks(
+            activation.environment_id, activation.rollout_program
+        ):
+            raise ValueError("MCP rollout activation is blocked by an active promotion block")
+        approval = self._session.get(MCPRolloutStageApprovalRow, activation.approval_id)
+        if approval is None:
+            raise ValueError("MCP rollout activation approval does not exist")
+        expected_approval = (
+            activation.environment_id,
+            activation.rollout_program,
+            activation.deployment_id,
+            stage,
+            activation.config_fingerprint,
+            activation.evidence_id,
+        )
+        actual_approval = (
+            approval.environment_id,
+            approval.rollout_program,
+            approval.deployment_id,
+            approval.stage,
+            approval.config_fingerprint,
+            approval.evidence_id,
+        )
+        if actual_approval != expected_approval:
+            raise ValueError("MCP rollout activation approval does not match target")
+        evidence = self._session.get(MCPRolloutEvidenceSnapshotRow, activation.evidence_id)
+        if evidence is None or (
+            evidence.environment_id != activation.environment_id
+            or evidence.rollout_program != activation.rollout_program
+        ):
+            raise ValueError("MCP rollout activation evidence scope does not match")
+        if activation.previous_activation_id is not None:
+            previous = self._session.get(
+                MCPRolloutDeploymentActivationRow,
+                activation.previous_activation_id,
+            )
+            if previous is None or (
+                previous.environment_id != activation.environment_id
+                or previous.rollout_program != activation.rollout_program
+            ):
+                raise ValueError("MCP rollout previous activation scope does not match")
+        if self._session.get(
+            MCPRolloutDeploymentActivationRow, activation.activation_id
+        ) is not None:
+            raise ValueError("MCP rollout activation replay is not allowed")
+        if self._session.scalar(
+            select(MCPRolloutDeploymentActivationRow.activation_id).where(
+                or_(
+                    MCPRolloutDeploymentActivationRow.approval_id == activation.approval_id,
+                    and_(
+                        MCPRolloutDeploymentActivationRow.environment_id
+                        == activation.environment_id,
+                        MCPRolloutDeploymentActivationRow.deployment_id
+                        == activation.deployment_id,
+                        MCPRolloutDeploymentActivationRow.stage == stage,
+                        MCPRolloutDeploymentActivationRow.config_fingerprint
+                        == activation.config_fingerprint,
+                    ),
+                )
+            )
+        ) is not None:
+            raise ValueError("MCP rollout approval or activation target was already consumed")
+        if self._session.scalar(
+            select(MCPRolloutBlockResolutionRow.resolution_id).where(
+                MCPRolloutBlockResolutionRow.approval_id == activation.approval_id
+            )
+        ) is not None:
+            raise ValueError("MCP rollout approval was already consumed by a block resolution")
+        row = MCPRolloutDeploymentActivationRow(
+            activation_id=activation.activation_id,
+            environment_id=activation.environment_id,
+            rollout_program=activation.rollout_program,
+            deployment_id=activation.deployment_id,
+            stage=stage,
+            config_fingerprint=activation.config_fingerprint,
+            approval_id=activation.approval_id,
+            evidence_id=activation.evidence_id,
+            previous_activation_id=activation.previous_activation_id,
+            operator_reason=activation.operator_reason,
+            is_rollback=activation.is_rollback,
+            created_at=activation.created_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_deployment_activation(row)
+
+    def get_mcp_rollout_deployment_activation(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        config_fingerprint: str,
+    ) -> MCPRolloutDeploymentActivation | None:
+        normalized_stage = _rollout_value(stage)
+        _validate_rollout_scope(environment_id, MCP_ROLLOUT_PROGRAM, normalized_stage)
+        row = self._session.scalar(
+            select(MCPRolloutDeploymentActivationRow).where(
+                MCPRolloutDeploymentActivationRow.environment_id == environment_id,
+                MCPRolloutDeploymentActivationRow.rollout_program == MCP_ROLLOUT_PROGRAM,
+                MCPRolloutDeploymentActivationRow.deployment_id == deployment_id,
+                MCPRolloutDeploymentActivationRow.stage == normalized_stage,
+                MCPRolloutDeploymentActivationRow.config_fingerprint == config_fingerprint,
+            )
+        )
+        return None if row is None else _row_to_mcp_rollout_deployment_activation(row)
+
+    def append_mcp_rollout_promotion_block(
+        self, block: MCPRolloutPromotionBlock
+    ) -> MCPRolloutPromotionBlock:
+        stage = _rollout_value(block.stage)
+        reason_code = _rollout_value(block.reason_code)
+        _validate_rollout_scope(block.environment_id, block.rollout_program, stage)
+        if reason_code not in MCP_ROLLOUT_BLOCK_REASONS:
+            raise ValueError("MCP rollout promotion block reason is not supported")
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=block.environment_id,
+                rollout_program=block.rollout_program,
+                created_at=block.created_at,
+            )
+        )
+        evidence = self._session.get(MCPRolloutEvidenceSnapshotRow, block.evidence_id)
+        if evidence is None:
+            raise ValueError("MCP rollout promotion block evidence does not exist")
+        expected_scope = (
+            block.environment_id,
+            block.rollout_program,
+            block.deployment_id,
+            stage,
+            block.config_fingerprint,
+        )
+        actual_scope = (
+            evidence.environment_id,
+            evidence.rollout_program,
+            evidence.deployment_id,
+            evidence.stage,
+            evidence.config_fingerprint,
+        )
+        if actual_scope != expected_scope:
+            raise ValueError("MCP rollout promotion block evidence scope does not match")
+        if self._session.get(MCPRolloutPromotionBlockRow, block.block_id) is not None:
+            raise ValueError("MCP rollout promotion block replay is not allowed")
+        if self._session.scalar(
+            select(MCPRolloutPromotionBlockRow.block_id).where(
+                MCPRolloutPromotionBlockRow.evidence_id == block.evidence_id,
+                MCPRolloutPromotionBlockRow.reason_code == reason_code,
+            )
+        ) is not None:
+            raise ValueError("MCP rollout promotion block was already recorded")
+        row = MCPRolloutPromotionBlockRow(
+            block_id=block.block_id,
+            environment_id=block.environment_id,
+            rollout_program=block.rollout_program,
+            deployment_id=block.deployment_id,
+            stage=stage,
+            config_fingerprint=block.config_fingerprint,
+            evidence_id=block.evidence_id,
+            reason_code=reason_code,
+            created_at=block.created_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_promotion_block(row)
+
+    def list_active_mcp_rollout_promotion_blocks(
+        self, environment_id: str, *, rollout_program: str = MCP_ROLLOUT_PROGRAM
+    ) -> list[MCPRolloutPromotionBlock]:
+        if not environment_id or rollout_program != MCP_ROLLOUT_PROGRAM:
+            raise ValueError("MCP rollout block scope is invalid")
+        resolution_exists = select(MCPRolloutBlockResolutionRow.resolution_id).where(
+            MCPRolloutBlockResolutionRow.block_id == MCPRolloutPromotionBlockRow.block_id
+        ).exists()
+        rows = self._session.scalars(
+            select(MCPRolloutPromotionBlockRow)
+            .where(
+                MCPRolloutPromotionBlockRow.environment_id == environment_id,
+                MCPRolloutPromotionBlockRow.rollout_program == rollout_program,
+                ~resolution_exists,
+            )
+            .order_by(
+                MCPRolloutPromotionBlockRow.created_at,
+                MCPRolloutPromotionBlockRow.block_id,
+            )
+        ).all()
+        return [_row_to_mcp_rollout_promotion_block(row) for row in rows]
+
+    def append_mcp_rollout_block_resolution(
+        self, resolution: MCPRolloutBlockResolution
+    ) -> MCPRolloutBlockResolution:
+        if not resolution.reason or not resolution.approver:
+            raise ValueError("MCP rollout block resolution reason and approver are required")
+        block = self._session.get(MCPRolloutPromotionBlockRow, resolution.block_id)
+        if block is None:
+            raise ValueError("MCP rollout promotion block does not exist")
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=block.environment_id,
+                rollout_program=block.rollout_program,
+                created_at=resolution.created_at,
+            )
+        )
+        approval = self._session.get(MCPRolloutStageApprovalRow, resolution.approval_id)
+        evidence = self._session.get(MCPRolloutEvidenceSnapshotRow, resolution.evidence_id)
+        if approval is None or evidence is None:
+            raise ValueError("MCP rollout block resolution approval and evidence are required")
+        if (
+            approval.environment_id != block.environment_id
+            or approval.rollout_program != block.rollout_program
+            or approval.evidence_id != resolution.evidence_id
+            or evidence.environment_id != block.environment_id
+            or evidence.rollout_program != block.rollout_program
+        ):
+            raise ValueError("MCP rollout block resolution scope does not match")
+        if self._session.get(MCPRolloutBlockResolutionRow, resolution.resolution_id) is not None:
+            raise ValueError("MCP rollout block resolution replay is not allowed")
+        if self._session.scalar(
+            select(MCPRolloutBlockResolutionRow.resolution_id).where(
+                or_(
+                    MCPRolloutBlockResolutionRow.block_id == resolution.block_id,
+                    MCPRolloutBlockResolutionRow.approval_id == resolution.approval_id,
+                )
+            )
+        ) is not None:
+            raise ValueError("MCP rollout block was already resolved")
+        if self._session.scalar(
+            select(MCPRolloutDeploymentActivationRow.activation_id).where(
+                MCPRolloutDeploymentActivationRow.approval_id == resolution.approval_id
+            )
+        ) is not None:
+            raise ValueError("MCP rollout approval was already consumed by an activation")
+        row = MCPRolloutBlockResolutionRow(
+            resolution_id=resolution.resolution_id,
+            block_id=resolution.block_id,
+            approval_id=resolution.approval_id,
+            evidence_id=resolution.evidence_id,
+            reason=resolution.reason,
+            approver=resolution.approver,
+            created_at=resolution.created_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_block_resolution(row)
+
+    def save_mcp_rollout_instance_config_lease(
+        self, lease: MCPRolloutInstanceConfigLease
+    ) -> MCPRolloutInstanceConfigLease:
+        stage = _rollout_value(lease.stage)
+        _validate_rollout_scope(lease.environment_id, lease.rollout_program, stage)
+        if lease.lease_expires_at <= lease.updated_at or lease.updated_at < lease.created_at:
+            raise ValueError("MCP rollout instance config lease timestamps are invalid")
+        self.ensure_mcp_rollout_gate_scope(
+            MCPRolloutGateScope(
+                environment_id=lease.environment_id,
+                rollout_program=lease.rollout_program,
+                created_at=lease.created_at,
+            )
+        )
+        deployment_rows = self._session.scalars(
+            select(MCPRolloutInstanceConfigRow).where(
+                MCPRolloutInstanceConfigRow.environment_id == lease.environment_id,
+                MCPRolloutInstanceConfigRow.rollout_program == lease.rollout_program,
+                MCPRolloutInstanceConfigRow.deployment_id == lease.deployment_id,
+            )
+        ).all()
+        for deployment_row in deployment_rows:
+            if (
+                deployment_row.stage != stage
+                or deployment_row.config_fingerprint != lease.config_fingerprint
+                or deployment_row.activation_id != lease.activation_id
+            ):
+                raise ValueError("MCP rollout deployment config fingerprint mismatch")
+        activation = self._session.get(
+            MCPRolloutDeploymentActivationRow, lease.activation_id
+        )
+        if activation is None or (
+            activation.environment_id,
+            activation.rollout_program,
+            activation.deployment_id,
+            activation.stage,
+            activation.config_fingerprint,
+        ) != (
+            lease.environment_id,
+            lease.rollout_program,
+            lease.deployment_id,
+            stage,
+            lease.config_fingerprint,
+        ):
+            raise ValueError("MCP rollout instance config activation does not match")
+        if not bool(activation.is_rollback) and self._has_active_mcp_rollout_blocks(
+            lease.environment_id, lease.rollout_program
+        ):
+            raise ValueError("MCP rollout instance admission is blocked")
+        existing = self._session.get(MCPRolloutInstanceConfigRow, lease.instance_config_id)
+        natural_existing = self._session.scalar(
+            select(MCPRolloutInstanceConfigRow).where(
+                MCPRolloutInstanceConfigRow.environment_id == lease.environment_id,
+                MCPRolloutInstanceConfigRow.deployment_id == lease.deployment_id,
+                MCPRolloutInstanceConfigRow.instance_id == lease.instance_id,
+            )
+        )
+        if existing is not None and natural_existing is not None and existing is not natural_existing:
+            raise ValueError("MCP rollout instance config identity conflict")
+        row = existing or natural_existing
+        if row is not None:
+            immutable = (
+                row.instance_config_id,
+                row.environment_id,
+                row.rollout_program,
+                row.deployment_id,
+                row.instance_id,
+                row.stage,
+                row.config_fingerprint,
+                row.activation_id,
+                row.created_at,
+            )
+            incoming = (
+                lease.instance_config_id,
+                lease.environment_id,
+                lease.rollout_program,
+                lease.deployment_id,
+                lease.instance_id,
+                stage,
+                lease.config_fingerprint,
+                lease.activation_id,
+                lease.created_at,
+            )
+            if immutable != incoming:
+                raise ValueError("MCP rollout instance config immutable fields changed")
+            row.lease_expires_at = lease.lease_expires_at
+            row.updated_at = lease.updated_at
+            self._session.flush()
+            return _row_to_mcp_rollout_instance_config(row)
+        row = MCPRolloutInstanceConfigRow(
+            instance_config_id=lease.instance_config_id,
+            environment_id=lease.environment_id,
+            rollout_program=lease.rollout_program,
+            deployment_id=lease.deployment_id,
+            instance_id=lease.instance_id,
+            stage=stage,
+            config_fingerprint=lease.config_fingerprint,
+            activation_id=lease.activation_id,
+            lease_expires_at=lease.lease_expires_at,
+            created_at=lease.created_at,
+            updated_at=lease.updated_at,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_rollout_instance_config(row)
+
+    def list_mcp_rollout_instance_config_leases(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> list[MCPRolloutInstanceConfigLease]:
+        conditions = [
+            MCPRolloutInstanceConfigRow.environment_id == environment_id,
+            MCPRolloutInstanceConfigRow.rollout_program == MCP_ROLLOUT_PROGRAM,
+            MCPRolloutInstanceConfigRow.deployment_id == deployment_id,
+        ]
+        if now is not None:
+            conditions.append(MCPRolloutInstanceConfigRow.lease_expires_at > now)
+        rows = self._session.scalars(
+            select(MCPRolloutInstanceConfigRow)
+            .where(*conditions)
+            .order_by(MCPRolloutInstanceConfigRow.instance_id)
+        ).all()
+        return [_row_to_mcp_rollout_instance_config(row) for row in rows]
+
+    def _has_active_mcp_rollout_blocks(
+        self, environment_id: str, rollout_program: str
+    ) -> bool:
+        resolution_exists = select(MCPRolloutBlockResolutionRow.resolution_id).where(
+            MCPRolloutBlockResolutionRow.block_id == MCPRolloutPromotionBlockRow.block_id
+        ).exists()
+        return (
+            self._session.scalar(
+                select(MCPRolloutPromotionBlockRow.block_id)
+                .where(
+                    MCPRolloutPromotionBlockRow.environment_id == environment_id,
+                    MCPRolloutPromotionBlockRow.rollout_program == rollout_program,
+                    ~resolution_exists,
+                )
+                .limit(1)
+            )
+            is not None
+        )
 
     def create_or_get_mcp_credential_key_validation(
         self, record: MCPCredentialKeyValidation
@@ -3612,10 +7081,32 @@ class SQLiteStorage(StoragePort):
         *,
         runtime_sidecar_client: Any | None = None,
         runtime_sidecar_shadow_sink: RuntimeSidecarShadowSink | None = None,
+        mcp_task_authority_mode: str | None = None,
     ) -> None:
+        if mcp_task_authority_mode not in {None, "off", "shadow", "enforce"}:
+            raise ValueError(
+                "mcp_task_authority_mode must be one of: off, shadow, enforce"
+            )
+        if (
+            mcp_task_authority_mode in {"shadow", "enforce"}
+            and runtime_sidecar_client is None
+        ):
+            raise RuntimeError(
+                "runtime_store_unavailable: MCP Task authority requires a "
+                "Rust runtime sidecar client"
+            )
+        if (
+            mcp_task_authority_mode == "shadow"
+            and runtime_sidecar_shadow_sink is None
+        ):
+            raise RuntimeError(
+                "runtime_store_unavailable: MCP Task shadow authority requires a "
+                "runtime sidecar comparison sink"
+            )
         self._session_factory = session_factory
         self._runtime_sidecar_client = runtime_sidecar_client
         self._runtime_sidecar_shadow_sink = runtime_sidecar_shadow_sink
+        self._mcp_task_authority_mode = mcp_task_authority_mode
 
     async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]:
         return await self._run(lambda state, collab: state.list_user_mcp_servers(owner_user_id))
@@ -3627,6 +7118,37 @@ class SQLiteStorage(StoragePort):
         self, server: UserMCPServer, credential: UserMCPCredentialRecord | None = None
     ) -> UserMCPServer:
         return await self._run(lambda state, collab: state.create_user_mcp_server(server, credential))
+
+    async def create_user_mcp_servers_atomic(
+        self,
+        candidates: Sequence[tuple[UserMCPServer, UserMCPCredentialRecord | None]],
+    ) -> list[UserMCPServer]:
+        return await self._run(
+            lambda state, collab: state.create_user_mcp_servers_atomic(candidates)
+        )
+
+    async def apply_legacy_mcp_migration_atomic(
+        self,
+        candidates: Sequence[
+            tuple[
+                UserMCPServer,
+                UserMCPCredentialRecord | None,
+                MCPLegacyMigrationRecord,
+            ]
+        ],
+    ) -> MCPLegacyMigrationBatchResult:
+        return await self._run(
+            lambda state, collab: state.apply_legacy_mcp_migration_atomic(candidates)
+        )
+
+    async def get_mcp_legacy_migration_record(
+        self, migration_id: str
+    ) -> MCPLegacyMigrationRecord | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_legacy_migration_record(
+                migration_id
+            )
+        )
 
     async def update_user_mcp_server(
         self, owner_user_id: str, server_id: str, *, changes: Mapping[str, Any],
@@ -3896,6 +7418,44 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def converge_dispatched_mcp_calls_to_unknown(
+        self, *, now: datetime, limit: int = 1000
+    ) -> list[MCPCallRecord]:
+        return await self._run(
+            lambda state, collab: state.converge_dispatched_mcp_calls_to_unknown(
+                now=now, limit=limit
+            )
+        )
+
+    async def count_active_mcp_remote_task_bindings(
+        self, *, rollout_config_version: str, protocol_version: str
+    ) -> int:
+        if self._task_authority_mode() == "enforce":
+            task_ids = await self._run(
+                lambda state, collab: state.list_active_mcp_remote_task_binding_task_ids(
+                    protocol_version=protocol_version,
+                )
+            )
+            tasks: dict[str, Task | None] = {}
+            for task_id in set(task_ids):
+                tasks[task_id] = await self.get_task(task_id)
+            return sum(
+                1
+                for task_id in task_ids
+                if (
+                    (task := tasks[task_id]) is not None
+                    and task.mcp_execution_mode == "user_scoped"
+                    and task.mcp_rollout_mode == "enforce"
+                    and task.mcp_rollout_config_version == rollout_config_version
+                )
+            )
+        return await self._run(
+            lambda state, collab: state.count_active_mcp_remote_task_bindings(
+                rollout_config_version=rollout_config_version,
+                protocol_version=protocol_version,
+            )
+        )
+
     async def save_mcp_remote_task_binding(
         self, binding: MCPRemoteTaskBinding
     ) -> MCPRemoteTaskBinding:
@@ -3912,11 +7472,692 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def get_mcp_remote_task_binding_for_call(
+        self, owner_user_id: str, task_id: str, call_ref: str
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_remote_task_binding_for_call(
+                owner_user_id, task_id, call_ref
+            )
+        )
+
+    async def publish_mcp_remote_task_binding(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        published_at: datetime,
+        continuation_plan: Mapping[str, Any] | None = None,
+    ) -> MCPRemoteTaskBinding | None:
+        node = None
+        binding = await self.get_mcp_remote_task_binding(
+            owner_user_id, task_id, safe_remote_task_ref
+        )
+        if binding is not None:
+            node = await self.get_task_node(binding.node_id)
+        if binding is None or node is None or node.status != NodeStatus.WAITING_FOR_DEPENDENCY:
+            return None
+        confirmed = await self.compare_and_set_task_node(
+            node, expected_from_status=NodeStatus.WAITING_FOR_DEPENDENCY
+        )
+        if confirmed is None:
+            return None
+        return await self._run(
+            lambda state, collab: state.publish_mcp_remote_task_binding(
+                owner_user_id,
+                task_id,
+                safe_remote_task_ref,
+                published_at=published_at,
+                continuation_plan=continuation_plan,
+            )
+        )
+
+    async def reconcile_unpublished_mcp_remote_task_bindings(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int:
+        bindings = await self._run(
+            lambda state, collab: state.list_unpublished_mcp_remote_task_bindings(
+                limit=limit
+            )
+        )
+        reconciled = 0
+        for binding in bindings:
+            node = await self.get_task_node(binding.node_id)
+            if node is not None and node.status == NodeStatus.WAITING_FOR_DEPENDENCY:
+                published = await self.publish_mcp_remote_task_binding(
+                    binding.owner_user_id,
+                    binding.task_id,
+                    binding.safe_remote_task_ref,
+                    published_at=now,
+                )
+                reconciled += int(published is not None)
+                continue
+            failed = await self._run(
+                lambda state, collab, current=binding: state.fail_unpublished_mcp_remote_task_binding(
+                    current, terminal_at=now
+                )
+            )
+            reconciled += int(failed is not None)
+        return reconciled
+
     async def list_due_mcp_remote_task_bindings(
         self, *, now: datetime, limit: int = 100
     ) -> list[MCPRemoteTaskBinding]:
         return await self._run(
             lambda state, collab: state.list_due_mcp_remote_task_bindings(now=now, limit=limit)
+        )
+
+    async def claim_due_mcp_remote_task_bindings(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskBinding]:
+        return await self._run(
+            lambda state, collab: state.claim_due_mcp_remote_task_bindings(
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                now=now,
+                lease_expires_at=lease_expires_at,
+                limit=limit,
+            )
+        )
+
+    async def renew_mcp_remote_task_binding_claim(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.renew_mcp_remote_task_binding_claim(
+                owner_user_id,
+                task_id,
+                safe_remote_task_ref,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                lease_expires_at=lease_expires_at,
+                updated_at=updated_at,
+            )
+        )
+
+    async def release_mcp_remote_task_binding_claim(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.release_mcp_remote_task_binding_claim(
+                owner_user_id,
+                task_id,
+                safe_remote_task_ref,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                updated_at=updated_at,
+            )
+        )
+
+    async def update_mcp_remote_task_binding_status(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        last_status: str,
+        next_poll_at: datetime | None,
+        updated_at: datetime,
+        terminal_at: datetime | None = None,
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.update_mcp_remote_task_binding_status(
+                owner_user_id,
+                task_id,
+                safe_remote_task_ref,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                last_status=last_status,
+                next_poll_at=next_poll_at,
+                updated_at=updated_at,
+                terminal_at=terminal_at,
+            )
+        )
+
+    async def finish_mcp_remote_task_binding(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        remote_status: str,
+        call_status: str,
+        terminal_at: datetime,
+        result_ref: str | None = None,
+        safe_error_code: str | None = None,
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.finish_mcp_remote_task_binding(
+                owner_user_id,
+                task_id,
+                safe_remote_task_ref,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                remote_status=remote_status,
+                call_status=call_status,
+                terminal_at=terminal_at,
+                result_ref=result_ref,
+                safe_error_code=safe_error_code,
+            )
+        )
+
+    async def claim_mcp_remote_task_outbox(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_remote_task_outbox(
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                now=now,
+                lease_expires_at=lease_expires_at,
+                limit=limit,
+            )
+        )
+
+    async def claim_abandoned_mcp_remote_task_controls(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]:
+        return await self._run(
+            lambda state, collab: state.claim_abandoned_mcp_remote_task_controls(
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                now=now,
+                limit=limit,
+            )
+        )
+
+    async def pause_mcp_remote_task_for_input(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        safe_remote_task_ref: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        input_requests: Mapping[str, Any],
+        conversation_id: str,
+        source_message_id: str,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        existing = await self.get_mcp_remote_task_binding(
+            owner_user_id, task_id, safe_remote_task_ref
+        )
+        if existing is None:
+            return None
+        node = await self.get_task_node(existing.node_id)
+        if node is None or node.status not in {
+            NodeStatus.WAITING_FOR_DEPENDENCY,
+            NodeStatus.WAITING_FOR_INPUT,
+        }:
+            return None
+        transitioned = await self.compare_and_set_task_node(
+            replace(node, status=NodeStatus.WAITING_FOR_INPUT),
+            expected_from_status=node.status,
+        )
+        if transitioned is None:
+            return None
+        binding = await self._run(
+            lambda state, collab: state.pause_mcp_remote_task_for_input(
+                owner_user_id,
+                task_id,
+                safe_remote_task_ref,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                input_requests=input_requests,
+                conversation_id=conversation_id,
+                source_message_id=source_message_id,
+                updated_at=updated_at,
+            )
+        )
+        return binding
+
+    async def begin_mcp_remote_task_control_delivery(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.begin_mcp_remote_task_control_delivery(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                lease_expires_at=lease_expires_at,
+                updated_at=updated_at,
+            )
+        )
+
+    async def enqueue_mcp_remote_task_control(
+        self,
+        answer: InterruptAnswer,
+        *,
+        action: str,
+        input_responses: Mapping[str, Any],
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        interrupt = await self.get_interrupt(answer.interrupt_id)
+        if interrupt is None or interrupt.reason_code != "mcp_remote_task_input_required":
+            return None
+        task = await self.get_task(interrupt.task_id)
+        if task is None:
+            return None
+        conversation = await self.get_conversation(task.conversation_id)
+        safe_ref = str(interrupt.required_fields.get("safe_remote_task_ref") or "").strip()
+        if conversation is None or not safe_ref:
+            return None
+        binding = await self.get_mcp_remote_task_binding(
+            conversation.username, task.task_id, safe_ref
+        )
+        if binding is None:
+            return None
+        expected_outbox = await self._run(
+            lambda state, collab: state.get_mcp_remote_task_outbox(
+                f"mcp-remote-input:{binding.call_ref}"
+            )
+        )
+        if (
+            expected_outbox is None
+            or expected_outbox.kind != "awaiting_input"
+            or expected_outbox.status != "awaiting_input"
+        ):
+            return None
+        node = await self.get_task_node(binding.node_id)
+        if node is None or node.status not in {
+            NodeStatus.WAITING_FOR_INPUT,
+            NodeStatus.WAITING_FOR_DEPENDENCY,
+        }:
+            return None
+        transitioned = await self.compare_and_set_task_node(
+            replace(node, status=NodeStatus.WAITING_FOR_DEPENDENCY),
+            expected_from_status=node.status,
+        )
+        if transitioned is None:
+            return None
+        command = await self._run(
+            lambda state, collab: state.enqueue_mcp_remote_task_control(
+                answer,
+                action=action,
+                input_responses=input_responses,
+                updated_at=updated_at,
+            )
+        )
+        if command is None:
+            raise RuntimeError("mcp_remote_task_control_aggregate_conflict")
+        return command
+
+    async def apply_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        outbox = await self._run(
+            lambda state, collab: state.get_mcp_remote_task_outbox(outbox_id)
+        )
+
+        if (
+            outbox is None
+            or outbox.claim_owner != claim_owner
+            or outbox.claim_token != claim_token
+            or outbox.revision != expected_revision
+            or outbox.kind != "terminal_continuation"
+        ):
+            return None
+        node = await self.get_task_node(outbox.node_id)
+        task = await self.get_task(outbox.task_id)
+        if node is None or task is None:
+            return None
+        call_status = str(outbox.payload.get("call_status") or "unknown")
+        result_ref = str(outbox.payload.get("result_ref") or "").strip()
+        target_node_status = {
+            "completed": NodeStatus.COMPLETED,
+            "failed": NodeStatus.FAILED,
+            "cancelled": NodeStatus.CANCELLED,
+        }.get(call_status, NodeStatus.FAILED)
+        if node.status not in {
+            NodeStatus.WAITING_FOR_DEPENDENCY,
+            NodeStatus.RUNNING,
+            target_node_status,
+        }:
+            return None
+        target_node = replace(
+            node,
+            status=target_node_status,
+            output_refs=(result_ref,) if result_ref else node.output_refs,
+            finished_at=node.finished_at or updated_at,
+        )
+        if node.status != target_node_status:
+            saved_node = await self.compare_and_set_task_node(
+                target_node,
+                expected_from_status=node.status,
+            )
+            if saved_node is None:
+                return None
+        if call_status != "completed":
+            target_task_status = (
+                TaskStatus.CANCELLED
+                if call_status == "cancelled"
+                else TaskStatus.FAILED
+            )
+            if task.status not in {
+                TaskStatus.ACCEPTED,
+                TaskStatus.PLANNING,
+                TaskStatus.RUNNING,
+                TaskStatus.CANCELLING,
+                target_task_status,
+            }:
+                return None
+            if task.status != target_task_status:
+                saved_task = await self._transition_mcp_recovery_task_terminal(
+                    task, target_status=target_task_status, updated_at=updated_at
+                )
+                if saved_task is None:
+                    return None
+        return await self._run(
+            lambda state, collab: state.apply_mcp_remote_task_continuation(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                updated_at=updated_at,
+            )
+        )
+
+    async def get_mcp_remote_task_outbox(
+        self, outbox_id: str
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_remote_task_outbox(outbox_id)
+        )
+
+    async def complete_mcp_remote_task_outbox(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        completed_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.complete_mcp_remote_task_outbox(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                completed_at=completed_at,
+            )
+        )
+
+    async def admit_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        admitted_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.admit_mcp_remote_task_continuation(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                admitted_at=admitted_at,
+            )
+        )
+
+    async def mark_mcp_remote_task_continuation_dispatched(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        dispatched_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.mark_mcp_remote_task_continuation_dispatched(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                dispatched_at=dispatched_at,
+            )
+        )
+
+    async def claim_mcp_remote_task_continuations(
+        self,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[MCPRemoteTaskOutbox]:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_remote_task_continuations(
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                now=now,
+                lease_expires_at=lease_expires_at,
+                limit=limit,
+            )
+        )
+
+    async def begin_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        started_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.begin_mcp_remote_task_continuation(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                started_at=started_at,
+            )
+        )
+
+    async def abandon_expired_mcp_remote_task_continuations(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[MCPRemoteTaskOutbox]:
+        return await self._run(
+            lambda state, collab: state.abandon_expired_mcp_remote_task_continuations(
+                now=now, limit=limit
+            )
+        )
+
+    async def complete_abandoned_mcp_remote_task_continuation(
+        self, outbox_id: str, *, expected_revision: int, completed_at: datetime
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.complete_abandoned_mcp_remote_task_continuation(
+                outbox_id,
+                expected_revision=expected_revision,
+                completed_at=completed_at,
+            )
+        )
+
+    async def renew_mcp_remote_task_continuation(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        lease_expires_at: datetime,
+        node_ids: tuple[str, ...] | None = None,
+        updated_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        return await self._run(
+            lambda state, collab: state.renew_mcp_remote_task_continuation(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                lease_expires_at=lease_expires_at,
+                node_ids=node_ids,
+                updated_at=updated_at,
+            )
+        )
+
+    async def complete_mcp_remote_task_control(
+        self,
+        outbox_id: str,
+        *,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        outcome: str,
+        completed_at: datetime,
+    ) -> MCPRemoteTaskOutbox | None:
+        outbox = await self._run(
+            lambda state, collab: state.get_mcp_remote_task_outbox(outbox_id)
+        )
+        if (
+            outbox is None
+            or outbox.claim_owner != claim_owner
+            or outbox.claim_token != claim_token
+            or outbox.revision != expected_revision
+        ):
+            return None
+        terminal = outcome == "ambiguous" or outbox.kind == "control_cancel"
+        if terminal:
+            node = await self.get_task_node(outbox.node_id)
+            task = await self.get_task(outbox.task_id)
+            if node is None or task is None:
+                return None
+            cancelled = outcome == "delivered" and outbox.kind == "control_cancel"
+            node_status = NodeStatus.CANCELLED if cancelled else NodeStatus.FAILED
+            task_status = TaskStatus.CANCELLED if cancelled else TaskStatus.FAILED
+            if node.status not in {NodeStatus.WAITING_FOR_DEPENDENCY, node_status}:
+                return None
+            if node.status != node_status:
+                saved_node = await self.compare_and_set_task_node(
+                    replace(
+                        node,
+                        status=node_status,
+                        finished_at=node.finished_at or completed_at,
+                    ),
+                    expected_from_status=NodeStatus.WAITING_FOR_DEPENDENCY,
+                )
+                if saved_node is None:
+                    return None
+            if task.status not in {
+                TaskStatus.ACCEPTED,
+                TaskStatus.PLANNING,
+                TaskStatus.RUNNING,
+                TaskStatus.CANCELLING,
+                task_status,
+            }:
+                return None
+            if task.status != task_status:
+                saved_task = await self._transition_mcp_recovery_task_terminal(
+                    task, target_status=task_status, updated_at=completed_at
+                )
+                if saved_task is None:
+                    return None
+        return await self._run(
+            lambda state, collab: state.complete_mcp_remote_task_control(
+                outbox_id,
+                claim_owner=claim_owner,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+                outcome=outcome,
+                completed_at=completed_at,
+            )
+        )
+
+    async def _transition_mcp_recovery_task_terminal(
+        self,
+        task: Task,
+        *,
+        target_status: TaskStatus,
+        updated_at: datetime,
+    ) -> Task | None:
+        if target_status != TaskStatus.CANCELLED:
+            return await self.compare_and_set_task(
+                replace(task, status=target_status, updated_at=updated_at),
+                expected_from_status=task.status,
+            )
+        current = task
+        if current.status != TaskStatus.CANCELLING:
+            current = await self.compare_and_set_task(
+                replace(
+                    current,
+                    status=TaskStatus.CANCELLING,
+                    cancel_requested_at=current.cancel_requested_at or updated_at,
+                    updated_at=updated_at,
+                ),
+                expected_from_status=current.status,
+            )
+            if current is None:
+                return None
+        return await self.compare_and_set_task(
+            replace(current, status=TaskStatus.CANCELLED, updated_at=updated_at),
+            expected_from_status=TaskStatus.CANCELLING,
         )
 
     async def delete_mcp_remote_task_binding(
@@ -3996,6 +8237,238 @@ class SQLiteStorage(StoragePort):
             lambda state, collab: state.delete_expired_mcp_audit_events(now=now, limit=limit)
         )
 
+    async def ensure_mcp_rollout_gate_scope(
+        self, scope: MCPRolloutGateScope
+    ) -> MCPRolloutGateScope:
+        return await self._run(
+            lambda state, collab: state.ensure_mcp_rollout_gate_scope(scope)
+        )
+
+    async def append_mcp_rollout_drill_observation(
+        self, observation: MCPRolloutDrillObservation
+    ) -> MCPRolloutDrillObservation:
+        return await self._run(
+            lambda state, collab: state.append_mcp_rollout_drill_observation(
+                observation
+            )
+        )
+
+    async def list_mcp_rollout_drill_observations(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPRolloutDrillObservation]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_rollout_drill_observations(
+                environment_id,
+                deployment_id,
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
+            )
+        )
+
+    async def upsert_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket:
+        return await self._run(
+            lambda state, collab: state.upsert_mcp_rollout_metric_bucket(bucket)
+        )
+
+    async def set_mcp_rollout_metric_bucket(
+        self, bucket: MCPRolloutMetricBucket
+    ) -> MCPRolloutMetricBucket:
+        return await self._run(
+            lambda state, collab: state.set_mcp_rollout_metric_bucket(bucket)
+        )
+
+    async def list_mcp_rollout_metric_buckets(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPRolloutMetricBucket]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_rollout_metric_buckets(
+                environment_id,
+                deployment_id,
+                stage,
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
+            )
+        )
+
+    async def save_mcp_shadow_audit_sample(
+        self, sample: MCPShadowAuditSample
+    ) -> MCPShadowAuditSample:
+        return await self._run(
+            lambda state, collab: state.save_mcp_shadow_audit_sample(sample)
+        )
+
+    async def list_mcp_shadow_audit_samples(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+    ) -> list[MCPShadowAuditSample]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_shadow_audit_samples(
+                environment_id,
+                deployment_id,
+                stage,
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
+            )
+        )
+
+    async def produce_mcp_shadow_evidence_snapshot(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        window_started_at: datetime,
+        window_ended_at: datetime,
+        builder: Callable[
+            [list[MCPShadowAuditSample], list[MCPRolloutMetricBucket]],
+            MCPRolloutEvidenceSnapshot,
+        ],
+    ) -> MCPRolloutEvidenceSnapshot:
+        def produce(state: SQLiteStateRepository, collab: Any) -> MCPRolloutEvidenceSnapshot:
+            del collab
+            samples = state.list_mcp_shadow_audit_samples(
+                environment_id,
+                deployment_id,
+                "internal_shadow",
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
+            )
+            metrics = state.list_mcp_rollout_metric_buckets(
+                environment_id,
+                deployment_id,
+                "internal_shadow",
+                window_started_at=window_started_at,
+                window_ended_at=window_ended_at,
+            )
+            return state.append_mcp_rollout_evidence_snapshot(builder(samples, metrics))
+
+        return await self._run(produce)
+
+    async def delete_expired_mcp_shadow_audit_samples(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int:
+        return await self._run(
+            lambda state, collab: state.delete_expired_mcp_shadow_audit_samples(
+                now=now, limit=limit
+            )
+        )
+
+    async def append_mcp_rollout_evidence_snapshot(
+        self, snapshot: MCPRolloutEvidenceSnapshot
+    ) -> MCPRolloutEvidenceSnapshot:
+        return await self._run(
+            lambda state, collab: state.append_mcp_rollout_evidence_snapshot(snapshot)
+        )
+
+    async def get_mcp_rollout_evidence_snapshot(
+        self, evidence_id: str
+    ) -> MCPRolloutEvidenceSnapshot | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_rollout_evidence_snapshot(evidence_id)
+        )
+
+    async def list_mcp_rollout_evidence_snapshots(
+        self, environment_id: str, deployment_id: str, stage: str
+    ) -> list[MCPRolloutEvidenceSnapshot]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_rollout_evidence_snapshots(
+                environment_id, deployment_id, stage
+            )
+        )
+
+    async def append_mcp_rollout_stage_approval(
+        self, approval: MCPRolloutStageApproval
+    ) -> MCPRolloutStageApproval:
+        return await self._run(
+            lambda state, collab: state.append_mcp_rollout_stage_approval(approval)
+        )
+
+    async def activate_mcp_rollout_deployment(
+        self, activation: MCPRolloutDeploymentActivation
+    ) -> MCPRolloutDeploymentActivation:
+        return await self._run(
+            lambda state, collab: state.activate_mcp_rollout_deployment(activation)
+        )
+
+    async def get_mcp_rollout_deployment_activation(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        stage: str,
+        config_fingerprint: str,
+    ) -> MCPRolloutDeploymentActivation | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_rollout_deployment_activation(
+                environment_id,
+                deployment_id,
+                stage,
+                config_fingerprint,
+            )
+        )
+
+    async def append_mcp_rollout_promotion_block(
+        self, block: MCPRolloutPromotionBlock
+    ) -> MCPRolloutPromotionBlock:
+        return await self._run(
+            lambda state, collab: state.append_mcp_rollout_promotion_block(block)
+        )
+
+    async def list_active_mcp_rollout_promotion_blocks(
+        self,
+        environment_id: str,
+        *,
+        rollout_program: str = MCP_ROLLOUT_PROGRAM,
+    ) -> list[MCPRolloutPromotionBlock]:
+        return await self._run(
+            lambda state, collab: state.list_active_mcp_rollout_promotion_blocks(
+                environment_id, rollout_program=rollout_program
+            )
+        )
+
+    async def append_mcp_rollout_block_resolution(
+        self, resolution: MCPRolloutBlockResolution
+    ) -> MCPRolloutBlockResolution:
+        return await self._run(
+            lambda state, collab: state.append_mcp_rollout_block_resolution(resolution)
+        )
+
+    async def save_mcp_rollout_instance_config_lease(
+        self, lease: MCPRolloutInstanceConfigLease
+    ) -> MCPRolloutInstanceConfigLease:
+        return await self._run(
+            lambda state, collab: state.save_mcp_rollout_instance_config_lease(lease)
+        )
+
+    async def list_mcp_rollout_instance_config_leases(
+        self,
+        environment_id: str,
+        deployment_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> list[MCPRolloutInstanceConfigLease]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_rollout_instance_config_leases(
+                environment_id, deployment_id, now=now
+            )
+        )
+
     async def create_or_get_mcp_credential_key_validation(
         self, record: MCPCredentialKeyValidation
     ) -> MCPCredentialKeyValidation:
@@ -4012,7 +8485,10 @@ class SQLiteStorage(StoragePort):
     ) -> object:
         def _sync() -> object:
             with self._session_factory() as session:
-                state_repo = SQLiteStateRepository(session)
+                state_repo = SQLiteStateRepository(
+                    session,
+                    task_authority_mode=self._mcp_task_authority_mode,
+                )
                 collab_repo = SQLiteCollaborationRepository(session)
                 result = callback(state_repo, collab_repo)
                 session.commit()
@@ -4486,64 +8962,321 @@ class SQLiteStorage(StoragePort):
             )
             raise
 
-    async def save_task(self, task: Task) -> Task:
+    async def save_task(
+        self, task: Task, *, expected_from_status: TaskStatus | None = None
+    ) -> Task:
+        if self._task_authority_mode() == "enforce":
+            current = await self.get_task(task.task_id)
+        else:
+            current = await self._run(
+                lambda state, collab: state.get_task(task.task_id)
+            )
+        effective_expected_status = (
+            expected_from_status
+            if expected_from_status is not None
+            else (None if current is None else current.status)
+        )
+        if self._mcp_task_authority_mode == "enforce" and task.mcp_execution_mode is None:
+            if (
+                current is not None
+                and current.status in _TERMINAL_TASK_STATUSES
+                and task == current
+            ):
+                return current
+            raise ValueError(
+                "mcp_task_route_assignment_migration_required: enforce authority requires a canonical assignment; terminal null history is read-only"
+            )
+        task_record = _task_to_sidecar_record(task)
+        idempotency_key = _task_snapshot_idempotency_key(task_record)
         sidecar_client = self._runtime_sidecar_client_for(
             component="runtime_store",
             operation_name="task_submit",
             unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
         )
         if sidecar_client is not None:
             response = await _resolve_runtime_sidecar_call(
                 sidecar_client.submit_task(
                     task_id=task.task_id,
                     conversation_id=task.conversation_id,
-                    idempotency_key=task.task_id,
+                    idempotency_key=idempotency_key,
+                    task=task_record,
+                    expected_from_status=(
+                        None
+                        if effective_expected_status is None
+                        else str(effective_expected_status)
+                    ),
                 )
             )
-            _consume_runtime_sidecar_response("task_submit", response)
-            return task
-        saved = await self._run(lambda state, collab: state.save_task(task))
+            envelope = _consume_runtime_sidecar_response("task_submit", response)
+            if envelope.get("task_id") != task.task_id:
+                _raise_task_snapshot_response_invalid("task_submit top-level task_id differs from request")
+            response_task = envelope.get("task")
+            if not isinstance(response_task, Mapping):
+                _raise_task_snapshot_response_invalid("task_submit response omitted the Task snapshot")
+            saved = _validated_task_from_sidecar_record(response_task)
+            if saved != task:
+                _raise_task_snapshot_response_invalid("task_submit returned a different Task snapshot")
+            return saved
+        if expected_from_status is None:
+            saved = await self._run(lambda state, collab: state.save_task(task))
+        else:
+            saved = await self._run(
+                lambda state, collab: state.compare_and_set_task(
+                    task, expected_from_status=expected_from_status
+                )
+            )
+            if saved is None:
+                raise RuntimeError(
+                    "runtime_store_idempotency_conflict: expected Task status is stale"
+                )
         await record_runtime_sidecar_shadow_write(
             component="runtime_store",
             operation_name="task_submit",
             runtime_sidecar_client=self._runtime_sidecar_client,
             shadow_sink=self._runtime_sidecar_shadow_sink,
             input_payload={
-                "conversation_id": task.conversation_id,
-                "task_id": task.task_id,
+                "task": task_record,
             },
-            legacy_output={
-                "task_id": saved.task_id,
-            },
+            legacy_output={"task": _task_to_sidecar_record(saved)},
             rust_call=lambda: self._runtime_sidecar_client.submit_task(
                 task_id=task.task_id,
                 conversation_id=task.conversation_id,
-                idempotency_key=task.task_id,
+                idempotency_key=idempotency_key,
+                task=task_record,
+                expected_from_status=(
+                    None
+                    if effective_expected_status is None
+                    else str(effective_expected_status)
+                ),
             ),
-            rust_output=lambda envelope: {
-                "task_id": str(envelope.get("task_id", "")),
-            },
+            rust_output=lambda envelope: {"task": envelope.get("task")},
+            mode=self._task_authority_mode(),
         )
         return saved
 
+    async def compare_and_set_task(
+        self, task: Task, *, expected_from_status: TaskStatus
+    ) -> Task | None:
+        if self._mcp_task_authority_mode == "enforce" and task.mcp_execution_mode is None:
+            current = await self.get_task(task.task_id)
+            if (
+                current is not None
+                and current.status in _TERMINAL_TASK_STATUSES
+                and task == current
+            ):
+                return current
+            raise ValueError(
+                "mcp_task_route_assignment_migration_required: enforce authority requires a canonical assignment; terminal null history is read-only"
+            )
+        task_record = _task_to_sidecar_record(task)
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_submit",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            try:
+                envelope = _consume_runtime_sidecar_response(
+                    "task_submit",
+                    await _resolve_runtime_sidecar_call(
+                        sidecar_client.submit_task(
+                            task_id=task.task_id,
+                            conversation_id=task.conversation_id,
+                            idempotency_key=_task_snapshot_idempotency_key(task_record),
+                            task=task_record,
+                            expected_from_status=str(expected_from_status),
+                        )
+                    ),
+                )
+            except RuntimeError as exc:
+                if str(exc).startswith("runtime_store_idempotency_conflict:"):
+                    return None
+                raise
+            if envelope.get("task_id") != task.task_id:
+                _raise_task_snapshot_response_invalid(
+                    "task_submit top-level task_id differs from request"
+                )
+            saved = _validated_task_from_sidecar_record(envelope.get("task"))
+            if saved != task:
+                _raise_task_snapshot_response_invalid(
+                    "task_submit returned a different Task snapshot"
+                )
+            return saved
+        saved = await self._run(
+            lambda state, collab: state.compare_and_set_task(
+                task, expected_from_status=expected_from_status
+            )
+        )
+        if saved is not None:
+            await record_runtime_sidecar_shadow_write(
+                component="runtime_store",
+                operation_name="task_submit",
+                runtime_sidecar_client=self._runtime_sidecar_client,
+                shadow_sink=self._runtime_sidecar_shadow_sink,
+                input_payload={
+                    "task": task_record,
+                    "expected_from_status": str(expected_from_status),
+                },
+                legacy_output={"task": _task_to_sidecar_record(saved)},
+                rust_call=lambda: self._runtime_sidecar_client.submit_task(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    idempotency_key=_task_snapshot_idempotency_key(task_record),
+                    task=task_record,
+                    expected_from_status=str(expected_from_status),
+                ),
+                rust_output=lambda envelope: {"task": envelope.get("task")},
+                mode=self._task_authority_mode(),
+            )
+        return saved
+
     async def get_task(self, task_id: str) -> Task | None:
-        return await self._run(lambda state, collab: state.get_task(task_id))
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_get",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(sidecar_client.get_task(task_id=task_id))
+            envelope = _consume_runtime_sidecar_response("task_get", response)
+            if not envelope["found"]:
+                return None
+            loaded = _validated_task_from_sidecar_record(envelope["task"])
+            if loaded.task_id != task_id:
+                _raise_task_snapshot_response_invalid("task_get Task snapshot differs from requested task_id")
+            return loaded
+
+        loaded = await self._run(lambda state, collab: state.get_task(task_id))
+        legacy_output = _task_get_shadow_payload(loaded)
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="task_get",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={"task_id": task_id},
+            legacy_output=legacy_output,
+            rust_call=lambda: self._runtime_sidecar_client.get_task(task_id=task_id),
+            rust_output=lambda envelope: {
+                "found": bool(envelope["found"]),
+                "task": envelope.get("task"),
+            },
+            mode=self._task_authority_mode(),
+        )
+        return loaded
 
     async def get_active_task_for_conversation(self, conversation_id: str) -> Task | None:
-        return await self._run(lambda state, collab: state.get_active_task_for_conversation(conversation_id))
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_get_active_for_conversation",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                sidecar_client.get_active_task_for_conversation(conversation_id=conversation_id)
+            )
+            envelope = _consume_runtime_sidecar_response("task_get_active_for_conversation", response)
+            if not envelope["found"]:
+                return None
+            loaded = _validated_task_from_sidecar_record(envelope["task"])
+            if loaded.conversation_id != conversation_id:
+                _raise_task_snapshot_response_invalid(
+                    "task_get_active_for_conversation Task snapshot differs from requested conversation_id"
+                )
+            return loaded
+
+        loaded = await self._run(lambda state, collab: state.get_active_task_for_conversation(conversation_id))
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="task_get_active_for_conversation",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={"conversation_id": conversation_id},
+            legacy_output=_task_get_shadow_payload(loaded),
+            rust_call=lambda: self._runtime_sidecar_client.get_active_task_for_conversation(
+                conversation_id=conversation_id
+            ),
+            rust_output=lambda envelope: {
+                "found": bool(envelope["found"]),
+                "task": envelope.get("task"),
+            },
+            mode=self._task_authority_mode(),
+        )
+        return loaded
 
     async def list_tasks_for_conversation(
         self,
         conversation_id: str,
         statuses: Iterable[TaskStatus] | None = None,
     ) -> list[Task]:
-        return await self._run(lambda state, collab: state.list_tasks_for_conversation(conversation_id, statuses=statuses))
+        status_values = None if statuses is None else tuple(statuses)
+        status_strings = () if status_values is None else tuple(sorted(str(status) for status in status_values))
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_list_for_conversation",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            response = await _resolve_runtime_sidecar_call(
+                sidecar_client.list_tasks_for_conversation(
+                    conversation_id=conversation_id,
+                    statuses=status_strings,
+                )
+            )
+            envelope = _consume_runtime_sidecar_response("task_list_for_conversation", response)
+            tasks = [_validated_task_from_sidecar_record(record) for record in envelope["tasks"]]
+            if any(task.conversation_id != conversation_id for task in tasks):
+                _raise_task_snapshot_response_invalid(
+                    "task_list_for_conversation contains a different conversation_id"
+                )
+            return tasks
 
-    async def save_task_node(self, node: TaskNode) -> TaskNode:
+        loaded = await self._run(
+            lambda state, collab: state.list_tasks_for_conversation(
+                conversation_id,
+                statuses=status_values,
+            )
+        )
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="task_list_for_conversation",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={"conversation_id": conversation_id, "statuses": list(status_strings)},
+            legacy_output={"tasks": [_task_to_sidecar_record(task) for task in loaded]},
+            rust_call=lambda: self._runtime_sidecar_client.list_tasks_for_conversation(
+                conversation_id=conversation_id,
+                statuses=status_strings,
+            ),
+            rust_output=lambda envelope: {"tasks": envelope["tasks"]},
+            mode=self._task_authority_mode(),
+        )
+        return loaded
+
+    async def save_task_node(
+        self, node: TaskNode, *, expected_from_status: NodeStatus | None = None
+    ) -> TaskNode:
+        if self._task_authority_mode() == "enforce":
+            current = await self.get_task_node(node.node_id)
+        else:
+            current = await self._run(
+                lambda state, collab: state.get_task_node(node.node_id)
+            )
+        effective_expected_status = (
+            expected_from_status
+            if expected_from_status is not None
+            else (None if current is None else current.status)
+        )
+        node_record = _task_node_to_sidecar_record(node)
         sidecar_client = self._runtime_sidecar_client_for(
             component="runtime_store",
             operation_name="node_state_transition",
             unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
         )
         if sidecar_client is not None:
             response = await _resolve_runtime_sidecar_call(
@@ -4551,12 +9284,40 @@ class SQLiteStorage(StoragePort):
                     task_id=node.task_id,
                     node_id=node.node_id,
                     to_status=str(node.status),
-                    idempotency_key=_runtime_sidecar_idempotency_key(node.node_id, str(node.status)),
+                    expected_from_status=(
+                        ""
+                        if effective_expected_status is None
+                        else str(effective_expected_status)
+                    ),
+                    idempotency_key=_task_node_snapshot_idempotency_key(node_record),
+                    node=node_record,
                 )
             )
-            _consume_runtime_sidecar_response("node_state_transition", response)
-            return node
-        saved = await self._run(lambda state, collab: state.save_task_node(node))
+            envelope = _consume_runtime_sidecar_response("node_state_transition", response)
+            if envelope.get("node_id") != node.node_id:
+                _raise_task_snapshot_response_invalid(
+                    "node_state_transition top-level node_id differs from request"
+                )
+            if envelope.get("status") != str(node.status):
+                _raise_task_snapshot_response_invalid(
+                    "node_state_transition top-level status differs from request"
+                )
+            saved = _validated_task_node_from_sidecar_record(envelope.get("node"))
+            if saved != node:
+                _raise_task_snapshot_response_invalid("node_state_transition returned a different TaskNode snapshot")
+            return saved
+        if expected_from_status is None:
+            saved = await self._run(lambda state, collab: state.save_task_node(node))
+        else:
+            saved = await self._run(
+                lambda state, collab: state.compare_and_set_task_node(
+                    node, expected_from_status=expected_from_status
+                )
+            )
+            if saved is None:
+                raise RuntimeError(
+                    "runtime_store_idempotency_conflict: expected TaskNode status is stale"
+                )
         await record_runtime_sidecar_shadow_write(
             component="runtime_store",
             operation_name="node_state_transition",
@@ -4566,6 +9327,7 @@ class SQLiteStorage(StoragePort):
                 "node_id": node.node_id,
                 "status": str(node.status),
                 "task_id": node.task_id,
+                "node": node_record,
             },
             legacy_output={
                 "node_id": saved.node_id,
@@ -4575,20 +9337,161 @@ class SQLiteStorage(StoragePort):
                 task_id=node.task_id,
                 node_id=node.node_id,
                 to_status=str(node.status),
-                idempotency_key=_runtime_sidecar_idempotency_key(node.node_id, str(node.status)),
+                expected_from_status=(
+                    ""
+                    if effective_expected_status is None
+                    else str(effective_expected_status)
+                ),
+                idempotency_key=_task_node_snapshot_idempotency_key(node_record),
+                node=node_record,
             ),
             rust_output=lambda envelope: {
                 "node_id": str(envelope.get("node_id", "")),
                 "status": str(envelope.get("status", "")),
+                "node": envelope.get("node"),
             },
+            mode=self._task_authority_mode(),
         )
         return saved
 
+    async def compare_and_set_task_node(
+        self, node: TaskNode, *, expected_from_status: NodeStatus
+    ) -> TaskNode | None:
+        node_record = _task_node_to_sidecar_record(node)
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="node_state_transition",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            try:
+                envelope = _consume_runtime_sidecar_response(
+                    "node_state_transition",
+                    await _resolve_runtime_sidecar_call(
+                        sidecar_client.transition_node(
+                            task_id=node.task_id,
+                            node_id=node.node_id,
+                            to_status=str(node.status),
+                            expected_from_status=str(expected_from_status),
+                            idempotency_key=_task_node_snapshot_idempotency_key(
+                                node_record
+                            ),
+                            node=node_record,
+                        )
+                    ),
+                )
+            except RuntimeError as exc:
+                if str(exc).startswith("runtime_store_idempotency_conflict:"):
+                    return None
+                raise
+            if envelope.get("node_id") != node.node_id:
+                _raise_task_snapshot_response_invalid(
+                    "node_state_transition top-level node_id differs from request"
+                )
+            saved = _validated_task_node_from_sidecar_record(envelope.get("node"))
+            if saved != node:
+                _raise_task_snapshot_response_invalid(
+                    "node_state_transition returned a different TaskNode snapshot"
+                )
+            return saved
+        saved = await self._run(
+            lambda state, collab: state.compare_and_set_task_node(
+                node, expected_from_status=expected_from_status
+            )
+        )
+        if saved is not None:
+            await record_runtime_sidecar_shadow_write(
+                component="runtime_store",
+                operation_name="node_state_transition",
+                runtime_sidecar_client=self._runtime_sidecar_client,
+                shadow_sink=self._runtime_sidecar_shadow_sink,
+                input_payload={
+                    "node": node_record,
+                    "expected_from_status": str(expected_from_status),
+                },
+                legacy_output={"node": _task_node_to_sidecar_record(saved)},
+                rust_call=lambda: self._runtime_sidecar_client.transition_node(
+                    task_id=node.task_id,
+                    node_id=node.node_id,
+                    to_status=str(node.status),
+                    expected_from_status=str(expected_from_status),
+                    idempotency_key=_task_node_snapshot_idempotency_key(node_record),
+                    node=node_record,
+                ),
+                rust_output=lambda envelope: {"node": envelope.get("node")},
+                mode=self._task_authority_mode(),
+            )
+        return saved
+
     async def get_task_node(self, node_id: str) -> TaskNode | None:
-        return await self._run(lambda state, collab: state.get_task_node(node_id))
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_node_get",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            envelope = _consume_runtime_sidecar_response(
+                "task_node_get",
+                await _resolve_runtime_sidecar_call(sidecar_client.get_task_node(node_id=node_id)),
+            )
+            if not envelope["found"]:
+                return None
+            loaded = _validated_task_node_from_sidecar_record(envelope["node"])
+            if loaded.node_id != node_id:
+                _raise_task_snapshot_response_invalid(
+                    "task_node_get TaskNode snapshot differs from requested node_id"
+                )
+            return loaded
+        loaded = await self._run(lambda state, collab: state.get_task_node(node_id))
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="task_node_get",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={"node_id": node_id},
+            legacy_output={"found": loaded is not None, "node": None if loaded is None else _task_node_to_sidecar_record(loaded)},
+            rust_call=lambda: self._runtime_sidecar_client.get_task_node(node_id=node_id),
+            rust_output=lambda envelope: {"found": envelope["found"], "node": envelope.get("node")},
+            mode=self._task_authority_mode(),
+        )
+        return loaded
 
     async def list_task_nodes_for_task(self, task_id: str) -> list[TaskNode]:
-        return await self._run(lambda state, collab: state.list_task_nodes_for_task(task_id))
+        sidecar_client = self._runtime_sidecar_client_for(
+            component="runtime_store",
+            operation_name="task_node_list",
+            unavailable_error_code="runtime_store_unavailable",
+            task_authority=True,
+        )
+        if sidecar_client is not None:
+            envelope = _consume_runtime_sidecar_response(
+                "task_node_list",
+                await _resolve_runtime_sidecar_call(sidecar_client.list_task_nodes_for_task(task_id=task_id)),
+            )
+            nodes = [
+                _validated_task_node_from_sidecar_record(node)
+                for node in envelope["nodes"]
+            ]
+            if any(node.task_id != task_id for node in nodes):
+                _raise_task_snapshot_response_invalid(
+                    "task_node_list contains a different task_id"
+                )
+            return nodes
+        loaded = await self._run(lambda state, collab: state.list_task_nodes_for_task(task_id))
+        await record_runtime_sidecar_shadow_write(
+            component="runtime_store",
+            operation_name="task_node_list",
+            runtime_sidecar_client=self._runtime_sidecar_client,
+            shadow_sink=self._runtime_sidecar_shadow_sink,
+            input_payload={"task_id": task_id},
+            legacy_output={"nodes": [_task_node_to_sidecar_record(node) for node in loaded]},
+            rust_call=lambda: self._runtime_sidecar_client.list_task_nodes_for_task(task_id=task_id),
+            rust_output=lambda envelope: {"nodes": envelope["nodes"]},
+            mode=self._task_authority_mode(),
+        )
+        return loaded
 
     async def save_task_edge(self, task_id: str, edge: TaskEdge) -> TaskEdge:
         sidecar_client = self._runtime_sidecar_client_for(
@@ -4921,10 +9824,33 @@ class SQLiteStorage(StoragePort):
         component: str,
         operation_name: str,
         unavailable_error_code: str,
+        task_authority: bool = False,
     ) -> Any | None:
-        if runtime_mode_for_component(component) != "enforce":
+        mode = (
+            self._task_authority_mode()
+            if task_authority
+            else runtime_mode_for_component(component)
+        )
+        if mode != "enforce":
             return None
         if self._runtime_sidecar_client is None:
+            if task_authority and self._mcp_task_authority_mode is not None:
+                raise RuntimeError(
+                    "runtime_store_unavailable: MCP Task enforce authority is active "
+                    "but no Rust runtime sidecar client is configured"
+                )
+            if operation_name in {
+                "task_get",
+                "task_list_for_conversation",
+                "task_get_active_for_conversation",
+                "task_node_get",
+                "task_node_list",
+            }:
+                error_code = runtime_error_policy(unavailable_error_code)["code"]
+                raise RuntimeError(
+                    f"{error_code}: Rust runtime sidecar enforce mode is active "
+                    "but no Rust runtime sidecar client is configured"
+                )
             ensure_sidecar_write_allowed(
                 component=component,
                 operation_name=operation_name,
@@ -4932,8 +9858,188 @@ class SQLiteStorage(StoragePort):
             )
         return self._runtime_sidecar_client
 
+    def _task_authority_mode(self) -> str:
+        if self._mcp_task_authority_mode is not None:
+            return self._mcp_task_authority_mode
+        return runtime_mode_for_component("runtime_store")
+
+
 def _runtime_sidecar_idempotency_key(*parts: str) -> str:
     return ":".join(parts)
+
+
+def _task_to_sidecar_record(task: Task) -> dict[str, Any]:
+    assignment_fields = _task_mcp_assignment(task)
+    assignment = None
+    if assignment_fields["mcp_execution_mode"] is not None:
+        assignment = {
+            "route_mode": assignment_fields["mcp_rollout_mode"],
+            "real_path": assignment_fields["mcp_execution_mode"],
+            "shadow_path": "user_scoped" if assignment_fields["mcp_shadow_enabled"] else "none",
+            "config_version": assignment_fields["mcp_rollout_config_version"],
+            "reason_code": assignment_fields["mcp_route_reason_code"],
+        }
+    return {
+        "task_id": task.task_id,
+        "conversation_id": task.conversation_id,
+        "root_message_id": task.root_message_id,
+        "status": str(task.status),
+        "routing_mode": str(task.routing_mode),
+        "requested_capability_id": task.requested_capability_id,
+        "root_node_id": task.root_node_id,
+        "summary": task.summary,
+        "cancel_requested_at": _optional_datetime_text(task.cancel_requested_at),
+        "created_at": _optional_datetime_text(task.created_at),
+        "updated_at": _optional_datetime_text(task.updated_at),
+        "assignment": assignment,
+    }
+
+
+def _task_snapshot_idempotency_key(task_record: Mapping[str, Any]) -> str:
+    snapshot = json.dumps(
+        task_record,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _runtime_sidecar_idempotency_key(
+        str(task_record["task_id"]),
+        hashlib.sha256(snapshot).hexdigest(),
+    )
+
+
+def _task_from_sidecar_record(record: Mapping[str, Any]) -> Task:
+    required_strings = ("task_id", "conversation_id", "root_message_id", "status", "routing_mode")
+    if any(not isinstance(record.get(name), str) or not record[name] for name in required_strings):
+        raise ValueError("mcp_task_snapshot_corrupt: required Task fields are missing")
+    assignment_record = record.get("assignment")
+    if assignment_record is None:
+        assignment = _validated_mcp_task_assignment(
+            execution_mode=None,
+            shadow_enabled=None,
+            config_version=None,
+            reason_code=None,
+            rollout_mode=None,
+        )
+    elif isinstance(assignment_record, Mapping):
+        shadow_path = assignment_record.get("shadow_path")
+        if shadow_path not in {"none", "user_scoped"}:
+            raise ValueError("mcp_task_route_assignment_invalid: unsupported shadow path")
+        assignment = _validated_mcp_task_assignment(
+            execution_mode=assignment_record.get("real_path"),
+            shadow_enabled=shadow_path == "user_scoped",
+            config_version=assignment_record.get("config_version"),
+            reason_code=assignment_record.get("reason_code"),
+            rollout_mode=assignment_record.get("route_mode"),
+        )
+    else:
+        raise ValueError("mcp_task_route_assignment_corrupt: sidecar assignment is invalid")
+    return Task(
+        task_id=str(record["task_id"]),
+        conversation_id=str(record["conversation_id"]),
+        root_message_id=str(record["root_message_id"]),
+        status=TaskStatus(str(record["status"])),
+        routing_mode=RoutingMode(str(record["routing_mode"])),
+        requested_capability_id=_optional_task_string(record, "requested_capability_id"),
+        root_node_id=_optional_task_string(record, "root_node_id"),
+        summary=_optional_task_string(record, "summary"),
+        cancel_requested_at=_optional_task_datetime(record, "cancel_requested_at"),
+        created_at=_optional_task_datetime(record, "created_at"),
+        updated_at=_optional_task_datetime(record, "updated_at"),
+        **assignment,
+    )
+
+
+def _validated_task_from_sidecar_record(record: Any) -> Task:
+    if not isinstance(record, Mapping):
+        _raise_task_snapshot_response_invalid("sidecar Task snapshot is not a mapping")
+    try:
+        return _task_from_sidecar_record(record)
+    except (KeyError, TypeError, ValueError) as exc:
+        _raise_task_snapshot_response_invalid(str(exc))
+
+
+def _task_get_shadow_payload(task: Task | None) -> dict[str, Any]:
+    return {
+        "found": task is not None,
+        "task": _task_to_sidecar_record(task) if task is not None else None,
+    }
+
+
+def _task_node_to_sidecar_record(node: TaskNode) -> dict[str, Any]:
+    return {
+        "node_id": node.node_id,
+        "task_id": node.task_id,
+        "capability_id": node.capability_id,
+        "assigned_instance_id": node.assigned_instance_id,
+        "status": str(node.status),
+        "criticality": str(node.criticality),
+        "dependency_type": str(node.dependency_type),
+        "retry_policy": dict(node.retry_policy),
+        "timeout_policy": dict(node.timeout_policy),
+        "resource_class": node.resource_class,
+        "input_refs": list(node.input_refs),
+        "output_refs": list(node.output_refs),
+        "started_at": _optional_datetime_text(node.started_at),
+        "finished_at": _optional_datetime_text(node.finished_at),
+    }
+
+
+def _task_node_snapshot_idempotency_key(record: Mapping[str, Any]) -> str:
+    snapshot = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return _runtime_sidecar_idempotency_key(str(record["node_id"]), hashlib.sha256(snapshot).hexdigest())
+
+
+def _validated_task_node_from_sidecar_record(record: Any) -> TaskNode:
+    if not isinstance(record, Mapping):
+        _raise_task_snapshot_response_invalid("sidecar TaskNode snapshot is not a mapping")
+    try:
+        return TaskNode(
+            node_id=str(record["node_id"]),
+            task_id=str(record["task_id"]),
+            capability_id=str(record["capability_id"]),
+            assigned_instance_id=_optional_task_string(record, "assigned_instance_id"),
+            status=NodeStatus(str(record["status"])),
+            criticality=NodeCriticality(str(record["criticality"])),
+            dependency_type=DependencyType(str(record["dependency_type"])),
+            retry_policy=dict(record["retry_policy"]),
+            timeout_policy=dict(record["timeout_policy"]),
+            resource_class=_optional_task_string(record, "resource_class"),
+            input_refs=tuple(str(value) for value in record["input_refs"]),
+            output_refs=tuple(str(value) for value in record["output_refs"]),
+            started_at=_optional_task_datetime(record, "started_at"),
+            finished_at=_optional_task_datetime(record, "finished_at"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        _raise_task_snapshot_response_invalid(str(exc))
+
+
+def _optional_datetime_text(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _optional_task_string(record: Mapping[str, Any], name: str) -> str | None:
+    value = record.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"mcp_task_snapshot_corrupt: {name} must be a string or null")
+    return value
+
+
+def _optional_task_datetime(record: Mapping[str, Any], name: str) -> datetime | None:
+    value = _optional_task_string(record, name)
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"mcp_task_snapshot_corrupt: {name} is not ISO-8601") from exc
+
+
+def _raise_task_snapshot_response_invalid(message: str) -> NoReturn:
+    error_code = runtime_error_policy("runtime_store_response_invalid")["code"]
+    raise RuntimeError(f"{error_code}: {message}")
 
 
 def _task_edge_from_sidecar_record(record: Mapping[str, Any]) -> TaskEdge:
@@ -5019,7 +10125,7 @@ def _artifact_shadow_payload_from_record(record: Mapping[str, Any]) -> dict[str,
     }
 
 
-def _consume_runtime_sidecar_response(operation_name: str, response: Any) -> None:
+def _consume_runtime_sidecar_response(operation_name: str, response: Any) -> dict[str, Any]:
     envelope = validate_runtime_sidecar_response(
         operation_name,
         normalize_runtime_sidecar_response(operation_name, response),
@@ -5027,6 +10133,7 @@ def _consume_runtime_sidecar_response(operation_name: str, response: Any) -> Non
     error = envelope.get("error")
     if isinstance(error, dict):
         raise RuntimeError(f"{error['code']}: {error['message']}")
+    return envelope
 
 
 async def _resolve_runtime_sidecar_call(result: Any) -> Any:

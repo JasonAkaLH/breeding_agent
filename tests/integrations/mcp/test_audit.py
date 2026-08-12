@@ -31,7 +31,43 @@ class _Storage:
         return self.deleted_batches.pop(0)
 
 
+class _SafetyDetector:
+    def __init__(self) -> None:
+        self.violations = []
+        self.attestations = []
+
+    async def report_violation(self, **kwargs) -> None:
+        self.violations.append(kwargs)
+
+    def attest_interval(self, started_at, ended_at) -> None:
+        self.attestations.append((started_at, ended_at))
+
+
 class MCPAuditServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_secret_boundary_blocks_nested_secret_and_records_red_line(
+        self,
+    ) -> None:
+        storage = _Storage()
+        detector = _SafetyDetector()
+        service = MCPAuditService(
+            storage=storage,
+            now_fn=lambda: NOW,
+            safety_detector=detector,
+        )
+
+        with self.assertRaisesRegex(ValueError, "prohibited secret field"):
+            await service.record(
+                owner_user_id="alice",
+                event_type="mcp.tool_call_started",
+                safe_payload={"arguments": {"api_key": "not-persisted"}},
+            )
+
+        self.assertEqual(storage.events, [])
+        self.assertEqual(
+            detector.violations,
+            [{"reason_code": "secret_payload_rejected", "observed_at": NOW}],
+        )
+
     async def test_observer_persists_only_allowlisted_safe_fields_for_thirty_days(self) -> None:
         storage = _Storage()
         service = MCPAuditService(storage=storage, now_fn=lambda: NOW)
@@ -98,6 +134,79 @@ class MCPAuditServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.owner_user_id, "alice")
         self.assertEqual(saved.server_id, "server-a")
         self.assertEqual(saved.safe_payload, {"status": "accepted"})
+
+    async def test_metric_gap_preserves_only_closed_safe_diagnostics(self) -> None:
+        storage = _Storage()
+        service = MCPAuditService(storage=storage, now_fn=lambda: NOW)
+
+        await service.observe_event(
+            EventRecord(
+                event_id="metric-gap-a",
+                conversation_id="conv-a",
+                task_id="task-a",
+                node_id="node-a",
+                event_type="mcp.rollout_metric_gap",
+                payload={
+                    "metric_family": "remote_task_terminal",
+                    "gap_reason": "recording_failed",
+                    "username": "alice",
+                    "exception": "token=secret",
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+                created_at=NOW,
+            )
+        )
+
+        self.assertEqual(
+            storage.events[0].safe_payload,
+            {
+                "gap_reason": "recording_failed",
+                "metric_family": "remote_task_terminal",
+            },
+        )
+
+    async def test_rollout_events_use_a_dedicated_low_cardinality_allowlist(self) -> None:
+        storage = _Storage()
+        service = MCPAuditService(storage=storage, now_fn=lambda: NOW)
+
+        await service.observe_event(
+            EventRecord(
+                event_id="rollout-event-a",
+                conversation_id="conv-a",
+                task_id="task-a",
+                node_id="node-a",
+                event_type="mcp.rollout.route_assigned",
+                payload={
+                    "safe_task_ref": "task-hmac-a",
+                    "safe_owner_ref": "owner-hmac-a",
+                    "config_version": "rollout-v1",
+                    "rollout_mode": "enforce",
+                    "real_path": "user_scoped",
+                    "shadow_enabled": False,
+                    "reason_code": "stable_hash_selected",
+                    "server_display_name": "must-not-cross-rollout-boundary",
+                    "username": "alice",
+                    "endpoint_url": "https://secret.invalid/mcp",
+                    "schema": {"secret": True},
+                    "result": {"private": True},
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+                created_at=NOW,
+            )
+        )
+
+        self.assertEqual(
+            storage.events[0].safe_payload,
+            {
+                "config_version": "rollout-v1",
+                "real_path": "user_scoped",
+                "reason_code": "stable_hash_selected",
+                "rollout_mode": "enforce",
+                "safe_owner_ref": "owner-hmac-a",
+                "safe_task_ref": "task-hmac-a",
+                "shadow_enabled": False,
+            },
+        )
 
     async def test_cleanup_returns_deleted_count(self) -> None:
         storage = _Storage()

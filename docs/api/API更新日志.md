@@ -8,6 +8,10 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-13 增量：MCP 灰度不可用任务事件
+
+任务 SSE 新增加法兼容事件 `mcp.runtime_unavailable`。当当前灰度、回滚或 assembly 配置无法为带用户自定义 MCP Server 的新任务分配安全单路径时，后端持久化并推送该事件；payload 只含 `status=unavailable` 与闭集 `reason_code`，不含用户名、Server endpoint、凭据、Tool 参数或结果。客户端应明确展示“当前任务的 MCP 暂不可用”，不得把它解释为无工具、自动切换到 global legacy，或提示重放原调用。任务创建响应与既有 REST schema 不变。
+
 ## 2026-08-12 增量：用户级 MCP 配置 API
 
 新增当前认证用户隔离的 MCP Server 配置端点：`GET/POST /api/v1/mcp/servers`、`GET/PATCH/DELETE /api/v1/mcp/servers/{server_id}` 和 `POST /api/v1/mcp/servers/{server_id}/test`。POST 与手动 test 异步返回 `testing`；安全校验通过但连接/发现失败的配置保留为 `unavailable`；空 Tool List 同样为 `unavailable`。响应只含 `credential_configured`，不返回凭据明文、密文或 Nonce。下文 `main@bd0fd2d` 对 `prod@e7ede32` 的“新增路径：0”是 2026-07-10 历史扫描结论，不包含本次增量。

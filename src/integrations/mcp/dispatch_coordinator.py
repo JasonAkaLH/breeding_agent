@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -19,7 +21,7 @@ from src.capabilities.mcp_dispatch.models import (
 from src.capabilities.mcp_dispatch.selector import MCPSelectorOutputError, MCPToolSelector
 from src.capabilities.mcp_dispatch.server_router import MCPServerRouter, MCPServerRouterOutputError
 from src.core.contracts import CapabilityExecutionError, CapabilityExecutionRequest, StoragePort
-from src.core.enums import EventVisibility, UserMCPHealthStatus
+from src.core.enums import EventVisibility, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import (
     EventRecord,
     Interrupt,
@@ -29,7 +31,22 @@ from src.core.models import (
     UserMCPToolGrant,
 )
 from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
+from src.integrations.mcp.client import MCPRemoteError
 from src.integrations.mcp.gateway_models import MCPCallOutcome, MCPCallOutcomeKind, MCPTaskServerScope
+from src.integrations.mcp.rollout_evidence import (
+    MCPCallKind,
+    MCPMetricAdapter,
+    MCPMetricErrorCategory,
+    MCPMetricExecutionPath,
+    MCPMetricLabels,
+    MCPMetricName,
+    MCPMetricProtocolVersion,
+    MCPMetricResultCategory,
+    MCPMetricRoutingMode,
+    MCPMetricTransport,
+    MCPSafetyRedLine,
+)
+from .safety_detectors import AuthoritativeMCPSafetyDetector
 from src.orchestration.models import UserMCPServerProfile
 
 
@@ -53,6 +70,37 @@ class MCPServerRouterPort(Protocol):
     ): ...
 
 
+class MCPRolloutMetricRecorderPort(Protocol):
+    async def record_count(
+        self,
+        metric_name: MCPMetricName,
+        *,
+        labels: MCPMetricLabels,
+        bucket_started_at: datetime,
+        bucket_ended_at: datetime,
+        value: int = 1,
+    ): ...
+
+    async def record_latency(
+        self,
+        metric_name: MCPMetricName,
+        *,
+        duration_seconds: float,
+        labels: MCPMetricLabels,
+        bucket_started_at: datetime,
+        bucket_ended_at: datetime,
+    ): ...
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDispatchMetricContext:
+    routing_mode: MCPMetricRoutingMode
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.routing_mode, MCPMetricRoutingMode):
+            raise ValueError("MCP dispatch metric routing mode must be closed")
+
+
 @dataclass(slots=True, frozen=True)
 class _Principal:
     username: str
@@ -62,6 +110,12 @@ class _Principal:
 class _ApprovalResolution:
     decision: str | None = None
     interrupt: Interrupt | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _MRTRContinuation:
+    sealed_request_state_ref: str
+    input_responses: Mapping[str, Any]
 
 
 NowFn = Callable[[], datetime]
@@ -85,21 +139,51 @@ class UserMCPDispatchCoordinator:
         server_router: MCPServerRouterPort | MCPServerRouter | None = None,
         now_fn: NowFn | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
+        metric_recorder: MCPRolloutMetricRecorderPort | None = None,
+        metric_context: MCPDispatchMetricContext | None = None,
         max_tool_calls: int = 20,
         max_selector_steps: int = MAX_SELECTOR_STEPS,
+        safety_detectors: Mapping[
+            MCPSafetyRedLine, AuthoritativeMCPSafetyDetector
+        ]
+        | None = None,
     ) -> None:
         if max_tool_calls < 1:
             raise ValueError("max_tool_calls must be positive")
         if max_selector_steps < 1:
             raise ValueError("max_selector_steps must be positive")
+        if (metric_recorder is None) != (metric_context is None):
+            raise ValueError("metric_recorder and metric_context must be provided together")
         self._storage = storage
         self._gateway = gateway
         self._selector = selector
         self._server_router = server_router
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
         self._live_event_recorder = live_event_recorder
+        self._metric_recorder = metric_recorder
+        self._metric_context = metric_context
         self._max_tool_calls = max_tool_calls
         self._max_selector_steps = max_selector_steps
+        self._safety_detectors = dict(safety_detectors or {})
+
+    def configure_safety_detectors(
+        self,
+        detectors: Mapping[MCPSafetyRedLine, AuthoritativeMCPSafetyDetector],
+    ) -> None:
+        self._safety_detectors = dict(detectors)
+
+    def attest_safety_interval(
+        self, bucket_started_at: datetime, bucket_ended_at: datetime
+    ) -> None:
+        for red_line in (
+            MCPSafetyRedLine.DUAL_TOOL_CALL,
+            MCPSafetyRedLine.UNAUTHORIZED_TOOL_CALL,
+            MCPSafetyRedLine.UNKNOWN_RESULT_REPLAY,
+        ):
+            detector = self._safety_detectors.get(red_line)
+            if detector is None:
+                raise RuntimeError("MCP dispatch safety detector is not configured")
+            detector.attest_interval(bucket_started_at, bucket_ended_at)
 
     async def dispatch(
         self,
@@ -128,6 +212,10 @@ class UserMCPDispatchCoordinator:
         events: list[EventRecord] = []
         retained_scope: MCPTaskServerScope | None = None
         retained_server_id: str | None = None
+        try:
+            mrtr_continuation = await self._resolve_mrtr_continuation(request)
+        except _CallReservationError as exc:
+            return self._error(exc.code, "MCP input continuation was rejected safely.")
 
         for selector_step in range(1, self._max_selector_steps + 1):
             scope = (
@@ -158,6 +246,7 @@ class UserMCPDispatchCoordinator:
                     )
                 )
                 opened_now = scope is None
+                discovery_started_at = monotonic()
                 if opened_now:
                     events.append(
                         _event(
@@ -190,17 +279,66 @@ class UserMCPDispatchCoordinator:
                             )
                         )
 
-                    scope = await self._gateway.open_scope(
-                        principal,
-                        request.task_id,
-                        current_server.server_id,
-                        on_queue_entered=on_queue_entered,
-                        on_queue_left=on_queue_left,
+                    try:
+                        scope = await self._gateway.open_scope(
+                            principal,
+                            request.task_id,
+                            current_server.server_id,
+                            on_queue_entered=on_queue_entered,
+                            on_queue_left=on_queue_left,
+                        )
+                        retained_scope = scope
+                        retained_server_id = current_server.server_id
+                    except BaseException as exc:
+                        await self._record_discovery_metric(
+                            request,
+                            server=current_server,
+                            protocol_version=str(
+                                current_server.protocol_preference
+                            ),
+                            duration_seconds=max(
+                                0.0, monotonic() - discovery_started_at
+                            ),
+                            result_category=(
+                                MCPMetricResultCategory.CANCELLED
+                                if isinstance(exc, asyncio.CancelledError)
+                                else MCPMetricResultCategory.FAILED
+                            ),
+                            error_category=_metric_error_category(exc),
+                            events=events,
+                            selector_step=selector_step,
+                        )
+                        raise
+                    try:
+                        catalog = await self._gateway.list_tools(scope)
+                    except BaseException as exc:
+                        await self._record_discovery_metric(
+                            request,
+                            server=current_server,
+                            protocol_version=str(
+                                current_server.protocol_preference
+                            ),
+                            duration_seconds=max(
+                                0.0, monotonic() - discovery_started_at
+                            ),
+                            result_category=(
+                                MCPMetricResultCategory.CANCELLED
+                                if isinstance(exc, asyncio.CancelledError)
+                                else MCPMetricResultCategory.FAILED
+                            ),
+                            error_category=_metric_error_category(exc),
+                            events=events,
+                            selector_step=selector_step,
+                        )
+                        raise
+                    await self._record_discovery_metric(
+                        request,
+                        server=current_server,
+                        protocol_version=catalog.effective_protocol_version,
+                        duration_seconds=max(0.0, monotonic() - discovery_started_at),
+                        events=events,
+                        selector_step=selector_step,
                     )
-                    retained_scope = scope
-                    retained_server_id = current_server.server_id
-                catalog = await self._gateway.list_tools(scope)
-                if opened_now:
                     events.append(
                         _event(
                             request,
@@ -212,6 +350,8 @@ class UserMCPDispatchCoordinator:
                             selector_step,
                         )
                     )
+                else:
+                    catalog = await self._gateway.list_tools(scope)
                 calls = await self._storage.list_mcp_call_records(
                     owner_user_id, request.task_id, branch_id=branch_id
                 )
@@ -301,6 +441,16 @@ class UserMCPDispatchCoordinator:
                     server_security_version=current_server.security_version,
                     input_schema_sha256=descriptor.input_schema_sha256,
                 )
+                if grant is not None:
+                    await self._record_permission_metric(
+                        request,
+                        server=current_server,
+                        protocol_version=catalog.effective_protocol_version,
+                        result_category=MCPMetricResultCategory.SUCCEEDED,
+                        error_category=MCPMetricErrorCategory.NONE,
+                        events=events,
+                        selector_step=selector_step,
+                    )
                 if grant is None:
                     approval = await self._resolve_approval(
                         request,
@@ -313,6 +463,15 @@ class UserMCPDispatchCoordinator:
                         fingerprint=fingerprint,
                     )
                     if approval.interrupt is not None:
+                        await self._record_permission_metric(
+                            request,
+                            server=current_server,
+                            protocol_version=catalog.effective_protocol_version,
+                            result_category=MCPMetricResultCategory.INPUT_REQUIRED,
+                            error_category=MCPMetricErrorCategory.NONE,
+                            events=events,
+                            selector_step=selector_step,
+                        )
                         branch = await self._save_branch_status(branch, "pending_approval")
                         events.append(
                             _event(
@@ -339,6 +498,15 @@ class UserMCPDispatchCoordinator:
                             interrupt=approval.interrupt,
                         )
                     if approval.decision == "deny":
+                        await self._record_permission_metric(
+                            request,
+                            server=current_server,
+                            protocol_version=catalog.effective_protocol_version,
+                            result_category=MCPMetricResultCategory.PERMISSION_DENIED,
+                            error_category=MCPMetricErrorCategory.AUTHORIZATION,
+                            events=events,
+                            selector_step=selector_step,
+                        )
                         # Denials do not consume the remote-call budget. The current
                         # invocation remembers it so the selector cannot loop on it.
                         calls = tuple(calls) + (
@@ -372,6 +540,15 @@ class UserMCPDispatchCoordinator:
                             safe_summary="The requested MCP tool call was denied by the user.",
                             events=events,
                         )
+                    await self._record_permission_metric(
+                        request,
+                        server=current_server,
+                        protocol_version=catalog.effective_protocol_version,
+                        result_category=MCPMetricResultCategory.SUCCEEDED,
+                        error_category=MCPMetricErrorCategory.NONE,
+                        events=events,
+                        selector_step=selector_step,
+                    )
                     if approval.decision == "always_allow":
                         await self._storage.save_user_mcp_tool_grant(
                             UserMCPToolGrant(
@@ -409,7 +586,17 @@ class UserMCPDispatchCoordinator:
                     input_schema_sha256=descriptor.input_schema_sha256,
                     protocol_version=catalog.effective_protocol_version,
                     fingerprint=fingerprint,
+                    mrtr_continuation=mrtr_continuation,
+                    events=events,
+                    selector_step=selector_step,
                 )
+                if mrtr_continuation is not None:
+                    await self._storage.delete_mcp_sealed_state(
+                        owner_user_id,
+                        request.task_id,
+                        mrtr_continuation.sealed_request_state_ref,
+                    )
+                mrtr_continuation = None
                 branch = (
                     await self._storage.get_mcp_branch_record(
                         owner_user_id, request.task_id, branch_id
@@ -433,6 +620,13 @@ class UserMCPDispatchCoordinator:
                     keep_scope = True
                     continue
                 if outcome.kind is MCPCallOutcomeKind.INPUT_REQUIRED:
+                    await self._record_mrtr_round_metric(
+                        request,
+                        server=current_server,
+                        protocol_version=catalog.effective_protocol_version,
+                        events=events,
+                        selector_step=selector_step,
+                    )
                     events.append(
                         _event(
                             request,
@@ -446,6 +640,14 @@ class UserMCPDispatchCoordinator:
                             selector_step,
                         )
                     )
+                    mrtr_interrupt = await self._save_mrtr_interrupt(
+                        request,
+                        conversation_id=conversation_id,
+                        root_message_id=root_message_id,
+                        server=current_server,
+                        tool_name=tool_name,
+                        sealed_request_state_ref=outcome.sealed_request_state_ref,
+                    )
                     return await self._finish_branch(
                         request,
                         branch,
@@ -458,7 +660,9 @@ class UserMCPDispatchCoordinator:
                             "safe_call_ref": call_ref,
                             "input_request_count": len(outcome.requests),
                             "sealed_request_state_ref": outcome.sealed_request_state_ref,
+                            "interrupt_id": mrtr_interrupt.interrupt_id,
                         },
+                        interrupt=mrtr_interrupt,
                     )
                 events.append(
                     _event(
@@ -474,10 +678,9 @@ class UserMCPDispatchCoordinator:
                         selector_step,
                     )
                 )
-                return await self._finish_branch(
+                return await self._wait_for_remote_task(
                     request,
                     branch,
-                    status="remote_task_created",
                     safe_summary="The MCP server created a remote task.",
                     result_ref=outcome.safe_remote_task_ref,
                     events=events,
@@ -638,6 +841,79 @@ class UserMCPDispatchCoordinator:
         )
         return _ApprovalResolution(interrupt=await self._storage.save_interrupt(interrupt))
 
+    async def _resolve_mrtr_continuation(
+        self, request: CapabilityExecutionRequest
+    ) -> _MRTRContinuation | None:
+        responses = request.metadata.get("mcp_input_responses")
+        if responses is None:
+            return None
+        if not isinstance(responses, Mapping):
+            raise _CallReservationError("mcp_input_responses_invalid")
+        interrupts = await self._storage.list_interrupts_for_task(request.task_id)
+        matching = [
+            interrupt
+            for interrupt in interrupts
+            if interrupt.node_id == request.node_id
+            and interrupt.reason_code == "mcp_input_required"
+        ]
+        for interrupt in reversed(matching):
+            answers = await self._storage.list_interrupt_answers(interrupt.interrupt_id)
+            accepted = next(
+                (
+                    answer
+                    for answer in reversed(answers)
+                    if answer.accepted
+                    and isinstance(
+                        answer.answer_payload.get("mcp_input_responses"), Mapping
+                    )
+                ),
+                None,
+            )
+            if accepted is None:
+                continue
+            accepted_responses = dict(
+                accepted.answer_payload["mcp_input_responses"]
+            )
+            if dict(responses) != accepted_responses:
+                raise _CallReservationError("mcp_input_responses_invalid")
+            sealed_ref = str(
+                interrupt.required_fields.get("sealed_request_state_ref") or ""
+            ).strip()
+            if sealed_ref:
+                return _MRTRContinuation(sealed_ref, accepted_responses)
+        raise _CallReservationError("mcp_input_required_state_missing")
+
+    async def _save_mrtr_interrupt(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        conversation_id: str,
+        root_message_id: str,
+        server: UserMCPServer,
+        tool_name: str,
+        sealed_request_state_ref: str | None,
+    ) -> Interrupt:
+        if not sealed_request_state_ref:
+            raise _CallReservationError("mcp_input_required_state_missing")
+        interrupt = Interrupt(
+            interrupt_id=f"mcp-input-{uuid4().hex}",
+            conversation_id=conversation_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            source_agent="mcp.dispatch",
+            source_message_id=root_message_id,
+            question=f"MCP server {server.display_name} requires additional input for {tool_name}.",
+            reason_code="mcp_input_required",
+            required_fields={
+                "mcp_input_responses": {"type": "object"},
+                "sealed_request_state_ref": sealed_request_state_ref,
+                "server_id": server.server_id,
+                "tool_name": tool_name,
+            },
+            created_at=self._now(),
+        )
+        return await self._storage.save_interrupt(interrupt)
+
     async def _call_tool(
         self,
         request: CapabilityExecutionRequest,
@@ -651,8 +927,31 @@ class UserMCPDispatchCoordinator:
         input_schema_sha256: str,
         protocol_version: str,
         fingerprint: str,
+        mrtr_continuation: _MRTRContinuation | None = None,
+        events: list[EventRecord],
+        selector_step: int,
     ) -> tuple[MCPCallOutcome, str]:
+        prior_calls = await self._storage.list_mcp_call_records(
+            branch.owner_user_id,
+            branch.task_id,
+            branch_id=branch.branch_id,
+        )
+        if any(
+            call.may_have_dispatched
+            and call.status == "unknown"
+            and call.server_id == server.server_id
+            and call.tool_name == tool_name
+            and call.arguments_sha256 == fingerprint
+            for call in prior_calls
+        ):
+            await self._report_safety_violation(
+                MCPSafetyRedLine.UNKNOWN_RESULT_REPLAY,
+                "unknown_replay_blocked",
+            )
+            raise _CallReservationError("mcp_unknown_result_replay_forbidden")
         call_ref_holder: dict[str, str] = {}
+        dispatched = False
+        call_started_at: float | None = None
 
         async def on_created(call_ref: str) -> None:
             call_ref_holder["value"] = call_ref
@@ -683,6 +982,19 @@ class UserMCPDispatchCoordinator:
                 )
             )
             if not reserved:
+                active_calls = await self._storage.list_mcp_call_records(
+                    current.owner_user_id,
+                    current.task_id,
+                    branch_id=current.branch_id,
+                )
+                if any(
+                    call.terminal_at is None
+                    for call in active_calls
+                ):
+                    await self._report_safety_violation(
+                        MCPSafetyRedLine.DUAL_TOOL_CALL,
+                        "call_idempotency_conflict",
+                    )
                 raise _CallReservationError("mcp_call_budget_or_concurrency_exhausted")
             await self._record_live_event(
                 _event(
@@ -698,12 +1010,15 @@ class UserMCPDispatchCoordinator:
             )
 
         async def on_registered(call_ref: str) -> None:
+            nonlocal call_started_at, dispatched
             await self._storage.mark_mcp_call_may_have_dispatched(
                 branch.owner_user_id,
                 branch.task_id,
                 call_ref,
                 updated_at=self._now(),
             )
+            dispatched = True
+            call_started_at = monotonic()
 
         async def on_heartbeat(call_ref: str) -> None:
             heartbeat_at = self._now()
@@ -731,17 +1046,61 @@ class UserMCPDispatchCoordinator:
                     on_registered=on_registered,
                     on_heartbeat=on_heartbeat,
                 ),
+                node_id=request.node_id,
+                input_responses=(
+                    mrtr_continuation.input_responses
+                    if mrtr_continuation is not None
+                    else None
+                ),
+                sealed_request_state_ref=(
+                    mrtr_continuation.sealed_request_state_ref
+                    if mrtr_continuation is not None
+                    else None
+                ),
+                continuation_plan=(
+                    request.metadata.get("mcp_remote_task_continuation_plan")
+                    if isinstance(
+                        request.metadata.get("mcp_remote_task_continuation_plan"),
+                        Mapping,
+                    )
+                    else None
+                ),
+                authorization_verified=True,
             )
-        except BaseException:
+        except BaseException as exc:
             call_ref = call_ref_holder.get("value")
             if call_ref:
+                terminal_status = "failed"
+                safe_error_code = "mcp_call_failed"
+                if dispatched and not isinstance(exc, MCPRemoteError):
+                    terminal_status = "unknown"
+                    safe_error_code = "execution_status_unknown"
                 await self._storage.finish_mcp_call(
                     branch.owner_user_id,
                     branch.task_id,
                     call_ref,
-                    status="failed",
+                    status=terminal_status,
                     terminal_at=self._now(),
-                    safe_error_code="mcp_call_failed",
+                    safe_error_code=safe_error_code,
+                )
+            if dispatched:
+                result_category = (
+                    MCPMetricResultCategory.FAILED
+                    if isinstance(exc, MCPRemoteError)
+                    else MCPMetricResultCategory.UNKNOWN
+                )
+                await self._record_terminal_call_metrics(
+                    request,
+                    server=server,
+                    protocol_version=protocol_version,
+                    result_category=result_category,
+                    error_category=_metric_error_category(exc),
+                    duration_seconds=max(
+                        0.0,
+                        monotonic() - (call_started_at or monotonic()),
+                    ),
+                    events=events,
+                    selector_step=selector_step,
                 )
             raise
 
@@ -755,10 +1114,14 @@ class UserMCPDispatchCoordinator:
         )
         if not marked:
             raise _CallReservationError("mcp_call_registration_not_persisted")
+        if outcome.kind is MCPCallOutcomeKind.TASK_CREATED:
+            # The durable remote-task binding is the recovery authority. Keep
+            # the call nonterminal so the recovery worker can atomically close
+            # both records when tasks/get reaches a terminal state.
+            return outcome, call_ref
         terminal_status = {
             MCPCallOutcomeKind.COMPLETED: "completed",
             MCPCallOutcomeKind.INPUT_REQUIRED: "input_required",
-            MCPCallOutcomeKind.TASK_CREATED: "remote_task_created",
         }[outcome.kind]
         finished = await self._storage.finish_mcp_call(
             branch.owner_user_id,
@@ -769,13 +1132,216 @@ class UserMCPDispatchCoordinator:
             result_ref=(
                 outcome.result_ref
                 or outcome.sealed_request_state_ref
-                or outcome.safe_remote_task_ref
             ),
             output_size_bytes=outcome.byte_size,
         )
         if finished is None:
             raise _CallReservationError("mcp_call_terminal_not_persisted")
+        if outcome.kind is MCPCallOutcomeKind.COMPLETED:
+            await self._record_terminal_call_metrics(
+                request,
+                server=server,
+                protocol_version=protocol_version,
+                result_category=MCPMetricResultCategory.SUCCEEDED,
+                error_category=MCPMetricErrorCategory.NONE,
+                duration_seconds=max(
+                    0.0,
+                    monotonic() - (call_started_at or monotonic()),
+                ),
+                events=events,
+                selector_step=selector_step,
+            )
         return outcome, call_ref
+
+    async def _record_permission_metric(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        server: UserMCPServer,
+        protocol_version: str,
+        result_category: MCPMetricResultCategory,
+        error_category: MCPMetricErrorCategory,
+        events: list[EventRecord],
+        selector_step: int,
+    ) -> None:
+        if self._metric_recorder is None or self._metric_context is None:
+            return
+        bucket_started_at, bucket_ended_at = _metric_bucket_window()
+        try:
+            await self._metric_recorder.record_count(
+                MCPMetricName.PERMISSION_DECISIONS_TOTAL,
+                labels=MCPMetricLabels(
+                    execution_path=MCPMetricExecutionPath.USER_SCOPED,
+                    routing_mode=self._metric_context.routing_mode,
+                    transport=_metric_transport(server),
+                    protocol_version=_metric_protocol_version(protocol_version),
+                    adapter=_metric_adapter(protocol_version),
+                    result_category=result_category,
+                    error_category=error_category,
+                ),
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_ended_at,
+            )
+        except Exception:
+            await self._record_metric_gap(
+                request,
+                metric_family="permission_decision",
+                events=events,
+                ordinal=selector_step,
+            )
+
+    async def _record_mrtr_round_metric(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        server: UserMCPServer,
+        protocol_version: str,
+        events: list[EventRecord],
+        selector_step: int,
+    ) -> None:
+        if self._metric_recorder is None or self._metric_context is None:
+            return
+        bucket_started_at, bucket_ended_at = _metric_bucket_window()
+        try:
+            await self._metric_recorder.record_count(
+                MCPMetricName.MRTR_ROUNDS_TOTAL,
+                labels=MCPMetricLabels(
+                    execution_path=MCPMetricExecutionPath.USER_SCOPED,
+                    routing_mode=self._metric_context.routing_mode,
+                    transport=_metric_transport(server),
+                    protocol_version=_metric_protocol_version(protocol_version),
+                    adapter=_metric_adapter(protocol_version),
+                    result_category=MCPMetricResultCategory.INPUT_REQUIRED,
+                    error_category=MCPMetricErrorCategory.NONE,
+                    call_kind=MCPCallKind.ORDINARY,
+                ),
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_ended_at,
+            )
+        except Exception:
+            await self._record_metric_gap(
+                request,
+                metric_family="mrtr_round",
+                events=events,
+                ordinal=selector_step,
+            )
+
+    async def _record_terminal_call_metrics(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        server: UserMCPServer,
+        protocol_version: str,
+        result_category: MCPMetricResultCategory,
+        error_category: MCPMetricErrorCategory,
+        duration_seconds: float,
+        events: list[EventRecord],
+        selector_step: int,
+    ) -> None:
+        if self._metric_recorder is None or self._metric_context is None:
+            return
+        bucket_started_at, bucket_ended_at = _metric_bucket_window()
+        labels = MCPMetricLabels(
+            execution_path=MCPMetricExecutionPath.USER_SCOPED,
+            routing_mode=self._metric_context.routing_mode,
+            transport=_metric_transport(server),
+            protocol_version=_metric_protocol_version(protocol_version),
+            adapter=_metric_adapter(protocol_version),
+            result_category=result_category,
+            error_category=error_category,
+            call_kind=MCPCallKind.ORDINARY,
+        )
+        try:
+            await self._metric_recorder.record_count(
+                MCPMetricName.TOOL_CALLS_TOTAL,
+                labels=labels,
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_ended_at,
+            )
+            await self._metric_recorder.record_latency(
+                MCPMetricName.TOOL_CALL_DURATION_SECONDS,
+                duration_seconds=duration_seconds,
+                labels=labels,
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_ended_at,
+            )
+        except Exception:
+            await self._record_metric_gap(
+                request,
+                metric_family="tool_call_terminal",
+                events=events,
+                ordinal=selector_step,
+            )
+
+    async def _record_discovery_metric(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        server: UserMCPServer,
+        protocol_version: str,
+        duration_seconds: float,
+        result_category: MCPMetricResultCategory = MCPMetricResultCategory.SUCCEEDED,
+        error_category: MCPMetricErrorCategory = MCPMetricErrorCategory.NONE,
+        events: list[EventRecord],
+        selector_step: int,
+    ) -> None:
+        if self._metric_recorder is None or self._metric_context is None:
+            return
+        bucket_started_at, bucket_ended_at = _metric_bucket_window()
+        labels = MCPMetricLabels(
+            execution_path=MCPMetricExecutionPath.USER_SCOPED,
+            routing_mode=self._metric_context.routing_mode,
+            transport=_metric_transport(server),
+            protocol_version=_metric_protocol_version(protocol_version),
+            adapter=_metric_adapter(protocol_version),
+            result_category=result_category,
+            error_category=error_category,
+        )
+        try:
+            await self._metric_recorder.record_latency(
+                MCPMetricName.SERVER_DISCOVER_DURATION_SECONDS,
+                duration_seconds=duration_seconds,
+                labels=labels,
+                bucket_started_at=bucket_started_at,
+                bucket_ended_at=bucket_ended_at,
+            )
+        except Exception:
+            await self._record_metric_gap(
+                request,
+                metric_family="discovery",
+                events=events,
+                ordinal=selector_step,
+            )
+
+    async def _record_metric_gap(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        metric_family: str,
+        events: list[EventRecord],
+        ordinal: int,
+    ) -> None:
+        gap = _event(
+            request,
+            "mcp.rollout_metric_gap",
+            {"metric_family": metric_family, "gap_reason": "recording_failed"},
+            ordinal,
+        )
+        events.append(gap)
+        if self._live_event_recorder is None:
+            raise RuntimeError("mcp_rollout_metric_gap_sink_missing")
+        try:
+            await self._record_live_event(gap)
+        except Exception as exc:
+            raise RuntimeError("mcp_rollout_metric_gap_not_persisted") from exc
+
+    async def _report_safety_violation(
+        self, red_line: MCPSafetyRedLine, reason_code: str
+    ) -> None:
+        detector = self._safety_detectors.get(red_line)
+        if detector is None:
+            return
+        await detector.report_violation(reason_code=reason_code)
 
     async def _record_live_event(self, event: EventRecord) -> None:
         if self._live_event_recorder is not None:
@@ -831,6 +1397,7 @@ class UserMCPDispatchCoordinator:
         result_ref: str | None = None,
         events: Sequence[EventRecord] = (),
         extra_output: Mapping[str, Any] | None = None,
+        interrupt: Interrupt | None = None,
     ) -> MCPDispatchOutcome:
         now = self._now()
         current = (
@@ -859,6 +1426,48 @@ class UserMCPDispatchCoordinator:
         }
         if extra_output:
             output.update({key: value for key, value in extra_output.items() if value is not None})
+        return MCPDispatchOutcome(
+            output_payload=output,
+            events=tuple(events),
+            interrupt=interrupt,
+        )
+
+    async def _wait_for_remote_task(
+        self,
+        request: CapabilityExecutionRequest,
+        branch: MCPBranchRecord,
+        *,
+        safe_summary: str,
+        result_ref: str | None,
+        events: Sequence[EventRecord],
+        extra_output: Mapping[str, Any],
+    ) -> MCPDispatchOutcome:
+        del request
+        now = self._now()
+        current = (
+            await self._storage.get_mcp_branch_record(
+                branch.owner_user_id, branch.task_id, branch.branch_id
+            )
+            or branch
+        )
+        saved = await self._storage.save_mcp_branch_record(
+            replace(
+                current,
+                status="waiting_for_dependency",
+                result_ref=result_ref,
+                safe_summary=_safe_text(safe_summary),
+                updated_at=now,
+                terminal_at=None,
+            )
+        )
+        output = {
+            "mcp_status": "remote_task_created",
+            "mcp_branch_id": saved.branch_id,
+            "safe_summary": saved.safe_summary,
+            "result_ref": saved.result_ref,
+            "external_content_notice": EXTERNAL_CONTENT_NOTICE,
+            **{key: value for key, value in extra_output.items() if value is not None},
+        }
         return MCPDispatchOutcome(output_payload=output, events=tuple(events))
 
     @staticmethod
@@ -872,6 +1481,8 @@ class _CallReservationError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
 
 
 def _branch_id(task_id: str, node_id: str) -> str:
@@ -949,6 +1560,56 @@ def _safe_text(value: str, *, limit: int = 2000) -> str:
     return " ".join(str(value).split())[:limit]
 
 
+def _metric_bucket_window() -> tuple[datetime, datetime]:
+    started_at = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    return started_at, started_at + timedelta(minutes=1)
+
+
+def _metric_transport(server: UserMCPServer) -> MCPMetricTransport:
+    return {
+        UserMCPTransport.STREAMABLE_HTTP: MCPMetricTransport.STREAMABLE_HTTP,
+        UserMCPTransport.LEGACY_HTTP_SSE: MCPMetricTransport.LEGACY_HTTP_SSE,
+    }[server.transport]
+
+
+def _metric_protocol_version(value: str) -> MCPMetricProtocolVersion:
+    try:
+        return MCPMetricProtocolVersion(value)
+    except ValueError:
+        return MCPMetricProtocolVersion.NOT_APPLICABLE
+
+
+def _metric_adapter(protocol_version: str) -> MCPMetricAdapter:
+    if protocol_version == MCPMetricProtocolVersion.V2026_07_28.value:
+        return MCPMetricAdapter.PYTHON_2026
+    if _metric_protocol_version(protocol_version) is not MCPMetricProtocolVersion.NOT_APPLICABLE:
+        return MCPMetricAdapter.PYTHON_LEGACY
+    return MCPMetricAdapter.NOT_APPLICABLE
+
+
+def _metric_error_category(exc: BaseException) -> MCPMetricErrorCategory:
+    if isinstance(exc, asyncio.CancelledError):
+        return MCPMetricErrorCategory.NONE
+    code = str(
+        getattr(exc, "code", "")
+        or getattr(exc, "mcp_error_code", "")
+        or ""
+    ).lower()
+    for fragments, category in (
+        (("credential", "authentication", "unauthenticated"), MCPMetricErrorCategory.AUTHENTICATION),
+        (("authorization", "permission", "approval", "forbidden"), MCPMetricErrorCategory.AUTHORIZATION),
+        (("endpoint", "ssrf", "dns"), MCPMetricErrorCategory.ENDPOINT_POLICY),
+        (("timeout", "deadline"), MCPMetricErrorCategory.TIMEOUT),
+        (("transport", "connection", "disconnect"), MCPMetricErrorCategory.TRANSPORT),
+        (("protocol", "adapter", "session"), MCPMetricErrorCategory.PROTOCOL),
+        (("argument", "schema", "validation", "tool_not_found"), MCPMetricErrorCategory.VALIDATION),
+        (("server",), MCPMetricErrorCategory.SERVER),
+    ):
+        if any(fragment in code for fragment in fragments):
+            return category
+    return MCPMetricErrorCategory.UNKNOWN
+
+
 def _event(
     request: CapabilityExecutionRequest,
     event_type: str,
@@ -1004,6 +1665,8 @@ MCPDispatchCoordinator = UserMCPDispatchCoordinator
 
 __all__ = [
     "EXTERNAL_CONTENT_NOTICE",
+    "MCPDispatchMetricContext",
     "MCPDispatchCoordinator",
+    "MCPRolloutMetricRecorderPort",
     "UserMCPDispatchCoordinator",
 ]
