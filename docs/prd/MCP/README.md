@@ -53,15 +53,28 @@ Phase 是工程落地顺序和验收门禁，不是产品版本、降级目标�
 
 入口：`docs/prd/MCP/official-sdk-compatibility/README.md`。
 
-## 5. 总览入口
+## 5. 用户级按需 MCP 三阶段改造
+
+`docs/prd/MCP/user-scoped-on-demand/` 是用户专属 MCP 配置与运行时状态模型改造轨道。它不替代本目录已有的协议、长任务、Rust Sidecar 或版本兼容 PRD，而是在这些能力之上解决用户所有权、凭据存储、按需发现、两级路由、调用授权、低常驻资源与旧全局 Runtime 下线。
+
+该轨道按可独立交付的三个阶段实施：
+
+1. `user-scoped-on-demand/01-用户级MCP配置凭据与按需GatewayPRD.md`：用户级最小配置、凭据密文入库、服务器密钥文件、远程 HTTP(S) 安全和任务级按需 Gateway。
+2. `user-scoped-on-demand/02-MCP两级路由授权与任务执行闭环PRD.md`：Server 级主路由、按需 Tool List、专用 Tool Selector、所有工具授权、长调用提示、任务生命周期和前端闭环。
+3. `user-scoped-on-demand/03-按需MCP灰度切换与旧Runtime下线PRD.md`：shadow/enforce 灰度、单路径执行、旧配置迁移、回滚门禁和进程级 MCP Runtime 下线。
+
+当前状态：三份 PRD 的产品决策已确认，均待实施。实施必须依次通过前一阶段验收，不允许绕过用户隔离、凭据加密、Endpoint Policy 或授权门禁直接开放模型调用。
+
+## 6. 总览入口
 
 联合实施总览见：`00-MCPRuntime联合改造总览PRD.md`。
 
-## 6. 维护要求
+## 7. 维护要求
 
 新增或修改本目录 PRD 时，应同步检查：
 
 1. `docs/prd/backend/17-MCP长任务流式SSEPRD.md` 是否仍与 Phase 划分一致；
 2. `docs/prd/rust/05-MCPRuntimeRustSidecarPRD.md` 是否仍与 Phase 划分一致；
 3. `docs/prd/README.md` 是否仍能指向本目录；
-4. `CHANGELOG.md` 是否记录当天文档变更。
+4. `docs/prd/MCP/user-scoped-on-demand/` 是否仍与用户级配置、路由、授权和 Runtime 状态模型一致；
+5. `CHANGELOG.md` 是否记录当天文档变更。

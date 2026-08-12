@@ -18,7 +18,8 @@
 | `docs/prd/backend/23-能力缺失LLMFallback披露PRD.md` | 无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止、事件审计与历史提示契约 | 父兼容入口；已拆分 Phase PRD，待实施 |
 | `docs/prd/backend/capability-missing-fallback/` | 能力缺失 LLM fallback 披露分步 PRD：现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段 | Phase 拆分已落地；待实施 |
 | `docs/prd/backend/skill-contract-progressive-disclosure/` | Skill Contract v2-only 渐进式披露、显式 skill.* 执行、input schema、ResourceService 与 v1 manifest 路径删除 | v2-only 复审完成；待实施 |
-| `docs/prd/MCP/` | MCP Runtime 长任务流式 SSE、Rust sidecar 联合改造 Phase PRD、MCP Client 四版本兼容 PRD，以及官方 SDK 引入轨道 | Phase 拆分已冻结；client 四版本兼容与官方 SDK PRD 已新增 |
+| `docs/prd/MCP/` | MCP Runtime 长任务流式 SSE、Rust sidecar、Client 多版本兼容、官方 SDK，以及用户级按需 MCP 轨道 | 既有 Phase 持续治理；用户级按需 MCP 已拆分三阶段，待实施 |
+| `docs/prd/MCP/user-scoped-on-demand/` | 用户专属 MCP 配置、凭据加密、按需 Gateway、两级路由、工具授权、任务执行、灰度切换与旧全局 Runtime 下线 | 三阶段 PRD 已确认；待实施 |
 | `docs/prd/frontend/` | 前端产品体验、页面结构、交互与视觉设计 | v1 业务对话台与发送时上传文件专题已落地 |
 | `docs/prd/frontend/deferred-message-upload/` | 对话台文件选择/拖拽后的浏览器草稿暂存、发送时上传与现有 conversation file resource API 衔接 | 已实施，待最终合并 |
 
@@ -52,6 +53,7 @@
 - MCP Runtime 联合改造 Phase PRD 入口：`docs/prd/MCP/README.md`。
 - MCP Client 四版本兼容 PRD 入口：`docs/prd/MCP/compatibility/README.md`。
 - MCP Client 官方 SDK 引入与四版本完整兼容 PRD 入口：`docs/prd/MCP/official-sdk-compatibility/README.md`（首批 remote HTTP/HTTPS ordinary tools；stdio 仍需 sandbox-gated 后续 PRD）。
+- 用户级按需 MCP 三阶段 PRD：`docs/prd/MCP/user-scoped-on-demand/01-用户级MCP配置凭据与按需GatewayPRD.md`、`02-MCP两级路由授权与任务执行闭环PRD.md`、`03-按需MCP灰度切换与旧Runtime下线PRD.md`。
 
 新增或补齐后端能力范围时，应同步更新：
 1. `docs/prd/backend/00-主代理框架PRD.md` 的专题索引；
