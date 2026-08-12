@@ -34,3 +34,14 @@ class UserMCPGatewayModelsTest(unittest.TestCase):
         self.assertEqual(completed.kind, MCPCallOutcomeKind.COMPLETED)
         self.assertEqual(input_required.sealed_request_state_ref, "sealed-ref")
         self.assertEqual(task_created.safe_remote_task_ref, "task-ref")
+
+    def test_completed_outcome_includes_safe_result_metadata(self) -> None:
+        completed = MCPCallOutcome.completed(
+            "result-ref",
+            content_type="application/json",
+            byte_size=42,
+        )
+
+        self.assertEqual(completed.result_ref, "result-ref")
+        self.assertEqual(completed.content_type, "application/json")
+        self.assertEqual(completed.byte_size, 42)

@@ -535,3 +535,24 @@ class UserMCPServerListResponse(BaseModel):
 class UserMCPDeletePendingResponse(BaseModel):
     server_id: str
     deletion_pending: bool = True
+
+
+class UserMCPToolGrantResponse(BaseModel):
+    grant_id: str
+    server_id: str
+    server_display_name: str
+    tool_name: str
+    granted_at: datetime | None = None
+    valid: bool
+    invalid_reason: str | None = None
+
+
+class UserMCPToolGrantListResponse(BaseModel):
+    grants: list[UserMCPToolGrantResponse]
+
+
+class MCPCallControlResponse(BaseModel):
+    task_id: str
+    call_ref: str
+    status: str
+    accepted: bool = True

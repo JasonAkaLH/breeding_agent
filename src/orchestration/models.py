@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from src.core.enums import NodeCriticality
+from src.core.enums import NodeCriticality, UserMCPTransport
 
 
 class StrEnum(str, Enum):
@@ -31,6 +31,28 @@ class CapabilityDescriptor:
     kind: str = "capability"
     source: str = "builtin"
     source_path: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPServerProfile:
+    """Planner-safe description of one available user-scoped MCP server."""
+
+    server_id: str
+    display_name: str
+    routing_description: str
+    transport: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("server_id", "display_name", "transport"):
+            value = str(getattr(self, field_name) or "").strip()
+            if not value:
+                raise ValueError(f"{field_name} must not be empty")
+            object.__setattr__(self, field_name, value)
+        try:
+            UserMCPTransport(self.transport)
+        except ValueError as exc:
+            raise ValueError(f"Unsupported MCP transport: {self.transport}") from exc
+        object.__setattr__(self, "routing_description", str(self.routing_description or "").strip())
 
 
 @dataclass(slots=True, frozen=True)
@@ -81,6 +103,16 @@ class OrchestrationRequest:
     current_user_message: str | None = None
     resolved_user_message: str | None = None
     memory_context: Mapping[str, Any] | None = None
+    available_mcp_servers: tuple[UserMCPServerProfile, ...] = ()
+
+    def __post_init__(self) -> None:
+        profiles = tuple(self.available_mcp_servers)
+        if any(not isinstance(profile, UserMCPServerProfile) for profile in profiles):
+            raise TypeError("available_mcp_servers must contain UserMCPServerProfile values")
+        server_ids = tuple(profile.server_id for profile in profiles)
+        if len(set(server_ids)) != len(server_ids):
+            raise ValueError("available_mcp_servers must not contain duplicate server_id values")
+        object.__setattr__(self, "available_mcp_servers", profiles)
 
     @property
     def effective_user_message(self) -> str:

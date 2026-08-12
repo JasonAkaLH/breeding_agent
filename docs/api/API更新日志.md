@@ -12,6 +12,10 @@
 
 新增当前认证用户隔离的 MCP Server 配置端点：`GET/POST /api/v1/mcp/servers`、`GET/PATCH/DELETE /api/v1/mcp/servers/{server_id}` 和 `POST /api/v1/mcp/servers/{server_id}/test`。POST 与手动 test 异步返回 `testing`；安全校验通过但连接/发现失败的配置保留为 `unavailable`；空 Tool List 同样为 `unavailable`。响应只含 `credential_configured`，不返回凭据明文、密文或 Nonce。下文 `main@bd0fd2d` 对 `prod@e7ede32` 的“新增路径：0”是 2026-07-10 历史扫描结论，不包含本次增量。
 
+## 2026-08-12 增量：用户级 MCP 授权与任务控制 API
+
+新增 `GET /api/v1/mcp/grants`、`DELETE /api/v1/mcp/grants/{grant_id}`、`DELETE /api/v1/mcp/servers/{server_id}/grants`，用于查询、撤销和按 Server 清空当前认证用户的“始终允许”授权；跨用户或未知授权统一返回 404。新增 `POST /api/v1/tasks/{task_id}/mcp-calls/{call_ref}/continue` 与 `POST /api/v1/tasks/{task_id}/mcp-calls/{call_ref}/cancel`，两者先校验 task owner，未知调用返回 404、已终态返回 409、接受控制返回 202。任务 SSE 增加 `mcp.server_routed`、发现/排队、授权、调用、执行状态未知、输入请求与远端任务状态事件；所有前端事件只携带显示名、计数、状态和平台安全引用，不携带 Endpoint、凭据、Tool 参数/结果、Schema、Session 或远端原始 ID。
+
 ## 1. 执行摘要
 
 本次扫描以两个分支的 FastAPI 路由、Pydantic DTO、OpenAPI 文档、SSE 事件、运行时逻辑、持久化实现、前端 API client 和回归测试为依据，替换本文件原有的增量历史记录。

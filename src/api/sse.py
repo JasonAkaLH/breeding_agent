@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 
 from src.core.contracts import AuditSink, EventSink
 from src.core.enums import EventVisibility
@@ -29,9 +29,15 @@ class EventSubscription:
 
 
 class InMemoryEventBroker(EventSink):
-    def __init__(self, *, audit_sink: AuditSink | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        audit_sink: AuditSink | None = None,
+        event_observer: Callable[[EventRecord], Awaitable[None]] | None = None,
+    ) -> None:
         self._subscribers: dict[str, set[asyncio.Queue[EventRecord]]] = {}
         self._audit_sink = audit_sink
+        self._event_observer = event_observer
 
     def subscribe(self, task_id: str) -> EventSubscription:
         queue: asyncio.Queue[EventRecord] = asyncio.Queue()
@@ -47,6 +53,15 @@ class InMemoryEventBroker(EventSink):
             self._subscribers.pop(task_id, None)
 
     async def publish(self, event: EventRecord) -> None:
+        if self._event_observer is not None:
+            try:
+                await self._event_observer(event)
+            except Exception:
+                _LOGGER.warning(
+                    "event_broker_observer_failed",
+                    extra={"event_id": event.event_id, "event_type": event.event_type},
+                    exc_info=True,
+                )
         if self._audit_sink is not None:
             try:
                 await self._audit_sink.record(

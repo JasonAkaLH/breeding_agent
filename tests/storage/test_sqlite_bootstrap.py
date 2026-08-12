@@ -41,6 +41,12 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                 "user_mcp_health_attempt",
                 "user_mcp_scope_lease",
                 "mcp_credential_key_validation",
+                "mcp_branch_record",
+                "mcp_call_record",
+                "mcp_remote_task_binding",
+                "mcp_sealed_state",
+                "mcp_connection_lease",
+                "mcp_audit_event",
             }.issubset(table_names)
         )
 
@@ -167,5 +173,38 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                 self.assertEqual(loaded.metadata, {})
                 self.assertIsNone(loaded.updated_at)
                 self.assertEqual(loaded.content, "hello")
+            finally:
+                engine.dispose()
+
+    def test_bootstrap_adds_grant_invalidation_columns_without_losing_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-mcp-grant.sqlite3")
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "CREATE TABLE user_mcp_tool_grant ("
+                            "grant_id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, "
+                            "server_id TEXT NOT NULL, tool_name TEXT NOT NULL, "
+                            "server_security_version BIGINT NOT NULL, "
+                            "input_schema_sha256 TEXT NOT NULL, granted_at TEXT)"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO user_mcp_tool_grant "
+                            "VALUES ('grant-a', 'alice', 'server-a', 'lookup', 1, 'schema-a', NULL)"
+                        )
+                    )
+
+                bootstrap_sqlite_database(engine)
+
+                columns = {column["name"] for column in inspect(engine).get_columns("user_mcp_tool_grant")}
+                self.assertTrue({"invalidated_at", "invalid_reason"}.issubset(columns))
+                with engine.connect() as connection:
+                    self.assertEqual(
+                        connection.execute(text("SELECT COUNT(*) FROM user_mcp_tool_grant")).scalar_one(),
+                        1,
+                    )
             finally:
                 engine.dispose()

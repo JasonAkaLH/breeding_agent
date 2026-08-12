@@ -14,6 +14,8 @@
 
 ## [Unreleased]
 
+- 用户级按需 MCP 阶段二核心闭环已落地：新增唯一公共 `mcp.dispatch`、认证用户安全 Server Profile、受限 Server Router/Tool Selector、20 次持久调用预算、pre-dispatch 防重放账本、Grant 三选一授权与 Finalizer 恢复；Gateway 增加公平排队、任务内串行、120 秒 continue/cancel、任务安全调用控制和结果延迟清理，SSE 增加多订阅者在线租约、5 分钟离线取消与认证失效即时取消；API/前端补齐 Server/Grant 管理、授权对话框、运行状态卡和调用控制，MCP 专题审计采用字段 allowlist 与 30 天批量清理。`2026-07-28` MRTR/Tasks 的密封状态跨进程恢复 worker 仍作为阶段二剩余项保留。License Requirement：复用既有 FastAPI、SQLAlchemy、React、Ant Design 与加密依赖，无新增依赖/许可变更。
+
 - 用户级按需 MCP 阶段一完成后端实现：新增 owner-scoped Server/凭据/health attempt/scope lease/sentinel 存储模型与 SQLite/PostgreSQL CAS，AES-256-GCM 凭据、主密钥文件 fail-closed、URL/DNS/SSRF/Header 策略，认证用户隔离的 CRUD/test API，任务级单航班 MCPGateway、跨实例失效与 tombstone 删除协调、Transport 层增量 JSON/SSE 结果落盘/清理和显式容量门禁；Python Adapter 新增 `2026-07-28` 无 Session 协议、`server/discover`、每请求 metadata/header、MRTR/Tasks 安全引用与仅明确不支持时的 auto 降级，旧全局 MCP Capability/Planner 执行链保持不变。License Requirement：复用既有 `cryptography`、`httpx/httpcore`、`jsonschema` 与 SQLAlchemy 依赖，无新增依赖/许可变更。
 
 - 用户级按需 MCP 阶段一 PRD 与实施计划完成 document-perfectization 加固：明确未声明 Tool 能力或空 Tool 列表统一为 `unavailable`；跨实例 DELETE 改为 tombstone + 持久化 Scope lease + 202 异步收尾，健康测试改为 attempt lease 避免实例启动误收敛；大输出要求从 HTTP/SSE Transport 层增量解析并流式落盘；补齐数据库密钥 sentinel 的发布/回滚、PostgreSQL 专有并发实现、PATCH 非破坏契约、canonical username 迁移边界和现有 Sidecar 仅 `2025-11-25` 的真实能力范围。License Requirement：PRD、实施计划与变更日志更新，无新增依赖/许可变更。

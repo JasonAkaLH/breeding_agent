@@ -243,6 +243,73 @@ describe('createApiClient', () => {
     expect(fetcher.mock.calls[0][0]).toBe('/api/v1/tasks/task-1/interrupts');
   });
 
+  it('manages user MCP servers without exposing credentials in response types', async () => {
+    const server = {
+      server_id: 'srv/1',
+      display_name: '育种数据',
+      routing_description: '查询育种业务数据',
+      endpoint_url: 'https://mcp.example.test',
+      transport: 'streamable_http',
+      protocol_preference: 'auto',
+      auth_type: 'bearer',
+      auth_metadata: {},
+      enabled: true,
+      health_status: 'testing',
+      credential_configured: true,
+      config_version: 1,
+      security_version: 1,
+      last_tested_at: null,
+      last_test_error_code: null,
+      created_at: '2026-08-12T00:00:00Z',
+      updated_at: '2026-08-12T00:00:00Z',
+    };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ servers: [server] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(server), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(server), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(server), { status: 202 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const api = createApiClient({ fetcher });
+
+    await api.listMCPServers();
+    await api.createMCPServer({
+      display_name: '育种数据',
+      endpoint_url: 'https://mcp.example.test',
+      auth_type: 'bearer',
+      credential: { secret_value: 'write-only-token' },
+    });
+    await api.patchMCPServer('srv/1', { enabled: false, credential_action: 'retain' });
+    await api.testMCPServer('srv/1');
+    await expect(api.deleteMCPServer('srv/1')).resolves.toBeUndefined();
+
+    expect(fetcher).toHaveBeenNthCalledWith(1, '/api/v1/mcp/servers', expect.any(Object));
+    expect(fetcher).toHaveBeenNthCalledWith(2, '/api/v1/mcp/servers', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, '/api/v1/mcp/servers/srv%2F1', expect.objectContaining({ method: 'PATCH' }));
+    expect(fetcher).toHaveBeenNthCalledWith(4, '/api/v1/mcp/servers/srv%2F1/test', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(5, '/api/v1/mcp/servers/srv%2F1', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('manages MCP grants and safe call controls through owner-scoped paths', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ grants: [] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task/1', call_ref: 'call/1', status: 'running', accepted: true }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task/1', call_ref: 'call/1', status: 'cancelling', accepted: true }), { status: 202 }));
+    const api = createApiClient({ fetcher });
+
+    await api.listMCPGrants();
+    await api.deleteMCPGrant('grant/1');
+    await api.clearMCPServerGrants('srv/1');
+    await api.continueMCPCall('task/1', 'call/1');
+    await api.cancelMCPCall('task/1', 'call/1');
+
+    expect(fetcher).toHaveBeenNthCalledWith(2, '/api/v1/mcp/grants/grant%2F1', expect.objectContaining({ method: 'DELETE' }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, '/api/v1/mcp/servers/srv%2F1/grants', expect.objectContaining({ method: 'DELETE' }));
+    expect(fetcher).toHaveBeenNthCalledWith(4, '/api/v1/tasks/task%2F1/mcp-calls/call%2F1/continue', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(5, '/api/v1/tasks/task%2F1/mcp-calls/call%2F1/cancel', expect.objectContaining({ method: 'POST' }));
+  });
+
   it('lists conversations and conversation messages for history restore', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ conversations: [] }), { status: 200 }));
     const api = createApiClient({ fetcher });

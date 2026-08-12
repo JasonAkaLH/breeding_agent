@@ -31,6 +31,67 @@ export interface CapabilityFallbackNotice {
   artifactGenerationAllowed: false;
 }
 
+export type MCPApprovalDecision = 'allow_once' | 'always_allow' | 'deny';
+export type MCPCallStatus = 'running' | 'still_running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
+
+export interface MCPDiscoveryState {
+  status: 'started' | 'completed' | 'failed';
+  serverDisplayName: string;
+  availableToolCount: number | null;
+  retried: boolean;
+  errorCode: string | null;
+}
+
+export interface MCPQueueState {
+  queued: boolean;
+  position: number | null;
+  serverDisplayName: string;
+}
+
+export interface MCPApprovalState {
+  interruptId: string;
+  safeCallRef: string;
+  serverDisplayName: string;
+  toolDisplayName: string;
+  decision: MCPApprovalDecision | null;
+  pending: boolean;
+}
+
+export interface MCPCallState {
+  safeCallRef: string;
+  serverDisplayName: string;
+  toolDisplayName: string;
+  status: MCPCallStatus;
+  elapsedSeconds: number | null;
+  nextPromptAfterSeconds: number | null;
+  errorCode: string | null;
+}
+
+export interface MCPInputState {
+  interruptId: string;
+  safeCallRef: string;
+  question: string;
+  fieldNames: string[];
+  pending: boolean;
+}
+
+export interface MCPRemoteTaskState {
+  safeTaskRef: string;
+  status: string;
+  serverDisplayName: string;
+  toolDisplayName: string;
+}
+
+export interface MCPTaskState {
+  serverDisplayName: string | null;
+  discovery: MCPDiscoveryState | null;
+  queue: MCPQueueState | null;
+  approval: MCPApprovalState | null;
+  calls: MCPCallState[];
+  input: MCPInputState | null;
+  remoteTask: MCPRemoteTaskState | null;
+}
+
 export interface TaskEventState {
   phase: TaskPhase;
   statusText: string;
@@ -47,6 +108,7 @@ export interface TaskEventState {
   answerReasoningText: string;
   errorMessage: string | null;
   fallbackNotice: CapabilityFallbackNotice | null;
+  mcp: MCPTaskState;
   seenEventIds: string[];
 }
 
@@ -67,6 +129,15 @@ export function createInitialTaskEventState(): TaskEventState {
     answerReasoningText: '',
     errorMessage: null,
     fallbackNotice: null,
+    mcp: {
+      serverDisplayName: null,
+      discovery: null,
+      queue: null,
+      approval: null,
+      calls: [],
+      input: null,
+      remoteTask: null,
+    },
     seenEventIds: [],
   };
 }
@@ -293,6 +364,39 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
         errorMessage: null,
       };
     }
+    case 'mcp.server_routed': {
+      const serverDisplayName = safeDisplayName(event.payload, 'server_display_name');
+      return {
+        ...withEvent,
+        phase: 'running',
+        statusText: serverDisplayName ? `正在连接 ${serverDisplayName}` : '正在选择 MCP 服务',
+        currentActivityText: serverDisplayName ? `已选择 MCP 服务：${serverDisplayName}` : '已选择 MCP 服务',
+        mcp: { ...withEvent.mcp, serverDisplayName: serverDisplayName || null },
+        errorMessage: null,
+      };
+    }
+    case 'mcp.discovery_started':
+    case 'mcp.discovery_completed':
+    case 'mcp.discovery_failed':
+      return applyMCPDiscoveryEvent(withEvent, event);
+    case 'mcp.queue_entered':
+    case 'mcp.queue_left':
+      return applyMCPQueueEvent(withEvent, event);
+    case 'mcp.tool_approval_required':
+    case 'mcp.tool_approval_decided':
+      return applyMCPApprovalEvent(withEvent, event);
+    case 'mcp.tool_call_started':
+    case 'mcp.tool_call_still_running':
+    case 'mcp.tool_call_completed':
+    case 'mcp.tool_call_failed':
+    case 'mcp.tool_call_cancelled':
+    case 'mcp.execution_status_unknown':
+      return applyMCPCallEvent(withEvent, event);
+    case 'mcp.input_required':
+    case 'mcp.input_submitted':
+      return applyMCPInputEvent(withEvent, event);
+    case 'mcp.remote_task_status_changed':
+      return applyMCPRemoteTaskEvent(withEvent, event);
     case 'task.completed':
       return {
         ...withEvent,
@@ -356,6 +460,189 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     default:
       return state;
   }
+}
+
+function applyMCPDiscoveryEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
+  const status = event.event_type === 'mcp.discovery_started'
+    ? 'started'
+    : event.event_type === 'mcp.discovery_completed' ? 'completed' : 'failed';
+  const serverDisplayName = safeDisplayName(event.payload, 'server_display_name') || state.mcp.serverDisplayName || '';
+  const discovery: MCPDiscoveryState = {
+    status,
+    serverDisplayName,
+    availableToolCount: safeNonNegativeInteger(event.payload.available_tool_count ?? event.payload.tool_count),
+    retried: event.payload.retried === true || event.payload.will_retry === true,
+    errorCode: safeCode(event.payload.error_code ?? event.payload.code),
+  };
+  const statusText = status === 'started'
+    ? '正在发现 MCP 工具'
+    : status === 'completed' ? 'MCP 工具发现完成' : 'MCP 工具发现失败';
+  return {
+    ...state,
+    phase: 'running',
+    statusText,
+    currentActivityText: serverDisplayName ? `${serverDisplayName}：${statusText}` : statusText,
+    mcp: { ...state.mcp, serverDisplayName: serverDisplayName || null, discovery },
+    errorMessage: status === 'failed' && !discovery.retried ? '当前 MCP 服务不可用，正在寻找其他方案。' : null,
+  };
+}
+
+function applyMCPQueueEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
+  const queued = event.event_type === 'mcp.queue_entered';
+  const serverDisplayName = safeDisplayName(event.payload, 'server_display_name') || state.mcp.serverDisplayName || '';
+  const queue: MCPQueueState = {
+    queued,
+    position: queued ? safeNonNegativeInteger(event.payload.position ?? event.payload.queue_position) : null,
+    serverDisplayName,
+  };
+  return {
+    ...state,
+    phase: 'running',
+    statusText: queued ? '正在等待 MCP 执行资源' : '已获得 MCP 执行资源',
+    currentActivityText: queued && queue.position !== null ? `MCP 排队位置：${queue.position}` : null,
+    mcp: { ...state.mcp, queue },
+    errorMessage: null,
+  };
+}
+
+function applyMCPApprovalEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
+  const previous = state.mcp.approval;
+  const safeCallRef = safeReference(event.payload.safe_call_ref ?? event.payload.call_ref) || previous?.safeCallRef || '';
+  const decision = safeApprovalDecision(event.payload.decision);
+  const approval: MCPApprovalState = {
+    interruptId: safeReference(event.payload.interrupt_id) || previous?.interruptId || '',
+    safeCallRef,
+    serverDisplayName: safeDisplayName(event.payload, 'server_display_name') || previous?.serverDisplayName || '',
+    toolDisplayName: safeDisplayName(event.payload, 'tool_display_name') || safeDisplayName(event.payload, 'tool_name') || previous?.toolDisplayName || '',
+    decision: event.event_type === 'mcp.tool_approval_decided' ? decision : null,
+    pending: event.event_type === 'mcp.tool_approval_required',
+  };
+  return {
+    ...state,
+    phase: approval.pending ? 'waiting_for_input' : 'running',
+    statusText: approval.pending ? '等待 MCP 工具授权' : 'MCP 工具授权已处理',
+    currentActivityText: approval.pending ? `请确认是否允许调用 ${approval.toolDisplayName || '该工具'}` : null,
+    mcp: { ...state.mcp, approval },
+    errorMessage: null,
+  };
+}
+
+function applyMCPCallEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
+  const safeCallRef = safeReference(event.payload.safe_call_ref ?? event.payload.call_ref);
+  if (!safeCallRef) return state;
+  const previous = state.mcp.calls.find((call) => call.safeCallRef === safeCallRef);
+  const status = mcpCallStatus(event.event_type);
+  const call: MCPCallState = {
+    safeCallRef,
+    serverDisplayName: safeDisplayName(event.payload, 'server_display_name') || previous?.serverDisplayName || '',
+    toolDisplayName: safeDisplayName(event.payload, 'tool_display_name') || safeDisplayName(event.payload, 'tool_name') || previous?.toolDisplayName || '',
+    status,
+    elapsedSeconds: safeNonNegativeInteger(event.payload.elapsed_seconds) ?? previous?.elapsedSeconds ?? null,
+    nextPromptAfterSeconds: safeNonNegativeInteger(event.payload.next_prompt_after_seconds) ?? previous?.nextPromptAfterSeconds ?? null,
+    errorCode: safeCode(event.payload.error_code ?? event.payload.code) ?? previous?.errorCode ?? null,
+  };
+  const calls = upsertMCPCall(state.mcp.calls, call);
+  const labels: Record<MCPCallStatus, string> = {
+    running: '正在调用 MCP 工具',
+    still_running: 'MCP 工具仍在运行',
+    completed: 'MCP 工具调用完成',
+    failed: 'MCP 工具调用失败',
+    cancelled: 'MCP 工具调用已取消',
+    unknown: 'MCP 工具执行结果无法确认',
+  };
+  return {
+    ...state,
+    phase: status === 'running' || status === 'still_running' ? 'running' : state.phase,
+    statusText: labels[status],
+    currentActivityText: call.toolDisplayName ? `${call.toolDisplayName}：${labels[status]}` : labels[status],
+    mcp: { ...state.mcp, calls },
+    errorMessage: status === 'unknown'
+      ? '服务重启后无法确认该工具是否完成；系统不会自动重复调用。'
+      : status === 'failed' ? 'MCP 工具调用失败，正在寻找其他方案。' : null,
+  };
+}
+
+function applyMCPInputEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
+  const previous = state.mcp.input;
+  const pending = event.event_type === 'mcp.input_required';
+  const fieldNames = Array.isArray(event.payload.field_names)
+    ? event.payload.field_names.filter((value): value is string => typeof value === 'string').slice(0, 50)
+    : previous?.fieldNames ?? [];
+  const input: MCPInputState = {
+    interruptId: safeReference(event.payload.interrupt_id) || previous?.interruptId || '',
+    safeCallRef: safeReference(event.payload.safe_call_ref ?? event.payload.call_ref) || previous?.safeCallRef || '',
+    question: safeText(event.payload.question, 2000) || previous?.question || '',
+    fieldNames,
+    pending,
+  };
+  return {
+    ...state,
+    phase: pending ? 'waiting_for_input' : 'running',
+    statusText: pending ? 'MCP 工具等待补充信息' : 'MCP 补充信息已提交',
+    currentActivityText: pending ? input.question || '请补充工具执行所需信息' : '已收到补充信息，准备继续执行',
+    mcp: { ...state.mcp, input },
+    errorMessage: null,
+  };
+}
+
+function applyMCPRemoteTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
+  const safeTaskRef = safeReference(event.payload.safe_task_ref ?? event.payload.remote_task_ref);
+  if (!safeTaskRef) return state;
+  const remoteTask: MCPRemoteTaskState = {
+    safeTaskRef,
+    status: safeCode(event.payload.status) ?? 'unknown',
+    serverDisplayName: safeDisplayName(event.payload, 'server_display_name'),
+    toolDisplayName: safeDisplayName(event.payload, 'tool_display_name') || safeDisplayName(event.payload, 'tool_name'),
+  };
+  return {
+    ...state,
+    phase: 'running',
+    statusText: `远程 MCP 任务：${remoteTask.status}`,
+    currentActivityText: remoteTask.toolDisplayName ? `${remoteTask.toolDisplayName}：${remoteTask.status}` : null,
+    mcp: { ...state.mcp, remoteTask },
+    errorMessage: null,
+  };
+}
+
+function upsertMCPCall(calls: MCPCallState[], next: MCPCallState): MCPCallState[] {
+  const index = calls.findIndex((call) => call.safeCallRef === next.safeCallRef);
+  if (index < 0) return [...calls, next];
+  return calls.map((call, candidateIndex) => candidateIndex === index ? next : call);
+}
+
+function mcpCallStatus(eventType: string): MCPCallStatus {
+  if (eventType === 'mcp.tool_call_started') return 'running';
+  if (eventType === 'mcp.tool_call_still_running') return 'still_running';
+  if (eventType === 'mcp.tool_call_completed') return 'completed';
+  if (eventType === 'mcp.tool_call_failed') return 'failed';
+  if (eventType === 'mcp.tool_call_cancelled') return 'cancelled';
+  return 'unknown';
+}
+
+function safeDisplayName(payload: Record<string, unknown>, key: string): string {
+  return safeText(payload[key], 200);
+}
+
+function safeText(value: unknown, maxLength: number): string {
+  return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
+}
+
+function safeReference(value: unknown): string {
+  const reference = safeText(value, 256);
+  return /^[A-Za-z0-9._:-]+$/.test(reference) ? reference : '';
+}
+
+function safeCode(value: unknown): string | null {
+  const code = safeText(value, 100);
+  return code && /^[A-Za-z0-9._:-]+$/.test(code) ? code : null;
+}
+
+function safeNonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function safeApprovalDecision(value: unknown): MCPApprovalDecision | null {
+  return value === 'allow_once' || value === 'always_allow' || value === 'deny' ? value : null;
 }
 
 function composeReasoningText(parts: {

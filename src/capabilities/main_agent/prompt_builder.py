@@ -446,6 +446,9 @@ def _sanitize_dependency_output(output: Mapping[str, Any]) -> dict[str, Any]:
         "is_error",
         "output_size_bytes",
         "external_content_notice",
+        "mcp_status",
+        "safe_summary",
+        "result_ref",
     )
     safe = {key: output[key] for key in allowlist if key in output}
     safe_files = _sanitize_output_files(output.get("output_files"))

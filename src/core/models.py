@@ -72,6 +72,112 @@ class UserMCPToolGrant:
     server_security_version: int
     input_schema_sha256: str
     granted_at: datetime | None = None
+    invalidated_at: datetime | None = None
+    invalid_reason: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPBranchRecord:
+    branch_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    status: str
+    initial_server_id: str | None = None
+    tool_call_count: int = 0
+    max_tool_calls: int = 20
+    active_call_ref: str | None = None
+    result_ref: str | None = None
+    safe_summary: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    terminal_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCallRecord:
+    call_ref: str
+    branch_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    tool_name: str
+    status: str
+    call_sequence: int
+    arguments_sha256: str
+    server_security_version: int
+    input_schema_sha256: str
+    protocol_version: str | None = None
+    input_field_names: tuple[str, ...] = ()
+    may_have_dispatched: bool = False
+    result_ref: str | None = None
+    output_size_bytes: int | None = None
+    safe_error_code: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    terminal_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MCPRemoteTaskBinding:
+    safe_remote_task_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    server_id: str
+    protocol_version: str
+    remote_task_ciphertext: bytes
+    remote_task_nonce: bytes
+    encryption_version: int
+    last_status: str
+    next_poll_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    terminal_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MCPSealedState:
+    sealed_state_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_ref: str
+    state_kind: str
+    ciphertext: bytes
+    nonce: bytes
+    encryption_version: int
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPConnectionLease:
+    connection_id: str
+    owner_user_id: str
+    task_id: str
+    instance_id: str
+    lease_expires_at: datetime
+    disconnected_at: datetime | None = None
+    auth_generation: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPAuditEvent:
+    audit_event_id: str
+    owner_user_id: str
+    event_type: str
+    occurred_at: datetime
+    expires_at: datetime
+    task_id: str | None = None
+    node_id: str | None = None
+    server_id: str | None = None
+    call_ref: str | None = None
+    safe_payload: JsonMapping = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)

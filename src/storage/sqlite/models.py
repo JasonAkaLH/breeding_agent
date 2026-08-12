@@ -56,6 +56,141 @@ class UserMCPToolGrantRow(SQLiteBase):
     server_security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     input_schema_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     granted_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    invalidated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    invalid_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MCPBranchRecordRow(SQLiteBase):
+    __tablename__ = "mcp_branch_record"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "task_id", "node_id", name="uq_mcp_branch_task_node"),
+        Index("idx_mcp_branch_owner_task", "owner_user_id", "task_id"),
+        Index("idx_mcp_branch_status_updated", "status", "updated_at"),
+    )
+
+    branch_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    initial_server_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    max_tool_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("20"))
+    active_call_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    terminal_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPCallRecordRow(SQLiteBase):
+    __tablename__ = "mcp_call_record"
+    __table_args__ = (
+        UniqueConstraint("branch_id", "call_sequence", name="uq_mcp_call_branch_sequence"),
+        Index("idx_mcp_call_owner_task", "owner_user_id", "task_id"),
+        Index("idx_mcp_call_branch_status", "branch_id", "status"),
+    )
+
+    call_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    branch_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    call_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    arguments_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    server_security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    input_schema_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    protocol_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_field_names: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
+    may_have_dispatched: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    result_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    safe_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    terminal_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPRemoteTaskBindingRow(SQLiteBase):
+    __tablename__ = "mcp_remote_task_binding"
+    __table_args__ = (
+        Index("idx_mcp_remote_task_owner_task", "owner_user_id", "task_id"),
+        Index("idx_mcp_remote_task_poll", "last_status", "next_poll_at"),
+    )
+
+    safe_remote_task_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    call_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    protocol_version: Mapped[str] = mapped_column(Text, nullable=False)
+    remote_task_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    remote_task_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encryption_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_status: Mapped[str] = mapped_column(Text, nullable=False)
+    next_poll_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    terminal_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPSealedStateRow(SQLiteBase):
+    __tablename__ = "mcp_sealed_state"
+    __table_args__ = (Index("idx_mcp_sealed_state_owner_task", "owner_user_id", "task_id"),)
+
+    sealed_state_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    call_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    state_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encryption_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPConnectionLeaseRow(SQLiteBase):
+    __tablename__ = "mcp_connection_lease"
+    __table_args__ = (
+        Index("idx_mcp_connection_owner_task", "owner_user_id", "task_id"),
+        Index("idx_mcp_connection_expiry", "lease_expires_at"),
+    )
+
+    connection_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    instance_id: Mapped[str] = mapped_column(Text, nullable=False)
+    lease_expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    disconnected_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    auth_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPAuditEventRow(SQLiteBase):
+    __tablename__ = "mcp_audit_event"
+    __table_args__ = (
+        Index("idx_mcp_audit_owner_occurred", "owner_user_id", "occurred_at"),
+        Index("idx_mcp_audit_expiry", "expires_at"),
+    )
+
+    audit_event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    node_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    server_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    call_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_payload: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
 
 
 class UserMCPHealthAttemptRow(SQLiteBase):

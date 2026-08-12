@@ -22,11 +22,15 @@ import {
   parseCapabilityFallbackNotice,
   taskProgressDisplayText,
   type CapabilityFallbackNotice,
+  type MCPApprovalDecision,
   type SkillStatusLine,
   type TaskEventState,
 } from './domain/taskEvents';
 import { DataQueryResultCard } from './components/DataQueryResultCard';
 import { MarkdownText } from './components/MarkdownText';
+import { MCPApprovalDialog } from './components/MCPApprovalDialog';
+import { MCPRuntimeStatus } from './components/MCPRuntimeStatus';
+import { MCPSettingsPanel } from './components/MCPSettingsPanel';
 import SlashCommandMenu from './components/SlashCommandMenu';
 import './styles.css';
 
@@ -312,6 +316,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const currentAssistantIdRef = useRef<string | null>(null);
   const taskPhaseRef = useRef(taskState.phase);
   const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
+  const [mcpSettingsOpen, setMCPSettingsOpen] = useState(false);
+  const [mcpApprovalSubmitting, setMCPApprovalSubmitting] = useState(false);
+  const [mcpBusyCallRef, setMCPBusyCallRef] = useState<string | null>(null);
   const [conversationHistory, setConversationHistory] = useState<ConversationSummaryResponse[]>([]);
   const [restoredWorkspaceConversationId, setRestoredWorkspaceConversationId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -929,7 +936,62 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   function handleAccountSettings() {
-    showTransientNotice('用户账户设置功能会在后续版本开放。');
+    setMCPSettingsOpen(true);
+  }
+
+  async function handleMCPApprovalDecision(decision: MCPApprovalDecision) {
+    const approval = taskState.mcp.approval;
+    if (!approval?.pending || !approval.interruptId || !conversationIdRef.current) return;
+    setMCPApprovalSubmitting(true);
+    try {
+      await api.submitMessage({
+        conversationId: conversationIdRef.current,
+        content: decision === 'deny' ? '拒绝本次 MCP 工具调用' : decision === 'always_allow' ? '始终允许此 MCP 工具' : '仅允许本次 MCP 工具调用',
+        mode,
+        clientMessageId: makeClientId('mcp-approval'),
+        metadata: {
+          interrupt_id: approval.interruptId,
+          mcp_tool_approval: decision,
+        },
+      });
+      setTaskState((state) => ({
+        ...state,
+        phase: 'running',
+        statusText: 'MCP 工具授权已提交',
+        mcp: {
+          ...state.mcp,
+          approval: state.mcp.approval
+            ? { ...state.mcp.approval, decision, pending: false }
+            : null,
+        },
+      }));
+    } catch (error) {
+      showTransientNotice(friendlyError(error));
+    } finally {
+      setMCPApprovalSubmitting(false);
+    }
+  }
+
+  async function handleContinueMCPCall(taskId: string, callRef: string) {
+    setMCPBusyCallRef(callRef);
+    try {
+      await api.continueMCPCall(taskId, callRef);
+    } catch (error) {
+      showTransientNotice(friendlyError(error));
+    } finally {
+      setMCPBusyCallRef(null);
+    }
+  }
+
+  async function handleCancelMCPCall(taskId: string, callRef: string) {
+    setMCPBusyCallRef(callRef);
+    try {
+      await api.cancelMCPCall(taskId, callRef);
+    } catch (error) {
+      showTransientNotice(friendlyError(error));
+    } finally {
+      setMCPBusyCallRef(null);
+    }
   }
 
   function resetConversationWorkspace(nextConversationId: string) {
@@ -2114,6 +2176,15 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   ? <FileUploadHistoryCard key={message.id} message={message} />
                   : <MessageBubble key={message.id} message={message} onDownloadArtifact={handleDownloadArtifact} />
               ))}
+              {currentTaskId ? (
+                <MCPRuntimeStatus
+                  taskId={currentTaskId}
+                  mcp={taskState.mcp}
+                  busyCallRef={mcpBusyCallRef}
+                  onContinue={handleContinueMCPCall}
+                  onCancel={handleCancelMCPCall}
+                />
+              ) : null}
             </div>
             <div
               className={`chat-floating-stack${draggingUpload ? ' chat-floating-stack-dragging' : ''}`}
@@ -2310,6 +2381,20 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             </Drawer>
           </section>
         </main>
+        <Drawer
+          title="MCP 服务与授权"
+          width={720}
+          open={mcpSettingsOpen}
+          onClose={() => setMCPSettingsOpen(false)}
+          destroyOnHidden
+        >
+          <MCPSettingsPanel api={api} onError={(error) => showTransientNotice(friendlyError(error))} />
+        </Drawer>
+        <MCPApprovalDialog
+          approval={taskState.mcp.approval}
+          submitting={mcpApprovalSubmitting}
+          onDecision={handleMCPApprovalDecision}
+        />
       </Layout>
     </ConfigProvider>
   );

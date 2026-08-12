@@ -19,6 +19,12 @@ from .models import (
     InterruptAnswer,
     MailboxDelivery,
     MailboxMessage,
+    MCPAuditEvent,
+    MCPBranchRecord,
+    MCPCallRecord,
+    MCPConnectionLease,
+    MCPRemoteTaskBinding,
+    MCPSealedState,
     Message,
     PendingSkillContext,
     SlotCollection,
@@ -187,12 +193,130 @@ class StoragePort(Protocol):
     async def save_user_mcp_tool_grant(self, grant: UserMCPToolGrant) -> UserMCPToolGrant: ...
 
     async def list_user_mcp_tool_grants(
-        self, owner_user_id: str, server_id: str
+        self, owner_user_id: str, server_id: str | None = None
     ) -> list[UserMCPToolGrant]: ...
+
+    async def get_valid_user_mcp_tool_grant(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        tool_name: str,
+        *,
+        server_security_version: int,
+        input_schema_sha256: str,
+    ) -> UserMCPToolGrant | None: ...
 
     async def delete_user_mcp_tool_grant(
         self, owner_user_id: str, server_id: str, grant_id: str
     ) -> bool: ...
+
+    async def delete_user_mcp_tool_grant_by_id(
+        self, owner_user_id: str, grant_id: str
+    ) -> bool: ...
+
+    async def clear_user_mcp_tool_grants(self, owner_user_id: str, server_id: str) -> int: ...
+
+    async def invalidate_user_mcp_tool_grants(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        invalidated_at: datetime,
+        invalid_reason: str,
+        tool_name: str | None = None,
+        input_schema_sha256: str | None = None,
+    ) -> int: ...
+
+    async def save_mcp_branch_record(self, record: MCPBranchRecord) -> MCPBranchRecord: ...
+
+    async def get_mcp_branch_record(
+        self, owner_user_id: str, task_id: str, branch_id: str
+    ) -> MCPBranchRecord | None: ...
+
+    async def list_mcp_branch_records(
+        self,
+        owner_user_id: str,
+        *,
+        task_id: str | None = None,
+        statuses: tuple[str, ...] = (),
+    ) -> list[MCPBranchRecord]: ...
+
+    async def reserve_mcp_call(self, record: MCPCallRecord) -> bool: ...
+
+    async def mark_mcp_call_may_have_dispatched(
+        self, owner_user_id: str, task_id: str, call_ref: str, *, updated_at: datetime
+    ) -> bool: ...
+
+    async def get_mcp_call_record(
+        self, owner_user_id: str, task_id: str, call_ref: str
+    ) -> MCPCallRecord | None: ...
+
+    async def list_mcp_call_records(
+        self, owner_user_id: str, task_id: str, *, branch_id: str | None = None
+    ) -> list[MCPCallRecord]: ...
+
+    async def finish_mcp_call(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        call_ref: str,
+        *,
+        status: str,
+        terminal_at: datetime,
+        result_ref: str | None = None,
+        output_size_bytes: int | None = None,
+        safe_error_code: str | None = None,
+    ) -> MCPCallRecord | None: ...
+
+    async def save_mcp_remote_task_binding(
+        self, binding: MCPRemoteTaskBinding
+    ) -> MCPRemoteTaskBinding: ...
+
+    async def get_mcp_remote_task_binding(
+        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def list_due_mcp_remote_task_bindings(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[MCPRemoteTaskBinding]: ...
+
+    async def delete_mcp_remote_task_binding(
+        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
+    ) -> bool: ...
+
+    async def save_mcp_sealed_state(self, state: MCPSealedState) -> MCPSealedState: ...
+
+    async def get_mcp_sealed_state(
+        self, owner_user_id: str, task_id: str, sealed_state_ref: str
+    ) -> MCPSealedState | None: ...
+
+    async def delete_mcp_sealed_state(
+        self, owner_user_id: str, task_id: str, sealed_state_ref: str
+    ) -> bool: ...
+
+    async def save_mcp_connection_lease(
+        self, lease: MCPConnectionLease
+    ) -> MCPConnectionLease: ...
+
+    async def list_live_mcp_connection_leases(
+        self, owner_user_id: str, task_id: str, *, now: datetime
+    ) -> list[MCPConnectionLease]: ...
+
+    async def delete_mcp_connection_lease(
+        self, owner_user_id: str, task_id: str, connection_id: str
+    ) -> bool: ...
+
+    async def expire_mcp_connection_leases(self, *, now: datetime, limit: int = 1000) -> int: ...
+
+    async def append_mcp_audit_event(self, event: MCPAuditEvent) -> MCPAuditEvent: ...
+
+    async def list_mcp_audit_events(
+        self, owner_user_id: str, *, task_id: str | None = None, limit: int = 100
+    ) -> list[MCPAuditEvent]: ...
+
+    async def delete_expired_mcp_audit_events(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int: ...
 
     async def create_or_get_mcp_credential_key_validation(
         self, record: MCPCredentialKeyValidation

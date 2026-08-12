@@ -43,6 +43,12 @@ from src.core.models import (
     InterruptAnswer,
     MailboxDelivery,
     MailboxMessage,
+    MCPAuditEvent,
+    MCPBranchRecord,
+    MCPCallRecord,
+    MCPConnectionLease,
+    MCPRemoteTaskBinding,
+    MCPSealedState,
     Message,
     PendingSkillContext,
     SlotCollection,
@@ -94,6 +100,12 @@ from .models import (
     InterruptRow,
     MailboxDeliveryRow,
     MailboxMessageRow,
+    MCPAuditEventRow,
+    MCPBranchRecordRow,
+    MCPCallRecordRow,
+    MCPConnectionLeaseRow,
+    MCPRemoteTaskBindingRow,
+    MCPSealedStateRow,
     MessageRow,
     PendingSkillContextRow,
     SlotCollectionRow,
@@ -111,6 +123,130 @@ from .models import (
 
 
 CONVERSATION_FILE_INDEX_REPAIR_KIND = "conversation_file_index"
+
+
+def _row_to_user_mcp_tool_grant(row: UserMCPToolGrantRow) -> UserMCPToolGrant:
+    return UserMCPToolGrant(
+        grant_id=row.grant_id,
+        owner_user_id=row.owner_user_id,
+        server_id=row.server_id,
+        tool_name=row.tool_name,
+        server_security_version=int(row.server_security_version),
+        input_schema_sha256=row.input_schema_sha256,
+        granted_at=row.granted_at,
+        invalidated_at=row.invalidated_at,
+        invalid_reason=row.invalid_reason,
+    )
+
+
+def _row_to_mcp_branch(row: MCPBranchRecordRow) -> MCPBranchRecord:
+    return MCPBranchRecord(
+        branch_id=row.branch_id,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        status=row.status,
+        initial_server_id=row.initial_server_id,
+        tool_call_count=int(row.tool_call_count),
+        max_tool_calls=int(row.max_tool_calls),
+        active_call_ref=row.active_call_ref,
+        result_ref=row.result_ref,
+        safe_summary=row.safe_summary,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        terminal_at=row.terminal_at,
+    )
+
+
+def _row_to_mcp_call(row: MCPCallRecordRow) -> MCPCallRecord:
+    return MCPCallRecord(
+        call_ref=row.call_ref,
+        branch_id=row.branch_id,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        server_id=row.server_id,
+        tool_name=row.tool_name,
+        status=row.status,
+        call_sequence=int(row.call_sequence),
+        arguments_sha256=row.arguments_sha256,
+        server_security_version=int(row.server_security_version),
+        input_schema_sha256=row.input_schema_sha256,
+        protocol_version=row.protocol_version,
+        input_field_names=tuple(row.input_field_names or ()),
+        may_have_dispatched=bool(row.may_have_dispatched),
+        result_ref=row.result_ref,
+        output_size_bytes=None if row.output_size_bytes is None else int(row.output_size_bytes),
+        safe_error_code=row.safe_error_code,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        terminal_at=row.terminal_at,
+    )
+
+
+def _row_to_mcp_remote_task(row: MCPRemoteTaskBindingRow) -> MCPRemoteTaskBinding:
+    return MCPRemoteTaskBinding(
+        safe_remote_task_ref=row.safe_remote_task_ref,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        call_ref=row.call_ref,
+        server_id=row.server_id,
+        protocol_version=row.protocol_version,
+        remote_task_ciphertext=row.remote_task_ciphertext,
+        remote_task_nonce=row.remote_task_nonce,
+        encryption_version=int(row.encryption_version),
+        last_status=row.last_status,
+        next_poll_at=row.next_poll_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        terminal_at=row.terminal_at,
+    )
+
+
+def _row_to_mcp_sealed_state(row: MCPSealedStateRow) -> MCPSealedState:
+    return MCPSealedState(
+        sealed_state_ref=row.sealed_state_ref,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        call_ref=row.call_ref,
+        state_kind=row.state_kind,
+        ciphertext=row.ciphertext,
+        nonce=row.nonce,
+        encryption_version=int(row.encryption_version),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_mcp_connection_lease(row: MCPConnectionLeaseRow) -> MCPConnectionLease:
+    return MCPConnectionLease(
+        connection_id=row.connection_id,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        instance_id=row.instance_id,
+        lease_expires_at=row.lease_expires_at,
+        disconnected_at=row.disconnected_at,
+        auth_generation=None if row.auth_generation is None else int(row.auth_generation),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_mcp_audit_event(row: MCPAuditEventRow) -> MCPAuditEvent:
+    return MCPAuditEvent(
+        audit_event_id=row.audit_event_id,
+        owner_user_id=row.owner_user_id,
+        event_type=row.event_type,
+        occurred_at=row.occurred_at,
+        expires_at=row.expires_at,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        server_id=row.server_id,
+        call_ref=row.call_ref,
+        safe_payload=dict(row.safe_payload or {}),
+    )
 
 
 def _row_to_user_mcp_server(row: UserMCPServerRow) -> UserMCPServer:
@@ -1213,6 +1349,12 @@ class SQLiteStateRepository:
             "event_record": 0,
             "artifact": 0,
             "task_input_attachment": 0,
+            "mcp_remote_task_binding": 0,
+            "mcp_sealed_state": 0,
+            "mcp_call_record": 0,
+            "mcp_branch_record": 0,
+            "mcp_connection_lease": 0,
+            "mcp_audit_event": 0,
             "task_edge": 0,
             "task_node": 0,
             "message": 0,
@@ -1242,6 +1384,23 @@ class SQLiteStateRepository:
                 "task_input_attachment",
                 delete(TaskInputAttachmentRow).where(TaskInputAttachmentRow.task_id.in_(task_ids)),
             )
+            _delete(
+                "mcp_remote_task_binding",
+                delete(MCPRemoteTaskBindingRow).where(MCPRemoteTaskBindingRow.task_id.in_(task_ids)),
+            )
+            _delete(
+                "mcp_sealed_state",
+                delete(MCPSealedStateRow).where(MCPSealedStateRow.task_id.in_(task_ids)),
+            )
+            _delete("mcp_call_record", delete(MCPCallRecordRow).where(MCPCallRecordRow.task_id.in_(task_ids)))
+            _delete(
+                "mcp_branch_record", delete(MCPBranchRecordRow).where(MCPBranchRecordRow.task_id.in_(task_ids))
+            )
+            _delete(
+                "mcp_connection_lease",
+                delete(MCPConnectionLeaseRow).where(MCPConnectionLeaseRow.task_id.in_(task_ids)),
+            )
+            _delete("mcp_audit_event", delete(MCPAuditEventRow).where(MCPAuditEventRow.task_id.in_(task_ids)))
             _delete("task_edge", delete(TaskEdgeRow).where(TaskEdgeRow.task_id.in_(task_ids)))
             _delete("task_node", delete(TaskNodeRow).where(TaskNodeRow.task_id.in_(task_ids)))
         _delete(
@@ -2065,7 +2224,10 @@ class SQLiteStateRepository:
         security_fields = {
             "endpoint_url", "transport", "protocol_preference", "auth_type", "auth_metadata", "enabled",
         }
-        if security_sensitive or credential_changes_security or security_fields.intersection(changes):
+        invalidates_grants = bool(
+            security_sensitive or credential_changes_security or security_fields.intersection(changes)
+        )
+        if invalidates_grants:
             values["security_version"] = UserMCPServerRow.security_version + 1
         if credential_operation == "replace":
             assert credential is not None
@@ -2100,6 +2262,16 @@ class SQLiteStateRepository:
         )
         if not result.rowcount:
             return None
+        if invalidates_grants:
+            self._session.execute(
+                update(UserMCPToolGrantRow)
+                .where(
+                    UserMCPToolGrantRow.owner_user_id == owner_user_id,
+                    UserMCPToolGrantRow.server_id == server_id,
+                    UserMCPToolGrantRow.invalidated_at.is_(None),
+                )
+                .values(invalidated_at=updated_at, invalid_reason="security_changed")
+            )
         self._session.flush()
         row = self._get_user_mcp_server_row(owner_user_id, server_id)
         return None if row is None else _row_to_user_mcp_server(row)
@@ -2417,10 +2589,16 @@ class SQLiteStateRepository:
         if server is None:
             raise ValueError("MCP server not found")
         existing = self._session.get(UserMCPToolGrantRow, grant.grant_id)
-        if existing is not None and (
-            existing.owner_user_id != grant.owner_user_id or existing.server_id != grant.server_id
-        ):
-            raise ValueError("MCP tool grant scope does not match existing grant")
+        if existing is not None:
+            if (
+                existing.owner_user_id != grant.owner_user_id
+                or existing.server_id != grant.server_id
+                or existing.tool_name != grant.tool_name
+                or int(existing.server_security_version) != grant.server_security_version
+                or existing.input_schema_sha256 != grant.input_schema_sha256
+            ):
+                raise ValueError("MCP tool grant scope does not match existing grant")
+            return _row_to_user_mcp_tool_grant(existing)
         row = UserMCPToolGrantRow(
             grant_id=grant.grant_id,
             owner_user_id=grant.owner_user_id,
@@ -2429,30 +2607,46 @@ class SQLiteStateRepository:
             server_security_version=grant.server_security_version,
             input_schema_sha256=grant.input_schema_sha256,
             granted_at=grant.granted_at,
+            invalidated_at=grant.invalidated_at,
+            invalid_reason=grant.invalid_reason,
         )
         merged = self._session.merge(row)
         self._session.flush()
-        return UserMCPToolGrant(
-            grant_id=merged.grant_id, owner_user_id=merged.owner_user_id, server_id=merged.server_id,
-            tool_name=merged.tool_name, server_security_version=int(merged.server_security_version),
-            input_schema_sha256=merged.input_schema_sha256, granted_at=merged.granted_at,
-        )
+        return _row_to_user_mcp_tool_grant(merged)
 
-    def list_user_mcp_tool_grants(self, owner_user_id: str, server_id: str) -> list[UserMCPToolGrant]:
+    def list_user_mcp_tool_grants(
+        self, owner_user_id: str, server_id: str | None = None
+    ) -> list[UserMCPToolGrant]:
+        conditions = [UserMCPToolGrantRow.owner_user_id == owner_user_id]
+        if server_id is not None:
+            conditions.append(UserMCPToolGrantRow.server_id == server_id)
         rows = self._session.scalars(
+            select(UserMCPToolGrantRow)
+            .where(*conditions)
+            .order_by(UserMCPToolGrantRow.server_id, UserMCPToolGrantRow.tool_name, UserMCPToolGrantRow.grant_id)
+        ).all()
+        return [_row_to_user_mcp_tool_grant(row) for row in rows]
+
+    def get_valid_user_mcp_tool_grant(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        tool_name: str,
+        *,
+        server_security_version: int,
+        input_schema_sha256: str,
+    ) -> UserMCPToolGrant | None:
+        row = self._session.scalar(
             select(UserMCPToolGrantRow).where(
                 UserMCPToolGrantRow.owner_user_id == owner_user_id,
                 UserMCPToolGrantRow.server_id == server_id,
-            ).order_by(UserMCPToolGrantRow.tool_name, UserMCPToolGrantRow.grant_id)
-        ).all()
-        return [
-            UserMCPToolGrant(
-                grant_id=row.grant_id, owner_user_id=row.owner_user_id, server_id=row.server_id,
-                tool_name=row.tool_name, server_security_version=int(row.server_security_version),
-                input_schema_sha256=row.input_schema_sha256, granted_at=row.granted_at,
+                UserMCPToolGrantRow.tool_name == tool_name,
+                UserMCPToolGrantRow.server_security_version == server_security_version,
+                UserMCPToolGrantRow.input_schema_sha256 == input_schema_sha256,
+                UserMCPToolGrantRow.invalidated_at.is_(None),
             )
-            for row in rows
-        ]
+        )
+        return None if row is None else _row_to_user_mcp_tool_grant(row)
 
     def delete_user_mcp_tool_grant(self, owner_user_id: str, server_id: str, grant_id: str) -> bool:
         result = self._session.execute(
@@ -2463,6 +2657,492 @@ class SQLiteStateRepository:
             )
         )
         return bool(result.rowcount)
+
+    def delete_user_mcp_tool_grant_by_id(self, owner_user_id: str, grant_id: str) -> bool:
+        result = self._session.execute(
+            delete(UserMCPToolGrantRow).where(
+                UserMCPToolGrantRow.owner_user_id == owner_user_id,
+                UserMCPToolGrantRow.grant_id == grant_id,
+            )
+        )
+        return bool(result.rowcount)
+
+    def clear_user_mcp_tool_grants(self, owner_user_id: str, server_id: str) -> int:
+        result = self._session.execute(
+            delete(UserMCPToolGrantRow).where(
+                UserMCPToolGrantRow.owner_user_id == owner_user_id,
+                UserMCPToolGrantRow.server_id == server_id,
+            )
+        )
+        return int(result.rowcount or 0)
+
+    def invalidate_user_mcp_tool_grants(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        invalidated_at: datetime,
+        invalid_reason: str,
+        tool_name: str | None = None,
+        input_schema_sha256: str | None = None,
+    ) -> int:
+        conditions = [
+            UserMCPToolGrantRow.owner_user_id == owner_user_id,
+            UserMCPToolGrantRow.server_id == server_id,
+            UserMCPToolGrantRow.invalidated_at.is_(None),
+        ]
+        if tool_name is not None:
+            conditions.append(UserMCPToolGrantRow.tool_name == tool_name)
+        if input_schema_sha256 is not None:
+            conditions.append(UserMCPToolGrantRow.input_schema_sha256 == input_schema_sha256)
+        result = self._session.execute(
+            update(UserMCPToolGrantRow)
+            .where(*conditions)
+            .values(invalidated_at=invalidated_at, invalid_reason=invalid_reason)
+        )
+        return int(result.rowcount or 0)
+
+    def save_mcp_branch_record(self, record: MCPBranchRecord) -> MCPBranchRecord:
+        existing = self._session.get(MCPBranchRecordRow, record.branch_id)
+        if existing is not None and (
+            existing.owner_user_id != record.owner_user_id or existing.task_id != record.task_id
+        ):
+            raise ValueError("MCP branch scope does not match existing record")
+        row = MCPBranchRecordRow(
+            branch_id=record.branch_id,
+            owner_user_id=record.owner_user_id,
+            task_id=record.task_id,
+            node_id=record.node_id,
+            status=record.status,
+            initial_server_id=record.initial_server_id,
+            tool_call_count=record.tool_call_count,
+            max_tool_calls=record.max_tool_calls,
+            active_call_ref=record.active_call_ref,
+            result_ref=record.result_ref,
+            safe_summary=record.safe_summary,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            terminal_at=record.terminal_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return _row_to_mcp_branch(merged)
+
+    def get_mcp_branch_record(
+        self, owner_user_id: str, task_id: str, branch_id: str
+    ) -> MCPBranchRecord | None:
+        row = self._session.scalar(
+            select(MCPBranchRecordRow).where(
+                MCPBranchRecordRow.branch_id == branch_id,
+                MCPBranchRecordRow.owner_user_id == owner_user_id,
+                MCPBranchRecordRow.task_id == task_id,
+            )
+        )
+        return None if row is None else _row_to_mcp_branch(row)
+
+    def list_mcp_branch_records(
+        self,
+        owner_user_id: str,
+        *,
+        task_id: str | None = None,
+        statuses: tuple[str, ...] = (),
+    ) -> list[MCPBranchRecord]:
+        conditions = [MCPBranchRecordRow.owner_user_id == owner_user_id]
+        if task_id is not None:
+            conditions.append(MCPBranchRecordRow.task_id == task_id)
+        if statuses:
+            conditions.append(MCPBranchRecordRow.status.in_(statuses))
+        rows = self._session.scalars(
+            select(MCPBranchRecordRow)
+            .where(*conditions)
+            .order_by(MCPBranchRecordRow.created_at, MCPBranchRecordRow.branch_id)
+        ).all()
+        return [_row_to_mcp_branch(row) for row in rows]
+
+    def reserve_mcp_call(self, record: MCPCallRecord) -> bool:
+        branch = self._session.scalar(
+            select(MCPBranchRecordRow).where(
+                MCPBranchRecordRow.branch_id == record.branch_id,
+                MCPBranchRecordRow.owner_user_id == record.owner_user_id,
+                MCPBranchRecordRow.task_id == record.task_id,
+                MCPBranchRecordRow.node_id == record.node_id,
+            )
+        )
+        if branch is None or branch.active_call_ref is not None:
+            return False
+        next_sequence = int(branch.tool_call_count) + 1
+        if next_sequence > int(branch.max_tool_calls) or record.call_sequence != next_sequence:
+            return False
+        if self._session.get(MCPCallRecordRow, record.call_ref) is not None:
+            return False
+        claimed = self._session.execute(
+            update(MCPBranchRecordRow)
+            .where(
+                MCPBranchRecordRow.branch_id == record.branch_id,
+                MCPBranchRecordRow.owner_user_id == record.owner_user_id,
+                MCPBranchRecordRow.task_id == record.task_id,
+                MCPBranchRecordRow.active_call_ref.is_(None),
+                MCPBranchRecordRow.tool_call_count == branch.tool_call_count,
+            )
+            .values(
+                tool_call_count=next_sequence,
+                active_call_ref=record.call_ref,
+                status="active",
+                updated_at=record.updated_at,
+            )
+        )
+        if not claimed.rowcount:
+            return False
+        self._session.add(
+            MCPCallRecordRow(
+                call_ref=record.call_ref,
+                branch_id=record.branch_id,
+                owner_user_id=record.owner_user_id,
+                task_id=record.task_id,
+                node_id=record.node_id,
+                server_id=record.server_id,
+                tool_name=record.tool_name,
+                status=record.status,
+                call_sequence=record.call_sequence,
+                arguments_sha256=record.arguments_sha256,
+                server_security_version=record.server_security_version,
+                input_schema_sha256=record.input_schema_sha256,
+                protocol_version=record.protocol_version,
+                input_field_names=list(record.input_field_names),
+                may_have_dispatched=record.may_have_dispatched,
+                result_ref=record.result_ref,
+                output_size_bytes=record.output_size_bytes,
+                safe_error_code=record.safe_error_code,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+                terminal_at=record.terminal_at,
+            )
+        )
+        self._session.flush()
+        return True
+
+    def mark_mcp_call_may_have_dispatched(
+        self, owner_user_id: str, task_id: str, call_ref: str, *, updated_at: datetime
+    ) -> bool:
+        result = self._session.execute(
+            update(MCPCallRecordRow)
+            .where(
+                MCPCallRecordRow.call_ref == call_ref,
+                MCPCallRecordRow.owner_user_id == owner_user_id,
+                MCPCallRecordRow.task_id == task_id,
+                MCPCallRecordRow.terminal_at.is_(None),
+            )
+            .values(may_have_dispatched=True, status="active", updated_at=updated_at)
+        )
+        return bool(result.rowcount)
+
+    def get_mcp_call_record(
+        self, owner_user_id: str, task_id: str, call_ref: str
+    ) -> MCPCallRecord | None:
+        row = self._session.scalar(
+            select(MCPCallRecordRow).where(
+                MCPCallRecordRow.call_ref == call_ref,
+                MCPCallRecordRow.owner_user_id == owner_user_id,
+                MCPCallRecordRow.task_id == task_id,
+            )
+        )
+        return None if row is None else _row_to_mcp_call(row)
+
+    def list_mcp_call_records(
+        self, owner_user_id: str, task_id: str, *, branch_id: str | None = None
+    ) -> list[MCPCallRecord]:
+        conditions = [
+            MCPCallRecordRow.owner_user_id == owner_user_id,
+            MCPCallRecordRow.task_id == task_id,
+        ]
+        if branch_id is not None:
+            conditions.append(MCPCallRecordRow.branch_id == branch_id)
+        rows = self._session.scalars(
+            select(MCPCallRecordRow)
+            .where(*conditions)
+            .order_by(MCPCallRecordRow.call_sequence, MCPCallRecordRow.call_ref)
+        ).all()
+        return [_row_to_mcp_call(row) for row in rows]
+
+    def finish_mcp_call(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        call_ref: str,
+        *,
+        status: str,
+        terminal_at: datetime,
+        result_ref: str | None = None,
+        output_size_bytes: int | None = None,
+        safe_error_code: str | None = None,
+    ) -> MCPCallRecord | None:
+        row = self._session.scalar(
+            select(MCPCallRecordRow).where(
+                MCPCallRecordRow.call_ref == call_ref,
+                MCPCallRecordRow.owner_user_id == owner_user_id,
+                MCPCallRecordRow.task_id == task_id,
+            )
+        )
+        if row is None or row.terminal_at is not None:
+            return None
+        row.status = status
+        row.result_ref = result_ref
+        row.output_size_bytes = output_size_bytes
+        row.safe_error_code = safe_error_code
+        row.updated_at = terminal_at
+        row.terminal_at = terminal_at
+        self._session.execute(
+            update(MCPBranchRecordRow)
+            .where(
+                MCPBranchRecordRow.branch_id == row.branch_id,
+                MCPBranchRecordRow.owner_user_id == owner_user_id,
+                MCPBranchRecordRow.task_id == task_id,
+                MCPBranchRecordRow.active_call_ref == call_ref,
+            )
+            .values(active_call_ref=None, updated_at=terminal_at)
+        )
+        self._session.flush()
+        return _row_to_mcp_call(row)
+
+    def save_mcp_remote_task_binding(
+        self, binding: MCPRemoteTaskBinding
+    ) -> MCPRemoteTaskBinding:
+        existing = self._session.get(MCPRemoteTaskBindingRow, binding.safe_remote_task_ref)
+        if existing is not None and (
+            existing.owner_user_id != binding.owner_user_id
+            or existing.task_id != binding.task_id
+            or existing.node_id != binding.node_id
+            or existing.call_ref != binding.call_ref
+            or existing.server_id != binding.server_id
+            or existing.protocol_version != binding.protocol_version
+        ):
+            raise ValueError("MCP remote task scope does not match existing binding")
+        merged = self._session.merge(
+            MCPRemoteTaskBindingRow(
+                safe_remote_task_ref=binding.safe_remote_task_ref,
+                owner_user_id=binding.owner_user_id,
+                task_id=binding.task_id,
+                node_id=binding.node_id,
+                call_ref=binding.call_ref,
+                server_id=binding.server_id,
+                protocol_version=binding.protocol_version,
+                remote_task_ciphertext=binding.remote_task_ciphertext,
+                remote_task_nonce=binding.remote_task_nonce,
+                encryption_version=binding.encryption_version,
+                last_status=binding.last_status,
+                next_poll_at=binding.next_poll_at,
+                created_at=binding.created_at,
+                updated_at=binding.updated_at,
+                terminal_at=binding.terminal_at,
+            )
+        )
+        self._session.flush()
+        return _row_to_mcp_remote_task(merged)
+
+    def get_mcp_remote_task_binding(
+        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
+    ) -> MCPRemoteTaskBinding | None:
+        row = self._session.scalar(
+            select(MCPRemoteTaskBindingRow).where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+            )
+        )
+        return None if row is None else _row_to_mcp_remote_task(row)
+
+    def list_due_mcp_remote_task_bindings(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[MCPRemoteTaskBinding]:
+        rows = self._session.scalars(
+            select(MCPRemoteTaskBindingRow)
+            .where(
+                MCPRemoteTaskBindingRow.terminal_at.is_(None),
+                MCPRemoteTaskBindingRow.next_poll_at.is_not(None),
+                MCPRemoteTaskBindingRow.next_poll_at <= now,
+            )
+            .order_by(MCPRemoteTaskBindingRow.next_poll_at, MCPRemoteTaskBindingRow.safe_remote_task_ref)
+            .limit(max(1, limit))
+        ).all()
+        return [_row_to_mcp_remote_task(row) for row in rows]
+
+    def delete_mcp_remote_task_binding(
+        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
+    ) -> bool:
+        result = self._session.execute(
+            delete(MCPRemoteTaskBindingRow).where(
+                MCPRemoteTaskBindingRow.safe_remote_task_ref == safe_remote_task_ref,
+                MCPRemoteTaskBindingRow.owner_user_id == owner_user_id,
+                MCPRemoteTaskBindingRow.task_id == task_id,
+            )
+        )
+        return bool(result.rowcount)
+
+    def save_mcp_sealed_state(self, state: MCPSealedState) -> MCPSealedState:
+        existing = self._session.get(MCPSealedStateRow, state.sealed_state_ref)
+        if existing is not None and (
+            existing.owner_user_id != state.owner_user_id
+            or existing.task_id != state.task_id
+            or existing.node_id != state.node_id
+            or existing.call_ref != state.call_ref
+            or existing.state_kind != state.state_kind
+        ):
+            raise ValueError("MCP sealed state scope does not match existing record")
+        merged = self._session.merge(
+            MCPSealedStateRow(
+                sealed_state_ref=state.sealed_state_ref,
+                owner_user_id=state.owner_user_id,
+                task_id=state.task_id,
+                node_id=state.node_id,
+                call_ref=state.call_ref,
+                state_kind=state.state_kind,
+                ciphertext=state.ciphertext,
+                nonce=state.nonce,
+                encryption_version=state.encryption_version,
+                created_at=state.created_at,
+                updated_at=state.updated_at,
+            )
+        )
+        self._session.flush()
+        return _row_to_mcp_sealed_state(merged)
+
+    def get_mcp_sealed_state(
+        self, owner_user_id: str, task_id: str, sealed_state_ref: str
+    ) -> MCPSealedState | None:
+        row = self._session.scalar(
+            select(MCPSealedStateRow).where(
+                MCPSealedStateRow.sealed_state_ref == sealed_state_ref,
+                MCPSealedStateRow.owner_user_id == owner_user_id,
+                MCPSealedStateRow.task_id == task_id,
+            )
+        )
+        return None if row is None else _row_to_mcp_sealed_state(row)
+
+    def delete_mcp_sealed_state(
+        self, owner_user_id: str, task_id: str, sealed_state_ref: str
+    ) -> bool:
+        result = self._session.execute(
+            delete(MCPSealedStateRow).where(
+                MCPSealedStateRow.sealed_state_ref == sealed_state_ref,
+                MCPSealedStateRow.owner_user_id == owner_user_id,
+                MCPSealedStateRow.task_id == task_id,
+            )
+        )
+        return bool(result.rowcount)
+
+    def save_mcp_connection_lease(self, lease: MCPConnectionLease) -> MCPConnectionLease:
+        existing = self._session.get(MCPConnectionLeaseRow, lease.connection_id)
+        if existing is not None and (
+            existing.owner_user_id != lease.owner_user_id
+            or existing.task_id != lease.task_id
+            or existing.instance_id != lease.instance_id
+        ):
+            raise ValueError("MCP connection lease scope does not match existing lease")
+        merged = self._session.merge(
+            MCPConnectionLeaseRow(
+                connection_id=lease.connection_id,
+                owner_user_id=lease.owner_user_id,
+                task_id=lease.task_id,
+                instance_id=lease.instance_id,
+                lease_expires_at=lease.lease_expires_at,
+                disconnected_at=lease.disconnected_at,
+                auth_generation=lease.auth_generation,
+                created_at=lease.created_at,
+                updated_at=lease.updated_at,
+            )
+        )
+        self._session.flush()
+        return _row_to_mcp_connection_lease(merged)
+
+    def list_live_mcp_connection_leases(
+        self, owner_user_id: str, task_id: str, *, now: datetime
+    ) -> list[MCPConnectionLease]:
+        rows = self._session.scalars(
+            select(MCPConnectionLeaseRow)
+            .where(
+                MCPConnectionLeaseRow.owner_user_id == owner_user_id,
+                MCPConnectionLeaseRow.task_id == task_id,
+                MCPConnectionLeaseRow.lease_expires_at > now,
+            )
+            .order_by(MCPConnectionLeaseRow.connection_id)
+        ).all()
+        return [_row_to_mcp_connection_lease(row) for row in rows]
+
+    def delete_mcp_connection_lease(
+        self, owner_user_id: str, task_id: str, connection_id: str
+    ) -> bool:
+        result = self._session.execute(
+            delete(MCPConnectionLeaseRow).where(
+                MCPConnectionLeaseRow.connection_id == connection_id,
+                MCPConnectionLeaseRow.owner_user_id == owner_user_id,
+                MCPConnectionLeaseRow.task_id == task_id,
+            )
+        )
+        return bool(result.rowcount)
+
+    def expire_mcp_connection_leases(self, *, now: datetime, limit: int = 1000) -> int:
+        ids = self._session.scalars(
+            select(MCPConnectionLeaseRow.connection_id)
+            .where(MCPConnectionLeaseRow.lease_expires_at <= now)
+            .order_by(MCPConnectionLeaseRow.lease_expires_at)
+            .limit(max(1, limit))
+        ).all()
+        if not ids:
+            return 0
+        self._session.execute(
+            delete(MCPConnectionLeaseRow).where(MCPConnectionLeaseRow.connection_id.in_(ids))
+        )
+        return len(ids)
+
+    def append_mcp_audit_event(self, event: MCPAuditEvent) -> MCPAuditEvent:
+        existing = self._session.get(MCPAuditEventRow, event.audit_event_id)
+        if existing is not None:
+            if existing.owner_user_id != event.owner_user_id:
+                raise ValueError("MCP audit event owner does not match existing event")
+            return _row_to_mcp_audit_event(existing)
+        row = MCPAuditEventRow(
+            audit_event_id=event.audit_event_id,
+            owner_user_id=event.owner_user_id,
+            event_type=event.event_type,
+            occurred_at=event.occurred_at,
+            expires_at=event.expires_at,
+            task_id=event.task_id,
+            node_id=event.node_id,
+            server_id=event.server_id,
+            call_ref=event.call_ref,
+            safe_payload=dict(event.safe_payload),
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_mcp_audit_event(row)
+
+    def list_mcp_audit_events(
+        self, owner_user_id: str, *, task_id: str | None = None, limit: int = 100
+    ) -> list[MCPAuditEvent]:
+        conditions = [MCPAuditEventRow.owner_user_id == owner_user_id]
+        if task_id is not None:
+            conditions.append(MCPAuditEventRow.task_id == task_id)
+        rows = self._session.scalars(
+            select(MCPAuditEventRow)
+            .where(*conditions)
+            .order_by(MCPAuditEventRow.occurred_at, MCPAuditEventRow.audit_event_id)
+            .limit(max(1, limit))
+        ).all()
+        return [_row_to_mcp_audit_event(row) for row in rows]
+
+    def delete_expired_mcp_audit_events(self, *, now: datetime, limit: int = 1000) -> int:
+        ids = self._session.scalars(
+            select(MCPAuditEventRow.audit_event_id)
+            .where(MCPAuditEventRow.expires_at <= now)
+            .order_by(MCPAuditEventRow.expires_at)
+            .limit(max(1, limit))
+        ).all()
+        if not ids:
+            return 0
+        self._session.execute(
+            delete(MCPAuditEventRow).where(MCPAuditEventRow.audit_event_id.in_(ids))
+        )
+        return len(ids)
 
     def create_or_get_mcp_credential_key_validation(
         self, record: MCPCredentialKeyValidation
@@ -3079,15 +3759,241 @@ class SQLiteStorage(StoragePort):
         return await self._run(lambda state, collab: state.save_user_mcp_tool_grant(grant))
 
     async def list_user_mcp_tool_grants(
-        self, owner_user_id: str, server_id: str
+        self, owner_user_id: str, server_id: str | None = None
     ) -> list[UserMCPToolGrant]:
         return await self._run(lambda state, collab: state.list_user_mcp_tool_grants(owner_user_id, server_id))
+
+    async def get_valid_user_mcp_tool_grant(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        tool_name: str,
+        *,
+        server_security_version: int,
+        input_schema_sha256: str,
+    ) -> UserMCPToolGrant | None:
+        return await self._run(
+            lambda state, collab: state.get_valid_user_mcp_tool_grant(
+                owner_user_id,
+                server_id,
+                tool_name,
+                server_security_version=server_security_version,
+                input_schema_sha256=input_schema_sha256,
+            )
+        )
 
     async def delete_user_mcp_tool_grant(
         self, owner_user_id: str, server_id: str, grant_id: str
     ) -> bool:
         return await self._run(
             lambda state, collab: state.delete_user_mcp_tool_grant(owner_user_id, server_id, grant_id)
+        )
+
+    async def delete_user_mcp_tool_grant_by_id(self, owner_user_id: str, grant_id: str) -> bool:
+        return await self._run(
+            lambda state, collab: state.delete_user_mcp_tool_grant_by_id(owner_user_id, grant_id)
+        )
+
+    async def clear_user_mcp_tool_grants(self, owner_user_id: str, server_id: str) -> int:
+        return await self._run(
+            lambda state, collab: state.clear_user_mcp_tool_grants(owner_user_id, server_id)
+        )
+
+    async def invalidate_user_mcp_tool_grants(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        invalidated_at: datetime,
+        invalid_reason: str,
+        tool_name: str | None = None,
+        input_schema_sha256: str | None = None,
+    ) -> int:
+        return await self._run(
+            lambda state, collab: state.invalidate_user_mcp_tool_grants(
+                owner_user_id,
+                server_id,
+                invalidated_at=invalidated_at,
+                invalid_reason=invalid_reason,
+                tool_name=tool_name,
+                input_schema_sha256=input_schema_sha256,
+            )
+        )
+
+    async def save_mcp_branch_record(self, record: MCPBranchRecord) -> MCPBranchRecord:
+        return await self._run(lambda state, collab: state.save_mcp_branch_record(record))
+
+    async def get_mcp_branch_record(
+        self, owner_user_id: str, task_id: str, branch_id: str
+    ) -> MCPBranchRecord | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_branch_record(owner_user_id, task_id, branch_id)
+        )
+
+    async def list_mcp_branch_records(
+        self,
+        owner_user_id: str,
+        *,
+        task_id: str | None = None,
+        statuses: tuple[str, ...] = (),
+    ) -> list[MCPBranchRecord]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_branch_records(
+                owner_user_id, task_id=task_id, statuses=statuses
+            )
+        )
+
+    async def reserve_mcp_call(self, record: MCPCallRecord) -> bool:
+        return await self._run(lambda state, collab: state.reserve_mcp_call(record))
+
+    async def mark_mcp_call_may_have_dispatched(
+        self, owner_user_id: str, task_id: str, call_ref: str, *, updated_at: datetime
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.mark_mcp_call_may_have_dispatched(
+                owner_user_id, task_id, call_ref, updated_at=updated_at
+            )
+        )
+
+    async def get_mcp_call_record(
+        self, owner_user_id: str, task_id: str, call_ref: str
+    ) -> MCPCallRecord | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_call_record(owner_user_id, task_id, call_ref)
+        )
+
+    async def list_mcp_call_records(
+        self, owner_user_id: str, task_id: str, *, branch_id: str | None = None
+    ) -> list[MCPCallRecord]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_call_records(
+                owner_user_id, task_id, branch_id=branch_id
+            )
+        )
+
+    async def finish_mcp_call(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        call_ref: str,
+        *,
+        status: str,
+        terminal_at: datetime,
+        result_ref: str | None = None,
+        output_size_bytes: int | None = None,
+        safe_error_code: str | None = None,
+    ) -> MCPCallRecord | None:
+        return await self._run(
+            lambda state, collab: state.finish_mcp_call(
+                owner_user_id,
+                task_id,
+                call_ref,
+                status=status,
+                terminal_at=terminal_at,
+                result_ref=result_ref,
+                output_size_bytes=output_size_bytes,
+                safe_error_code=safe_error_code,
+            )
+        )
+
+    async def save_mcp_remote_task_binding(
+        self, binding: MCPRemoteTaskBinding
+    ) -> MCPRemoteTaskBinding:
+        return await self._run(
+            lambda state, collab: state.save_mcp_remote_task_binding(binding)
+        )
+
+    async def get_mcp_remote_task_binding(
+        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_remote_task_binding(
+                owner_user_id, task_id, safe_remote_task_ref
+            )
+        )
+
+    async def list_due_mcp_remote_task_bindings(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[MCPRemoteTaskBinding]:
+        return await self._run(
+            lambda state, collab: state.list_due_mcp_remote_task_bindings(now=now, limit=limit)
+        )
+
+    async def delete_mcp_remote_task_binding(
+        self, owner_user_id: str, task_id: str, safe_remote_task_ref: str
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.delete_mcp_remote_task_binding(
+                owner_user_id, task_id, safe_remote_task_ref
+            )
+        )
+
+    async def save_mcp_sealed_state(self, state: MCPSealedState) -> MCPSealedState:
+        return await self._run(lambda storage, collab: storage.save_mcp_sealed_state(state))
+
+    async def get_mcp_sealed_state(
+        self, owner_user_id: str, task_id: str, sealed_state_ref: str
+    ) -> MCPSealedState | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_sealed_state(
+                owner_user_id, task_id, sealed_state_ref
+            )
+        )
+
+    async def delete_mcp_sealed_state(
+        self, owner_user_id: str, task_id: str, sealed_state_ref: str
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.delete_mcp_sealed_state(
+                owner_user_id, task_id, sealed_state_ref
+            )
+        )
+
+    async def save_mcp_connection_lease(
+        self, lease: MCPConnectionLease
+    ) -> MCPConnectionLease:
+        return await self._run(lambda state, collab: state.save_mcp_connection_lease(lease))
+
+    async def list_live_mcp_connection_leases(
+        self, owner_user_id: str, task_id: str, *, now: datetime
+    ) -> list[MCPConnectionLease]:
+        return await self._run(
+            lambda state, collab: state.list_live_mcp_connection_leases(
+                owner_user_id, task_id, now=now
+            )
+        )
+
+    async def delete_mcp_connection_lease(
+        self, owner_user_id: str, task_id: str, connection_id: str
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.delete_mcp_connection_lease(
+                owner_user_id, task_id, connection_id
+            )
+        )
+
+    async def expire_mcp_connection_leases(self, *, now: datetime, limit: int = 1000) -> int:
+        return await self._run(
+            lambda state, collab: state.expire_mcp_connection_leases(now=now, limit=limit)
+        )
+
+    async def append_mcp_audit_event(self, event: MCPAuditEvent) -> MCPAuditEvent:
+        return await self._run(lambda state, collab: state.append_mcp_audit_event(event))
+
+    async def list_mcp_audit_events(
+        self, owner_user_id: str, *, task_id: str | None = None, limit: int = 100
+    ) -> list[MCPAuditEvent]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_audit_events(
+                owner_user_id, task_id=task_id, limit=limit
+            )
+        )
+
+    async def delete_expired_mcp_audit_events(
+        self, *, now: datetime, limit: int = 1000
+    ) -> int:
+        return await self._run(
+            lambda state, collab: state.delete_expired_mcp_audit_events(now=now, limit=limit)
         )
 
     async def create_or_get_mcp_credential_key_validation(

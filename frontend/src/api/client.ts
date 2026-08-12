@@ -12,10 +12,17 @@ import type {
   LogoutResponse,
   TaskInterruptsResponse,
   TaskListResponse,
+  CreateMCPServerRequest,
+  MCPCallControlResponse,
+  MCPDeleteServerResponse,
+  MCPServerListResponse,
+  MCPServerResponse,
+  MCPToolGrantListResponse,
   MessageAcceptedResponse,
   ModelEdition,
   ModelEditionsResponse,
   ReasoningEffort,
+  PatchMCPServerRequest,
   SubmitMessageRequest,
   TaskArtifactsResponse,
   TaskGraphResponse,
@@ -65,6 +72,17 @@ export interface ApiClient {
   downloadArtifact(artifactId: string, filename: string): Promise<void>;
   getTaskGraph(taskId: string): Promise<TaskGraphResponse>;
   listInterrupts(taskId: string): Promise<TaskInterruptsResponse>;
+  listMCPServers(): Promise<MCPServerListResponse>;
+  createMCPServer(input: CreateMCPServerRequest): Promise<MCPServerResponse>;
+  getMCPServer(serverId: string): Promise<MCPServerResponse>;
+  patchMCPServer(serverId: string, input: PatchMCPServerRequest): Promise<MCPServerResponse>;
+  testMCPServer(serverId: string): Promise<MCPServerResponse>;
+  deleteMCPServer(serverId: string): Promise<MCPDeleteServerResponse | undefined>;
+  listMCPGrants(): Promise<MCPToolGrantListResponse>;
+  deleteMCPGrant(grantId: string): Promise<void>;
+  clearMCPServerGrants(serverId: string): Promise<void>;
+  continueMCPCall(taskId: string, callRef: string): Promise<MCPCallControlResponse>;
+  cancelMCPCall(taskId: string, callRef: string): Promise<MCPCallControlResponse>;
 }
 
 export class ApiError extends Error {
@@ -116,6 +134,9 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
         options.onUnauthorized?.();
       }
       throw await toApiError(response);
+    }
+    if (response.status === 204) {
+      return undefined as T;
     }
     return (await response.json()) as T;
   }
@@ -207,6 +228,38 @@ export function createApiClient(options: CreateApiClientOptions = {}): ApiClient
       body: JSON.stringify({ task_id: taskId }),
     }),
     listInterrupts: (taskId) => request<TaskInterruptsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/interrupts`),
+    listMCPServers: () => request<MCPServerListResponse>('/api/v1/mcp/servers'),
+    createMCPServer: (input) => request<MCPServerResponse>('/api/v1/mcp/servers', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    getMCPServer: (serverId) => request<MCPServerResponse>(`/api/v1/mcp/servers/${encodeURIComponent(serverId)}`),
+    patchMCPServer: (serverId, input) => request<MCPServerResponse>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}`,
+      { method: 'PATCH', body: JSON.stringify(input) },
+    ),
+    testMCPServer: (serverId) => request<MCPServerResponse>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}/test`,
+      { method: 'POST' },
+    ),
+    deleteMCPServer: (serverId) => request<MCPDeleteServerResponse | undefined>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}`,
+      { method: 'DELETE' },
+    ),
+    listMCPGrants: () => request<MCPToolGrantListResponse>('/api/v1/mcp/grants'),
+    deleteMCPGrant: (grantId) => request<void>(`/api/v1/mcp/grants/${encodeURIComponent(grantId)}`, { method: 'DELETE' }),
+    clearMCPServerGrants: (serverId) => request<void>(
+      `/api/v1/mcp/servers/${encodeURIComponent(serverId)}/grants`,
+      { method: 'DELETE' },
+    ),
+    continueMCPCall: (taskId, callRef) => request<MCPCallControlResponse>(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/mcp-calls/${encodeURIComponent(callRef)}/continue`,
+      { method: 'POST' },
+    ),
+    cancelMCPCall: (taskId, callRef) => request<MCPCallControlResponse>(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/mcp-calls/${encodeURIComponent(callRef)}/cancel`,
+      { method: 'POST' },
+    ),
     getTaskArtifacts: (taskId) => request<TaskArtifactsResponse>(`/api/v1/tasks/${encodeURIComponent(taskId)}/artifacts`),
     downloadArtifact: async (artifactId, filename) => {
       const response = await fetcher(`${baseUrl}/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`, {

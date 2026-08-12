@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import json
+import unittest
+
+from src.capabilities.mcp_dispatch import (
+    MCPCallBudget,
+    MCPCallBudgetExhausted,
+    MCPCallFingerprintBlocked,
+    MCPDispatchExecutor,
+    MCPDispatchOutcome,
+    MCPDispatchWorkflowProvider,
+    MCPSelectorActionType,
+    MCPSelectorContext,
+    MCPSelectorOutputError,
+    MCPServerRouteActionType,
+    MCPServerRouter,
+    MCPToolProfile,
+    MCPToolSelector,
+    build_mcp_call_fingerprint,
+)
+from src.core.contracts import CapabilityExecutionRequest
+from src.orchestration.models import OrchestrationRequest, UserMCPServerProfile
+
+
+class MCPSelectorTest(unittest.IsolatedAsyncioTestCase):
+    def context(self) -> MCPSelectorContext:
+        return MCPSelectorContext(
+            user_request="查询客户",
+            server=UserMCPServerProfile("server-1", "CRM", "查询客户", "streamable_http"),
+            tools=(
+                MCPToolProfile(
+                    name="search_customer",
+                    description="按姓名查询客户",
+                    input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+                ),
+            ),
+        )
+
+    async def test_selector_accepts_all_four_actions(self) -> None:
+        cases = (
+            (
+                {"action": "call_tool", "tool_name": "search_customer", "arguments": {"name": "Alice"}},
+                MCPSelectorActionType.CALL_TOOL,
+            ),
+            ({"action": "finish", "reason": "done"}, MCPSelectorActionType.FINISH),
+            ({"action": "route_another_server"}, MCPSelectorActionType.ROUTE_ANOTHER_SERVER),
+            ({"action": "stop", "reason": "no safe action"}, MCPSelectorActionType.STOP),
+        )
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                selector = MCPToolSelector(text_generator=lambda _prompt, value=payload: json.dumps(value))
+                action = await selector.select(self.context())
+                self.assertEqual(action.action, expected)
+
+    async def test_selector_repairs_once(self) -> None:
+        outputs = iter(("not-json", '{"action":"finish","reason":"done"}'))
+        prompts: list[str] = []
+
+        def generator(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(outputs)
+
+        action = await MCPToolSelector(text_generator=generator).select(self.context())
+
+        self.assertEqual(action.action, MCPSelectorActionType.FINISH)
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("未通过严格校验", prompts[1])
+
+    async def test_selector_fails_after_one_repair_and_rejects_unknown_tool(self) -> None:
+        outputs = iter(
+            (
+                '{"action":"call_tool","tool_name":"invented","arguments":{}}',
+                '{"action":"call_tool","tool_name":"invented","arguments":{}}',
+            )
+        )
+        selector = MCPToolSelector(text_generator=lambda _prompt: next(outputs))
+
+        with self.assertRaises(MCPSelectorOutputError):
+            await selector.select(self.context())
+
+    async def test_selector_rejects_blocked_fingerprint_and_zero_budget(self) -> None:
+        arguments = {"name": "Alice"}
+        fingerprint = build_mcp_call_fingerprint(
+            server_id="server-1",
+            tool_name="search_customer",
+            arguments=arguments,
+        )
+        blocked_context = MCPSelectorContext(
+            user_request="查询客户",
+            server=self.context().server,
+            tools=self.context().tools,
+            failed_call_fingerprints=frozenset({fingerprint}),
+        )
+        output = json.dumps(
+            {"action": "call_tool", "tool_name": "search_customer", "arguments": arguments}
+        )
+        with self.assertRaises(MCPSelectorOutputError):
+            await MCPToolSelector(text_generator=lambda _prompt: output).select(blocked_context)
+
+        no_budget_context = MCPSelectorContext(
+            user_request="查询客户",
+            server=self.context().server,
+            tools=self.context().tools,
+            remaining_call_budget=0,
+        )
+        with self.assertRaises(MCPSelectorOutputError):
+            await MCPToolSelector(text_generator=lambda _prompt: output).select(no_budget_context)
+
+
+class MCPServerRouterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_router_only_accepts_remaining_server_and_repairs_once(self) -> None:
+        outputs = iter(
+            (
+                '{"action":"route_server","server_id":"invented"}',
+                '{"action":"route_server","server_id":"server-2"}',
+            )
+        )
+        router = MCPServerRouter(text_generator=lambda _prompt: next(outputs))
+        action = await router.route(
+            user_request="查询订单",
+            remaining_servers=(
+                UserMCPServerProfile("server-2", "ERP", "查询订单", "legacy_http_sse"),
+            ),
+        )
+
+        self.assertEqual(action.action, MCPServerRouteActionType.ROUTE_SERVER)
+        self.assertEqual(action.server_id, "server-2")
+
+
+class MCPCallBudgetTest(unittest.TestCase):
+    def test_fingerprint_is_canonical_and_budget_is_exactly_twenty(self) -> None:
+        first = build_mcp_call_fingerprint(
+            server_id="server-1",
+            tool_name="search",
+            arguments={"b": 2, "a": 1},
+        )
+        second = build_mcp_call_fingerprint(
+            server_id="server-1",
+            tool_name="search",
+            arguments={"a": 1, "b": 2},
+        )
+        self.assertEqual(first, second)
+
+        budget = MCPCallBudget()
+        reservations = [
+            budget.reserve(server_id="server-1", tool_name="search", arguments={"page": index})
+            for index in range(20)
+        ]
+        self.assertEqual(reservations[-1].call_number, 20)
+        self.assertEqual(budget.remaining_calls, 0)
+        with self.assertRaises(MCPCallBudgetExhausted):
+            budget.reserve(server_id="server-1", tool_name="search", arguments={"page": 21})
+
+    def test_failed_and_rejected_fingerprints_cannot_repeat(self) -> None:
+        budget = MCPCallBudget()
+        failed = budget.reserve(server_id="server-1", tool_name="search", arguments={"q": "a"})
+        budget.record_failed(failed.fingerprint)
+        with self.assertRaises(MCPCallFingerprintBlocked):
+            budget.reserve(server_id="server-1", tool_name="search", arguments={"q": "a"})
+
+        rejected_fingerprint = build_mcp_call_fingerprint(
+            server_id="server-1",
+            tool_name="delete",
+            arguments={"id": "1"},
+        )
+        budget.record_rejected(rejected_fingerprint)
+        with self.assertRaises(MCPCallFingerprintBlocked):
+            budget.reserve(server_id="server-1", tool_name="delete", arguments={"id": "1"})
+
+
+class _FakeCoordinator:
+    def __init__(self) -> None:
+        self.server_ids: list[str] = []
+
+    async def dispatch(self, request: CapabilityExecutionRequest, *, server_id: str) -> MCPDispatchOutcome:
+        self.server_ids.append(server_id)
+        return MCPDispatchOutcome(output_payload={"safe_result_ref": "result-1"})
+
+
+class MCPDispatchExecutorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_executor_delegates_only_exact_server_id_payload(self) -> None:
+        coordinator = _FakeCoordinator()
+        executor = MCPDispatchExecutor(coordinator=coordinator)
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="mcp.dispatch",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"server_id": "server-1"},
+            )
+        )
+
+        self.assertEqual(coordinator.server_ids, ["server-1"])
+        self.assertEqual(result.output_payload, {"safe_result_ref": "result-1"})
+        self.assertIsNone(result.error)
+
+    async def test_executor_rejects_extra_payload_before_coordinator(self) -> None:
+        coordinator = _FakeCoordinator()
+        executor = MCPDispatchExecutor(coordinator=coordinator)
+        result = await executor.execute(
+            CapabilityExecutionRequest(
+                capability_id="mcp.dispatch",
+                conversation_id="conv-1",
+                task_id="task-1",
+                node_id="node-1",
+                input_payload={"server_id": "server-1", "endpoint": "https://forbidden.example"},
+            )
+        )
+
+        self.assertEqual(coordinator.server_ids, [])
+        self.assertEqual(result.error.code, "mcp_dispatch_payload_invalid")
+
+
+class MCPDispatchWorkflowProviderTest(unittest.TestCase):
+    def test_resume_workflow_keeps_dispatch_before_finalizer(self) -> None:
+        plan = MCPDispatchWorkflowProvider().build_plan(
+            OrchestrationRequest(
+                task_id="task-resume",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="继续查询",
+                metadata={
+                    "mcp_dispatch_server_id": "server-1",
+                    "resume_interrupted_node_id": "dispatch-original",
+                    "resume_finalizer_node_id": "answer-original",
+                },
+            )
+        )
+
+        self.assertEqual([node.capability_id for node in plan.nodes], ["mcp.dispatch", "main_agent.respond"])
+        self.assertEqual(plan.node_by_id("dispatch-original").input_payload, {"server_id": "server-1"})
+        self.assertEqual(plan.node_by_id("answer-original").depends_on, ("dispatch-original",))
+
+
+if __name__ == "__main__":
+    unittest.main()

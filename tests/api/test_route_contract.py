@@ -15,6 +15,10 @@ class APIRouteContractTest(unittest.TestCase):
             "PATCH /api/v1/mcp/servers/{server_id}",
             "POST /api/v1/mcp/servers/{server_id}/test",
             "DELETE /api/v1/mcp/servers/{server_id}",
+            "DELETE /api/v1/mcp/servers/{server_id}/grants",
+            "DELETE /api/v1/mcp/grants/{grant_id}",
+            "POST /api/v1/tasks/{task_id}/mcp-calls/{call_ref}/continue",
+            "POST /api/v1/tasks/{task_id}/mcp-calls/{call_ref}/cancel",
         }
         violations = [
             f"{','.join(sorted(route.methods or []))} {route.path}"

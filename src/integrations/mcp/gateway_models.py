@@ -19,6 +19,12 @@ class MCPCancelStatus(StrEnum):
     UNKNOWN_CALL = "unknown_call"
 
 
+class MCPContinueStatus(StrEnum):
+    RESET = "reset"
+    ALREADY_TERMINAL = "already_terminal"
+    UNKNOWN_CALL = "unknown_call"
+
+
 @dataclass(slots=True, frozen=True)
 class MCPTaskServerScope:
     scope_id: str
@@ -64,10 +70,23 @@ class MCPCallOutcome:
     safe_remote_task_ref: str | None = None
     status: str | None = None
     next_poll_at: str | None = None
+    content_type: str | None = None
+    byte_size: int | None = None
 
     @classmethod
-    def completed(cls, result_ref: str) -> "MCPCallOutcome":
-        return cls(kind=MCPCallOutcomeKind.COMPLETED, result_ref=result_ref)
+    def completed(
+        cls,
+        result_ref: str,
+        *,
+        content_type: str | None = None,
+        byte_size: int | None = None,
+    ) -> "MCPCallOutcome":
+        return cls(
+            kind=MCPCallOutcomeKind.COMPLETED,
+            result_ref=result_ref,
+            content_type=content_type,
+            byte_size=byte_size,
+        )
 
     @classmethod
     def input_required(
@@ -101,6 +120,11 @@ class MCPCallOutcome:
 class CancelOutcome:
     status: MCPCancelStatus
     remote_stop_confirmed: bool
+
+
+@dataclass(slots=True, frozen=True)
+class ContinueOutcome:
+    status: MCPContinueStatus
 
 
 def _deep_freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:

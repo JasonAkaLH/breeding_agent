@@ -6,6 +6,31 @@ from src.capabilities.main_agent.prompt_builder import build_dependency_context,
 
 
 class MainAgentDependencyContextTest(unittest.TestCase):
+    def test_mcp_safe_summary_and_result_reference_enter_dependency_context(self) -> None:
+        context = build_dependency_context(
+            {
+                "mcp-node": {
+                    "mcp_status": "completed",
+                    "safe_summary": "已完成客户查询。",
+                    "result_ref": "mcp-result-safe-1",
+                    "arguments": {"customer_id": "secret"},
+                    "endpoint_url": "https://secret.invalid/mcp",
+                }
+            }
+        )
+
+        self.assertEqual(
+            context,
+            [
+                {
+                    "node_id": "mcp-node",
+                    "mcp_status": "completed",
+                    "safe_summary": "已完成客户查询。",
+                    "result_ref": "mcp-result-safe-1",
+                }
+            ],
+        )
+
     def test_response_text_enters_dependency_context(self) -> None:
         context = build_dependency_context({"node-1": {"response_text": "RCBD 完成"}})
 

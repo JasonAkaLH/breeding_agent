@@ -8,7 +8,8 @@ import os
 import secrets
 import shutil
 import time
-from collections.abc import AsyncIterator, Callable, Collection
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,15 @@ class MCPTemporaryStorageExhaustedError(MCPTemporaryResultError):
             "User MCP temporary storage is exhausted.",
             code="temporary_storage_exhausted",
             retriable=True,
+        )
+
+
+class MCPAdmissionCancelledError(MCPTemporaryResultError):
+    def __init__(self) -> None:
+        super().__init__(
+            "User MCP admission was cancelled.",
+            code="mcp_admission_cancelled",
+            retriable=False,
         )
 
 
@@ -83,8 +93,200 @@ class MCPTemporaryResultCapacityConfig:
                 raise ValueError(f"{field_name} must be a positive integer.")
 
 
+@dataclass(slots=True)
+class _AdmissionRequest:
+    owner_user_id: str
+    request_ref: str
+    granted: asyncio.Future["MCPAdmissionLease"]
+
+
+class MCPAdmissionLease:
+    """One active per-instance MCP network slot."""
+
+    def __init__(self, queue: "MCPFairAdmissionQueue", request_ref: str) -> None:
+        self._queue = queue
+        self.request_ref = request_ref
+        self._released = False
+
+    async def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        await self._queue.release(self.request_ref)
+
+    async def __aenter__(self) -> "MCPAdmissionLease":
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        await self.release()
+
+
+class MCPFairAdmissionQueue:
+    """In-memory round-robin admission across users and FIFO within each user."""
+
+    def __init__(
+        self,
+        *,
+        max_active: int,
+        disk_available: Callable[[], bool],
+    ) -> None:
+        if (
+            isinstance(max_active, bool)
+            or not isinstance(max_active, int)
+            or max_active <= 0
+        ):
+            raise ValueError("max_active must be a positive integer.")
+        self._max_active = max_active
+        self._disk_available = disk_available
+        self._active_refs: set[str] = set()
+        self._pending_by_owner: dict[str, deque[_AdmissionRequest]] = {}
+        self._owner_cycle: deque[str] = deque()
+        self._pending_by_ref: dict[str, _AdmissionRequest] = {}
+        self._lock = asyncio.Lock()
+
+    @property
+    def active_count(self) -> int:
+        return len(self._active_refs)
+
+    @property
+    def queued_count(self) -> int:
+        return len(self._pending_by_ref)
+
+    async def acquire(
+        self,
+        owner_user_id: str,
+        request_ref: str,
+        *,
+        on_queued: Callable[[int], Awaitable[None]] | None = None,
+        on_admitted: Callable[[], Awaitable[None]] | None = None,
+    ) -> MCPAdmissionLease:
+        owner = str(owner_user_id).strip()
+        ref = str(request_ref).strip()
+        if not owner or not ref:
+            raise ValueError("owner_user_id and request_ref are required.")
+        loop = asyncio.get_running_loop()
+        request = _AdmissionRequest(owner, ref, loop.create_future())
+        async with self._lock:
+            if ref in self._active_refs or ref in self._pending_by_ref:
+                raise ValueError(
+                    "request_ref must be unique while admission is active or queued."
+                )
+            if not self._has_disk_capacity():
+                raise MCPCapacityUnavailableError()
+            owner_queue = self._pending_by_owner.get(owner)
+            if owner_queue is None:
+                owner_queue = deque()
+                self._pending_by_owner[owner] = owner_queue
+                self._owner_cycle.append(owner)
+            owner_queue.append(request)
+            self._pending_by_ref[ref] = request
+            self._drain_locked()
+            queue_position = (
+                len(self._pending_by_ref) if not request.granted.done() else None
+            )
+        try:
+            if queue_position is not None and on_queued is not None:
+                await on_queued(queue_position)
+            lease = await request.granted
+            if queue_position is not None and on_admitted is not None:
+                await on_admitted()
+            return lease
+        except BaseException:
+            if request.granted.done() and not request.granted.cancelled():
+                lease = request.granted.result()
+                await lease.release()
+            else:
+                await self.cancel(ref)
+            raise
+
+    async def try_acquire(
+        self, owner_user_id: str, request_ref: str
+    ) -> MCPAdmissionLease:
+        owner = str(owner_user_id).strip()
+        ref = str(request_ref).strip()
+        if not owner or not ref:
+            raise ValueError("owner_user_id and request_ref are required.")
+        async with self._lock:
+            if ref in self._active_refs or ref in self._pending_by_ref:
+                raise ValueError(
+                    "request_ref must be unique while admission is active or queued."
+                )
+            if (
+                self._pending_by_ref
+                or len(self._active_refs) >= self._max_active
+                or not self._has_disk_capacity()
+            ):
+                raise MCPCapacityUnavailableError()
+            self._active_refs.add(ref)
+            return MCPAdmissionLease(self, ref)
+
+    async def cancel(self, request_ref: str) -> bool:
+        ref = str(request_ref)
+        async with self._lock:
+            request = self._pending_by_ref.pop(ref, None)
+            if request is None:
+                return False
+            owner_queue = self._pending_by_owner[request.owner_user_id]
+            owner_queue.remove(request)
+            if not owner_queue:
+                self._pending_by_owner.pop(request.owner_user_id, None)
+                try:
+                    self._owner_cycle.remove(request.owner_user_id)
+                except ValueError:
+                    pass
+            if not request.granted.done():
+                request.granted.set_exception(MCPAdmissionCancelledError())
+            return True
+
+    async def release(self, request_ref: str) -> None:
+        ref = str(request_ref)
+        async with self._lock:
+            if ref not in self._active_refs:
+                return
+            self._active_refs.remove(ref)
+            self._drain_locked()
+
+    def _drain_locked(self) -> None:
+        while self._owner_cycle and len(self._active_refs) < self._max_active:
+            if not self._has_disk_capacity():
+                self._fail_pending_locked()
+                return
+            owner = self._owner_cycle.popleft()
+            owner_queue = self._pending_by_owner[owner]
+            request = owner_queue.popleft()
+            self._pending_by_ref.pop(request.request_ref, None)
+            if owner_queue:
+                self._owner_cycle.append(owner)
+            else:
+                self._pending_by_owner.pop(owner, None)
+            if request.granted.cancelled():
+                continue
+            self._active_refs.add(request.request_ref)
+            request.granted.set_result(MCPAdmissionLease(self, request.request_ref))
+
+    def _fail_pending_locked(self) -> None:
+        for request in self._pending_by_ref.values():
+            if not request.granted.done():
+                request.granted.set_exception(MCPCapacityUnavailableError())
+        self._pending_by_ref.clear()
+        self._pending_by_owner.clear()
+        self._owner_cycle.clear()
+
+    def _has_disk_capacity(self) -> bool:
+        try:
+            return bool(self._disk_available())
+        except Exception:
+            return False
+
+
 class MCPTemporaryResultCapacity:
-    """Fail-fast admission guard used before a remote tools/call is sent."""
+    """Disk-aware admission capacity with a keyed fair-queue API.
+
+    ``admit()`` remains the legacy fail-fast context manager. New user-scoped
+    execution should use ``acquire()`` so callers queue before constructing a
+    client or decrypting credentials.
+    """
 
     def __init__(
         self,
@@ -96,26 +298,52 @@ class MCPTemporaryResultCapacity:
         self._config = config
         self._storage_root = storage_root
         self._free_bytes = free_bytes or _disk_free_bytes
-        self._active = 0
-        self._lock = asyncio.Lock()
+        self._fair_queue = MCPFairAdmissionQueue(
+            max_active=config.max_active_user_mcp_calls_per_instance,
+            disk_available=self._has_disk_capacity,
+        )
 
     @property
     def active_calls(self) -> int:
-        return self._active
+        return self._fair_queue.active_count
+
+    @property
+    def queued_calls(self) -> int:
+        return self._fair_queue.queued_count
+
+    async def acquire(
+        self,
+        owner_user_id: str,
+        request_ref: str,
+        *,
+        on_queued: Callable[[int], Awaitable[None]] | None = None,
+        on_admitted: Callable[[], Awaitable[None]] | None = None,
+    ) -> MCPAdmissionLease:
+        return await self._fair_queue.acquire(
+            owner_user_id,
+            request_ref,
+            on_queued=on_queued,
+            on_admitted=on_admitted,
+        )
+
+    async def cancel(self, request_ref: str) -> bool:
+        return await self._fair_queue.cancel(request_ref)
 
     @asynccontextmanager
     async def admit(self) -> AsyncIterator[None]:
-        async with self._lock:
-            if self._active >= self._config.max_active_user_mcp_calls_per_instance:
-                raise MCPCapacityUnavailableError()
-            if self._free_bytes(self._storage_root) < self._config.temporary_disk_low_watermark_bytes:
-                raise MCPCapacityUnavailableError()
-            self._active += 1
+        lease = await self._fair_queue.try_acquire(
+            "__legacy__", f"mcp-legacy-admission-{secrets.token_urlsafe(18)}"
+        )
         try:
             yield
         finally:
-            async with self._lock:
-                self._active -= 1
+            await lease.release()
+
+    def _has_disk_capacity(self) -> bool:
+        return (
+            self._free_bytes(self._storage_root)
+            >= self._config.temporary_disk_low_watermark_bytes
+        )
 
 
 @dataclass(slots=True)
@@ -386,7 +614,10 @@ async def _unlink(path: Path) -> None:
 
 
 __all__ = [
+    "MCPAdmissionCancelledError",
+    "MCPAdmissionLease",
     "MCPCapacityUnavailableError",
+    "MCPFairAdmissionQueue",
     "MCPResultSink",
     "MCPTemporaryResultCapacity",
     "MCPTemporaryResultCapacityConfig",

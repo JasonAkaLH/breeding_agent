@@ -32,6 +32,15 @@ from src.capabilities.main_agent import (
     build_local_main_agent_instance,
 )
 from src.capabilities.main_agent.prompt_builder import MAIN_AGENT_SKILL_DOCUMENT_GROUNDING_CONSTRAINT
+from src.capabilities.mcp_dispatch import (
+    MCP_DISPATCH_CAPABILITY_DESCRIPTOR,
+    MCP_DISPATCH_PLANNER_PAYLOAD_POLICY,
+    MCPDispatchExecutor,
+    MCPDispatchWorkflowProvider,
+    MCPServerRouter,
+    MCPToolSelector,
+    build_local_mcp_dispatch_instance,
+)
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
 from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus
@@ -102,7 +111,6 @@ from src.integrations.llm_request_options import (
 )
 from src.integrations.llm_runtime import SharedLLMRuntime
 from src.integrations.model_editions import (
-    ReasoningEffortConfig,
     config_for_model_edition,
     default_model_edition,
     model_edition_options,
@@ -112,8 +120,10 @@ from src.integrations.model_editions import (
 )
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
 from src.integrations.mcp.credentials import CredentialCipher
+from src.integrations.mcp.audit import MCPAuditService
 from src.integrations.mcp.endpoint_policy import EndpointAllowlist, EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
+from src.integrations.mcp.dispatch_coordinator import UserMCPDispatchCoordinator
 from src.integrations.mcp.health import MCPHealthRunner
 from src.integrations.mcp.invalidation import (
     CompositeMCPInvalidationPublisher,
@@ -134,6 +144,7 @@ from src.integrations.rust_safety_contract import configure_safety_shadow_sink
 from src.lifecycle.cancellation_service import CancellationService
 from src.lifecycle.conversation_guard import ConversationSerialGuard
 from src.lifecycle.interrupt_service import InterruptService
+from src.lifecycle.mcp_presence import MCPTaskPresenceService
 from src.orchestration.answer_selection import select_final_text_artifact
 from src.orchestration.capability_fallback import (
     CAPABILITY_MISSING_FALLBACK_EVENT,
@@ -147,7 +158,13 @@ from src.orchestration.completion_policy import CompletionPolicy
 from src.orchestration.auto_workflow_provider import AutoWorkflowProvider
 from src.orchestration.conversation_memory import ConversationMemoryBuilder, ConversationMemoryConfig, ResolutionGenerator
 from src.orchestration.llm_workflow_provider import LLMWorkflowProvider, WorkflowPlanningError
-from src.orchestration.models import CapabilityDescriptor, OrchestrationRequest, OrchestrationRunResult, WorkflowPlan
+from src.orchestration.models import (
+    CapabilityDescriptor,
+    OrchestrationRequest,
+    OrchestrationRunResult,
+    UserMCPServerProfile,
+    WorkflowPlan,
+)
 from src.orchestration.planner_contract import TextGenerator as PlannerTextGenerator
 from src.orchestration.planner_payload_policy import CapabilityPayloadPolicy
 from src.orchestration.visible_message_history import INTERRUPT_VISIBLE_STREAM_STATUS, persist_interrupt_question_message
@@ -229,6 +246,7 @@ RESUME_SKILL_INTERNAL_METADATA_KEYS = frozenset(
     {
         "resume_interrupted_node_id",
         "resume_finalizer_node_id",
+        "mcp_dispatch_server_id",
     }
 )
 SYSTEM_MANAGED_METADATA_KEYS = frozenset(
@@ -383,6 +401,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         postgres_mcp_invalidation_bus: PostgresMCPInvalidationBus | None = None,
         user_mcp_result_store: MCPTemporaryResultStore | None = None,
         user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
+        user_mcp_presence_service: MCPTaskPresenceService | None = None,
+        user_mcp_audit_service: MCPAuditService | None = None,
+        user_mcp_routing_enabled: bool = False,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -406,6 +427,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self.postgres_mcp_invalidation_bus = postgres_mcp_invalidation_bus
         self.user_mcp_result_store = user_mcp_result_store
         self.user_mcp_result_janitor = user_mcp_result_janitor
+        self.user_mcp_presence_service = user_mcp_presence_service
+        self.user_mcp_audit_service = user_mcp_audit_service
+        self.user_mcp_routing_enabled = user_mcp_routing_enabled
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
@@ -434,6 +458,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self._task_file_selection_resume_metadata: dict[str, dict[str, Any]] = {}
         self._assistant_history_sync_failure_task_ids: set[str] = set()
         self._assistant_history_sync_failure_lock = asyncio.Lock()
+        self._mcp_auth_invalidation_queue = None
+        self._mcp_auth_invalidation_task: asyncio.Task[None] | None = None
+        self._mcp_audit_retention_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._skill_refresh_lock = asyncio.Lock()
         self._mcp_refresh_lock = asyncio.Lock()
@@ -740,6 +767,18 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     ) -> dict[str, object]:
         upload_ids = self._chat_message_upload_ids(request.metadata)
         sheet_selections = self._chat_message_sheet_selections(request.metadata)
+        if interrupt.reason_code == "mcp_tool_approval_required":
+            decision = str(request.metadata.get("mcp_tool_approval") or "").strip()
+            if decision not in {"allow_once", "always_allow", "deny"}:
+                raise ValueError(
+                    "mcp_tool_approval must be allow_once, always_allow, or deny"
+                )
+            return {"mcp_tool_approval": decision}
+        if interrupt.reason_code == "mcp_input_required":
+            responses = request.metadata.get("mcp_input_responses")
+            if not isinstance(responses, Mapping):
+                raise ValueError("mcp_input_responses must be an object")
+            return {"mcp_input_responses": dict(responses)}
         if interrupt.reason_code == "file_selection_ambiguous":
             answer: dict[str, object] = {"text": request.content}
             if upload_ids:
@@ -1023,9 +1062,32 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             metadata=metadata,
             current_user_message=current_user_message,
             resolved_user_message=resolved_user_message,
+            available_mcp_servers=await self.available_user_mcp_server_profiles(
+                authenticated_username
+            ),
         )
         await self._schedule_execution(orchestration_request)
         return message, task
+
+    async def available_user_mcp_server_profiles(
+        self,
+        owner_user_id: str,
+    ) -> tuple[UserMCPServerProfile, ...]:
+        if not self.user_mcp_routing_enabled or self.user_mcp_config_service is None:
+            return ()
+        servers = await self.user_mcp_config_service.list_servers(owner_user_id)
+        return tuple(
+            UserMCPServerProfile(
+                server_id=server.server_id,
+                display_name=server.display_name,
+                routing_description=server.routing_description,
+                transport=str(server.transport),
+            )
+            for server in servers
+            if server.enabled
+            and str(server.health_status) == "available"
+            and not server.deletion_pending
+        )
 
     @staticmethod
     def _drop_user_supplied_system_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -1817,7 +1879,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 await self._clear_conversation_current_task(request.conversation_id, request.task_id)
                 if self.user_mcp_gateway is not None:
                     try:
-                        await self.user_mcp_gateway.close_task(request.task_id, "task_terminal")
+                        latest_task = await self.storage.get_task(request.task_id)
+                        if latest_task is not None and latest_task.status in {
+                            TaskStatus.COMPLETED,
+                            TaskStatus.FAILED,
+                            TaskStatus.CANCELLED,
+                        }:
+                            await self.user_mcp_gateway.close_task(
+                                request.task_id,
+                                "task_terminal",
+                            )
                     except Exception:
                         pass
                 await self._release_task_skill_revision_if_terminal(request.task_id)
@@ -2955,7 +3026,22 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         await self._await_existing_execution(task.task_id)
         resume_capability_id = task.requested_capability_id
         interrupted_node = await self.storage.get_task_node(interrupt.node_id)
-        if interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
+        if (
+            interrupted_node is not None
+            and interrupted_node.capability_id == "mcp.dispatch"
+        ):
+            resume_capability_id = "mcp.dispatch"
+            resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
+            server_id = str(interrupt.required_fields.get("server_id") or "").strip()
+            if server_id:
+                resume_metadata["mcp_dispatch_server_id"] = server_id
+            resume_finalizer_node_id = await self._resume_finalizer_node_id(
+                task.task_id,
+                interrupted_node.node_id,
+            )
+            if resume_finalizer_node_id:
+                resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
+        elif interrupted_node is not None and interrupted_node.capability_id.startswith("skill."):
             resume_capability_id = interrupted_node.capability_id
             resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
             resume_finalizer_node_id = await self._resume_finalizer_node_id(task.task_id, interrupted_node.node_id)
@@ -2963,6 +3049,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 resume_metadata["resume_finalizer_node_id"] = resume_finalizer_node_id
         elif interrupt.source_agent.startswith("skill.") and self.capability_registry.get(interrupt.source_agent) is not None:
             resume_capability_id = interrupt.source_agent
+        owner_conversation = await self.storage.get_conversation(task.conversation_id)
+        if owner_conversation is None:
+            raise ValueError(f"Unknown conversation: {task.conversation_id}")
         await self._schedule_execution(
             OrchestrationRequest(
                 task_id=task.task_id,
@@ -2971,6 +3060,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 user_message=combined_message,
                 requested_capability_id=resume_capability_id,
                 metadata=resume_metadata,
+                available_mcp_servers=await self.available_user_mcp_server_profiles(
+                    owner_conversation.username
+                ),
             )
         )
         if sheet_selection_resume_metadata:
@@ -6558,6 +6650,17 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
 
     async def start(self) -> None:
+        if self.user_mcp_audit_service is not None:
+            self._mcp_audit_retention_task = asyncio.create_task(
+                self.user_mcp_audit_service.run_retention_forever(),
+                name="mcp-audit-retention",
+            )
+        if self.user_mcp_presence_service is not None and self.auth_invalidation_bus is not None:
+            self._mcp_auth_invalidation_queue = self.auth_invalidation_bus.subscribe()
+            self._mcp_auth_invalidation_task = asyncio.create_task(
+                self._run_mcp_auth_invalidation_listener(),
+                name="mcp-auth-invalidation-listener",
+            )
         if self.mcp_credential_cipher is not None:
             await self.mcp_credential_cipher.create_or_verify_sentinel(self.storage)
         if self.user_mcp_health_runner is not None:
@@ -6603,8 +6706,21 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 await asyncio.gather(*pending, return_exceptions=True)
         if self._mysql_adapter is not None:
             await self._mysql_adapter.aclose()
+        if self._mcp_audit_retention_task is not None:
+            self._mcp_audit_retention_task.cancel()
+            await asyncio.gather(self._mcp_audit_retention_task, return_exceptions=True)
+            self._mcp_audit_retention_task = None
+        if self._mcp_auth_invalidation_task is not None:
+            self._mcp_auth_invalidation_task.cancel()
+            await asyncio.gather(self._mcp_auth_invalidation_task, return_exceptions=True)
+            self._mcp_auth_invalidation_task = None
+        if self._mcp_auth_invalidation_queue is not None and self.auth_invalidation_bus is not None:
+            self.auth_invalidation_bus.unsubscribe(self._mcp_auth_invalidation_queue)
+            self._mcp_auth_invalidation_queue = None
         if self.user_mcp_config_service is not None:
             await self.user_mcp_config_service.aclose()
+        if self.user_mcp_presence_service is not None:
+            await self.user_mcp_presence_service.aclose()
         if self.user_mcp_health_runner is not None:
             await self.user_mcp_health_runner.aclose()
         if self.user_mcp_gateway is not None:
@@ -6616,6 +6732,18 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if self.postgres_auth_invalidation_bus is not None:
             await self.postgres_auth_invalidation_bus.aclose()
         await asyncio.to_thread(self._engine.dispose)
+
+    async def _run_mcp_auth_invalidation_listener(self) -> None:
+        queue = self._mcp_auth_invalidation_queue
+        presence = self.user_mcp_presence_service
+        if queue is None or presence is None:
+            return
+        while True:
+            event = await queue.get()
+            await presence.invalidate_owner(
+                event.username,
+                reason=f"auth_{event.reason}",
+            )
 
     @staticmethod
     def _normalize_conversation_file_selector_mode(raw_mode: object) -> str:
@@ -7299,6 +7427,7 @@ def build_api_runtime(
     runtime_sidecar_client: Any | None = None,
     skill_sandbox_client: Any | None = None,
     enable_user_mcp: bool | None = None,
+    enable_user_mcp_routing: bool | None = None,
     user_mcp_credential_key_file: str | Path | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
@@ -7342,6 +7471,12 @@ def build_api_runtime(
         enable_user_mcp
         if enable_user_mcp is not None
         else os.environ.get("MAF_USER_MCP_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    user_mcp_routing_enabled = user_mcp_enabled and (
+        enable_user_mcp_routing
+        if enable_user_mcp_routing is not None
+        else os.environ.get("MAF_USER_MCP_ROUTING_ENABLED", "").strip().lower()
         in {"1", "true", "yes", "on"}
     )
     mcp_credential_cipher = (
@@ -7409,6 +7544,8 @@ def build_api_runtime(
     postgres_mcp_invalidation_bus = None
     user_mcp_result_store = None
     user_mcp_result_janitor = None
+    user_mcp_presence_service = None
+    user_mcp_audit_service = None
     if user_mcp_enabled:
         assert mcp_credential_cipher is not None
         assert user_mcp_capacity_values is not None
@@ -7461,6 +7598,24 @@ def build_api_runtime(
             capacity=capacity,
             now_fn=ApiRuntime._utcnow_naive,
         )
+
+        async def cancel_offline_user_mcp(
+            owner_user_id: str,
+            platform_task_id: str,
+            reason: str,
+        ) -> None:
+            del owner_user_id
+            await user_mcp_gateway.close_task(platform_task_id, reason)
+
+        user_mcp_presence_service = MCPTaskPresenceService(
+            cancel_mcp_task=cancel_offline_user_mcp,
+            grace_period_seconds=float(
+                os.environ.get("MAF_USER_MCP_SSE_OFFLINE_GRACE_SECONDS") or 300
+            ),
+            storage=storage,
+            instance_id=instance_id,
+            now_fn=ApiRuntime._utcnow_naive,
+        )
         mcp_invalidation_bus = InMemoryMCPInvalidationBus()
 
         async def handle_mcp_invalidation(event) -> None:
@@ -7493,6 +7648,10 @@ def build_api_runtime(
             invalidation_bus=CompositeMCPInvalidationPublisher(
                 mcp_invalidation_bus, postgres_mcp_invalidation_bus
             ),
+            now_fn=ApiRuntime._utcnow_naive,
+        )
+        user_mcp_audit_service = MCPAuditService(
+            storage=storage,
             now_fn=ApiRuntime._utcnow_naive,
         )
     username_token_service = UsernameTokenService(
@@ -7558,7 +7717,24 @@ def build_api_runtime(
             resolved_mcp_runtime_state,
             mcp_refresh_result,
         )
-    event_broker = InMemoryEventBroker(audit_sink=audit_sink)
+    if user_mcp_routing_enabled:
+        _register_capability_descriptors(
+            capability_registry,
+            (MCP_DISPATCH_CAPABILITY_DESCRIPTOR,),
+            planner_payload_policies={
+                MCP_DISPATCH_CAPABILITY_DESCRIPTOR.capability_id:
+                    MCP_DISPATCH_PLANNER_PAYLOAD_POLICY,
+            },
+        )
+        instance_registry.register(build_local_mcp_dispatch_instance())
+    event_broker = InMemoryEventBroker(
+        audit_sink=audit_sink,
+        event_observer=(
+            user_mcp_audit_service.observe_event
+            if user_mcp_audit_service is not None
+            else None
+        ),
+    )
     runtime_cancelled_task_ids: set[str] = set()
 
     async def record_live_event(event: EventRecord) -> None:
@@ -7699,6 +7875,25 @@ def build_api_runtime(
         planner_reasoning_effort=planner_reasoning_effort,
         enable_llm_planner=enable_llm_planner,
     )
+    mcp_dispatch_executor = None
+    mcp_dispatch_workflow_provider = None
+    if user_mcp_routing_enabled:
+        if user_mcp_gateway is None:
+            raise RuntimeError("User-scoped MCP routing requires the user MCP Gateway")
+        if resolved_planner_text_generator is None:
+            raise RuntimeError("User-scoped MCP routing requires the LLM planner")
+        mcp_dispatch_coordinator = UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=user_mcp_gateway,
+            selector=MCPToolSelector(text_generator=resolved_planner_text_generator),
+            server_router=MCPServerRouter(text_generator=resolved_planner_text_generator),
+            live_event_recorder=record_live_event,
+            now_fn=ApiRuntime._utcnow_naive,
+        )
+        mcp_dispatch_executor = MCPDispatchExecutor(
+            coordinator=mcp_dispatch_coordinator
+        )
+        mcp_dispatch_workflow_provider = MCPDispatchWorkflowProvider()
     default_workflow_provider = LLMWorkflowProvider(
         capability_registry=capability_registry,
         fallback_provider=auto_workflow_provider,
@@ -7759,6 +7954,7 @@ def build_api_runtime(
                     platform_handler_registry=resolved_skill_platform_handler_registry,
                     service_registry=resolved_skill_service_registry,
                 ),
+                *([mcp_dispatch_executor] if mcp_dispatch_executor is not None else []),
                 MCPToolExecutor(runtime_state=resolved_mcp_runtime_state, live_event_recorder=record_live_event),
             ]
         ),
@@ -7781,6 +7977,7 @@ def build_api_runtime(
             default_provider=default_workflow_provider,
             main_agent_provider=main_agent_workflow_provider,
             skill_provider=skill_workflow_provider,
+            mcp_provider=mcp_dispatch_workflow_provider,
         ),
         mysql_adapter=resolved_mysql_adapter,
         username_token_service=username_token_service,
@@ -7811,6 +8008,9 @@ def build_api_runtime(
         postgres_mcp_invalidation_bus=postgres_mcp_invalidation_bus,
         user_mcp_result_store=user_mcp_result_store,
         user_mcp_result_janitor=user_mcp_result_janitor,
+        user_mcp_presence_service=user_mcp_presence_service,
+        user_mcp_audit_service=user_mcp_audit_service,
+        user_mcp_routing_enabled=user_mcp_routing_enabled,
     )
 
 
@@ -8565,7 +8765,14 @@ def _sync_mcp_capability_registry(
 
 
 def _is_mcp_descriptor(descriptor: CapabilityDescriptor) -> bool:
-    return descriptor.kind == "mcp_tool" or descriptor.source == "mcp" or descriptor.capability_id.startswith("mcp.")
+    return (
+        descriptor.capability_id != "mcp.dispatch"
+        and (
+            descriptor.kind == "mcp_tool"
+            or descriptor.source == "mcp"
+            or descriptor.capability_id.startswith("mcp.")
+        )
+    )
 
 
 def _is_skill_descriptor(descriptor: CapabilityDescriptor) -> bool:

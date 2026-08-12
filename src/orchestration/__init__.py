@@ -9,6 +9,7 @@ from .models import (
     InstanceState,
     OrchestrationRequest,
     OrchestrationRunResult,
+    UserMCPServerProfile,
     WorkflowNodePlan,
     WorkflowPlan,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "OrchestrationRequest",
     "PLANNER_OUTPUT_JSON_SCHEMA",
     "OrchestrationRunResult",
+    "UserMCPServerProfile",
     "PlannerOutputError",
     "PlannerPayloadPolicy",
     "OrchestrationService",

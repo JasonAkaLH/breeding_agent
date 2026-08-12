@@ -4,11 +4,11 @@ import asyncio
 import hashlib
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, AsyncContextManager, Protocol
 from uuid import uuid4
 
 from jsonschema import Draft202012Validator, Draft7Validator, SchemaError, ValidationError
@@ -24,14 +24,17 @@ from .adapter_2026 import (
 from .client import MCPClientError, MCPProtocolError
 from .gateway_models import (
     CancelOutcome,
+    ContinueOutcome,
     MCPCallOutcome,
     MCPCancelStatus,
+    MCPContinueStatus,
     MCPTaskServerScope,
     MCPToolDescriptor,
     ToolCatalogSnapshot,
 )
 from .invalidation import MCPInvalidationAction, MCPServerInvalidated
 from .temporary_results import (
+    MCPAdmissionLease,
     MCPTemporaryResultCapacity,
     MCPTemporaryResultStore,
 )
@@ -54,10 +57,61 @@ class MCPAuthenticatedPrincipal(Protocol):
     username: str
 
 
+class MCPTaskCallGuard(Protocol):
+    """Cluster-capable contract for serializing calls within a platform task."""
+
+    def admit(
+        self,
+        owner_user_id: str,
+        platform_task_id: str,
+        call_ref: str,
+    ) -> AsyncContextManager[None]: ...
+
+
+@dataclass(slots=True)
+class _TaskGuardEntry:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    references: int = 0
+
+
+class MCPInMemoryTaskCallGuard:
+    """Single-process default; production may inject a storage-backed guard."""
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str], _TaskGuardEntry] = {}
+        self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def admit(
+        self,
+        owner_user_id: str,
+        platform_task_id: str,
+        call_ref: str,
+    ) -> AsyncIterator[None]:
+        del call_ref
+        key = (str(owner_user_id), str(platform_task_id))
+        async with self._lock:
+            entry = self._entries.setdefault(key, _TaskGuardEntry())
+            entry.references += 1
+        acquired = False
+        try:
+            await entry.lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                entry.lock.release()
+            async with self._lock:
+                entry.references -= 1
+                if entry.references == 0 and not entry.lock.locked():
+                    self._entries.pop(key, None)
+
+
 @dataclass(frozen=True, slots=True)
 class MCPCallCallbacks:
     on_registered: Callable[[str], Awaitable[None] | None] | None = None
     on_heartbeat: Callable[[str], Awaitable[None] | None] | None = None
+    on_created: Callable[[str], Awaitable[None] | None] | None = None
 
 
 @dataclass(slots=True)
@@ -65,6 +119,9 @@ class _CallState:
     call_ref: str
     task: asyncio.Task[MCPCallOutcome] | None = None
     remote_request_id: str | int | None = None
+    dispatched: bool = False
+    start_allowed: asyncio.Event = field(default_factory=asyncio.Event)
+    heartbeat_reset: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass(slots=True)
@@ -74,8 +131,10 @@ class _ScopeState:
     adapter: Any
     catalog: ToolCatalogSnapshot
     renew_stop: asyncio.Event
+    admission_lease: MCPAdmissionLease
     renew_task: asyncio.Task[None] | None = None
     calls: dict[str, _CallState] = field(default_factory=dict)
+    terminal_calls: set[str] = field(default_factory=set)
     accepting_calls: bool = True
     closing: bool = False
 
@@ -98,6 +157,8 @@ class MCPGateway:
         discovery_timeout_seconds: float = SCOPE_DISCOVERY_TIMEOUT_SECONDS,
         discovery_retry_delay_seconds: float = SCOPE_DISCOVERY_RETRY_DELAY_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        task_call_guard: MCPTaskCallGuard | None = None,
+        heartbeat_waiter: Callable[[asyncio.Event, float], Awaitable[bool]] | None = None,
     ) -> None:
         self._storage = storage
         self._instance_id = gateway_instance_id
@@ -113,9 +174,12 @@ class MCPGateway:
         self._discovery_timeout_seconds = discovery_timeout_seconds
         self._discovery_retry_delay_seconds = discovery_retry_delay_seconds
         self._sleep = sleep
+        self._task_call_guard = task_call_guard or MCPInMemoryTaskCallGuard()
+        self._heartbeat_waiter = heartbeat_waiter or _wait_for_signal
         self._scopes: dict[tuple[str, str], _ScopeState] = {}
         self._opening: dict[tuple[str, str], asyncio.Task[_ScopeState]] = {}
         self._opening_owners: dict[tuple[str, str], str] = {}
+        self._terminal_call_tasks: dict[str, str] = {}
         self._closing_tasks: set[str] = set()
         self._lock = asyncio.Lock()
 
@@ -124,6 +188,9 @@ class MCPGateway:
         authenticated_user: MCPAuthenticatedPrincipal,
         platform_task_id: str,
         server_id: str,
+        *,
+        on_queue_entered: Callable[[int], Awaitable[None]] | None = None,
+        on_queue_left: Callable[[], Awaitable[None]] | None = None,
     ) -> MCPTaskServerScope:
         owner_user_id = str(authenticated_user.username)
         await self._require_task_owner(owner_user_id, platform_task_id)
@@ -141,7 +208,13 @@ class MCPGateway:
             opening = self._opening.get(key)
             if opening is None:
                 opening = asyncio.create_task(
-                    self._bootstrap_scope(owner_user_id, platform_task_id, server_id),
+                    self._bootstrap_scope(
+                        owner_user_id,
+                        platform_task_id,
+                        server_id,
+                        on_queue_entered=on_queue_entered,
+                        on_queue_left=on_queue_left,
+                    ),
                     name=f"user-mcp-open:{platform_task_id}:{server_id}",
                 )
                 self._opening[key] = opening
@@ -157,7 +230,13 @@ class MCPGateway:
                         self._opening_owners.pop(key, None)
 
     async def _bootstrap_scope(
-        self, owner_user_id: str, platform_task_id: str, server_id: str
+        self,
+        owner_user_id: str,
+        platform_task_id: str,
+        server_id: str,
+        *,
+        on_queue_entered: Callable[[int], Awaitable[None]] | None = None,
+        on_queue_left: Callable[[], Awaitable[None]] | None = None,
     ) -> _ScopeState:
         server = await self._storage.get_user_mcp_server(owner_user_id, server_id)
         if (
@@ -166,6 +245,13 @@ class MCPGateway:
             or server.health_status is not UserMCPHealthStatus.AVAILABLE
         ):
             raise MCPGatewayError("mcp_server_unavailable")
+        admission_ref = f"mcp-admission-{uuid4().hex}"
+        admission_lease = await self._capacity.acquire(
+            owner_user_id,
+            admission_ref,
+            on_queued=on_queue_entered,
+            on_admitted=on_queue_left,
+        )
         now = self._now()
         scope = MCPTaskServerScope(
             scope_id=f"mcp-scope-{uuid4().hex}",
@@ -185,7 +271,13 @@ class MCPGateway:
             created_at=now,
             updated_at=now,
         )
-        if not await self._storage.acquire_user_mcp_scope_lease(lease):
+        try:
+            lease_acquired = await self._storage.acquire_user_mcp_scope_lease(lease)
+        except BaseException:
+            await admission_lease.release()
+            raise
+        if not lease_acquired:
+            await admission_lease.release()
             raise MCPGatewayError("mcp_scope_lease_unavailable")
         adapter = None
         bootstrap_renew_stop = asyncio.Event()
@@ -269,6 +361,7 @@ class MCPGateway:
                 adapter=adapter,
                 catalog=catalog,
                 renew_stop=asyncio.Event(),
+                admission_lease=admission_lease,
             )
             state.renew_task = asyncio.create_task(
                 self._renew_scope(state), name=f"user-mcp-renew:{scope.scope_id}"
@@ -293,11 +386,11 @@ class MCPGateway:
             if adapter is not None:
                 await _safe_close(adapter)
             try:
-                await self._result_store.cleanup_scope(scope.scope_id)
-            finally:
                 await self._storage.release_user_mcp_scope_lease(
                     scope.scope_id, gateway_instance_id=self._instance_id
                 )
+            finally:
+                await admission_lease.release()
             raise
 
     async def list_tools(self, scope: MCPTaskServerScope) -> ToolCatalogSnapshot:
@@ -325,10 +418,23 @@ class MCPGateway:
             name=f"user-mcp-call:{call_ref}",
         )
         call_state.task = call_task
+        if callbacks is not None and callbacks.on_created is not None:
+            try:
+                await _await_maybe(callbacks.on_created(call_ref))
+            except BaseException:
+                call_task.cancel()
+                await asyncio.gather(call_task, return_exceptions=True)
+                state.calls.pop(call_ref, None)
+                raise
+        call_state.start_allowed.set()
         try:
             return await call_task
         finally:
             state.calls.pop(call_ref, None)
+            state.terminal_calls.add(call_ref)
+            self._terminal_call_tasks[call_ref] = state.public.platform_task_id
+            if len(self._terminal_call_tasks) > 4096:
+                self._terminal_call_tasks.pop(next(iter(self._terminal_call_tasks)))
 
     async def _execute_call(
         self,
@@ -338,17 +444,24 @@ class MCPGateway:
         arguments: Mapping[str, Any],
         callbacks: MCPCallCallbacks | None,
     ) -> MCPCallOutcome:
-        sink = self._result_store.create_sink(
-            state.public.platform_task_id, scope_id=state.public.scope_id
-        )
+        await call_state.start_allowed.wait()
+        async with self._task_call_guard.admit(
+            state.public.owner_user_id,
+            state.public.platform_task_id,
+            call_state.call_ref,
+        ):
+            if not state.accepting_calls:
+                raise MCPGatewayError("mcp_scope_closed")
+            sink = self._result_store.create_sink(
+                state.public.platform_task_id, scope_id=state.public.scope_id
+            )
 
-        def registered(request_id: str | int) -> None:
-            call_state.remote_request_id = request_id
+            def registered(request_id: str | int) -> None:
+                call_state.remote_request_id = request_id
+
             if callbacks is not None and callbacks.on_registered is not None:
-                _spawn_callback(callbacks.on_registered(call_state.call_ref))
-
-        async with AsyncExitStack() as stack:
-            await stack.enter_async_context(self._capacity.admit())
+                await _await_maybe(callbacks.on_registered(call_state.call_ref))
+            call_state.dispatched = True
             invocation = asyncio.create_task(
                 state.adapter.call_tool(
                     tool_name,
@@ -358,7 +471,7 @@ class MCPGateway:
                 )
             )
             heartbeat = asyncio.create_task(
-                self._heartbeat(call_state.call_ref, invocation, callbacks)
+                self._heartbeat(call_state, invocation, callbacks)
             )
             try:
                 raw = await invocation
@@ -369,11 +482,9 @@ class MCPGateway:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
         if not state.accepting_calls:
-            await self._result_store.cleanup_scope(state.public.scope_id)
             raise MCPGatewayError("mcp_scope_closed")
         outcome = await self._normalize_outcome(raw, sink)
         if not state.accepting_calls:
-            await self._result_store.cleanup_scope(state.public.scope_id)
             raise MCPGatewayError("mcp_scope_closed")
         return outcome
 
@@ -393,11 +504,48 @@ class MCPGateway:
             result = {"value": result}
         embedded = result.get("_mcpResultRef")
         if isinstance(embedded, Mapping):
-            return MCPCallOutcome.completed(str(embedded["ref"]))
+            size = embedded.get("sizeBytes")
+            return MCPCallOutcome.completed(
+                str(embedded["ref"]),
+                content_type=str(embedded.get("contentType") or "application/json"),
+                byte_size=(
+                    size
+                    if isinstance(size, int) and not isinstance(size, bool)
+                    else None
+                ),
+            )
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
         await sink.write(encoded)
         ref = await sink.finalize()
-        return MCPCallOutcome.completed(ref.ref)
+        return MCPCallOutcome.completed(
+            ref.ref,
+            content_type="application/json",
+            byte_size=ref.size_bytes,
+        )
+
+    async def continue_call(
+        self, scope: MCPTaskServerScope, call_ref: str
+    ) -> ContinueOutcome:
+        state = self._require_scope(scope)
+        call = state.calls.get(call_ref)
+        if call is not None and call.task is not None and not call.task.done():
+            call.heartbeat_reset.set()
+            return ContinueOutcome(MCPContinueStatus.RESET)
+        if self._terminal_call_tasks.get(call_ref) == scope.platform_task_id or (
+            call is not None and call.task is not None and call.task.done()
+        ):
+            return ContinueOutcome(MCPContinueStatus.ALREADY_TERMINAL)
+        return ContinueOutcome(MCPContinueStatus.UNKNOWN_CALL)
+
+    async def continue_call_for_task(
+        self, platform_task_id: str, call_ref: str
+    ) -> ContinueOutcome:
+        state = self._find_call_scope(platform_task_id, call_ref)
+        if state is not None:
+            return await self.continue_call(state.public, call_ref)
+        if self._terminal_call_tasks.get(call_ref) == platform_task_id:
+            return ContinueOutcome(MCPContinueStatus.ALREADY_TERMINAL)
+        return ContinueOutcome(MCPContinueStatus.UNKNOWN_CALL)
 
     async def cancel_call(
         self, scope: MCPTaskServerScope, call_ref: str, reason: str
@@ -405,9 +553,16 @@ class MCPGateway:
         state = self._require_scope(scope)
         call = state.calls.get(call_ref)
         if call is None:
+            if self._terminal_call_tasks.get(call_ref) == scope.platform_task_id:
+                return CancelOutcome(MCPCancelStatus.ALREADY_TERMINAL, True)
             return CancelOutcome(MCPCancelStatus.UNKNOWN_CALL, False)
         if call.task is not None and call.task.done():
             return CancelOutcome(MCPCancelStatus.ALREADY_TERMINAL, True)
+        if not call.dispatched:
+            if call.task is not None:
+                call.task.cancel()
+                await asyncio.gather(call.task, return_exceptions=True)
+            return CancelOutcome(MCPCancelStatus.CANCELLED, True)
         cancel_request = getattr(state.adapter, "cancel_request", None)
         if callable(cancel_request) and call.remote_request_id is not None:
             try:
@@ -422,6 +577,16 @@ class MCPGateway:
                 pass
         await self.close_scope(scope, reason)
         return CancelOutcome(MCPCancelStatus.REMOTE_STOP_UNKNOWN, False)
+
+    async def cancel_call_for_task(
+        self, platform_task_id: str, call_ref: str, reason: str
+    ) -> CancelOutcome:
+        state = self._find_call_scope(platform_task_id, call_ref)
+        if state is not None:
+            return await self.cancel_call(state.public, call_ref, reason)
+        if self._terminal_call_tasks.get(call_ref) == platform_task_id:
+            return CancelOutcome(MCPCancelStatus.ALREADY_TERMINAL, True)
+        return CancelOutcome(MCPCancelStatus.UNKNOWN_CALL, False)
 
     async def close_scope(self, scope: MCPTaskServerScope, reason: str) -> None:
         del reason
@@ -440,10 +605,6 @@ class MCPGateway:
             await asyncio.gather(*pending, return_exceptions=True)
         try:
             await _safe_close(state.adapter)
-            try:
-                await self._result_store.cleanup_scope(scope.scope_id)
-            except Exception:
-                pass
         finally:
             state.renew_stop.set()
             if state.renew_task is not None and state.renew_task is not current:
@@ -454,6 +615,7 @@ class MCPGateway:
                     scope.scope_id, gateway_instance_id=self._instance_id
                 )
             finally:
+                await state.admission_lease.release()
                 async with self._lock:
                     if self._scopes.get(key) is state:
                         self._scopes.pop(key, None)
@@ -598,16 +760,24 @@ class MCPGateway:
 
     async def _heartbeat(
         self,
-        call_ref: str,
+        call_state: _CallState,
         invocation: asyncio.Task[Any],
         callbacks: MCPCallCallbacks | None,
     ) -> None:
         while not invocation.done():
-            await asyncio.sleep(self._heartbeat_interval_seconds)
+            reset = await self._heartbeat_waiter(
+                call_state.heartbeat_reset,
+                self._heartbeat_interval_seconds,
+            )
             if invocation.done():
                 return
+            if reset:
+                continue
             if callbacks is not None and callbacks.on_heartbeat is not None:
-                await _await_maybe(callbacks.on_heartbeat(call_ref))
+                try:
+                    await _await_maybe(callbacks.on_heartbeat(call_state.call_ref))
+                except Exception:
+                    pass
 
     async def _require_task_owner(self, owner_user_id: str, task_id: str) -> None:
         task = await self._storage.get_task(task_id)
@@ -626,6 +796,18 @@ class MCPGateway:
         if state is None or state.public.scope_id != scope.scope_id:
             raise MCPGatewayError("mcp_scope_not_found")
         return state
+
+    def _find_call_scope(
+        self, platform_task_id: str, call_ref: str
+    ) -> _ScopeState | None:
+        return next(
+            (
+                state
+                for (task_id, _), state in self._scopes.items()
+                if task_id == platform_task_id and call_ref in state.calls
+            ),
+            None,
+        )
 
     async def _mark_unavailable(self, server: UserMCPServer, error_code: str) -> None:
         await self._storage.update_user_mcp_server(
@@ -698,6 +880,15 @@ async def _safe_close(value: Any) -> None:
         await _await_maybe(value.close())
     except Exception:
         pass
+
+
+async def _wait_for_signal(signal: asyncio.Event, timeout_seconds: float) -> bool:
+    try:
+        await asyncio.wait_for(signal.wait(), timeout=timeout_seconds)
+    except TimeoutError:
+        return False
+    signal.clear()
+    return True
 
 
 async def _await_maybe(value: Any) -> Any:

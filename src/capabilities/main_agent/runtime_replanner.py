@@ -296,7 +296,9 @@ class MainAgentRuntimeReplanner:
         return False
 
     def _build_prompt(self, context: RuntimeReplanContext) -> str:
-        capabilities = self._format_public_capabilities(self._capability_registry.list(public_only=True))
+        capabilities = self._format_public_capabilities(
+            self._capability_registry.list_for_request(context.request, public_only=True)
+        )
         node_outputs = self._sanitize_node_outputs(context.node_outputs)
         current_nodes = []
         for node in context.nodes.values():
@@ -343,7 +345,9 @@ class MainAgentRuntimeReplanner:
 
     def _build_prompt_resolution(self, context: RuntimeReplanContext):
         legacy_prompt = self._build_prompt(context)
-        capabilities = self._format_public_capabilities(self._capability_registry.list(public_only=True))
+        capabilities = self._format_public_capabilities(
+            self._capability_registry.list_for_request(context.request, public_only=True)
+        )
         node_outputs = self._sanitize_node_outputs(context.node_outputs)
         current_nodes = []
         for node in context.nodes.values():

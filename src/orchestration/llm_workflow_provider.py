@@ -81,9 +81,10 @@ class LLMWorkflowProvider:
             capability_id: policy.planner_allowed_fields
             for capability_id, policy in payload_policies.items()
         }
+        visible_public_capabilities = self._capability_registry.list_for_request(request, public_only=True)
         original_prompt_resolution = build_planner_profile_resolution(
             request,
-            public_capabilities=self._capability_registry.list(public_only=True),
+            public_capabilities=visible_public_capabilities,
             planner_payload_allowlist=planner_payload_allowlist,
         )
         original_prompt = original_prompt_resolution.prompt
@@ -106,6 +107,7 @@ class LLMWorkflowProvider:
                     raise PlannerOutputError("Planner text generator must return a string.")
                 previous_output = raw_output
                 public_plan = parse_planner_output(raw_output, task_id=request.task_id)
+                self._validate_request_visible_capabilities(public_plan, request=request)
                 public_plan = self._enrich_public_plan(public_plan, request=request, payload_policies=payload_policies)
                 self._public_validator.validate(public_plan)
                 expanded = self._expander.expand(public_plan, request=request)
@@ -283,6 +285,18 @@ class LLMWorkflowProvider:
         payload_policies = self._capability_registry.planner_payload_policies()
         payload_policies.update(self._payload_policy_overrides)
         return payload_policies
+
+    @staticmethod
+    def _validate_request_visible_capabilities(
+        plan: WorkflowPlan,
+        *,
+        request: OrchestrationRequest,
+    ) -> None:
+        for node in plan.nodes:
+            if node.capability_id == "mcp.dispatch" and not request.available_mcp_servers:
+                raise WorkflowPlanValidationError(
+                    f"Capability is not available for this request: {node.capability_id}"
+                )
 
     @staticmethod
     def _unique_node_id(preferred: str, existing: set[str]) -> str:

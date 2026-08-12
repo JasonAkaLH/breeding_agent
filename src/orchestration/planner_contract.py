@@ -10,7 +10,7 @@ from .capability_fallback import (
     CAPABILITY_MISSING_FALLBACK_KEY,
     sanitize_capability_missing_fallback_metadata,
 )
-from .models import CapabilityDescriptor, OrchestrationRequest, WorkflowNodePlan, WorkflowPlan
+from .models import CapabilityDescriptor, OrchestrationRequest, UserMCPServerProfile, WorkflowNodePlan, WorkflowPlan
 from .prompt_envelope import PromptSegment
 from .prompt_profiles import (
     PROMPT_PROFILE_TEMPLATE_VERSION,
@@ -222,6 +222,7 @@ def build_planner_prompt(
     )
     question_block = _format_question_block(request)
     memory_block = _format_memory_block(request.memory_context)
+    mcp_server_block = _format_mcp_server_profiles(request.available_mcp_servers)
     return (
         "你是一个受边界约束的高层工作流规划器。"
         "除非用户请求已经显式指定某个 capability，否则所有路由和 DAG 编排都由你基于上下文决定。"
@@ -236,6 +237,7 @@ def build_planner_prompt(
         "对于追问、参数调整、继续上次任务等请求，必须结合对话记忆判断是否继续调用上一轮相关 public capability；"
         "对于兜底对话、解释、汇总，使用 main_agent.respond。\n\n"
         f"可用 public capability：\n{capability_block}\n\n"
+        f"{mcp_server_block}"
         f"{memory_block}"
         f"{question_block}\n\n"
         f"输出 JSON Schema：\n{schema}"
@@ -262,6 +264,7 @@ def build_planner_profile_resolution(
         include_source_path=False,
     )
     memory_block = _format_memory_block(request.memory_context)
+    mcp_server_block = _format_mcp_server_profiles(request.available_mcp_servers)
     segments = [
         PromptSegment(
             name="stable_planner_rules",
@@ -297,6 +300,19 @@ def build_planner_profile_resolution(
             security_role="tool_profile",
         ),
     ]
+    if mcp_server_block:
+        segments.append(
+            PromptSegment(
+                name="user_mcp_server_profiles",
+                role="context",
+                content=mcp_server_block,
+                priority=0,
+                mutability="dynamic",
+                cache_affinity="no_cache",
+                trim_policy="required",
+                security_role="tool_profile",
+            )
+        )
     if memory_block:
         segments.append(
             PromptSegment(
@@ -428,6 +444,27 @@ def call_text_generator(
 
 def _call_text_generator(text_generator: TextGenerator, prompt: str, *, request: OrchestrationRequest):
     return call_text_generator(text_generator, prompt, request=request)
+
+
+def _format_mcp_server_profiles(profiles: Iterable[UserMCPServerProfile]) -> str:
+    safe_profiles = tuple(profiles)
+    if not safe_profiles:
+        return ""
+    payload = [
+        {
+            "server_id": profile.server_id,
+            "display_name": profile.display_name,
+            "routing_description": profile.routing_description,
+            "transport": profile.transport,
+        }
+        for profile in safe_profiles
+    ]
+    return (
+        "# 当前用户可用 MCP Server Profiles\n"
+        "仅可把下列 server_id 写入 mcp.dispatch.input_payload；不得推断 Endpoint、凭据、Tool 或 Schema。\n"
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n\n"
+    )
 
 
 def _format_public_capabilities(

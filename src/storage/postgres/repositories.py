@@ -7,8 +7,21 @@ from typing import Any, Callable, Mapping, TypeVar
 from sqlalchemy import select, text
 
 from src.core.enums import ConversationStatus
-from src.core.models import UserMCPCredentialRecord, UserMCPHealthAttempt, UserMCPScopeLease, UserMCPServer, Conversation
-from src.storage.sqlite.models import ConversationRow, UserMCPHealthAttemptRow, UserMCPScopeLeaseRow, UserMCPServerRow
+from src.core.models import (
+    Conversation,
+    MCPCallRecord,
+    UserMCPCredentialRecord,
+    UserMCPHealthAttempt,
+    UserMCPScopeLease,
+    UserMCPServer,
+)
+from src.storage.sqlite.models import (
+    ConversationRow,
+    MCPBranchRecordRow,
+    UserMCPHealthAttemptRow,
+    UserMCPScopeLeaseRow,
+    UserMCPServerRow,
+)
 from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage, _row_to_conversation
 
 
@@ -42,6 +55,25 @@ class PostgreSQLStorage(SQLiteStorage):
                     .with_for_update()
                 )
                 result = callback(SQLiteStateRepository(session))
+                session.commit()
+                return result
+
+        return await asyncio.to_thread(_sync)
+
+    async def reserve_mcp_call(self, record: MCPCallRecord) -> bool:
+        """Serialize the per-task budget and active-call reservation on PostgreSQL."""
+        def _sync() -> bool:
+            with self._session_factory() as session:
+                session.scalar(
+                    select(MCPBranchRecordRow.branch_id)
+                    .where(
+                        MCPBranchRecordRow.branch_id == record.branch_id,
+                        MCPBranchRecordRow.owner_user_id == record.owner_user_id,
+                        MCPBranchRecordRow.task_id == record.task_id,
+                    )
+                    .with_for_update()
+                )
+                result = SQLiteStateRepository(session).reserve_mcp_call(record)
                 session.commit()
                 return result
 
@@ -334,6 +366,12 @@ class PostgreSQLStorage(SQLiteStorage):
             "event_record": 0,
             "artifact": 0,
             "task_input_attachment": 0,
+            "mcp_remote_task_binding": 0,
+            "mcp_sealed_state": 0,
+            "mcp_call_record": 0,
+            "mcp_branch_record": 0,
+            "mcp_connection_lease": 0,
+            "mcp_audit_event": 0,
             "task_edge": 0,
             "task_node": 0,
             "message": 0,
@@ -434,6 +472,60 @@ class PostgreSQLStorage(SQLiteStorage):
                 "task_input_attachment",
                 """
                 DELETE FROM task_input_attachment a
+                USING task t
+                WHERE a.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_remote_task_binding",
+                """
+                DELETE FROM mcp_remote_task_binding r
+                USING task t
+                WHERE r.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_sealed_state",
+                """
+                DELETE FROM mcp_sealed_state s
+                USING task t
+                WHERE s.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_call_record",
+                """
+                DELETE FROM mcp_call_record c
+                USING task t
+                WHERE c.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_branch_record",
+                """
+                DELETE FROM mcp_branch_record b
+                USING task t
+                WHERE b.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_connection_lease",
+                """
+                DELETE FROM mcp_connection_lease l
+                USING task t
+                WHERE l.task_id = t.task_id
+                  AND t.conversation_id = :conversation_id
+                """,
+            ),
+            (
+                "mcp_audit_event",
+                """
+                DELETE FROM mcp_audit_event a
                 USING task t
                 WHERE a.task_id = t.task_id
                   AND t.conversation_id = :conversation_id

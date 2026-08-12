@@ -7,6 +7,8 @@
 - `src/components/mathFormulaParser.ts`: deterministic TeX/MathML tokenization and per-render resource limits.
 - `src/components/MathFormula.tsx`: React lifecycle boundary for asynchronous formula conversion and readable fallback.
 - `src/components/mathJaxRuntime.ts`: lazy, same-origin, self-hosted MathJax runtime.
+- `src/components/MCPSettingsPanel.tsx`: user-scoped MCP Server configuration and Grant management.
+- `src/components/MCPApprovalDialog.tsx`, `src/components/MCPRuntimeStatus.tsx`: accessible Tool approval and task execution status/control surfaces.
 - `scripts/prepare_mathjax_assets.mjs`: reproducible allowlisted MathJax asset preparation.
 
 ## Formula Rendering Constraints

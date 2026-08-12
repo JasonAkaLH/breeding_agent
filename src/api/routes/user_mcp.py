@@ -21,6 +21,20 @@ from ..dto import (
 router = APIRouter(prefix="/api/v1/mcp/servers", tags=["user-mcp"])
 
 
+async def _audit(request: Request, owner_user_id: str, event_type: str, server_id: str) -> None:
+    service = request.app.state.runtime.user_mcp_audit_service
+    if service is None:
+        return
+    try:
+        await service.record(
+            owner_user_id=owner_user_id,
+            event_type=event_type,
+            server_id=server_id,
+        )
+    except Exception:
+        return
+
+
 def _service(request: Request) -> UserMCPConfigService:
     service = getattr(request.app.state.runtime, "user_mcp_config_service", None)
     if service is None:
@@ -88,6 +102,7 @@ async def create_user_mcp_server(
         server = await _service(request).create_server(user.username, payload.model_dump())
     except Exception as exc:
         _raise_safe_error(exc)
+    await _audit(request, user.username, "mcp.config_created", server.server_id)
     return _response(server)
 
 
@@ -98,6 +113,7 @@ async def get_user_mcp_server(server_id: str, request: Request) -> UserMCPServer
         server = await _service(request).get_server(user.username, server_id)
     except Exception as exc:
         _raise_safe_error(exc)
+    await _audit(request, user.username, "mcp.config_updated", server.server_id)
     return _response(server)
 
 
@@ -112,6 +128,7 @@ async def patch_user_mcp_server(
         )
     except Exception as exc:
         _raise_safe_error(exc)
+    await _audit(request, user.username, "mcp.config_tested", server.server_id)
     return _response(server)
 
 
@@ -122,6 +139,7 @@ async def test_user_mcp_server(server_id: str, request: Request) -> UserMCPServe
         server = await _service(request).test_server(user.username, server_id)
     except Exception as exc:
         _raise_safe_error(exc)
+    await _audit(request, user.username, "mcp.config_delete_requested", server_id)
     return _response(server)
 
 
@@ -146,3 +164,18 @@ async def delete_user_mcp_server(server_id: str, request: Request) -> Response |
         status_code=status.HTTP_202_ACCEPTED,
         content=pending.model_dump(),
     )
+
+
+@router.delete("/{server_id}/grants", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_user_mcp_server_grants(server_id: str, request: Request) -> Response:
+    user = await require_authenticated_user(request)
+    try:
+        await _service(request).get_server(user.username, server_id)
+    except Exception as exc:
+        _raise_safe_error(exc)
+    await request.app.state.runtime.storage.clear_user_mcp_tool_grants(
+        user.username,
+        server_id,
+    )
+    await _audit(request, user.username, "mcp.grants_cleared", server_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

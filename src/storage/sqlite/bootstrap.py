@@ -16,6 +16,7 @@ LEGACY_AUTH_TABLES = (
 def bootstrap_sqlite_database(engine: Engine) -> None:
     _migrate_username_owner_columns(engine)
     _migrate_message_public_columns(engine)
+    _migrate_user_mcp_grant_invalidation_columns(engine)
     _drop_legacy_auth_tables(engine)
     SQLiteBase.metadata.create_all(engine)
 
@@ -105,6 +106,24 @@ def _migrate_message_public_columns(engine: Engine) -> None:
             connection.execute(
                 text(f"ALTER TABLE {quoted_table} ADD COLUMN {_quote(connection, 'updated_at')} TEXT")
             )
+
+
+def _migrate_user_mcp_grant_invalidation_columns(engine: Engine) -> None:
+    """Add nullable phase-two grant lifecycle fields to existing local databases."""
+    with engine.begin() as connection:
+        existing_tables = set(inspect(connection).get_table_names())
+        if "user_mcp_tool_grant" not in existing_tables:
+            return
+        columns = {column["name"] for column in inspect(connection).get_columns("user_mcp_tool_grant")}
+        quoted_table = _quote(connection, "user_mcp_tool_grant")
+        for column_name in ("invalidated_at", "invalid_reason"):
+            if column_name not in columns:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {quoted_table} "
+                        f"ADD COLUMN {_quote(connection, column_name)} TEXT"
+                    )
+                )
 
 
 def _rebuild_table_without_legacy_owner(connection: Connection, table_name: str, old_column: str) -> None:

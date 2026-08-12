@@ -15,6 +15,7 @@ from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway
 from src.integrations.mcp.temporary_results import (
     MCPTemporaryResultCapacity,
     MCPTemporaryResultCapacityConfig,
+    MCPTemporaryResultRef,
     MCPTemporaryResultStore,
 )
 from src.storage.sqlite import (
@@ -90,6 +91,38 @@ class _BlockingCallAdapter(_Adapter):
         del request_id, reason
         self.cancel_notification_sent = True
         return False
+
+
+class _SequencedBlockingCallAdapter(_Adapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = (asyncio.Event(), asyncio.Event())
+        self.release = (asyncio.Event(), asyncio.Event())
+
+    async def call_tool(self, tool_name, arguments, **kwargs):
+        del tool_name, arguments
+        ordinal = self.call_count
+        self.call_count += 1
+        callback = kwargs.get("request_registered_callback")
+        if callback:
+            callback(f"remote-call-{ordinal + 1}")
+        self.started[ordinal].set()
+        await self.release[ordinal].wait()
+        return {"ordinal": ordinal + 1}
+
+
+class _ManualHeartbeatWaiter:
+    def __init__(self) -> None:
+        self.entered: asyncio.Queue[float] = asyncio.Queue()
+        self.advance: asyncio.Queue[None] = asyncio.Queue()
+
+    async def __call__(self, signal: asyncio.Event, timeout_seconds: float) -> bool:
+        await self.entered.put(timeout_seconds)
+        await self.advance.get()
+        if not signal.is_set():
+            return False
+        signal.clear()
+        return True
 
 
 class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
@@ -172,6 +205,80 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.storage.list_live_user_mcp_scope_leases(now=self.now), []
         )
+
+    async def test_close_scope_preserves_completed_result_until_task_cleanup(self) -> None:
+        scope = await self.gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+        outcome = await self.gateway.call_tool(scope, "echo", {"text": "hello"})
+        self.assertEqual(outcome.content_type, "application/json")
+        self.assertGreater(outcome.byte_size or 0, 0)
+        result_ref = MCPTemporaryResultRef(
+            ref=outcome.result_ref or "",
+            size_bytes=outcome.byte_size or 0,
+            sha256="",
+            storage="memory",
+        )
+
+        await self.gateway.close_scope(scope, "server_switch")
+
+        payload = b"".join(
+            [chunk async for chunk in self.result_store.iter_bytes(result_ref)]
+        )
+        self.assertIn(b"hello", payload)
+        await self.gateway.close_task("task-1", "terminal")
+        with self.assertRaises(KeyError):
+            _ = [chunk async for chunk in self.result_store.iter_bytes(result_ref)]
+
+    async def test_scope_waits_for_fair_admission_before_credentials_or_client(self) -> None:
+        root = Path(self.temp_dir.name) / "queued-results"
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(1, 1),
+            storage_root=root,
+            free_bytes=lambda path: 10_000_000,
+        )
+        holder = await capacity.acquire("other-user", "holder")
+        credentials_loaded = 0
+        clients_created = 0
+
+        async def credential_loader(server):
+            nonlocal credentials_loaded
+            del server
+            credentials_loaded += 1
+            return {}
+
+        async def client_factory(server, credentials):
+            nonlocal clients_created
+            del server, credentials
+            clients_created += 1
+            return _Adapter()
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-queued",
+            credential_loader=credential_loader,
+            client_factory=client_factory,
+            endpoint_revalidator=lambda server: server.endpoint_url,
+            result_store=MCPTemporaryResultStore(root, memory_threshold_bytes=8),
+            capacity=capacity,
+            now_fn=lambda: self.now,
+        )
+        opening = asyncio.create_task(
+            gateway.open_scope(
+                SimpleNamespace(username="alice"), "task-1", "server-1"
+            )
+        )
+        while capacity.queued_calls != 1:
+            await asyncio.sleep(0)
+        self.assertEqual(credentials_loaded, 0)
+        self.assertEqual(clients_created, 0)
+
+        await holder.release()
+        scope = await asyncio.wait_for(opening, timeout=1)
+        self.assertEqual(credentials_loaded, 1)
+        self.assertEqual(clients_created, 1)
+        await gateway.close_scope(scope, "done")
+        await gateway.aclose()
 
     async def test_other_owner_cannot_open_scope(self) -> None:
         with self.assertRaisesRegex(Exception, "mcp_task_not_found"):
@@ -366,6 +473,123 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         await gateway.close_scope(scope, "cancel")
         with self.assertRaises(asyncio.CancelledError):
             await call
+        await gateway.aclose()
+
+    async def test_continue_resets_heartbeat_cycle_with_injected_waiter(self) -> None:
+        started = asyncio.Event()
+        waiter = _ManualHeartbeatWaiter()
+        refs: list[str] = []
+        heartbeats: list[str] = []
+        adapter = _BlockingCallAdapter(started)
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-heartbeat-reset",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials: adapter,
+            endpoint_revalidator=lambda server: server.endpoint_url,
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+            heartbeat_waiter=waiter,
+        )
+        scope = await gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+        call = asyncio.create_task(
+            gateway.call_tool(
+                scope,
+                "echo",
+                {},
+                MCPCallCallbacks(
+                    on_created=lambda ref: refs.append(ref),
+                    on_heartbeat=lambda ref: heartbeats.append(ref),
+                ),
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        self.assertEqual(await asyncio.wait_for(waiter.entered.get(), timeout=1), 120.0)
+
+        continued = await gateway.continue_call(scope, refs[0])
+        self.assertEqual(continued.status.value, "reset")
+        await waiter.advance.put(None)
+        self.assertEqual(await asyncio.wait_for(waiter.entered.get(), timeout=1), 120.0)
+        self.assertEqual(heartbeats, [])
+
+        await waiter.advance.put(None)
+        while not heartbeats:
+            await asyncio.sleep(0)
+        self.assertEqual(heartbeats, refs)
+        continued_for_task = await gateway.continue_call_for_task("task-1", refs[0])
+        self.assertEqual(continued_for_task.status.value, "reset")
+        unknown = await gateway.continue_call_for_task("another-task", refs[0])
+        self.assertEqual(unknown.status.value, "unknown_call")
+        await gateway.close_scope(scope, "cancel")
+        with self.assertRaises(asyncio.CancelledError):
+            await call
+        await gateway.aclose()
+
+    async def test_default_task_guard_serializes_calls_and_queued_call_can_cancel(self) -> None:
+        adapter = _SequencedBlockingCallAdapter()
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-serial",
+            credential_loader=lambda server: {},
+            client_factory=lambda server, credentials: adapter,
+            endpoint_revalidator=lambda server: server.endpoint_url,
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+        )
+        scope = await gateway.open_scope(
+            SimpleNamespace(username="alice"), "task-1", "server-1"
+        )
+        first_refs: list[str] = []
+        first = asyncio.create_task(
+            gateway.call_tool(
+                scope,
+                "echo",
+                {},
+                MCPCallCallbacks(on_created=lambda ref: first_refs.append(ref)),
+            )
+        )
+        await asyncio.wait_for(adapter.started[0].wait(), timeout=1)
+        refs: list[str] = []
+        second = asyncio.create_task(
+            gateway.call_tool(
+                scope,
+                "echo",
+                {},
+                MCPCallCallbacks(on_created=lambda ref: refs.append(ref)),
+            )
+        )
+        while not refs:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertFalse(adapter.started[1].is_set())
+
+        cancelled = await gateway.cancel_call_for_task(
+            "task-1", refs[0], "user_cancelled"
+        )
+        self.assertEqual(cancelled.status.value, "cancelled")
+        with self.assertRaises(asyncio.CancelledError):
+            await second
+        self.assertEqual(adapter.call_count, 1)
+
+        adapter.release[0].set()
+        await first
+        terminal = await gateway.cancel_call_for_task(
+            "task-1", first_refs[0], "late_cancel"
+        )
+        self.assertEqual(terminal.status.value, "already_terminal")
+        await gateway.close_scope(scope, "done")
         await gateway.aclose()
 
     async def test_unacknowledged_legacy_cancel_closes_scope_and_reports_unknown(self) -> None:

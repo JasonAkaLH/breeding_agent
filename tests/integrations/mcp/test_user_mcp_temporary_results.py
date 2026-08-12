@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import errno
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.integrations.mcp.temporary_results import (
+    MCPAdmissionCancelledError,
     MCPCapacityUnavailableError,
     MCPTemporaryResultCapacity,
     MCPTemporaryResultCapacityConfig,
@@ -16,6 +18,10 @@ from src.integrations.mcp.temporary_results import (
     MCPTemporaryResultStore,
     MCPTemporaryStorageExhaustedError,
 )
+
+
+async def _record_async(target: list, value: object) -> None:
+    target.append(value)
 
 
 class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
@@ -157,6 +163,86 @@ class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(MCPCapacityUnavailableError):
             async with low_disk.admit():
                 pass
+
+    async def test_keyed_admission_is_round_robin_between_users_and_fifo_within_user(self) -> None:
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(1, 1),
+            storage_root=Path("/unused"),
+            free_bytes=lambda _path: 100,
+        )
+        holder = await capacity.acquire("holder", "holder-1")
+        order: list[str] = []
+
+        async def wait_for_slot(owner: str, request_ref: str):
+            lease = await capacity.acquire(owner, request_ref)
+            order.append(request_ref)
+            return lease
+
+        tasks = [
+            asyncio.create_task(wait_for_slot("alice", "alice-1")),
+            asyncio.create_task(wait_for_slot("alice", "alice-2")),
+            asyncio.create_task(wait_for_slot("bob", "bob-1")),
+            asyncio.create_task(wait_for_slot("bob", "bob-2")),
+        ]
+        while capacity.queued_calls != 4:
+            await asyncio.sleep(0)
+
+        await holder.release()
+        for expected, task in zip(
+            ("alice-1", "bob-1", "alice-2", "bob-2"), tasks[::2] + tasks[1::2]
+        ):
+            lease = await asyncio.wait_for(task, timeout=1)
+            self.assertEqual(order[-1], expected)
+            await lease.release()
+
+        self.assertEqual(order, ["alice-1", "bob-1", "alice-2", "bob-2"])
+        self.assertEqual(capacity.active_calls, 0)
+        self.assertEqual(capacity.queued_calls, 0)
+
+    async def test_keyed_admission_can_cancel_a_queued_request(self) -> None:
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(1, 1),
+            storage_root=Path("/unused"),
+            free_bytes=lambda _path: 100,
+        )
+        holder = await capacity.acquire("alice", "active")
+        queued = asyncio.create_task(capacity.acquire("bob", "queued"))
+        while capacity.queued_calls != 1:
+            await asyncio.sleep(0)
+
+        self.assertTrue(await capacity.cancel("queued"))
+        with self.assertRaises(MCPAdmissionCancelledError):
+            await queued
+        self.assertFalse(await capacity.cancel("queued"))
+        await holder.release()
+
+    async def test_keyed_admission_reports_queue_entry_and_admission(self) -> None:
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(1, 1),
+            storage_root=Path("/unused"),
+            free_bytes=lambda _path: 100,
+        )
+        holder = await capacity.acquire("alice", "active")
+        events: list[tuple[str, int | None]] = []
+
+        queued = asyncio.create_task(
+            capacity.acquire(
+                "bob",
+                "queued",
+                on_queued=lambda position: _record_async(
+                    events, ("queued", position)
+                ),
+                on_admitted=lambda: _record_async(events, ("admitted", None)),
+            )
+        )
+        while capacity.queued_calls != 1:
+            await asyncio.sleep(0)
+        self.assertEqual(events, [("queued", 1)])
+
+        await holder.release()
+        lease = await queued
+        self.assertEqual(events, [("queued", 1), ("admitted", None)])
+        await lease.release()
 
     async def test_disk_exhaustion_returns_stable_error_and_removes_partial_file(self) -> None:
         class ExhaustedHandle:

@@ -14,7 +14,7 @@ from src.storage.sqlite.base import SQLiteBase
 
 from .schema import POSTGRES_STATE_TABLES, build_schema_ddl
 
-POSTGRES_RUNTIME_SCHEMA_VERSION = "maf.postgresql_fresh_runtime_schema.v1"
+POSTGRES_RUNTIME_SCHEMA_VERSION = "maf.postgresql_fresh_runtime_schema.v2"
 POSTGRES_RUNTIME_TABLES = tuple(sorted(SQLiteBase.metadata.tables))
 
 

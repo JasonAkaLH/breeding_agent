@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import CapabilityDescriptor, ExecutionInstance
+from .models import CapabilityDescriptor, ExecutionInstance, OrchestrationRequest
 from .planner_payload_policy import CapabilityPayloadPolicy
 
 
@@ -39,6 +39,23 @@ class CapabilityRegistry:
         if public_only:
             return [descriptor for descriptor in descriptors if descriptor.public]
         return descriptors
+
+    def list_for_request(
+        self,
+        request: OrchestrationRequest,
+        *,
+        public_only: bool = False,
+    ) -> list[CapabilityDescriptor]:
+        """Return descriptors visible for one trusted orchestration request.
+
+        ``mcp.dispatch`` is intentionally absent unless the API/runtime supplied
+        at least one safe, available server profile for the authenticated user.
+        """
+
+        descriptors = self.list(public_only=public_only)
+        if request.available_mcp_servers:
+            return descriptors
+        return [descriptor for descriptor in descriptors if descriptor.capability_id != "mcp.dispatch"]
 
     def require(self, capability_id: str) -> CapabilityDescriptor:
         descriptor = self.get(capability_id)

@@ -117,6 +117,17 @@ function makeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     })),
     listConversationTasks: vi.fn(async () => ({ conversation_id: 'conv-test', tasks: [] })),
     listInterrupts: vi.fn(async () => ({ task_id: 'task-1', interrupts: [] })),
+    listMCPServers: vi.fn(async () => ({ servers: [] })),
+    createMCPServer: vi.fn(),
+    getMCPServer: vi.fn(),
+    patchMCPServer: vi.fn(),
+    testMCPServer: vi.fn(),
+    deleteMCPServer: vi.fn(),
+    listMCPGrants: vi.fn(async () => ({ grants: [] })),
+    deleteMCPGrant: vi.fn(async () => undefined),
+    clearMCPServerGrants: vi.fn(async () => undefined),
+    continueMCPCall: vi.fn(),
+    cancelMCPCall: vi.fn(),
     getTask: vi.fn(),
     getTaskArtifacts: vi.fn(async () => ({ task_id: 'task-1', artifacts: [] })),
     downloadArtifact: vi.fn(async () => undefined),
@@ -315,7 +326,10 @@ describe('App', () => {
     expect(within(userCard).getByRole('button', { name: '退出登录' })).toBeInTheDocument();
     expect(within(workspace).queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument();
     fireEvent.click(accountSettingsButton);
-    expect(await screen.findByText('用户账户设置功能会在后续版本开放。')).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'MCP 服务与授权' })).toBeInTheDocument();
+    expect(await screen.findByText('尚未配置 MCP 服务')).toBeInTheDocument();
+    expect(api.listMCPServers).toHaveBeenCalledTimes(1);
+    expect(api.listMCPGrants).toHaveBeenCalledTimes(1);
     expect(conversationList).toBeInTheDocument();
     expect(conversationList.parentElement).toHaveClass('app-content');
     expect(conversationList.closest('.conversation-card')).toBeNull();

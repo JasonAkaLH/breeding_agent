@@ -264,6 +264,89 @@ export interface CancelTaskResponse {
   accepted: boolean;
 }
 
+export type MCPTransport = 'streamable_http' | 'legacy_http_sse';
+export type MCPAuthType = 'none' | 'bearer' | 'api_key_header' | 'static_headers';
+
+export interface MCPCredentialInput {
+  secret_value?: string;
+  static_headers?: Record<string, string>;
+}
+
+export interface CreateMCPServerRequest {
+  display_name: string;
+  routing_description?: string;
+  endpoint_url: string;
+  transport?: MCPTransport;
+  protocol_preference?: string;
+  auth_type?: MCPAuthType;
+  auth_metadata?: Record<string, unknown>;
+  credential?: MCPCredentialInput;
+  enabled?: boolean;
+}
+
+export interface PatchMCPServerRequest {
+  display_name?: string;
+  routing_description?: string;
+  endpoint_url?: string;
+  transport?: MCPTransport;
+  protocol_preference?: string;
+  auth_type?: MCPAuthType;
+  auth_metadata?: Record<string, unknown>;
+  enabled?: boolean;
+  credential_action?: 'retain' | 'replace' | 'clear';
+  credential?: MCPCredentialInput;
+}
+
+export interface MCPServerResponse {
+  server_id: string;
+  display_name: string;
+  routing_description: string;
+  endpoint_url: string;
+  transport: MCPTransport | string;
+  protocol_preference: string;
+  auth_type: MCPAuthType | string;
+  auth_metadata: Record<string, unknown>;
+  enabled: boolean;
+  health_status: string;
+  credential_configured: boolean;
+  config_version: number;
+  security_version: number;
+  last_tested_at: string | null;
+  last_test_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MCPServerListResponse {
+  servers: MCPServerResponse[];
+}
+
+export interface MCPDeleteServerResponse {
+  server_id: string;
+  deletion_pending: boolean;
+}
+
+export interface MCPToolGrantResponse {
+  grant_id: string;
+  server_id: string;
+  server_display_name: string;
+  tool_name: string;
+  granted_at: string | null;
+  valid: boolean;
+  invalid_reason: string | null;
+}
+
+export interface MCPToolGrantListResponse {
+  grants: MCPToolGrantResponse[];
+}
+
+export interface MCPCallControlResponse {
+  task_id: string;
+  call_ref: string;
+  status: string;
+  accepted: boolean;
+}
+
 export interface TaskEventEnvelope {
   event_id: string;
   conversation_id: string;

@@ -12,6 +12,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from src.core.enums import ArtifactType, EventVisibility, NodeStatus, TaskStatus
 from src.core.models import Artifact, EventRecord
+from src.lifecycle.mcp_presence import MCPPresenceConnection
+from src.integrations.mcp.gateway_models import MCPCancelStatus, MCPContinueStatus
 from src.storage.artifact_files import is_active_skill_output_file, parse_file_storage_ref
 
 from ..artifact_responses import artifact_response, should_return_task_artifact
@@ -24,6 +26,7 @@ from ..dto import (
     TaskEdgeResponse,
     TaskGraphResponse,
     TaskInterruptsResponse,
+    MCPCallControlResponse,
     TaskListResponse,
     TaskNodeResponse,
     TaskSummaryResponse,
@@ -173,6 +176,16 @@ async def _iter_authorized_frontend_events(
         )
     event_iterator = runtime.iter_frontend_events(context.task_id).__aiter__()
     pending_next = asyncio.create_task(event_iterator.__anext__())
+    presence_service = runtime.user_mcp_presence_service
+    if presence_service is not None:
+        await presence_service.connect(
+            MCPPresenceConnection(
+                connection_id=context.connection_id,
+                task_id=context.task_id,
+                owner_user_id=context.username,
+                auth_generation=context.auth_generation_at_connect,
+            )
+        )
     try:
         while True:
             done, _pending = await asyncio.wait(
@@ -182,6 +195,12 @@ async def _iter_authorized_frontend_events(
             )
             postgres_auth_bus = runtime.postgres_auth_invalidation_bus
             if postgres_auth_bus is not None and not postgres_auth_bus.health.ready:
+                if presence_service is not None:
+                    await presence_service.invalidate_owner(
+                        context.username,
+                        auth_generation=context.auth_generation_at_connect,
+                        reason="auth_generation_unavailable",
+                    )
                 yield _auth_invalidated_event(
                     runtime,
                     context,
@@ -191,6 +210,16 @@ async def _iter_authorized_frontend_events(
                 return
             auth_check = runtime.auth_generation_cache.is_current(context.username, context.auth_generation_at_connect)
             if not auth_check.current:
+                if presence_service is not None:
+                    await presence_service.invalidate_owner(
+                        context.username,
+                        auth_generation=context.auth_generation_at_connect,
+                        reason=(
+                            "auth_generation_unknown"
+                            if not auth_check.known
+                            else "auth_generation_mismatch"
+                        ),
+                    )
                 yield _auth_invalidated_event(
                     runtime,
                     context,
@@ -198,6 +227,8 @@ async def _iter_authorized_frontend_events(
                     current_auth_generation=auth_check.current_generation,
                 )
                 return
+            if presence_service is not None:
+                await presence_service.heartbeat(context.connection_id)
             if not done:
                 continue
             try:
@@ -207,6 +238,8 @@ async def _iter_authorized_frontend_events(
             yield event
             pending_next = asyncio.create_task(event_iterator.__anext__())
     finally:
+        if presence_service is not None:
+            await presence_service.disconnect(context.connection_id)
         if not pending_next.done():
             pending_next.cancel()
             with suppress(asyncio.CancelledError):
@@ -252,6 +285,70 @@ async def cancel_task(body: CancelTaskRequest, request: Request) -> CancelTaskRe
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return CancelTaskResponse(task_id=task.task_id, status=str(task.status), accepted=True)
+
+
+@router.post(
+    "/api/v1/tasks/{task_id}/mcp-calls/{call_ref}/continue",
+    response_model=MCPCallControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def continue_mcp_call(
+    task_id: str,
+    call_ref: str,
+    request: Request,
+) -> MCPCallControlResponse:
+    runtime = _runtime(request)
+    user = await require_authenticated_user(request)
+    await require_task_owner(runtime, task_id, user)
+    if runtime.user_mcp_gateway is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "mcp_feature_unavailable"},
+        )
+    outcome = await runtime.user_mcp_gateway.continue_call_for_task(task_id, call_ref)
+    if str(outcome.status) == str(MCPContinueStatus.UNKNOWN_CALL):
+        raise HTTPException(status_code=404, detail={"code": "mcp_call_not_found"})
+    if str(outcome.status) == str(MCPContinueStatus.ALREADY_TERMINAL):
+        raise HTTPException(status_code=409, detail={"code": "mcp_call_already_terminal"})
+    return MCPCallControlResponse(
+        task_id=task_id,
+        call_ref=call_ref,
+        status=str(outcome.status),
+    )
+
+
+@router.post(
+    "/api/v1/tasks/{task_id}/mcp-calls/{call_ref}/cancel",
+    response_model=MCPCallControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def cancel_mcp_call(
+    task_id: str,
+    call_ref: str,
+    request: Request,
+) -> MCPCallControlResponse:
+    runtime = _runtime(request)
+    user = await require_authenticated_user(request)
+    await require_task_owner(runtime, task_id, user)
+    if runtime.user_mcp_gateway is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "mcp_feature_unavailable"},
+        )
+    outcome = await runtime.user_mcp_gateway.cancel_call_for_task(
+        task_id,
+        call_ref,
+        "user_cancelled",
+    )
+    if str(outcome.status) == str(MCPCancelStatus.UNKNOWN_CALL):
+        raise HTTPException(status_code=404, detail={"code": "mcp_call_not_found"})
+    if str(outcome.status) == str(MCPCancelStatus.ALREADY_TERMINAL):
+        raise HTTPException(status_code=409, detail={"code": "mcp_call_already_terminal"})
+    return MCPCallControlResponse(
+        task_id=task_id,
+        call_ref=call_ref,
+        status=str(outcome.status),
+    )
 
 
 @router.get("/api/v1/tasks/{task_id}/interrupts", response_model=TaskInterruptsResponse)

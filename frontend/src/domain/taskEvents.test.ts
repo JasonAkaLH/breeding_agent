@@ -391,4 +391,92 @@ describe('applyTaskEvent', () => {
     const state = applyTaskEvent(initial, event('main_agent.llm_call', { provider: 'hidden' }));
     expect(state).toEqual(initial);
   });
+
+  it('tracks discovery and fair-queue state using safe display fields only', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('mcp.server_routed', {
+      server_display_name: '育种数据',
+      endpoint_url: 'https://must-not-leak.test',
+    }, 'mcp-routed'));
+    state = applyTaskEvent(state, event('mcp.discovery_completed', {
+      server_display_name: '育种数据',
+      available_tool_count: 3,
+      full_tool_catalog: [{ name: 'must-not-leak' }],
+    }, 'mcp-discovered'));
+    state = applyTaskEvent(state, event('mcp.queue_entered', {
+      server_display_name: '育种数据',
+      queue_position: 2,
+      credential: 'must-not-leak',
+    }, 'mcp-queued'));
+
+    expect(state.mcp.serverDisplayName).toBe('育种数据');
+    expect(state.mcp.discovery).toMatchObject({ status: 'completed', availableToolCount: 3 });
+    expect(state.mcp.queue).toMatchObject({ queued: true, position: 2 });
+    expect(JSON.stringify(state.mcp)).not.toContain('must-not-leak');
+    expect(JSON.stringify(state.mcp)).not.toContain('endpoint_url');
+  });
+
+  it('merges long-running MCP call updates by safe_call_ref', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('mcp.tool_call_started', {
+      safe_call_ref: 'call-safe-1',
+      server_display_name: '育种数据',
+      tool_display_name: '查询品系',
+      raw_jsonrpc_id: 'must-not-leak',
+      arguments: { password: 'must-not-leak' },
+    }, 'mcp-call-start'));
+    state = applyTaskEvent(state, event('mcp.tool_call_still_running', {
+      safe_call_ref: 'call-safe-1',
+      elapsed_seconds: 120,
+      next_prompt_after_seconds: 120,
+    }, 'mcp-call-running'));
+
+    expect(state.mcp.calls).toHaveLength(1);
+    expect(state.mcp.calls[0]).toMatchObject({
+      safeCallRef: 'call-safe-1',
+      toolDisplayName: '查询品系',
+      status: 'still_running',
+      elapsedSeconds: 120,
+    });
+    expect(JSON.stringify(state.mcp.calls)).not.toContain('must-not-leak');
+
+    state = applyTaskEvent(state, event('mcp.execution_status_unknown', {
+      safe_call_ref: 'call-safe-1',
+      code: 'mcp_execution_status_unknown',
+    }, 'mcp-call-unknown'));
+    expect(state.mcp.calls).toHaveLength(1);
+    expect(state.mcp.calls[0].status).toBe('unknown');
+    expect(state.errorMessage).toContain('不会自动重复调用');
+  });
+
+  it('tracks approval, elicitation, and remote task state without protocol identifiers', () => {
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, event('mcp.tool_approval_required', {
+      interrupt_id: 'interrupt-1',
+      safe_call_ref: 'call-safe-1',
+      server_display_name: '育种数据',
+      tool_display_name: '查询品系',
+      input_schema: { secret: true },
+    }, 'mcp-approval'));
+    expect(state.mcp.approval).toMatchObject({ pending: true, interruptId: 'interrupt-1', toolDisplayName: '查询品系' });
+    expect(state.phase).toBe('waiting_for_input');
+
+    state = applyTaskEvent(state, event('mcp.input_required', {
+      interrupt_id: 'interrupt-2',
+      safe_call_ref: 'call-safe-1',
+      question: '请选择试验年份',
+      field_names: ['year'],
+      requestState: 'must-not-leak',
+    }, 'mcp-input'));
+    state = applyTaskEvent(state, event('mcp.remote_task_status_changed', {
+      safe_task_ref: 'task-safe-1',
+      status: 'working',
+      tool_display_name: '查询品系',
+      remote_task_id: 'must-not-leak',
+    }, 'mcp-remote-task'));
+
+    expect(state.mcp.input).toMatchObject({ pending: true, fieldNames: ['year'] });
+    expect(state.mcp.remoteTask).toMatchObject({ safeTaskRef: 'task-safe-1', status: 'working' });
+    expect(JSON.stringify(state.mcp)).not.toContain('must-not-leak');
+  });
 });
