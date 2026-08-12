@@ -20,7 +20,7 @@ class MCPPRDDDocumentSyncTests(unittest.TestCase):
 
         self.assertIn("latest-feature invariant", text)
         self.assertIn("multi-version client compatibility invariant", text)
-        self.assertIn("2025-11-25 long-task / Tasks", text)
+        self.assertIn("2025 session-era invariant", text)
         self.assertIn(SUPPORTED_MARKER, text)
 
     def test_backend_runtime_prd_points_to_compatibility_matrix_not_single_latest_only(self) -> None:

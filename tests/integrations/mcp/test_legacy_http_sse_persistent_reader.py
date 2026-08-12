@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -10,6 +12,7 @@ import httpx
 from src.integrations.mcp.client import MCPClient, MCPClientError
 from src.integrations.mcp.protocol import MCP_PROTOCOL_VERSION_2024_11_05
 from src.integrations.mcp.transport_legacy_http_sse import LegacyHTTPSSETransport
+from src.integrations.mcp.temporary_results import MCPTemporaryResultStore
 from tests.integrations.mcp.legacy_sse_helpers import QueueSSEStream
 
 
@@ -240,6 +243,57 @@ class LegacyHTTPSSEPersistentReaderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.mcp_error_code, "legacy_response_timeout")
         self.assertEqual(transport.unknown_response_count, 1)
         self.assertEqual(transport.pending_request_count, 0)
+
+    async def test_streaming_request_spools_response_from_original_sse_connection(self) -> None:
+        fake = PersistentLegacyFakeServer()
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+        transport = LegacyHTTPSSETransport(endpoint="https://legacy.example.com/sse", client=async_client)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=4)
+            response = await transport.send_streaming(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "stream-call",
+                    "method": "tools/call",
+                    "params": {"name": "echo", "arguments": {"text": "legacy streamed"}},
+                },
+                protocol_version=MCP_PROTOCOL_VERSION_2024_11_05,
+                result_sink=store.create_sink("task-legacy", scope_id="scope-legacy"),
+                timeout_seconds=1,
+            )
+            ref_payload = response.message["result"]["_mcpResultRef"]
+
+        await transport.close()
+        await async_client.aclose()
+
+        self.assertEqual(ref_payload["storage"], "file")
+        self.assertEqual(transport.pending_request_count, 0)
+
+    async def test_streaming_and_buffered_pending_requests_remain_correlated(self) -> None:
+        fake = CorrelatingLegacyFakeServer()
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+        transport = LegacyHTTPSSETransport(endpoint="https://legacy.example.com/sse", client=async_client)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=1)
+            buffered, streamed = await asyncio.gather(
+                transport.send(
+                    {"jsonrpc": "2.0", "id": "buffered", "method": "buffered"},
+                    protocol_version=MCP_PROTOCOL_VERSION_2024_11_05,
+                    timeout_seconds=1,
+                ),
+                transport.send_streaming(
+                    {"jsonrpc": "2.0", "id": "streamed", "method": "streamed"},
+                    protocol_version=MCP_PROTOCOL_VERSION_2024_11_05,
+                    result_sink=store.create_sink("task", scope_id="scope"),
+                    timeout_seconds=1,
+                ),
+            )
+
+        await transport.close()
+        await async_client.aclose()
+
+        self.assertEqual(buffered.message["result"], {"value": "buffered"})
+        self.assertTrue(streamed.message["result"]["_mcpResultRef"]["ref"].startswith("mcp-result-"))
 
 
 if __name__ == "__main__":

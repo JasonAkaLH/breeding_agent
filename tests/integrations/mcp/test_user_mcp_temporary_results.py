@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import hashlib
+import errno
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from src.integrations.mcp.temporary_results import (
+    MCPCapacityUnavailableError,
+    MCPTemporaryResultCapacity,
+    MCPTemporaryResultCapacityConfig,
+    MCPTemporaryResultJanitor,
+    MCPTemporaryResultStore,
+    MCPTemporaryStorageExhaustedError,
+)
+
+
+class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spills_without_using_task_id_as_path_and_preserves_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "mcp-results"
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=8)
+            sink = store.create_sink("../../another-user/task")
+            payload = b'{"content":"streamed-result"}'
+
+            await sink.write(payload[:5])
+            await sink.write(payload[5:])
+            result = await sink.finalize()
+            rebuilt = b"".join([chunk async for chunk in store.iter_bytes(result, chunk_size=4)])
+
+            self.assertEqual(rebuilt, payload)
+            self.assertEqual(result.sha256, hashlib.sha256(payload).hexdigest())
+            self.assertEqual(result.storage, "file")
+            self.assertNotIn(str(root), result.ref)
+            self.assertNotIn("another-user", result.ref)
+            task_dirs = list(root.iterdir())
+            self.assertEqual(len(task_dirs), 1)
+            self.assertEqual(os.stat(root).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(task_dirs[0]).st_mode & 0o777, 0o700)
+            files = list(task_dirs[0].iterdir())
+            self.assertEqual(len(files), 1)
+            self.assertEqual(os.stat(files[0]).st_mode & 0o777, 0o600)
+
+    async def test_abort_and_task_cleanup_remove_partial_and_completed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "mcp-results"
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=1)
+            partial = store.create_sink("task-1")
+            await partial.write(b"partial")
+            await partial.abort()
+            self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
+
+            completed_sink = store.create_sink("task-1")
+            await completed_sink.write(b"complete")
+            result = await completed_sink.finalize()
+            await store.cleanup_task("task-1")
+
+            with self.assertRaises(KeyError):
+                _ = [chunk async for chunk in store.iter_bytes(result)]
+            self.assertEqual(list(root.iterdir()), [])
+
+    async def test_promoted_result_is_retained_by_task_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=1)
+            sink = store.create_sink("task-1")
+            await sink.write(b"promote-me")
+            result = await sink.finalize()
+            store.mark_promoted(result)
+
+            await store.cleanup_task("task-1")
+
+            self.assertEqual(b"".join([chunk async for chunk in store.iter_bytes(result)]), b"promote-me")
+
+    async def test_scope_cleanup_does_not_remove_another_server_result_in_same_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=1)
+            first_sink = store.create_sink("shared-task", scope_id="scope-server-a")
+            second_sink = store.create_sink("shared-task", scope_id="scope-server-b")
+            await first_sink.write(b"server-a")
+            await second_sink.write(b"server-b")
+            first = await first_sink.finalize()
+            second = await second_sink.finalize()
+
+            await store.cleanup_scope("scope-server-a")
+
+            with self.assertRaises(KeyError):
+                _ = [chunk async for chunk in store.iter_bytes(first)]
+            self.assertEqual(b"".join([chunk async for chunk in store.iter_bytes(second)]), b"server-b")
+
+            await store.cleanup_task("shared-task")
+            with self.assertRaises(KeyError):
+                _ = [chunk async for chunk in store.iter_bytes(second)]
+
+    async def test_scope_cleanup_preserves_another_scopes_in_progress_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MCPTemporaryResultStore(Path(temporary), memory_threshold_bytes=1)
+            completed_sink = store.create_sink("shared-task", scope_id="scope-server-a")
+            active_sink = store.create_sink("shared-task", scope_id="scope-server-b")
+            await completed_sink.write(b"server-a")
+            completed = await completed_sink.finalize()
+            await active_sink.write(b"server-b")
+
+            await store.cleanup_scope("scope-server-a")
+            active = await active_sink.finalize()
+
+            with self.assertRaises(KeyError):
+                _ = [chunk async for chunk in store.iter_bytes(completed)]
+            self.assertEqual(
+                b"".join([chunk async for chunk in store.iter_bytes(active)]),
+                b"server-b",
+            )
+
+    async def test_janitor_only_removes_old_inactive_task_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = root / "task-old"
+            active = root / "task-active"
+            recent = root / "task-recent"
+            unrelated = root / "other"
+            for directory in (old, active, recent, unrelated):
+                directory.mkdir()
+            os.utime(old, (10, 10))
+            os.utime(active, (10, 10))
+            os.utime(recent, (95, 95))
+            janitor = MCPTemporaryResultJanitor(root, safe_age_seconds=20, clock=lambda: 100)
+
+            removed = await janitor.cleanup_orphans(active_task_keys={"task-active"})
+
+            self.assertEqual(removed, ("task-old",))
+            self.assertFalse(old.exists())
+            self.assertTrue(active.exists())
+            self.assertTrue(recent.exists())
+            self.assertTrue(unrelated.exists())
+
+    async def test_capacity_configuration_and_fail_fast_admission(self) -> None:
+        with self.assertRaises(ValueError):
+            MCPTemporaryResultCapacityConfig(
+                max_active_user_mcp_calls_per_instance=0,
+                temporary_disk_low_watermark_bytes=1,
+            )
+        config = MCPTemporaryResultCapacityConfig(
+            max_active_user_mcp_calls_per_instance=1,
+            temporary_disk_low_watermark_bytes=10,
+        )
+        capacity = MCPTemporaryResultCapacity(config, storage_root=Path("/unused"), free_bytes=lambda _path: 100)
+        async with capacity.admit():
+            with self.assertRaises(MCPCapacityUnavailableError) as ctx:
+                async with capacity.admit():
+                    pass
+            self.assertEqual(ctx.exception.mcp_error_code, "mcp_capacity_unavailable")
+        self.assertEqual(capacity.active_calls, 0)
+
+        low_disk = MCPTemporaryResultCapacity(config, storage_root=Path("/unused"), free_bytes=lambda _path: 9)
+        with self.assertRaises(MCPCapacityUnavailableError):
+            async with low_disk.admit():
+                pass
+
+    async def test_disk_exhaustion_returns_stable_error_and_removes_partial_file(self) -> None:
+        class ExhaustedHandle:
+            def write(self, _data):
+                raise OSError(errno.ENOSPC, "no space")
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        def exhausted_fdopen(descriptor, _mode):
+            os.close(descriptor)
+            return ExhaustedHandle()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = MCPTemporaryResultStore(root, memory_threshold_bytes=0)
+            sink = store.create_sink("task-1")
+            with patch("src.integrations.mcp.temporary_results.os.fdopen", side_effect=exhausted_fdopen):
+                await sink.write(b"payload")
+                with self.assertRaises(MCPTemporaryStorageExhaustedError) as ctx:
+                    await sink.finalize()
+
+            self.assertEqual(ctx.exception.mcp_error_code, "temporary_storage_exhausted")
+            self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -9,9 +9,11 @@ class FakeMCPClient:
     def __init__(self, *, fail_discovery: bool = False):
         self.fail_discovery = fail_discovery
         self.calls = []
+        self.list_tools_calls = 0
         self.closed = False
 
     async def list_tools(self):
+        self.list_tools_calls += 1
         if self.fail_discovery:
             raise RuntimeError("mcp offline")
         return [
@@ -49,6 +51,19 @@ MCP_CONFIG = {
 
 
 class MCPRuntimeRegistrationAPITests(APITestCase):
+    async def test_startup_discovers_each_configured_legacy_server_once(self) -> None:
+        client = FakeMCPClient()
+        discovered_server_ids = []
+
+        def client_factory(server):
+            discovered_server_ids.append(server.server_id)
+            return client
+
+        await self.reconfigure_runtime(mcp_config=MCP_CONFIG, mcp_client_factory=client_factory)
+
+        self.assertEqual(discovered_server_ids, ["crm"])
+        self.assertEqual(client.list_tools_calls, 1)
+
     async def test_runtime_registers_public_mcp_capability_and_hides_server_description(self) -> None:
         client = FakeMCPClient()
         await self.reconfigure_runtime(mcp_config=MCP_CONFIG, mcp_client_factory=lambda server: client)

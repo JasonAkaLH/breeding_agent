@@ -86,7 +86,7 @@ class MCPPhase0ContractArtifactTests(unittest.TestCase):
         self.assertEqual(contract["external_mcp_protocol_version_scope"], "single_latest_long_task_phase_baseline")
         self.assertEqual(
             contract["python_visible_mcp_client_protocol_versions"],
-            list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+            list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]),
         )
         self.assertFalse(contract["canonical_multi_version_transport"])
         self.assertNotEqual(contract["sidecar_protocol_version"], contract["external_mcp_protocol_version"])
@@ -97,7 +97,7 @@ class MCPPhase0ContractArtifactTests(unittest.TestCase):
         self.assertIn("remote_cancel", contract["reserved_features"])
         self.assertNotIn("mcp_tasks", contract["implemented_features"])
 
-    def test_conformance_matrix_declares_four_client_versions_and_safe_gates(self) -> None:
+    def test_conformance_matrix_declares_five_client_versions_and_safe_gates(self) -> None:
         matrix = json.loads((CONTRACT_ROOT / "conformance_matrix.json").read_text(encoding="utf-8"))
 
         self.assertEqual(matrix["schema_version"], "maf.mcp.client_compatibility_conformance_matrix.v1")

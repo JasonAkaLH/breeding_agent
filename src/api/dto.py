@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 
@@ -382,3 +382,156 @@ class CapabilityResponse(BaseModel):
 
 class CapabilityListResponse(BaseModel):
     capabilities: list[CapabilityResponse]
+
+
+class UserMCPCredentialInput(StrictRequestModel):
+    secret_value: SecretStr | None = None
+    static_headers: dict[str, SecretStr] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_exactly_one_shape(self) -> "UserMCPCredentialInput":
+        has_secret = self.secret_value is not None and bool(self.secret_value.get_secret_value())
+        has_headers = bool(self.static_headers)
+        if has_secret == has_headers:
+            raise ValueError("credential requires exactly one of secret_value or static_headers")
+        if has_headers and any(not value.get_secret_value() for value in self.static_headers.values()):
+            raise ValueError("static header credential values must not be empty")
+        return self
+
+
+class CreateUserMCPServerRequest(StrictRequestModel):
+    display_name: str = Field(min_length=1, max_length=100)
+    routing_description: str = Field(default="", max_length=2000)
+    endpoint_url: str
+    transport: Literal["streamable_http", "legacy_http_sse"] = "streamable_http"
+    protocol_preference: str = "auto"
+    auth_type: Literal["none", "bearer", "api_key_header", "static_headers"] = "none"
+    auth_metadata: dict[str, Any] = Field(default_factory=dict)
+    credential: UserMCPCredentialInput | None = None
+    enabled: bool = True
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+            raise ValueError("display_name must be non-empty and contain no control characters")
+        return normalized
+
+    @field_validator("routing_description")
+    @classmethod
+    def normalize_routing_description(cls, value: str) -> str:
+        normalized = value.strip()
+        if any(ord(char) < 32 and char not in "\n\t" for char in normalized):
+            raise ValueError("routing_description contains unsupported control characters")
+        return normalized
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def enforce_endpoint_size(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or len(normalized.encode("utf-8")) > 2048:
+            raise ValueError("endpoint_url must be non-empty and at most 2048 UTF-8 bytes")
+        return normalized
+
+    @field_validator("auth_metadata")
+    @classmethod
+    def reject_identity_auth_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _reject_reserved_identity_fields(value, field_name="auth_metadata")
+
+    @model_validator(mode="after")
+    def validate_credential_shape(self) -> "CreateUserMCPServerRequest":
+        if self.auth_type == "none" and self.credential is not None:
+            raise ValueError("none auth must not include a credential")
+        if self.auth_type != "none" and self.credential is None:
+            raise ValueError("configured auth requires a credential")
+        return self
+
+
+class PatchUserMCPServerRequest(StrictRequestModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    routing_description: str | None = Field(default=None, max_length=2000)
+    endpoint_url: str | None = None
+    transport: Literal["streamable_http", "legacy_http_sse"] | None = None
+    protocol_preference: str | None = None
+    auth_type: Literal["none", "bearer", "api_key_header", "static_headers"] | None = None
+    auth_metadata: dict[str, Any] | None = None
+    enabled: bool | None = None
+    credential_action: Literal["retain", "replace", "clear"] = "retain"
+    credential: UserMCPCredentialInput | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+            raise ValueError("display_name must be non-empty and contain no control characters")
+        return normalized
+
+    @field_validator("routing_description")
+    @classmethod
+    def normalize_routing_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if any(ord(char) < 32 and char not in "\n\t" for char in normalized):
+            raise ValueError("routing_description contains unsupported control characters")
+        return normalized
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def enforce_endpoint_size(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or len(normalized.encode("utf-8")) > 2048:
+            raise ValueError("endpoint_url must be non-empty and at most 2048 UTF-8 bytes")
+        return normalized
+
+    @field_validator("auth_metadata")
+    @classmethod
+    def reject_identity_auth_metadata(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return _reject_reserved_identity_fields(value, field_name="auth_metadata")
+
+    @model_validator(mode="after")
+    def validate_credential_action(self) -> "PatchUserMCPServerRequest":
+        if self.credential_action == "replace" and self.credential is None:
+            raise ValueError("credential_action=replace requires credential")
+        if self.credential_action != "replace" and self.credential is not None:
+            raise ValueError("credential is only accepted with credential_action=replace")
+        if self.auth_type == "none" and self.credential_action == "replace":
+            raise ValueError("none auth cannot replace a credential")
+        return self
+
+
+class UserMCPServerResponse(BaseModel):
+    server_id: str
+    display_name: str
+    routing_description: str
+    endpoint_url: str
+    transport: str
+    protocol_preference: str
+    auth_type: str
+    auth_metadata: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool
+    health_status: str
+    credential_configured: bool
+    config_version: int
+    security_version: int
+    last_tested_at: datetime | None = None
+    last_test_error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserMCPServerListResponse(BaseModel):
+    servers: list[UserMCPServerResponse]
+
+
+class UserMCPDeletePendingResponse(BaseModel):
+    server_id: str
+    deletion_pending: bool = True

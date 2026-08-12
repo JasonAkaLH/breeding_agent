@@ -1,9 +1,25 @@
 from .adapter import MCPAdapterDiagnostic, MCPClientAdapter, PythonLegacyMCPClientAdapter
+from .adapter_2026 import (
+    MCP2026Adapter,
+    MCPCallOutcome,
+    MCPCompletedOutcome,
+    MCPDiscoverResult,
+    MCPInputRequiredOutcome,
+    MCPListCacheHint,
+    MCPMethodNotFoundError,
+    MCPTaskCreatedOutcome,
+    MCPTaskState,
+    MCPToolCatalogPage,
+    MCPUnsupportedProtocolVersionError,
+    encode_mcp_header_value,
+    safe_auto_downgrade_version,
+)
 from .client import MCPAuthRequiredError, MCPClient, MCPClientError, MCPProtocolError, MCPRemoteError
 from .config import MCPRuntimeConfig, MCPServerConfig, MCPToolConfig, load_mcp_server_config
 from .protocol import (
     DEFAULT_MCP_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_2026_07_28,
     MCPCompatibilityStatus,
     MCPNegotiatedSession,
     MCPTransportResponse,
@@ -36,11 +52,25 @@ from .transport_legacy_http_sse import LegacyHTTPSSETransport
 
 __all__ = [
     "MCP_PROTOCOL_VERSION",
+    "MCP_PROTOCOL_VERSION_2026_07_28",
     "DEFAULT_MCP_PROTOCOL_VERSION",
     "SUPPORTED_MCP_PROTOCOL_VERSION_ORDER",
     "SUPPORTED_MCP_PROTOCOL_VERSIONS",
     "MCPCompatibilityStatus",
     "MCPAdapterDiagnostic",
+    "MCP2026Adapter",
+    "MCPCallOutcome",
+    "MCPCompletedOutcome",
+    "MCPDiscoverResult",
+    "MCPInputRequiredOutcome",
+    "MCPListCacheHint",
+    "MCPMethodNotFoundError",
+    "MCPTaskCreatedOutcome",
+    "MCPTaskState",
+    "MCPToolCatalogPage",
+    "MCPUnsupportedProtocolVersionError",
+    "encode_mcp_header_value",
+    "safe_auto_downgrade_version",
     "MCPClientAdapter",
     "PythonLegacyMCPClientAdapter",
     "MCPNegotiatedSession",

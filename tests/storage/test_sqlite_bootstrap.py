@@ -36,6 +36,11 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                 "interrupt",
                 "interrupt_answer",
                 "checkpoint",
+                "user_mcp_server",
+                "user_mcp_tool_grant",
+                "user_mcp_health_attempt",
+                "user_mcp_scope_lease",
+                "mcp_credential_key_validation",
             }.issubset(table_names)
         )
 

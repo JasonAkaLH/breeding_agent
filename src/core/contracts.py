@@ -27,6 +27,12 @@ from .models import (
     TaskEdge,
     TaskInputAttachment,
     TaskNode,
+    UserMCPCredentialRecord,
+    UserMCPHealthAttempt,
+    UserMCPScopeLease,
+    UserMCPServer,
+    UserMCPToolGrant,
+    MCPCredentialKeyValidation,
 )
 
 
@@ -68,6 +74,132 @@ class CapabilityExecutionResult:
 
 @runtime_checkable
 class StoragePort(Protocol):
+    async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]: ...
+
+    async def get_user_mcp_server(self, owner_user_id: str, server_id: str) -> UserMCPServer | None: ...
+
+    async def create_user_mcp_server(
+        self,
+        server: UserMCPServer,
+        credential: UserMCPCredentialRecord | None = None,
+    ) -> UserMCPServer: ...
+
+    async def update_user_mcp_server(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        changes: Mapping[str, Any],
+        credential_operation: str = "retain",
+        credential: UserMCPCredentialRecord | None = None,
+        security_sensitive: bool = False,
+        expected_config_version: int | None = None,
+        expected_security_version: int | None = None,
+        updated_at: datetime,
+    ) -> UserMCPServer | None: ...
+
+    async def get_user_mcp_credential(
+        self, owner_user_id: str, server_id: str
+    ) -> UserMCPCredentialRecord | None: ...
+
+    async def claim_user_mcp_health_attempt(self, attempt: UserMCPHealthAttempt) -> bool: ...
+
+    async def renew_user_mcp_health_attempt(
+        self,
+        attempt_id: str,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        runner_instance_id: str,
+        config_version: int,
+        security_version: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> bool: ...
+
+    async def complete_user_mcp_health_attempt(
+        self,
+        attempt_id: str,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        runner_instance_id: str,
+        config_version: int,
+        security_version: int,
+        health_status: str,
+        error_code: str | None,
+        completed_at: datetime,
+    ) -> UserMCPServer | None: ...
+
+    async def expire_user_mcp_health_attempts(
+        self, *, now: datetime, error_code: str = "test_interrupted"
+    ) -> int: ...
+
+    async def release_user_mcp_health_attempt(
+        self,
+        attempt_id: str,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        runner_instance_id: str,
+        config_version: int,
+        security_version: int,
+    ) -> bool: ...
+
+    async def acquire_user_mcp_scope_lease(self, lease: UserMCPScopeLease) -> bool: ...
+
+    async def renew_user_mcp_scope_lease(
+        self,
+        scope_id: str,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        gateway_instance_id: str,
+        security_version: int,
+        lease_expires_at: datetime,
+        updated_at: datetime,
+    ) -> bool: ...
+
+    async def release_user_mcp_scope_lease(
+        self, scope_id: str, *, gateway_instance_id: str
+    ) -> bool: ...
+
+    async def list_live_user_mcp_scope_leases(
+        self,
+        *,
+        now: datetime,
+        owner_user_id: str | None = None,
+        server_id: str | None = None,
+    ) -> list[UserMCPScopeLease]: ...
+
+    async def expire_user_mcp_scope_leases(self, *, now: datetime) -> int: ...
+
+    async def mark_user_mcp_server_deleted(
+        self, owner_user_id: str, server_id: str, *, deleted_at: datetime
+    ) -> UserMCPServer | None: ...
+
+    async def list_pending_user_mcp_server_deletions(self) -> list[UserMCPServer]: ...
+
+    async def finalize_user_mcp_server_delete(
+        self, owner_user_id: str, server_id: str, *, now: datetime
+    ) -> bool: ...
+
+    async def save_user_mcp_tool_grant(self, grant: UserMCPToolGrant) -> UserMCPToolGrant: ...
+
+    async def list_user_mcp_tool_grants(
+        self, owner_user_id: str, server_id: str
+    ) -> list[UserMCPToolGrant]: ...
+
+    async def delete_user_mcp_tool_grant(
+        self, owner_user_id: str, server_id: str, grant_id: str
+    ) -> bool: ...
+
+    async def create_or_get_mcp_credential_key_validation(
+        self, record: MCPCredentialKeyValidation
+    ) -> MCPCredentialKeyValidation: ...
+
+    async def get_mcp_credential_key_validation(self) -> MCPCredentialKeyValidation | None: ...
+
     async def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken: ...
 
     async def get_auth_user_token(self, username: str) -> AuthUserToken | None: ...

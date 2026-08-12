@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Mapping, TypeVar
 
 from sqlalchemy import select, text
 
 from src.core.enums import ConversationStatus
-from src.core.models import Conversation
-from src.storage.sqlite.models import ConversationRow
-from src.storage.sqlite.repositories import SQLiteStorage, _row_to_conversation
+from src.core.models import UserMCPCredentialRecord, UserMCPHealthAttempt, UserMCPScopeLease, UserMCPServer, Conversation
+from src.storage.sqlite.models import ConversationRow, UserMCPHealthAttemptRow, UserMCPScopeLeaseRow, UserMCPServerRow
+from src.storage.sqlite.repositories import SQLiteStateRepository, SQLiteStorage, _row_to_conversation
+
+
+_T = TypeVar("_T")
 
 
 class PostgreSQLStorage(SQLiteStorage):
@@ -21,6 +24,188 @@ class PostgreSQLStorage(SQLiteStorage):
     set-based inside PostgreSQL and avoid pulling large task/message id lists
     into Python.
     """
+
+    async def _run_with_user_mcp_server_lock(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        callback: Callable[[SQLiteStateRepository], _T],
+    ) -> _T:
+        def _sync() -> _T:
+            with self._session_factory() as session:
+                session.scalar(
+                    select(UserMCPServerRow.server_id)
+                    .where(
+                        UserMCPServerRow.owner_user_id == owner_user_id,
+                        UserMCPServerRow.server_id == server_id,
+                    )
+                    .with_for_update()
+                )
+                result = callback(SQLiteStateRepository(session))
+                session.commit()
+                return result
+
+        return await asyncio.to_thread(_sync)
+
+    async def update_user_mcp_server(
+        self, owner_user_id: str, server_id: str, *, changes: Mapping[str, Any],
+        credential_operation: str = "retain", credential: UserMCPCredentialRecord | None = None,
+        security_sensitive: bool = False, expected_config_version: int | None = None,
+        expected_security_version: int | None = None, updated_at: datetime
+    ) -> UserMCPServer | None:
+        return await self._run_with_user_mcp_server_lock(
+            owner_user_id,
+            server_id,
+            lambda state: state.update_user_mcp_server(
+                owner_user_id, server_id, changes=changes, credential_operation=credential_operation,
+                credential=credential, security_sensitive=security_sensitive,
+                expected_config_version=expected_config_version,
+                expected_security_version=expected_security_version,
+                updated_at=updated_at,
+            ),
+        )
+
+    async def claim_user_mcp_health_attempt(self, attempt: UserMCPHealthAttempt) -> bool:
+        return await self._run_with_user_mcp_server_lock(
+            attempt.owner_user_id,
+            attempt.server_id,
+            lambda state: state.claim_user_mcp_health_attempt(attempt),
+        )
+
+    async def renew_user_mcp_health_attempt(
+        self, attempt_id: str, owner_user_id: str, server_id: str, *, runner_instance_id: str,
+        config_version: int, security_version: int, lease_expires_at: datetime, updated_at: datetime
+    ) -> bool:
+        return await self._run_with_user_mcp_server_lock(
+            owner_user_id,
+            server_id,
+            lambda state: state.renew_user_mcp_health_attempt(
+                attempt_id, owner_user_id, server_id, runner_instance_id=runner_instance_id,
+                config_version=config_version, security_version=security_version,
+                lease_expires_at=lease_expires_at, updated_at=updated_at,
+            ),
+        )
+
+    async def complete_user_mcp_health_attempt(
+        self, attempt_id: str, owner_user_id: str, server_id: str, *, runner_instance_id: str,
+        config_version: int, security_version: int, health_status: str, error_code: str | None,
+        completed_at: datetime
+    ) -> UserMCPServer | None:
+        return await self._run_with_user_mcp_server_lock(
+            owner_user_id,
+            server_id,
+            lambda state: state.complete_user_mcp_health_attempt(
+                attempt_id, owner_user_id, server_id, runner_instance_id=runner_instance_id,
+                config_version=config_version, security_version=security_version,
+                health_status=health_status, error_code=error_code, completed_at=completed_at,
+            ),
+        )
+
+    async def acquire_user_mcp_scope_lease(self, lease: UserMCPScopeLease) -> bool:
+        return await self._run_with_user_mcp_server_lock(
+            lease.owner_user_id,
+            lease.server_id,
+            lambda state: state.acquire_user_mcp_scope_lease(lease),
+        )
+
+    async def renew_user_mcp_scope_lease(
+        self, scope_id: str, owner_user_id: str, server_id: str, *, gateway_instance_id: str,
+        security_version: int, lease_expires_at: datetime, updated_at: datetime
+    ) -> bool:
+        return await self._run_with_user_mcp_server_lock(
+            owner_user_id,
+            server_id,
+            lambda state: state.renew_user_mcp_scope_lease(
+                scope_id, owner_user_id, server_id, gateway_instance_id=gateway_instance_id,
+                security_version=security_version, lease_expires_at=lease_expires_at, updated_at=updated_at,
+            ),
+        )
+
+    async def mark_user_mcp_server_deleted(
+        self, owner_user_id: str, server_id: str, *, deleted_at: datetime
+    ) -> UserMCPServer | None:
+        return await self._run_with_user_mcp_server_lock(
+            owner_user_id,
+            server_id,
+            lambda state: state.mark_user_mcp_server_deleted(owner_user_id, server_id, deleted_at=deleted_at),
+        )
+
+    async def finalize_user_mcp_server_delete(
+        self, owner_user_id: str, server_id: str, *, now: datetime
+    ) -> bool:
+        return await self._run_with_user_mcp_server_lock(
+            owner_user_id,
+            server_id,
+            lambda state: state.finalize_user_mcp_server_delete(owner_user_id, server_id, now=now),
+        )
+
+    async def expire_user_mcp_health_attempts(
+        self, *, now: datetime, error_code: str = "test_interrupted"
+    ) -> int:
+        def _sync() -> int:
+            with self._session_factory() as session:
+                expired = session.scalars(
+                    select(UserMCPHealthAttemptRow)
+                    .where(UserMCPHealthAttemptRow.lease_expires_at <= now)
+                    .with_for_update()
+                ).all()
+                if not expired:
+                    session.commit()
+                    return 0
+                # Lock each affected server before the shared CAS implementation updates health.
+                session.scalars(
+                    select(UserMCPServerRow.server_id)
+                    .where(
+                        UserMCPServerRow.server_id.in_([attempt.server_id for attempt in expired]),
+                        UserMCPServerRow.owner_user_id.in_([attempt.owner_user_id for attempt in expired]),
+                    )
+                    .with_for_update()
+                ).all()
+                result = SQLiteStateRepository(session).expire_user_mcp_health_attempts(
+                    now=now, error_code=error_code
+                )
+                session.commit()
+                return result
+
+        return await asyncio.to_thread(_sync)
+
+    async def release_user_mcp_health_attempt(
+        self,
+        attempt_id: str,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        runner_instance_id: str,
+        config_version: int,
+        security_version: int,
+    ) -> bool:
+        return await self._run_with_user_mcp_server_lock(
+            owner_user_id,
+            server_id,
+            lambda state: state.release_user_mcp_health_attempt(
+                attempt_id,
+                owner_user_id,
+                server_id,
+                runner_instance_id=runner_instance_id,
+                config_version=config_version,
+                security_version=security_version,
+            ),
+        )
+
+    async def expire_user_mcp_scope_leases(self, *, now: datetime) -> int:
+        def _sync() -> int:
+            with self._session_factory() as session:
+                rows = session.scalars(
+                    select(UserMCPScopeLeaseRow)
+                    .where(UserMCPScopeLeaseRow.lease_expires_at <= now)
+                    .with_for_update(skip_locked=True)
+                ).all()
+                for row in rows:
+                    session.delete(row)
+                session.commit()
+                return len(rows)
+
+        return await asyncio.to_thread(_sync)
 
     async def mark_conversation_deleting(
         self,

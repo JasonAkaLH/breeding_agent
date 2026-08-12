@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "resultType": "complete",
+    "tools": [
+      {
+        "name": "lookup",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tenant": {
+              "type": "string",
+              "x-mcp-header": "Tenant"
+            }
+          },
+          "required": ["tenant"]
+        }
+      }
+    ],
+    "ttlMs": 30000,
+    "cacheScope": "private"
+  }
+}

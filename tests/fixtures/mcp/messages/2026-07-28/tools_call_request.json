@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "lookup",
+    "arguments": {
+      "tenant": "alpha"
+    },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {
+        "name": "breeding_agent",
+        "version": "1"
+      },
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}

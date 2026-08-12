@@ -1,0 +1,7 @@
+: request-scoped stream
+
+event: message
+data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1,"total":1}}
+
+event: message
+data: {"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"text","text":"ok"}],"isError":false}}

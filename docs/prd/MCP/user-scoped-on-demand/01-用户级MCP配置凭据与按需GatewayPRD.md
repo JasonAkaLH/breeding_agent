@@ -35,7 +35,7 @@
 ### 3.2 工程目标
 
 1. 建立逻辑独立的 `MCPGateway` 边界，第一阶段允许与 FastAPI 后端同进程部署。
-2. Gateway 只编排连接、发现、调用、取消与资源释放，继续复用现有 MCP Client/Transport/Rust Sidecar，不重写第二套协议栈。
+2. Gateway 只编排连接、发现、调用、取消与资源释放，继续复用现有 Python MCP Client/Transport；既有 Rust Sidecar 保持其已验证的 `2025-11-25` 兼容路径，本阶段不扩展 Sidecar proto 或能力声明，不重写第二套通用协议栈。
 3. 服务器不持久化 Tool List、`inputSchema`、`outputSchema`、MCP Client 或 HTTP/SSE 连接。
 4. 用户身份始终来自后端认证上下文，不信任前端提交的 `user_id`/`username`。
 5. Gateway 将来可以拆成独立服务，但本阶段不引入额外网络跳数和部署复杂度。
@@ -63,6 +63,7 @@
 | Tool List/Schema | 不持久化，按任务、按服务器临时获取 |
 | 连接 | 同一任务中复用临时 Client/连接池，任务之间不复用 |
 | 输出 | 不设产品级大小上限；超出上下文容量时临时落盘并分块处理 |
+| 健康可用 | 只有完整发现成功且至少存在一个合法 Tool 时为 `available`；未声明 Tool 能力或 Tool 列表为空均为 `unavailable` |
 | 密钥 | 数据库保存密文，单一固定主密钥以服务器文件提供，不支持轮换 |
 | 前端持久化 | 前端不保存凭据、Tool List、Schema 或可信执行状态 |
 
@@ -84,7 +85,7 @@ Task-scoped MCPGateway
         |
         +--> existing Python MCP client / transports
         |
-        +--> existing Rust MCP sidecar adapter
+        +--> existing Rust MCP sidecar adapter（仅既有 2025-11-25 兼容路径）
         |
         v
 User-configured remote MCP Server
@@ -99,7 +100,7 @@ User-configured remote MCP Server
 | 字段 | 语义 |
 |---|---|
 | `server_id` | 平台生成的不可猜测 ID |
-| `owner_user_id` | 后端认证用户；当前实现可用 canonical `username` 承载，不从请求 body 接收 |
+| `owner_user_id` | 后端认证主体的当前存储键；当前认证契约只暴露 canonical `username`，本阶段沿用该值且不从请求 body 接收，但不把“用户名永不变更”提升为产品承诺；未来增加 rename 或稳定 subject 前必须先提供 owner key 迁移 |
 | `display_name` | 用户设置的 MCP 名称 |
 | `routing_description` | 后续一级 Planner 路由时使用的服务器描述 |
 | `endpoint_url` | 规范化后的 HTTP(S) Endpoint，不允许用户信息嵌入 URL |
@@ -146,7 +147,17 @@ granted_at
 
 `(owner_user_id, server_id, tool_name, server_security_version, input_schema_sha256)` 必须唯一。
 
-### 7.4 明确禁止持久化的内容
+### 7.4 内部协调记录
+
+为支持多实例安全收敛，数据库允许保存下列短期协调元数据；它们不是 MCP Session、Tool Catalog 或远端执行状态：
+
+1. `user_mcp_health_attempt`：包含随机 `attempt_id`、`owner_user_id`、`server_id`、捕获的 `config_version/security_version`、`runner_instance_id`、`lease_expires_at` 和更新时间。健康测试只能通过 attempt 所有权与版本 CAS 续租、写回或释放。
+2. `user_mcp_scope_lease`：包含随机 `scope_id`、`owner_user_id`、`server_id`、`security_version`、`gateway_instance_id`、`lease_expires_at` 和更新时间。不得保存凭据、Tool、Schema、远端 Task ID、MCP Session ID 或业务结果。
+3. `mcp_credential_key_validation`：单例密钥一致性验证记录，只保存固定验证明文的随机 Nonce、密文和格式版本，不保存主密钥、主密钥 Hash 或 `key_id`。
+
+Scope lease 必须短周期续租；续租同时检查 Server 未 tombstone、仍启用且 `security_version` 未变化。续租失败时 Gateway 必须停止新调用并取消/关闭当前 Scope。过期 lease 可由协调清理器回收，但不得仅凭无确认的进程内通知或 PostgreSQL `NOTIFY` 判断远端 Scope 已关闭。
+
+### 7.5 明确禁止持久化的内容
 
 - Tool List 和远程 Tool Description。
 - `inputSchema` 和 `outputSchema` 原文。
@@ -170,7 +181,10 @@ granted_at
 - 文件使用 UTF-8 文本保存一行标准 Base64；解码后必须恰好为 32-byte 主密钥，只允许末尾一个换行，不接受空白折叠、Hex 或自动补位。
 - 文件不进 Git、不进 Docker 镜像、不进普通配置文件，生产权限为 `0400`。
 - 所有 Gateway 实例必须挂载同一份主密钥，否则不得取得 Ready 状态。
-- 启动时只校验可读性、权限和长度，不自动生成或覆盖密钥文件。
+- 启动时先校验文件可读性、权限和长度，再对数据库单例 `mcp_credential_key_validation` 执行原子 create-or-verify；无法创建、读取或解密该记录时不得取得 Ready 状态。
+- 首次部署顺序固定为“先完成向后兼容的数据库增量建表，再为所有实例挂载同一密钥，最后发布读取 sentinel 的新版本”。并发首启只能有一个实例创建 sentinel，其余实例读取并验证胜出的记录。
+- 回滚旧版本时保留 sentinel 表和记录；旧版本忽略该表，新版本再次发布时继续验证。不得由回滚脚本删除、重建或覆盖 sentinel。
+- 不自动生成或覆盖密钥文件；数据库暂时不可用或只读且 sentinel 尚不存在时 fail closed，不以跳过一致性验证继续 Ready。
 - 数据库备份与密钥文件分开备份。密钥丢失后已存凭据无法恢复，用户必须重新填写。
 - 本阶段不提供密钥轮换。密钥泄露时的处置方式是废弃已存凭据，更换服务器密钥并要求用户重新配置。
 
@@ -209,7 +223,7 @@ URL 安全校验失败属于配置非法，不允许“保存为不可用”；�
 | `POST` | `/api/v1/mcp/servers` | 创建配置，加密凭据并异步发起连接测试 |
 | `GET` | `/api/v1/mcp/servers/{server_id}` | 读取单个配置元数据 |
 | `PATCH` | `/api/v1/mcp/servers/{server_id}` | 更新配置；关键连接/认证字段变更后自动重测 |
-| `DELETE` | `/api/v1/mcp/servers/{server_id}` | 删除配置；预留级联删除授权记录 |
+| `DELETE` | `/api/v1/mcp/servers/{server_id}` | 原子标记删除并禁止新 Scope；无活跃 lease 时完成物理删除，否则返回异步删除状态 |
 | `POST` | `/api/v1/mcp/servers/{server_id}/test` | 手动重新发起连接测试 |
 
 ### 10.1 响应约束
@@ -219,6 +233,9 @@ URL 安全校验失败属于配置非法，不允许“保存为不可用”；�
 - 连接失败不回滚已通过安全校验的配置；配置保留但不可路由。
 - 表示凭据的输入字段具有“未提交则保留旧凭据”语义；清空凭据必须使用显式操作，不能由空字符串隐式触发。
 - API 不提供“返回密文”或“显示已存凭据”的后门。
+- PATCH 不强制客户端提交 `expected_config_version` 或 `If-Match`；Repository 必须在事务中串行化同一记录的更新并单调递增 `config_version`。`config_version/security_version` 用于后台任务和 Scope 的服务端 CAS，不在本阶段新增破坏性客户端前置条件。
+- DELETE 的线性化点是 tombstone 成功：此后 GET/PATCH/TEST/再次 DELETE 与不存在记录一致返回 404，所有实例拒绝新 Scope/health attempt。没有活跃 Scope lease 或 health attempt lease 时返回 204；任一 lease 仍活跃时返回 202 和 `deletion_pending=true`，后台协调器在所有相关 lease 释放或过期后级联物理删除。PostgreSQL `LISTEN/NOTIFY` 或进程内事件只用于加速取消，不作为删除完成依据。
+- 首版输入边界固定为：`display_name` 1–100 个 Unicode code point、`routing_description` 最多 2000 个 code point、规范化 URL 最多 2048 UTF-8 bytes、静态 Header 最多 20 个、Header 名最多 128 个 ASCII 字符、单个 Header 值最多 4096 UTF-8 bytes、解密后的受控凭据 JSON 最多 16 KiB。空白名称、控制字符、非法组合或超限输入统一 422。
 
 ## 11. `MCPGateway` 逻辑接口
 
@@ -240,6 +257,7 @@ close_task(platform_task_id, reason) -> None
 3. `(platform_task_id, server_id)` 在一个 Gateway 实例中只有一个活跃 Scope；同一任务重复访问同一 Server 复用它。
 4. 不同任务不共享 Tool Catalog、协议 Session、Client、Discovery 结果或远端能力快照。
 5. Scope 关闭时必须取消未完成请求、关闭 SSE/HTTP 资源并删除未提升为 Artifact 的临时文件。
+6. Scope 创建前必须原子登记持久化 lease；活跃期间周期续租并检查 tombstone、`enabled` 和 `security_version`。lease 登记失败不得建立远端连接，lease 续租失败必须触发关闭。
 
 ### 11.2 Tool Catalog
 
@@ -249,6 +267,7 @@ close_task(platform_task_id, reason) -> None
 - 保留 Tool Name、Description、`inputSchema`、可选 `outputSchema` 和必要 annotations，所有远程 metadata 都按不可信输入处理。
 - 为每个 `inputSchema` 计算 canonical SHA-256，但本阶段只保存在 Scope 内存中。
 - MCP `2026-07-28` 返回的 `ttlMs/cacheScope` 只作为当前任务 Scope 内的缓存提示；不跨任务、不写数据库，也不发往前端作为权威执行源。
+- 任务级重新发现若未声明 Tool 能力或最终列表为空，必须关闭 Scope，并通过版本 CAS 将配置更新为对应 `unavailable` 原因码；不得保留旧健康测试的 `available` 继续调用。
 
 ### 11.3 `MCPCallOutcome`
 
@@ -323,6 +342,8 @@ Streamable HTTP 的自动协商必须遵循以下顺序：
 - 协议版本不兼容、非法 JSON-RPC 或非法 Tool Schema。
 - 服务器明确的业务拒绝。
 
+健康测试只有在握手/Discovery、能力门控和完整分页 `tools/list` 全部成功，且最终至少包含一个名称与 Schema 合法的 Tool 时才写入 `available`。Server 未声明 `tools` capability 写入 `unavailable/no_tools_capability`；成功返回空列表写入 `unavailable/empty_tool_list`。超时、分页失败、cursor 循环或非法 Catalog 属于发现失败，不得伪装成空列表。
+
 ### 13.2 `tools/call`
 
 - 不设置产品级最长执行时间。
@@ -351,15 +372,19 @@ unavailable/disabled -- retest/enable --> testing
 - 配置必须同时满足 `enabled=true` 且 `health_status=available` 才能被后续 Planner 路由。
 - 仅更改名称或描述不强制重测，但更新 `config_version`。
 - 更改 Endpoint、transport、protocol preference、auth type 或凭据必须递增 `security_version`、立即变为 `testing` 并重测。
-- 应用重启时，未完成的 `testing` 记录收敛为 `unavailable/test_interrupted`，不隐式当作可用。
+- 每次进入 `testing` 必须创建唯一 health attempt lease；只有持有该 attempt、版本仍匹配且 lease 未过期的 runner 可以续租或写回结果。
+- 应用启动时只把 lease 已过期的 `testing` attempt 通过 CAS 收敛为 `unavailable/test_interrupted`；不得把其他实例仍持有有效 lease 的测试误判为中断。
+- Runner 正常 shutdown 时取消并释放自己持有的 attempt；异常退出由 lease 到期和任一实例的协调器收敛。
 
 ## 15. 输出与任务级临时存储
 
 1. MCP 业务输出不设产品级字节上限，不因结果大小主动截断或拒绝。
 2. 运行时可以配置“内存转临时文件阈值”，该阈值只决定存储形态，不是输出上限。
-3. 超大结果使用平台管理的任务临时目录，文件权限不高于 `0600`，文件名不采用远程输入。
-4. 临时结果不写入业务数据库。任务完成、取消或失败后删除；进程重启时由 Janitor 删除无活跃任务引用的孤儿文件。
-5. 用户明确需要原始结果时，后续阶段通过现有 Artifact 存储流程将其提升为正式下载资源，不将临时路径暴露给前端。
+3. Streamable HTTP 与 Legacy HTTP+SSE Transport 必须从响应读取阶段使用 streaming API 和 result sink；禁止先访问完整 `response.content`、`response.text`、`response.json()` 或等价全量缓冲后再决定落盘。JSON-RPC 与 SSE 解析器必须增量读取，并把超过内存阈值的结果内容直接写入临时存储。
+4. 超大结果使用平台管理的任务临时目录，文件权限不高于 `0600`，文件名不采用远程输入；Transport/Adapter/Gateway 之间只传递受控 chunk、有限大小的协议 metadata 或 opaque result ref。
+5. 临时结果不写入业务数据库。任务完成、取消或失败后删除；进程重启时由 Janitor 删除无活跃任务引用的孤儿文件。
+6. 可在发起远端调用前根据全局并发和临时磁盘低水位拒绝新工作，返回稳定、可重试的 `mcp_capacity_unavailable`。`max_active_user_mcp_calls_per_instance` 与 `temporary_disk_low_watermark_bytes` 必须由部署环境显式配置且大于零，代码不提供可能被误用于生产的隐式默认值；发布前通过目标环境容量测试确定并写入 runbook。一旦接受调用，不得因达到任意结果大小阈值静默截断。流式接收期间发生真实磁盘耗尽时，当前调用显式失败为 `temporary_storage_exhausted` 并清理部分文件。
+7. 用户明确需要原始结果时，后续阶段通过现有 Artifact 存储流程将其提升为正式下载资源，不将临时路径暴露给前端。
 
 ## 16. 输出安全边界
 
@@ -379,6 +404,9 @@ unavailable/disabled -- retest/enable --> testing
 | 配置领域服务 | `src/integrations/mcp/` 中新增用户配置、凭据和 Endpoint Policy 组件 |
 | Gateway Port/实现 | `src/integrations/mcp/` 中的任务作用域 facade，调用现有 Client/Adapter |
 | 存储模型 | `src/storage/` 的 SQLite/PostgreSQL 对等 schema、repository 和 port |
+| 多实例协调 | SQLite 进程内提示 + PostgreSQL `LISTEN/NOTIFY` 提示；健康 attempt 与 Scope lease 以数据库记录为权威 |
+| 流式结果 | `transport_http.py`、`transport_legacy_http_sse.py`、协议 Adapter 和任务临时结果 sink 共同承担，不允许只在 Gateway 末端补落盘 |
+| Rust Sidecar | 保留现有 `maf.mcp.sidecar.v1` 与 `2025-11-25` 兼容路径；用户级 Gateway 的五版本交付以 Python Adapter 为基线，不修改 Sidecar proto，也不让 Sidecar 宣称未验证版本 |
 | 运行时装配 | `src/api/runtime.py` 只组装服务和 Gateway，本阶段不切换旧执行链 |
 | 密钥运维 | 部署配置只提供文件挂载路径，不提供文件内容 |
 
@@ -394,8 +422,11 @@ unavailable/disabled -- retest/enable --> testing
 | 密钥文件不可用 | MCP 凭据功能 fail closed，实例不得 Ready |
 | 密文认证失败 | 不发起网络请求，记录脱敏安全事件 |
 | 连接测试失败 | 配置保存为 `unavailable`，不可路由 |
+| 无 Tool 能力/空 Tool 列表 | 分别记录 `no_tools_capability` / `empty_tool_list`，统一为 `unavailable`，不可路由 |
 | Tool Catalog 非法 | 当前 Scope 失败并关闭，不持久化部分 Catalog |
-| 删除时仍有调用 | 标记删除、禁止新调用，取消已有 Scope 后完成级联删除 |
+| 删除时仍有调用/测试 | tombstone 后返回 202；通知实例取消，等待持久化 Scope lease 与 health attempt lease 全部释放/过期后完成级联删除 |
+| 调用前容量不足 | 返回可重试 `mcp_capacity_unavailable`，不发起远端业务调用 |
+| 流式接收时磁盘耗尽 | 当前调用显式失败为 `temporary_storage_exhausted`，清理部分文件，不返回截断结果 |
 
 ## 19. 验收标准
 
@@ -403,16 +434,16 @@ unavailable/disabled -- retest/enable --> testing
 |---|---|
 | MCP-USER-P1-001 | 两个用户可保存同名/同 Endpoint 配置，且不能查看、测试、修改或删除对方记录 |
 | MCP-USER-P1-002 | 数据库不出现凭据明文；API、日志、事件和错误不返回明文或密文 |
-| MCP-USER-P1-003 | 主密钥缺失、权限不合法或长度错误时，MCP 凭据功能 fail closed 且不自动生成密钥 |
+| MCP-USER-P1-003 | 主密钥缺失、权限不合法、长度错误或无法验证数据库 sentinel 时，MCP 凭据功能 fail closed 且不自动生成密钥；并发首启只创建一个 sentinel，回滚保留该记录 |
 | MCP-USER-P1-004 | HTTPS 公网 Endpoint 通过安全校验后可测试；HTTP/私网目标仅在管理员白名单内可访问 |
 | MCP-USER-P1-005 | `localhost`、链路本地、云元数据、DNS Rebinding 和跨 Origin 凭据重定向均被阻断 |
-| MCP-USER-P1-006 | 连接失败的安全配置可保存为 `unavailable`，但后续不可被路由 |
+| MCP-USER-P1-006 | 连接失败的安全配置、未声明 Tool 能力或完整 Tool List 为空均保存为带脱敏原因码的 `unavailable`，后续不可被路由；只有至少一个合法 Tool 时为 `available` |
 | MCP-USER-P1-007 | Gateway 在同一任务内对同一 Server 只执行一次 Tool Discovery，并复用任务级 Scope |
-| MCP-USER-P1-008 | 任务结束/取消后 Client、SSE、Tool Catalog 和临时文件均被释放 |
+| MCP-USER-P1-008 | 任务结束/取消后 Client、SSE、Tool Catalog、Scope lease 和临时文件均被释放；跨实例 DELETE 仅在 Scope lease 与 health attempt lease 全部释放/过期后物理删除 |
 | MCP-USER-P1-009 | Tool List、Schema 和完整工具结果不写入用户 MCP 配置表 |
 | MCP-USER-P1-010 | 连接/发现每次 60 秒，可重试一次且拥有独立 60 秒预算；非暂时错误不重试 |
 | MCP-USER-P1-011 | `tools/call` 不自动重试，不设最长执行时间，并提供 120 秒运行中回调 seam |
-| MCP-USER-P1-012 | 超大输出不被截断，可切换为任务级临时文件，且未提升文件会在任务后清理 |
+| MCP-USER-P1-012 | HTTP/SSE 响应从 Transport 层增量读取，超大输出不经全量内存缓冲且不被截断，可切换为任务级临时文件，未提升文件会在任务后清理 |
 | MCP-USER-P1-013 | 前四个版本行为无回归；`2026-07-28` 不发送 initialize/session/GET stream，并正确发送每请求 metadata 与协议 Header |
 | MCP-USER-P1-014 | `auto` 只在明确版本不支持时安全回退；认证、网络、5xx、畸形响应和已发业务请求均不触发降级重放 |
 | MCP-USER-P1-015 | `server/discover`、List Cache Hint、MRTR 与 Tasks Extension 均经版本门控；Discovery/能力/Tool List 不跨任务持久化 |
@@ -426,6 +457,7 @@ unavailable/disabled -- retest/enable --> testing
 - 凭据更新/保留/显式清空语义。
 - URL 正规化、IPv4/IPv6 分类、域名/CIDR 白名单、DNS Rebinding 和重定向策略。
 - 任务 Scope 去重、Tool Catalog 只读快照和 Close 幂等。
+- health attempt/Scope lease 的原子 claim、续租、过期回收和版本/tombstone CAS。
 - 发现重试分类，验证每次独立 60 秒预算。
 - 临时结果文件权限、路径隔离和 Janitor。
 - 五版本配置矩阵、`auto`/pin 协商、2026 Body/Header 一致性和静态 Header 不可覆盖。
@@ -437,13 +469,15 @@ unavailable/disabled -- retest/enable --> testing
 - 列表、详情、编辑、删除、测试的跨用户隔离。
 - API 响应全字段扫描，确保无凭据明文、密文、Nonce 和认证 Header。
 - 配置删除与当前活跃 Scope 的竞态测试。
+- 两个 Runtime 并发健康测试与其中一个实例重启的竞态，证明有效 attempt 不被错误收敛。
+- DELETE tombstone、202 pending、通知丢失、lease 续租发现 tombstone、lease 释放/过期后物理删除的多实例测试。
 
 ### 20.3 集成测试
 
 - Fake HTTPS Streamable HTTP Server。
 - Fake HTTP Legacy HTTP+SSE Server，分别在白名单内/外验证。
 - 分页 `tools/list`、慢发现、首次失败第二次成功、两次失败。
-- 大输出落盘不截断、任务后清理和 Artifact 提升 seam。
+- JSON 与 SSE 大输出从 socket 分块读取并直接落盘，测试 Transport 未访问全量 `content/text/json`，重组 SHA-256 与远端一致；覆盖取消、解析失败和磁盘耗尽时的部分文件清理。
 - 不访问真实外部 MCP Server 的默认 CI 测试。
 - `2026-07-28` Fake Server 覆盖 `server/discover`、JSON/SSE 响应、List Cache Hint、`InputRequiredResult`、`CreateTaskResult` 与 method-not-found 安全回退。
 
@@ -455,6 +489,7 @@ unavailable/disabled -- retest/enable --> testing
 2. Gateway 可在 service-level integration test 中完成按需 connect/list/call/cancel/close，不需要新增对普通用户公开的“任意工具调用 API”。
 3. 任务结束后没有用户 Client、Tool List、Schema 或临时文件残留。
 4. 旧的全局 MCP Runtime 执行链未被切换，因此本阶段可以独立回滚。
+5. 现有 Rust Sidecar 继续只声明其已验证的 `2025-11-25` 能力；用户级 Gateway 的五版本 Python Adapter 发布不要求修改 Sidecar proto。
 
 ## 22. 参考
 

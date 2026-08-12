@@ -10,12 +10,25 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason
 from src.auth.postgres_invalidation_bus import auth_generation_notify_sql
 from src.core.contracts import StoragePort
-from src.core.enums import ArtifactType, ConversationStatus, EdgeType, EventVisibility, MessageRole, TaskStatus
+from src.core.enums import (
+    ArtifactType,
+    ConversationStatus,
+    EdgeType,
+    EventVisibility,
+    MessageRole,
+    TaskStatus,
+    UserMCPAuthType,
+    UserMCPHealthStatus,
+    UserMCPProtocolPreference,
+    UserMCPTransport,
+)
 from src.core.models import (
     Artifact,
     AuthUserToken,
@@ -38,6 +51,12 @@ from src.core.models import (
     TaskEdge,
     TaskInputAttachment,
     TaskNode,
+    UserMCPCredentialRecord,
+    UserMCPHealthAttempt,
+    UserMCPScopeLease,
+    UserMCPServer,
+    UserMCPToolGrant,
+    MCPCredentialKeyValidation,
 )
 from src.storage.conversation_files import (
     FILE_UPLOAD_MESSAGE_MARKED_DELETED_EVENT,
@@ -83,10 +102,80 @@ from .models import (
     TaskEdgeRow,
     TaskNodeRow,
     TaskRow,
+    UserMCPHealthAttemptRow,
+    UserMCPScopeLeaseRow,
+    UserMCPServerRow,
+    UserMCPToolGrantRow,
+    MCPCredentialKeyValidationRow,
 )
 
 
 CONVERSATION_FILE_INDEX_REPAIR_KIND = "conversation_file_index"
+
+
+def _row_to_user_mcp_server(row: UserMCPServerRow) -> UserMCPServer:
+    return UserMCPServer(
+        server_id=row.server_id,
+        owner_user_id=row.owner_user_id,
+        display_name=row.display_name,
+        routing_description=row.routing_description,
+        endpoint_url=row.endpoint_url,
+        transport=UserMCPTransport(row.transport),
+        protocol_preference=UserMCPProtocolPreference(row.protocol_preference),
+        auth_type=UserMCPAuthType(row.auth_type),
+        auth_metadata=dict(row.auth_metadata or {}),
+        enabled=bool(row.enabled),
+        health_status=UserMCPHealthStatus(row.health_status),
+        config_version=int(row.config_version),
+        security_version=int(row.security_version),
+        credential_configured=row.credential_ciphertext is not None,
+        last_tested_at=row.last_tested_at,
+        last_test_error_code=row.last_test_error_code,
+        deletion_pending=bool(row.deletion_pending),
+        deleted_at=row.deleted_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_user_mcp_credential(row: UserMCPServerRow) -> UserMCPCredentialRecord | None:
+    if row.credential_ciphertext is None or row.credential_nonce is None or row.encryption_version is None:
+        return None
+    return UserMCPCredentialRecord(
+        owner_user_id=row.owner_user_id,
+        server_id=row.server_id,
+        credential_ciphertext=bytes(row.credential_ciphertext),
+        credential_nonce=bytes(row.credential_nonce),
+        encryption_version=int(row.encryption_version),
+        credential_updated_at=row.credential_updated_at,
+    )
+
+
+def _row_to_user_mcp_health_attempt(row: UserMCPHealthAttemptRow) -> UserMCPHealthAttempt:
+    return UserMCPHealthAttempt(
+        attempt_id=row.attempt_id,
+        owner_user_id=row.owner_user_id,
+        server_id=row.server_id,
+        config_version=int(row.config_version),
+        security_version=int(row.security_version),
+        runner_instance_id=row.runner_instance_id,
+        lease_expires_at=cast(datetime, row.lease_expires_at),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_user_mcp_scope_lease(row: UserMCPScopeLeaseRow) -> UserMCPScopeLease:
+    return UserMCPScopeLease(
+        scope_id=row.scope_id,
+        owner_user_id=row.owner_user_id,
+        server_id=row.server_id,
+        security_version=int(row.security_version),
+        gateway_instance_id=row.gateway_instance_id,
+        lease_expires_at=cast(datetime, row.lease_expires_at),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 def _row_to_conversation(row: ConversationRow) -> Conversation:
@@ -1877,6 +1966,542 @@ class SQLiteStateRepository:
         rows = self._session.scalars(statement).all()
         return [_row_to_task_input_attachment(row) for row in rows]
 
+    def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]:
+        rows = self._session.scalars(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == owner_user_id,
+                UserMCPServerRow.deletion_pending.is_(False),
+            )
+            .order_by(UserMCPServerRow.created_at, UserMCPServerRow.server_id)
+        ).all()
+        return [_row_to_user_mcp_server(row) for row in rows]
+
+    def get_user_mcp_server(self, owner_user_id: str, server_id: str) -> UserMCPServer | None:
+        row = self._get_user_mcp_server_row(owner_user_id, server_id)
+        return None if row is None else _row_to_user_mcp_server(row)
+
+    def _get_user_mcp_server_row(
+        self, owner_user_id: str, server_id: str, *, include_deleted: bool = False
+    ) -> UserMCPServerRow | None:
+        conditions = [
+            UserMCPServerRow.owner_user_id == owner_user_id,
+            UserMCPServerRow.server_id == server_id,
+        ]
+        if not include_deleted:
+            conditions.append(UserMCPServerRow.deletion_pending.is_(False))
+        return self._session.scalar(select(UserMCPServerRow).where(*conditions))
+
+    def create_user_mcp_server(
+        self, server: UserMCPServer, credential: UserMCPCredentialRecord | None = None
+    ) -> UserMCPServer:
+        if credential is not None and (
+            credential.owner_user_id != server.owner_user_id or credential.server_id != server.server_id
+        ):
+            raise ValueError("credential scope does not match MCP server")
+        row = UserMCPServerRow(
+            server_id=server.server_id,
+            owner_user_id=server.owner_user_id,
+            display_name=server.display_name,
+            routing_description=server.routing_description,
+            endpoint_url=server.endpoint_url,
+            transport=str(server.transport),
+            protocol_preference=str(server.protocol_preference),
+            auth_type=str(server.auth_type),
+            auth_metadata=dict(server.auth_metadata),
+            enabled=server.enabled,
+            health_status=str(server.health_status),
+            config_version=max(1, int(server.config_version)),
+            security_version=max(1, int(server.security_version)),
+            last_tested_at=server.last_tested_at,
+            last_test_error_code=server.last_test_error_code,
+            deletion_pending=False,
+            deleted_at=None,
+            created_at=server.created_at,
+            updated_at=server.updated_at,
+        )
+        if credential is not None:
+            self._replace_user_mcp_credential(row, credential)
+        self._session.add(row)
+        self._session.flush()
+        return _row_to_user_mcp_server(row)
+
+    def update_user_mcp_server(
+        self,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        changes: Mapping[str, Any],
+        credential_operation: str,
+        credential: UserMCPCredentialRecord | None,
+        security_sensitive: bool,
+        expected_config_version: int | None = None,
+        expected_security_version: int | None = None,
+        updated_at: datetime,
+    ) -> UserMCPServer | None:
+        if credential_operation not in {"retain", "replace", "clear"}:
+            raise ValueError("credential_operation must be retain, replace, or clear")
+        if credential_operation == "replace":
+            if credential is None or credential.owner_user_id != owner_user_id or credential.server_id != server_id:
+                raise ValueError("replacement credential must match MCP server scope")
+        elif credential is not None:
+            raise ValueError("credential is only valid for replace operation")
+        allowed = {
+            "display_name", "routing_description", "endpoint_url", "transport", "protocol_preference",
+            "auth_type", "auth_metadata", "enabled", "health_status", "last_tested_at", "last_test_error_code",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unsupported MCP server fields: {', '.join(sorted(unknown))}")
+        values = dict(changes)
+        for enum_field in ("transport", "protocol_preference", "auth_type", "health_status"):
+            if enum_field in values:
+                values[enum_field] = str(values[enum_field])
+        if "auth_metadata" in values:
+            values["auth_metadata"] = dict(values["auth_metadata"] or {})
+        values["updated_at"] = updated_at
+        values["config_version"] = UserMCPServerRow.config_version + 1
+        credential_changes_security = credential_operation in {"replace", "clear"}
+        security_fields = {
+            "endpoint_url", "transport", "protocol_preference", "auth_type", "auth_metadata", "enabled",
+        }
+        if security_sensitive or credential_changes_security or security_fields.intersection(changes):
+            values["security_version"] = UserMCPServerRow.security_version + 1
+        if credential_operation == "replace":
+            assert credential is not None
+            values.update(
+                credential_ciphertext=credential.credential_ciphertext,
+                credential_nonce=credential.credential_nonce,
+                encryption_version=credential.encryption_version,
+                credential_updated_at=credential.credential_updated_at or updated_at,
+            )
+        elif credential_operation == "clear":
+            values.update(
+                credential_ciphertext=None,
+                credential_nonce=None,
+                encryption_version=None,
+                credential_updated_at=updated_at,
+            )
+        conditions = [
+            UserMCPServerRow.owner_user_id == owner_user_id,
+            UserMCPServerRow.server_id == server_id,
+            UserMCPServerRow.deletion_pending.is_(False),
+        ]
+        if expected_config_version is not None:
+            conditions.append(
+                UserMCPServerRow.config_version == expected_config_version
+            )
+        if expected_security_version is not None:
+            conditions.append(
+                UserMCPServerRow.security_version == expected_security_version
+            )
+        result = self._session.execute(
+            update(UserMCPServerRow).where(*conditions).values(**values)
+        )
+        if not result.rowcount:
+            return None
+        self._session.flush()
+        row = self._get_user_mcp_server_row(owner_user_id, server_id)
+        return None if row is None else _row_to_user_mcp_server(row)
+
+    @staticmethod
+    def _replace_user_mcp_credential(row: UserMCPServerRow, credential: UserMCPCredentialRecord) -> None:
+        row.credential_ciphertext = credential.credential_ciphertext
+        row.credential_nonce = credential.credential_nonce
+        row.encryption_version = credential.encryption_version
+        row.credential_updated_at = credential.credential_updated_at
+
+    def get_user_mcp_credential(
+        self, owner_user_id: str, server_id: str
+    ) -> UserMCPCredentialRecord | None:
+        row = self._get_user_mcp_server_row(owner_user_id, server_id)
+        return None if row is None else _row_to_user_mcp_credential(row)
+
+    def claim_user_mcp_health_attempt(self, attempt: UserMCPHealthAttempt) -> bool:
+        server = self._get_user_mcp_server_row(attempt.owner_user_id, attempt.server_id)
+        if (
+            server is None
+            or int(server.config_version) != attempt.config_version
+            or int(server.security_version) != attempt.security_version
+        ):
+            return False
+        claim_at = attempt.updated_at or attempt.created_at or _utcnow_naive()
+        self._session.execute(
+            delete(UserMCPHealthAttemptRow).where(
+                UserMCPHealthAttemptRow.owner_user_id == attempt.owner_user_id,
+                UserMCPHealthAttemptRow.server_id == attempt.server_id,
+                or_(
+                    UserMCPHealthAttemptRow.lease_expires_at <= claim_at,
+                    UserMCPHealthAttemptRow.config_version != attempt.config_version,
+                    UserMCPHealthAttemptRow.security_version != attempt.security_version,
+                ),
+            )
+        )
+        values = {
+            "attempt_id": attempt.attempt_id,
+            "owner_user_id": attempt.owner_user_id,
+            "server_id": attempt.server_id,
+            "config_version": attempt.config_version,
+            "security_version": attempt.security_version,
+            "runner_instance_id": attempt.runner_instance_id,
+            "lease_expires_at": attempt.lease_expires_at,
+            "created_at": attempt.created_at,
+            "updated_at": attempt.updated_at,
+        }
+        dialect_name = self._session.get_bind().dialect.name
+        statement = postgresql_insert(UserMCPHealthAttemptRow).values(**values) if dialect_name == "postgresql" else sqlite_insert(UserMCPHealthAttemptRow).values(**values)
+        result = self._session.execute(
+            statement.on_conflict_do_nothing(index_elements=["owner_user_id", "server_id"])
+        )
+        if not result.rowcount:
+            return False
+        server.health_status = str(UserMCPHealthStatus.TESTING)
+        server.last_test_error_code = None
+        server.updated_at = attempt.updated_at
+        self._session.flush()
+        return True
+
+    def renew_user_mcp_health_attempt(
+        self, attempt_id: str, owner_user_id: str, server_id: str, *, runner_instance_id: str,
+        config_version: int, security_version: int, lease_expires_at: datetime, updated_at: datetime
+    ) -> bool:
+        result = self._session.execute(
+            update(UserMCPHealthAttemptRow)
+            .where(
+                UserMCPHealthAttemptRow.attempt_id == attempt_id,
+                UserMCPHealthAttemptRow.owner_user_id == owner_user_id,
+                UserMCPHealthAttemptRow.server_id == server_id,
+                UserMCPHealthAttemptRow.runner_instance_id == runner_instance_id,
+                UserMCPHealthAttemptRow.config_version == config_version,
+                UserMCPHealthAttemptRow.security_version == security_version,
+                UserMCPHealthAttemptRow.lease_expires_at > updated_at,
+                select(UserMCPServerRow.server_id).where(
+                    UserMCPServerRow.owner_user_id == owner_user_id,
+                    UserMCPServerRow.server_id == server_id,
+                    UserMCPServerRow.config_version == config_version,
+                    UserMCPServerRow.security_version == security_version,
+                    UserMCPServerRow.deletion_pending.is_(False),
+                ).exists(),
+            )
+            .values(lease_expires_at=lease_expires_at, updated_at=updated_at)
+        )
+        return bool(result.rowcount)
+
+    def complete_user_mcp_health_attempt(
+        self, attempt_id: str, owner_user_id: str, server_id: str, *, runner_instance_id: str,
+        config_version: int, security_version: int, health_status: str, error_code: str | None,
+        completed_at: datetime
+    ) -> UserMCPServer | None:
+        attempt = self._session.scalar(
+            select(UserMCPHealthAttemptRow).where(
+                UserMCPHealthAttemptRow.attempt_id == attempt_id,
+                UserMCPHealthAttemptRow.owner_user_id == owner_user_id,
+                UserMCPHealthAttemptRow.server_id == server_id,
+                UserMCPHealthAttemptRow.runner_instance_id == runner_instance_id,
+                UserMCPHealthAttemptRow.config_version == config_version,
+                UserMCPHealthAttemptRow.security_version == security_version,
+                UserMCPHealthAttemptRow.lease_expires_at > completed_at,
+            )
+        )
+        server = self._get_user_mcp_server_row(owner_user_id, server_id)
+        if (
+            attempt is None or server is None or int(server.config_version) != config_version
+            or int(server.security_version) != security_version
+        ):
+            return None
+        server.health_status = str(UserMCPHealthStatus(health_status))
+        server.last_tested_at = completed_at
+        server.last_test_error_code = error_code
+        server.updated_at = completed_at
+        self._session.delete(attempt)
+        self._session.flush()
+        return _row_to_user_mcp_server(server)
+
+    def expire_user_mcp_health_attempts(self, *, now: datetime, error_code: str) -> int:
+        attempts = self._session.scalars(
+            select(UserMCPHealthAttemptRow).where(UserMCPHealthAttemptRow.lease_expires_at <= now)
+        ).all()
+        for attempt in attempts:
+            server = self._get_user_mcp_server_row(attempt.owner_user_id, attempt.server_id)
+            if (
+                server is not None
+                and int(server.config_version) == int(attempt.config_version)
+                and int(server.security_version) == int(attempt.security_version)
+                and server.health_status == str(UserMCPHealthStatus.TESTING)
+            ):
+                server.health_status = str(UserMCPHealthStatus.UNAVAILABLE)
+                server.last_tested_at = now
+                server.last_test_error_code = error_code
+                server.updated_at = now
+            self._session.delete(attempt)
+        self._session.flush()
+        return len(attempts)
+
+    def release_user_mcp_health_attempt(
+        self,
+        attempt_id: str,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        runner_instance_id: str,
+        config_version: int,
+        security_version: int,
+    ) -> bool:
+        result = self._session.execute(
+            delete(UserMCPHealthAttemptRow).where(
+                UserMCPHealthAttemptRow.attempt_id == attempt_id,
+                UserMCPHealthAttemptRow.owner_user_id == owner_user_id,
+                UserMCPHealthAttemptRow.server_id == server_id,
+                UserMCPHealthAttemptRow.runner_instance_id == runner_instance_id,
+                UserMCPHealthAttemptRow.config_version == config_version,
+                UserMCPHealthAttemptRow.security_version == security_version,
+            )
+        )
+        return bool(result.rowcount)
+
+    def acquire_user_mcp_scope_lease(self, lease: UserMCPScopeLease) -> bool:
+        server = self._get_user_mcp_server_row(lease.owner_user_id, lease.server_id)
+        if (
+            server is None or not server.enabled
+            or server.health_status != str(UserMCPHealthStatus.AVAILABLE)
+            or int(server.security_version) != lease.security_version
+        ):
+            return False
+        if self._session.get(UserMCPScopeLeaseRow, lease.scope_id) is not None:
+            return False
+        self._session.add(
+            UserMCPScopeLeaseRow(
+                scope_id=lease.scope_id,
+                owner_user_id=lease.owner_user_id,
+                server_id=lease.server_id,
+                security_version=lease.security_version,
+                gateway_instance_id=lease.gateway_instance_id,
+                lease_expires_at=lease.lease_expires_at,
+                created_at=lease.created_at,
+                updated_at=lease.updated_at,
+            )
+        )
+        self._session.flush()
+        return True
+
+    def renew_user_mcp_scope_lease(
+        self, scope_id: str, owner_user_id: str, server_id: str, *, gateway_instance_id: str,
+        security_version: int, lease_expires_at: datetime, updated_at: datetime
+    ) -> bool:
+        result = self._session.execute(
+            update(UserMCPScopeLeaseRow)
+            .where(
+                UserMCPScopeLeaseRow.scope_id == scope_id,
+                UserMCPScopeLeaseRow.owner_user_id == owner_user_id,
+                UserMCPScopeLeaseRow.server_id == server_id,
+                UserMCPScopeLeaseRow.gateway_instance_id == gateway_instance_id,
+                UserMCPScopeLeaseRow.security_version == security_version,
+                UserMCPScopeLeaseRow.lease_expires_at > updated_at,
+                select(UserMCPServerRow.server_id).where(
+                    UserMCPServerRow.owner_user_id == owner_user_id,
+                    UserMCPServerRow.server_id == server_id,
+                    UserMCPServerRow.security_version == security_version,
+                    UserMCPServerRow.deletion_pending.is_(False),
+                    UserMCPServerRow.enabled.is_(True),
+                ).exists(),
+            )
+            .values(lease_expires_at=lease_expires_at, updated_at=updated_at)
+        )
+        return bool(result.rowcount)
+
+    def release_user_mcp_scope_lease(self, scope_id: str, *, gateway_instance_id: str) -> bool:
+        result = self._session.execute(
+            delete(UserMCPScopeLeaseRow).where(
+                UserMCPScopeLeaseRow.scope_id == scope_id,
+                UserMCPScopeLeaseRow.gateway_instance_id == gateway_instance_id,
+            )
+        )
+        return bool(result.rowcount)
+
+    def list_live_user_mcp_scope_leases(
+        self, *, now: datetime, owner_user_id: str | None, server_id: str | None
+    ) -> list[UserMCPScopeLease]:
+        statement = select(UserMCPScopeLeaseRow).where(UserMCPScopeLeaseRow.lease_expires_at > now)
+        if owner_user_id is not None:
+            statement = statement.where(UserMCPScopeLeaseRow.owner_user_id == owner_user_id)
+        if server_id is not None:
+            statement = statement.where(UserMCPScopeLeaseRow.server_id == server_id)
+        rows = self._session.scalars(statement.order_by(UserMCPScopeLeaseRow.lease_expires_at)).all()
+        return [_row_to_user_mcp_scope_lease(row) for row in rows]
+
+    def expire_user_mcp_scope_leases(self, *, now: datetime) -> int:
+        result = self._session.execute(
+            delete(UserMCPScopeLeaseRow).where(UserMCPScopeLeaseRow.lease_expires_at <= now)
+        )
+        return int(result.rowcount or 0)
+
+    def mark_user_mcp_server_deleted(
+        self, owner_user_id: str, server_id: str, *, deleted_at: datetime
+    ) -> UserMCPServer | None:
+        result = self._session.execute(
+            update(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == owner_user_id,
+                UserMCPServerRow.server_id == server_id,
+                UserMCPServerRow.deletion_pending.is_(False),
+            )
+            .values(
+                deletion_pending=True,
+                deleted_at=deleted_at,
+                enabled=False,
+                health_status=str(UserMCPHealthStatus.DISABLED),
+                config_version=UserMCPServerRow.config_version + 1,
+                security_version=UserMCPServerRow.security_version + 1,
+                updated_at=deleted_at,
+            )
+        )
+        if not result.rowcount:
+            return None
+        row = self._get_user_mcp_server_row(owner_user_id, server_id, include_deleted=True)
+        return None if row is None else _row_to_user_mcp_server(row)
+
+    def list_pending_user_mcp_server_deletions(self) -> list[UserMCPServer]:
+        rows = self._session.scalars(
+            select(UserMCPServerRow)
+            .where(UserMCPServerRow.deletion_pending.is_(True))
+            .order_by(UserMCPServerRow.deleted_at, UserMCPServerRow.server_id)
+        ).all()
+        return [_row_to_user_mcp_server(row) for row in rows]
+
+    def finalize_user_mcp_server_delete(
+        self, owner_user_id: str, server_id: str, *, now: datetime
+    ) -> bool:
+        server = self._get_user_mcp_server_row(owner_user_id, server_id, include_deleted=True)
+        if server is None or not server.deletion_pending:
+            return False
+        live_health = self._session.scalar(
+            select(UserMCPHealthAttemptRow.attempt_id).where(
+                UserMCPHealthAttemptRow.owner_user_id == owner_user_id,
+                UserMCPHealthAttemptRow.server_id == server_id,
+                UserMCPHealthAttemptRow.lease_expires_at > now,
+            ).limit(1)
+        )
+        live_scope = self._session.scalar(
+            select(UserMCPScopeLeaseRow.scope_id).where(
+                UserMCPScopeLeaseRow.owner_user_id == owner_user_id,
+                UserMCPScopeLeaseRow.server_id == server_id,
+                UserMCPScopeLeaseRow.lease_expires_at > now,
+            ).limit(1)
+        )
+        if live_health is not None or live_scope is not None:
+            return False
+        self._session.execute(
+            delete(UserMCPHealthAttemptRow).where(
+                UserMCPHealthAttemptRow.owner_user_id == owner_user_id,
+                UserMCPHealthAttemptRow.server_id == server_id,
+            )
+        )
+        self._session.execute(
+            delete(UserMCPScopeLeaseRow).where(
+                UserMCPScopeLeaseRow.owner_user_id == owner_user_id,
+                UserMCPScopeLeaseRow.server_id == server_id,
+            )
+        )
+        self._session.execute(
+            delete(UserMCPToolGrantRow).where(
+                UserMCPToolGrantRow.owner_user_id == owner_user_id,
+                UserMCPToolGrantRow.server_id == server_id,
+            )
+        )
+        self._session.delete(server)
+        self._session.flush()
+        return True
+
+    def save_user_mcp_tool_grant(self, grant: UserMCPToolGrant) -> UserMCPToolGrant:
+        server = self._get_user_mcp_server_row(grant.owner_user_id, grant.server_id)
+        if server is None:
+            raise ValueError("MCP server not found")
+        existing = self._session.get(UserMCPToolGrantRow, grant.grant_id)
+        if existing is not None and (
+            existing.owner_user_id != grant.owner_user_id or existing.server_id != grant.server_id
+        ):
+            raise ValueError("MCP tool grant scope does not match existing grant")
+        row = UserMCPToolGrantRow(
+            grant_id=grant.grant_id,
+            owner_user_id=grant.owner_user_id,
+            server_id=grant.server_id,
+            tool_name=grant.tool_name,
+            server_security_version=grant.server_security_version,
+            input_schema_sha256=grant.input_schema_sha256,
+            granted_at=grant.granted_at,
+        )
+        merged = self._session.merge(row)
+        self._session.flush()
+        return UserMCPToolGrant(
+            grant_id=merged.grant_id, owner_user_id=merged.owner_user_id, server_id=merged.server_id,
+            tool_name=merged.tool_name, server_security_version=int(merged.server_security_version),
+            input_schema_sha256=merged.input_schema_sha256, granted_at=merged.granted_at,
+        )
+
+    def list_user_mcp_tool_grants(self, owner_user_id: str, server_id: str) -> list[UserMCPToolGrant]:
+        rows = self._session.scalars(
+            select(UserMCPToolGrantRow).where(
+                UserMCPToolGrantRow.owner_user_id == owner_user_id,
+                UserMCPToolGrantRow.server_id == server_id,
+            ).order_by(UserMCPToolGrantRow.tool_name, UserMCPToolGrantRow.grant_id)
+        ).all()
+        return [
+            UserMCPToolGrant(
+                grant_id=row.grant_id, owner_user_id=row.owner_user_id, server_id=row.server_id,
+                tool_name=row.tool_name, server_security_version=int(row.server_security_version),
+                input_schema_sha256=row.input_schema_sha256, granted_at=row.granted_at,
+            )
+            for row in rows
+        ]
+
+    def delete_user_mcp_tool_grant(self, owner_user_id: str, server_id: str, grant_id: str) -> bool:
+        result = self._session.execute(
+            delete(UserMCPToolGrantRow).where(
+                UserMCPToolGrantRow.owner_user_id == owner_user_id,
+                UserMCPToolGrantRow.server_id == server_id,
+                UserMCPToolGrantRow.grant_id == grant_id,
+            )
+        )
+        return bool(result.rowcount)
+
+    def create_or_get_mcp_credential_key_validation(
+        self, record: MCPCredentialKeyValidation
+    ) -> MCPCredentialKeyValidation:
+        values = {
+            "validation_id": record.validation_id,
+            "singleton_key": 1,
+            "validation_nonce": record.validation_nonce,
+            "validation_ciphertext": record.validation_ciphertext,
+            "encryption_version": record.encryption_version,
+            "created_at": record.created_at,
+        }
+        dialect_name = self._session.get_bind().dialect.name
+        statement = postgresql_insert(MCPCredentialKeyValidationRow).values(**values) if dialect_name == "postgresql" else sqlite_insert(MCPCredentialKeyValidationRow).values(**values)
+        self._session.execute(statement.on_conflict_do_nothing(index_elements=["singleton_key"]))
+        existing = self._session.scalar(
+            select(MCPCredentialKeyValidationRow).where(MCPCredentialKeyValidationRow.singleton_key == 1)
+        )
+        assert existing is not None
+        return MCPCredentialKeyValidation(
+            validation_id=existing.validation_id,
+            validation_nonce=bytes(existing.validation_nonce),
+            validation_ciphertext=bytes(existing.validation_ciphertext),
+            encryption_version=int(existing.encryption_version),
+            created_at=existing.created_at,
+        )
+
+    def get_mcp_credential_key_validation(self) -> MCPCredentialKeyValidation | None:
+        row = self._session.scalar(select(MCPCredentialKeyValidationRow).limit(1))
+        if row is None:
+            return None
+        return MCPCredentialKeyValidation(
+            validation_id=row.validation_id,
+            validation_nonce=bytes(row.validation_nonce),
+            validation_ciphertext=bytes(row.validation_ciphertext),
+            encryption_version=int(row.encryption_version),
+            created_at=row.created_at,
+        )
+
 
 class SQLiteCollaborationRepository:
     def __init__(self, session: Session) -> None:
@@ -2311,6 +2936,169 @@ class SQLiteStorage(StoragePort):
         self._session_factory = session_factory
         self._runtime_sidecar_client = runtime_sidecar_client
         self._runtime_sidecar_shadow_sink = runtime_sidecar_shadow_sink
+
+    async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]:
+        return await self._run(lambda state, collab: state.list_user_mcp_servers(owner_user_id))
+
+    async def get_user_mcp_server(self, owner_user_id: str, server_id: str) -> UserMCPServer | None:
+        return await self._run(lambda state, collab: state.get_user_mcp_server(owner_user_id, server_id))
+
+    async def create_user_mcp_server(
+        self, server: UserMCPServer, credential: UserMCPCredentialRecord | None = None
+    ) -> UserMCPServer:
+        return await self._run(lambda state, collab: state.create_user_mcp_server(server, credential))
+
+    async def update_user_mcp_server(
+        self, owner_user_id: str, server_id: str, *, changes: Mapping[str, Any],
+        credential_operation: str = "retain", credential: UserMCPCredentialRecord | None = None,
+        security_sensitive: bool = False, expected_config_version: int | None = None,
+        expected_security_version: int | None = None, updated_at: datetime
+    ) -> UserMCPServer | None:
+        return await self._run(
+            lambda state, collab: state.update_user_mcp_server(
+                owner_user_id, server_id, changes=changes, credential_operation=credential_operation,
+                credential=credential, security_sensitive=security_sensitive,
+                expected_config_version=expected_config_version,
+                expected_security_version=expected_security_version,
+                updated_at=updated_at,
+            )
+        )
+
+    async def get_user_mcp_credential(
+        self, owner_user_id: str, server_id: str
+    ) -> UserMCPCredentialRecord | None:
+        return await self._run(lambda state, collab: state.get_user_mcp_credential(owner_user_id, server_id))
+
+    async def claim_user_mcp_health_attempt(self, attempt: UserMCPHealthAttempt) -> bool:
+        return await self._run(lambda state, collab: state.claim_user_mcp_health_attempt(attempt))
+
+    async def renew_user_mcp_health_attempt(
+        self, attempt_id: str, owner_user_id: str, server_id: str, *, runner_instance_id: str,
+        config_version: int, security_version: int, lease_expires_at: datetime, updated_at: datetime
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.renew_user_mcp_health_attempt(
+                attempt_id, owner_user_id, server_id, runner_instance_id=runner_instance_id,
+                config_version=config_version, security_version=security_version,
+                lease_expires_at=lease_expires_at, updated_at=updated_at,
+            )
+        )
+
+    async def complete_user_mcp_health_attempt(
+        self, attempt_id: str, owner_user_id: str, server_id: str, *, runner_instance_id: str,
+        config_version: int, security_version: int, health_status: str, error_code: str | None,
+        completed_at: datetime
+    ) -> UserMCPServer | None:
+        return await self._run(
+            lambda state, collab: state.complete_user_mcp_health_attempt(
+                attempt_id, owner_user_id, server_id, runner_instance_id=runner_instance_id,
+                config_version=config_version, security_version=security_version,
+                health_status=health_status, error_code=error_code, completed_at=completed_at,
+            )
+        )
+
+    async def expire_user_mcp_health_attempts(
+        self, *, now: datetime, error_code: str = "test_interrupted"
+    ) -> int:
+        return await self._run(
+            lambda state, collab: state.expire_user_mcp_health_attempts(now=now, error_code=error_code)
+        )
+
+    async def release_user_mcp_health_attempt(
+        self,
+        attempt_id: str,
+        owner_user_id: str,
+        server_id: str,
+        *,
+        runner_instance_id: str,
+        config_version: int,
+        security_version: int,
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.release_user_mcp_health_attempt(
+                attempt_id,
+                owner_user_id,
+                server_id,
+                runner_instance_id=runner_instance_id,
+                config_version=config_version,
+                security_version=security_version,
+            )
+        )
+
+    async def acquire_user_mcp_scope_lease(self, lease: UserMCPScopeLease) -> bool:
+        return await self._run(lambda state, collab: state.acquire_user_mcp_scope_lease(lease))
+
+    async def renew_user_mcp_scope_lease(
+        self, scope_id: str, owner_user_id: str, server_id: str, *, gateway_instance_id: str,
+        security_version: int, lease_expires_at: datetime, updated_at: datetime
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.renew_user_mcp_scope_lease(
+                scope_id, owner_user_id, server_id, gateway_instance_id=gateway_instance_id,
+                security_version=security_version, lease_expires_at=lease_expires_at, updated_at=updated_at,
+            )
+        )
+
+    async def release_user_mcp_scope_lease(self, scope_id: str, *, gateway_instance_id: str) -> bool:
+        return await self._run(
+            lambda state, collab: state.release_user_mcp_scope_lease(scope_id, gateway_instance_id=gateway_instance_id)
+        )
+
+    async def list_live_user_mcp_scope_leases(
+        self, *, now: datetime, owner_user_id: str | None = None, server_id: str | None = None
+    ) -> list[UserMCPScopeLease]:
+        return await self._run(
+            lambda state, collab: state.list_live_user_mcp_scope_leases(
+                now=now, owner_user_id=owner_user_id, server_id=server_id,
+            )
+        )
+
+    async def expire_user_mcp_scope_leases(self, *, now: datetime) -> int:
+        return await self._run(lambda state, collab: state.expire_user_mcp_scope_leases(now=now))
+
+    async def mark_user_mcp_server_deleted(
+        self, owner_user_id: str, server_id: str, *, deleted_at: datetime
+    ) -> UserMCPServer | None:
+        return await self._run(
+            lambda state, collab: state.mark_user_mcp_server_deleted(
+                owner_user_id, server_id, deleted_at=deleted_at,
+            )
+        )
+
+    async def list_pending_user_mcp_server_deletions(self) -> list[UserMCPServer]:
+        return await self._run(lambda state, collab: state.list_pending_user_mcp_server_deletions())
+
+    async def finalize_user_mcp_server_delete(
+        self, owner_user_id: str, server_id: str, *, now: datetime
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.finalize_user_mcp_server_delete(owner_user_id, server_id, now=now)
+        )
+
+    async def save_user_mcp_tool_grant(self, grant: UserMCPToolGrant) -> UserMCPToolGrant:
+        return await self._run(lambda state, collab: state.save_user_mcp_tool_grant(grant))
+
+    async def list_user_mcp_tool_grants(
+        self, owner_user_id: str, server_id: str
+    ) -> list[UserMCPToolGrant]:
+        return await self._run(lambda state, collab: state.list_user_mcp_tool_grants(owner_user_id, server_id))
+
+    async def delete_user_mcp_tool_grant(
+        self, owner_user_id: str, server_id: str, grant_id: str
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.delete_user_mcp_tool_grant(owner_user_id, server_id, grant_id)
+        )
+
+    async def create_or_get_mcp_credential_key_validation(
+        self, record: MCPCredentialKeyValidation
+    ) -> MCPCredentialKeyValidation:
+        return await self._run(
+            lambda state, collab: state.create_or_get_mcp_credential_key_validation(record)
+        )
+
+    async def get_mcp_credential_key_validation(self) -> MCPCredentialKeyValidation | None:
+        return await self._run(lambda state, collab: state.get_mcp_credential_key_validation())
 
     async def _run(
         self,

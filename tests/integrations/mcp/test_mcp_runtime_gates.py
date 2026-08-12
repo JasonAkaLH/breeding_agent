@@ -130,13 +130,13 @@ class MCPRuntimeGateTests(unittest.TestCase):
 
         result = validate_mcp_runtime_conformance_report(report)
 
-        self.assertEqual(result["supported_mcp_spec_versions"], ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER))
+        self.assertEqual(result["supported_mcp_spec_versions"], ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]))
         self.assertEqual(result["transport_families"], "2024-11-05=legacy_http_sse,2025+=streamable_http")
 
     def test_conformance_report_rejects_missing_or_extra_supported_versions(self) -> None:
         for versions in (
-            SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1],
-            (*SUPPORTED_MCP_PROTOCOL_VERSION_ORDER, "2024-10-07"),
+            SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-2],
+            (*SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1], "2024-10-07"),
             (),
         ):
             with self.subTest(versions=versions):
@@ -208,7 +208,7 @@ def _manifest() -> dict[str, object]:
 def _conformance_report() -> dict[str, object]:
     return {
         "schema_version": "maf.mcp.client_compatibility_conformance.v1",
-        "supported_mcp_spec_versions": list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        "supported_mcp_spec_versions": list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]),
         "phase_results": {
             "phase_0": True,
             "phase_1": True,

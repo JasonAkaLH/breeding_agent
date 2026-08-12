@@ -14,7 +14,11 @@
 
 ## [Unreleased]
 
-- MCP `2026-07-28` 已作为第五个 Client 协议版本纳入用户级按需 MCP 三阶段 PRD：阶段一新增无状态 Streamable HTTP Adapter、`server/discover`、每请求 metadata/header、List Cache Hint 与安全版本回退；阶段二新增 MRTR elicitation 和与 2025 实验 Tasks 隔离的 Tasks Extension 闭环；阶段三新增五版本 conformance、灰度与旧 Runtime 下线门禁。当前仓库代码仍只实现原四版本，完成实现与证据前不得宣称已支持 2026。同步 MCP 兼容/SDK/总览、后端、Rust、PRD 索引与 Future Work 口径。License Requirement：PRD 与文档索引更新，无新增依赖/许可变更。
+- 用户级按需 MCP 阶段一完成后端实现：新增 owner-scoped Server/凭据/health attempt/scope lease/sentinel 存储模型与 SQLite/PostgreSQL CAS，AES-256-GCM 凭据、主密钥文件 fail-closed、URL/DNS/SSRF/Header 策略，认证用户隔离的 CRUD/test API，任务级单航班 MCPGateway、跨实例失效与 tombstone 删除协调、Transport 层增量 JSON/SSE 结果落盘/清理和显式容量门禁；Python Adapter 新增 `2026-07-28` 无 Session 协议、`server/discover`、每请求 metadata/header、MRTR/Tasks 安全引用与仅明确不支持时的 auto 降级，旧全局 MCP Capability/Planner 执行链保持不变。License Requirement：复用既有 `cryptography`、`httpx/httpcore`、`jsonschema` 与 SQLAlchemy 依赖，无新增依赖/许可变更。
+
+- 用户级按需 MCP 阶段一 PRD 与实施计划完成 document-perfectization 加固：明确未声明 Tool 能力或空 Tool 列表统一为 `unavailable`；跨实例 DELETE 改为 tombstone + 持久化 Scope lease + 202 异步收尾，健康测试改为 attempt lease 避免实例启动误收敛；大输出要求从 HTTP/SSE Transport 层增量解析并流式落盘；补齐数据库密钥 sentinel 的发布/回滚、PostgreSQL 专有并发实现、PATCH 非破坏契约、canonical username 迁移边界和现有 Sidecar 仅 `2025-11-25` 的真实能力范围。License Requirement：PRD、实施计划与变更日志更新，无新增依赖/许可变更。
+
+- MCP `2026-07-28` 已作为第五个 Client 协议版本纳入用户级按需 MCP 三阶段 PRD：阶段一新增无状态 Streamable HTTP Adapter、`server/discover`、每请求 metadata/header、List Cache Hint 与安全版本回退；阶段二新增 MRTR elicitation 和与 2025 实验 Tasks 隔离的 Tasks Extension 闭环；阶段三新增五版本 conformance、灰度与旧 Runtime 下线门禁。该条成文时仓库仍只实现原四版本；现已由本节第一条所述阶段一实现与证据取代。同步 MCP 兼容/SDK/总览、后端、Rust、PRD 索引与 Future Work 口径。License Requirement：PRD 与文档索引更新，无新增依赖/许可变更。
 
 - 用户级按需 MCP 方案拆分为三份独立 PRD：阶段一建立用户级最小配置、AES-256-GCM 凭据密文与服务器密钥文件、远程 HTTP(S) Endpoint Policy 和任务级按需 Gateway；阶段二建立 Server 级主路由、按需 Tool List、专用 Tool Selector、所有工具授权、20 次调用上限、120 秒长调用提示、同用户多任务并行与 30 天审计；阶段三通过 shadow/enforce 单路径灰度切换，迁移受控系统配置并删除启动发现、全局工具注册及进程级 Client/Bundle。同步 MCP/PRD 索引与 Future Work。License Requirement：PRD、文档索引与变更日志更新，无新增依赖/许可变更。
 

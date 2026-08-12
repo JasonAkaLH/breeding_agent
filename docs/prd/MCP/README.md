@@ -11,7 +11,7 @@ Phase 是工程落地顺序和验收门禁，不是产品版本、降级目标�
 
 本目录内 PRD 不替代上述两个冻结基线；如果出现冲突，以后续明确更新过的冻结基线和本目录总览 PRD 为准，并必须同步更新 `CHANGELOG.md`。
 
-所有 Phase 必须遵守 `00-MCPRuntime联合改造总览PRD.md` 第 8 节的版本化 invariant。当前代码已实现 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25` 四版本普通 tools 基线；用户级按需轨道已批准把 `2026-07-28` 加入第五版本目标，但完成实现与 conformance 前不得宣称已支持。
+所有 Phase 必须遵守 `00-MCPRuntime联合改造总览PRD.md` 第 8 节的版本化 invariant。当前 Python Client/Gateway 已实现 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 / 2026-07-28` 五版本普通 tools 基线；Rust Sidecar 仍只声明已验证的 `2025-11-25` 路径。
 
 ## 2. Phase 列表
 
@@ -63,7 +63,7 @@ Phase 是工程落地顺序和验收门禁，不是产品版本、降级目标�
 2. `user-scoped-on-demand/02-MCP两级路由授权与任务执行闭环PRD.md`：Server 级主路由、按需 Tool List、专用 Tool Selector、所有工具授权、长调用提示、任务生命周期和前端闭环。
 3. `user-scoped-on-demand/03-按需MCP灰度切换与旧Runtime下线PRD.md`：shadow/enforce 灰度、单路径执行、旧配置迁移、回滚门禁和进程级 MCP Runtime 下线。
 
-当前状态：三份 PRD 的产品决策已确认，均待实施。实施必须依次通过前一阶段验收，不允许绕过用户隔离、凭据加密、Endpoint Policy 或授权门禁直接开放模型调用。
+当前状态：阶段一用户隔离、凭据加密、Endpoint Policy、五版本任务级 Gateway 与流式临时结果已实现；阶段二、三待实施。不得绕过后续授权门禁直接开放模型自动调用。
 
 该轨道同时承接第五版本升级：阶段 1 实现 `2026-07-28` 无状态 Adapter、`server/discover`、每请求 metadata/header、ordinary tools 与结果联合类型；阶段 2 接入 MRTR elicitation 和 Tasks Extension 用户闭环；阶段 3 完成五版本 conformance、灰度与旧 Runtime 下线。现有四版本继续保留。
 

@@ -111,6 +111,24 @@ from src.integrations.model_editions import (
     validate_model_reasoning_effort_configs,
 )
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
+from src.integrations.mcp.credentials import CredentialCipher
+from src.integrations.mcp.endpoint_policy import EndpointAllowlist, EndpointPolicy
+from src.integrations.mcp.gateway import MCPGateway
+from src.integrations.mcp.health import MCPHealthRunner
+from src.integrations.mcp.invalidation import (
+    CompositeMCPInvalidationPublisher,
+    InMemoryMCPInvalidationBus,
+    MCPInvalidationAction,
+    PostgresMCPInvalidationBus,
+)
+from src.integrations.mcp.temporary_results import (
+    MCPTemporaryResultCapacity,
+    MCPTemporaryResultCapacityConfig,
+    MCPTemporaryResultJanitor,
+    MCPTemporaryResultStore,
+)
+from src.integrations.mcp.user_client import UserMCPClientFactory, UserMCPCredentialResolver
+from src.integrations.mcp.user_config import UserMCPConfigService
 from src.integrations.mysql_readonly import MySQLReadonlyAdapter
 from src.integrations.rust_safety_contract import configure_safety_shadow_sink
 from src.lifecycle.cancellation_service import CancellationService
@@ -357,6 +375,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         auth_generation_cache: AuthGenerationCache | None = None,
         auth_invalidation_bus: InMemoryAuthInvalidationBus | None = None,
         postgres_auth_invalidation_bus: PostgresAuthInvalidationBus | None = None,
+        user_mcp_config_service: UserMCPConfigService | None = None,
+        user_mcp_health_runner: MCPHealthRunner | None = None,
+        user_mcp_gateway: MCPGateway | None = None,
+        mcp_credential_cipher: CredentialCipher | None = None,
+        mcp_invalidation_bus: InMemoryMCPInvalidationBus | None = None,
+        postgres_mcp_invalidation_bus: PostgresMCPInvalidationBus | None = None,
+        user_mcp_result_store: MCPTemporaryResultStore | None = None,
+        user_mcp_result_janitor: MCPTemporaryResultJanitor | None = None,
     ) -> None:
         self._engine = engine
         self.storage = storage
@@ -372,6 +398,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self.auth_generation_cache = auth_generation_cache or AuthGenerationCache()
         self.auth_invalidation_bus = auth_invalidation_bus
         self.postgres_auth_invalidation_bus = postgres_auth_invalidation_bus
+        self.user_mcp_config_service = user_mcp_config_service
+        self.user_mcp_health_runner = user_mcp_health_runner
+        self.user_mcp_gateway = user_mcp_gateway
+        self.mcp_credential_cipher = mcp_credential_cipher
+        self.mcp_invalidation_bus = mcp_invalidation_bus
+        self.postgres_mcp_invalidation_bus = postgres_mcp_invalidation_bus
+        self.user_mcp_result_store = user_mcp_result_store
+        self.user_mcp_result_janitor = user_mcp_result_janitor
         self._conversation_title_generator = conversation_title_generator
         self.upload_store = upload_store or InMemoryUploadStore(now_fn=self._utcnow_naive)
         self._conversation_memory_builder = conversation_memory_builder
@@ -1781,6 +1815,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         finally:
             try:
                 await self._clear_conversation_current_task(request.conversation_id, request.task_id)
+                if self.user_mcp_gateway is not None:
+                    try:
+                        await self.user_mcp_gateway.close_task(request.task_id, "task_terminal")
+                    except Exception:
+                        pass
                 await self._release_task_skill_revision_if_terminal(request.task_id)
                 await self._release_task_mcp_revision_if_terminal(request.task_id)
             finally:
@@ -2343,16 +2382,24 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         if existing_task is not None and existing_task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
             self._locally_cancelled_task_ids.add(task_id)
         if existing_task is not None and self._mcp_runtime_state is not None:
-            for envelope in await self._mcp_runtime_state.cancel_platform_task(task_id):
-                await self._record_event(
-                    self._make_event(
-                        task_id=existing_task.task_id,
-                        conversation_id=existing_task.conversation_id,
-                        event_type=str(envelope.get("event_type") or "mcp.long_task_cancel_requested"),
-                        payload=dict(envelope.get("payload") or {}),
+            try:
+                for envelope in await self._mcp_runtime_state.cancel_platform_task(task_id):
+                    await self._record_event(
+                        self._make_event(
+                            task_id=existing_task.task_id,
+                            conversation_id=existing_task.conversation_id,
+                            event_type=str(envelope.get("event_type") or "mcp.long_task_cancel_requested"),
+                            payload=dict(envelope.get("payload") or {}),
+                        )
                     )
-                )
+            except Exception:
+                pass
         task = await self.cancellation_service.cancel_task_context(task_id)
+        if existing_task is not None and self.user_mcp_gateway is not None:
+            try:
+                await self.user_mcp_gateway.close_task(task_id, "task_cancelled")
+            except Exception:
+                pass
         await self._cancel_active_slot_collections_for_task(task)
         if task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED}:
             await self._cancel_existing_execution(task_id)
@@ -6511,6 +6558,23 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
 
     async def start(self) -> None:
+        if self.mcp_credential_cipher is not None:
+            await self.mcp_credential_cipher.create_or_verify_sentinel(self.storage)
+        if self.user_mcp_health_runner is not None:
+            await self.user_mcp_health_runner.start()
+        if self.user_mcp_gateway is not None:
+            await self.storage.expire_user_mcp_scope_leases(now=self._utcnow_naive())
+        if self.user_mcp_result_janitor is not None and self.user_mcp_result_store is not None:
+            await self.user_mcp_result_janitor.cleanup_orphans(
+                active_task_keys=self.user_mcp_result_store.active_task_keys()
+            )
+        if self.user_mcp_config_service is not None:
+            await self.user_mcp_config_service.start()
+        if self.postgres_mcp_invalidation_bus is not None:
+            try:
+                await self.postgres_mcp_invalidation_bus.start()
+            except Exception:
+                pass
         if self.postgres_auth_invalidation_bus is not None:
             await self.postgres_auth_invalidation_bus.start()
         await self.recover_deleting_conversations()
@@ -6539,6 +6603,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 await asyncio.gather(*pending, return_exceptions=True)
         if self._mysql_adapter is not None:
             await self._mysql_adapter.aclose()
+        if self.user_mcp_config_service is not None:
+            await self.user_mcp_config_service.aclose()
+        if self.user_mcp_health_runner is not None:
+            await self.user_mcp_health_runner.aclose()
+        if self.user_mcp_gateway is not None:
+            await self.user_mcp_gateway.aclose()
+        if self.postgres_mcp_invalidation_bus is not None:
+            await self.postgres_mcp_invalidation_bus.aclose()
         if self._mcp_runtime_state is not None:
             await self._mcp_runtime_state.aclose()
         if self.postgres_auth_invalidation_bus is not None:
@@ -7160,6 +7232,23 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 self._running_tasks.pop(task_id, None)
 
 
+def _split_env_values(raw: str | None) -> tuple[str, ...]:
+    return tuple(value.strip() for value in str(raw or "").split(",") if value.strip())
+
+
+def _positive_required_env_int(name: str, *, allow_default: int | None = None) -> int:
+    raw = os.environ.get(name)
+    if raw is None and allow_default is not None:
+        return allow_default
+    try:
+        value = int(str(raw or ""))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be explicitly configured as a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be explicitly configured as a positive integer")
+    return value
+
+
 def build_api_runtime(
     *,
     database_path: str | Path,
@@ -7209,6 +7298,8 @@ def build_api_runtime(
     conversation_file_store_path: str | Path | None = None,
     runtime_sidecar_client: Any | None = None,
     skill_sandbox_client: Any | None = None,
+    enable_user_mcp: bool | None = None,
+    user_mcp_credential_key_file: str | Path | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
         platform_llm_text_generator=platform_llm_text_generator,
@@ -7247,6 +7338,31 @@ def build_api_runtime(
     if token_secret_required and not token_secret:
         raise AuthTokenValidationError("Auth token hash secret is required.", code="token_secret_required")
 
+    user_mcp_enabled = (
+        enable_user_mcp
+        if enable_user_mcp is not None
+        else os.environ.get("MAF_USER_MCP_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    mcp_credential_cipher = (
+        CredentialCipher.from_key_file(
+            user_mcp_credential_key_file,
+            require_read_only=deployment_env in {"prod", "production"},
+        )
+        if user_mcp_enabled
+        else None
+    )
+    user_mcp_capacity_values = (
+        (
+            _positive_required_env_int("MAF_USER_MCP_MAX_ACTIVE_CALLS"),
+            _positive_required_env_int(
+                "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES"
+            ),
+        )
+        if user_mcp_enabled
+        else None
+    )
+
     _bootstrap_state_platform_config_env()
     state_config = build_state_platform_runtime_config(
         env=os.environ,
@@ -7284,6 +7400,100 @@ def build_api_runtime(
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
         conversation_file_store = LocalConversationFileStore(
             conversation_file_store_path or (Path(database_path).parent / "conversation_files")
+        )
+
+    user_mcp_config_service = None
+    user_mcp_health_runner = None
+    user_mcp_gateway = None
+    mcp_invalidation_bus = None
+    postgres_mcp_invalidation_bus = None
+    user_mcp_result_store = None
+    user_mcp_result_janitor = None
+    if user_mcp_enabled:
+        assert mcp_credential_cipher is not None
+        assert user_mcp_capacity_values is not None
+        endpoint_policy = EndpointPolicy(
+            allowlist=EndpointAllowlist.from_values(
+                domains=_split_env_values(os.environ.get("MAF_USER_MCP_ALLOWLIST_DOMAINS")),
+                cidrs=_split_env_values(os.environ.get("MAF_USER_MCP_ALLOWLIST_CIDRS")),
+            )
+        )
+        user_client_factory = UserMCPClientFactory(endpoint_policy)
+        credential_resolver = UserMCPCredentialResolver(storage, mcp_credential_cipher)
+        instance_id = f"mcp-instance-{uuid4().hex}"
+        result_root = Path(
+            os.environ.get("MAF_USER_MCP_TEMPORARY_RESULT_ROOT")
+            or (Path(database_path).parent / "user_mcp_results")
+        )
+        user_mcp_result_store = MCPTemporaryResultStore(
+            result_root,
+            memory_threshold_bytes=_positive_required_env_int(
+                "MAF_USER_MCP_MEMORY_RESULT_THRESHOLD_BYTES", allow_default=1024 * 1024
+            ),
+        )
+        user_mcp_result_janitor = MCPTemporaryResultJanitor(
+            result_root,
+            safe_age_seconds=float(
+                os.environ.get("MAF_USER_MCP_ORPHAN_SAFE_AGE_SECONDS") or 3600
+            ),
+        )
+        capacity = MCPTemporaryResultCapacity(
+            MCPTemporaryResultCapacityConfig(
+                max_active_user_mcp_calls_per_instance=user_mcp_capacity_values[0],
+                temporary_disk_low_watermark_bytes=user_mcp_capacity_values[1],
+            ),
+            storage_root=result_root,
+        )
+        user_mcp_health_runner = MCPHealthRunner(
+            storage=storage,
+            instance_id=instance_id,
+            client_factory=user_client_factory.create,
+            credential_loader=credential_resolver.request_headers_for,
+            now_fn=ApiRuntime._utcnow_naive,
+        )
+        user_mcp_gateway = MCPGateway(
+            storage=storage,
+            gateway_instance_id=instance_id,
+            credential_loader=credential_resolver.request_headers_for,
+            client_factory=user_client_factory.create,
+            endpoint_revalidator=user_client_factory.revalidate_endpoint,
+            result_store=user_mcp_result_store,
+            capacity=capacity,
+            now_fn=ApiRuntime._utcnow_naive,
+        )
+        mcp_invalidation_bus = InMemoryMCPInvalidationBus()
+
+        async def handle_mcp_invalidation(event) -> None:
+            version = (
+                event.security_version
+                if event.action is MCPInvalidationAction.SECURITY_UPDATED
+                else None
+            )
+            await asyncio.gather(
+                user_mcp_health_runner.cancel_server(
+                    event.owner_user_id,
+                    event.server_id,
+                    reason=str(event.action),
+                    invalidate_before_security_version=version,
+                ),
+                user_mcp_gateway.invalidate_server(event),
+                return_exceptions=True,
+            )
+
+        mcp_invalidation_bus.subscribe(handle_mcp_invalidation)
+        if state_config.backend == StatePlatformBackend.POSTGRESQL and isinstance(engine, Engine):
+            postgres_mcp_invalidation_bus = PostgresMCPInvalidationBus(
+                engine, handle_mcp_invalidation
+            )
+        user_mcp_config_service = UserMCPConfigService(
+            storage=storage,
+            credential_cipher=mcp_credential_cipher,
+            endpoint_policy=endpoint_policy,
+            health_runner=user_mcp_health_runner,
+            invalidation_bus=CompositeMCPInvalidationPublisher(
+                mcp_invalidation_bus, postgres_mcp_invalidation_bus
+            ),
+            now_fn=ApiRuntime._utcnow_naive,
         )
     username_token_service = UsernameTokenService(
         storage,
@@ -7593,6 +7803,14 @@ def build_api_runtime(
         auth_generation_cache=auth_generation_cache,
         auth_invalidation_bus=auth_invalidation_bus,
         postgres_auth_invalidation_bus=postgres_auth_invalidation_bus,
+        user_mcp_config_service=user_mcp_config_service,
+        user_mcp_health_runner=user_mcp_health_runner,
+        user_mcp_gateway=user_mcp_gateway,
+        mcp_credential_cipher=mcp_credential_cipher,
+        mcp_invalidation_bus=mcp_invalidation_bus,
+        postgres_mcp_invalidation_bus=postgres_mcp_invalidation_bus,
+        user_mcp_result_store=user_mcp_result_store,
+        user_mcp_result_janitor=user_mcp_result_janitor,
     )
 
 

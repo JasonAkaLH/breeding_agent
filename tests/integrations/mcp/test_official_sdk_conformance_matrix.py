@@ -9,13 +9,13 @@ from src.integrations.mcp.protocol import SUPPORTED_MCP_PROTOCOL_VERSION_ORDER
 
 
 class OfficialSDKConformanceMatrixTest(unittest.TestCase):
-    def test_matrix_declares_exact_four_versions_and_adapter_transport_results(self) -> None:
+    def test_matrix_declares_exact_five_versions_and_version_specific_adapter_results(self) -> None:
         matrix = json.loads(Path("tests/fixtures/mcp/contracts/conformance_matrix.json").read_text(encoding="utf-8"))
 
         result = validate_mcp_official_sdk_conformance_matrix(matrix)
 
         self.assertEqual(result["supported_mcp_spec_versions"], ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER))
-        self.assertEqual(result["adapters"], "official_rust_sdk,python_legacy")
+        self.assertEqual(result["adapters"], "official_rust_sdk,python_legacy,python_2026")
         self.assertEqual(result["transport_scope"], "remote_http_only_until_stdio_sandbox_passes")
         official_2024 = matrix["adapter_conformance"]["2024-11-05"]["legacy_http_sse"]["official_rust_sdk"]
         self.assertEqual(official_2024["operational_status"], "unsupported_transport")
@@ -26,6 +26,12 @@ class OfficialSDKConformanceMatrixTest(unittest.TestCase):
         self.assertTrue(official_2025["object_response"])
         self.assertFalse(official_2025["sse_response"])
         self.assertTrue(official_2025["sse_response_gap_reason"])
+        python_2026 = matrix["adapter_conformance"]["2026-07-28"]["streamable_http"]["python_2026"]
+        self.assertTrue(python_2026["server_discover"])
+        self.assertTrue(python_2026["no_protocol_session"])
+        official_2026 = matrix["adapter_conformance"]["2026-07-28"]["streamable_http"]["official_rust_sdk"]
+        self.assertEqual(official_2026["operational_status"], "pending_adapter_contract")
+        self.assertFalse(official_2026["enforce_allowed"])
 
     def test_matrix_rejects_silent_version_expansion_or_missing_adapter_result(self) -> None:
         matrix = json.loads(Path("tests/fixtures/mcp/contracts/conformance_matrix.json").read_text(encoding="utf-8"))

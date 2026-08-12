@@ -19,10 +19,93 @@ from .enums import (
     NodeStatus,
     RoutingMode,
     TaskStatus,
+    UserMCPAuthType,
+    UserMCPHealthStatus,
+    UserMCPProtocolPreference,
+    UserMCPTransport,
 )
 
 
 JsonMapping = Mapping[str, Any]
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPServer:
+    server_id: str
+    owner_user_id: str
+    display_name: str
+    routing_description: str
+    endpoint_url: str
+    transport: UserMCPTransport
+    protocol_preference: UserMCPProtocolPreference = UserMCPProtocolPreference.AUTO
+    auth_type: UserMCPAuthType = UserMCPAuthType.NONE
+    auth_metadata: JsonMapping = field(default_factory=dict)
+    enabled: bool = True
+    health_status: UserMCPHealthStatus = UserMCPHealthStatus.UNTESTED
+    config_version: int = 1
+    security_version: int = 1
+    credential_configured: bool = False
+    last_tested_at: datetime | None = None
+    last_test_error_code: str | None = None
+    deletion_pending: bool = False
+    deleted_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class UserMCPCredentialRecord:
+    owner_user_id: str
+    server_id: str
+    credential_ciphertext: bytes
+    credential_nonce: bytes
+    encryption_version: int = 1
+    credential_updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPToolGrant:
+    grant_id: str
+    owner_user_id: str
+    server_id: str
+    tool_name: str
+    server_security_version: int
+    input_schema_sha256: str
+    granted_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPHealthAttempt:
+    attempt_id: str
+    owner_user_id: str
+    server_id: str
+    config_version: int
+    security_version: int
+    runner_instance_id: str
+    lease_expires_at: datetime
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPScopeLease:
+    scope_id: str
+    owner_user_id: str
+    server_id: str
+    security_version: int
+    gateway_instance_id: str
+    lease_expires_at: datetime
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True, repr=False)
+class MCPCredentialKeyValidation:
+    validation_id: str
+    validation_nonce: bytes
+    validation_ciphertext: bytes
+    encryption_version: int
+    created_at: datetime | None = None
 
 
 @dataclass(slots=True, frozen=True)

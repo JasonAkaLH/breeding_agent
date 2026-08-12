@@ -1,9 +1,108 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Boolean, Index, Integer, Text, UniqueConstraint, false, text
+from sqlalchemy import BigInteger, Boolean, Index, Integer, LargeBinary, Text, UniqueConstraint, false, text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import DateTimeText, JSONText, SQLiteBase
+
+
+class UserMCPServerRow(SQLiteBase):
+    __tablename__ = "user_mcp_server"
+    __table_args__ = (
+        Index("idx_user_mcp_server_owner_server", "owner_user_id", "server_id"),
+        Index("idx_user_mcp_server_owner_updated", "owner_user_id", "updated_at"),
+        Index("idx_user_mcp_server_health_deletion", "health_status", "deletion_pending", "updated_at"),
+    )
+
+    server_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    routing_description: Mapped[str] = mapped_column(Text, nullable=False)
+    endpoint_url: Mapped[str] = mapped_column(Text, nullable=False)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    protocol_preference: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_type: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_metadata: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
+    health_status: Mapped[str] = mapped_column(Text, nullable=False)
+    config_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    security_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    last_tested_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    last_test_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    credential_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    encryption_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    credential_updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    deletion_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    deleted_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class UserMCPToolGrantRow(SQLiteBase):
+    __tablename__ = "user_mcp_tool_grant"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id", "server_id", "tool_name", "server_security_version", "input_schema_sha256",
+            name="uq_user_mcp_tool_grant_scope",
+        ),
+        Index("idx_user_mcp_tool_grant_owner_server", "owner_user_id", "server_id"),
+    )
+
+    grant_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    server_security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    input_schema_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class UserMCPHealthAttemptRow(SQLiteBase):
+    __tablename__ = "user_mcp_health_attempt"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "server_id", name="uq_user_mcp_health_attempt_server"),
+        Index("idx_user_mcp_health_attempt_lease", "lease_expires_at"),
+        Index("idx_user_mcp_health_attempt_owner_server", "owner_user_id", "server_id"),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    config_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    runner_instance_id: Mapped[str] = mapped_column(Text, nullable=False)
+    lease_expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class UserMCPScopeLeaseRow(SQLiteBase):
+    __tablename__ = "user_mcp_scope_lease"
+    __table_args__ = (
+        Index("idx_user_mcp_scope_lease_expiry", "lease_expires_at"),
+        Index("idx_user_mcp_scope_lease_owner_server", "owner_user_id", "server_id", "lease_expires_at"),
+    )
+
+    scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    gateway_instance_id: Mapped[str] = mapped_column(Text, nullable=False)
+    lease_expires_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPCredentialKeyValidationRow(SQLiteBase):
+    __tablename__ = "mcp_credential_key_validation"
+
+    validation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    singleton_key: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, server_default=text("1"))
+    validation_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    validation_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encryption_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
 class ConversationRow(SQLiteBase):

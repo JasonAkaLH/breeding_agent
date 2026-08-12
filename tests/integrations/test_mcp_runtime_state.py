@@ -11,6 +11,7 @@ class FakeClient:
         self.tools = list(tools or [])
         self.fail = fail
         self.calls = []
+        self.close_calls = 0
         self.closed = False
 
     async def list_tools(self):
@@ -23,6 +24,7 @@ class FakeClient:
         return {"content": [{"type": "text", "text": "called"}], "structuredContent": {"ok": True}}
 
     async def close(self):
+        self.close_calls += 1
         self.closed = True
 
 
@@ -150,6 +152,34 @@ class MCPRuntimeStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(pending.bundle.revision, first_revision)
         await state.commit_activation(pending)
         self.assertEqual(state.active_revision, pending.bundle.revision)
+
+    async def test_release_revision_evicts_inactive_bundle(self) -> None:
+        clients = iter(
+            [
+                FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}]),
+                FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}]),
+            ]
+        )
+        state = MCPRuntimeState(config=self._config(), client_factory=lambda server: next(clients), reserved_capability_ids=())
+        await state.refresh(reason="startup", force=True)
+        retained_revision = state.active_revision
+        state.retain_revision(retained_revision)
+        await state.refresh(reason="manual", force=True)
+
+        state.release_revision(retained_revision)
+
+        with self.assertRaisesRegex(KeyError, "Unknown MCP bundle revision"):
+            state.bundle_for_revision(retained_revision)
+
+    async def test_aclose_closes_active_client_once(self) -> None:
+        client = FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}])
+        state = MCPRuntimeState(config=self._config(), client_factory=lambda server: client, reserved_capability_ids=())
+        await state.refresh(reason="startup", force=True)
+
+        await state.aclose()
+        await state.aclose()
+
+        self.assertEqual(client.close_calls, 1)
 
     async def test_call_tool_uses_binding_client_and_filtered_arguments(self) -> None:
         client = FakeClient(tools=[{"name": "search_customer", "inputSchema": {"type": "object"}}])

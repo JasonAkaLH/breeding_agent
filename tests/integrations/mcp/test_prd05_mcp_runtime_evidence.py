@@ -71,7 +71,7 @@ class PRD05MCPRuntimeEvidenceTest(unittest.TestCase):
 
         self.assertEqual(
             result["supported_mcp_spec_versions"],
-            ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+            ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]),
         )
         self.assertEqual(repo_local["evidence_kind"], "repo_local_client_compatibility")
         self.assertEqual(repo_local["visible_runtime"], "python_mcp_client_path")
@@ -126,7 +126,7 @@ class PRD05MCPRuntimeEvidenceTest(unittest.TestCase):
         self.assertEqual(result["results"]["artifact_provenance"]["artifact_kind"], "mcp_runtime_sidecar_binary")
         self.assertEqual(
             result["results"]["conformance_report"]["supported_mcp_spec_versions"],
-            ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+            ",".join(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]),
         )
 
 
@@ -148,7 +148,7 @@ def _artifact(contract: dict[str, Any]) -> dict[str, str]:
 def _conformance() -> dict[str, Any]:
     return {
         "schema_version": "maf.mcp.client_compatibility_conformance.v1",
-        "supported_mcp_spec_versions": list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER),
+        "supported_mcp_spec_versions": list(SUPPORTED_MCP_PROTOCOL_VERSION_ORDER[:-1]),
         "phase_results": {
             "phase_0": True,
             "phase_1": True,

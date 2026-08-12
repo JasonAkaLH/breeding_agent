@@ -13,6 +13,7 @@ from .routes.conversations import router as conversations_router
 from .routes.developer_docs import router as developer_docs_router
 from .routes.tasks import router as tasks_router
 from .routes.uploads import router as uploads_router
+from .routes.user_mcp import router as user_mcp_router
 from .runtime import ApiRuntime, build_api_runtime
 
 
@@ -40,4 +41,5 @@ def create_app(*, runtime: ApiRuntime | None = None) -> FastAPI:
     app.include_router(uploads_router)
     app.include_router(capabilities_router)
     app.include_router(config_router)
+    app.include_router(user_mcp_router)
     return app

@@ -7,8 +7,10 @@ from typing import Any
 from .protocol import (
     JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_2026_07_28,
     MCPNegotiatedSession,
     MCPStreamEvent,
+    MCPTransportResponse,
     MCP_TRANSPORT_STREAMABLE_HTTP,
     MCPTransport,
     is_mcp_transport_family_allowed,
@@ -97,6 +99,8 @@ class MCPClient:
         self.server_id = server_id
         self._transport = transport
         self._requested_protocol_version = validate_mcp_protocol_version(protocol_version)
+        if self._requested_protocol_version == MCP_PROTOCOL_VERSION_2026_07_28:
+            raise ValueError("MCPClient supports initialization-based revisions only; use MCP2026Adapter for 2026-07-28.")
         self._pinned_protocol_version = bool(pinned_protocol_version)
         self._transport_family = str(transport_family or "").strip().lower()
         self._timeout_seconds = timeout_seconds
@@ -238,16 +242,27 @@ class MCPClient:
         params: Mapping[str, Any] | None = None,
         *,
         request_registered_callback: Callable[[str | int], None] | None = None,
+        result_sink: Any | None = None,
     ) -> Mapping[str, Any]:
         if method != "initialize" and not self.initialized:
             await self.initialize()
         try:
-            return await self._send_request_once(method, params, request_registered_callback=request_registered_callback)
+            return await self._send_request_once(
+                method,
+                params,
+                request_registered_callback=request_registered_callback,
+                result_sink=result_sink,
+            )
         except MCPClientError as exc:
             if exc.mcp_error_code != "mcp_session_expired" or method == "tools/call":
                 raise
             await self._reinitialize_after_session_expiry()
-            return await self._send_request_once(method, params, request_registered_callback=request_registered_callback)
+            return await self._send_request_once(
+                method,
+                params,
+                request_registered_callback=request_registered_callback,
+                result_sink=result_sink,
+            )
 
     async def _send_request_once(
         self,
@@ -255,21 +270,32 @@ class MCPClient:
         params: Mapping[str, Any] | None = None,
         *,
         request_registered_callback: Callable[[str | int], None] | None = None,
+        result_sink: Any | None = None,
     ) -> Mapping[str, Any]:
         request_id = self._next_request_id()
         if request_registered_callback is not None:
             request_registered_callback(request_id)
-        response = await self._transport.send(
+        sender = (
+            getattr(self._transport, "send_streaming")
+            if result_sink is not None and hasattr(self._transport, "send_streaming")
+            else self._transport.send
+        )
+        send_kwargs: dict[str, Any] = {
+            "protocol_version": self._current_protocol_version,
+            "session_id": self._session_id,
+            "timeout_seconds": None if method == "tools/call" else self._timeout_seconds,
+            "last_event_id": self._last_event_id,
+        }
+        if result_sink is not None and hasattr(self._transport, "send_streaming"):
+            send_kwargs["result_sink"] = result_sink
+        response = await sender(
             {
                 "jsonrpc": JSONRPC_VERSION,
                 "id": request_id,
                 "method": method,
                 "params": dict(params or {}),
             },
-            protocol_version=self._current_protocol_version,
-            session_id=self._session_id,
-            timeout_seconds=self._timeout_seconds,
-            last_event_id=self._last_event_id,
+            **send_kwargs,
         )
         self._capture_transport_metadata(response.headers, response.last_event_id, response.sse_retry_ms)
         self._last_stream_notifications = await self._handle_stream_events(response.sse_events, expected_response_id=request_id)
@@ -301,6 +327,7 @@ class MCPClient:
     async def list_tools(self) -> list[Mapping[str, Any]]:
         tools: list[Mapping[str, Any]] = []
         cursor: str | None = None
+        seen_cursors: set[str] = set()
         while True:
             params = {"cursor": cursor} if cursor else {}
             result = await self.send_request("tools/list", params)
@@ -311,6 +338,9 @@ class MCPClient:
             if not next_cursor:
                 return tools
             cursor = str(next_cursor)
+            if cursor in seen_cursors:
+                raise MCPProtocolError("MCP tools/list pagination cursor repeated.")
+            seen_cursors.add(cursor)
 
     @property
     def server_capabilities(self) -> Mapping[str, Any]:
@@ -325,13 +355,19 @@ class MCPClient:
         progress_token: str | int | None = None,
         task_ttl_ms: int | None = None,
         request_registered_callback: Callable[[str | int], None] | None = None,
+        result_sink: Any | None = None,
     ) -> Mapping[str, Any]:
         params: dict[str, Any] = {"name": tool_name, "arguments": dict(arguments)}
         if task_augmented:
             params["task"] = {"ttl": int(task_ttl_ms or 60000)}
             if progress_token is not None:
                 params["_meta"] = {"progressToken": progress_token}
-        return await self.send_request("tools/call", params, request_registered_callback=request_registered_callback)
+        return await self.send_request(
+            "tools/call",
+            params,
+            request_registered_callback=request_registered_callback,
+            result_sink=result_sink,
+        )
 
     async def tasks_get(self, task_id: str) -> Mapping[str, Any]:
         return await self.send_request("tasks/get", {"taskId": task_id})
@@ -349,11 +385,12 @@ class MCPClient:
             params["reason"] = reason
         return await self.send_request("tasks/cancel", params)
 
-    async def cancel_request(self, request_id: str | int, *, reason: str = "") -> None:
+    async def cancel_request(self, request_id: str | int, *, reason: str = "") -> bool:
         params: dict[str, Any] = {"requestId": request_id}
         if reason:
             params["reason"] = reason
         await self.send_notification("notifications/cancelled", params)
+        return False
 
     async def send_response(self, request_id: str | int | None, result: Mapping[str, Any] | None = None) -> None:
         response = await self._transport.send(

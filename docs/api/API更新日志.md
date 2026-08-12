@@ -8,6 +8,10 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-12 增量：用户级 MCP 配置 API
+
+新增当前认证用户隔离的 MCP Server 配置端点：`GET/POST /api/v1/mcp/servers`、`GET/PATCH/DELETE /api/v1/mcp/servers/{server_id}` 和 `POST /api/v1/mcp/servers/{server_id}/test`。POST 与手动 test 异步返回 `testing`；安全校验通过但连接/发现失败的配置保留为 `unavailable`；空 Tool List 同样为 `unavailable`。响应只含 `credential_configured`，不返回凭据明文、密文或 Nonce。下文 `main@bd0fd2d` 对 `prod@e7ede32` 的“新增路径：0”是 2026-07-10 历史扫描结论，不包含本次增量。
+
 ## 1. 执行摘要
 
 本次扫描以两个分支的 FastAPI 路由、Pydantic DTO、OpenAPI 文档、SSE 事件、运行时逻辑、持久化实现、前端 API client 和回归测试为依据，替换本文件原有的增量历史记录。

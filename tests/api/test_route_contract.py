@@ -11,12 +11,18 @@ class APIRouteContractTest(unittest.TestCase):
         with patch.dict("os.environ", {"MAF_STATE_STORE_BACKEND": "sqlite"}, clear=False):
             app = create_app()
 
+        approved_resource_routes = {
+            "PATCH /api/v1/mcp/servers/{server_id}",
+            "POST /api/v1/mcp/servers/{server_id}/test",
+            "DELETE /api/v1/mcp/servers/{server_id}",
+        }
         violations = [
             f"{','.join(sorted(route.methods or []))} {route.path}"
             for route in app.routes
             if route.path.startswith("/api/v1/")
             and "{" in route.path
             and any(method not in {"GET", "HEAD"} for method in (route.methods or set()))
+            and f"{','.join(sorted(route.methods or []))} {route.path}" not in approved_resource_routes
         ]
 
         self.assertEqual(violations, [])
