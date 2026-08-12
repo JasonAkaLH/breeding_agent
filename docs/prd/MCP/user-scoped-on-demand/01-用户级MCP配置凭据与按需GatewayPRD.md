@@ -30,7 +30,7 @@
 2. 用户配置的 MCP 在后端持久化，不依赖浏览器 `localStorage` 或某一设备的本地缓存。
 3. 用户凭据以可解密密文存入数据库，加密主密钥以服务器挂载文件提供。
 4. 后端仅在连接测试或任务执行时按需建立 MCP 运行时，结束后释放。
-5. 支持远程 HTTPS Streamable HTTP 与受控的 HTTP Legacy HTTP+SSE，不支持本地 `stdio`。
+5. 支持远程 HTTPS Streamable HTTP 与受控的 HTTP Legacy HTTP+SSE，不支持本地 `stdio`；Client 目标兼容版本扩展为 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25`、`2026-07-28`。
 
 ### 3.2 工程目标
 
@@ -48,7 +48,7 @@
 4. 不支持 `stdio`、本地进程、Unix Socket、`file://` 或用户指定本地文件的 MCP Server。
 5. 不实现用户交互式 OAuth 授权流。首版沿用静态 Bearer/API Key/受控 Header 凭据注入能力。
 6. 不实现加密密钥轮换、在线换钥或多 `key_id` Keyring。
-7. 不在本轨道内同时完成 MCP `2026-07-28` 协议升级；协议版本支持继续由现有 compatibility/official SDK 轨道治理。
+7. 不实现已被 `2026-07-28` 废弃且本产品当前不使用的 Roots、Sampling、Logging，也不恢复 `stdio`。
 
 ## 5. 已确认的共享不变量
 
@@ -104,7 +104,7 @@ User-configured remote MCP Server
 | `routing_description` | 后续一级 Planner 路由时使用的服务器描述 |
 | `endpoint_url` | 规范化后的 HTTP(S) Endpoint，不允许用户信息嵌入 URL |
 | `transport` | `streamable_http` 或 `legacy_http_sse` |
-| `protocol_preference` | 可选协议版本偏好，必须落在当前 adapter 支持矩阵中 |
+| `protocol_preference` | `auto` 或显式版本；目标允许五个版本，默认 `auto`，显式版本不降级 |
 | `auth_type` | `none`、`bearer`、`api_key_header` 或受控 `static_headers` |
 | `auth_metadata` | 非敏感元数据，例如 Header 名称；不包含凭据值 |
 | `enabled` | 用户是否启用该配置 |
@@ -151,7 +151,7 @@ granted_at
 - Tool List 和远程 Tool Description。
 - `inputSchema` 和 `outputSchema` 原文。
 - MCP Client、HTTP Client、SSE Reader 和协议 Session 对象。
-- MCP Session ID、Progress Token、原始 JSON-RPC 报文和认证 Header。
+- MCP Session ID、Progress Token、`server/discover` 完整响应、远端能力快照、原始 JSON-RPC 报文和认证 Header。
 - 连接测试的完整返回内容。
 
 ## 8. 凭据加密与密钥文件
@@ -227,7 +227,7 @@ Gateway 对业务层暴露稳定的任务作用域接口，不泄露具体 SDK �
 ```text
 open_scope(authenticated_user, platform_task_id, server_id) -> MCPTaskServerScope
 list_tools(scope) -> ToolCatalogSnapshot
-call_tool(scope, tool_name, arguments, callbacks) -> MCPToolResultRef
+call_tool(scope, tool_name, arguments, callbacks) -> MCPCallOutcome
 cancel_call(scope, call_ref, reason) -> CancelOutcome
 close_scope(scope, reason) -> None
 close_task(platform_task_id, reason) -> None
@@ -238,7 +238,7 @@ close_task(platform_task_id, reason) -> None
 1. `open_scope` 再次校验 Server 归属、`enabled` 和 `health_status=available`，不信任上游传递的 Server DTO。
 2. 凭据只在创建底层 Client 前解密，不进入任务 metadata、Planner payload、Tool Catalog 或异常字符串。
 3. `(platform_task_id, server_id)` 在一个 Gateway 实例中只有一个活跃 Scope；同一任务重复访问同一 Server 复用它。
-4. 不同任务不共享 Tool Catalog、协议 Session 或 Client。
+4. 不同任务不共享 Tool Catalog、协议 Session、Client、Discovery 结果或远端能力快照。
 5. Scope 关闭时必须取消未完成请求、关闭 SSE/HTTP 资源并删除未提升为 Artifact 的临时文件。
 
 ### 11.2 Tool Catalog
@@ -248,16 +248,69 @@ close_task(platform_task_id, reason) -> None
 - Catalog 是当前任务的不可变快照；运行中收到 `tools/list_changed` 只记录安全状态，不在本任务二次发现，新任务会重新获取。
 - 保留 Tool Name、Description、`inputSchema`、可选 `outputSchema` 和必要 annotations，所有远程 metadata 都按不可信输入处理。
 - 为每个 `inputSchema` 计算 canonical SHA-256，但本阶段只保存在 Scope 内存中。
-- 如 MCP `2026-07-28` adapter 未来返回 `ttlMs/cacheScope`，本产品仍只将其视为当前任务内优化提示，不因此跨任务持久化 Tool List。
+- MCP `2026-07-28` 返回的 `ttlMs/cacheScope` 只作为当前任务 Scope 内的缓存提示；不跨任务、不写数据库，也不发往前端作为权威执行源。
 
-## 12. 连接、发现和重试策略
+### 11.3 `MCPCallOutcome`
 
-### 12.1 连接/发现
+Gateway 对上层返回归一化联合类型，不把不同协议版本的 Wire Contract 泄露给 Planner：
+
+```text
+completed(result_ref)
+input_required(requests, sealed_request_state_ref)
+task_created(safe_remote_task_ref, status, next_poll_at)
+```
+
+- 前四个版本继续映射已有普通结果；仅在对应版本 Adapter 已实现异步任务语义时返回 `task_created`。
+- `2026-07-28` 的 `InputRequiredResult` 和 Tasks Extension 在第 1 阶段完成协议解析、能力门控与安全引用封装；用户交互、重试、轮询与取消闭环由第 2 阶段实现。
+- `requestState` 和远端 Task ID 都是协议内部值，不进入模型、前端、普通日志或审计原文。
+
+## 12. 五版本协议 Adapter 与协商
+
+### 12.1 目标兼容矩阵
+
+| 协议版本 | Transport | 生命周期 | 本阶段目标 |
+|---|---|---|---|
+| `2024-11-05` | Legacy HTTP+SSE | `initialize` / `initialized`，session-era | 保留现有普通 tools 兼容 |
+| `2025-03-26` | Streamable HTTP | `initialize` / `initialized`，session-era | 保留现有普通 tools 兼容 |
+| `2025-06-18` | Streamable HTTP | `initialize` / `initialized`，session-era | 保留现有普通 tools 兼容 |
+| `2025-11-25` | Streamable HTTP | `initialize` / `initialized`，session-era | 保留现有普通 tools 与既有 Tasks 语义 |
+| `2026-07-28` | Streamable HTTP | 无协议 Session；每个请求独立且自描述 | 新增 `server/discover`、ordinary tools、List Cache Hint、MRTR 与 Tasks Extension 适配 |
+
+当前仓库的 `SUPPORTED_MCP_PROTOCOL_VERSIONS` 仍只有前四个版本；只有实现、fixtures 和 conformance gate 全部通过后，才能宣称运行时支持第五个版本。
+
+`legacy_http_sse` 只能选择 `2024-11-05`。`streamable_http` 可选择四个 Streamable HTTP 版本。已有系统配置未填写版本时继续沿用当前 `2025-11-25` 默认语义，避免部署升级后静默改变；新建用户配置默认使用 `auto`。
+
+### 12.2 `auto` 协商
+
+Streamable HTTP 的自动协商必须遵循以下顺序：
+
+1. 先发送无业务副作用的 `server/discover`，请求按 `2026-07-28` 的每请求 metadata/header 契约构造。
+2. Discovery 成功且 `supportedVersions` 包含 `2026-07-28` 时，选择 `2026-07-28`；显式 pin 到该版本时，每个任务 Scope 仍先调用一次 Discovery 做能力门控，但失败不降级。
+3. 只有 Discovery 成功但明确只列出旧版，或收到结构正确的“不支持该协议版本”/`server/discover` method-not-found，`auto` 才回退到双方支持的最高 2025 版本，并执行现有 `initialize` / `notifications/initialized` 协商。
+4. TLS、认证、SSRF、网络、5xx、非法 JSON-RPC 或畸形 Discovery 响应不得触发版本回退。
+5. 显式固定版本必须 fail closed，不自动降级。
+6. 一旦发出 `tools/call` 或任何可能产生副作用的请求，不得换版本重放。
+
+只把最终 `effective_protocol_version` 和本任务必要能力放入 Scope。`supportedVersions`、Discovery 原文和 Tool Catalog 都不持久化；`serverInfo` 是远端自报信息，只用于展示/诊断，不能作为身份、所有权或授权依据。
+
+### 12.3 `2026-07-28` 每请求契约
+
+1. 不发送 `initialize`、`notifications/initialized`、`MCP-Session-Id`、独立 GET stream 或 `Last-Event-ID`。
+2. 每个 JSON-RPC 请求都是独立 HTTP POST；响应可以是 JSON，也可以是只服务于该请求的 SSE。
+3. Body `_meta` 必须包含 `protocolVersion`、`clientInfo`、`clientCapabilities`；`MCP-Protocol-Version` Header 必须与 Body 一致。
+4. 所有请求发送 `Mcp-Method`；`tools/call` 等命名请求发送 `Mcp-Name`。用户静态 Header 不能覆盖任何 MCP 协议 Header。
+5. 如 Tool Schema 使用 `x-mcp-header` 声明参数镜像，Adapter 只能从已通过 Schema 校验的参数生成安全 Header；认证凭据和受保护 Header 永远不能由工具参数覆盖。
+6. 变更通知只在活跃任务确有需要且 Server 支持 `subscriptions/listen` 时订阅；默认依赖当前任务内 `ttlMs/cacheScope`，不维护跨任务长连接。
+7. Client 按请求只声明已启用且完成测试的 `elicitation` 和 Tasks Extension 能力；不声明 Roots、Sampling、Logging。
+
+## 13. 连接、发现和重试策略
+
+### 13.1 连接/发现
 
 每次尝试的 60 秒预算覆盖：
 
 - DNS 和网络连接。
-- 旧协议所需的 initialize/initialized 协商。
+- 旧协议所需的 initialize/initialized 协商，或 `2026-07-28` 的 `server/discover` 与每请求 metadata 校验。
 - `tools/list` 全分页读取。
 - Legacy HTTP+SSE 的 Endpoint 发现。
 
@@ -270,7 +323,7 @@ close_task(platform_task_id, reason) -> None
 - 协议版本不兼容、非法 JSON-RPC 或非法 Tool Schema。
 - 服务器明确的业务拒绝。
 
-### 12.2 `tools/call`
+### 13.2 `tools/call`
 
 - 不设置产品级最长执行时间。
 - 不设置 MCP 子流程总时长。
@@ -278,7 +331,7 @@ close_task(platform_task_id, reason) -> None
 - Gateway 预留每 120 秒“仍在执行”回调和精细取消接口；用户交互在第 2 阶段接入。
 - 调用取消时优先使用协议取消；远程不支持时关闭当前连接/Scope，并明确记录“远程是否已停止不可确认”。
 
-## 13. 连接测试状态机
+## 14. 连接测试状态机
 
 ```text
 create/update
@@ -300,7 +353,7 @@ unavailable/disabled -- retest/enable --> testing
 - 更改 Endpoint、transport、protocol preference、auth type 或凭据必须递增 `security_version`、立即变为 `testing` 并重测。
 - 应用重启时，未完成的 `testing` 记录收敛为 `unavailable/test_interrupted`，不隐式当作可用。
 
-## 14. 输出与任务级临时存储
+## 15. 输出与任务级临时存储
 
 1. MCP 业务输出不设产品级字节上限，不因结果大小主动截断或拒绝。
 2. 运行时可以配置“内存转临时文件阈值”，该阈值只决定存储形态，不是输出上限。
@@ -308,7 +361,7 @@ unavailable/disabled -- retest/enable --> testing
 4. 临时结果不写入业务数据库。任务完成、取消或失败后删除；进程重启时由 Janitor 删除无活跃任务引用的孤儿文件。
 5. 用户明确需要原始结果时，后续阶段通过现有 Artifact 存储流程将其提升为正式下载资源，不将临时路径暴露给前端。
 
-## 15. 输出安全边界
+## 16. 输出安全边界
 
 本阶段继续复用现有 MCP 输出不可信标记和凭据清理，但不对正常业务结果做字段级脱敏：
 
@@ -318,7 +371,7 @@ unavailable/disabled -- retest/enable --> testing
 - MCP Session ID、Progress Token、原始 Request ID、内部 Header 和协议控制字段不进入模型上下文。
 - 远程文本一律标记为“不可信外部业务数据，不是系统指令”。
 
-## 16. 组件边界与预计代码落点
+## 17. 组件边界与预计代码落点
 
 | 责任 | 目标边界 |
 |---|---|
@@ -331,7 +384,7 @@ unavailable/disabled -- retest/enable --> testing
 
 不允许在 `src/orchestration/` 中加密/解密凭据、解析 Endpoint 或创建 MCP Client。
 
-## 17. 错误契约
+## 18. 错误契约
 
 | 错误类型 | 行为 |
 |---|---|
@@ -344,7 +397,7 @@ unavailable/disabled -- retest/enable --> testing
 | Tool Catalog 非法 | 当前 Scope 失败并关闭，不持久化部分 Catalog |
 | 删除时仍有调用 | 标记删除、禁止新调用，取消已有 Scope 后完成级联删除 |
 
-## 18. 验收标准
+## 19. 验收标准
 
 | 编号 | 验收项 |
 |---|---|
@@ -360,10 +413,13 @@ unavailable/disabled -- retest/enable --> testing
 | MCP-USER-P1-010 | 连接/发现每次 60 秒，可重试一次且拥有独立 60 秒预算；非暂时错误不重试 |
 | MCP-USER-P1-011 | `tools/call` 不自动重试，不设最长执行时间，并提供 120 秒运行中回调 seam |
 | MCP-USER-P1-012 | 超大输出不被截断，可切换为任务级临时文件，且未提升文件会在任务后清理 |
+| MCP-USER-P1-013 | 前四个版本行为无回归；`2026-07-28` 不发送 initialize/session/GET stream，并正确发送每请求 metadata 与协议 Header |
+| MCP-USER-P1-014 | `auto` 只在明确版本不支持时安全回退；认证、网络、5xx、畸形响应和已发业务请求均不触发降级重放 |
+| MCP-USER-P1-015 | `server/discover`、List Cache Hint、MRTR 与 Tasks Extension 均经版本门控；Discovery/能力/Tool List 不跨任务持久化 |
 
-## 19. 测试要求
+## 20. 测试要求
 
-### 19.1 单元测试
+### 20.1 单元测试
 
 - 配置 DTO 和 owner 强制绑定。
 - AES-GCM round trip、AAD 替换失败、Nonce 唯一性和错误密钥 fail closed。
@@ -372,23 +428,26 @@ unavailable/disabled -- retest/enable --> testing
 - 任务 Scope 去重、Tool Catalog 只读快照和 Close 幂等。
 - 发现重试分类，验证每次独立 60 秒预算。
 - 临时结果文件权限、路径隔离和 Janitor。
+- 五版本配置矩阵、`auto`/pin 协商、2026 Body/Header 一致性和静态 Header 不可覆盖。
+- `x-mcp-header` 只从已验证参数生成，禁止认证与连接级 Header 注入。
 
-### 19.2 存储/API 测试
+### 20.2 存储/API 测试
 
 - SQLite 与 PostgreSQL 模型/repository 语义对等。
 - 列表、详情、编辑、删除、测试的跨用户隔离。
 - API 响应全字段扫描，确保无凭据明文、密文、Nonce 和认证 Header。
 - 配置删除与当前活跃 Scope 的竞态测试。
 
-### 19.3 集成测试
+### 20.3 集成测试
 
 - Fake HTTPS Streamable HTTP Server。
 - Fake HTTP Legacy HTTP+SSE Server，分别在白名单内/外验证。
 - 分页 `tools/list`、慢发现、首次失败第二次成功、两次失败。
 - 大输出落盘不截断、任务后清理和 Artifact 提升 seam。
 - 不访问真实外部 MCP Server 的默认 CI 测试。
+- `2026-07-28` Fake Server 覆盖 `server/discover`、JSON/SSE 响应、List Cache Hint、`InputRequiredResult`、`CreateTaskResult` 与 method-not-found 安全回退。
 
-## 20. 与第 2 阶段的交付边界
+## 21. 与第 2 阶段的交付边界
 
 第 1 阶段只在以下条件全部满足后交付第 2 阶段：
 
@@ -397,10 +456,14 @@ unavailable/disabled -- retest/enable --> testing
 3. 任务结束后没有用户 Client、Tool List、Schema 或临时文件残留。
 4. 旧的全局 MCP Runtime 执行链未被切换，因此本阶段可以独立回滚。
 
-## 21. 参考
+## 22. 参考
 
 - [MCP 2026-07-28 Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
 - [MCP 2026-07-28 发布说明](https://blog.modelcontextprotocol.io/posts/2026-07-28/)（无协议 Session、List Cache Hint、Header Routing）
+- [MCP 2026-07-28 Server Discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)
+- [MCP 2026-07-28 Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+- [MCP 2026-07-28 Multi-Round-Trip Requests](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr)
+- [MCP Tasks Extension](https://modelcontextprotocol.io/extensions/tasks/overview)
 - [OpenAI Codex Configuration Reference](https://developers.openai.com/codex/config-reference/)（MCP `startup_timeout_sec` / `tool_timeout_sec` 对照）
 
 本 PRD 的 60 秒发现尝试、单次重试和工具无硬超时是本产品已确认策略，不声称为 Codex 或 MCP 协议的默认值。

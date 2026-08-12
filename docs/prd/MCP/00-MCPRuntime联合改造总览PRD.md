@@ -29,6 +29,7 @@ Phase 只表达工程顺序，不允许把任一中间 Phase 包装成完整 MCP
 3. 保持现有用户行为、API/SSE、capability、Skill、artifact 与前端事件契约兼容。
 4. 所有外部 MCP 输入、output、status、progress、server-to-client request 均按不可信输入治理，fail closed、脱敏审计、限流和可观测。
 5. 生产 `enforce` 前必须通过 shadow compare、durable recovery、resource limit、redaction、compatibility、rollback drill 与 ops runbook 门禁。
+6. 在用户级按需 MCP 三阶段轨道中新增 `2026-07-28` 无状态 Adapter，并与本 PRD 的 2025 session-era 长任务实现分开演进、统一验收。
 
 ## 4. 非目标
 
@@ -59,7 +60,8 @@ Rust MCP sidecar
 
 External MCP servers
   ├─ MCP 2025-11-25 JSON-RPC over Streamable HTTP（long-task / Tasks latest-feature target）
-  └─ MCP 2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 ordinary tools client compatibility
+  ├─ MCP 2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 ordinary tools current compatibility
+  └─ MCP 2026-07-28 stateless Streamable HTTP（approved fifth-version target）
 ```
 
 ## 6. Phase 顺序与依赖
@@ -82,15 +84,17 @@ Phase 之间可以并行准备测试、fixtures、proto 草案和 fake server，
 3. 外部 MCP server 永远只通过 MCP 标准 transport 与 sidecar 通信，不得直连 Python ↔ sidecar 内部协议。
 4. 所有 raw MCP task id、session id、Last-Event-ID、progressToken 只进入受控 registry / audit fingerprint，不进入前端事件原文。
 5. side-effecting tool call 不允许自动重复发起；重连只恢复 stream、查询 task 或拉取 result。
-6. `input_required` 首版稳定失败；不得让外部 MCP server 直接驱动用户输入或内部能力。
+6. 本 Phase 0-5 旧基线中的 `input_required` 稳定失败；只有用户级按需 MCP 第 2 阶段完成受控 MRTR elicitation 后才允许进入平台 Interrupt，外部 Server 仍不得直接驱动内部能力。
 7. `enforce` 模式下安全、权限、schema、sanitizer、sidecar identity、secret、contract mismatch 默认 fail closed。
 
-## 8. MCP latest-feature invariant 与 multi-version client compatibility invariant
+## 8. 版本化 latest-feature invariant 与 multi-version client compatibility invariant
 
 以下规则跨所有 Phase 生效，任何实现或测试不得放宽：
 
-- **latest-feature invariant**：MCP `2025-11-25` 是长任务、Tasks、progress、cancellation、完整 Streamable HTTP/SSE 与 Rust sidecar canonical runtime 的 latest-feature invariant。`2025-11-25 long-task / Tasks` 约束不得因四版本普通 tools 兼容而删除或降级。
-- **multi-version client compatibility invariant**：本项目作为 MCP Client 的普通 `tools/list` / `tools/call` 首版兼容范围是 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25`；2024 使用 legacy HTTP+SSE，2025+ 使用 Streamable HTTP，conformance gate 必须逐版本验证。
+- **2025 session-era invariant**：MCP `2025-11-25` 仍是本 Phase 0-5 长任务、实验 Tasks、progress、cancellation 与完整 sessionful Streamable HTTP/SSE 基线，不因新版本加入而删除。
+- **multi-version client compatibility invariant**：当前代码已实现普通 `tools/list` / `tools/call` 四版本；已批准的目标矩阵增加 `2026-07-28`。第五版本由 `user-scoped-on-demand/` 三阶段 PRD 实施，完成前不得写成当前能力。
+
+下列第 1-12 条是 `2024-11-05` 至 `2025-11-25` 的历史/session-era 约束，并按各版本 feature gate 适用。`2026-07-28` 不使用 initialize、协议 Session、GET stream 或 Last-Event-ID，改用 `server/discover`、每请求 metadata/header、MRTR 和 Tasks Extension；具体契约以用户级按需 MCP 第 1、2 阶段 PRD 为准，禁止把两套规则拼接成一个状态机。
 
 1. **JSON-RPC 形态**：所有 MCP data layer message 必须是 JSON-RPC 2.0 object；Streamable HTTP POST body 必须是单个 JSON-RPC request、notification 或 response，不支持 batch array。
 2. **Lifecycle first**：每个 MCP session 的第一阶段必须是 `initialize`；client 收到 `InitializeResult` 后必须发送 `notifications/initialized`，随后才能进入 operation。初始化完成前除 `ping` 外不得发送普通 operation request。

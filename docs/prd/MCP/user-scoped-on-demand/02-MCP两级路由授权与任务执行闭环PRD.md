@@ -32,6 +32,7 @@
 5. 工具执行不设最长时间和 MCP 子流程总时长；每持续 120 秒向用户提供停止选项。
 6. 同一用户可以并行运行多个 MCP 任务，每个任务内的 MCP 工具串行执行。
 7. 前端完成配置、授权、运行状态、长时间提示、排队与取消的用户闭环。
+8. 对 `2026-07-28` Server 支持 MRTR elicitation 和 Tasks Extension，同时与 `2025-11-25` 实验 Tasks 保持版本隔离。
 
 ## 4. 非目标
 
@@ -61,6 +62,8 @@
 | `tools/call` 重试 | 默认不重试 |
 | 输出 | 不设大小上限，超过模型上下文时落任务临时文件并分块处理 |
 | 审计保留 | 默认 30 天，可由后端运行配置调整 |
+| `2026-07-28` MRTR | 只实现 elicitation；`requestState` 原样封存，每轮重试计入 20 次调用 |
+| `2026-07-28` Tasks | Server 定向创建；默认轮询，活跃期可选订阅；与 2025 Tasks 分开适配 |
 
 ## 6. 目标流程
 
@@ -369,7 +372,19 @@ Selector 和 Main Agent 必须遵守：
 - Main Agent 不宣称远程成功或失败，向用户说明状态无法确认。
 - 用户后续如需重试，重新走工具选择与授权检查。
 
-### 14.2 标准 MCP 异步任务
+### 14.2 `2026-07-28` MRTR 输入闭环
+
+当 Gateway 返回 `input_required` 时，MCP Tool Selector 暂停当前调用并通过平台 Interrupt 展示：Server、Tool、远端请求说明和经 Schema 约束的表单字段。
+
+1. Client 只声明已实现的 `elicitation`，不声明 Roots、Sampling 或 Logging。
+2. `requestState` 是远端 Server 的不透明值。平台不得解析、修改、交给模型或前端；需要跨重启等待时，用任务私有密文/密封引用保存。
+3. 用户提交后，以新的 JSON-RPC Request ID 重试原始 `tools/call`，同时原样附带 `requestState` 和用户的 `inputResponses`。
+4. 每次 MRTR 往返都是一次新的远程 `tools/call`，计入每任务 20 次上限；达到上限时停止继续往返，避免恶意或错误 Server 无限索取输入。
+5. 如果 Tool 与原 Arguments 未发生实质变化，不重复弹出通用工具授权；但 elicitation 的每次业务输入都必须由用户明确提交，“始终允许此工具”不能代替回答。
+6. MRTR 必须重试原 Tool 和原业务 Arguments；远端不能借 `requestState` 替换调用目标。若 Selector 放弃当前往返并改为其他 Tool 或实质不同的 Arguments，必须作为新调用重新校验和授权。
+7. 用户拒绝或取消 elicitation 后，不再提交该轮输入；Selector 按第 9.4 节寻找替代 Tool、Server 或已有结果。
+
+### 14.3 标准 MCP 异步任务
 
 如当前协议 Adapter 和远程 Server 明确协商支持标准 MCP Task，可持久化最小恢复绑定：
 
@@ -386,8 +401,14 @@ created_at / updated_at
 ```
 
 - 远程原始 Task ID 不进入前端、Planner Prompt 或普通审计日志。
-- 重启后只执行状态查询、结果获取或协议取消，不重新发起原 `tools/call`。
-- 具体 Task 方法由当前协议 Adapter 归一化，本 PRD 不将 2025-11-25 核心 Tasks 和 2026-07-28 Tasks Extension 硬编码成同一 Wire Contract。
+- 重启后只执行状态查询、状态更新或协议取消，不重新发起原 `tools/call`。
+- `2026-07-28` 只有 Client 已启用且在每请求 `clientCapabilities` 声明 Tasks Extension、Server 又通过 `server/discover` 声明支持时才启用。
+- `2026-07-28` Task 必须由 Server 返回 `resultType: task` 创建；Client 不在 `tools/call` 中发送旧版 `task` 参数。
+- 2026 Adapter 使用 `tasks/get`、`tasks/update`、`tasks/cancel`；不得调用该版本已移除的 `tasks/result`、`tasks/list`。
+- 默认按 Server 的 `pollIntervalMs` 轮询。仅在任务活跃且 Server 支持时使用 `subscriptions/listen` 接收 `notifications/tasks`，任务结束立即取消订阅，避免常驻连接。
+- `working`、`input_required`、`completed`、`failed`、`cancelled` 映射为平台任务状态；`input_required` 继续进入第 14.2 节交互闭环。
+- 取消是协作式请求；远端最终状态不一定是 `cancelled`，平台必须展示实际查询到的终态。
+- `2025-11-25` 实验 Tasks 与 `2026-07-28` Tasks Extension 不具备 Wire Compatibility，必须按 `protocol_version` 分派到不同 Adapter，禁止共享请求 DTO 或方法表。
 - 普通调用不伪装成可恢复 Task。
 
 ## 15. 审计与保留策略
@@ -458,6 +479,8 @@ created_at / updated_at
 | `mcp.tool_call_cancelled` | frontend/audit | 用户、任务或离线取消 |
 | `mcp.execution_status_unknown` | frontend/audit | 普通调用在重启后结果不可确认 |
 | `mcp.queue_entered` / `mcp.queue_left` | frontend/audit | Gateway 容量排队 |
+| `mcp.input_required` / `mcp.input_submitted` | frontend/audit | 2026 MRTR elicitation 等待与提交；不携带 `requestState` 原文 |
+| `mcp.remote_task_status_changed` | frontend/audit | 远端 Task 状态更新；只使用平台安全引用 |
 
 所有 FRONTEND 事件必须经现有可见性 allowlist 和脱敏处理，不包含凭据、Endpoint、完整参数、完整输出或原始协议 ID。
 
@@ -497,6 +520,10 @@ created_at / updated_at
 | MCP-USER-P2-014 | 普通调用重启后不自动重放；标准 MCP Task 只通过最小绑定恢复查询 |
 | MCP-USER-P2-015 | MCP 审计默认 30 天自动清理，不记录完整参数、Tool List、Schema、凭据或业务结果 |
 | MCP-USER-P2-016 | MCP 分支结束后结果作为 dependency output 供 `main_agent.respond` 生成最终回答 |
+| MCP-USER-P2-017 | `2026-07-28` MRTR 的 `requestState` 始终不透明且不泄漏；新 Request ID 重试，每轮计入 20 次上限 |
+| MCP-USER-P2-018 | “始终允许此工具”不会自动回答 elicitation；用户拒绝输入后可寻找替代方案但不绕过确认 |
+| MCP-USER-P2-019 | 2026 Tasks 仅在双向能力协商后启用，支持 get/update/cancel 与受控恢复，不调用已移除方法 |
+| MCP-USER-P2-020 | 2025 实验 Tasks 与 2026 Tasks Extension 分 Adapter 测试，任一版本请求形态不会串用到另一版本 |
 
 ## 20. 测试矩阵
 
@@ -507,6 +534,9 @@ created_at / updated_at
 - Selector 四种动作、一次格式修复、非 Catalog Tool 拒绝、Schema 校验失败。
 - 多工具迭代、多 Server 回路、相同失败指纹防重复和 20 次停止。
 - 远程结果中的 Prompt Injection、伪 Endpoint、伪 Tool 指令无法绕过追溯、Schema 和授权。
+- MRTR 单轮/多轮/拒绝/取消/重启恢复、`requestState` 逐字节保真与每轮调用计数。
+- 2026 Task 双向能力协商、Server 定向创建、轮询间隔、可选订阅、五种状态和协作式取消。
+- 2025 与 2026 Tasks 交叉负例，确保方法、参数和恢复逻辑不串版。
 
 ### 20.2 授权
 

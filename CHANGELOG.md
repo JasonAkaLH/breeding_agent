@@ -14,6 +14,8 @@
 
 ## [Unreleased]
 
+- MCP `2026-07-28` 已作为第五个 Client 协议版本纳入用户级按需 MCP 三阶段 PRD：阶段一新增无状态 Streamable HTTP Adapter、`server/discover`、每请求 metadata/header、List Cache Hint 与安全版本回退；阶段二新增 MRTR elicitation 和与 2025 实验 Tasks 隔离的 Tasks Extension 闭环；阶段三新增五版本 conformance、灰度与旧 Runtime 下线门禁。当前仓库代码仍只实现原四版本，完成实现与证据前不得宣称已支持 2026。同步 MCP 兼容/SDK/总览、后端、Rust、PRD 索引与 Future Work 口径。License Requirement：PRD 与文档索引更新，无新增依赖/许可变更。
+
 - 用户级按需 MCP 方案拆分为三份独立 PRD：阶段一建立用户级最小配置、AES-256-GCM 凭据密文与服务器密钥文件、远程 HTTP(S) Endpoint Policy 和任务级按需 Gateway；阶段二建立 Server 级主路由、按需 Tool List、专用 Tool Selector、所有工具授权、20 次调用上限、120 秒长调用提示、同用户多任务并行与 30 天审计；阶段三通过 shadow/enforce 单路径灰度切换，迁移受控系统配置并删除启动发现、全局工具注册及进程级 Client/Bundle。同步 MCP/PRD 索引与 Future Work。License Requirement：PRD、文档索引与变更日志更新，无新增依赖/许可变更。
 
 - 个人桌面长任务 Agent 总纲将受控子 Agent spawn 提升为核心产品主旨：每次获准 spawn 必须创建可独立调度、取消和恢复的 Child Run，子权限仅为父权限子集，Context Envelope 按最小必要原则投递；子 Agent 之间禁止直接通信和任务/权限/上下文转交，所有 handoff 必须由主 Agent 决定并由 Rust Runtime 验权、持久化和投递。同步补齐 spawn/handoff 事件、工作台可见性、恢复与三平台安全/端到端验证门禁。License Requirement：设计总纲、文档索引与变更日志更新，无新增依赖/许可变更。

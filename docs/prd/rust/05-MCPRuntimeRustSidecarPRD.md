@@ -33,6 +33,7 @@ MCP Runtime 需要处理外部 server / tools 的协议输入输出。外部 too
 4. shadow 样本、promotion report、production enforce、ops runbook / rollback drill 与 Python legacy MCP duplicate semantics 下线。
 5. Phase 2-5 canonical runtime operations 仍未在 Rust sidecar 中成为主执行面；当前 MCP tool 真实执行仍由 Python MCP client / transport / task registry 承担。
 6. Rust sidecar canonical multi-version transport 仍需后续 feature evidence；当前四版本普通 tools 兼容的用户可见执行面仍是 Python MCP client path，sidecar 仅保留 `2025-11-25` latest-feature / long-task phase baseline 与 compatibility handshake 骨架。
+7. `2026-07-28` 无状态 Streamable HTTP、`server/discover`、MRTR、Tasks Extension 与五版本 conformance 仍是已批准但未实现的用户级按需 MCP 后续范围。
 
 因此，当前只能宣称“Rust MCP sidecar 接入骨架 / Phase 0-1 基线已落地”；不得宣称完整 Rust MCP Runtime、完整长任务流式 SSE、production enforce 或 Python legacy 下线已完成。
 
@@ -43,6 +44,7 @@ MCP Runtime 需要处理外部 server / tools 的协议输入输出。外部 too
 3. 支持 MCP bundle 原子激活：新 bundle 准备成功后切换，失败保留旧 bundle。
 4. 保持 Python capability wrapper 与 `MCPToolExecutor` 对外契约不变。
 5. MCP Runtime Rust 化最终接入方式冻结为独立 Rust sidecar；Python 只保留 config、capability descriptor、executor wrapper 与 sidecar client。
+6. 外部协议 Adapter 必须逐版本隔离：保留现有四版本语义，并为 `2026-07-28` 建立无 session 的第五版本 Adapter，不能用 2025 状态机伪装兼容。
 
 ## 3. 非目标
 

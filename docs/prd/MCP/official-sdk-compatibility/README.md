@@ -9,6 +9,8 @@
 - `2025-06-18`
 - `2025-11-25`
 
+本目录记录的是当前已实现的四版本 SDK/adapter 基线，不代表官方 SDK 当前已经适配 `2026-07-28`。第五版本的产品目标、无状态 lifecycle、MRTR、Tasks Extension 与放量门禁由 `../user-scoped-on-demand/` 三阶段 PRD 管理；实施时必须先验证所选官方 SDK 版本是否具备对应 Wire Contract，缺口由受控 Adapter 补齐，不得靠版本字符串冒充支持。
+
 ## 总原则
 
 1. 本项目在该轨道中仍然只是 **MCP Client**，不扩展为 MCP Server。
@@ -44,6 +46,7 @@ PRD 3 的 SDK 依赖评估可以提前准备，但不得在 PRD 1 的 adapter co
 ## 与既有 MCP PRD 的关系
 
 - `docs/prd/MCP/compatibility/`：现有 client 四版本兼容轨道，重点是已落地/待收敛的协议协商、2024 legacy、2025+ streamable 与 conformance 口径。
+- `docs/prd/MCP/user-scoped-on-demand/`：已批准的第五版本目标轨道，新增 `2026-07-28`，当前待实施。
 - 本目录：新的中长期官方 SDK 引入轨道，重点是 `mcp_server_config.json`、统一 adapter contract、官方 Rust SDK shadow/enforce rollout。
 - `docs/prd/MCP/` Phase 0-5：仍是 MCP 长任务 / Rust sidecar canonical runtime 的阶段性交付，不被本目录取代。
 

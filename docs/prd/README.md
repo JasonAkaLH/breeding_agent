@@ -51,8 +51,8 @@
 - 大语言模型提示词信封分步 PRD：`docs/prd/backend/prompt-envelope/README.md`。
 - Rust 化实施专题拆分入口：`docs/prd/rust/README.md`。
 - MCP Runtime 联合改造 Phase PRD 入口：`docs/prd/MCP/README.md`。
-- MCP Client 四版本兼容 PRD 入口：`docs/prd/MCP/compatibility/README.md`。
-- MCP Client 官方 SDK 引入与四版本完整兼容 PRD 入口：`docs/prd/MCP/official-sdk-compatibility/README.md`（首批 remote HTTP/HTTPS ordinary tools；stdio 仍需 sandbox-gated 后续 PRD）。
+- MCP Client 多版本兼容 PRD 入口：`docs/prd/MCP/compatibility/README.md`（当前四版本已实现，`2026-07-28` 第五版本已批准、待实施）。
+- MCP Client 官方 SDK 引入与当前四版本完整兼容 PRD 入口：`docs/prd/MCP/official-sdk-compatibility/README.md`；`2026-07-28` 由用户级按需 MCP 三阶段 PRD 增量治理。
 - 用户级按需 MCP 三阶段 PRD：`docs/prd/MCP/user-scoped-on-demand/01-用户级MCP配置凭据与按需GatewayPRD.md`、`02-MCP两级路由授权与任务执行闭环PRD.md`、`03-按需MCP灰度切换与旧Runtime下线PRD.md`。
 
 新增或补齐后端能力范围时，应同步更新：

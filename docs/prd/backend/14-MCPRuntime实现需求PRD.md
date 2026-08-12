@@ -3,7 +3,7 @@
 - **范围**：后端 / MCP client runtime / capability 接入 / 外部工具治理
 - **文档状态**：Phase 1 已实现（2026-05-12）；长任务 / 完整流式 SSE 扩展见 `docs/prd/backend/17-MCP长任务流式SSEPRD.md`
 - **日期**：2026-05-12
-- **协议参考版本**：Model Context Protocol `2025-11-25` latest features + 四版本 client compatibility matrix（`2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25`，见 `docs/prd/MCP/compatibility/README.md`）
+- **协议参考版本**：当前代码为 `2025-11-25` latest features + 四版本 client compatibility；目标增加 `2026-07-28` 第五版本（见 `docs/prd/MCP/user-scoped-on-demand/`）
 
 ## 1. 背景
 
@@ -32,18 +32,21 @@
 - MCP 2025-11-25 Authorization：https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 - MCP 2025-11-25 Key Changes：https://modelcontextprotocol.io/specification/2025-11-25/changelog
 
-### 2.0A 四版本 client compatibility matrix
+### 2.0A 当前四版本基线与五版本目标矩阵
 
 本 PRD 的 v1 普通 MCP tools 链路不再只声明 single latest baseline。仓库内 MCP Client 兼容目标以 `docs/prd/MCP/compatibility/README.md` 和 `SUPPORTED_MCP_PROTOCOL_VERSIONS` 为准，四版本 client compatibility matrix 覆盖 `2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25`：
 
 - `2024-11-05`：legacy HTTP+SSE transport family，仅用于普通 `initialize`、`tools/list`、`tools/call` 兼容。
 - `2025-03-26`、`2025-06-18`、`2025-11-25`：Streamable HTTP transport family，后续 HTTP 请求使用 negotiated `MCP-Protocol-Version`。
 - `2025-11-25 latest features`（Tasks、progress、cancellation、long-task Streamable HTTP/SSE）仍由 `docs/prd/backend/17-MCP长任务流式SSEPRD.md` 和 `docs/prd/MCP/` Phase 0-5 轨道治理，不等同于四版本普通 tools 首版兼容范围。
+- `2026-07-28`：已批准的第五版本目标。它使用无协议 Session 的 Streamable HTTP、`server/discover`、每请求 metadata/header、MRTR 与 Tasks Extension，由用户级按需 MCP 三阶段 PRD 实施和验收；当前 `SUPPORTED_MCP_PROTOCOL_VERSIONS` 尚未包含该版本。
 
 
-### 2.1 MCP 2025-11-25 标准通用通信方式
+### 2.1 MCP 2025-11-25 session-era 通信基线
 
 MCP Runtime 的通信协议层必须按照 latest spec 2025-11-25 的通用通信模型设计，不允许自创一套非标准 tool RPC。具体要求：
+
+本节是现有 2025 实现基线，不适用于 `2026-07-28`。第五版本不执行 initialize、不使用 MCP Session/GET stream/Last-Event-ID，其独立 Adapter 契约见 `docs/prd/MCP/user-scoped-on-demand/01-用户级MCP配置凭据与按需GatewayPRD.md`。
 
 1. **Base Protocol**：所有 client / server 消息必须是 JSON-RPC 2.0，UTF-8 编码；request id 必须是非空 string 或 integer；notification 不得包含 id；response 必须复用 request id。
 2. **Lifecycle first**：每个 MCP client 与 server 建连后的第一阶段必须是 initialization，完成 protocol version negotiation 与 capability negotiation 后才能进入 operation。
@@ -63,7 +66,7 @@ MCP Runtime 的通信协议层必须按照 latest spec 2025-11-25 的通用通�
 为避免实现时把 MCP 做成普通 HTTP tool wrapper，v1 必须把“协议通信层”和“业务 capability 层”分开实现：
 
 1. `MCPTransport` 抽象只负责标准消息传输：`initialize`、`send_request`、`send_notification`、`close`、可选 SSE 接收与重连。
-2. `MCPClient` 负责 lifecycle 状态机：`new` → `initializing` → `initialized` → `closed` / `failed`；任何 `tools/list`、`tools/call` 都必须在收到 server `InitializeResult` 且发送 `notifications/initialized` 后执行。
+2. session-era Adapter 的 `MCPClient` 负责 lifecycle 状态机：`new` → `initializing` → `initialized` → `closed` / `failed`；这些版本的 `tools/list`、`tools/call` 必须在收到 server `InitializeResult` 且发送 `notifications/initialized` 后执行。2026 Adapter 不复用该状态机。
 3. v1 client capabilities 默认必须保持最小化：不声明 `roots`、`sampling`、`elicitation`、`tasks`，除非对应能力已经实现并有测试。
 4. 如果 server 在 operation 阶段发起本项目未声明或未实现的 client feature request，client 必须返回标准 JSON-RPC method-not-found / unsupported error，并记录脱敏 audit；不得静默执行。
 5. 每个 MCP session 内 request id 必须由 client 统一生成并保证不复用；response correlation、timeout、cancellation 与 audit 都以该 request id 为链路字段。
@@ -110,7 +113,7 @@ v1 不做以下事项：
 4. 不让 LLM Planner 直接生成外部 server 地址、鉴权信息、账号、token、header 或任意 tool name。
 5. 不支持未审核、未沙箱、未显式配置的本地 stdio server 自动启动；stdio 属于 MCP 标准 transport，但默认必须受配置、沙箱与权限约束。
 6. 不在 v1 完整支持 MCP resources / prompts 作为独立 public capability。tool 返回的 resource link 可以作为受限 metadata / artifact 处理。
-7. 不在 v1 支持 MCP sampling / elicitation 的完整双向协议。需要用户确认或补充信息时，优先映射到本项目已有 Interrupt 机制。
+7. 本 v1 基线不支持 MCP sampling / elicitation 的完整双向协议；后续已批准仅为 `2026-07-28` 实现受控 MRTR elicitation，并映射到平台 Interrupt，不启用 Sampling/Roots/Logging。
 8. 不在 Phase 1 实现完整交互式 OAuth 授权流；Phase 1 只支持静态 bearer / API key / 预注册凭据和授权错误识别。
 9. 不引入 LangChain、LangGraph、AutoGen 等框架来承接 MCP。
 

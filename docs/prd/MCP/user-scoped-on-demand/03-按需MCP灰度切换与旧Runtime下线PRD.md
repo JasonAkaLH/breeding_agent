@@ -30,10 +30,11 @@
 3. 出现安全、正确性或稳定性问题时，可以快速停止新任务进入新链路。
 4. 全量切换后，后端不再因用户数量增长而在进程中常驻用户 MCP Client、连接和 Tool List。
 5. 删除旧全局 Runtime 后，保留成熟的 MCP 协议实现和 Rust Sidecar，不重写协议栈。
+6. 用逐版本 conformance 证明新增 `2026-07-28` 不破坏现有四版本，并让五个版本都进入同一用户级 Gateway 安全边界。
 
 ## 4. 非目标
 
-1. 不在本阶段新增 MCP Transport；仍只支持已确认的远程 HTTP(S)。
+1. 不在本阶段新增 MCP Transport family；仍只支持已确认的远程 HTTP(S)，但 Streamable HTTP 增加 `2026-07-28` 无状态协议形态。
 2. 不把 legacy 全局 MCP 配置自动复制给全部用户。
 3. 不迁移或持久化旧 Runtime 运行期发现到的 Tool List、Schema、Client 或 Bundle。
 4. 不为普通 `tools/call` 增加自动重试或故障后重放。
@@ -54,6 +55,7 @@
 | 凭据 | 环境变量为主 | 数据库密文 + 服务器密钥文件，使用时解密 |
 | 用户授权 | 非用户级统一闭环 | 每次调用检查允许一次 / 始终允许 / 拒绝 |
 | 执行恢复 | revision-bound Bundle | 任务状态 + Gateway scope；普通调用重启后标记 unknown，不重放 |
+| 协议版本 | 当前四版本、2025 lifecycle/session 为主 | 五版本 Adapter；2026 无 initialize/session/GET stream，与旧四版隔离 |
 
 ## 6. 发布模式与配置契约
 
@@ -261,6 +263,9 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 - “始终允许”授权在安全版本和 Schema 指纹匹配时复用，变更时失效。
 - 用户拒绝后可寻找替代方案，但不重复相同调用。
 - 普通业务结果不做字段级脱敏，凭据与协议内部信息必须移除。
+- 版本协商只在 `server/discover` 明确不支持时回退，任何 `tools/call` 不因降级、shadow 或重启而双执行。
+- `2026-07-28` 不发送 initialize/session/GET stream/Last-Event-ID；前四版本仍遵守各自已冻结生命周期。
+- MRTR `requestState`、远端 Task ID 和每请求协议 metadata 不进入模型、前端或普通审计。
 
 ### 12.3 稳定性门禁
 
@@ -270,6 +275,7 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 - 任务完成、失败、拒绝、取消、断线超时和进程关闭均释放 Client、连接和任务临时文件。
 - 同一用户多任务并行时，不串用 Catalog、凭据、Grant 或 Tool Result。
 - 全量切换后，API 进程启动不连接任何用户 MCP Server。
+- 五版本 Fake Server 与真实受控样本均通过发现、`tools/list`、`tools/call`、取消和资源释放矩阵；2026 同时覆盖 MRTR 与 Tasks Extension。
 
 ### 12.4 资源门禁
 
@@ -300,8 +306,12 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 - `mcp_disconnect_lease_expired_total`
 - `mcp_temp_spill_bytes`
 - `mcp_resource_cleanup_failures_total`
+- `mcp_protocol_negotiation_total`
+- `mcp_server_discover_duration_seconds`
+- `mcp_mrtr_rounds_total`
+- `mcp_remote_tasks_active`
 
-所有标签必须是低基数字段，不得用原始 URL、用户名、工具参数或凭据作为指标标签。
+允许使用 `protocol_version`、transport family、adapter 和结果类别等固定枚举标签。所有标签必须是低基数字段，不得用原始 URL、用户名、工具参数或凭据作为指标标签。
 
 ### 13.2 审计事件
 
@@ -373,6 +383,8 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 - [ ] legacy 配置迁移必须指定 owner/ACL，且凭据重新加密。
 - [ ] 全量切换后，应用启动不执行用户 MCP `tools/list`。
 - [ ] `/api/v1/capabilities` 不包含用户动态工具。
+- [ ] 新 Gateway 对五个目标协议版本都有 `version + transport + adapter` conformance 证据，前四版无回归。
+- [ ] `2026-07-28` 的 Discovery、ordinary tools、MRTR 与 Tasks Extension 都通过能力门控；Roots/Sampling/Logging 未被声明。
 
 ### 18.2 安全验收
 
@@ -411,6 +423,7 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 | Lifecycle | 完成/失败/拒绝/取消/断线/重启资源清理、临时文件回收、Artifact 例外 |
 | Load | 大用户量仅配置不调用、突发路由、按需发现、长调用与超大结果落盘 |
 | Rollback | flag 回滚、版本回滚、legacy 系统 MCP 恢复、用户自定义明确不可用、无数据删除 |
+| Protocol conformance | 五版本协商与 pin、2026 无状态 POST/header/body、JSON/SSE 响应、Discovery/List Cache Hint、MRTR、Tasks、`x-mcp-header`、取消和安全降级 |
 
 ## 20. 实施完成定义
 
@@ -420,15 +433,18 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 2. 旧全局 MCP Runtime 已停止装配并从生产代码路径删除。
 3. 启动时全量 MCP 发现、全局 Tool Capability 注册和 revision-bound Client/Bundle 已删除。
 4. 现有 MCP Client、Transport、Rust Sidecar 和安全校验被复用且回归通过。
-5. 用户数量增长但不调用 MCP 时，Runtime 资源保持近似常量。
-6. 安全、正确性、稳定性、资源和回滚门禁全部有可审计证据。
-7. 相关 PRD、API 文档、部署配置、Runbook、`AGENTS.md` 和 `CHANGELOG.md` 已同步。
+5. `SUPPORTED_MCP_PROTOCOL_VERSIONS` 与 Gateway/Sidecar adapter 明确支持五个目标版本，并有逐组合证据；2026 能力未被错误下放到旧版本。
+6. 用户数量增长但不调用 MCP 时，Runtime 资源保持近似常量。
+7. 安全、正确性、稳定性、资源和回滚门禁全部有可审计证据。
+8. 相关 PRD、API 文档、部署配置、Runbook、`AGENTS.md` 和 `CHANGELOG.md` 已同步。
 
 ## 21. 官方协议与项目约束说明
 
 - MCP 协议负责 `tools/list`、`tools/call`、变更通知和标准 async task 等线协议能力；用户所有权、授权、灰度、资源预算、重试和超时是本项目策略。
 - 新链路继续遵守项目已冻结的 MCP compatibility 与 official SDK adapter 轨道；本 PRD 不用产品灰度设计替代协议 conformance。
 - 当前设计依据 MCP `2026-07-28` 工具与生命周期语义，同时保留项目现有旧版本 Client compatibility；协议升级和本三阶段状态模型改造必须分别验收。
+- 旧全局 Runtime 下线只删除进程级常驻状态和全局注册，不删除 `2024-11-05` 至 `2025-11-25` 的协议兼容；`2026-07-28` 作为第五个独立 Adapter 增量交付。
+- shadow 可以比较 Discovery、版本选择、Catalog 指纹和 Selector dry-run，但不得为比较对同一业务请求执行两次 `tools/call`。
 
 参考：
 
