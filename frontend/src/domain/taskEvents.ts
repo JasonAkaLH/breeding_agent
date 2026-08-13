@@ -84,7 +84,45 @@ export interface MCPRemoteTaskState {
 
 export interface MCPAvailabilityState {
   status: 'unavailable';
-  reasonCode: string | null;
+  reasonCode: 'no_user_scoped_server';
+}
+
+export interface MCPExecutionUnknownState {
+  projectionId: string;
+  intentId: string;
+  callId: string;
+  reasonCode: 'trusted_terminal_result_absent';
+  noReplay: true;
+  nodeId: string;
+  projectionRevision: 0;
+  intentRevision: number;
+  unknownEventId: string;
+  taskFailedEventId: string;
+  unknownTerminalAt: string;
+  createdAt: string;
+}
+
+export interface MCPExecutionResolutionState {
+  resolutionEventId: string;
+  resultReceiptId: string;
+  fromIntentRevision: number;
+  toIntentRevision: number;
+  resolvedAt: string;
+  createdAt: string;
+}
+
+export interface MCPLateResultState {
+  projectionId: string;
+  resultReceiptId: string;
+  resultPayloadSha256: string;
+  terminalState: 'completed' | 'failed' | 'cancelled';
+  safeResultRef: string | null;
+  safeResultRefSha256: string | null;
+  safeErrorCode: string | null;
+  resolvedAt: string;
+  taskRemainsFailed: true;
+  nodeRemainsFailed: true;
+  noReplay: true;
 }
 
 export interface MCPTaskState {
@@ -96,6 +134,9 @@ export interface MCPTaskState {
   input: MCPInputState | null;
   remoteTask: MCPRemoteTaskState | null;
   availability: MCPAvailabilityState | null;
+  executionUnknown: MCPExecutionUnknownState | null;
+  executionResolution: MCPExecutionResolutionState | null;
+  lateResult: MCPLateResultState | null;
 }
 
 export interface TaskEventState {
@@ -116,6 +157,9 @@ export interface TaskEventState {
   fallbackNotice: CapabilityFallbackNotice | null;
   mcp: MCPTaskState;
   seenEventIds: string[];
+  eventFingerprints: Record<string, string>;
+  pendingEvents: TaskEventEnvelope[];
+  eventSyncError: string | null;
 }
 
 export function createInitialTaskEventState(): TaskEventState {
@@ -144,8 +188,14 @@ export function createInitialTaskEventState(): TaskEventState {
       input: null,
       remoteTask: null,
       availability: null,
+      executionUnknown: null,
+      executionResolution: null,
+      lateResult: null,
     },
     seenEventIds: [],
+    eventFingerprints: {},
+    pendingEvents: [],
+    eventSyncError: null,
   };
 }
 
@@ -163,6 +213,22 @@ export function createRestoringTaskState(): TaskEventState {
     phase: 'running',
     statusText: '正在恢复任务状态',
     currentActivityText: '正在同步任务输出',
+  };
+}
+
+export function prepareTaskEventResync(state: TaskEventState): TaskEventState {
+  return {
+    ...state,
+    mcp: {
+      ...state.mcp,
+      executionUnknown: null,
+      executionResolution: null,
+      lateResult: null,
+    },
+    seenEventIds: [],
+    eventFingerprints: {},
+    pendingEvents: [],
+    eventSyncError: null,
   };
 }
 
@@ -193,10 +259,50 @@ export function isTaskActive(phase: TaskPhase): boolean {
 }
 
 export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
-  if (state.seenEventIds.includes(event.event_id)) {
+  if (!isClosedCP7Event(event)) {
+    return isCP7ContractEvent(event)
+      ? { ...state, eventSyncError: '任务事件格式不完整，请重新同步任务历史。' }
+      : state;
+  }
+  if (!isCP7ContractEvent(event) && !isKnownTaskEventType(event.event_type)) {
     return state;
   }
-  const withEvent = { ...state, seenEventIds: [...state.seenEventIds, event.event_id] };
+  const fingerprint = taskEventFingerprint(event);
+  const previousFingerprint = state.eventFingerprints[event.event_id];
+  if (previousFingerprint) {
+    return previousFingerprint === fingerprint
+      ? state
+      : { ...state, eventSyncError: '任务事件内容发生冲突，请重新同步任务历史。' };
+  }
+  const withFingerprint = {
+    ...state,
+    eventFingerprints: { ...state.eventFingerprints, [event.event_id]: fingerprint },
+  };
+  const predecessorId = predecessorEventId(event);
+  if (predecessorId && !state.seenEventIds.includes(predecessorId)) {
+    return { ...withFingerprint, pendingEvents: [...state.pendingEvents, event] };
+  }
+  if (!hasValidConsumedChainBinding(withFingerprint, event)) {
+    return { ...withFingerprint, eventSyncError: '任务事件链绑定不一致，请重新同步任务历史。' };
+  }
+  return drainPendingTaskEvents(reduceTaskEvent(withFingerprint, event));
+}
+
+export function replayTaskEvents(state: TaskEventState, events: TaskEventEnvelope[]): TaskEventState {
+  const replayed = [...events]
+    .sort(compareTaskEvents)
+    .reduce((current, event) => applyTaskEvent(current, event), state);
+  return replayed.pendingEvents.length === 0
+    ? replayed
+    : { ...replayed, eventSyncError: '任务事件历史缺少前序记录，请稍后重新同步。' };
+}
+
+function reduceTaskEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {
+  const withEvent = {
+    ...state,
+    seenEventIds: [...state.seenEventIds, event.event_id],
+    pendingEvents: state.pendingEvents.filter((pending) => pending.event_id !== event.event_id),
+  };
 
   switch (event.event_type) {
     case 'task.accepted':
@@ -397,8 +503,70 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     case 'mcp.tool_call_completed':
     case 'mcp.tool_call_failed':
     case 'mcp.tool_call_cancelled':
-    case 'mcp.execution_status_unknown':
       return applyMCPCallEvent(withEvent, event);
+    case 'mcp.execution_status_unknown':
+      return {
+        ...withEvent,
+        statusText: 'MCP 工具执行结果无法确认',
+        currentActivityText: null,
+        mcp: {
+          ...withEvent.mcp,
+          executionUnknown: {
+            projectionId: event.payload.projection_id as string,
+            intentId: event.payload.intent_id as string,
+            callId: event.payload.call_id as string,
+            reasonCode: 'trusted_terminal_result_absent',
+            noReplay: true,
+            nodeId: event.payload.node_id as string,
+            projectionRevision: 0,
+            intentRevision: event.payload.intent_revision as number,
+            unknownEventId: event.event_id,
+            taskFailedEventId: expectedUnknownTaskFailedEventId(event.payload.call_id as string, event.payload.intent_revision as number),
+            unknownTerminalAt: event.payload.unknown_terminal_at as string,
+            createdAt: event.created_at as string,
+          },
+        },
+        errorMessage: '服务重启后无法确认该工具是否完成；系统不会自动重复调用。',
+      };
+    case 'mcp.execution_status_resolution':
+      return {
+        ...withEvent,
+        mcp: {
+          ...withEvent.mcp,
+          executionResolution: {
+            resolutionEventId: event.event_id,
+            resultReceiptId: event.payload.result_receipt_id as string,
+            fromIntentRevision: event.payload.from_intent_revision as number,
+            toIntentRevision: event.payload.to_intent_revision as number,
+            resolvedAt: event.payload.resolved_at as string,
+            createdAt: event.created_at as string,
+          },
+        },
+      };
+    case 'mcp.late_terminal_result_recovered':
+      return {
+        ...withEvent,
+        phase: 'failed',
+        statusText: '任务仍未完成，但已恢复可信迟到结果',
+        currentActivityText: null,
+        mcp: {
+          ...withEvent.mcp,
+          lateResult: {
+            projectionId: event.payload.projection_id as string,
+            resultReceiptId: event.payload.result_receipt_id as string,
+            resultPayloadSha256: event.payload.result_payload_sha256 as string,
+            terminalState: event.payload.terminal_state as MCPLateResultState['terminalState'],
+            safeResultRef: event.payload.safe_result_ref as string | null,
+            safeResultRefSha256: event.payload.safe_result_ref_sha256 as string | null,
+            safeErrorCode: event.payload.safe_error_code as string | null,
+            resolvedAt: event.payload.resolved_at as string,
+            taskRemainsFailed: true,
+            nodeRemainsFailed: true,
+            noReplay: true,
+          },
+        },
+        errorMessage: '任务仍因未知执行状态失败，但已恢复可信迟到结果；不会恢复任务或继续调度。',
+      };
     case 'mcp.input_required':
     case 'mcp.input_submitted':
       return applyMCPInputEvent(withEvent, event);
@@ -412,10 +580,10 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
           ...withEvent.mcp,
           availability: {
             status: 'unavailable',
-            reasonCode: safeCode(event.payload.reason_code),
+            reasonCode: 'no_user_scoped_server',
           },
         },
-        errorMessage: '当前灰度或回滚配置未为该任务分配 MCP 执行路径；已有任务不会改道或重放。',
+        errorMessage: '当前用户没有可用的 MCP Server；该任务不会改道或重放。',
       };
     case 'task.completed':
       return {
@@ -480,6 +648,320 @@ export function applyTaskEvent(state: TaskEventState, event: TaskEventEnvelope):
     default:
       return state;
   }
+}
+
+const CP7_EVENT_TYPES = new Set([
+  'mcp.runtime_unavailable',
+  'mcp.execution_status_unknown',
+  'mcp.execution_status_resolution',
+  'mcp.late_terminal_result_recovered',
+]);
+
+const KNOWN_TASK_EVENT_TYPES = new Set([
+  'task.accepted', 'task.graph_created', 'node.started', 'node.completed',
+  'node.waiting_for_input', 'node.ready_to_resume', 'node.resuming',
+  'main_agent.output_delta', 'main_agent.reasoning_delta', 'planner.reasoning_delta',
+  'memory.reasoning_delta', 'interrupt.reasoning_delta', 'soft_skill.reasoning_delta',
+  'main_agent.output_final', 'capability.missing_fallback', 'mcp.server_routed',
+  'mcp.discovery_started', 'mcp.discovery_completed', 'mcp.discovery_failed',
+  'mcp.queue_entered', 'mcp.queue_left', 'mcp.tool_approval_required',
+  'mcp.tool_approval_decided', 'mcp.tool_call_started', 'mcp.tool_call_still_running',
+  'mcp.tool_call_completed', 'mcp.tool_call_failed', 'mcp.tool_call_cancelled',
+  'mcp.input_required', 'mcp.input_submitted', 'mcp.remote_task_status_changed',
+  'task.completed', 'task.cancellation_requested', 'task.cancelled', 'node.cancelled',
+  'node.blocked_by_cancellation', 'node.orphaned', 'node.failed', 'task.failed',
+  'skill.progress',
+]);
+
+function isKnownTaskEventType(eventType: string): boolean {
+  return KNOWN_TASK_EVENT_TYPES.has(eventType);
+}
+
+export function isClosedCP7Event(event: TaskEventEnvelope): boolean {
+  const payload = event.payload;
+  if (!isRecord(payload)) return false;
+  if (event.event_type === 'mcp.runtime_unavailable') {
+    return hasExactKeys(payload, ['status', 'reason_code'])
+      && payload.status === 'unavailable'
+      && payload.reason_code === 'no_user_scoped_server'
+      && event.event_id === `mcp-no-server:v1:${event.task_id}:01-runtime-unavailable`;
+  }
+  if (event.event_type === 'mcp.execution_status_unknown') {
+    return hasExactKeys(payload, [
+      'schema', 'projection_id', 'intent_id', 'call_id', 'task_id', 'node_id',
+      'projection_revision', 'intent_revision', 'unknown_terminal_at', 'reason_code',
+      'no_replay', 'result_receipt_id', 'predecessor_event_id',
+    ])
+      && payload.schema === 'maf.user_mcp.execution_status_unknown.v1'
+      && hasIdentityFields(payload, event)
+      && isNonEmptyString(payload.intent_id)
+      && isNonEmptyString(payload.call_id)
+      && isNonEmptyString(payload.projection_id)
+      && payload.projection_id === `mcp-terminal-projection:v1:${payload.call_id}`
+      && payload.projection_revision === 0
+      && isNonNegativeInteger(payload.intent_revision)
+      && isNonEmptyString(payload.unknown_terminal_at)
+      && payload.reason_code === 'trusted_terminal_result_absent'
+      && payload.no_replay === true
+      && payload.result_receipt_id === null
+      && payload.predecessor_event_id === null
+      && event.event_id === expectedUnknownEventId(payload.call_id, payload.intent_revision)
+      && sameInstant(event.created_at, payload.unknown_terminal_at);
+  }
+  if (event.event_type === 'task.failed' && isUnknownTaskFailedPayload(payload)) {
+    return hasExactKeys(payload, [
+      'schema', 'projection_id', 'call_id', 'task_id', 'node_id', 'code', 'no_replay',
+      'unknown_event_id', 'predecessor_event_id',
+    ])
+      && payload.schema === 'maf.user_mcp.unknown_task_failed.v1'
+      && hasIdentityFields(payload, event)
+      && isNonEmptyString(payload.projection_id)
+      && isNonEmptyString(payload.call_id)
+      && payload.code === 'execution_status_unknown'
+      && payload.no_replay === true
+      && isNonEmptyString(payload.unknown_event_id)
+      && payload.predecessor_event_id === payload.unknown_event_id
+      && event.event_id === expectedUnknownTaskFailedEventId(payload.call_id, unknownIntentRevision(payload.unknown_event_id));
+  }
+  if (event.event_type === 'task.failed' && isNoServerTaskFailedPayload(payload)) {
+    return hasExactKeys(payload, ['code'])
+      && payload.code === 'mcp_runtime_unavailable'
+      && event.event_id === `mcp-no-server:v1:${event.task_id}:02-task-failed`;
+  }
+  if (event.event_type === 'mcp.execution_status_resolution') {
+    return hasExactKeys(payload, [
+      'schema', 'projection_id', 'intent_id', 'call_id', 'task_id', 'node_id',
+      'unknown_event_id', 'task_failed_event_id', 'result_receipt_id',
+      'from_projection_revision', 'to_projection_revision', 'from_intent_revision',
+      'to_intent_revision', 'unknown_terminal_at', 'resolved_at', 'predecessor_event_id',
+    ])
+      && payload.schema === 'maf.user_mcp.execution_status_resolution.v1'
+      && hasIdentityFields(payload, event)
+      && allNonEmptyStrings(payload, [
+        'projection_id', 'intent_id', 'call_id', 'unknown_event_id', 'task_failed_event_id',
+        'result_receipt_id', 'unknown_terminal_at', 'resolved_at',
+      ])
+      && payload.from_projection_revision === 0
+      && payload.to_projection_revision === 1
+      && isNonNegativeInteger(payload.from_intent_revision)
+      && isNonNegativeInteger(payload.to_intent_revision)
+      && payload.to_intent_revision === (payload.from_intent_revision as number) + 1
+      && payload.predecessor_event_id === payload.task_failed_event_id
+      && event.event_id === expectedResolutionEventId(payload.call_id)
+      && sameInstant(event.created_at, payload.resolved_at);
+  }
+  if (event.event_type === 'mcp.late_terminal_result_recovered') {
+    const terminalState = payload.terminal_state;
+    const completed = terminalState === 'completed';
+    return hasExactKeys(payload, [
+      'schema', 'projection_id', 'intent_id', 'call_id', 'task_id', 'node_id',
+      'unknown_event_id', 'resolution_event_id', 'result_receipt_id',
+      'result_payload_sha256', 'projection_revision', 'terminal_state', 'safe_result_ref',
+      'safe_result_ref_sha256', 'safe_error_code', 'resolved_at', 'task_remains_failed',
+      'node_remains_failed', 'no_replay', 'predecessor_event_id',
+    ])
+      && payload.schema === 'maf.user_mcp.late_terminal_result_recovered.v1'
+      && hasIdentityFields(payload, event)
+      && allNonEmptyStrings(payload, [
+        'projection_id', 'intent_id', 'call_id', 'unknown_event_id', 'resolution_event_id',
+        'result_receipt_id', 'result_payload_sha256', 'resolved_at',
+      ])
+      && payload.projection_revision === 1
+      && (terminalState === 'completed' || terminalState === 'failed' || terminalState === 'cancelled')
+      && (completed
+        ? isNonEmptyString(payload.safe_result_ref) && isNonEmptyString(payload.safe_result_ref_sha256) && payload.safe_error_code === null
+        : payload.safe_result_ref === null && payload.safe_result_ref_sha256 === null && isNonEmptyString(payload.safe_error_code))
+      && payload.task_remains_failed === true
+      && payload.node_remains_failed === true
+      && payload.no_replay === true
+      && payload.predecessor_event_id === payload.resolution_event_id
+      && event.event_id === expectedCorrectionEventId(payload.call_id);
+  }
+  return true;
+}
+
+function isCP7ContractEvent(event: TaskEventEnvelope): boolean {
+  return CP7_EVENT_TYPES.has(event.event_type)
+    || (event.event_type === 'task.failed'
+      && (isUnknownTaskFailedPayload(event.payload) || isNoServerTaskFailedPayload(event.payload)));
+}
+
+function isUnknownTaskFailedPayload(payload: Record<string, unknown>): boolean {
+  return payload.schema === 'maf.user_mcp.unknown_task_failed.v1'
+    || payload.code === 'execution_status_unknown';
+}
+
+function isNoServerTaskFailedPayload(payload: Record<string, unknown>): boolean {
+  return payload.code === 'mcp_runtime_unavailable';
+}
+
+function predecessorEventId(event: TaskEventEnvelope): string | null {
+  if (!isCP7ContractEvent(event)) return null;
+  if (event.event_type === 'task.failed' && isNoServerTaskFailedPayload(event.payload)) {
+    return `mcp-no-server:v1:${event.task_id}:01-runtime-unavailable`;
+  }
+  return typeof event.payload.predecessor_event_id === 'string'
+    ? event.payload.predecessor_event_id
+    : null;
+}
+
+function drainPendingTaskEvents(state: TaskEventState): TaskEventState {
+  let current = state;
+  while (true) {
+    const ready = current.pendingEvents
+      .filter((event) => {
+        const predecessorId = predecessorEventId(event);
+        return predecessorId === null || current.seenEventIds.includes(predecessorId);
+      })
+      .sort(compareTaskEvents)[0];
+    if (!ready) return current;
+    if (!hasValidConsumedChainBinding(current, ready)) {
+      return {
+        ...current,
+        pendingEvents: current.pendingEvents.filter((event) => event.event_id !== ready.event_id),
+        eventSyncError: '任务事件链绑定不一致，请重新同步任务历史。',
+      };
+    }
+    current = reduceTaskEvent(current, ready);
+  }
+}
+
+function hasValidConsumedChainBinding(state: TaskEventState, event: TaskEventEnvelope): boolean {
+  if (!isCP7ContractEvent(event) || event.event_type === 'mcp.runtime_unavailable') return true;
+  if (event.event_type === 'mcp.execution_status_unknown') return true;
+  if (event.event_type === 'task.failed' && isNoServerTaskFailedPayload(event.payload)) {
+    return state.mcp.availability?.status === 'unavailable';
+  }
+  const unknown = state.mcp.executionUnknown;
+  if (!unknown) return false;
+  if (event.event_type === 'task.failed') {
+    return event.event_id === unknown.taskFailedEventId
+      && event.payload.unknown_event_id === unknown.unknownEventId
+      && event.payload.projection_id === unknown.projectionId
+      && event.payload.call_id === unknown.callId
+      && event.payload.task_id === event.task_id
+      && event.payload.node_id === unknown.nodeId
+      && isStrictlyAfter(event.created_at, unknown.createdAt);
+  }
+  if (event.event_type === 'mcp.execution_status_resolution') {
+    return event.payload.projection_id === unknown.projectionId
+      && event.payload.intent_id === unknown.intentId
+      && event.payload.call_id === unknown.callId
+      && event.payload.node_id === unknown.nodeId
+      && event.payload.unknown_event_id === unknown.unknownEventId
+      && event.payload.task_failed_event_id === unknown.taskFailedEventId
+      && event.payload.from_projection_revision === unknown.projectionRevision
+      && event.payload.from_intent_revision === unknown.intentRevision
+      && event.payload.unknown_terminal_at === unknown.unknownTerminalAt
+      && isStrictlyAfter(event.created_at, unknown.createdAt);
+  }
+  if (event.event_type === 'mcp.late_terminal_result_recovered') {
+    const resolution = state.mcp.executionResolution;
+    return resolution !== null
+      && event.payload.projection_id === unknown.projectionId
+      && event.payload.intent_id === unknown.intentId
+      && event.payload.call_id === unknown.callId
+      && event.payload.node_id === unknown.nodeId
+      && event.payload.unknown_event_id === unknown.unknownEventId
+      && event.payload.resolution_event_id === resolution.resolutionEventId
+      && event.payload.result_receipt_id === resolution.resultReceiptId
+      && event.payload.projection_revision === 1
+      && event.payload.resolved_at === resolution.resolvedAt
+      && isStrictlyAfter(event.created_at, resolution.createdAt);
+  }
+  return true;
+}
+
+function compareTaskEvents(left: TaskEventEnvelope, right: TaskEventEnvelope): number {
+  const byCreatedAt = (left.created_at ?? '').localeCompare(right.created_at ?? '');
+  return byCreatedAt || left.event_id.localeCompare(right.event_id);
+}
+
+function taskEventFingerprint(event: TaskEventEnvelope): string {
+  return canonicalJson({
+    event_type: event.event_type,
+    conversation_id: event.conversation_id,
+    task_id: event.task_id,
+    node_id: event.node_id,
+    payload: event.payload,
+    created_at: event.created_at,
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hasExactKeys(payload: Record<string, unknown>, keys: string[]): boolean {
+  const actual = Object.keys(payload).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function hasIdentityFields(payload: Record<string, unknown>, event: TaskEventEnvelope): boolean {
+  return payload.task_id === event.task_id
+    && typeof payload.node_id === 'string'
+    && payload.node_id === event.node_id;
+}
+
+function allNonEmptyStrings(payload: Record<string, unknown>, keys: string[]): boolean {
+  return keys.every((key) => isNonEmptyString(payload[key]));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function expectedUnknownEventId(callId: unknown, intentRevision: unknown): string {
+  return `mcp-execution-status-unknown:v1:${String(callId)}:${String(intentRevision)}:01-unknown`;
+}
+
+function expectedUnknownTaskFailedEventId(callId: unknown, intentRevision: unknown): string {
+  return `mcp-execution-status-unknown:v1:${String(callId)}:${String(intentRevision)}:02-task-failed`;
+}
+
+function expectedResolutionEventId(callId: unknown): string {
+  return `mcp-late-terminal:v1:${String(callId)}:1:01-resolution`;
+}
+
+function expectedCorrectionEventId(callId: unknown): string {
+  return `mcp-late-terminal:v1:${String(callId)}:1:02-correction`;
+}
+
+function unknownIntentRevision(eventId: unknown): number {
+  if (typeof eventId !== 'string') return -1;
+  const match = eventId.match(/^mcp-execution-status-unknown:v1:[^:]+:(\d+):01-unknown$/);
+  return match ? Number(match[1]) : -1;
+}
+
+function sameInstant(left: unknown, right: unknown): boolean {
+  const leftMicros = instantMicros(left);
+  const rightMicros = instantMicros(right);
+  return leftMicros !== null && leftMicros === rightMicros;
+}
+
+function isStrictlyAfter(left: unknown, right: unknown): boolean {
+  const leftMicros = instantMicros(left);
+  const rightMicros = instantMicros(right);
+  return leftMicros !== null && rightMicros !== null && leftMicros > rightMicros;
+}
+
+function instantMicros(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match) return null;
+  const seconds = Date.parse(`${match[1]}${match[3]}`);
+  if (!Number.isFinite(seconds)) return null;
+  const fractionMicros = Number((match[2] ?? '').padEnd(6, '0'));
+  return seconds * 1_000 + fractionMicros;
 }
 
 function applyMCPDiscoveryEvent(state: TaskEventState, event: TaskEventEnvelope): TaskEventState {

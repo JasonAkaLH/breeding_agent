@@ -5,11 +5,14 @@ interface Props {
   taskId: string;
   mcp: MCPTaskState;
   busyCallRef?: string | null;
+  syncError?: string | null;
   onContinue?(taskId: string, safeCallRef: string): void | Promise<void>;
   onCancel?(taskId: string, safeCallRef: string): void | Promise<void>;
+  onResync?(taskId: string): void;
 }
 
-export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, onContinue, onCancel }: Props) {
+export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, syncError = null, onContinue, onCancel, onResync }: Props) {
+  const noReplay = Boolean(mcp.executionUnknown?.noReplay || mcp.lateResult?.noReplay);
   const visible = Boolean(
     mcp.serverDisplayName
     || mcp.discovery
@@ -18,7 +21,10 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, onContinue, 
     || mcp.calls.length
     || mcp.input
     || mcp.remoteTask
-    || mcp.availability,
+    || mcp.availability
+    || mcp.executionUnknown
+    || mcp.lateResult
+    || syncError,
   );
   if (!visible) return null;
 
@@ -27,6 +33,15 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, onContinue, 
       <div role="status" aria-live="polite" aria-atomic="true">
         {runtimeAnnouncement(mcp)}
       </div>
+      {syncError ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="任务事件需要重新同步"
+          description={syncError}
+          action={<Button size="small" disabled={!onResync} onClick={() => onResync?.(taskId)}>重新同步</Button>}
+        />
+      ) : null}
       {mcp.discovery ? (
         <Typography.Paragraph>
           工具发现：<Tag color={mcp.discovery.status === 'failed' ? 'red' : mcp.discovery.status === 'completed' ? 'green' : 'blue'}>
@@ -58,12 +73,30 @@ export function MCPRuntimeStatus({ taskId, mcp, busyCallRef = null, onContinue, 
           description="当前灰度或回滚配置未分配可用执行路径；该任务不会切换到另一条 MCP 链路或自动重试。"
         />
       ) : null}
+      {mcp.executionUnknown && !mcp.lateResult ? (
+        <Alert
+          type="error"
+          showIcon
+          message="MCP 工具执行结果无法确认"
+          description="系统不会自动重复调用该工具。"
+        />
+      ) : null}
+      {mcp.lateResult ? (
+        <Alert
+          type="info"
+          showIcon
+          message="已恢复可信迟到结果"
+          description={mcp.lateResult.safeResultRef
+            ? `任务仍因未知执行状态失败；安全结果引用：${mcp.lateResult.safeResultRef}`
+            : `任务仍因未知执行状态失败；固定错误：${mcp.lateResult.safeErrorCode ?? 'unknown'}`}
+        />
+      ) : null}
       <List
         size="small"
         dataSource={mcp.calls}
         locale={{ emptyText: '尚未开始工具调用' }}
         renderItem={(call) => (
-          <List.Item actions={callActions(taskId, call, busyCallRef, onContinue, onCancel)}>
+          <List.Item actions={callActions(taskId, call, busyCallRef, noReplay, onContinue, onCancel)}>
             <List.Item.Meta
               title={call.toolDisplayName || 'MCP 工具'}
               description={<CallDescription call={call} />}
@@ -89,16 +122,17 @@ function callActions(
   taskId: string,
   call: MCPCallState,
   busyCallRef: string | null,
+  noReplay: boolean,
   onContinue: Props['onContinue'],
   onCancel: Props['onCancel'],
 ) {
   if (call.status !== 'still_running') return [];
   const busy = busyCallRef === call.safeCallRef;
   return [
-    <Button key="continue" size="small" loading={busy} disabled={!onContinue} onClick={() => void onContinue?.(taskId, call.safeCallRef)}>
+    <Button key="continue" size="small" loading={busy} disabled={noReplay || !onContinue} onClick={() => void onContinue?.(taskId, call.safeCallRef)}>
       继续等待
     </Button>,
-    <Button key="cancel" size="small" danger disabled={busy || !onCancel} onClick={() => void onCancel?.(taskId, call.safeCallRef)}>
+    <Button key="cancel" size="small" danger disabled={noReplay || busy || !onCancel} onClick={() => void onCancel?.(taskId, call.safeCallRef)}>
       停止当前工具
     </Button>,
   ];
@@ -106,6 +140,8 @@ function callActions(
 
 function runtimeAnnouncement(mcp: MCPTaskState): string {
   const active = [...mcp.calls].reverse().find((call) => call.status === 'running' || call.status === 'still_running');
+  if (mcp.lateResult) return '已恢复可信迟到结果，任务仍保持失败';
+  if (mcp.executionUnknown) return 'MCP 工具执行结果无法确认，任务不会自动重放';
   if (mcp.input?.pending) return 'MCP 工具等待补充信息';
   if (mcp.approval?.pending) return 'MCP 工具等待授权';
   if (mcp.queue?.queued) return mcp.queue.position === null ? 'MCP 调用正在排队' : `MCP 调用排队位置 ${mcp.queue.position}`;

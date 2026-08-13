@@ -164,6 +164,26 @@ function event(event_type: string, payload: Record<string, unknown> = {}, event_
   };
 }
 
+function terminalProjectionEvents(): TaskEventEnvelope[] {
+  const unknownId = 'mcp-execution-status-unknown:v1:call-1:4:01-unknown';
+  const failedId = 'mcp-execution-status-unknown:v1:call-1:4:02-task-failed';
+  const resolutionId = 'mcp-late-terminal:v1:call-1:1:01-resolution';
+  return [
+    { ...event('mcp.execution_status_unknown', {
+      schema: 'maf.user_mcp.execution_status_unknown.v1', projection_id: 'mcp-terminal-projection:v1:call-1', intent_id: 'intent-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', projection_revision: 0, intent_revision: 4, unknown_terminal_at: '2026-04-27T00:00:00Z', reason_code: 'trusted_terminal_result_absent', no_replay: true, result_receipt_id: null, predecessor_event_id: null,
+    }, unknownId, 'node-1'), created_at: '2026-04-27T00:00:00Z' },
+    { ...event('task.failed', {
+      schema: 'maf.user_mcp.unknown_task_failed.v1', projection_id: 'mcp-terminal-projection:v1:call-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', code: 'execution_status_unknown', no_replay: true, unknown_event_id: unknownId, predecessor_event_id: unknownId,
+    }, failedId, 'node-1'), created_at: '2026-04-27T00:00:00.000001Z' },
+    { ...event('mcp.execution_status_resolution', {
+      schema: 'maf.user_mcp.execution_status_resolution.v1', projection_id: 'mcp-terminal-projection:v1:call-1', intent_id: 'intent-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', unknown_event_id: unknownId, task_failed_event_id: failedId, result_receipt_id: 'receipt-1', from_projection_revision: 0, to_projection_revision: 1, from_intent_revision: 4, to_intent_revision: 5, unknown_terminal_at: '2026-04-27T00:00:00Z', resolved_at: '2026-04-27T00:01:00Z', predecessor_event_id: failedId,
+    }, resolutionId, 'node-1'), created_at: '2026-04-27T00:01:00Z' },
+    { ...event('mcp.late_terminal_result_recovered', {
+      schema: 'maf.user_mcp.late_terminal_result_recovered.v1', projection_id: 'mcp-terminal-projection:v1:call-1', intent_id: 'intent-1', call_id: 'call-1', task_id: 'task-1', node_id: 'node-1', unknown_event_id: unknownId, resolution_event_id: resolutionId, result_receipt_id: 'receipt-1', result_payload_sha256: 'sha256:result', projection_revision: 1, terminal_state: 'completed', safe_result_ref: 'artifact:safe-result', safe_result_ref_sha256: 'sha256:ref', safe_error_code: null, resolved_at: '2026-04-27T00:01:00Z', task_remains_failed: true, node_remains_failed: true, no_replay: true, predecessor_event_id: resolutionId,
+    }, 'mcp-late-terminal:v1:call-1:1:02-correction', 'node-1'), created_at: '2026-04-27T00:01:00.000001Z' },
+  ];
+}
+
 function taskSummary(taskId: string, status: string) {
   return {
     task_id: taskId,
@@ -226,6 +246,19 @@ function makeSequencedEventSourceFactory(eventBatches: TaskEventEnvelope[][]): E
     });
     return { close: vi.fn() };
   };
+}
+
+function makeEndingEventSourceFactory(events: TaskEventEnvelope[]) {
+  let subscriptionCount = 0;
+  const factory: EventSourceFactory = (_url, handlers) => {
+    subscriptionCount += 1;
+    queueMicrotask(() => {
+      for (const item of events) handlers.onMessage(item);
+      handlers.onError(new Error('replay ended'));
+    });
+    return { close: vi.fn() };
+  };
+  return { factory, subscriptionCount: () => subscriptionCount };
 }
 
 function makeErrorEventSourceFactory(): EventSourceFactory {
@@ -855,6 +888,56 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
     expect(api.getTask).toHaveBeenCalledWith('task-running');
     expect(eventSource.urls).toEqual(['/api/v1/tasks/task-running/events']);
+  });
+
+  it('restores a failed MCP terminal projection and replays its late result without reopening the task', async () => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-1', title: '迟到结果', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({ conversation_id: 'conv-history', messages: [] })),
+      getTask: vi.fn(async () => ({
+        ...taskSummary('task-1', 'failed'),
+        mcp_terminal_projection: { projection_id: 'mcp-terminal-projection:v1:call-1' },
+      })),
+    });
+    const eventSource = makeInspectableEventSourceFactory(terminalProjectionEvents());
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('已恢复可信迟到结果')).toBeInTheDocument();
+    expect(screen.getAllByText(/任务仍因未知执行状态失败/)).toHaveLength(2);
+    expect(screen.getByLabelText('请输入问题')).not.toBeDisabled();
+    expect(eventSource.urls).toEqual(['/api/v1/tasks/task-1/events']);
+  });
+
+  it.each([
+    ['correction only', [terminalProjectionEvents()[3]]],
+    ['resolution and correction', terminalProjectionEvents().slice(2)],
+  ])('shows a bounded recoverable sync error when terminal replay ends with a predecessor gap: %s', async (_name, replayEvents) => {
+    localStorage.setItem('maf.frontend.conversation_id.alice', 'conv-history');
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{ conversation_id: 'conv-history', username: 'alice', status: 'active', current_task_id: 'task-1', title: '缺失前序', created_at: null, updated_at: null }],
+      })),
+      listConversationMessages: vi.fn(async () => ({ conversation_id: 'conv-history', messages: [] })),
+      getTask: vi.fn(async () => ({
+        ...taskSummary('task-1', 'failed'),
+        mcp_terminal_projection: { projection_id: 'mcp-terminal-projection:v1:call-1' },
+      })),
+    });
+    const eventSource = makeEndingEventSourceFactory(replayEvents);
+
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSource.factory} />);
+
+    expect(await screen.findByText('任务事件需要重新同步')).toBeInTheDocument();
+    expect(screen.getByText(/缺少前序记录/)).toBeInTheDocument();
+    expect(screen.queryByText('已恢复可信迟到结果')).not.toBeInTheDocument();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    });
+    expect(eventSource.subscriptionCount()).toBe(1);
   });
 
   it('restores an active current task after explicit login', async () => {
@@ -1775,6 +1858,35 @@ describe('App', () => {
 
     expect(await screen.findByLabelText('任务失败')).toBeInTheDocument();
     expect(close).toHaveBeenCalled();
+  });
+
+  it('waits for reducer consumption before applying terminal side effects to an out-of-order MCP chain', async () => {
+    let streamHandlers: TaskEventHandlers | null = null;
+    const close = vi.fn();
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      streamHandlers = handlers;
+      return { close };
+    };
+    await renderAuthed(<App apiClient={makeApi()} eventSourceFactory={eventSourceFactory} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '乱序终态' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(streamHandlers).not.toBeNull());
+    const [unknown, failed, resolution, correction] = terminalProjectionEvents();
+
+    await act(async () => {
+      streamHandlers?.onMessage(correction);
+      streamHandlers?.onMessage(resolution);
+      streamHandlers?.onMessage(failed);
+    });
+    expect(close).not.toHaveBeenCalled();
+    expect(screen.queryByText('已恢复可信迟到结果')).not.toBeInTheDocument();
+
+    await act(async () => {
+      streamHandlers?.onMessage(unknown);
+    });
+    expect(await screen.findByText('已恢复可信迟到结果')).toBeInTheDocument();
+    expect(screen.getByLabelText('任务失败')).toBeInTheDocument();
+    expect(close).not.toHaveBeenCalled();
   });
 
   it('composer safe autofocus focuses the composer when an interrupt prompt is ready', async () => {

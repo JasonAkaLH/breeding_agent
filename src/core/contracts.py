@@ -25,9 +25,11 @@ from .models import (
     MCPConnectionLease,
     MCPCP7CandidateGuard,
     MCPCP7ReadyEpochEvent,
+    MCPCP7ReadyEpochEventKind,
     MCPCP7SafetyLedgerRecord,
     MCPCP7SafetySnapshot,
     MCPDispatchResumeOutbox,
+    MCPDispatchFinalizeResult,
     MCPExecutionTerminalProjection,
     MCPInitialIntentCreateResult,
     MCPLegacyRetirementEvidence,
@@ -35,6 +37,7 @@ from .models import (
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
     MCPNoServerConvergenceResult,
+    MCPNoServerConvergenceReceipt,
     MCPNoServerIntent,
     MCPRemoteTaskBinding,
     MCPRemoteTaskOutbox,
@@ -329,6 +332,10 @@ class StoragePort(Protocol):
         self,
     ) -> list[MCPNoServerIntent]: ...
 
+    async def list_mcp_no_server_intents(
+        self, *, limit: int = 10_000
+    ) -> list[MCPNoServerIntent]: ...
+
     async def create_user_mcp_initial_intent(
         self,
         task: Task,
@@ -353,6 +360,10 @@ class StoragePort(Protocol):
     async def get_mcp_dispatch_resume_outbox(
         self, outbox_id: str
     ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def list_mcp_dispatch_resume_outboxes(
+        self, *, limit: int = 10_000
+    ) -> list[MCPDispatchResumeOutbox]: ...
 
     async def claim_mcp_dispatch_resume_outbox(
         self,
@@ -379,13 +390,30 @@ class StoragePort(Protocol):
         expected_outbox_revision: int,
         record: MCPCallRecord,
         occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
     ) -> bool: ...
+
+    async def finalize_mcp_dispatch_no_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        outcome: str,
+        safe_error_code: str | None,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult: ...
 
     async def converge_user_mcp_no_server(
         self,
         task_id: str,
         occurred_at: datetime,
     ) -> MCPNoServerConvergenceResult: ...
+
+    async def get_mcp_no_server_convergence_receipt(
+        self, task_id: str
+    ) -> MCPNoServerConvergenceReceipt | None: ...
 
     async def commit_authoritative_mcp_terminal_result(
         self,
@@ -394,8 +422,20 @@ class StoragePort(Protocol):
         occurred_at: datetime,
     ) -> MCPTerminalResultCommitResult: ...
 
+    async def finalize_mcp_dispatch_intent(
+        self,
+        intent_id: str,
+        node_id: str,
+        result_receipt_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult: ...
+
     async def get_mcp_terminal_result_receipt(
         self, result_receipt_id: str
+    ) -> MCPTerminalResultReceipt | None: ...
+
+    async def get_mcp_terminal_result_receipt_for_call(
+        self, call_id: str
     ) -> MCPTerminalResultReceipt | None: ...
 
     async def get_mcp_execution_terminal_projection(
@@ -415,6 +455,14 @@ class StoragePort(Protocol):
         self, evidence: MCPLegacyRetirementEvidence
     ) -> MCPLegacyRetirementEvidence: ...
 
+    async def list_mcp_legacy_retirement_task_ids(
+        self,
+        inventory_id: str,
+        inventory_sha256: str,
+        *,
+        limit: int = 10_000,
+    ) -> list[str]: ...
+
     async def append_mcp_cp7_safety_ledger_record(
         self, record: MCPCP7SafetyLedgerRecord
     ) -> MCPCP7SafetyLedgerRecord: ...
@@ -422,6 +470,13 @@ class StoragePort(Protocol):
     async def append_mcp_cp7_ready_epoch_event(
         self, event: MCPCP7ReadyEpochEvent
     ) -> MCPCP7ReadyEpochEvent: ...
+
+    async def get_mcp_cp7_ready_epoch_event(
+        self,
+        candidate_id: str,
+        epoch_id: str,
+        event_kind: MCPCP7ReadyEpochEventKind,
+    ) -> MCPCP7ReadyEpochEvent | None: ...
 
     async def get_mcp_cp7_candidate_guard(
         self, candidate_id: str
@@ -525,6 +580,14 @@ class StoragePort(Protocol):
         terminal_at: datetime,
         result_ref: str | None = None,
         safe_error_code: str | None = None,
+        result_receipt_id: str | None = None,
+    ) -> MCPRemoteTaskBinding | None: ...
+
+    async def finish_mcp_remote_task_binding_from_receipt(
+        self,
+        call_id: str,
+        result_receipt_id: str,
+        occurred_at: datetime,
     ) -> MCPRemoteTaskBinding | None: ...
 
     async def claim_mcp_remote_task_outbox(

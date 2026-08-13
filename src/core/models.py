@@ -221,6 +221,12 @@ class MCPTerminalResultCommitResult(StrEnum):
     CONFLICT = "conflict"
 
 
+class MCPDispatchFinalizeResult(StrEnum):
+    FINALIZED = "finalized"
+    ALREADY_FINALIZED = "already_finalized"
+    CONFLICT = "conflict"
+
+
 class MCPLegacyRetirementConvergenceResult(StrEnum):
     NOT_APPLICABLE = "not_applicable"
     CONVERGED = "converged"

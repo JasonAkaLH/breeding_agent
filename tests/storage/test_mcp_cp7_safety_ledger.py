@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from src.core.models import (
@@ -15,6 +16,13 @@ from src.core.models import (
     MCPCP7SafetyRecordKind,
 )
 from src.integrations.mcp.cp7_artifacts import canonical_sha256
+from src.integrations.mcp.cp7_safety import (
+    CP7BoundaryEvidence,
+    CP7LocalSafetyFacade,
+    CP7RuntimeIdentity,
+    CP7SafetyStateError,
+)
+from src.integrations.mcp.rollout_evidence import MCPSafetyRedLine
 from src.storage.sqlite.bootstrap import bootstrap_sqlite_database
 from src.storage.sqlite.repositories import SQLiteStorage
 
@@ -29,6 +37,47 @@ RED_LINES = (
     ("shadow_tool_call", "gateway.persisted_assignment_boundary"),
     ("persistent_resource_leak", "gateway.resource_cleanup_boundary"),
 )
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _signed_record(record: MCPCP7SafetyLedgerRecord) -> MCPCP7SafetyLedgerRecord:
+    payload = {
+        "candidate_id": record.candidate_id,
+        "epoch_id": record.epoch_id,
+        "config_fingerprint": record.config_fingerprint,
+        "record_kind": record.record_kind.value,
+        "red_line": record.red_line,
+        "hook_id": record.hook_id,
+        "bucket_started_at": None if record.bucket_started_at is None else _utc_text(record.bucket_started_at),
+        "bucket_ended_at": None if record.bucket_ended_at is None else _utc_text(record.bucket_ended_at),
+        "reason_code": record.reason_code,
+        "value": record.value,
+        "boundary_source_sha256": record.boundary_source_sha256,
+        "recorded_at": _utc_text(record.recorded_at),
+    }
+    return replace(record, payload_sha256=canonical_sha256(payload))
+
+
+def _signed_event(event: MCPCP7ReadyEpochEvent) -> MCPCP7ReadyEpochEvent:
+    payload = {
+        "candidate_id": event.candidate_id,
+        "epoch_id": event.epoch_id,
+        "predecessor_epoch_id": event.predecessor_epoch_id,
+        "event_kind": event.event_kind.value,
+        "container_id": event.container_id,
+        "image_id": event.image_id,
+        "config_fingerprint": event.config_fingerprint,
+        "boundary_at": _utc_text(event.boundary_at),
+        "audit_device": event.audit_device,
+        "audit_inode": event.audit_inode,
+        "audit_offset": event.audit_offset,
+        "ledger_record_count": event.ledger_record_count,
+        "inflight_state_sha256": event.inflight_state_sha256,
+    }
+    return replace(event, payload_sha256=canonical_sha256(payload))
 
 
 class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
@@ -56,7 +105,7 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
         epoch_id = f"epoch-{candidate_id}"
         for index, (red_line, hook_id) in enumerate(RED_LINES):
             await self.storage.append_mcp_cp7_safety_ledger_record(
-                MCPCP7SafetyLedgerRecord(
+                _signed_record(MCPCP7SafetyLedgerRecord(
                     record_id=f"{candidate_id}-registration-{index}",
                     candidate_id=candidate_id,
                     epoch_id=epoch_id,
@@ -73,12 +122,12 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                         {"candidate": candidate_id, "registration": index}
                     ),
                     recorded_at=self.at + timedelta(microseconds=index),
-                )
+                ))
             )
         for minute in range(attestation_minutes):
             for index, (red_line, hook_id) in enumerate(RED_LINES):
                 await self.storage.append_mcp_cp7_safety_ledger_record(
-                    MCPCP7SafetyLedgerRecord(
+                    _signed_record(MCPCP7SafetyLedgerRecord(
                         record_id=f"{candidate_id}-attestation-{minute}-{index}",
                         candidate_id=candidate_id,
                         epoch_id=epoch_id,
@@ -100,7 +149,7 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                         ),
                         recorded_at=self.at
                         + timedelta(minutes=2 + minute, microseconds=index),
-                    )
+                    ))
                 )
         boundaries = (
             (MCPCP7ReadyEpochEventKind.OPENED, 0),
@@ -109,7 +158,7 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
         )
         for kind, minute in boundaries:
             await self.storage.append_mcp_cp7_ready_epoch_event(
-                MCPCP7ReadyEpochEvent(
+                _signed_event(MCPCP7ReadyEpochEvent(
                     event_id=f"{candidate_id}-{kind.value}",
                     candidate_id=candidate_id,
                     epoch_id=epoch_id,
@@ -129,13 +178,13 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                     payload_sha256=canonical_sha256(
                         {"candidate": candidate_id, "event": kind.value}
                     ),
-                )
+                ))
             )
         if fork:
             fork_epoch = f"{epoch_id}-fork"
             for kind, minute in boundaries:
                 await self.storage.append_mcp_cp7_ready_epoch_event(
-                    MCPCP7ReadyEpochEvent(
+                    _signed_event(MCPCP7ReadyEpochEvent(
                         event_id=f"{candidate_id}-fork-{kind.value}",
                         candidate_id=candidate_id,
                         epoch_id=fork_epoch,
@@ -155,13 +204,13 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                         payload_sha256=canonical_sha256(
                             {"candidate": candidate_id, "fork-event": kind.value}
                         ),
-                    )
+                    ))
                 )
 
     async def test_snapshot_is_deterministic_and_positive_record_latches_guard(self) -> None:
         for index, (red_line, hook_id) in enumerate(RED_LINES):
             await self.storage.append_mcp_cp7_safety_ledger_record(
-                MCPCP7SafetyLedgerRecord(
+                _signed_record(MCPCP7SafetyLedgerRecord(
                     record_id=f"registration-{index}",
                     candidate_id="candidate-1",
                     epoch_id="epoch-1",
@@ -176,27 +225,31 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                     boundary_source_sha256=None,
                     payload_sha256=canonical_sha256({"registration": index}),
                     recorded_at=self.at + timedelta(microseconds=index),
-                )
+                ))
             )
-        for index, (red_line, hook_id) in enumerate(RED_LINES):
-            await self.storage.append_mcp_cp7_safety_ledger_record(
-                MCPCP7SafetyLedgerRecord(
-                    record_id=f"attestation-{index}",
+        for minute in range(2):
+            for index, (red_line, hook_id) in enumerate(RED_LINES):
+                await self.storage.append_mcp_cp7_safety_ledger_record(
+                    _signed_record(MCPCP7SafetyLedgerRecord(
+                    record_id=f"attestation-{minute}-{index}",
                     candidate_id="candidate-1",
                     epoch_id="epoch-1",
                     config_fingerprint="config-1",
                     record_kind=MCPCP7SafetyRecordKind.ATTESTATION,
                     red_line=red_line,
                     hook_id=hook_id,
-                    bucket_started_at=self.at + timedelta(minutes=1),
-                    bucket_ended_at=self.at + timedelta(minutes=2),
+                    bucket_started_at=self.at + timedelta(minutes=minute),
+                    bucket_ended_at=self.at + timedelta(minutes=minute + 1),
                     reason_code="observed_zero",
                     value=0,
                     boundary_source_sha256=None,
-                    payload_sha256=canonical_sha256({"attestation": index}),
-                    recorded_at=self.at + timedelta(minutes=2, microseconds=index),
+                    payload_sha256=canonical_sha256(
+                        {"attestation": index, "minute": minute}
+                    ),
+                    recorded_at=self.at
+                    + timedelta(minutes=minute + 1, microseconds=index),
+                    ))
                 )
-            )
         for offset, kind in enumerate(
             (
                 MCPCP7ReadyEpochEventKind.OPENED,
@@ -205,7 +258,7 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
             )
         ):
             await self.storage.append_mcp_cp7_ready_epoch_event(
-                MCPCP7ReadyEpochEvent(
+                _signed_event(MCPCP7ReadyEpochEvent(
                     event_id=f"epoch-{kind.value}",
                     candidate_id="candidate-1",
                     epoch_id="epoch-1",
@@ -221,13 +274,13 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                     ledger_record_count=8,
                     inflight_state_sha256=canonical_sha256({"inflight": offset}),
                     payload_sha256=canonical_sha256({"event": kind.value}),
-                )
+                ))
             )
         first = await self.storage.produce_mcp_cp7_safety_snapshot("candidate-1")
         second = await self.storage.produce_mcp_cp7_safety_snapshot("candidate-1")
         self.assertEqual(first.snapshot_sha256, second.snapshot_sha256)
         self.assertFalse(first.invalid_latched)
-        gap = MCPCP7SafetyLedgerRecord(
+        gap = _signed_record(MCPCP7SafetyLedgerRecord(
             record_id="gap-1",
             candidate_id="candidate-1",
             epoch_id="epoch-1",
@@ -242,17 +295,80 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
             boundary_source_sha256=canonical_sha256({"boundary": 1}),
             payload_sha256=canonical_sha256({"gap": 1}),
             recorded_at=self.at + timedelta(minutes=3),
-        )
+        ))
         await self.storage.append_mcp_cp7_safety_ledger_record(gap)
         await self.storage.append_mcp_cp7_safety_ledger_record(gap)
         guard = await self.storage.get_mcp_cp7_candidate_guard("candidate-1")
         self.assertTrue(guard.invalid_latched)
         self.assertEqual(guard.first_invalid_record_id, "gap-1")
 
+    async def test_snapshot_accepts_durable_two_epoch_restart_chain(self) -> None:
+        def identity(epoch_id: str, predecessor: str | None = None):
+            return CP7RuntimeIdentity(
+                candidate_id="candidate-restart",
+                epoch_id=epoch_id,
+                predecessor_epoch_id=predecessor,
+                container_id="container-1",
+                image_id="image-1",
+                config_fingerprint="config-1",
+            )
+
+        def boundary(at: datetime, count: int):
+            return CP7BoundaryEvidence(
+                boundary_at=at,
+                audit_device="device-1",
+                audit_inode=1,
+                audit_offset=count,
+                ledger_record_count=count,
+                inflight_state_sha256=canonical_sha256({"at": at.isoformat()}),
+            )
+
+        first = CP7LocalSafetyFacade(self.storage, identity("epoch-1"))
+        await first.open_epoch(boundary(self.at, 0))
+        first_start = self.at
+        first_end = first_start + timedelta(minutes=1)
+        for detector in first.detectors.values():
+            detector.attest_interval(first_start, first_end)
+        await first.complete_minute(first_start, first_end)
+        await first.mark_ready(boundary(first_end, 16))
+        predecessor = await first.begin_verifier_maintenance(
+            boundary(first_end, 16),
+            verifier_authorized=True,
+            requests_stopped=True,
+        )
+
+        second = CP7LocalSafetyFacade(
+            self.storage, identity("epoch-2", "epoch-1")
+        )
+        await second.open_epoch(
+            boundary(first_end, 16),
+            predecessor=predecessor,
+            verifier_authorized=True,
+        )
+        second_start = first_end
+        second_end = second_start + timedelta(minutes=1)
+        for detector in second.detectors.values():
+            detector.attest_interval(second_start, second_end)
+        await second.complete_minute(second_start, second_end)
+        await second.mark_ready(boundary(second_end, 32))
+        snapshot = await second.close_for_approval(
+            boundary(second_end, 32), verifier_authorized=True
+        )
+
+        self.assertEqual(snapshot.ready_epochs, ("epoch-1", "epoch-2"))
+        self.assertEqual(snapshot.observation_started_at, self.at)
+        self.assertEqual(snapshot.observation_ended_at, second_end)
+        self.assertTrue(
+            all(value == 2 for value in snapshot.registration_count_by_red_line.values())
+        )
+        self.assertEqual(set(snapshot.registration_count_by_red_line), {
+            red_line.value for red_line in MCPSafetyRedLine
+        })
+
     async def test_snapshot_rejects_missing_complete_minute_hook(self) -> None:
         for index, (red_line, hook_id) in enumerate(RED_LINES):
             await self.storage.append_mcp_cp7_safety_ledger_record(
-                MCPCP7SafetyLedgerRecord(
+                _signed_record(MCPCP7SafetyLedgerRecord(
                     record_id=f"registration-missing-{index}",
                     candidate_id="candidate-missing",
                     epoch_id="epoch-missing",
@@ -267,11 +383,11 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                     boundary_source_sha256=None,
                     payload_sha256=canonical_sha256({"registration-missing": index}),
                     recorded_at=self.at + timedelta(microseconds=index),
-                )
+                ))
             )
         for index, (red_line, hook_id) in enumerate(RED_LINES[:-1]):
             await self.storage.append_mcp_cp7_safety_ledger_record(
-                MCPCP7SafetyLedgerRecord(
+                _signed_record(MCPCP7SafetyLedgerRecord(
                     record_id=f"attestation-missing-{index}",
                     candidate_id="candidate-missing",
                     epoch_id="epoch-missing",
@@ -286,7 +402,7 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                     boundary_source_sha256=None,
                     payload_sha256=canonical_sha256({"attestation-missing": index}),
                     recorded_at=self.at + timedelta(minutes=2, microseconds=index),
-                )
+                ))
             )
         for offset, kind in enumerate(
             (
@@ -296,7 +412,7 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
             )
         ):
             await self.storage.append_mcp_cp7_ready_epoch_event(
-                MCPCP7ReadyEpochEvent(
+                _signed_event(MCPCP7ReadyEpochEvent(
                     event_id=f"missing-{kind.value}",
                     candidate_id="candidate-missing",
                     epoch_id="epoch-missing",
@@ -312,7 +428,7 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                     ledger_record_count=15,
                     inflight_state_sha256=canonical_sha256({"missing-inflight": offset}),
                     payload_sha256=canonical_sha256({"missing-event": kind.value}),
-                )
+                ))
             )
         with self.assertRaisesRegex(RuntimeError, "attestation_coverage_invalid"):
             await self.storage.produce_mcp_cp7_safety_snapshot("candidate-missing")
@@ -333,6 +449,63 @@ class MCPCP7SafetyLedgerTest(unittest.IsolatedAsyncioTestCase):
                 )
                 with self.assertRaisesRegex(RuntimeError, error):
                     await self.storage.produce_mcp_cp7_safety_snapshot(candidate_id)
+
+    async def test_snapshot_rejects_tampered_payload_and_authoritative_hook(self) -> None:
+        await self._seed_candidate(
+            "candidate-tamper", closed_minutes=1, attestation_minutes=1
+        )
+        with self.engine.begin() as connection:
+            connection.execute(text("DROP TRIGGER IF EXISTS trg_mcp_cp7_safety_ledger_reject_update"))
+            connection.execute(
+                text("UPDATE mcp_cp7_safety_ledger SET payload_sha256 = :sha WHERE record_id = :id"),
+                {"sha": canonical_sha256({"tampered": True}), "id": "candidate-tamper-registration-0"},
+            )
+        with self.assertRaisesRegex(RuntimeError, "ledger_payload_tampered"):
+            await self.storage.produce_mcp_cp7_safety_snapshot("candidate-tamper")
+
+        await self._seed_candidate(
+            "candidate-hook", closed_minutes=1, attestation_minutes=1
+        )
+        with self.engine.begin() as connection:
+            connection.execute(text("DROP TRIGGER IF EXISTS trg_mcp_cp7_safety_ledger_reject_update"))
+            connection.execute(text("PRAGMA ignore_check_constraints = ON"))
+            connection.execute(
+                text("UPDATE mcp_cp7_safety_ledger SET hook_id = :hook WHERE record_id = :id"),
+                {"hook": "gateway.endpoint_policy_boundary", "id": "candidate-hook-registration-0"},
+            )
+            connection.execute(text("PRAGMA ignore_check_constraints = OFF"))
+        with self.assertRaisesRegex(RuntimeError, "ledger_payload_tampered|hook_mismatch"):
+            await self.storage.produce_mcp_cp7_safety_snapshot("candidate-hook")
+
+    async def test_snapshot_rejects_successor_boundary_identity_drift(self) -> None:
+        def identity(epoch_id: str, predecessor: str | None = None):
+            return CP7RuntimeIdentity(
+                candidate_id="candidate-drift", epoch_id=epoch_id,
+                predecessor_epoch_id=predecessor, container_id="container-1",
+                image_id="image-1", config_fingerprint="config-1",
+            )
+        def boundary(at: datetime, count: int):
+            return CP7BoundaryEvidence(
+                boundary_at=at, audit_device="device-1", audit_inode=1,
+                audit_offset=count, ledger_record_count=count,
+                inflight_state_sha256=canonical_sha256({"at": at.isoformat()}),
+            )
+        first = CP7LocalSafetyFacade(self.storage, identity("epoch-1"))
+        await first.open_epoch(boundary(self.at, 0))
+        end = self.at + timedelta(minutes=1)
+        for detector in first.detectors.values():
+            detector.attest_interval(self.at, end)
+        await first.complete_minute(self.at, end)
+        await first.mark_ready(boundary(end, 16))
+        predecessor = await first.begin_verifier_maintenance(
+            boundary(end, 16), verifier_authorized=True, requests_stopped=True
+        )
+        drifted = replace(predecessor, container_id="container-recreated")
+        second = CP7LocalSafetyFacade(self.storage, identity("epoch-2", "epoch-1"))
+        with self.assertRaisesRegex(CP7SafetyStateError, "maintenance_boundary_invalid"):
+            await second.open_epoch(
+                boundary(end, 16), predecessor=drifted, verifier_authorized=True
+            )
 
 
 if __name__ == "__main__":

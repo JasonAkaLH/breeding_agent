@@ -54,10 +54,12 @@ from src.core.models import (
     MCPConnectionLease,
     MCPCP7CandidateGuard,
     MCPCP7ReadyEpochEvent,
+    MCPCP7ReadyEpochEventKind,
     MCPCP7SafetyLedgerRecord,
     MCPCP7SafetyRecordKind,
     MCPCP7SafetySnapshot,
     MCPDispatchResumeOutbox,
+    MCPDispatchFinalizeResult,
     MCPDispatchResumeOutboxStatus,
     MCPExecutionTerminalProjection,
     MCPExecutionTerminalProjectionStatus,
@@ -66,11 +68,11 @@ from src.core.models import (
     MCPLegacyRetirementConvergenceResult,
     MCPLegacyRetirementEvidence,
     MCPNoServerConvergenceResult,
+    MCPNoServerConvergenceReceipt,
     MCPNoServerIntent,
     MCPNoServerIntentStatus,
     MCPNoServerIntentTrigger,
     MCPTerminalResultCommitResult,
-    MCPTerminalResultCompletionMode,
     MCPTerminalResultReceipt,
     MCPTerminalState,
     MCPValidatedTerminalResultCandidate,
@@ -504,7 +506,7 @@ def _row_to_mcp_dispatch_resume(
         updated_at=row.updated_at,
         completed_at=row.completed_at,
         result_receipt_id=row.result_receipt_id,
-        completion_mode=MCPTerminalResultCompletionMode(row.completion_mode),
+        completion_mode=row.completion_mode,
     )
 
 
@@ -1216,6 +1218,16 @@ _CP7_RED_LINES = (
     "shadow_tool_call",
     "persistent_resource_leak",
 )
+_CP7_HOOK_BY_RED_LINE = {
+    "cross_user_access": "gateway.task_owner_boundary",
+    "secret_exposure": "audit.secret_payload_boundary",
+    "dual_tool_call": "dispatch.durable_call_idempotency_boundary",
+    "unauthorized_tool_call": "dispatch.permission_boundary",
+    "endpoint_policy_bypass": "gateway.endpoint_policy_boundary",
+    "unknown_result_replay": "recovery.unknown_replay_boundary",
+    "shadow_tool_call": "gateway.persisted_assignment_boundary",
+    "persistent_resource_leak": "gateway.resource_cleanup_boundary",
+}
 
 
 def _mcp_owner_server_set_fingerprint(rows: Sequence[UserMCPServerRow]) -> str:
@@ -4245,11 +4257,25 @@ class SQLiteStateRepository:
             select(MCPNoServerIntentRow)
             .where(
                 MCPNoServerIntentRow.status.in_(
-                    ("armed", "available", "unavailable", "dispatched")
+                    ("armed", "available", "unavailable", "dispatched", "unknown")
                 )
             )
             .order_by(MCPNoServerIntentRow.created_at, MCPNoServerIntentRow.intent_id)
         ).all()
+        return [_row_to_mcp_no_server_intent(row) for row in rows]
+
+    def list_mcp_no_server_intents(
+        self, *, limit: int = 10_000
+    ) -> list[MCPNoServerIntent]:
+        if isinstance(limit, bool) or limit < 1 or limit > 10_000:
+            raise ValueError("mcp_intent_scan_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPNoServerIntentRow)
+            .order_by(MCPNoServerIntentRow.created_at, MCPNoServerIntentRow.intent_id)
+            .limit(limit + 1)
+        ).all()
+        if len(rows) > limit:
+            raise RuntimeError("mcp_intent_scan_limit_exceeded")
         return [_row_to_mcp_no_server_intent(row) for row in rows]
 
     def create_user_mcp_initial_intent(
@@ -4491,6 +4517,23 @@ class SQLiteStateRepository:
         row = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
         return None if row is None else _row_to_mcp_dispatch_resume(row)
 
+    def list_mcp_dispatch_resume_outboxes(
+        self, *, limit: int = 10_000
+    ) -> list[MCPDispatchResumeOutbox]:
+        if isinstance(limit, bool) or limit < 1 or limit > 10_000:
+            raise ValueError("mcp_dispatch_resume_scan_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPDispatchResumeOutboxRow)
+            .order_by(
+                MCPDispatchResumeOutboxRow.created_at,
+                MCPDispatchResumeOutboxRow.outbox_id,
+            )
+            .limit(limit + 1)
+        ).all()
+        if len(rows) > limit:
+            raise RuntimeError("mcp_dispatch_resume_scan_limit_exceeded")
+        return [_row_to_mcp_dispatch_resume(row) for row in rows]
+
     def claim_mcp_dispatch_resume_outbox(
         self,
         outbox_id: str,
@@ -4582,7 +4625,38 @@ class SQLiteStateRepository:
         expected_outbox_revision: int,
         record: MCPCallRecord,
         occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
     ) -> bool:
+        if (cp7_candidate_id is None) != (cp7_epoch_id is None):
+            return False
+        if cp7_candidate_id is not None:
+            guard = self._session.scalar(
+                select(MCPCP7CandidateGuardRow)
+                .where(MCPCP7CandidateGuardRow.candidate_id == cp7_candidate_id)
+                .with_for_update()
+            )
+            ready = self._session.scalar(
+                select(MCPCP7ReadyEpochEventRow)
+                .where(
+                    MCPCP7ReadyEpochEventRow.candidate_id == cp7_candidate_id,
+                    MCPCP7ReadyEpochEventRow.epoch_id == cp7_epoch_id,
+                    MCPCP7ReadyEpochEventRow.event_kind == "ready",
+                )
+                .with_for_update()
+            )
+            terminal = self._session.scalar(
+                select(MCPCP7ReadyEpochEventRow)
+                .where(
+                    MCPCP7ReadyEpochEventRow.candidate_id == cp7_candidate_id,
+                    MCPCP7ReadyEpochEventRow.epoch_id == cp7_epoch_id,
+                    MCPCP7ReadyEpochEventRow.event_kind.in_(("closed", "invalidated")),
+                )
+                .with_for_update()
+            )
+            if guard is None or guard.invalid_latched or ready is None or terminal is not None:
+                return False
         intent = self._session.scalar(
             select(MCPNoServerIntentRow)
             .where(MCPNoServerIntentRow.intent_id == intent_id)
@@ -4593,12 +4667,15 @@ class SQLiteStateRepository:
             .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
             .with_for_update()
         )
+        first_call = intent is not None and intent.status == "available"
+        later_call = intent is not None and intent.status == "dispatched"
         if (
             intent is None
             or outbox is None
             or outbox.intent_id != intent_id
-            or intent.status != "available"
-            or outbox.status != "claimed"
+            or not (first_call or later_call)
+            or (first_call and outbox.status != "claimed")
+            or (later_call and outbox.status != "completed")
             or int(intent.revision) != expected_intent_revision
             or int(outbox.revision) != expected_outbox_revision
             or record.owner_user_id != intent.owner_user_id
@@ -4630,11 +4707,106 @@ class SQLiteStateRepository:
         )
         if not admitted:
             return False
-        intent.status = "dispatched"
-        intent.revision = int(intent.revision) + 1
-        intent.updated_at = occurred_at
+        if first_call:
+            intent.status = "dispatched"
+            intent.revision = int(intent.revision) + 1
+            intent.updated_at = occurred_at
         self._session.flush()
         return True
+
+    def finalize_mcp_dispatch_no_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        outcome: str,
+        safe_error_code: str | None,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        if outcome not in {"stopped", "failed"}:
+            raise ValueError("mcp_dispatch_no_call_outcome_invalid")
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow).where(TaskNodeRow.node_id == node_id).with_for_update()
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == intent.task_id).with_for_update()
+        ) if intent is not None else None
+        if (
+            intent is not None
+            and intent.status == "resolved"
+            and outbox is not None
+            and outbox.status == "aborted"
+            and outbox.completion_mode == "aborted"
+        ):
+            return MCPDispatchFinalizeResult.ALREADY_FINALIZED
+        dispatched_call = self._session.scalar(
+            select(MCPCallRecordRow.call_ref)
+            .where(
+                MCPCallRecordRow.task_id == (intent.task_id if intent is not None else ""),
+                MCPCallRecordRow.node_id == node_id,
+                MCPCallRecordRow.may_have_dispatched.is_(True),
+            )
+            .with_for_update()
+        )
+        if (
+            intent is None
+            or outbox is None
+            or node is None
+            or task is None
+            or outbox.intent_id != intent_id
+            or intent.node_id != node_id
+            or node.task_id != intent.task_id
+            or intent.status != "available"
+            or outbox.status not in {"pending", "claimed"}
+            or dispatched_call is not None
+        ):
+            return MCPDispatchFinalizeResult.CONFLICT
+        intent.status = "resolved"
+        intent.revision = int(intent.revision) + 1
+        intent.updated_at = occurred_at
+        intent.terminal_at = occurred_at
+        outbox.status = "aborted"
+        outbox.claim_owner = None
+        outbox.claim_token = None
+        outbox.lease_expires_at = None
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        outbox.completed_at = occurred_at
+        outbox.completion_mode = "aborted"
+        node.status = str(NodeStatus.COMPLETED if outcome == "stopped" else NodeStatus.FAILED)
+        node.finished_at = occurred_at
+        if outcome == "failed":
+            task.status = str(TaskStatus.FAILED)
+            task.updated_at = occurred_at
+        self._insert_or_compare_event(
+            event_id=f"mcp-dispatch-no-call:v1:{intent_id}:{int(intent.revision)}",
+            conversation_id=task.conversation_id,
+            task_id=task.task_id,
+            node_id=node_id,
+            event_type="mcp.dispatch_no_call",
+            payload={
+                "schema": "maf.user_mcp.dispatch_no_call.v1",
+                "intent_id": intent_id,
+                "outbox_id": outbox_id,
+                "node_id": node_id,
+                "outcome": outcome,
+                "safe_error_code": safe_error_code,
+                "intent_revision": int(intent.revision),
+            },
+            created_at=occurred_at,
+        )
+        self._session.flush()
+        return MCPDispatchFinalizeResult.FINALIZED
 
     def append_mcp_cp7_safety_ledger_record(
         self, record: MCPCP7SafetyLedgerRecord
@@ -4725,6 +4897,39 @@ class SQLiteStateRepository:
         self._session.flush()
         return event
 
+    def get_mcp_cp7_ready_epoch_event(
+        self,
+        candidate_id: str,
+        epoch_id: str,
+        event_kind: MCPCP7ReadyEpochEventKind,
+    ) -> MCPCP7ReadyEpochEvent | None:
+        row = self._session.scalar(
+            select(MCPCP7ReadyEpochEventRow).where(
+                MCPCP7ReadyEpochEventRow.candidate_id == candidate_id,
+                MCPCP7ReadyEpochEventRow.epoch_id == epoch_id,
+                MCPCP7ReadyEpochEventRow.event_kind == str(event_kind),
+            )
+        )
+        if row is None:
+            return None
+        return MCPCP7ReadyEpochEvent(
+            event_id=row.event_id,
+            candidate_id=row.candidate_id,
+            epoch_id=row.epoch_id,
+            predecessor_epoch_id=row.predecessor_epoch_id,
+            event_kind=MCPCP7ReadyEpochEventKind(row.event_kind),
+            container_id=row.container_id,
+            image_id=row.image_id,
+            config_fingerprint=row.config_fingerprint,
+            boundary_at=row.boundary_at,
+            audit_device=row.audit_device,
+            audit_inode=int(row.audit_inode),
+            audit_offset=int(row.audit_offset),
+            ledger_record_count=int(row.ledger_record_count),
+            inflight_state_sha256=row.inflight_state_sha256,
+            payload_sha256=row.payload_sha256,
+        )
+
     def get_mcp_cp7_candidate_guard(
         self, candidate_id: str
     ) -> MCPCP7CandidateGuard | None:
@@ -4761,16 +4966,59 @@ class SQLiteStateRepository:
             raise RuntimeError("mcp_cp7_safety_snapshot_config_mismatch")
         by_epoch: dict[str, dict[str, MCPCP7ReadyEpochEventRow]] = {}
         for event in events:
+            event_payload = {
+                "candidate_id": event.candidate_id,
+                "epoch_id": event.epoch_id,
+                "predecessor_epoch_id": event.predecessor_epoch_id,
+                "event_kind": event.event_kind,
+                "container_id": event.container_id,
+                "image_id": event.image_id,
+                "config_fingerprint": event.config_fingerprint,
+                "boundary_at": event.boundary_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "audit_device": event.audit_device,
+                "audit_inode": int(event.audit_inode),
+                "audit_offset": int(event.audit_offset),
+                "ledger_record_count": int(event.ledger_record_count),
+                "inflight_state_sha256": event.inflight_state_sha256,
+            }
+            if canonical_sha256(event_payload) != event.payload_sha256:
+                raise RuntimeError("mcp_cp7_safety_snapshot_epoch_payload_tampered")
             slot = by_epoch.setdefault(event.epoch_id, {})
             if event.event_kind in slot:
                 raise RuntimeError("mcp_cp7_safety_snapshot_epoch_fork")
             slot[event.event_kind] = event
+        roots = [
+            epoch_id
+            for epoch_id, epoch_events in by_epoch.items()
+            if epoch_events.get("opened") is not None
+            and epoch_events["opened"].predecessor_epoch_id is None
+        ]
+        if len(roots) != 1:
+            raise RuntimeError("mcp_cp7_safety_snapshot_epoch_chain_invalid")
+        ordered_epoch_ids: list[str] = []
+        current: str | None = roots[0]
+        while current is not None:
+            if current in ordered_epoch_ids:
+                raise RuntimeError("mcp_cp7_safety_snapshot_epoch_chain_invalid")
+            ordered_epoch_ids.append(current)
+            successors = [
+                epoch_id
+                for epoch_id, epoch_events in by_epoch.items()
+                if epoch_events.get("opened") is not None
+                and epoch_events["opened"].predecessor_epoch_id == current
+            ]
+            if len(successors) > 1:
+                raise RuntimeError("mcp_cp7_safety_snapshot_epoch_fork")
+            current = successors[0] if successors else None
+        if len(ordered_epoch_ids) != len(by_epoch):
+            raise RuntimeError("mcp_cp7_safety_snapshot_epoch_chain_invalid")
         ready_epochs: list[str] = []
         previous: str | None = None
         maintenance_count = 0
         observation_started_at: datetime | None = None
         observation_ended_at: datetime | None = None
-        for epoch_id, epoch_events in by_epoch.items():
+        for epoch_id in ordered_epoch_ids:
+            epoch_events = by_epoch[epoch_id]
             if not {"opened", "ready", "closed"}.issubset(epoch_events):
                 raise RuntimeError("mcp_cp7_safety_snapshot_epoch_incomplete")
             opened = epoch_events["opened"]
@@ -4780,6 +5028,14 @@ class SQLiteStateRepository:
                 opened.boundary_at <= ready.boundary_at <= closed.boundary_at
             ):
                 raise RuntimeError("mcp_cp7_safety_snapshot_epoch_chain_invalid")
+            if previous is not None:
+                predecessor = by_epoch[previous]["closed"]
+                boundary_fields = (
+                    "boundary_at", "audit_device", "audit_inode", "audit_offset",
+                    "ledger_record_count", "inflight_state_sha256", "container_id", "image_id",
+                )
+                if any(getattr(opened, field) != getattr(predecessor, field) for field in boundary_fields):
+                    raise RuntimeError("mcp_cp7_safety_snapshot_epoch_boundary_mismatch")
             if "maintenance_started" in epoch_events:
                 maintenance = epoch_events["maintenance_started"]
                 if not ready.boundary_at <= maintenance.boundary_at <= closed.boundary_at:
@@ -4787,24 +5043,47 @@ class SQLiteStateRepository:
                 maintenance_count += 1
             ready_epochs.append(epoch_id)
             previous = epoch_id
-            observation_started_at = observation_started_at or ready.boundary_at
+            observation_started_at = observation_started_at or opened.boundary_at
             observation_ended_at = closed.boundary_at
         registrations = {red_line: 0 for red_line in _CP7_RED_LINES}
+        registrations_by_epoch = {
+            epoch_id: {red_line: 0 for red_line in _CP7_RED_LINES}
+            for epoch_id in by_epoch
+        }
         attestations = {red_line: 0 for red_line in _CP7_RED_LINES}
         violations = {red_line: 0 for red_line in _CP7_RED_LINES}
         gap_count = 0
         attestation_keys: set[tuple[str, str, datetime, datetime]] = set()
         for record in records:
+            record_payload = {
+                "candidate_id": record.candidate_id,
+                "epoch_id": record.epoch_id,
+                "config_fingerprint": record.config_fingerprint,
+                "record_kind": record.record_kind,
+                "red_line": record.red_line,
+                "hook_id": record.hook_id,
+                "bucket_started_at": None if record.bucket_started_at is None else record.bucket_started_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "bucket_ended_at": None if record.bucket_ended_at is None else record.bucket_ended_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "reason_code": record.reason_code,
+                "value": int(record.value),
+                "boundary_source_sha256": record.boundary_source_sha256,
+                "recorded_at": record.recorded_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            if canonical_sha256(record_payload) != record.payload_sha256:
+                raise RuntimeError("mcp_cp7_safety_snapshot_ledger_payload_tampered")
             if record.epoch_id not in by_epoch:
                 raise RuntimeError("mcp_cp7_safety_snapshot_record_epoch_unknown")
             if record.record_kind == "gap":
                 gap_count += 1
             elif record.red_line not in registrations:
                 raise RuntimeError("mcp_cp7_safety_snapshot_red_line_unknown")
+            elif record.hook_id != _CP7_HOOK_BY_RED_LINE[record.red_line]:
+                raise RuntimeError("mcp_cp7_safety_snapshot_hook_mismatch")
             elif record.record_kind == "registration":
                 if record.recorded_at > by_epoch[record.epoch_id]["ready"].boundary_at:
                     raise RuntimeError("mcp_cp7_safety_snapshot_registration_late")
                 registrations[record.red_line] += 1
+                registrations_by_epoch[record.epoch_id][record.red_line] += 1
             elif record.record_kind == "attestation":
                 if record.bucket_started_at is None or record.bucket_ended_at is None:
                     raise RuntimeError("mcp_cp7_safety_snapshot_attestation_window_invalid")
@@ -4824,16 +5103,21 @@ class SQLiteStateRepository:
                 violations[record.red_line] += 1
             else:
                 raise RuntimeError("mcp_cp7_safety_snapshot_record_kind_unknown")
-        if any(value != 1 for value in registrations.values()):
+        if any(
+            value != 1
+            for counts in registrations_by_epoch.values()
+            for value in counts.values()
+        ):
             raise RuntimeError("mcp_cp7_safety_snapshot_registration_missing")
         if observation_started_at is None or observation_ended_at is None:
             raise RuntimeError("mcp_cp7_safety_snapshot_observation_missing")
         required_attestations: set[tuple[str, str, datetime, datetime]] = set()
-        for epoch_id, epoch_events in by_epoch.items():
-            ready_at = epoch_events["ready"].boundary_at
+        for epoch_id in ordered_epoch_ids:
+            epoch_events = by_epoch[epoch_id]
+            opened_at = epoch_events["opened"].boundary_at
             closed_at = epoch_events["closed"].boundary_at
-            bucket_start = ready_at.replace(second=0, microsecond=0)
-            if bucket_start < ready_at:
+            bucket_start = opened_at.replace(second=0, microsecond=0)
+            if bucket_start < opened_at:
                 bucket_start += timedelta(minutes=1)
             while bucket_start + timedelta(minutes=1) <= closed_at:
                 bucket_end = bucket_start + timedelta(minutes=1)
@@ -4931,36 +5215,42 @@ class SQLiteStateRepository:
             raise RuntimeError("mcp_no_server_owner_binding_corrupt")
         dispatched = [row for row in calls if row.may_have_dispatched]
         if dispatched:
-            if len(dispatched) != 1 or intent.node_id is None:
+            if intent.node_id is None:
                 raise RuntimeError("mcp_unknown_call_ambiguous")
-            call = dispatched[0]
-            receipt = self._session.scalar(
-                select(MCPTerminalResultReceiptRow)
-                .where(MCPTerminalResultReceiptRow.call_id == call.call_ref)
-                .with_for_update()
-            )
-            if receipt is not None:
-                raise RuntimeError("mcp_terminal_receipt_without_terminal_projection")
-            if self._terminal_candidate_resolver is not None:
-                candidate = self._terminal_candidate_resolver(call.call_ref)
-                if candidate is not None:
-                    if (
-                        candidate.call_id != call.call_ref
-                        or candidate.owner_user_id != call.owner_user_id
-                        or candidate.task_id != call.task_id
-                        or candidate.node_id != call.node_id
-                        or candidate.intent_id != intent.intent_id
-                        or candidate.server_id != call.server_id
-                        or call.server_config_version is None
-                        or candidate.server_config_version
-                        != int(call.server_config_version)
-                        or candidate.server_security_version
-                        != int(call.server_security_version)
-                    ):
-                        raise RuntimeError("mcp_terminal_candidate_binding_conflict")
-                    return (
-                        MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT
-                    )
+            missing: list[MCPCallRecordRow] = []
+            for call in dispatched:
+                receipt = self._session.scalar(
+                    select(MCPTerminalResultReceiptRow)
+                    .where(MCPTerminalResultReceiptRow.call_id == call.call_ref)
+                    .with_for_update()
+                )
+                if receipt is not None:
+                    continue
+                candidate = (
+                    self._terminal_candidate_resolver(call.call_ref)
+                    if self._terminal_candidate_resolver is not None
+                    else None
+                )
+                if candidate is None:
+                    missing.append(call)
+                    continue
+                if (
+                    candidate.call_id != call.call_ref
+                    or candidate.owner_user_id != call.owner_user_id
+                    or candidate.task_id != call.task_id
+                    or candidate.node_id != call.node_id
+                    or candidate.intent_id != intent.intent_id
+                    or candidate.server_id != call.server_id
+                    or call.server_config_version is None
+                    or candidate.server_config_version != int(call.server_config_version)
+                    or candidate.server_security_version
+                    != int(call.server_security_version)
+                ):
+                    raise RuntimeError("mcp_terminal_candidate_binding_conflict")
+                return MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT
+            if not missing:
+                raise RuntimeError("mcp_terminal_receipts_require_dispatch_resume")
+            call = missing[0]
             projection_id = mcp_terminal_projection_id(call.call_ref)
             unknown_revision = int(intent.revision) + 1
             unknown_event_id = (
@@ -4991,10 +5281,11 @@ class SQLiteStateRepository:
             task.updated_at = occurred_at
             node.status = str(NodeStatus.FAILED)
             node.finished_at = occurred_at
-            call.status = "execution_status_unknown"
-            call.safe_error_code = "execution_status_unknown"
-            call.updated_at = occurred_at
-            call.terminal_at = occurred_at
+            for dispatched_call in dispatched:
+                dispatched_call.status = "execution_status_unknown"
+                dispatched_call.safe_error_code = "execution_status_unknown"
+                dispatched_call.updated_at = occurred_at
+                dispatched_call.terminal_at = occurred_at
             for outbox in outboxes:
                 outbox.status = "completed"
                 outbox.claim_owner = None
@@ -5045,11 +5336,18 @@ class SQLiteStateRepository:
                 node_id=node.node_id,
                 event_type="mcp.execution_status_unknown",
                 payload={
+                    "schema": "maf.user_mcp.execution_status_unknown.v1",
                     "projection_id": projection_id,
                     "intent_id": intent.intent_id,
                     "call_id": call.call_ref,
+                    "task_id": task_id,
+                    "node_id": node.node_id,
+                    "projection_revision": 0,
+                    "intent_revision": unknown_revision,
+                    "unknown_terminal_at": occurred_at.isoformat(),
                     "reason_code": "trusted_terminal_result_absent",
                     "no_replay": True,
+                    "result_receipt_id": None,
                     "predecessor_event_id": None,
                 },
                 created_at=occurred_at,
@@ -5061,6 +5359,11 @@ class SQLiteStateRepository:
                 node_id=node.node_id,
                 event_type="task.failed",
                 payload={
+                    "schema": "maf.user_mcp.unknown_task_failed.v1",
+                    "projection_id": projection_id,
+                    "call_id": call.call_ref,
+                    "task_id": task_id,
+                    "node_id": node.node_id,
                     "code": "execution_status_unknown",
                     "no_replay": True,
                     "unknown_event_id": unknown_event_id,
@@ -5169,6 +5472,34 @@ class SQLiteStateRepository:
         self, result_receipt_id: str
     ) -> MCPTerminalResultReceipt | None:
         row = self._session.get(MCPTerminalResultReceiptRow, result_receipt_id)
+        return None if row is None else _row_to_mcp_terminal_receipt(row)
+
+    def get_mcp_no_server_convergence_receipt(
+        self, task_id: str
+    ) -> MCPNoServerConvergenceReceipt | None:
+        row = self._session.get(MCPNoServerConvergenceReceiptRow, f"mcp-no-server:v1:{task_id}")
+        if row is None:
+            return None
+        return MCPNoServerConvergenceReceipt(
+            idempotency_key=row.idempotency_key,
+            task_id=row.task_id,
+            intent_id=row.intent_id,
+            owner_user_id=row.owner_user_id,
+            terminal_code=row.terminal_code,
+            evidence_sha256=row.evidence_sha256,
+            runtime_unavailable_event_id=row.runtime_unavailable_event_id,
+            task_failed_event_id=row.task_failed_event_id,
+            committed_at=row.committed_at,
+        )
+
+    def get_mcp_terminal_result_receipt_for_call(
+        self, call_id: str
+    ) -> MCPTerminalResultReceipt | None:
+        row = self._session.scalar(
+            select(MCPTerminalResultReceiptRow).where(
+                MCPTerminalResultReceiptRow.call_id == call_id
+            )
+        )
         return None if row is None else _row_to_mcp_terminal_receipt(row)
 
     def get_mcp_execution_terminal_projection(
@@ -5318,8 +5649,21 @@ class SQLiteStateRepository:
                 node_id=candidate.node_id,
                 event_type="mcp.execution_status_resolution",
                 payload={
+                    "schema": "maf.user_mcp.execution_status_resolution.v1",
                     "projection_id": projection.projection_id,
+                    "intent_id": candidate.intent_id,
+                    "call_id": call_id,
+                    "task_id": candidate.task_id,
+                    "node_id": candidate.node_id,
+                    "unknown_event_id": projection.unknown_event_id,
+                    "task_failed_event_id": projection.task_failed_event_id,
                     "result_receipt_id": receipt_id,
+                    "from_projection_revision": 0,
+                    "to_projection_revision": 1,
+                    "from_intent_revision": projection.unknown_intent_revision,
+                    "to_intent_revision": int(intent.revision),
+                    "unknown_terminal_at": projection.unknown_terminal_at.isoformat(),
+                    "resolved_at": resolved_at.isoformat(),
                     "predecessor_event_id": projection.task_failed_event_id,
                 },
                 created_at=resolved_at,
@@ -5331,8 +5675,24 @@ class SQLiteStateRepository:
                 node_id=candidate.node_id,
                 event_type="mcp.late_terminal_result_recovered",
                 payload={
+                    "schema": "maf.user_mcp.late_terminal_result_recovered.v1",
                     "projection_id": projection.projection_id,
+                    "intent_id": candidate.intent_id,
+                    "call_id": call_id,
+                    "task_id": candidate.task_id,
+                    "node_id": candidate.node_id,
+                    "unknown_event_id": projection.unknown_event_id,
+                    "resolution_event_id": resolution_id,
                     "result_receipt_id": receipt_id,
+                    "result_payload_sha256": candidate.result_payload_sha256,
+                    "projection_revision": 1,
+                    "terminal_state": str(candidate.terminal_state),
+                    "safe_result_ref": candidate.safe_result_ref,
+                    "safe_result_ref_sha256": candidate.safe_result_ref_sha256,
+                    "safe_error_code": candidate.safe_error_code,
+                    "resolved_at": resolved_at.isoformat(),
+                    "task_remains_failed": True,
+                    "node_remains_failed": True,
                     "predecessor_event_id": resolution_id,
                     "no_replay": True,
                 },
@@ -5343,38 +5703,18 @@ class SQLiteStateRepository:
             if intent.status != "dispatched" or not call.may_have_dispatched:
                 return MCPTerminalResultCommitResult.CONFLICT
             self._session.add(MCPTerminalResultReceiptRow(**receipt_values))
-            intent.status = "resolved"
-            intent.revision = int(intent.revision) + 1
-            intent.updated_at = occurred_at
-            intent.terminal_at = occurred_at
             call.status = str(candidate.terminal_state)
             call.result_ref = candidate.safe_result_ref
             call.safe_error_code = candidate.safe_error_code
             call.terminal_at = occurred_at
             call.updated_at = occurred_at
-            task.status = (
-                str(TaskStatus.COMPLETED)
-                if candidate.terminal_state == MCPTerminalState.COMPLETED
-                else str(TaskStatus.FAILED)
-            )
-            task.updated_at = occurred_at
-            node.status = (
-                str(NodeStatus.COMPLETED)
-                if candidate.terminal_state == MCPTerminalState.COMPLETED
-                else str(NodeStatus.FAILED)
-            )
-            node.finished_at = occurred_at
             terminal_event_id = f"{receipt_id}:terminal"
             self._insert_or_compare_event(
                 event_id=terminal_event_id,
                 conversation_id=candidate.conversation_id,
                 task_id=candidate.task_id,
                 node_id=candidate.node_id,
-                event_type=(
-                    "task.completed"
-                    if candidate.terminal_state == MCPTerminalState.COMPLETED
-                    else "task.failed"
-                ),
+                event_type="mcp.tool_call_terminal",
                 payload={
                     "result_receipt_id": receipt_id,
                     "terminal_state": str(candidate.terminal_state),
@@ -5395,6 +5735,83 @@ class SQLiteStateRepository:
         outbox.completion_mode = mode
         self._session.flush()
         return result
+
+    def finalize_mcp_dispatch_intent(
+        self,
+        intent_id: str,
+        node_id: str,
+        result_receipt_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == node_id)
+            .with_for_update()
+        )
+        receipt = self._session.scalar(
+            select(MCPTerminalResultReceiptRow)
+            .where(MCPTerminalResultReceiptRow.result_receipt_id == result_receipt_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == intent.task_id).with_for_update()
+        ) if intent is not None else None
+        if intent is not None and intent.status == "resolved":
+            return (
+                MCPDispatchFinalizeResult.ALREADY_FINALIZED
+                if node is not None
+                and node.status in {str(NodeStatus.COMPLETED), str(NodeStatus.FAILED)}
+                else MCPDispatchFinalizeResult.CONFLICT
+            )
+        if (
+            intent is None
+            or node is None
+            or receipt is None
+            or outbox is None
+            or task is None
+            or intent.status != "dispatched"
+            or node.node_id != intent.node_id
+            or node.task_id != intent.task_id
+            or receipt.intent_id != intent_id
+            or receipt.node_id != node_id
+            or receipt.task_id != intent.task_id
+            or receipt.completion_mode != "normal_terminal_projection"
+            or receipt.terminal_state not in {
+                str(MCPTerminalState.COMPLETED),
+                str(MCPTerminalState.FAILED),
+                str(MCPTerminalState.CANCELLED),
+            }
+            or outbox.status != "completed"
+            or outbox.result_receipt_id != result_receipt_id
+            or outbox.completion_mode != "normal_terminal_projection"
+        ):
+            return MCPDispatchFinalizeResult.CONFLICT
+        intent.status = "resolved"
+        intent.revision = int(intent.revision) + 1
+        intent.updated_at = occurred_at
+        intent.terminal_at = occurred_at
+        if receipt.terminal_state == str(MCPTerminalState.COMPLETED):
+            node.status = str(NodeStatus.COMPLETED)
+        elif receipt.terminal_state in {
+            str(MCPTerminalState.FAILED),
+            str(MCPTerminalState.CANCELLED),
+        }:
+            node.status = str(NodeStatus.FAILED)
+            task.status = str(TaskStatus.FAILED)
+            task.updated_at = occurred_at
+        node.finished_at = occurred_at
+        self._session.flush()
+        return MCPDispatchFinalizeResult.FINALIZED
 
     def append_mcp_legacy_retirement_evidence(
         self, evidence: MCPLegacyRetirementEvidence
@@ -5422,6 +5839,33 @@ class SQLiteStateRepository:
         )
         self._session.flush()
         return evidence
+
+    def list_mcp_legacy_retirement_task_ids(
+        self,
+        inventory_id: str,
+        inventory_sha256: str,
+        *,
+        limit: int = 10_000,
+    ) -> list[str]:
+        if not inventory_id or not inventory_sha256:
+            raise ValueError("mcp_legacy_retirement_inventory_binding_invalid")
+        if isinstance(limit, bool) or limit < 1 or limit > 10_000:
+            raise ValueError("mcp_legacy_retirement_scan_limit_invalid")
+        rows = self._session.scalars(
+            select(MCPLegacyRetirementEvidenceRow.task_id)
+            .join(TaskRow, TaskRow.task_id == MCPLegacyRetirementEvidenceRow.task_id)
+            .where(
+                MCPLegacyRetirementEvidenceRow.inventory_id == inventory_id,
+                MCPLegacyRetirementEvidenceRow.inventory_sha256 == inventory_sha256,
+                TaskRow.status.not_in(_TERMINAL_TASK_STATUSES),
+            )
+            .distinct()
+            .order_by(MCPLegacyRetirementEvidenceRow.task_id)
+            .limit(limit + 1)
+        ).all()
+        if len(rows) > limit:
+            raise RuntimeError("mcp_legacy_retirement_scan_limit_exceeded")
+        return [str(task_id) for task_id in rows]
 
     def converge_legacy_runtime_retirement(
         self,
@@ -6153,6 +6597,7 @@ class SQLiteStateRepository:
         terminal_at: datetime,
         result_ref: str | None = None,
         safe_error_code: str | None = None,
+        result_receipt_id: str | None = None,
     ) -> MCPRemoteTaskBinding | None:
         result = self._session.execute(
             update(MCPRemoteTaskBindingRow)
@@ -6190,13 +6635,24 @@ class SQLiteStateRepository:
                 MCPCallRecordRow.task_id == task_id,
             )
         )
-        if call_row is not None and call_row.terminal_at is None:
-            call_row.status = call_status
-            call_row.result_ref = result_ref
-            call_row.output_size_bytes = None
-            call_row.safe_error_code = safe_error_code
-            call_row.updated_at = terminal_at
-            call_row.terminal_at = terminal_at
+        if call_row is not None:
+            if result_receipt_id is not None:
+                receipt = self._session.get(
+                    MCPTerminalResultReceiptRow, result_receipt_id
+                )
+                if (
+                    receipt is None
+                    or receipt.call_id != call_row.call_ref
+                    or receipt.safe_result_ref != result_ref
+                ):
+                    raise RuntimeError("MCP remote terminal receipt binding mismatch")
+            if call_row.terminal_at is None:
+                call_row.status = call_status
+                call_row.result_ref = result_ref
+                call_row.output_size_bytes = None
+                call_row.safe_error_code = safe_error_code
+                call_row.updated_at = terminal_at
+                call_row.terminal_at = terminal_at
             self._session.execute(
                 update(MCPBranchRecordRow)
                 .where(
@@ -6237,6 +6693,7 @@ class SQLiteStateRepository:
                     payload={
                         "call_status": call_status,
                         "result_ref": result_ref,
+                        "result_receipt_id": result_receipt_id,
                         "safe_error_code": safe_error_code,
                         "continuation_plan": dict(binding_row.continuation_plan or {}),
                     },
@@ -6249,6 +6706,96 @@ class SQLiteStateRepository:
         self._session.flush()
         self._session.expire_all()
         persisted = self._session.get(MCPRemoteTaskBindingRow, safe_remote_task_ref)
+        return None if persisted is None else _row_to_mcp_remote_task(persisted)
+
+    def finish_mcp_remote_task_binding_from_receipt(
+        self,
+        call_id: str,
+        result_receipt_id: str,
+        occurred_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        receipt = self._session.get(MCPTerminalResultReceiptRow, result_receipt_id)
+        binding_row = self._session.scalar(
+            select(MCPRemoteTaskBindingRow)
+            .where(MCPRemoteTaskBindingRow.call_ref == call_id)
+            .with_for_update()
+        )
+        if binding_row is None:
+            return None
+        if (
+            receipt is None
+            or receipt.call_id != call_id
+            or receipt.task_id != binding_row.task_id
+            or receipt.owner_user_id != binding_row.owner_user_id
+            or receipt.completion_mode != "normal_terminal_projection"
+        ):
+            raise RuntimeError("MCP remote terminal receipt binding mismatch")
+        if binding_row.terminal_at is None:
+            binding_row.last_status = receipt.terminal_state
+            binding_row.next_poll_at = None
+            binding_row.updated_at = occurred_at
+            binding_row.terminal_at = occurred_at
+            binding_row.claim_owner = None
+            binding_row.claim_token = None
+            binding_row.lease_expires_at = None
+            binding_row.revision = int(binding_row.revision or 0) + 1
+        call_row = self._session.scalar(
+            select(MCPCallRecordRow).where(MCPCallRecordRow.call_ref == call_id)
+        )
+        if call_row is None or call_row.terminal_at is None:
+            raise RuntimeError("MCP remote terminal receipt call missing")
+        self._session.execute(
+            update(MCPBranchRecordRow)
+            .where(
+                MCPBranchRecordRow.branch_id == call_row.branch_id,
+                MCPBranchRecordRow.active_call_ref == call_id,
+            )
+            .values(
+                active_call_ref=None,
+                status=receipt.terminal_state,
+                result_ref=receipt.safe_result_ref,
+                safe_summary=(
+                    "The MCP remote task completed."
+                    if receipt.terminal_state == "completed"
+                    else "The MCP remote task ended without a completed result."
+                ),
+                updated_at=occurred_at,
+                terminal_at=occurred_at,
+            )
+        )
+        insert_statement = (
+            postgresql_insert(MCPRemoteTaskOutboxRow)
+            if self._session.bind is not None
+            and self._session.bind.dialect.name == "postgresql"
+            else sqlite_insert(MCPRemoteTaskOutboxRow)
+        )
+        self._session.execute(
+            insert_statement.values(
+                outbox_id=f"mcp-remote-terminal:{call_id}",
+                kind="terminal_continuation",
+                owner_user_id=binding_row.owner_user_id,
+                task_id=binding_row.task_id,
+                node_id=binding_row.node_id,
+                call_ref=call_id,
+                safe_remote_task_ref=binding_row.safe_remote_task_ref,
+                payload={
+                    "call_status": receipt.terminal_state,
+                    "result_ref": receipt.safe_result_ref,
+                    "result_receipt_id": result_receipt_id,
+                    "safe_error_code": receipt.safe_error_code,
+                    "continuation_plan": dict(binding_row.continuation_plan or {}),
+                },
+                status="pending",
+                revision=0,
+                created_at=occurred_at,
+                updated_at=occurred_at,
+            ).on_conflict_do_nothing()
+        )
+        self._session.flush()
+        self._session.expire_all()
+        persisted = self._session.get(
+            MCPRemoteTaskBindingRow, binding_row.safe_remote_task_ref
+        )
         return None if persisted is None else _row_to_mcp_remote_task(persisted)
 
     def claim_mcp_remote_task_outbox(
@@ -9045,6 +9592,13 @@ class SQLiteStorage(StoragePort):
             lambda state, collab: state.list_unresolved_mcp_no_server_intents()
         )
 
+    async def list_mcp_no_server_intents(
+        self, *, limit: int = 10_000
+    ) -> list[MCPNoServerIntent]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_no_server_intents(limit=limit)
+        )
+
     async def create_user_mcp_initial_intent(
         self, task: Task, occurred_at: datetime
     ) -> MCPInitialIntentCreateResult:
@@ -9080,6 +9634,13 @@ class SQLiteStorage(StoragePort):
     ) -> MCPDispatchResumeOutbox | None:
         return await self._run(
             lambda state, collab: state.get_mcp_dispatch_resume_outbox(outbox_id)
+        )
+
+    async def list_mcp_dispatch_resume_outboxes(
+        self, *, limit: int = 10_000
+    ) -> list[MCPDispatchResumeOutbox]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_dispatch_resume_outboxes(limit=limit)
         )
 
     async def claim_mcp_dispatch_resume_outbox(
@@ -9122,6 +9683,9 @@ class SQLiteStorage(StoragePort):
         expected_outbox_revision: int,
         record: MCPCallRecord,
         occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
     ) -> bool:
         return await self._run(
             lambda state, collab: state.admit_mcp_tool_call(
@@ -9131,6 +9695,23 @@ class SQLiteStorage(StoragePort):
                 expected_outbox_revision,
                 record,
                 occurred_at,
+                cp7_candidate_id=cp7_candidate_id,
+                cp7_epoch_id=cp7_epoch_id,
+            )
+        )
+
+    async def finalize_mcp_dispatch_no_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        outcome: str,
+        safe_error_code: str | None,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        return await self._run(
+            lambda state, collab: state.finalize_mcp_dispatch_no_call(
+                intent_id, outbox_id, node_id, outcome, safe_error_code, occurred_at
             )
         )
 
@@ -9146,6 +9727,18 @@ class SQLiteStorage(StoragePort):
     ) -> MCPCP7ReadyEpochEvent:
         return await self._run(
             lambda state, collab: state.append_mcp_cp7_ready_epoch_event(event)
+        )
+
+    async def get_mcp_cp7_ready_epoch_event(
+        self,
+        candidate_id: str,
+        epoch_id: str,
+        event_kind: MCPCP7ReadyEpochEventKind,
+    ) -> MCPCP7ReadyEpochEvent | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_cp7_ready_epoch_event(
+                candidate_id, epoch_id, event_kind
+            )
         )
 
     async def get_mcp_cp7_candidate_guard(
@@ -9180,12 +9773,41 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def finalize_mcp_dispatch_intent(
+        self,
+        intent_id: str,
+        node_id: str,
+        result_receipt_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        return await self._run(
+            lambda state, collab: state.finalize_mcp_dispatch_intent(
+                intent_id, node_id, result_receipt_id, occurred_at
+            )
+        )
+
     async def get_mcp_terminal_result_receipt(
         self, result_receipt_id: str
     ) -> MCPTerminalResultReceipt | None:
         return await self._run(
             lambda state, collab: state.get_mcp_terminal_result_receipt(
                 result_receipt_id
+            )
+        )
+
+    async def get_mcp_no_server_convergence_receipt(
+        self, task_id: str
+    ) -> MCPNoServerConvergenceReceipt | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_no_server_convergence_receipt(task_id)
+        )
+
+    async def get_mcp_terminal_result_receipt_for_call(
+        self, call_id: str
+    ) -> MCPTerminalResultReceipt | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_terminal_result_receipt_for_call(
+                call_id
             )
         )
 
@@ -9202,6 +9824,19 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.append_mcp_legacy_retirement_evidence(
                 evidence
+            )
+        )
+
+    async def list_mcp_legacy_retirement_task_ids(
+        self,
+        inventory_id: str,
+        inventory_sha256: str,
+        *,
+        limit: int = 10_000,
+    ) -> list[str]:
+        return await self._run(
+            lambda state, collab: state.list_mcp_legacy_retirement_task_ids(
+                inventory_id, inventory_sha256, limit=limit
             )
         )
 
@@ -9513,6 +10148,7 @@ class SQLiteStorage(StoragePort):
         terminal_at: datetime,
         result_ref: str | None = None,
         safe_error_code: str | None = None,
+        result_receipt_id: str | None = None,
     ) -> MCPRemoteTaskBinding | None:
         return await self._run(
             lambda state, collab: state.finish_mcp_remote_task_binding(
@@ -9527,6 +10163,19 @@ class SQLiteStorage(StoragePort):
                 terminal_at=terminal_at,
                 result_ref=result_ref,
                 safe_error_code=safe_error_code,
+                result_receipt_id=result_receipt_id,
+            )
+        )
+
+    async def finish_mcp_remote_task_binding_from_receipt(
+        self,
+        call_id: str,
+        result_receipt_id: str,
+        occurred_at: datetime,
+    ) -> MCPRemoteTaskBinding | None:
+        return await self._run(
+            lambda state, collab: state.finish_mcp_remote_task_binding_from_receipt(
+                call_id, result_receipt_id, occurred_at
             )
         )
 
@@ -10353,7 +11002,12 @@ class SQLiteStorage(StoragePort):
                 session.commit()
                 return result
 
-        return await asyncio.to_thread(_sync)
+        worker = asyncio.create_task(asyncio.to_thread(_sync))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await worker
+            raise
 
     def _ensure_event_replay_available(self) -> None:
         if runtime_mode_for_component("event_log") != "enforce":

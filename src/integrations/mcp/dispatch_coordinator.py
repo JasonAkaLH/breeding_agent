@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Protocol
+from pathlib import Path
 from uuid import uuid4
 
 from src.capabilities.mcp_dispatch.executor import MCPDispatchOutcome
@@ -27,12 +28,24 @@ from src.core.models import (
     Interrupt,
     MCPBranchRecord,
     MCPCallRecord,
+    MCPValidatedTerminalResultCandidate,
+    MCPTerminalState,
+    MCPTargetIntentArmResult,
+    MCPTargetIntentResolveResult,
     UserMCPServer,
     UserMCPToolGrant,
 )
 from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
 from src.integrations.mcp.client import MCPRemoteError
 from src.integrations.mcp.gateway_models import MCPCallOutcome, MCPCallOutcomeKind, MCPTaskServerScope
+from src.integrations.mcp.cp7_artifacts import (
+    canonical_sha256,
+    mcp_dispatch_resume_outbox_id,
+    mcp_no_server_intent_id,
+    mcp_terminal_candidate_id,
+    mcp_terminal_receipt_id,
+)
+from src.integrations.mcp.cp7_terminal_results import seal_terminal_result_candidate
 from src.integrations.mcp.rollout_evidence import (
     MCPCallKind,
     MCPMetricAdapter,
@@ -118,6 +131,13 @@ class _MRTRContinuation:
     input_responses: Mapping[str, Any]
 
 
+@dataclass(slots=True)
+class _DispatchAuthority:
+    intent_id: str
+    outbox_id: str
+    admitted: bool = False
+
+
 NowFn = Callable[[], datetime]
 LiveEventRecorder = Callable[[EventRecord], Awaitable[None]]
 
@@ -147,6 +167,9 @@ class UserMCPDispatchCoordinator:
             MCPSafetyRedLine, AuthoritativeMCPSafetyDetector
         ]
         | None = None,
+        terminal_result_root: str | Path | None = None,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
     ) -> None:
         if max_tool_calls < 1:
             raise ValueError("max_tool_calls must be positive")
@@ -154,6 +177,8 @@ class UserMCPDispatchCoordinator:
             raise ValueError("max_selector_steps must be positive")
         if (metric_recorder is None) != (metric_context is None):
             raise ValueError("metric_recorder and metric_context must be provided together")
+        if (cp7_candidate_id is None) != (cp7_epoch_id is None):
+            raise ValueError("CP7 candidate and epoch must be configured together")
         self._storage = storage
         self._gateway = gateway
         self._selector = selector
@@ -165,6 +190,11 @@ class UserMCPDispatchCoordinator:
         self._max_tool_calls = max_tool_calls
         self._max_selector_steps = max_selector_steps
         self._safety_detectors = dict(safety_detectors or {})
+        self._terminal_result_root = (
+            Path(terminal_result_root) if terminal_result_root is not None else None
+        )
+        self._cp7_candidate_id = cp7_candidate_id
+        self._cp7_epoch_id = cp7_epoch_id
 
     def configure_safety_detectors(
         self,
@@ -177,7 +207,6 @@ class UserMCPDispatchCoordinator:
     ) -> None:
         for red_line in (
             MCPSafetyRedLine.DUAL_TOOL_CALL,
-            MCPSafetyRedLine.UNAUTHORIZED_TOOL_CALL,
             MCPSafetyRedLine.UNKNOWN_RESULT_REPLAY,
         ):
             detector = self._safety_detectors.get(red_line)
@@ -195,9 +224,27 @@ class UserMCPDispatchCoordinator:
         if identity is None:
             return self._error("mcp_task_not_found", "MCP task is not available.")
         owner_user_id, conversation_id, root_message_id = identity
+        authority = None
+        if self._terminal_result_root is not None:
+            authority = await self._prepare_dispatch_authority(
+                request,
+                conversation_id=conversation_id,
+                root_message_id=root_message_id,
+                server_id=server_id,
+            )
+            if authority is None:
+                return self._error(
+                    "mcp_runtime_unavailable", "MCP server is not available."
+                )
         server = await self._available_server(owner_user_id, server_id)
         if server is None:
-            return self._error("mcp_server_not_available", "MCP server is not available.")
+            return await self._finalize_no_call_outcome(
+                authority,
+                request,
+                self._error("mcp_server_not_available", "MCP server is not available."),
+                outcome="failed",
+                safe_error_code="mcp_server_not_available",
+            )
 
         branch_id = _branch_id(request.task_id, request.node_id)
         branch = await self._load_or_create_branch(
@@ -212,10 +259,29 @@ class UserMCPDispatchCoordinator:
         events: list[EventRecord] = []
         retained_scope: MCPTaskServerScope | None = None
         retained_server_id: str | None = None
+        last_result_receipt_id: str | None = None
+        if authority is not None:
+            existing_calls = await self._storage.list_mcp_call_records(
+                owner_user_id, request.task_id, branch_id=branch_id
+            )
+            authority.admitted = any(call.may_have_dispatched for call in existing_calls)
+            for existing_call in reversed(existing_calls):
+                receipt = await self._storage.get_mcp_terminal_result_receipt_for_call(
+                    existing_call.call_ref
+                )
+                if receipt is not None:
+                    last_result_receipt_id = receipt.result_receipt_id
+                    break
         try:
             mrtr_continuation = await self._resolve_mrtr_continuation(request)
         except _CallReservationError as exc:
-            return self._error(exc.code, "MCP input continuation was rejected safely.")
+            return await self._finalize_no_call_outcome(
+                authority,
+                request,
+                self._error(exc.code, "MCP input continuation was rejected safely."),
+                outcome="failed",
+                safe_error_code=exc.code,
+            )
 
         for selector_step in range(1, self._max_selector_steps + 1):
             scope = (
@@ -230,12 +296,18 @@ class UserMCPDispatchCoordinator:
                     owner_user_id, current_server.server_id
                 )
                 if current_server is None:
-                    return await self._finish_branch(
+                    return await self._finalize_no_call_outcome(
+                        authority,
+                        request,
+                        await self._finish_branch(
                         request,
                         branch,
                         status="stopped",
                         safe_summary="The selected MCP server became unavailable.",
                         events=events,
+                        ),
+                        outcome="stopped",
+                        safe_error_code="mcp_server_not_available",
                     )
                 events.append(
                     _event(
@@ -385,7 +457,16 @@ class UserMCPDispatchCoordinator:
                 )
 
                 if action.action is MCPSelectorActionType.FINISH:
-                    return await self._finish_branch(
+                    if last_result_receipt_id is not None and authority is not None:
+                        finalized = await self._storage.finalize_mcp_dispatch_intent(
+                            authority.intent_id,
+                            request.node_id,
+                            last_result_receipt_id,
+                            self._now(),
+                        )
+                        if str(finalized) == "conflict":
+                            raise RuntimeError("mcp_dispatch_finalize_conflict")
+                    result = await self._finish_branch(
                         request,
                         branch,
                         status="completed",
@@ -393,14 +474,23 @@ class UserMCPDispatchCoordinator:
                         result_ref=_last_result_ref(calls),
                         events=events,
                     )
+                    return await self._finalize_no_call_outcome(
+                        authority, request, result, outcome="stopped", safe_error_code=None
+                    )
                 if action.action is MCPSelectorActionType.STOP:
-                    return await self._finish_branch(
+                    return await self._finalize_no_call_outcome(
+                        authority,
+                        request,
+                        await self._finish_branch(
                         request,
                         branch,
                         status="stopped",
                         safe_summary=action.reason or "MCP execution stopped safely.",
                         result_ref=_last_result_ref(calls),
                         events=events,
+                        ),
+                        outcome="stopped",
+                        safe_error_code="selector_stopped",
                     )
                 if action.action is MCPSelectorActionType.ROUTE_ANOTHER_SERVER:
                     visited_server_ids.add(current_server.server_id)
@@ -410,13 +500,19 @@ class UserMCPDispatchCoordinator:
                         visited_server_ids=visited_server_ids,
                     )
                     if next_server is None:
-                        return await self._finish_branch(
+                        return await self._finalize_no_call_outcome(
+                            authority,
+                            request,
+                            await self._finish_branch(
                             request,
                             branch,
                             status="stopped",
                             safe_summary=action.reason or "No additional MCP server was selected.",
                             result_ref=_last_result_ref(calls),
                             events=events,
+                            ),
+                            outcome="stopped",
+                            safe_error_code="mcp_no_additional_server",
                         )
                     current_server = next_server
                     continue
@@ -424,8 +520,14 @@ class UserMCPDispatchCoordinator:
                 tool_name = action.tool_name or ""
                 descriptor = catalog.get(tool_name)
                 if descriptor is None:
-                    return self._error(
-                        "mcp_tool_not_found", "The selected MCP tool is no longer available."
+                    return await self._finalize_no_call_outcome(
+                        authority,
+                        request,
+                        self._error(
+                            "mcp_tool_not_found", "The selected MCP tool is no longer available."
+                        ),
+                        outcome="failed",
+                        safe_error_code="mcp_tool_not_found",
                     )
                 fingerprint = build_mcp_call_fingerprint(
                     server_id=current_server.server_id,
@@ -533,12 +635,18 @@ class UserMCPDispatchCoordinator:
                                 selector_step,
                             )
                         )
-                        return await self._finish_branch(
+                        return await self._finalize_no_call_outcome(
+                            authority,
+                            request,
+                            await self._finish_branch(
                             request,
                             branch,
                             status="stopped",
                             safe_summary="The requested MCP tool call was denied by the user.",
                             events=events,
+                            ),
+                            outcome="stopped",
+                            safe_error_code="mcp_tool_denied",
                         )
                     await self._record_permission_metric(
                         request,
@@ -575,7 +683,7 @@ class UserMCPDispatchCoordinator:
                         )
                     )
 
-                outcome, call_ref = await self._call_tool(
+                outcome, call_ref, result_receipt_id = await self._call_tool(
                     request,
                     branch=branch,
                     server=current_server,
@@ -589,7 +697,10 @@ class UserMCPDispatchCoordinator:
                     mrtr_continuation=mrtr_continuation,
                     events=events,
                     selector_step=selector_step,
+                    authority=authority,
                 )
+                if result_receipt_id is not None:
+                    last_result_receipt_id = result_receipt_id
                 if mrtr_continuation is not None:
                     await self._storage.delete_mcp_sealed_state(
                         owner_user_id,
@@ -693,13 +804,34 @@ class UserMCPDispatchCoordinator:
                     },
                 )
             except MCPSelectorOutputError:
-                return self._error("selector_invalid_output", "MCP selector output was invalid.")
+                return await self._finalize_no_call_outcome(
+                    authority, request,
+                    self._error("selector_invalid_output", "MCP selector output was invalid."),
+                    outcome="failed", safe_error_code="selector_invalid_output",
+                )
             except MCPServerRouterOutputError:
-                return self._error("server_router_invalid_output", "MCP server routing failed safely.")
+                return await self._finalize_no_call_outcome(
+                    authority, request,
+                    self._error("server_router_invalid_output", "MCP server routing failed safely."),
+                    outcome="failed", safe_error_code="server_router_invalid_output",
+                )
             except MCPGatewayError as exc:
-                return self._error(exc.code, "MCP execution failed safely.")
+                return await self._finalize_no_call_outcome(
+                    authority, request, self._error(exc.code, "MCP execution failed safely."),
+                    outcome="failed", safe_error_code=exc.code,
+                )
             except _CallReservationError as exc:
-                return self._error(exc.code, "MCP call could not be reserved safely.")
+                return await self._finalize_no_call_outcome(
+                    authority, request,
+                    self._error(exc.code, "MCP call could not be reserved safely."),
+                    outcome="failed", safe_error_code=exc.code,
+                )
+            except BaseException:
+                await self._finalize_no_call_outcome(
+                    authority, request, None, outcome="failed",
+                    safe_error_code="mcp_dispatch_pre_admission_failure",
+                )
+                raise
             finally:
                 if scope is not None and not keep_scope:
                     await self._gateway.close_scope(scope, "dispatch_step_complete")
@@ -709,7 +841,131 @@ class UserMCPDispatchCoordinator:
 
         if retained_scope is not None:
             await self._gateway.close_scope(retained_scope, "selector_step_limit")
-        return self._error("selector_step_limit_exceeded", "MCP selector step limit exceeded.")
+        return await self._finalize_no_call_outcome(
+            authority, request,
+            self._error("selector_step_limit_exceeded", "MCP selector step limit exceeded."),
+            outcome="failed", safe_error_code="selector_step_limit_exceeded",
+        )
+
+    async def _finalize_no_call_outcome(
+        self,
+        authority: _DispatchAuthority | None,
+        request: CapabilityExecutionRequest,
+        result: MCPDispatchOutcome | None,
+        *,
+        outcome: str,
+        safe_error_code: str | None,
+    ) -> MCPDispatchOutcome | None:
+        if authority is not None and not authority.admitted:
+            finalized = await self._storage.finalize_mcp_dispatch_no_call(
+                authority.intent_id,
+                authority.outbox_id,
+                request.node_id,
+                outcome,
+                safe_error_code,
+                self._now(),
+            )
+            if str(finalized) == "conflict":
+                raise RuntimeError("mcp_dispatch_no_call_finalize_conflict")
+        return result
+
+    async def _prepare_dispatch_authority(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        conversation_id: str,
+        root_message_id: str,
+        server_id: str,
+    ) -> _DispatchAuthority | None:
+        intent_id = mcp_no_server_intent_id(request.task_id, node_id=request.node_id)
+        task = await self._storage.get_task(request.task_id)
+        node = await self._storage.get_task_node(request.node_id)
+        if task is None or node is None:
+            raise RuntimeError("mcp_dispatch_resume_snapshot_missing")
+        edges = await self._storage.list_task_edges(request.task_id)
+        attachments = await self._storage.list_task_input_attachments_for_task(
+            request.task_id
+        )
+        armed = await self._storage.arm_user_mcp_target_intent(
+            request.task_id,
+            request.node_id,
+            server_id,
+            {
+                "capability_id": request.capability_id,
+                "conversation_id": conversation_id,
+                "context_refs": list(request.context_refs),
+                "dependency_outputs": dict(request.dependency_outputs),
+                "input_payload": dict(request.input_payload),
+                "metadata": dict(request.metadata),
+                "node_id": request.node_id,
+                "node_snapshot": {
+                    "capability_id": node.capability_id,
+                    "criticality": str(node.criticality),
+                    "dependency_type": str(node.dependency_type),
+                    "input_refs": list(node.input_refs),
+                    "resource_class": node.resource_class,
+                    "retry_policy": dict(node.retry_policy),
+                    "timeout_policy": dict(node.timeout_policy),
+                },
+                "edge_snapshot": [
+                    {
+                        "condition": edge.condition,
+                        "edge_type": str(edge.edge_type),
+                        "from_node_id": edge.from_node_id,
+                        "to_node_id": edge.to_node_id,
+                    }
+                    for edge in edges
+                ],
+                "input_attachment_ids": sorted(
+                    attachment.attachment_id for attachment in attachments
+                ),
+                "root_message_id": root_message_id,
+                "server_id": server_id,
+                "task_id": request.task_id,
+                "task_assignment": {
+                    "mcp_execution_mode": task.mcp_execution_mode,
+                    "mcp_route_reason_code": task.mcp_route_reason_code,
+                    "mcp_rollout_config_version": task.mcp_rollout_config_version,
+                    "mcp_rollout_mode": task.mcp_rollout_mode,
+                    "mcp_shadow_enabled": task.mcp_shadow_enabled,
+                },
+            },
+            self._now(),
+        )
+        if armed is MCPTargetIntentArmResult.UNAVAILABLE:
+            await self._storage.converge_user_mcp_no_server(
+                request.task_id, self._now()
+            )
+            return None
+        resolved = await self._storage.resolve_user_mcp_target_intent(
+            intent_id, self._now()
+        )
+        intent = await self._storage.get_mcp_no_server_intent(intent_id)
+        if (
+            resolved is MCPTargetIntentResolveResult.UNAVAILABLE
+            or intent is None
+            or str(intent.status) == "unavailable"
+        ):
+            await self._storage.converge_user_mcp_no_server(
+                request.task_id, self._now()
+            )
+            return None
+        outbox_id = mcp_dispatch_resume_outbox_id(intent_id)
+        outbox = await self._storage.get_mcp_dispatch_resume_outbox(outbox_id)
+        if outbox is None:
+            raise RuntimeError("mcp_dispatch_resume_outbox_missing")
+        if str(outbox.status) == "pending":
+            now = self._now()
+            outbox = await self._storage.claim_mcp_dispatch_resume_outbox(
+                outbox_id,
+                f"dispatch:{request.task_id}:{request.node_id}",
+                uuid4().hex,
+                now,
+                now + timedelta(seconds=30),
+            )
+        if outbox is None or str(outbox.status) not in {"claimed", "completed"}:
+            raise RuntimeError("mcp_dispatch_resume_claim_lost")
+        return _DispatchAuthority(intent_id=intent_id, outbox_id=outbox_id)
 
     async def _resolve_identity(
         self, request: CapabilityExecutionRequest
@@ -930,7 +1186,8 @@ class UserMCPDispatchCoordinator:
         mrtr_continuation: _MRTRContinuation | None = None,
         events: list[EventRecord],
         selector_step: int,
-    ) -> tuple[MCPCallOutcome, str]:
+        authority: _DispatchAuthority | None = None,
+    ) -> tuple[MCPCallOutcome, str, str | None]:
         prior_calls = await self._storage.list_mcp_call_records(
             branch.owner_user_id,
             branch.task_id,
@@ -961,8 +1218,7 @@ class UserMCPDispatchCoordinator:
             if current is None:
                 raise _CallReservationError("mcp_branch_not_found")
             now = self._now()
-            reserved = await self._storage.reserve_mcp_call(
-                MCPCallRecord(
+            record = MCPCallRecord(
                     call_ref=call_ref,
                     branch_id=current.branch_id,
                     owner_user_id=current.owner_user_id,
@@ -974,13 +1230,35 @@ class UserMCPDispatchCoordinator:
                     call_sequence=current.tool_call_count + 1,
                     arguments_sha256=fingerprint,
                     server_security_version=server.security_version,
+                    server_config_version=server.config_version,
                     input_schema_sha256=input_schema_sha256,
                     protocol_version=protocol_version,
                     input_field_names=tuple(sorted(str(key) for key in arguments)),
                     created_at=now,
                     updated_at=now,
+                    may_have_dispatched=True,
                 )
-            )
+            if authority is None:
+                reserved = await self._storage.reserve_mcp_call(record)
+            else:
+                intent = await self._storage.get_mcp_no_server_intent(
+                    authority.intent_id
+                )
+                outbox = await self._storage.get_mcp_dispatch_resume_outbox(
+                    authority.outbox_id
+                )
+                if intent is None or outbox is None:
+                    raise _CallReservationError("mcp_dispatch_authority_missing")
+                reserved = await self._storage.admit_mcp_tool_call(
+                    authority.intent_id,
+                    authority.outbox_id,
+                    intent.revision,
+                    outbox.revision,
+                    record,
+                    now,
+                    cp7_candidate_id=self._cp7_candidate_id,
+                    cp7_epoch_id=self._cp7_epoch_id,
+                )
             if not reserved:
                 active_calls = await self._storage.list_mcp_call_records(
                     current.owner_user_id,
@@ -996,6 +1274,8 @@ class UserMCPDispatchCoordinator:
                         "call_idempotency_conflict",
                     )
                 raise _CallReservationError("mcp_call_budget_or_concurrency_exhausted")
+            if authority is not None:
+                authority.admitted = True
             await self._record_live_event(
                 _event(
                     request,
@@ -1011,12 +1291,13 @@ class UserMCPDispatchCoordinator:
 
         async def on_registered(call_ref: str) -> None:
             nonlocal call_started_at, dispatched
-            await self._storage.mark_mcp_call_may_have_dispatched(
-                branch.owner_user_id,
-                branch.task_id,
-                call_ref,
-                updated_at=self._now(),
-            )
+            if authority is None:
+                await self._storage.mark_mcp_call_may_have_dispatched(
+                    branch.owner_user_id,
+                    branch.task_id,
+                    call_ref,
+                    updated_at=self._now(),
+                )
             dispatched = True
             call_started_at = monotonic()
 
@@ -1075,14 +1356,71 @@ class UserMCPDispatchCoordinator:
                 if dispatched and not isinstance(exc, MCPRemoteError):
                     terminal_status = "unknown"
                     safe_error_code = "execution_status_unknown"
-                await self._storage.finish_mcp_call(
-                    branch.owner_user_id,
-                    branch.task_id,
-                    call_ref,
-                    status=terminal_status,
-                    terminal_at=self._now(),
-                    safe_error_code=safe_error_code,
-                )
+                if authority is not None and dispatched:
+                    if isinstance(exc, MCPRemoteError):
+                        if self._terminal_result_root is None:
+                            raise _CallReservationError(
+                                "mcp_terminal_result_store_unavailable"
+                            ) from exc
+                        payload_sha = canonical_sha256(
+                            {
+                                "safe_error_code": safe_error_code,
+                                "terminal_state": "failed",
+                            }
+                        )
+                        candidate = MCPValidatedTerminalResultCandidate(
+                            candidate_id=mcp_terminal_candidate_id(call_ref, payload_sha),
+                            owner_user_id=branch.owner_user_id,
+                            conversation_id=request.conversation_id,
+                            task_id=request.task_id,
+                            node_id=request.node_id,
+                            intent_id=authority.intent_id,
+                            call_id=call_ref,
+                            server_id=server.server_id,
+                            server_config_version=server.config_version,
+                            server_security_version=server.security_version,
+                            terminal_state=MCPTerminalState.FAILED,
+                            result_payload_sha256=payload_sha,
+                            safe_result_ref=None,
+                            safe_result_ref_sha256=None,
+                            safe_error_code=safe_error_code,
+                            sealed_at=self._now().replace(microsecond=0),
+                        )
+                        await asyncio.to_thread(
+                            seal_terminal_result_candidate,
+                            self._terminal_result_root,
+                            candidate,
+                        )
+                        committed = await self._storage.commit_authoritative_mcp_terminal_result(
+                            call_ref, candidate.candidate_id, self._now()
+                        )
+                        if str(committed) == "conflict":
+                            raise _CallReservationError(
+                                "mcp_terminal_result_commit_conflict"
+                            ) from exc
+                        finalized = await self._storage.finalize_mcp_dispatch_intent(
+                            authority.intent_id,
+                            request.node_id,
+                            mcp_terminal_receipt_id(call_ref, payload_sha),
+                            self._now(),
+                        )
+                        if str(finalized) == "conflict":
+                            raise _CallReservationError(
+                                "mcp_dispatch_finalize_conflict"
+                            ) from exc
+                    else:
+                        await self._storage.converge_user_mcp_no_server(
+                            request.task_id, self._now()
+                        )
+                else:
+                    await self._storage.finish_mcp_call(
+                        branch.owner_user_id,
+                        branch.task_id,
+                        call_ref,
+                        status=terminal_status,
+                        terminal_at=self._now(),
+                        safe_error_code=safe_error_code,
+                    )
             if dispatched:
                 result_category = (
                     MCPMetricResultCategory.FAILED
@@ -1118,25 +1456,66 @@ class UserMCPDispatchCoordinator:
             # The durable remote-task binding is the recovery authority. Keep
             # the call nonterminal so the recovery worker can atomically close
             # both records when tasks/get reaches a terminal state.
-            return outcome, call_ref
+            return outcome, call_ref, None
         terminal_status = {
             MCPCallOutcomeKind.COMPLETED: "completed",
             MCPCallOutcomeKind.INPUT_REQUIRED: "input_required",
         }[outcome.kind]
-        finished = await self._storage.finish_mcp_call(
-            branch.owner_user_id,
-            branch.task_id,
-            call_ref,
-            status=terminal_status,
-            terminal_at=self._now(),
-            result_ref=(
-                outcome.result_ref
-                or outcome.sealed_request_state_ref
-            ),
-            output_size_bytes=outcome.byte_size,
-        )
-        if finished is None:
-            raise _CallReservationError("mcp_call_terminal_not_persisted")
+        result_receipt_id: str | None = None
+        if outcome.kind is MCPCallOutcomeKind.COMPLETED and authority is not None:
+            if self._terminal_result_root is None or not outcome.result_ref:
+                raise _CallReservationError("mcp_terminal_result_store_unavailable")
+            result_payload_sha256 = canonical_sha256(
+                {
+                    "safe_result_ref": outcome.result_ref,
+                    "terminal_state": "completed",
+                }
+            )
+            candidate = MCPValidatedTerminalResultCandidate(
+                candidate_id=mcp_terminal_candidate_id(
+                    call_ref, result_payload_sha256
+                ),
+                owner_user_id=branch.owner_user_id,
+                conversation_id=request.conversation_id,
+                task_id=request.task_id,
+                node_id=request.node_id,
+                intent_id=authority.intent_id,
+                call_id=call_ref,
+                server_id=server.server_id,
+                server_config_version=server.config_version,
+                server_security_version=server.security_version,
+                terminal_state=MCPTerminalState.COMPLETED,
+                result_payload_sha256=result_payload_sha256,
+                safe_result_ref=outcome.result_ref,
+                safe_result_ref_sha256=canonical_sha256(outcome.result_ref),
+                safe_error_code=None,
+                sealed_at=self._now().replace(microsecond=0),
+            )
+            await asyncio.to_thread(
+                seal_terminal_result_candidate,
+                self._terminal_result_root,
+                candidate,
+            )
+            committed = await self._storage.commit_authoritative_mcp_terminal_result(
+                call_ref, candidate.candidate_id, self._now()
+            )
+            if str(committed) == "conflict":
+                raise _CallReservationError("mcp_terminal_result_commit_conflict")
+            result_receipt_id = mcp_terminal_receipt_id(
+                call_ref, result_payload_sha256
+            )
+        else:
+            finished = await self._storage.finish_mcp_call(
+                branch.owner_user_id,
+                branch.task_id,
+                call_ref,
+                status=terminal_status,
+                terminal_at=self._now(),
+                result_ref=outcome.result_ref or outcome.sealed_request_state_ref,
+                output_size_bytes=outcome.byte_size,
+            )
+            if finished is None:
+                raise _CallReservationError("mcp_call_terminal_not_persisted")
         if outcome.kind is MCPCallOutcomeKind.COMPLETED:
             await self._record_terminal_call_metrics(
                 request,
@@ -1151,7 +1530,7 @@ class UserMCPDispatchCoordinator:
                 events=events,
                 selector_step=selector_step,
             )
-        return outcome, call_ref
+        return outcome, call_ref, result_receipt_id
 
     async def _record_permission_metric(
         self,

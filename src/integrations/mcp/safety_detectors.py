@@ -51,6 +51,8 @@ MCP_SAFETY_GAP_REASONS = frozenset(
         "terminal_metric_write_failed",
         "producer_interval_missed",
         "zero_series_write_failed",
+        "unplanned_process_exit",
+        "maintenance_boundary_invalid",
     }
 )
 
@@ -193,6 +195,18 @@ class AuthoritativeMCPSafetyDetectorRegistry:
             raise ValueError("MCP safety violation reason is not supported")
         started_at, ended_at = _minute_bucket(observed_at)
         try:
+            durable_violation_writer = getattr(
+                self._recorder, "record_safety_violation", None
+            )
+            if callable(durable_violation_writer):
+                return await _await_maybe(
+                    durable_violation_writer(
+                        red_line=red_line,
+                        reason_code=reason_code,
+                        bucket_started_at=started_at,
+                        bucket_ended_at=ended_at,
+                    )
+                )
             return await self._record_red_line(
                 red_line,
                 value=1,
@@ -313,8 +327,16 @@ def _validate_interval(started_at: datetime, ended_at: datetime) -> None:
 
 def _validate_bucket(started_at: datetime, ended_at: datetime) -> None:
     _validate_interval(started_at, ended_at)
-    if ended_at - started_at > _MAX_ATTESTATION_WINDOW:
-        raise ValueError("MCP safety detector attestation may cover at most one bucket")
+    utc_start = started_at.astimezone(timezone.utc)
+    utc_end = ended_at.astimezone(timezone.utc)
+    if (
+        utc_end - utc_start != _MAX_ATTESTATION_WINDOW
+        or utc_start.second != 0
+        or utc_start.microsecond != 0
+        or utc_end.second != 0
+        or utc_end.microsecond != 0
+    ):
+        raise ValueError("MCP safety detector attestation must cover one full UTC minute")
 
 
 def _minute_bucket(observed_at: datetime | None) -> tuple[datetime, datetime]:

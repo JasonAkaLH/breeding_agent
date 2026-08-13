@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -15,8 +16,11 @@ from src.storage.sqlite.models import (
     ConversationRow,
     EventRecordRow,
     MCPCallRecordRow,
+    MCPBranchRecordRow,
     MCPDispatchResumeOutboxRow,
     MCPNoServerIntentRow,
+    MCPRemoteTaskBindingRow,
+    MCPRemoteTaskOutboxRow,
     TaskNodeRow,
     TaskRow,
 )
@@ -192,7 +196,135 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(receipt.candidate_id, self.candidate.candidate_id)
         self.assertEqual(receipt.committed_at, self.at)
-        self.assertEqual(str((await self.storage.get_task("task-1")).status), "completed")
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox("outbox-1")
+        self.assertEqual(outbox.status, "completed")
+        self.assertEqual(outbox.result_receipt_id, receipt.result_receipt_id)
+        self.assertEqual(outbox.completion_mode, "normal_terminal_projection")
+        self.assertEqual(str((await self.storage.get_task("task-1")).status), "running")
+        self.assertEqual(
+            str(
+                await self.storage.finalize_mcp_dispatch_intent(
+                    "intent-1",
+                    "node-1",
+                    f"mcp-terminal-result:v1:call-1:{self.candidate.result_payload_sha256}",
+                    self.at,
+                )
+            ),
+            "finalized",
+        )
+        self.assertEqual(str((await self.storage.get_task("task-1")).status), "running")
+        self.assertEqual(
+            str((await self.storage.get_task_node("node-1")).status), "completed"
+        )
+
+    async def test_failed_receipt_atomically_converges_node_and_task_failure(self) -> None:
+        failed = replace(
+            self.candidate,
+            terminal_state=MCPTerminalState.FAILED,
+            safe_result_ref=None,
+            safe_result_ref_sha256=None,
+            safe_error_code="remote_failed",
+        )
+        self.storage = SQLiteStorage(
+            self.sessions,
+            mcp_terminal_candidate_reader=lambda call_id, candidate_id: failed,
+        )
+        self.assertEqual(
+            str(await self.storage.commit_authoritative_mcp_terminal_result(
+                "call-1", failed.candidate_id, self.at
+            )),
+            "committed_normal",
+        )
+        receipt_id = f"mcp-terminal-result:v1:call-1:{failed.result_payload_sha256}"
+        self.assertEqual(
+            str(await self.storage.finalize_mcp_dispatch_intent(
+                "intent-1", "node-1", receipt_id, self.at
+            )),
+            "finalized",
+        )
+        self.assertEqual(str((await self.storage.get_task("task-1")).status), "failed")
+        self.assertEqual(str((await self.storage.get_task_node("node-1")).status), "failed")
+
+    async def test_no_call_failure_aborts_claim_and_converges_without_call(self) -> None:
+        with self.sessions() as session:
+            session.query(MCPCallRecordRow).delete()
+            intent = session.get(MCPNoServerIntentRow, "intent-1")
+            intent.status = "available"
+            outbox = session.get(MCPDispatchResumeOutboxRow, "outbox-1")
+            outbox.status = "claimed"
+            session.commit()
+        self.assertEqual(
+            str(await self.storage.finalize_mcp_dispatch_no_call(
+                "intent-1", "outbox-1", "node-1", "failed",
+                "mcp_server_not_available", self.at,
+            )),
+            "finalized",
+        )
+        intent = await self.storage.get_mcp_no_server_intent("intent-1")
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox("outbox-1")
+        self.assertEqual(str(intent.status), "resolved")
+        self.assertEqual(outbox.status, "aborted")
+        self.assertEqual(outbox.completion_mode, "aborted")
+        self.assertEqual(str((await self.storage.get_task("task-1")).status), "failed")
+        self.assertEqual(str((await self.storage.get_task_node("node-1")).status), "failed")
+
+    async def test_receipt_finishes_remote_binding_without_replaying_network(self) -> None:
+        with self.sessions() as session:
+            session.add(
+                MCPBranchRecordRow(
+                    branch_id="branch-1",
+                    owner_user_id="owner-a",
+                    task_id="task-1",
+                    node_id="node-1",
+                    status="running",
+                    initial_server_id="server-1",
+                    tool_call_count=1,
+                    max_tool_calls=20,
+                    active_call_ref="call-1",
+                    created_at=self.at,
+                    updated_at=self.at,
+                )
+            )
+            session.add(
+                MCPRemoteTaskBindingRow(
+                    safe_remote_task_ref="remote:safe-1",
+                    owner_user_id="owner-a",
+                    task_id="task-1",
+                    node_id="node-1",
+                    call_ref="call-1",
+                    server_id="server-1",
+                    protocol_version="2026-07-28",
+                    remote_task_ciphertext=b"ciphertext",
+                    remote_task_nonce=b"nonce",
+                    encryption_version=1,
+                    last_status="working",
+                    next_poll_at=self.at,
+                    published_at=self.at,
+                    continuation_plan={"capability_id": "main_agent.respond"},
+                    created_at=self.at,
+                    updated_at=self.at,
+                    revision=0,
+                )
+            )
+            session.commit()
+        await self.storage.commit_authoritative_mcp_terminal_result(
+            "call-1", self.candidate.candidate_id, self.at
+        )
+        receipt_id = (
+            f"mcp-terminal-result:v1:call-1:{self.candidate.result_payload_sha256}"
+        )
+        binding = await self.storage.finish_mcp_remote_task_binding_from_receipt(
+            "call-1", receipt_id, self.at + timedelta(seconds=1)
+        )
+        self.assertIsNotNone(binding.terminal_at)
+        retry = await self.storage.finish_mcp_remote_task_binding_from_receipt(
+            "call-1", receipt_id, self.at + timedelta(seconds=2)
+        )
+        self.assertIsNotNone(retry.terminal_at)
+        with self.sessions() as session:
+            outbox = session.get(MCPRemoteTaskOutboxRow, "mcp-remote-terminal:call-1")
+            self.assertEqual(outbox.payload["result_receipt_id"], receipt_id)
+            self.assertEqual(outbox.payload["result_ref"], "artifact:safe-result")
         with self.sessions() as session:
             terminal_events = session.scalars(
                 select(EventRecordRow).where(
@@ -204,6 +336,7 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
                 )
             ).all()
             self.assertEqual(len(terminal_events), 1)
+            self.assertEqual(terminal_events[0].event_type, "mcp.tool_call_terminal")
 
     async def test_no_server_convergence_defers_unknown_when_secure_candidate_exists(self) -> None:
         recovery_storage = SQLiteStorage(
@@ -250,6 +383,45 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
                     "mcp.late_terminal_result_recovered",
                 ],
             )
+
+    async def test_two_dispatched_calls_converge_unknown_without_replay(self) -> None:
+        with self.sessions() as session:
+            session.add(
+                MCPCallRecordRow(
+                    call_ref="call-2",
+                    branch_id="branch-1",
+                    owner_user_id="owner-a",
+                    task_id="task-1",
+                    node_id="node-1",
+                    server_id="server-1",
+                    tool_name="safe_tool_2",
+                    status="running",
+                    call_sequence=2,
+                    arguments_sha256=canonical_sha256({"args": 2}),
+                    server_security_version=1,
+                    server_config_version=1,
+                    input_schema_sha256=canonical_sha256({"schema": 2}),
+                    protocol_version="2026-07-28",
+                    input_field_names=[],
+                    may_have_dispatched=True,
+                    created_at=self.at,
+                    updated_at=self.at,
+                )
+            )
+            session.commit()
+        outcome = await self.storage.converge_user_mcp_no_server(
+            "task-1", self.at
+        )
+        self.assertEqual(str(outcome), "unknown_requires_no_replay")
+        first = await self.storage.get_mcp_call_record(
+            "owner-a", "task-1", "call-1"
+        )
+        second = await self.storage.get_mcp_call_record(
+            "owner-a", "task-1", "call-2"
+        )
+        self.assertEqual(first.status, "execution_status_unknown")
+        self.assertEqual(second.status, "execution_status_unknown")
+        self.assertEqual(str((await self.storage.get_task("task-1")).status), "failed")
 
 
 if __name__ == "__main__":

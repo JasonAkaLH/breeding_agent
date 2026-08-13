@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, taskProgressDisplayText } from './taskEvents';
+import { applyTaskEvent, createInitialTaskEventState, createRestoringTaskState, isTaskActive, markWaitingInputRequired, parseCapabilityFallbackNotice, replayTaskEvents, taskProgressDisplayText } from './taskEvents';
 import type { TaskEventEnvelope } from '../api/types';
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = event_type, node_id: string | null = null): TaskEventEnvelope {
@@ -12,6 +12,82 @@ function event(event_type: string, payload: Record<string, unknown> = {}, event_
     payload,
     created_at: '2026-04-27T00:00:00',
   };
+}
+
+const unknownEventId = 'mcp-execution-status-unknown:v1:call-1:4:01-unknown';
+const failedEventId = 'mcp-execution-status-unknown:v1:call-1:4:02-task-failed';
+const resolutionEventId = 'mcp-late-terminal:v1:call-1:1:01-resolution';
+const correctionEventId = 'mcp-late-terminal:v1:call-1:1:02-correction';
+
+function terminalProjectionEvents(): TaskEventEnvelope[] {
+  return [
+    { ...event('mcp.execution_status_unknown', {
+      schema: 'maf.user_mcp.execution_status_unknown.v1',
+      projection_id: 'mcp-terminal-projection:v1:call-1',
+      intent_id: 'intent-1',
+      call_id: 'call-1',
+      task_id: 'task-1',
+      node_id: 'node-1',
+      projection_revision: 0,
+      intent_revision: 4,
+      unknown_terminal_at: '2026-04-27T00:00:00Z',
+      reason_code: 'trusted_terminal_result_absent',
+      no_replay: true,
+      result_receipt_id: null,
+      predecessor_event_id: null,
+    }, unknownEventId, 'node-1'), created_at: '2026-04-27T00:00:00Z' },
+    { ...event('task.failed', {
+      schema: 'maf.user_mcp.unknown_task_failed.v1',
+      projection_id: 'mcp-terminal-projection:v1:call-1',
+      call_id: 'call-1',
+      task_id: 'task-1',
+      node_id: 'node-1',
+      code: 'execution_status_unknown',
+      no_replay: true,
+      unknown_event_id: unknownEventId,
+      predecessor_event_id: unknownEventId,
+    }, failedEventId, 'node-1'), created_at: '2026-04-27T00:00:00.000001Z' },
+    { ...event('mcp.execution_status_resolution', {
+      schema: 'maf.user_mcp.execution_status_resolution.v1',
+      projection_id: 'mcp-terminal-projection:v1:call-1',
+      intent_id: 'intent-1',
+      call_id: 'call-1',
+      task_id: 'task-1',
+      node_id: 'node-1',
+      unknown_event_id: unknownEventId,
+      task_failed_event_id: failedEventId,
+      result_receipt_id: 'receipt-1',
+      from_projection_revision: 0,
+      to_projection_revision: 1,
+      from_intent_revision: 4,
+      to_intent_revision: 5,
+      unknown_terminal_at: '2026-04-27T00:00:00Z',
+      resolved_at: '2026-04-27T00:01:00Z',
+      predecessor_event_id: failedEventId,
+    }, resolutionEventId, 'node-1'), created_at: '2026-04-27T00:01:00Z' },
+    { ...event('mcp.late_terminal_result_recovered', {
+      schema: 'maf.user_mcp.late_terminal_result_recovered.v1',
+      projection_id: 'mcp-terminal-projection:v1:call-1',
+      intent_id: 'intent-1',
+      call_id: 'call-1',
+      task_id: 'task-1',
+      node_id: 'node-1',
+      unknown_event_id: unknownEventId,
+      resolution_event_id: resolutionEventId,
+      result_receipt_id: 'receipt-1',
+      result_payload_sha256: 'sha256:result',
+      projection_revision: 1,
+      terminal_state: 'completed',
+      safe_result_ref: 'artifact:safe-result',
+      safe_result_ref_sha256: 'sha256:ref',
+      safe_error_code: null,
+      resolved_at: '2026-04-27T00:01:00Z',
+      task_remains_failed: true,
+      node_remains_failed: true,
+      no_replay: true,
+      predecessor_event_id: resolutionEventId,
+    }, correctionEventId, 'node-1'), created_at: '2026-04-27T00:01:00.000001Z' },
+  ];
 }
 
 describe('applyTaskEvent', () => {
@@ -440,12 +516,10 @@ describe('applyTaskEvent', () => {
     });
     expect(JSON.stringify(state.mcp.calls)).not.toContain('must-not-leak');
 
-    state = applyTaskEvent(state, event('mcp.execution_status_unknown', {
-      safe_call_ref: 'call-safe-1',
-      code: 'mcp_execution_status_unknown',
-    }, 'mcp-call-unknown'));
+    state = applyTaskEvent(state, terminalProjectionEvents()[0]);
     expect(state.mcp.calls).toHaveLength(1);
-    expect(state.mcp.calls[0].status).toBe('unknown');
+    expect(state.mcp.calls[0].status).toBe('still_running');
+    expect(state.mcp.executionUnknown).toMatchObject({ callId: 'call-1', noReplay: true });
     expect(state.errorMessage).toContain('不会自动重复调用');
   });
 
@@ -485,16 +559,93 @@ describe('applyTaskEvent', () => {
       createInitialTaskEventState(),
       event('mcp.runtime_unavailable', {
         status: 'unavailable',
-        reason_code: 'no_execution_path',
-        owner_user_id: 'must-not-be-used',
-      }, 'mcp-unavailable'),
+        reason_code: 'no_user_scoped_server',
+      }, 'mcp-no-server:v1:task-1:01-runtime-unavailable'),
     );
 
     expect(state.mcp.availability).toEqual({
       status: 'unavailable',
-      reasonCode: 'no_execution_path',
+      reasonCode: 'no_user_scoped_server',
     });
     expect(state.errorMessage).toContain('不会改道或重放');
-    expect(JSON.stringify(state.mcp)).not.toContain('must-not-be-used');
+  });
+
+  it('buffers predecessor gaps, deduplicates replay, and keeps late results separate from the failed task', () => {
+    const [unknown, failed, resolution, correction] = terminalProjectionEvents();
+    let state = createInitialTaskEventState();
+    state = applyTaskEvent(state, correction);
+    state = applyTaskEvent(state, resolution);
+    expect(state.pendingEvents.map((item) => item.event_id)).toEqual([correctionEventId, resolutionEventId]);
+    expect(state.mcp.lateResult).toBeNull();
+
+    state = applyTaskEvent(state, unknown);
+    state = applyTaskEvent(state, failed);
+    expect(state.pendingEvents).toEqual([]);
+    expect(state.seenEventIds).toEqual([unknownEventId, failedEventId, resolutionEventId, correctionEventId]);
+    expect(state.phase).toBe('failed');
+    expect(state.mcp.lateResult).toMatchObject({
+      terminalState: 'completed',
+      safeResultRef: 'artifact:safe-result',
+      taskRemainsFailed: true,
+      noReplay: true,
+    });
+
+    const duplicate = applyTaskEvent(state, correction);
+    expect(duplicate).toBe(state);
+  });
+
+  it('flags same event_id payload conflicts and unresolved replay gaps as recoverable sync errors', () => {
+    const [unknown, , resolution, correction] = terminalProjectionEvents();
+    const conflict = { ...unknown, payload: { ...unknown.payload, intent_id: 'intent-conflict' } };
+    let state = applyTaskEvent(createInitialTaskEventState(), unknown);
+    state = applyTaskEvent(state, conflict);
+    expect(state.eventSyncError).toContain('冲突');
+
+    state = replayTaskEvents(createInitialTaskEventState(), [correction, resolution]);
+    expect(state.pendingEvents).toHaveLength(2);
+    expect(state.eventSyncError).toContain('缺少前序记录');
+  });
+
+  it('rejects a closed resolution whose cross-event identity binding disagrees with the consumed unknown event', () => {
+    const [unknown, failed, resolution] = terminalProjectionEvents();
+    const mismatched = { ...resolution, payload: { ...resolution.payload, intent_id: 'intent-other' } };
+    let state = applyTaskEvent(createInitialTaskEventState(), unknown);
+    state = applyTaskEvent(state, failed);
+    state = applyTaskEvent(state, mismatched);
+
+    expect(state.phase).toBe('failed');
+    expect(state.mcp.executionResolution).toBeNull();
+    expect(state.mcp.lateResult).toBeNull();
+    expect(state.eventSyncError).toContain('绑定不一致');
+  });
+
+  it('accepts only the deterministic no-server failure after its unavailable predecessor', () => {
+    let state = applyTaskEvent(createInitialTaskEventState(), event(
+      'mcp.runtime_unavailable',
+      { status: 'unavailable', reason_code: 'no_user_scoped_server' },
+      'mcp-no-server:v1:task-1:01-runtime-unavailable',
+    ));
+    state = applyTaskEvent(state, event(
+      'task.failed',
+      { code: 'mcp_runtime_unavailable' },
+      'mcp-no-server:v1:task-1:02-task-failed',
+    ));
+
+    expect(state.phase).toBe('failed');
+    expect(state.seenEventIds).toEqual([
+      'mcp-no-server:v1:task-1:01-runtime-unavailable',
+      'mcp-no-server:v1:task-1:02-task-failed',
+    ]);
+  });
+
+  it('rejects malformed closed events and unknown fields without changing task phase', () => {
+    const malformed = terminalProjectionEvents()[0];
+    const state = applyTaskEvent(createInitialTaskEventState(), {
+      ...malformed,
+      payload: { ...malformed.payload, unexpected: true },
+    });
+    expect(state.phase).toBe('idle');
+    expect(state.seenEventIds).toEqual([]);
+    expect(state.eventSyncError).toContain('格式不完整');
   });
 });

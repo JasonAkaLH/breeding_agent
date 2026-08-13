@@ -16,7 +16,12 @@ from src.core.enums import (
     UserMCPHealthStatus,
     UserMCPTransport,
 )
-from src.core.models import Conversation, Task, TaskNode, UserMCPHealthAttempt, UserMCPServer
+from src.core.models import (
+    Conversation, MCPCallRecord, MCPCP7ReadyEpochEvent,
+    MCPCP7ReadyEpochEventKind, MCPCP7SafetyLedgerRecord, MCPCP7SafetyRecordKind,
+    Task, TaskNode, UserMCPHealthAttempt, UserMCPServer,
+)
+from src.integrations.mcp.cp7_artifacts import canonical_sha256
 from src.storage.sqlite.bootstrap import bootstrap_sqlite_database
 from src.storage.sqlite.models import EventRecordRow, UserMCPOwnerMutationGuardRow
 from src.storage.sqlite.repositories import SQLiteStorage
@@ -217,6 +222,131 @@ class UserMCPNoServerIntentTest(unittest.IsolatedAsyncioTestCase):
                 "mcp-dispatch-resume:v1:mcp-no-server-intent:v1:task-delete:node-delete"
             )
         )
+
+    async def test_expired_dispatch_resume_claim_is_reclaimed_without_call_replay(self) -> None:
+        await self.storage.create_user_mcp_server(self._available_server())
+        await self.storage.save_task(
+            Task(
+                task_id="task-claim-crash",
+                conversation_id="conv-1",
+                root_message_id="message-claim-crash",
+                status=TaskStatus.RUNNING,
+                routing_mode=RoutingMode.AUTO,
+                created_at=self.at,
+                updated_at=self.at,
+                mcp_execution_mode="user_scoped",
+                mcp_shadow_enabled=False,
+                mcp_rollout_config_version="cp7",
+                mcp_route_reason_code="enforce_selected",
+                mcp_rollout_mode="enforce",
+            )
+        )
+        await self.storage.save_task_node(
+            TaskNode(
+                node_id="node-claim-crash",
+                task_id="task-claim-crash",
+                capability_id="mcp.dispatch",
+                status=NodeStatus.RUNNING,
+            )
+        )
+        intent_id = "mcp-no-server-intent:v1:task-claim-crash:node-claim-crash"
+        outbox_id = f"mcp-dispatch-resume:v1:{intent_id}"
+        await self.storage.arm_user_mcp_target_intent(
+            "task-claim-crash",
+            "node-claim-crash",
+            "server-1",
+            {"task_id": "task-claim-crash"},
+            self.at,
+        )
+        await self.storage.resolve_user_mcp_target_intent(
+            intent_id, self.at + timedelta(seconds=1)
+        )
+        claimed = await self.storage.claim_mcp_dispatch_resume_outbox(
+            outbox_id,
+            "crashed-worker",
+            "crashed-token",
+            self.at + timedelta(seconds=2),
+            self.at + timedelta(seconds=3),
+        )
+        self.assertIsNotNone(claimed)
+        self.assertIsNone(
+            await self.storage.reclaim_mcp_dispatch_resume_outbox(
+                outbox_id, claimed.revision, self.at + timedelta(seconds=2)
+            )
+        )
+        pending = await self.storage.reclaim_mcp_dispatch_resume_outbox(
+            outbox_id, claimed.revision, self.at + timedelta(seconds=4)
+        )
+        self.assertEqual(str(pending.status), "pending")
+        restarted = await self.storage.claim_mcp_dispatch_resume_outbox(
+            outbox_id,
+            "restart-worker",
+            "restart-token",
+            self.at + timedelta(seconds=4),
+            self.at + timedelta(seconds=34),
+        )
+        self.assertEqual(str(restarted.status), "claimed")
+        self.assertEqual(
+            await self.storage.list_mcp_call_records("owner-a", "task-claim-crash"),
+            [],
+        )
+
+    async def test_cp7_guard_latch_between_precheck_and_admit_writes_no_call(self) -> None:
+        await self.storage.create_user_mcp_server(self._available_server())
+        await self.storage.save_task(Task(
+            task_id="task-race", conversation_id="conv-1", root_message_id="message-race",
+            status=TaskStatus.RUNNING, routing_mode=RoutingMode.AUTO,
+            created_at=self.at, updated_at=self.at, mcp_execution_mode="user_scoped",
+            mcp_shadow_enabled=False, mcp_rollout_config_version="cp7",
+            mcp_route_reason_code="enforce_selected", mcp_rollout_mode="enforce",
+        ))
+        await self.storage.save_task_node(TaskNode(
+            node_id="node-race", task_id="task-race", capability_id="mcp.dispatch",
+            status=NodeStatus.RUNNING,
+        ))
+        intent_id = "mcp-no-server-intent:v1:task-race:node-race"
+        outbox_id = f"mcp-dispatch-resume:v1:{intent_id}"
+        await self.storage.arm_user_mcp_target_intent(
+            "task-race", "node-race", "server-1", {"task_id": "task-race"}, self.at
+        )
+        await self.storage.resolve_user_mcp_target_intent(intent_id, self.at)
+        await self.storage.claim_mcp_dispatch_resume_outbox(
+            outbox_id, "worker", "token", self.at, self.at + timedelta(minutes=1)
+        )
+        await self.storage.append_mcp_cp7_safety_ledger_record(MCPCP7SafetyLedgerRecord(
+            record_id="fatal-gap", candidate_id="candidate-race", epoch_id="epoch-race",
+            config_fingerprint="config", record_kind=MCPCP7SafetyRecordKind.GAP,
+            red_line=None, hook_id=None, bucket_started_at=None, bucket_ended_at=None,
+            reason_code="producer_interval_missed", value=1,
+            boundary_source_sha256=canonical_sha256({"gap": 1}),
+            payload_sha256=canonical_sha256({"record": 1}), recorded_at=self.at,
+        ))
+        await self.storage.append_mcp_cp7_ready_epoch_event(MCPCP7ReadyEpochEvent(
+            event_id="ready-race", candidate_id="candidate-race", epoch_id="epoch-race",
+            predecessor_epoch_id=None, event_kind=MCPCP7ReadyEpochEventKind.READY,
+            container_id="container", image_id="image", config_fingerprint="config",
+            boundary_at=self.at, audit_device="device", audit_inode=1, audit_offset=1,
+            ledger_record_count=1, inflight_state_sha256=canonical_sha256({"inflight": 1}),
+            payload_sha256=canonical_sha256({"ready": 1}),
+        ))
+        intent = await self.storage.get_mcp_no_server_intent(intent_id)
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(outbox_id)
+        admitted = await self.storage.admit_mcp_tool_call(
+            intent_id, outbox_id, intent.revision, outbox.revision,
+            MCPCallRecord(
+                call_ref="call-race", branch_id="branch-race", owner_user_id="owner-a",
+                task_id="task-race", node_id="node-race", server_id="server-1",
+                tool_name="tool", status="reserved", call_sequence=1,
+                arguments_sha256=canonical_sha256({"args": 1}), server_security_version=1,
+                server_config_version=1, input_schema_sha256=canonical_sha256({"schema": 1}),
+                protocol_version="2026-07-28", input_field_names=(), created_at=self.at,
+                updated_at=self.at, may_have_dispatched=True,
+            ), self.at, cp7_candidate_id="candidate-race", cp7_epoch_id="epoch-race",
+        )
+        self.assertFalse(admitted)
+        self.assertIsNone(await self.storage.get_mcp_call_record(
+            "owner-a", "task-race", "call-race"
+        ))
 
 
 if __name__ == "__main__":

@@ -718,14 +718,25 @@ class UserMCPRemoteTaskRecoveryWorkerTest(unittest.IsolatedAsyncioTestCase):
             )
             for binding, remote_status in zip(bindings, expected, strict=True)
         }
+        sealed: list[tuple[str, str, str | None, str | None]] = []
+
+        async def seal(binding, call_status, result_ref, safe_error_code):
+            before_finish = await self._get(binding)
+            self.assertIsNone(before_finish.terminal_at)
+            sealed.append(
+                (binding.call_ref, call_status, result_ref, safe_error_code)
+            )
+
         worker = MCPRemoteTaskRecoveryWorker(
             storage=self.storage,
             client_factory=lambda binding: clients[binding.safe_remote_task_ref],
             instance_id="worker-terminal-normalization",
             now_fn=lambda: self.now,
+            terminal_sealer=seal,
         )
 
         self.assertEqual(await worker.run_once(), len(bindings))
+        self.assertEqual(len(sealed), len(bindings))
 
         for binding, remote_status in zip(bindings, expected, strict=True):
             call_status, safe_error_code = expected[remote_status]

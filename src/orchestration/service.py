@@ -3,11 +3,12 @@ from __future__ import annotations
 import inspect
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from src.core.contracts import CapabilityExecutionRequest, EventSink, ExecutorPort, StoragePort
 from src.core.enums import EventVisibility, NodeStatus, TaskStatus
 from src.core.models import EventRecord, Interrupt, Task, TaskEdge, TaskNode
+from src.integrations.mcp.cp7_artifacts import canonical_sha256
 from src.integrations.agent_skills.missing_input_interrupt import (
     SLOT_COLLECTION_V2_SCHEMA_VERSION,
     slot_collection_bootstrap_events,
@@ -797,6 +798,91 @@ class OrchestrationService:
             )
         )
         return completed, dict(result.output_payload)
+
+    async def resume_persisted_mcp_dispatch_node(
+        self,
+        request: OrchestrationRequest,
+        envelope: Mapping[str, Any],
+        *,
+        expected_envelope_sha256: str,
+    ) -> tuple[TaskNode, dict[str, Any]]:
+        if canonical_sha256(dict(envelope)) != expected_envelope_sha256:
+            raise RuntimeError("mcp_dispatch_resume_envelope_digest_mismatch")
+        task = await self._storage.get_task(request.task_id)
+        node = await self._storage.get_task_node(str(envelope.get("node_id") or ""))
+        if (
+            task is None
+            or node is None
+            or task.status != TaskStatus.RUNNING
+            or task.task_id != envelope.get("task_id")
+            or task.root_message_id != envelope.get("root_message_id")
+            or task.mcp_execution_mode != "user_scoped"
+            or task.mcp_route_reason_code != "enforce_selected"
+            or node.task_id != task.task_id
+            or node.capability_id != "mcp.dispatch"
+        ):
+            raise RuntimeError("mcp_dispatch_resume_authority_mismatch")
+        assignment = envelope.get("task_assignment")
+        snapshot = envelope.get("node_snapshot")
+        if not isinstance(assignment, Mapping) or not isinstance(snapshot, Mapping):
+            raise RuntimeError("mcp_dispatch_resume_snapshot_missing")
+        actual_assignment = {
+            "mcp_execution_mode": task.mcp_execution_mode,
+            "mcp_route_reason_code": task.mcp_route_reason_code,
+            "mcp_rollout_config_version": task.mcp_rollout_config_version,
+            "mcp_rollout_mode": task.mcp_rollout_mode,
+            "mcp_shadow_enabled": task.mcp_shadow_enabled,
+        }
+        actual_node = {
+            "capability_id": node.capability_id,
+            "criticality": str(node.criticality),
+            "dependency_type": str(node.dependency_type),
+            "input_refs": list(node.input_refs),
+            "resource_class": node.resource_class,
+            "retry_policy": dict(node.retry_policy),
+            "timeout_policy": dict(node.timeout_policy),
+        }
+        edges = await self._storage.list_task_edges(task.task_id)
+        actual_edges = [
+            {
+                "condition": edge.condition,
+                "edge_type": str(edge.edge_type),
+                "from_node_id": edge.from_node_id,
+                "to_node_id": edge.to_node_id,
+            }
+            for edge in edges
+        ]
+        attachments = await self._storage.list_task_input_attachments_for_task(
+            task.task_id
+        )
+        if (
+            dict(assignment) != actual_assignment
+            or dict(snapshot) != actual_node
+            or envelope.get("edge_snapshot") != actual_edges
+            or envelope.get("input_attachment_ids")
+            != sorted(item.attachment_id for item in attachments)
+        ):
+            raise RuntimeError("mcp_dispatch_resume_snapshot_drift")
+        node_plan = WorkflowNodePlan(
+            node_id=node.node_id,
+            capability_id=node.capability_id,
+            input_payload=dict(envelope.get("input_payload") or {}),
+            metadata=dict(envelope.get("metadata") or {}),
+            depends_on=tuple(
+                edge.from_node_id for edge in edges if edge.to_node_id == node.node_id
+            ),
+            criticality=node.criticality,
+            retry_policy=dict(node.retry_policy),
+            timeout_policy=dict(node.timeout_policy),
+            resource_class=node.resource_class,
+        )
+        dependency_outputs = {
+            str(key): dict(value)
+            for key, value in dict(envelope.get("dependency_outputs") or {}).items()
+        }
+        return await self._execute_node(
+            request, node_plan, node, dependency_outputs=dependency_outputs
+        )
 
     async def _assert_mcp_continuation_execution_owned(
         self, request: OrchestrationRequest

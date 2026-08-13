@@ -325,6 +325,7 @@ class MCPGateway:
         self._metric_routing_mode = metric_routing_mode
         self._remote_task_canceller = remote_task_canceller
         self._safety_detectors = dict(safety_detectors or {})
+        self._safety_admission_checker: Callable[[], Awaitable[bool]] | None = None
         self._scopes: dict[tuple[str, str], _ScopeState] = {}
         self._opening: dict[tuple[str, str], asyncio.Task[_ScopeState]] = {}
         self._opening_owners: dict[tuple[str, str], str] = {}
@@ -377,11 +378,24 @@ class MCPGateway:
     ) -> None:
         self._safety_detectors = dict(detectors)
 
+    def configure_safety_admission_checker(
+        self, checker: Callable[[], Awaitable[bool]]
+    ) -> None:
+        self._safety_admission_checker = checker
+
+    async def _require_safety_admission(self) -> None:
+        if (
+            self._safety_admission_checker is not None
+            and not await self._safety_admission_checker()
+        ):
+            raise MCPGatewayError("mcp_cp7_runtime_not_ready")
+
     def attest_safety_interval(
         self, bucket_started_at: datetime, bucket_ended_at: datetime
     ) -> None:
         for red_line in (
             MCPSafetyRedLine.CROSS_USER_ACCESS,
+            MCPSafetyRedLine.UNAUTHORIZED_TOOL_CALL,
             MCPSafetyRedLine.ENDPOINT_POLICY_BYPASS,
             MCPSafetyRedLine.SHADOW_TOOL_CALL,
             MCPSafetyRedLine.PERSISTENT_RESOURCE_LEAK,
@@ -400,6 +414,7 @@ class MCPGateway:
         on_queue_entered: Callable[[int], Awaitable[None]] | None = None,
         on_queue_left: Callable[[], Awaitable[None]] | None = None,
     ) -> MCPTaskServerScope:
+        await self._require_safety_admission()
         owner_user_id = str(authenticated_user.username)
         await self._require_task_owner(owner_user_id, platform_task_id)
         key = (platform_task_id, server_id)
@@ -868,6 +883,7 @@ class MCPGateway:
         continuation_plan: Mapping[str, Any] | None = None,
         authorization_verified: bool = False,
     ) -> MCPCallOutcome:
+        await self._require_safety_admission()
         state = self._require_scope(scope)
         if self._safety_detectors and not authorization_verified:
             await self._report_safety_violation(

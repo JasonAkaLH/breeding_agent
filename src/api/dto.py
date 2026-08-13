@@ -234,6 +234,7 @@ class TaskSummaryResponse(BaseModel):
     cancel_requested: bool
     created_at: datetime | None
     updated_at: datetime | None
+    mcp_terminal_projection: dict[str, Any] | None = None
 
 
 class TaskListResponse(BaseModel):

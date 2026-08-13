@@ -138,6 +138,7 @@ export interface TaskSummaryResponse {
   cancel_requested: boolean;
   created_at: string | null;
   updated_at: string | null;
+  mcp_terminal_projection?: Record<string, unknown> | null;
 }
 
 export interface TaskListResponse {

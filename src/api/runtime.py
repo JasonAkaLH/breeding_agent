@@ -53,6 +53,10 @@ from src.core.models import (
     Message,
     MCPShadowAuditSample,
     MCPRolloutInstanceConfigLease,
+    MCPInitialIntentCreateResult,
+    MCPNoServerConvergenceResult,
+    MCPValidatedTerminalResultCandidate,
+    MCPTerminalState,
     PendingSkillContext,
     SlotCollection,
     SlotEvent,
@@ -128,6 +132,25 @@ from src.integrations.mcp.gateway import MCPGateway
 from src.integrations.mcp.dispatch_coordinator import (
     MCPDispatchMetricContext,
     UserMCPDispatchCoordinator,
+)
+from src.integrations.mcp.cp7_terminal_results import (
+    enumerate_unconsumed_terminal_result_candidates,
+    secure_read_terminal_result_candidate,
+)
+from src.integrations.mcp.cp7_artifacts import (
+    mcp_dispatch_resume_outbox_id,
+    mcp_terminal_receipt_id,
+    mcp_terminal_candidate_id,
+    canonical_sha256,
+)
+from src.integrations.mcp.cp7_terminal_results import seal_terminal_result_candidate
+from src.integrations.mcp.cp7_safety import (
+    CP7BoundaryEvidence,
+    CP7LocalSafetyFacade,
+    CP7PredecessorClose,
+    CP7RuntimeIdentity,
+    CP7SafetyFatalPersistenceError,
+    cp7_runtime_safety_wiring,
 )
 from src.integrations.mcp.health import MCPHealthRunner
 from src.integrations.mcp.recovery_worker import (
@@ -570,6 +593,17 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         mcp_rollout_instance_admission: _MCPRolloutInstanceAdmission | None = None,
         mcp_rollout_metric_recorder: MCPRolloutMetricRecorder | None = None,
         mcp_rollout_engine: Engine | None = None,
+        mcp_terminal_result_root: Path | None = None,
+        mcp_legacy_retirement_binding: tuple[str, str] | None = None,
+        mcp_cp7_safety_facade: CP7LocalSafetyFacade | None = None,
+        mcp_cp7_open_boundary: CP7BoundaryEvidence | None = None,
+        mcp_cp7_boundary_provider: Callable[[], Any] | None = None,
+        mcp_cp7_fatal_exit: Callable[[int], None] = os._exit,
+        mcp_cp7_safety_probes: tuple[Callable[[datetime, datetime], None], ...] = (),
+        mcp_cp7_predecessor_close: CP7PredecessorClose | None = None,
+        mcp_cp7_verifier_authorized: bool = False,
+        mcp_cp7_maintenance_authorization: object | None = None,
+        mcp_cp7_maintenance_authorizer: Callable[[object], bool] | None = None,
     ) -> None:
         self._engine = engine
         self._mcp_rollout_engine = mcp_rollout_engine
@@ -608,6 +642,21 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self.mcp_rollout_config = mcp_rollout_config or MCPRolloutConfig.from_env({})
         self._mcp_rollout_instance_admission = mcp_rollout_instance_admission
         self._mcp_rollout_metric_recorder = mcp_rollout_metric_recorder
+        self._mcp_terminal_result_root = mcp_terminal_result_root
+        self._mcp_legacy_retirement_binding = mcp_legacy_retirement_binding
+        self._mcp_cp7_safety_facade = mcp_cp7_safety_facade
+        self._mcp_cp7_open_boundary = mcp_cp7_open_boundary
+        self._mcp_cp7_boundary_provider = mcp_cp7_boundary_provider
+        self._mcp_cp7_fatal_exit = mcp_cp7_fatal_exit
+        self._mcp_cp7_safety_probes = mcp_cp7_safety_probes
+        self._mcp_cp7_predecessor_close = mcp_cp7_predecessor_close
+        self._mcp_cp7_verifier_authorized = mcp_cp7_verifier_authorized
+        self._mcp_cp7_maintenance_authorization = mcp_cp7_maintenance_authorization
+        self._mcp_cp7_maintenance_authorizer = mcp_cp7_maintenance_authorizer
+        self._mcp_cp7_requests_stopped = False
+        self._mcp_cp7_minute_task: asyncio.Task[None] | None = None
+        self._mcp_cp7_clock = lambda: datetime.now(timezone.utc)
+        self._mcp_cp7_sleep = asyncio.sleep
         self._mcp_rollout_zero_series_task: asyncio.Task[None] | None = None
         self._mcp_rollout_instance_lease_created_at: datetime | None = None
         self._mcp_rollout_instance_lease_valid_until: datetime | None = None
@@ -1044,6 +1093,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     ) -> tuple[Message, Task]:
         if authenticated_username is None:
             raise ValueError("authenticated_username is required")
+        cp7_safety_facade = getattr(self, "_mcp_cp7_safety_facade", None)
+        if (
+            getattr(self, "_mcp_cp7_requests_stopped", False)
+            or cp7_safety_facade is not None
+            and not await cp7_safety_facade.ensure_ready()
+        ):
+            raise RuntimeError("mcp_cp7_runtime_not_ready")
         self._ensure_mcp_rollout_instance_admitted()
         selected_model_edition = self._validate_requested_model_edition(request.model_edition)
         existing_conversation = await self.storage.get_conversation(conversation_id)
@@ -1183,7 +1239,29 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             mcp_route_reason_code=mcp_assignment.reason_code.value,
             mcp_rollout_mode=mcp_assignment.routing_mode.value,
         )
-        await self.storage.save_task(task)
+        explicit_mcp_dispatch = (
+            explicit_force_capability and requested_capability_id == "mcp.dispatch"
+        )
+        initial_no_server = False
+        if explicit_mcp_dispatch:
+            profiles = await self.available_user_mcp_server_profiles(
+                authenticated_username,
+                execution_mode=task.mcp_execution_mode,
+            )
+            if not profiles:
+                created = await self.storage.create_user_mcp_initial_intent(task, now)
+                if created is MCPInitialIntentCreateResult.RETRY_ROUTE:
+                    profiles = await self.available_user_mcp_server_profiles(
+                        authenticated_username,
+                        execution_mode=MCPExecutionPath.USER_SCOPED.value,
+                    )
+                    if not profiles:
+                        raise RuntimeError("mcp_initial_intent_retry_route_without_profile")
+                else:
+                    initial_no_server = True
+                    task = await self.storage.get_task(task_id) or task
+        if not initial_no_server:
+            await self.storage.save_task(task)
         await self._record_mcp_route_assignment_metric(task)
         await self._record_event(
             self._make_event(
@@ -1231,19 +1309,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 created_at=now,
             )
         )
-        if mcp_assignment.real_path is MCPExecutionPath.UNAVAILABLE:
-            await self._record_event(
-                self._make_event(
-                    task_id=task_id,
-                    conversation_id=conversation_id,
-                    event_type="mcp.runtime_unavailable",
-                    payload={
-                        "status": "unavailable",
-                        "reason_code": mcp_assignment.reason_code.value,
-                    },
-                    created_at=now,
-                )
-            )
         if superseded_pending_count:
             await self._record_event(
                 self._make_event(
@@ -1296,6 +1361,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             and self._mcp_runtime_state is not None
         ):
             metadata["mcp_bundle_revision"] = self._mcp_runtime_state.active_revision
+        if initial_no_server:
+            outcome = await self.storage.converge_user_mcp_no_server(task_id, now)
+            if outcome not in {
+                MCPNoServerConvergenceResult.CONVERGED,
+                MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+                MCPNoServerConvergenceResult.ALREADY_TERMINAL,
+            }:
+                raise RuntimeError(f"mcp_initial_no_server_convergence_failed:{outcome}")
+            return message, await self.storage.get_task(task_id) or task
         upload_ids = request.metadata.get("upload_ids") or ()
         explicit_upload_ids = self._normalize_upload_ids(upload_ids)
         if upload_context["uploaded_artifacts"]:
@@ -2134,6 +2208,49 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             payload = event.payload if isinstance(event.payload, Mapping) else {}
             return self._llm_request_metadata(payload, include_defaults=False)
         return {}
+
+    async def mcp_terminal_projection_for_task(
+        self, task: Task
+    ) -> dict[str, object] | None:
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        if conversation is None:
+            return None
+        projections = []
+        for call in await self.storage.list_mcp_call_records(
+            conversation.username, task.task_id
+        ):
+            projection = await self.storage.get_mcp_execution_terminal_projection(
+                call.call_ref
+            )
+            if projection is not None:
+                projections.append(projection)
+        if not projections:
+            return None
+        if len(projections) != 1:
+            raise RuntimeError("mcp_terminal_projection_task_fork")
+        projection = projections[0]
+        return {
+            "projection_id": projection.projection_id,
+            "status": str(projection.status),
+            "revision": projection.revision,
+            "no_replay": projection.no_replay,
+            "reason_code": str(projection.reason_code),
+            "unknown_event_id": projection.unknown_event_id,
+            "task_failed_event_id": projection.task_failed_event_id,
+            "result_receipt_id": projection.result_receipt_id,
+            "result_payload_sha256": projection.result_payload_sha256,
+            "terminal_state": (
+                str(projection.resolved_terminal_state)
+                if projection.resolved_terminal_state is not None
+                else None
+            ),
+            "safe_result_ref": projection.safe_result_ref,
+            "safe_error_code": projection.safe_error_code,
+            "resolution_event_id": projection.resolution_event_id,
+            "correction_event_id": projection.correction_event_id,
+            "unknown_terminal_at": projection.unknown_terminal_at,
+            "resolved_at": projection.resolved_at,
+        }
 
     async def _resume_llm_metadata(
         self,
@@ -7958,6 +8075,28 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
 
     async def start(self) -> None:
         await self._admit_mcp_rollout_instance()
+        await self._reconcile_cp7_mcp_authority()
+        if self._mcp_cp7_safety_facade is not None:
+            if self._mcp_cp7_open_boundary is None:
+                raise RuntimeError("mcp_cp7_open_boundary_missing")
+            if not self._mcp_cp7_safety_facade.opened:
+                try:
+                    await self._mcp_cp7_safety_facade.open_epoch(
+                        self._mcp_cp7_open_boundary,
+                        predecessor=self._mcp_cp7_predecessor_close,
+                        verifier_authorized=self._mcp_cp7_verifier_authorized,
+                    )
+                except CP7SafetyFatalPersistenceError:
+                    self._mcp_cp7_fatal_exit(70)
+                    raise
+            if self._mcp_cp7_boundary_provider is None:
+                raise RuntimeError("mcp_cp7_boundary_provider_missing")
+            self._mcp_cp7_minute_task = asyncio.create_task(
+                self._run_cp7_safety_minutes(), name="mcp-cp7-safety-minute-producer"
+            )
+            self._mcp_cp7_minute_task.add_done_callback(
+                self._handle_cp7_safety_minute_exit
+            )
         if self.user_mcp_audit_service is not None:
             self._mcp_audit_retention_task = asyncio.create_task(
                 self.user_mcp_audit_service.run_retention_forever(),
@@ -8004,6 +8143,424 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 self._mcp_rollout_metric_recorder.run_continuous_zero_series(),
                 name="mcp-rollout-zero-series",
             )
+
+    async def _reconcile_cp7_mcp_authority(self) -> None:
+        root = self._mcp_terminal_result_root
+        sealed_by_intent: dict[str, list[MCPValidatedTerminalResultCandidate]] = {}
+        if root is not None:
+            sealed = await asyncio.to_thread(
+                enumerate_unconsumed_terminal_result_candidates, root
+            )
+            for item in sealed:
+                sealed_by_intent.setdefault(item.candidate.intent_id, []).append(
+                    item.candidate
+                )
+                result = await self.storage.commit_authoritative_mcp_terminal_result(
+                    item.candidate.call_id,
+                    item.candidate.candidate_id,
+                    self._utcnow_naive(),
+                )
+                if str(result) == "conflict":
+                    raise RuntimeError("mcp_terminal_candidate_reconciliation_conflict")
+                await self.storage.finish_mcp_remote_task_binding_from_receipt(
+                    item.candidate.call_id,
+                    mcp_terminal_receipt_id(
+                        item.candidate.call_id,
+                        item.candidate.result_payload_sha256,
+                    ),
+                    self._utcnow_naive(),
+                )
+
+        all_intents = await self.storage.list_mcp_no_server_intents()
+        await self._validate_terminal_cp7_mcp_authority(all_intents)
+        intents = [
+            intent
+            for intent in all_intents
+            if str(intent.status)
+            in {"armed", "available", "unavailable", "dispatched"}
+        ]
+        outboxes = {
+            item.intent_id: item
+            for item in await self.storage.list_mcp_dispatch_resume_outboxes()
+        }
+        for intent in intents:
+            if str(intent.status) == "armed":
+                await self.storage.resolve_user_mcp_target_intent(
+                    intent.intent_id, self._utcnow_naive()
+                )
+                intent = (
+                    await self.storage.get_mcp_no_server_intent(intent.intent_id)
+                    or intent
+                )
+            if str(intent.status) == "unavailable":
+                outcome = await self.storage.converge_user_mcp_no_server(
+                    intent.task_id, self._utcnow_naive()
+                )
+                if outcome is MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT:
+                    raise RuntimeError("mcp_terminal_candidate_reconciliation_incomplete")
+                continue
+            if str(intent.status) == "available":
+                expected_id = mcp_dispatch_resume_outbox_id(intent.intent_id)
+                outbox = outboxes.get(intent.intent_id)
+                if outbox is None or outbox.outbox_id != expected_id:
+                    raise RuntimeError("mcp_dispatch_resume_outbox_missing")
+                envelope = dict(intent.resume_envelope or {})
+                envelope_sha = canonical_sha256(envelope)
+                if (
+                    envelope_sha != intent.resume_envelope_sha256
+                    or envelope_sha != outbox.resume_envelope_sha256
+                ):
+                    raise RuntimeError("mcp_dispatch_resume_envelope_digest_mismatch")
+                outbox_payload_sha = canonical_sha256(
+                    {
+                        "intent_id": intent.intent_id,
+                        "node_id": intent.node_id,
+                        "owner_user_id": intent.owner_user_id,
+                        "resume_envelope_sha256": envelope_sha,
+                        "server_id": intent.requested_server_id,
+                        "task_id": intent.task_id,
+                    }
+                )
+                if outbox_payload_sha != outbox.payload_sha256:
+                    raise RuntimeError("mcp_dispatch_resume_outbox_payload_mismatch")
+                now = self._utcnow_naive()
+                if str(outbox.status) == "claimed":
+                    if outbox.lease_expires_at is None or outbox.lease_expires_at > now:
+                        raise RuntimeError("mcp_dispatch_resume_claim_supervised_elsewhere")
+                    outbox = await self.storage.reclaim_mcp_dispatch_resume_outbox(
+                        outbox.outbox_id, outbox.revision, now
+                    )
+                    if outbox is None or str(outbox.status) != "pending":
+                        raise RuntimeError("mcp_dispatch_resume_reclaim_lost")
+                if str(outbox.status) == "pending":
+                    outbox = await self.storage.claim_mcp_dispatch_resume_outbox(
+                        outbox.outbox_id,
+                        f"startup:{intent.task_id}:{intent.node_id}",
+                        uuid4().hex,
+                        now,
+                        now + timedelta(seconds=30),
+                    )
+                if outbox is None or str(outbox.status) != "claimed":
+                    raise RuntimeError("mcp_dispatch_resume_claim_lost")
+                task = await self.storage.get_task(intent.task_id)
+                if (
+                    task is None
+                    or envelope.get("task_id") != task.task_id
+                    or envelope.get("node_id") != intent.node_id
+                    or envelope.get("server_id") != intent.requested_server_id
+                    or not envelope.get("root_message_id")
+                ):
+                    raise RuntimeError("mcp_dispatch_resume_envelope_corrupt")
+                root_message = await self.storage.get_message(task.root_message_id)
+                resume_request = OrchestrationRequest(
+                    task_id=task.task_id,
+                    conversation_id=task.conversation_id,
+                    root_message_id=task.root_message_id,
+                    user_message=(
+                        root_message.content
+                        if root_message is not None
+                        else task.summary or ""
+                    ),
+                    requested_capability_id="mcp.dispatch",
+                    metadata={
+                        **self._mcp_task_assignment_metadata(task),
+                        **dict(envelope.get("metadata") or {}),
+                        "mcp_dispatch_resume_envelope": envelope,
+                        "mcp_dispatch_server_id": intent.requested_server_id,
+                        "resume_interrupted_node_id": intent.node_id,
+                    },
+                )
+                resumed_node, _ = (
+                    await self.orchestration_service.resume_persisted_mcp_dispatch_node(
+                        resume_request,
+                        envelope,
+                        expected_envelope_sha256=envelope_sha,
+                    )
+                )
+                if resumed_node.status in {
+                    NodeStatus.FAILED,
+                    NodeStatus.CANCELLED,
+                    NodeStatus.ORPHANED,
+                    NodeStatus.BLOCKED_BY_CANCELLATION,
+                }:
+                    raise RuntimeError("mcp_dispatch_resume_execution_failed")
+                continue
+            if str(intent.status) == "dispatched":
+                candidates = sorted(
+                    sealed_by_intent.get(intent.intent_id, ()),
+                    key=lambda item: item.call_id,
+                )
+                if candidates:
+                    task = await self.storage.get_task(intent.task_id)
+                    if task is None:
+                        raise RuntimeError("mcp_dispatch_recovery_task_missing")
+                    root_message = await self.storage.get_message(task.root_message_id)
+                    envelope = dict(intent.resume_envelope or {})
+                    envelope_sha = canonical_sha256(envelope)
+                    outbox = outboxes.get(intent.intent_id)
+                    if (
+                        outbox is None
+                        or envelope_sha != intent.resume_envelope_sha256
+                        or envelope_sha != outbox.resume_envelope_sha256
+                        or canonical_sha256(
+                            {
+                                "intent_id": intent.intent_id,
+                                "node_id": intent.node_id,
+                                "owner_user_id": intent.owner_user_id,
+                                "resume_envelope_sha256": envelope_sha,
+                                "server_id": intent.requested_server_id,
+                                "task_id": intent.task_id,
+                            }
+                        )
+                        != outbox.payload_sha256
+                    ):
+                        raise RuntimeError("mcp_dispatch_resume_authority_digest_mismatch")
+                    receipt_ids = [
+                        mcp_terminal_receipt_id(
+                            candidate.call_id, candidate.result_payload_sha256
+                        )
+                        for candidate in candidates
+                    ]
+                    resume_request = OrchestrationRequest(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        root_message_id=task.root_message_id,
+                        user_message=(
+                            root_message.content
+                            if root_message is not None
+                            else task.summary or ""
+                        ),
+                        requested_capability_id="mcp.dispatch",
+                        metadata={
+                            **self._mcp_task_assignment_metadata(task),
+                            **dict(envelope.get("metadata") or {}),
+                            "mcp_dispatch_server_id": intent.requested_server_id,
+                            "resume_interrupted_node_id": intent.node_id,
+                            "mcp_recovered_result_receipt_ids": receipt_ids,
+                            "mcp_recovered_result_refs": [
+                                candidate.safe_result_ref for candidate in candidates
+                            ],
+                        },
+                    )
+                    resumed_node, _ = await self.orchestration_service.resume_persisted_mcp_dispatch_node(
+                        resume_request,
+                        envelope,
+                        expected_envelope_sha256=envelope_sha,
+                    )
+                    if resumed_node.status in {
+                        NodeStatus.FAILED,
+                        NodeStatus.CANCELLED,
+                        NodeStatus.ORPHANED,
+                        NodeStatus.BLOCKED_BY_CANCELLATION,
+                    }:
+                        raise RuntimeError("mcp_dispatch_resume_execution_failed")
+                    continue
+                outcome = await self.storage.converge_user_mcp_no_server(
+                    intent.task_id, self._utcnow_naive()
+                )
+                if outcome is MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT:
+                    raise RuntimeError("mcp_terminal_candidate_reconciliation_incomplete")
+
+        binding = self._mcp_legacy_retirement_binding
+        if binding is not None:
+            inventory_id, inventory_sha256 = binding
+            for task_id in await self.storage.list_mcp_legacy_retirement_task_ids(
+                inventory_id, inventory_sha256
+            ):
+                await self.storage.converge_legacy_runtime_retirement(
+                    task_id,
+                    inventory_id,
+                    inventory_sha256,
+                    f"legacy-retire:v1:{task_id}:{inventory_sha256}",
+                    self._utcnow_naive(),
+                )
+
+    async def _validate_terminal_cp7_mcp_authority(self, intents: list[Any]) -> None:
+        outboxes = {
+            item.intent_id: item
+            for item in await self.storage.list_mcp_dispatch_resume_outboxes()
+        }
+        for intent in intents:
+            status = str(intent.status)
+            if status not in {"unknown", "converged", "resolved"}:
+                continue
+            task = await self.storage.get_task(intent.task_id)
+            node = (
+                await self.storage.get_task_node(intent.node_id)
+                if intent.node_id is not None
+                else None
+            )
+            if task is None or intent.terminal_at is None:
+                raise RuntimeError("mcp_terminal_intent_authority_incomplete")
+            events = {
+                event.event_id: event
+                for event in await self.storage.list_events_for_task(intent.task_id)
+            }
+            outbox = outboxes.get(intent.intent_id)
+            if status == "unknown":
+                calls = await self.storage.list_mcp_call_records(
+                    intent.owner_user_id, intent.task_id
+                )
+                projections = [
+                    await self.storage.get_mcp_execution_terminal_projection(
+                        call.call_ref
+                    )
+                    for call in calls
+                    if call.may_have_dispatched
+                ]
+                authoritative = [projection for projection in projections if projection is not None]
+                if (
+                    task.status != TaskStatus.FAILED
+                    or node is None
+                    or node.status != NodeStatus.FAILED
+                    or not projections
+                    or any(
+                        projection is None
+                        or not projection.no_replay
+                        or str(projection.status) not in {"unknown", "late_result_resolved"}
+                        for projection in projections
+                    )
+                    or len(authoritative) != 1
+                    or authoritative[0].unknown_event_id not in events
+                    or authoritative[0].task_failed_event_id not in events
+                    or events[authoritative[0].unknown_event_id].event_type
+                    != "mcp.execution_status_unknown"
+                    or events[authoritative[0].task_failed_event_id].event_type != "task.failed"
+                    or outbox is None
+                    or str(outbox.status) != "completed"
+                    or outbox.completion_mode != "unknown_no_replay"
+                    or outbox.result_receipt_id is not None
+                ):
+                    raise RuntimeError("mcp_unknown_authority_incomplete")
+            elif status == "resolved":
+                calls = await self.storage.list_mcp_call_records(
+                    intent.owner_user_id, intent.task_id
+                )
+                receipts = [
+                    await self.storage.get_mcp_terminal_result_receipt_for_call(call.call_ref)
+                    for call in calls if call.may_have_dispatched
+                ]
+                no_call = outbox is not None and str(outbox.status) == "aborted"
+                if no_call:
+                    no_call_events = [
+                        event for event in events.values()
+                        if event.event_type == "mcp.dispatch_no_call"
+                        and event.payload.get("intent_id") == intent.intent_id
+                    ]
+                    if (
+                        outbox.completion_mode != "aborted"
+                        or outbox.result_receipt_id is not None
+                        or len(no_call_events) != 1
+                        or any(call.may_have_dispatched for call in calls)
+                        or node is None
+                        or node.status not in {NodeStatus.COMPLETED, NodeStatus.FAILED}
+                    ):
+                        raise RuntimeError("mcp_resolved_no_call_authority_incomplete")
+                elif (
+                    node is None
+                    or node.status not in {NodeStatus.COMPLETED, NodeStatus.FAILED}
+                    or outbox is None
+                    or str(outbox.status) != "completed"
+                    or outbox.completion_mode != "normal_terminal_projection"
+                    or outbox.result_receipt_id is None
+                    or not receipts
+                    or any(receipt is None for receipt in receipts)
+                    or outbox.result_receipt_id not in {
+                        receipt.result_receipt_id for receipt in receipts if receipt is not None
+                    }
+                ):
+                    raise RuntimeError("mcp_resolved_authority_incomplete")
+            else:
+                receipt = await self.storage.get_mcp_no_server_convergence_receipt(
+                    intent.task_id
+                )
+                if (
+                    task.status != TaskStatus.FAILED
+                    or receipt is None
+                    or receipt.intent_id != intent.intent_id
+                    or receipt.runtime_unavailable_event_id not in events
+                    or receipt.task_failed_event_id not in events
+                    or events[receipt.runtime_unavailable_event_id].event_type
+                    != "mcp.runtime_unavailable"
+                    or events[receipt.task_failed_event_id].event_type != "task.failed"
+                    or (outbox is not None and (
+                        str(outbox.status) != "aborted"
+                        or outbox.completion_mode != "aborted"
+                        or outbox.result_receipt_id is not None
+                    ))
+                ):
+                    raise RuntimeError("mcp_converged_authority_incomplete")
+
+    async def complete_cp7_safety_minute(
+        self, started_at: datetime, ended_at: datetime
+    ) -> None:
+        if self._mcp_cp7_safety_facade is None:
+            raise RuntimeError("mcp_cp7_safety_not_configured")
+        try:
+            await self._mcp_cp7_safety_facade.complete_minute(started_at, ended_at)
+        except CP7SafetyFatalPersistenceError:
+            self._mcp_cp7_fatal_exit(70)
+            raise
+
+    async def mark_cp7_ready(self, evidence: CP7BoundaryEvidence) -> None:
+        if self._mcp_cp7_safety_facade is None:
+            raise RuntimeError("mcp_cp7_safety_not_configured")
+        try:
+            await self._mcp_cp7_safety_facade.mark_ready(evidence)
+        except CP7SafetyFatalPersistenceError:
+            self._mcp_cp7_fatal_exit(70)
+            raise
+
+    async def _run_cp7_safety_minutes(self) -> None:
+        facade = self._mcp_cp7_safety_facade
+        provider = self._mcp_cp7_boundary_provider
+        if facade is None or provider is None:
+            return
+        opened_at = self._mcp_cp7_open_boundary.boundary_at
+        started_at = opened_at.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        if started_at < opened_at:
+            started_at += timedelta(minutes=1)
+        try:
+            while True:
+                ended_at = started_at + timedelta(minutes=1)
+                delay = max(0.0, (ended_at - datetime.now(timezone.utc)).total_seconds())
+                await asyncio.sleep(delay)
+                for probe in self._mcp_cp7_safety_probes:
+                    probe(started_at, ended_at)
+                await facade.complete_minute(started_at, ended_at)
+                if not facade.ready:
+                    evidence = provider()
+                    if inspect.isawaitable(evidence):
+                        evidence = await evidence
+                    if not isinstance(evidence, CP7BoundaryEvidence):
+                        raise RuntimeError("mcp_cp7_boundary_evidence_invalid")
+                    await facade.mark_ready(evidence)
+                started_at = ended_at
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            try:
+                await facade.record_unplanned_process_exit(
+                    datetime.now(timezone.utc)
+                )
+            except BaseException:
+                pass
+            self._mcp_cp7_fatal_exit(70)
+            raise
+
+    def _handle_cp7_safety_minute_exit(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if (
+            error is not None
+            and self._mcp_cp7_safety_facade is not None
+            and self._mcp_cp7_safety_facade.ready
+        ):
+            self._mcp_cp7_fatal_exit(70)
 
     async def _admit_mcp_rollout_instance(self) -> None:
         admission = self._mcp_rollout_instance_admission
@@ -8284,6 +8841,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             return
 
     async def shutdown(self) -> None:
+        await self._quiesce_cp7_for_shutdown()
+        if self._mcp_cp7_minute_task is not None:
+            self._mcp_cp7_minute_task.cancel()
+            await asyncio.gather(self._mcp_cp7_minute_task, return_exceptions=True)
+            self._mcp_cp7_minute_task = None
         await self._stop_mcp_rollout_instance_lease_renewal()
         if self._mcp_continuation_consumer_task is not None:
             self._mcp_continuation_consumer_task.cancel()
@@ -8311,8 +8873,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 for handle in pending:
                     handle.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+        await self._close_cp7_safety()
         if self._mysql_adapter is not None:
             await self._mysql_adapter.aclose()
+
         if self._mcp_audit_retention_task is not None:
             self._mcp_audit_retention_task.cancel()
             await asyncio.gather(self._mcp_audit_retention_task, return_exceptions=True)
@@ -8342,7 +8906,61 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             await self.postgres_auth_invalidation_bus.aclose()
         if self._mcp_rollout_engine is not None:
             await asyncio.to_thread(self._mcp_rollout_engine.dispose)
-        await asyncio.to_thread(self._engine.dispose)
+        self._engine.dispose()
+
+    async def _quiesce_cp7_for_shutdown(self) -> None:
+        facade = self._mcp_cp7_safety_facade
+        authorization = self._mcp_cp7_maintenance_authorization
+        authorizer = self._mcp_cp7_maintenance_authorizer
+        authorized = bool(
+            facade is not None
+            and facade.ready
+            and authorization is not None
+            and authorizer is not None
+            and authorizer(authorization)
+        )
+        if authorized:
+            now = self._mcp_cp7_clock().astimezone(timezone.utc)
+            boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            await self._mcp_cp7_sleep(max(0.0, (boundary - now).total_seconds()))
+            await asyncio.sleep(0)
+        self._mcp_cp7_requests_stopped = True
+
+    async def _close_cp7_safety(self) -> None:
+        facade = self._mcp_cp7_safety_facade
+        provider = self._mcp_cp7_boundary_provider
+        if facade is None or not facade.ready or provider is None:
+            return
+        evidence = provider()
+        if inspect.isawaitable(evidence):
+            evidence = await evidence
+        if not isinstance(evidence, CP7BoundaryEvidence):
+            raise RuntimeError("mcp_cp7_boundary_evidence_invalid")
+        authorization = self._mcp_cp7_maintenance_authorization
+        authorizer = self._mcp_cp7_maintenance_authorizer
+        authorized = bool(
+            authorization is not None
+            and authorizer is not None
+            and authorizer(authorization)
+        )
+        if authorized:
+            try:
+                await facade.begin_verifier_maintenance(
+                    evidence,
+                    verifier_authorized=True,
+                    requests_stopped=self._mcp_cp7_requests_stopped,
+                )
+            except CP7SafetyFatalPersistenceError:
+                self._mcp_cp7_fatal_exit(70)
+                raise
+            return
+        try:
+            await facade.record_unplanned_process_exit(evidence.boundary_at)
+        except CP7SafetyFatalPersistenceError:
+            self._mcp_cp7_fatal_exit(70)
+            raise
+        except Exception:
+            pass
 
     async def _run_mcp_auth_invalidation_listener(self) -> None:
         queue = self._mcp_auth_invalidation_queue
@@ -9396,6 +10014,17 @@ def build_api_runtime(
     enable_user_mcp: bool | None = None,
     enable_user_mcp_routing: bool | None = None,
     user_mcp_credential_key_file: str | Path | None = None,
+    user_mcp_terminal_result_store_path: str | Path | None = None,
+    mcp_legacy_retirement_inventory_id: str | None = None,
+    mcp_legacy_retirement_inventory_sha256: str | None = None,
+    mcp_cp7_runtime_identity: CP7RuntimeIdentity | None = None,
+    mcp_cp7_open_boundary: CP7BoundaryEvidence | None = None,
+    mcp_cp7_boundary_provider: Callable[[], Any] | None = None,
+    mcp_cp7_fatal_exit: Callable[[int], None] = os._exit,
+    mcp_cp7_predecessor_close: CP7PredecessorClose | None = None,
+    mcp_cp7_verifier_authorized: bool = False,
+    mcp_cp7_maintenance_authorization: object | None = None,
+    mcp_cp7_maintenance_authorizer: Callable[[object], bool] | None = None,
 ) -> ApiRuntime:
     _bootstrap_runtime_config_env(
         platform_llm_text_generator=platform_llm_text_generator,
@@ -9521,6 +10150,34 @@ def build_api_runtime(
     auth_invalidation_bus = InMemoryAuthInvalidationBus()
     postgres_auth_invalidation_bus = None
     mcp_rollout_engine: Engine | None = None
+    terminal_result_root = (
+        Path(user_mcp_terminal_result_store_path)
+        if user_mcp_terminal_result_store_path is not None
+        else Path(database_path).parent / "user_mcp_terminal_results"
+    )
+    if user_mcp_enabled and not terminal_result_root.exists():
+        terminal_result_root.mkdir(mode=0o700)
+
+    def read_terminal_candidate(call_id: str, candidate_id: str):
+        sealed = secure_read_terminal_result_candidate(
+            terminal_result_root, candidate_id
+        )
+        if sealed.candidate.call_id != call_id:
+            raise RuntimeError("mcp_terminal_candidate_call_binding_conflict")
+        return sealed.candidate
+
+    def resolve_terminal_candidate(call_id: str):
+        matches = [
+            item.candidate
+            for item in enumerate_unconsumed_terminal_result_candidates(
+                terminal_result_root
+            )
+            if item.candidate.call_id == call_id
+        ]
+        if len(matches) > 1:
+            raise RuntimeError("mcp_terminal_candidate_call_fork")
+        return matches[0] if matches else None
+
     if state_config.backend == StatePlatformBackend.POSTGRESQL:
         engine = create_postgres_engine(state_config.dsn or "")
         bootstrap_postgres_database(engine)
@@ -9546,6 +10203,8 @@ def build_api_runtime(
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
             mcp_task_authority_mode=canonical_task_authority_mode,
+            mcp_terminal_candidate_reader=read_terminal_candidate,
+            mcp_terminal_candidate_resolver=resolve_terminal_candidate,
             **mcp_rollout_storage_kwargs,
         )
         if isinstance(engine, Engine):
@@ -9564,6 +10223,8 @@ def build_api_runtime(
             runtime_sidecar_client=resolved_runtime_sidecar_client,
             runtime_sidecar_shadow_sink=_build_runtime_sidecar_shadow_diff_sink(audit_sink),
             mcp_task_authority_mode=canonical_task_authority_mode,
+            mcp_terminal_candidate_reader=read_terminal_candidate,
+            mcp_terminal_candidate_resolver=resolve_terminal_candidate,
         )
         artifact_file_store = LocalArtifactFileStore(artifact_store_path or (Path(database_path).parent / "artifacts"))
         conversation_file_store = LocalConversationFileStore(
@@ -9993,6 +10654,25 @@ def build_api_runtime(
     mcp_rollout_metric_recorder = None
     mcp_dispatch_metric_context = None
     mcp_safety_detectors = None
+    mcp_cp7_safety_facade = None
+    mcp_cp7_safety_probes: tuple[Callable[[datetime, datetime], None], ...] = ()
+    if mcp_cp7_runtime_identity is not None and mcp_rollout_instance_admission is not None:
+        raise RuntimeError("CP7 local safety cannot share production rollout admission")
+    if mcp_cp7_runtime_identity is not None:
+        mcp_cp7_safety_facade, mcp_safety_detectors = cp7_runtime_safety_wiring(
+            storage,
+            mcp_cp7_runtime_identity,
+            fatal_exit=mcp_cp7_fatal_exit,
+        )
+        if user_mcp_gateway is None or user_mcp_audit_service is None:
+            raise RuntimeError("CP7 safety wiring requires MCP Gateway and audit")
+        user_mcp_gateway.configure_safety_detectors(mcp_safety_detectors)
+        user_mcp_gateway.configure_safety_admission_checker(
+            mcp_cp7_safety_facade.ensure_ready
+        )
+        user_mcp_audit_service.configure_safety_detector(
+            mcp_safety_detectors[MCPSafetyRedLine.SECRET_EXPOSURE]
+        )
     if mcp_rollout_instance_admission is not None:
         mcp_rollout_metric_recorder = MCPRolloutMetricRecorder(
             storage,
@@ -10030,17 +10710,18 @@ def build_api_runtime(
                 ),
             )
 
-        mcp_safety_registry = AuthoritativeMCPSafetyDetectorRegistry(
-            mcp_rollout_metric_recorder,
-            gap_sink=record_mcp_safety_metric_gap,
-            routing_mode=mcp_dispatch_metric_context.routing_mode,
-        )
-        mcp_safety_detectors = register_authoritative_mcp_safety_detectors(
-            mcp_safety_registry
-        )
-        mcp_rollout_metric_recorder.configure_safety_detector_registry(
-            mcp_safety_registry
-        )
+        if mcp_safety_detectors is None:
+            mcp_safety_registry = AuthoritativeMCPSafetyDetectorRegistry(
+                mcp_rollout_metric_recorder,
+                gap_sink=record_mcp_safety_metric_gap,
+                routing_mode=mcp_dispatch_metric_context.routing_mode,
+            )
+            mcp_safety_detectors = register_authoritative_mcp_safety_detectors(
+                mcp_safety_registry
+            )
+            mcp_rollout_metric_recorder.configure_safety_detector_registry(
+                mcp_safety_registry
+            )
         user_mcp_gateway.configure_safety_detectors(mcp_safety_detectors)
         user_mcp_audit_service.configure_safety_detector(
             mcp_safety_detectors[MCPSafetyRedLine.SECRET_EXPOSURE]
@@ -10091,6 +10772,81 @@ def build_api_runtime(
                 await sink.abort()
                 raise
             return persisted.ref
+
+        async def seal_remote_task_terminal(
+            binding,
+            call_status: str,
+            result_ref: str | None,
+            safe_error_code: str | None,
+        ) -> None:
+            task = await storage.get_task(binding.task_id)
+            call = await storage.get_mcp_call_record(
+                binding.owner_user_id, binding.task_id, binding.call_ref
+            )
+            intent = await storage.get_mcp_no_server_intent(
+                f"mcp-no-server-intent:v1:{binding.task_id}:{binding.node_id}"
+            )
+            if task is None or call is None:
+                raise RuntimeError("mcp_remote_task_terminal_binding_missing")
+            if task.mcp_execution_mode != MCPExecutionPath.USER_SCOPED.value:
+                return
+            if intent is None or call.server_config_version is None:
+                raise RuntimeError("mcp_remote_task_terminal_authority_corrupt")
+            terminal_state = MCPTerminalState(call_status)
+            payload_sha = canonical_sha256(
+                {
+                    "safe_result_ref": result_ref,
+                    "safe_error_code": safe_error_code,
+                    "terminal_state": call_status,
+                }
+            )
+            await asyncio.to_thread(
+                seal_terminal_result_candidate,
+                terminal_result_root,
+                MCPValidatedTerminalResultCandidate(
+                    candidate_id=mcp_terminal_candidate_id(
+                        binding.call_ref, payload_sha
+                    ),
+                    owner_user_id=binding.owner_user_id,
+                    conversation_id=task.conversation_id,
+                    task_id=binding.task_id,
+                    node_id=binding.node_id,
+                    intent_id=intent.intent_id,
+                    call_id=binding.call_ref,
+                    server_id=binding.server_id,
+                    server_config_version=call.server_config_version,
+                    server_security_version=call.server_security_version,
+                    terminal_state=terminal_state,
+                    result_payload_sha256=payload_sha,
+                    safe_result_ref=result_ref,
+                    safe_result_ref_sha256=(
+                        canonical_sha256(result_ref) if result_ref is not None else None
+                    ),
+                    safe_error_code=safe_error_code,
+                    sealed_at=ApiRuntime._utcnow_naive().replace(microsecond=0),
+                ),
+            )
+        async def commit_remote_task_result(
+            binding, result_ref: str | None
+        ) -> str | None:
+            candidate = resolve_terminal_candidate(binding.call_ref)
+            if candidate is None:
+                task = await storage.get_task(binding.task_id)
+                if task is not None and task.mcp_execution_mode != MCPExecutionPath.USER_SCOPED.value:
+                    return None
+                raise RuntimeError("mcp_remote_task_terminal_candidate_missing")
+            if candidate.safe_result_ref != result_ref:
+                raise RuntimeError("mcp_remote_task_terminal_candidate_missing")
+            committed = await storage.commit_authoritative_mcp_terminal_result(
+                binding.call_ref,
+                candidate.candidate_id,
+                ApiRuntime._utcnow_naive(),
+            )
+            if str(committed) == "conflict":
+                raise RuntimeError("mcp_remote_task_terminal_commit_conflict")
+            return mcp_terminal_receipt_id(
+                binding.call_ref, candidate.result_payload_sha256
+            )
 
         async def continue_remote_task(
             outbox,
@@ -10260,9 +11016,15 @@ def build_api_runtime(
             active_metric_sink=record_remote_tasks_active_metric,
             global_metric_gap_sink=record_remote_task_global_metric_gap,
             result_persister=persist_remote_task_result,
+            result_committer=commit_remote_task_result,
+            terminal_sealer=seal_remote_task_terminal,
             continuation_sink=continue_remote_task,
             now_fn=ApiRuntime._utcnow_naive,
         )
+        if mcp_safety_detectors is not None:
+            mcp_remote_task_recovery_worker.configure_safety_detectors(
+                mcp_safety_detectors
+            )
         if user_mcp_gateway is not None:
             user_mcp_gateway.configure_remote_task_canceller(
                 mcp_remote_task_recovery_worker.cancel_remote_task
@@ -10288,8 +11050,27 @@ def build_api_runtime(
             metric_recorder=mcp_rollout_metric_recorder,
             metric_context=mcp_dispatch_metric_context,
             safety_detectors=mcp_safety_detectors,
+            terminal_result_root=terminal_result_root,
+            cp7_candidate_id=(
+                None if mcp_cp7_runtime_identity is None
+                else mcp_cp7_runtime_identity.candidate_id
+            ),
+            cp7_epoch_id=(
+                None if mcp_cp7_runtime_identity is None
+                else mcp_cp7_runtime_identity.epoch_id
+            ),
         )
+        if mcp_cp7_safety_facade is not None:
+            if mcp_remote_task_recovery_worker is None:
+                raise RuntimeError("CP7 safety wiring requires MCP recovery")
+            mcp_cp7_safety_probes = (
+                user_mcp_audit_service.attest_safety_interval,
+                user_mcp_gateway.attest_safety_interval,
+                mcp_dispatch_coordinator.attest_safety_interval,
+            )
         if mcp_rollout_metric_recorder is not None:
+            if mcp_remote_task_recovery_worker is None:
+                raise RuntimeError("MCP rollout safety requires MCP recovery")
             mcp_rollout_metric_recorder.configure_safety_interval_probes(
                 user_mcp_audit_service.attest_safety_interval,
                 user_mcp_gateway.attest_safety_interval,
@@ -10453,6 +11234,25 @@ def build_api_runtime(
         mcp_rollout_instance_admission=mcp_rollout_instance_admission,
         mcp_rollout_metric_recorder=mcp_rollout_metric_recorder,
         mcp_rollout_engine=mcp_rollout_engine,
+        mcp_terminal_result_root=(terminal_result_root if user_mcp_enabled else None),
+        mcp_legacy_retirement_binding=(
+            (
+                mcp_legacy_retirement_inventory_id,
+                mcp_legacy_retirement_inventory_sha256,
+            )
+            if mcp_legacy_retirement_inventory_id
+            and mcp_legacy_retirement_inventory_sha256
+            else None
+        ),
+        mcp_cp7_safety_facade=mcp_cp7_safety_facade,
+        mcp_cp7_open_boundary=mcp_cp7_open_boundary,
+        mcp_cp7_boundary_provider=mcp_cp7_boundary_provider,
+        mcp_cp7_fatal_exit=mcp_cp7_fatal_exit,
+        mcp_cp7_safety_probes=mcp_cp7_safety_probes,
+        mcp_cp7_predecessor_close=mcp_cp7_predecessor_close,
+        mcp_cp7_verifier_authorized=mcp_cp7_verifier_authorized,
+        mcp_cp7_maintenance_authorization=mcp_cp7_maintenance_authorization,
+        mcp_cp7_maintenance_authorizer=mcp_cp7_maintenance_authorizer,
     )
     if user_mcp_enabled:
         mcp_runtime_holder["runtime"] = runtime

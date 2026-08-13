@@ -101,6 +101,7 @@ async def _build_task_summary(runtime: ApiRuntime, task) -> TaskSummaryResponse:
         cancel_requested=task.cancel_requested_at is not None or task.status in {TaskStatus.CANCELLING, TaskStatus.CANCELLED},
         created_at=task.created_at,
         updated_at=task.updated_at,
+        mcp_terminal_projection=await runtime.mcp_terminal_projection_for_task(task),
     )
 
 

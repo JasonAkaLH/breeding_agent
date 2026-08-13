@@ -22,6 +22,8 @@ from .protocol import (
     MCP_PROTOCOL_VERSION_2026_07_28,
 )
 from .rollout_evidence import MCPMetricErrorCategory, MCPMetricResultCategory
+from .rollout_evidence import MCPSafetyRedLine
+from .safety_detectors import AuthoritativeMCPSafetyDetector
 
 
 REMOTE_TASK_CLAIM_TTL_SECONDS = 30.0
@@ -153,6 +155,7 @@ class MCPRemoteTaskStorage(Protocol):
         terminal_at: datetime,
         result_ref: str | None = None,
         safe_error_code: str | None = None,
+        result_receipt_id: str | None = None,
     ) -> MCPRemoteTaskBinding | None: ...
 
 
@@ -297,6 +300,12 @@ RemoteTaskGlobalMetricGapSink = Callable[[str], Any | Awaitable[Any]]
 RemoteTaskResultPersister = Callable[
     [MCPRemoteTaskBinding, Mapping[str, Any]], str | Awaitable[str]
 ]
+RemoteTaskResultCommitter = Callable[
+    [MCPRemoteTaskBinding, str | None], str | None | Awaitable[str | None]
+]
+RemoteTaskTerminalSealer = Callable[
+    [MCPRemoteTaskBinding, str, str | None, str | None], Any | Awaitable[Any]
+]
 RemoteTaskContinuationSink = Callable[
     [MCPRemoteTaskOutbox], Any | Awaitable[Any]
 ]
@@ -345,6 +354,8 @@ class MCPRemoteTaskRecoveryWorker:
         active_metric_sink: RemoteTaskActiveMetricSink | None = None,
         global_metric_gap_sink: RemoteTaskGlobalMetricGapSink | None = None,
         result_persister: RemoteTaskResultPersister | None = None,
+        result_committer: RemoteTaskResultCommitter | None = None,
+        terminal_sealer: RemoteTaskTerminalSealer | None = None,
         continuation_sink: RemoteTaskContinuationSink | None = None,
         now_fn: NowFn | None = None,
         claim_ttl_seconds: float = REMOTE_TASK_CLAIM_TTL_SECONDS,
@@ -386,6 +397,8 @@ class MCPRemoteTaskRecoveryWorker:
         self._active_metric_sink = active_metric_sink
         self._global_metric_gap_sink = global_metric_gap_sink
         self._result_persister = result_persister
+        self._result_committer = result_committer
+        self._terminal_sealer = terminal_sealer
         self._continuation_sink = continuation_sink
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
         self._claim_ttl = timedelta(seconds=claim_ttl_seconds)
@@ -396,6 +409,20 @@ class MCPRemoteTaskRecoveryWorker:
         self._stop = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
         self._active: dict[str, tuple[MCPRemoteTaskBinding, str]] = {}
+        self._safety_detectors: dict[
+            MCPSafetyRedLine, AuthoritativeMCPSafetyDetector
+        ] = {}
+
+    def configure_safety_detectors(
+        self,
+        detectors: Mapping[MCPSafetyRedLine, AuthoritativeMCPSafetyDetector],
+    ) -> None:
+        self._safety_detectors = dict(detectors)
+
+    def attest_safety_interval(
+        self, bucket_started_at: datetime, bucket_ended_at: datetime
+    ) -> None:
+        del bucket_started_at, bucket_ended_at
 
     async def start(self) -> None:
         if self._runner is not None and not self._runner.done():
@@ -653,6 +680,7 @@ class MCPRemoteTaskRecoveryWorker:
                     result.status
                 )
                 result_ref = None
+                result_receipt_id = None
                 if call_status == "completed":
                     if result.final_result is None or self._result_persister is None:
                         raise MCPRemoteTaskRecoveryError(
@@ -667,34 +695,70 @@ class MCPRemoteTaskRecoveryWorker:
                         raise MCPRemoteTaskRecoveryError(
                             "mcp_remote_task_result_persistence_failed"
                         )
+                if self._terminal_sealer is not None:
+                    await _await_maybe(
+                        self._terminal_sealer(
+                            binding, call_status, result_ref, safe_error_code
+                        )
+                    )
+                if self._result_committer is not None:
+                    committed = await _await_maybe(
+                        self._result_committer(binding, result_ref)
+                    )
+                    result_receipt_id = (
+                        None if committed is None else str(committed).strip()
+                    )
+                finish_kwargs = {
+                    "claim_owner": self._instance_id,
+                    "claim_token": claim_token,
+                    "expected_revision": revision["value"],
+                    "remote_status": remote_status,
+                    "call_status": call_status,
+                    "terminal_at": now,
+                    "result_ref": result_ref,
+                    "safe_error_code": safe_error_code,
+                }
+                if result_receipt_id:
+                    finish_kwargs["result_receipt_id"] = result_receipt_id
                 updated = await self._storage.finish_mcp_remote_task_binding(
                     binding.owner_user_id,
                     binding.task_id,
                     binding.safe_remote_task_ref,
-                    claim_owner=self._instance_id,
-                    claim_token=claim_token,
-                    expected_revision=revision["value"],
-                    remote_status=remote_status,
-                    call_status=call_status,
-                    terminal_at=now,
-                    result_ref=result_ref,
-                    safe_error_code=safe_error_code,
+                    **finish_kwargs,
                 )
             elif result.status == "input_required":
                 if binding.protocol_version == MCP_PROTOCOL_VERSION_2025_11_25:
+                    safe_error = "mcp_remote_task_input_required_unsupported"
+                    if self._terminal_sealer is not None:
+                        await _await_maybe(
+                            self._terminal_sealer(
+                                binding, "failed", None, safe_error
+                            )
+                        )
+                    result_receipt_id = None
+                    if self._result_committer is not None:
+                        committed = await _await_maybe(
+                            self._result_committer(binding, None)
+                        )
+                        result_receipt_id = (
+                            None if committed is None else str(committed).strip()
+                        )
+                    finish_kwargs = {
+                        "claim_owner": self._instance_id,
+                        "claim_token": claim_token,
+                        "expected_revision": revision["value"],
+                        "remote_status": "input_required",
+                        "call_status": "failed",
+                        "terminal_at": now,
+                        "safe_error_code": safe_error,
+                    }
+                    if result_receipt_id:
+                        finish_kwargs["result_receipt_id"] = result_receipt_id
                     updated = await self._storage.finish_mcp_remote_task_binding(
                         binding.owner_user_id,
                         binding.task_id,
                         binding.safe_remote_task_ref,
-                        claim_owner=self._instance_id,
-                        claim_token=claim_token,
-                        expected_revision=revision["value"],
-                        remote_status="input_required",
-                        call_status="failed",
-                        terminal_at=now,
-                        safe_error_code=(
-                            "mcp_remote_task_input_required_unsupported"
-                        ),
+                        **finish_kwargs,
                     )
                     result = MCPRemoteTaskPollResult(
                         status="failed", terminal=True

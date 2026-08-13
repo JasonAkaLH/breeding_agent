@@ -14,6 +14,9 @@ from src.integrations.mcp.safety_detectors import (
     MCPSafetyMetricGap,
     register_authoritative_mcp_safety_detectors,
 )
+from src.integrations.mcp.audit import MCPAuditService
+from src.integrations.mcp.dispatch_coordinator import UserMCPDispatchCoordinator
+from src.integrations.mcp.gateway import MCPGateway
 
 
 _START = datetime(2026, 8, 13, 10, 0, tzinfo=timezone.utc)
@@ -85,7 +88,7 @@ class MCPSafetyDetectorRegistryTest(unittest.TestCase):
                 )
             )
         self.assertEqual(self.gaps[-1].reason_code, "interval_attestation_missing")
-        with self.assertRaisesRegex(ValueError, "at most one bucket"):
+        with self.assertRaisesRegex(ValueError, "full UTC minute"):
             detectors[MCPSafetyRedLine.CROSS_USER_ACCESS].attest_interval(
                 _START, _END + timedelta(seconds=1)
             )
@@ -151,6 +154,51 @@ class MCPSafetyDetectorRegistryTest(unittest.TestCase):
                 )
             )
         self.assertEqual(self.gaps[-1].reason_code, "safety_metric_write_failed")
+
+    def test_each_authoritative_boundary_attests_only_its_owned_hooks(self) -> None:
+        detectors = register_authoritative_mcp_safety_detectors(self.registry)
+        audit = MCPAuditService.__new__(MCPAuditService)
+        audit._safety_detector = detectors[MCPSafetyRedLine.SECRET_EXPOSURE]
+        gateway = MCPGateway.__new__(MCPGateway)
+        gateway._safety_detectors = detectors
+        dispatch = UserMCPDispatchCoordinator.__new__(UserMCPDispatchCoordinator)
+        dispatch._safety_detectors = detectors
+        producers = (
+            audit.attest_safety_interval,
+            gateway.attest_safety_interval,
+            dispatch.attest_safety_interval,
+        )
+        for producer in producers:
+            producer(_START, _END)
+        records = asyncio.run(self.registry.record_verified_zero_series(
+            bucket_started_at=_START, bucket_ended_at=_END
+        ))
+        self.assertEqual({record["labels"].red_line for record in records}, set(MCPSafetyRedLine))
+
+        for missing_index in range(len(producers)):
+            recorder = _Recorder()
+            gaps: list[MCPSafetyMetricGap] = []
+            registry = AuthoritativeMCPSafetyDetectorRegistry(
+                recorder, gap_sink=gaps.append, routing_mode=MCPMetricRoutingMode.ENFORCE
+            )
+            owned = register_authoritative_mcp_safety_detectors(registry)
+            objects = (
+                MCPAuditService.__new__(MCPAuditService),
+                MCPGateway.__new__(MCPGateway),
+                UserMCPDispatchCoordinator.__new__(UserMCPDispatchCoordinator),
+            )
+            objects[0]._safety_detector = owned[MCPSafetyRedLine.SECRET_EXPOSURE]
+            objects[1]._safety_detectors = owned
+            objects[2]._safety_detectors = owned
+            calls = tuple(obj.attest_safety_interval for obj in objects)
+            for index, call in enumerate(calls):
+                if index != missing_index:
+                    call(_START, _END)
+            with self.assertRaisesRegex(RuntimeError, "interval"):
+                asyncio.run(registry.record_verified_zero_series(
+                    bucket_started_at=_START, bucket_ended_at=_END
+                ))
+            self.assertEqual(gaps[-1].reason_code, "interval_attestation_missing")
 
 
 if __name__ == "__main__":

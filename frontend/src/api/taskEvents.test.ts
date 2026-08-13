@@ -32,6 +32,49 @@ describe('taskEvents', () => {
     }))).toMatchObject({ event_id: 'evt-1', event_type: 'task.completed' });
   });
 
+  it('parses CP7 events only when their payload matches the closed schema', () => {
+    const unavailable = {
+      event_id: 'mcp-no-server:v1:task-1:01-runtime-unavailable',
+      event_type: 'mcp.runtime_unavailable',
+      task_id: 'task-1',
+      payload: { status: 'unavailable', reason_code: 'no_user_scoped_server' },
+    };
+    expect(parseTaskEventData(JSON.stringify(unavailable))).toMatchObject(unavailable);
+    expect(parseTaskEventData(JSON.stringify({
+      ...unavailable,
+      payload: { ...unavailable.payload, detail: 'must-not-pass' },
+    }))).toBeNull();
+
+    const unknown = {
+      event_id: 'mcp-execution-status-unknown:v1:call-1:4:01-unknown',
+      conversation_id: 'conv-1',
+      event_type: 'mcp.execution_status_unknown',
+      task_id: 'task-1',
+      node_id: 'node-1',
+      created_at: '2026-04-27T00:00:00Z',
+      payload: {
+        schema: 'maf.user_mcp.execution_status_unknown.v1',
+        projection_id: 'mcp-terminal-projection:v1:call-1',
+        intent_id: 'intent-1',
+        call_id: 'call-1',
+        task_id: 'task-1',
+        node_id: 'node-1',
+        projection_revision: 0,
+        intent_revision: 4,
+        unknown_terminal_at: '2026-04-27T00:00:00Z',
+        reason_code: 'trusted_terminal_result_absent',
+        no_replay: true,
+        result_receipt_id: null,
+        predecessor_event_id: null,
+      },
+    };
+    expect(parseTaskEventData(JSON.stringify(unknown))).toMatchObject({ event_id: unknown.event_id });
+    expect(parseTaskEventData(JSON.stringify({
+      ...unknown,
+      payload: { ...unknown.payload, no_replay: false },
+    }))).toBeNull();
+  });
+
   it('builds task event URLs without query tokens', () => {
     expect(taskEventsUrl('task/id', 'https://api.example')).toBe('https://api.example/api/v1/tasks/task%2Fid/events');
   });
@@ -153,7 +196,10 @@ describe('taskEvents', () => {
         'mcp.tool_call_completed',
         'mcp.tool_call_failed',
         'mcp.tool_call_cancelled',
+        'mcp.runtime_unavailable',
         'mcp.execution_status_unknown',
+        'mcp.execution_status_resolution',
+        'mcp.late_terminal_result_recovered',
         'mcp.queue_entered',
         'mcp.queue_left',
         'mcp.input_required',

@@ -15,10 +15,12 @@ from src.core.models import (
     Conversation,
     MCPCallRecord,
     MCPDispatchResumeOutbox,
+    MCPDispatchFinalizeResult,
     MCPInitialIntentCreateResult,
     MCPLegacyRetirementConvergenceResult,
     MCPLegacyRetirementEvidence,
     MCPNoServerConvergenceResult,
+    MCPNoServerConvergenceReceipt,
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
     MCPRemoteTaskBinding,
@@ -467,6 +469,9 @@ class PostgreSQLStorage(SQLiteStorage):
         expected_outbox_revision: int,
         record: MCPCallRecord,
         occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
     ) -> bool:
         return await asyncio.to_thread(
             self._run_cp7_authority_sync,
@@ -484,8 +489,34 @@ class PostgreSQLStorage(SQLiteStorage):
                 expected_outbox_revision,
                 record,
                 occurred_at,
+                cp7_candidate_id=cp7_candidate_id,
+                cp7_epoch_id=cp7_epoch_id,
             ),
         )
+
+    async def finalize_mcp_dispatch_no_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        outcome: str,
+        safe_error_code: str | None,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        def _sync() -> MCPDispatchFinalizeResult:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(outbox_id)
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.finalize_mcp_dispatch_no_call(
+                    intent_id, outbox_id, node_id, outcome, safe_error_code, occurred_at
+                ),
+            )
+        return await asyncio.to_thread(_sync)
 
     async def converge_user_mcp_no_server(
         self, task_id: str, occurred_at: datetime
@@ -527,6 +558,19 @@ class PostgreSQLStorage(SQLiteStorage):
                 ),
             )
 
+        return await asyncio.to_thread(_sync)
+
+    async def get_mcp_no_server_convergence_receipt(
+        self, task_id: str
+    ) -> MCPNoServerConvergenceReceipt | None:
+        def _sync() -> MCPNoServerConvergenceReceipt | None:
+            with self._session_factory() as session:
+                return SQLiteStateRepository(
+                    session,
+                    task_authority_mode=self._mcp_task_authority_mode,
+                    terminal_candidate_reader=self._mcp_terminal_candidate_reader,
+                    terminal_candidate_resolver=self._mcp_terminal_candidate_resolver,
+                ).get_mcp_no_server_convergence_receipt(task_id)
         return await asyncio.to_thread(_sync)
 
     async def commit_authoritative_mcp_terminal_result(

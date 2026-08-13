@@ -20,6 +20,7 @@ import {
   markTaskFailed,
   markWaitingInputRequired,
   parseCapabilityFallbackNotice,
+  prepareTaskEventResync,
   taskProgressDisplayText,
   type CapabilityFallbackNotice,
   type MCPApprovalDecision,
@@ -196,6 +197,11 @@ const TRANSIENT_NOTICE_DURATION_MS = 5_000;
 const CONVERSATION_AUTO_FOLLOW_THRESHOLD_PX = 32;
 const ACTIVE_TASK_STATUSES = new Set(['accepted', 'planning', 'running', 'cancelling']);
 const TERMINAL_TASK_EVENT_TYPES = new Set(['task.completed', 'task.failed', 'task.cancelled']);
+const TERMINAL_PROJECTION_EVENT_TYPES = new Set([
+  'mcp.execution_status_unknown',
+  'mcp.execution_status_resolution',
+  'mcp.late_terminal_result_recovered',
+]);
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 function validReasoningConfig(option: ModelEditionOption | null | undefined): option is ModelEditionOption {
   return Boolean(
@@ -310,6 +316,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [deletingUploadIds, setDeletingUploadIds] = useState<Set<string>>(() => new Set());
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [taskState, setTaskState] = useState<TaskEventState>(createInitialTaskEventState());
+  const taskStateRef = useRef(taskState);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null);
   const currentTaskIdRef = useRef<string | null>(null);
@@ -404,7 +411,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   useEffect(() => {
     taskPhaseRef.current = taskState.phase;
-  }, [taskState.phase]);
+    taskStateRef.current = taskState;
+  }, [taskState]);
 
   useEffect(() => {
     let mounted = true;
@@ -748,6 +756,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   function shouldIgnoreNonTerminalTaskEvent(eventType: string): boolean {
     if (eventType === 'task.cancellation_requested') return false;
+    if (TERMINAL_PROJECTION_EVENT_TYPES.has(eventType)) return false;
     return !TERMINAL_TASK_EVENT_TYPES.has(eventType)
       && CANCELLATION_OR_TERMINAL_PHASES.has(taskPhaseRef.current);
   }
@@ -789,7 +798,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function reconcileTerminalTaskStatus(
-    task: Pick<TaskSummaryResponse, 'task_id' | 'status'>,
+    task: Pick<TaskSummaryResponse, 'task_id' | 'status' | 'mcp_terminal_projection'>,
     expectedTaskId: string,
     assistantId: string,
     generation: number,
@@ -798,6 +807,12 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (task.task_id !== expectedTaskId) return false;
     if (!isCurrentRestoreGeneration(generation, targetConversationId)) return true;
     if (!isTerminalTaskStatus(task.status)) return false;
+    if (task.status === 'failed' && task.mcp_terminal_projection) {
+      taskPhaseRef.current = 'failed';
+      localTaskRuntimeActiveRef.current = false;
+      updateCurrentTaskId(expectedTaskId);
+      return true;
+    }
     clearEventStreamReconnectTimer();
     setPendingInterrupt(null);
     if (task.status === 'completed') {
@@ -850,7 +865,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       return;
     }
     if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
-    if (isTerminalTaskStatus(task.status)) {
+    const hasTerminalProjection = task.status === 'failed' && Boolean(task.mcp_terminal_projection);
+    if (isTerminalTaskStatus(task.status) && !hasTerminalProjection) {
       clearCurrentTaskRuntime({ closeSubscription: true });
       if (task.status === 'completed') {
         try {
@@ -868,12 +884,14 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       }
       return;
     }
-    if (!isActiveTaskStatus(task.status)) {
+    if (!isActiveTaskStatus(task.status) && !hasTerminalProjection) {
       showTransientNotice('任务状态暂不支持恢复，请刷新历史消息。');
       clearCurrentTaskRuntime({ closeSubscription: true });
       return;
     }
-    const restoringState = createRestoringTaskState();
+    const restoringState = hasTerminalProjection
+      ? { ...createRestoringTaskState(), phase: 'failed' as const, statusText: '任务执行结果无法确认', currentActivityText: null }
+      : createRestoringTaskState();
     const restoredAssistantId = `restored-assistant-${taskId}`;
     const restoredAssistantMessage: ConversationMessage = {
       id: restoredAssistantId,
@@ -894,8 +912,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     updateCurrentTaskId(taskId);
     updateCurrentAssistantId(restoredAssistantId);
     setPendingInterrupt(null);
+    taskPhaseRef.current = restoringState.phase;
+    taskStateRef.current = restoringState;
+    localTaskRuntimeActiveRef.current = !hasTerminalProjection;
     setTaskState(restoringState);
     subscribeToTask(taskId, restoredAssistantId, generation, targetConversationId);
+  }
+
+  function resyncTaskEvents(taskId: string) {
+    const assistantId = currentAssistantIdRef.current;
+    if (!assistantId || currentTaskIdRef.current !== taskId) return;
+    setTaskState((state) => prepareTaskEventResync(state));
+    subscribeToTask(taskId, assistantId, restoreGenerationRef.current, conversationIdRef.current);
   }
 
   async function handleLogin(result: AuthTokenResponse) {
@@ -1591,9 +1619,6 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     generation: number,
     targetConversationId: string,
   ) {
-    if (TERMINAL_TASK_EVENT_TYPES.has(event.event_type)) {
-      clearWaitingInputRetryTimers();
-    }
     if (event.event_type === 'task.cancellation_requested') {
       taskPhaseRef.current = 'cancelling';
       clearWaitingInputRetryTimers();
@@ -1603,65 +1628,77 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     if (shouldIgnoreNonTerminalTaskEvent(event.event_type)) {
       return;
     }
-    setTaskState((previous) => {
-      if (CANCELLATION_OR_TERMINAL_PHASES.has(previous.phase) && !TERMINAL_TASK_EVENT_TYPES.has(event.event_type)) {
-        return previous;
+    const previous = taskStateRef.current;
+    if (CANCELLATION_OR_TERMINAL_PHASES.has(previous.phase)
+      && !TERMINAL_TASK_EVENT_TYPES.has(event.event_type)
+      && !TERMINAL_PROJECTION_EVENT_TYPES.has(event.event_type)) {
+      return;
+    }
+    const next = applyTaskEvent(previous, event);
+    taskStateRef.current = next;
+    setTaskState(next);
+    const eventConsumed = !previous.seenEventIds.includes(event.event_id)
+      && next.seenEventIds.includes(event.event_id);
+    const failedJustConsumed = eventConsumed && previous.phase !== 'failed' && next.phase === 'failed';
+    const cancelledJustConsumed = eventConsumed && previous.phase !== 'cancelled' && next.phase === 'cancelled';
+    const completedJustConsumed = eventConsumed && event.event_type === 'task.completed';
+    const previousProgressText = taskProgressDisplayText(previous);
+    const nextProgressText = taskProgressDisplayText(next);
+    if (next.skillStatuses !== previous.skillStatuses) {
+      updateAssistantMessage(assistantId, { skillStatuses: next.skillStatuses });
+    }
+    if (next.assistantText !== previous.assistantText) {
+      updateAssistantStreamingContent(assistantId, next.assistantText);
+      if (next.assistantText) {
+        updateAssistantMessage(assistantId, { activityText: undefined });
       }
-      const next = applyTaskEvent(previous, event);
-      const previousProgressText = taskProgressDisplayText(previous);
-      const nextProgressText = taskProgressDisplayText(next);
-      if (next.skillStatuses !== previous.skillStatuses) {
-        updateAssistantMessage(assistantId, { skillStatuses: next.skillStatuses });
-      }
-      if (next.assistantText !== previous.assistantText) {
-        updateAssistantStreamingContent(assistantId, next.assistantText);
-        if (next.assistantText) {
-          updateAssistantMessage(assistantId, { activityText: undefined });
-        }
-      }
-      if (next.reasoningText !== previous.reasoningText) {
-        updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
-      }
-      if (next.fallbackNotice !== previous.fallbackNotice) {
-        updateAssistantMessage(assistantId, { fallbackNotice: next.fallbackNotice ?? undefined, taskId });
-      }
-      if (next.phase === 'failed') {
-        updateAssistantMessage(assistantId, {
-          activityText: next.errorMessage ?? next.statusText,
-          activityStatus: 'failed',
-        });
-      } else if (nextProgressText !== previousProgressText) {
-        updateAssistantMessage(assistantId, {
-          activityText: assistantActivityText(next, nextProgressText),
-          activityStatus: next.phase === 'cancelled' ? 'cancelled' : 'pending',
-        });
-      }
-      if (event.event_type === 'task.failed') {
-        taskPhaseRef.current = 'failed';
-        setPendingInterrupt(null);
-        updateAssistantMessage(assistantId, { interruptPrompt: undefined });
-        localTaskRuntimeActiveRef.current = false;
+    }
+    if (next.reasoningText !== previous.reasoningText) {
+      updateAssistantMessage(assistantId, { reasoningContent: next.reasoningText });
+    }
+    if (next.fallbackNotice !== previous.fallbackNotice) {
+      updateAssistantMessage(assistantId, { fallbackNotice: next.fallbackNotice ?? undefined, taskId });
+    }
+    if (next.phase === 'failed') {
+      updateAssistantMessage(assistantId, {
+        activityText: next.errorMessage ?? next.statusText,
+        activityStatus: 'failed',
+      });
+    } else if (nextProgressText !== previousProgressText) {
+      updateAssistantMessage(assistantId, {
+        activityText: assistantActivityText(next, nextProgressText),
+        activityStatus: next.phase === 'cancelled' ? 'cancelled' : 'pending',
+      });
+    }
+    if (failedJustConsumed) {
+      taskPhaseRef.current = 'failed';
+      clearWaitingInputRetryTimers();
+      setPendingInterrupt(null);
+      updateAssistantMessage(assistantId, { interruptPrompt: undefined });
+      localTaskRuntimeActiveRef.current = false;
+      if (!next.mcp.executionUnknown && !next.mcp.availability) {
         subscriptionRef.current?.close();
         subscriptionRef.current = null;
         updateCurrentTaskId(null);
         restoredTaskIdsRef.current.delete(taskId);
         taskPresentationModesRef.current.delete(taskId);
       }
-      if (event.event_type === 'task.cancelled') {
-        taskPhaseRef.current = 'cancelled';
-        setPendingInterrupt(null);
-        updateAssistantMessage(assistantId, { interruptPrompt: undefined });
-        localTaskRuntimeActiveRef.current = false;
-        subscriptionRef.current?.close();
-        subscriptionRef.current = null;
-        updateCurrentTaskId(null);
-        restoredTaskIdsRef.current.delete(taskId);
-        taskPresentationModesRef.current.delete(taskId);
-      }
-      return next;
-    });
-    if (event.event_type === 'task.completed') {
+    }
+    if (cancelledJustConsumed) {
+      taskPhaseRef.current = 'cancelled';
+      clearWaitingInputRetryTimers();
+      setPendingInterrupt(null);
+      updateAssistantMessage(assistantId, { interruptPrompt: undefined });
+      localTaskRuntimeActiveRef.current = false;
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      updateCurrentTaskId(null);
+      restoredTaskIdsRef.current.delete(taskId);
+      taskPresentationModesRef.current.delete(taskId);
+    }
+    if (completedJustConsumed) {
       taskPhaseRef.current = 'loading_artifacts';
+      clearWaitingInputRetryTimers();
       updateAssistantMessage(assistantId, { reasoningComplete: true, replyCompleted: true });
       void loadArtifacts(taskId, assistantId);
     }
@@ -1783,6 +1820,18 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     generation = restoreGenerationRef.current,
     targetConversationId = conversationIdRef.current,
   ) {
+    if (taskStateRef.current.pendingEvents.length > 0) {
+      const replayIncomplete = {
+        ...taskStateRef.current,
+        eventSyncError: '任务事件历史缺少前序记录，请重新同步任务历史。',
+      };
+      taskStateRef.current = replayIncomplete;
+      setTaskState(replayIncomplete);
+      clearEventStreamReconnectTimer();
+      subscriptionRef.current?.close();
+      subscriptionRef.current = null;
+      return;
+    }
     showTransientNotice('事件流暂时中断，正在尝试查询任务状态。');
     try {
       const task = await api.getTask(taskId);
@@ -2183,6 +2232,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                   busyCallRef={mcpBusyCallRef}
                   onContinue={handleContinueMCPCall}
                   onCancel={handleCancelMCPCall}
+                  syncError={taskState.eventSyncError}
+                  onResync={resyncTaskEvents}
                 />
               ) : null}
             </div>
