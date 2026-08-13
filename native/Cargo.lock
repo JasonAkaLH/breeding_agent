@@ -1035,6 +1035,7 @@ dependencies = [
 name = "maf_runtime_sidecar"
 version = "0.1.0"
 dependencies = [
+ "hyper-util",
  "maf_event_log",
  "maf_runtime_store",
  "maf_task_dispatcher",
@@ -1048,6 +1049,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower",
 ]
 
 [[package]]

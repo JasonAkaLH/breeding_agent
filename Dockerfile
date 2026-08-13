@@ -14,6 +14,34 @@ COPY frontend/ ./
 RUN npm run build
 
 
+FROM rust:1.95-bookworm AS runtime-sidecar-build
+
+WORKDIR /workspace/native
+
+COPY native/ ./
+
+RUN cargo build --locked --release -p maf_runtime_sidecar --bin maf-runtime-sidecar
+
+
+FROM debian:bookworm-slim AS runtime-sidecar
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=runtime-sidecar-build \
+    /workspace/native/target/release/maf-runtime-sidecar \
+    /usr/local/bin/maf-runtime-sidecar
+
+RUN mkdir -p /run/maf-runtime-sidecar /var/lib/maf-runtime-sidecar
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=6 \
+    CMD ["/usr/local/bin/maf-runtime-sidecar", "--probe", "unix:///run/maf-runtime-sidecar/runtime.sock"]
+
+ENTRYPOINT ["/usr/local/bin/maf-runtime-sidecar"]
+CMD ["--serve", "unix:///run/maf-runtime-sidecar/runtime.sock", "--sqlite", "/var/lib/maf-runtime-sidecar/runtime.sqlite3"]
+
+
 FROM ubuntu:22.04 AS backend
 
 ENV DEBIAN_FRONTEND=noninteractive \

@@ -20,7 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
 use std::future::Future;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -2608,12 +2611,75 @@ pub async fn serve_runtime_sidecar_unix_socket(
     socket_path: &Path,
     service: RuntimeSidecarGrpcService,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(socket_path)?,
+        Ok(_) => return Err("runtime sidecar socket path exists and is not a socket".into()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let listener = tokio::net::UnixListener::bind(socket_path)?;
     let incoming = UnixListenerStream::new(listener);
     tonic::transport::Server::builder()
         .add_service(runtime_pb::runtime_sidecar_server::RuntimeSidecarServer::new(service))
         .serve_with_incoming(incoming)
         .await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+pub async fn semantic_probe_runtime_sidecar_unix_socket(
+    socket_path: impl AsRef<Path>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let socket_path = socket_path.as_ref().to_path_buf();
+    let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")?
+        .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+            let socket_path = socket_path.clone();
+            async move {
+                tokio::net::UnixStream::connect(socket_path)
+                    .await
+                    .map(hyper_util::rt::TokioIo::new)
+            }
+        }))
+        .await?;
+    let mut client = runtime_pb::runtime_sidecar_client::RuntimeSidecarClient::new(channel);
+    let version = client
+        .version(runtime_pb::VersionRequest {})
+        .await?
+        .into_inner()
+        .version
+        .ok_or("runtime sidecar Version response omitted version")?;
+    if version.component != COMPONENT_ID
+        || version.protocol_version != PROTOCOL_VERSION
+        || version.schema_hash != SCHEMA_HASH
+        || version.error_code_table_hash != RUNTIME_ERROR_CODE_TABLE_HASH
+        || version.supported_features != supported_features()
+    {
+        return Err("runtime sidecar Version response is incompatible with this probe".into());
+    }
+    let compatibility = client
+        .check_compatibility(runtime_pb::CompatibilityCheckRequest {
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            expected_component: COMPONENT_ID.to_owned(),
+            expected_protocol_version: PROTOCOL_VERSION.to_owned(),
+            expected_schema_hash: SCHEMA_HASH.to_owned(),
+            expected_error_code_table_hash: RUNTIME_ERROR_CODE_TABLE_HASH.to_owned(),
+            required_features: supported_features(),
+        })
+        .await?
+        .into_inner();
+    if !compatibility.compatible || compatibility.error.is_some() {
+        return Err("runtime sidecar CheckCompatibility failed".into());
+    }
+    let readiness = client
+        .readiness(runtime_pb::ReadinessRequest {})
+        .await?
+        .into_inner();
+    if readiness.state != common_pb::ReadinessState::Ready as i32
+        || !readiness.compatibility_handshake_passed
+        || readiness.error.is_some()
+    {
+        return Err("runtime sidecar Readiness is not ready after compatibility handshake".into());
+    }
     Ok(())
 }
 

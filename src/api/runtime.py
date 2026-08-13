@@ -11420,7 +11420,7 @@ def _resolve_runtime_sidecar_artifact_trust_from_env(
     if not manifest_path and not allowlist_path:
         if _runtime_sidecar_enforce_enabled(
             require_runtime_store_attestation=require_runtime_store_attestation,
-        ):
+        ) and not _dev_local_runtime_sidecar_attestation_bypass_allowed():
             _raise_runtime_sidecar_artifact_untrusted(
                 "Rust runtime sidecar enforce mode requires an artifact manifest and allowlist"
             )
@@ -11453,6 +11453,34 @@ def _resolve_runtime_sidecar_artifact_trust_from_env(
         allowed_cargo_lock_digests=set(allowed_cargo_lock_digests),
     )
     return metadata, allowed_checksums, allowed_cargo_lock_digests
+
+
+def _dev_local_runtime_sidecar_attestation_bypass_allowed() -> bool:
+    if os.environ.get("MAF_API_ENV", "").strip().lower() != "dev":
+        return False
+    if (
+        os.environ.get("MAF_RUNTIME_SIDECAR_ENDPOINT", "").strip()
+        != "unix:///run/maf-runtime-sidecar/runtime.sock"
+    ):
+        return False
+    if os.environ.get("MCP_USER_SCOPED_GATEWAY_ENABLED", "").strip().lower() != "true":
+        return False
+    if os.environ.get("MCP_ROUTING_MODE", "").strip().lower() != "enforce":
+        return False
+    if os.environ.get("MCP_LEGACY_GLOBAL_RUNTIME_ENABLED", "").strip().lower() != "false":
+        return False
+    if os.environ.get("MCP_ENFORCE_COHORTS", "").strip():
+        return False
+    if os.environ.get("MCP_ENFORCE_PERCENT", "").strip() != "100":
+        return False
+    if os.environ.get("MCP_ENFORCE_HASH_SALT", "").strip() != "main-cp7a-user-scoped-v1":
+        return False
+    if os.environ.get("MCP_ENFORCE_COHORT_CONFIG_FILE", "").strip():
+        return False
+    return all(
+        runtime_sidecar_mode_for_component(component) == "off"
+        for component in ("runtime_store", "event_log", "task_dispatcher")
+    )
 
 
 def _runtime_sidecar_enforce_enabled(

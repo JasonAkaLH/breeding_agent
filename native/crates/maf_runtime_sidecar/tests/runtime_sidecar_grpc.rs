@@ -5,6 +5,10 @@ use maf_runtime_sidecar::{
     RuntimeSidecarSqliteAdapter, runtime_sidecar_service_from_config,
     serve_runtime_sidecar_with_incoming,
 };
+#[cfg(unix)]
+use maf_runtime_sidecar::{
+    semantic_probe_runtime_sidecar_unix_socket, serve_runtime_sidecar_unix_socket,
+};
 use runtime_pb::runtime_sidecar_server::RuntimeSidecar;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -602,6 +606,59 @@ async fn sidecar_listener_accepts_generated_grpc_client_on_loopback() {
     server.await.expect("server task");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn semantic_probe_replaces_stale_socket_and_verifies_readiness() {
+    let socket_path = temp_socket_path("probe");
+    let stale = std::os::unix::net::UnixListener::bind(&socket_path)
+        .expect("create stale runtime sidecar socket");
+    drop(stale);
+
+    let service = RuntimeSidecarGrpcService::new();
+    let served_path = socket_path.clone();
+    let server = tokio::spawn(async move {
+        serve_runtime_sidecar_unix_socket(&served_path, service)
+            .await
+            .expect("serve runtime sidecar over Unix socket")
+    });
+
+    let mut probe_error = None;
+    for _ in 0..50 {
+        match semantic_probe_runtime_sidecar_unix_socket(&socket_path).await {
+            Ok(()) => {
+                probe_error = None;
+                break;
+            }
+            Err(error) => {
+                probe_error = Some(error.to_string());
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    assert!(
+        probe_error.is_none(),
+        "semantic probe failed: {probe_error:?}"
+    );
+
+    server.abort();
+    let _ = server.await;
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_listener_rejects_non_socket_collision() {
+    let socket_path = temp_socket_path("collision");
+    std::fs::write(&socket_path, b"not a socket").expect("write collision file");
+
+    let error = serve_runtime_sidecar_unix_socket(&socket_path, RuntimeSidecarGrpcService::new())
+        .await
+        .expect_err("non-socket collision must fail closed");
+    assert!(error.to_string().contains("is not a socket"));
+
+    let _ = std::fs::remove_file(socket_path);
+}
+
 fn temp_db_path(test_name: &str) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -611,6 +668,17 @@ fn temp_db_path(test_name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "maf-runtime-sidecar-{test_name}-{}-{timestamp}-{unique}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn temp_socket_path(test_name: &str) -> PathBuf {
+    let unique = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "maf-rs-{test_name}-{}-{unique}.sock",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);

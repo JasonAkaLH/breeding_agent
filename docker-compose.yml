@@ -1,4 +1,21 @@
 services:
+  runtime-sidecar:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime-sidecar
+    image: breeding-agent-runtime-sidecar:local
+    volumes:
+      - breeding-agent-runtime-sidecar-socket:/run/maf-runtime-sidecar
+      - breeding-agent-runtime-sidecar-data:/var/lib/maf-runtime-sidecar
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/maf-runtime-sidecar", "--probe", "unix:///run/maf-runtime-sidecar/runtime.sock"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 6
+
   backend:
     platform: linux/amd64
     build:
@@ -6,9 +23,19 @@ services:
       dockerfile: Dockerfile
       target: backend
     image: breeding-agent-backend:local
+    depends_on:
+      runtime-sidecar:
+        condition: service_healthy
     environment:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
+      MAF_API_ENV: "dev"
+      MAF_STATE_STORE_BACKEND: "sqlite"
+      MAF_STATE_PLATFORM_CONFIG_BRIDGE: "0"
+      MAF_RUNTIME_SIDECAR_ENDPOINT: "unix:///run/maf-runtime-sidecar/runtime.sock"
+      MAF_RUST_RUNTIME_STORE_MODE: "off"
+      MAF_RUST_EVENT_LOG_MODE: "off"
+      MAF_RUST_TASK_DISPATCHER_MODE: "off"
       MAF_RUST_CORE_MODE: "off"
       MAF_RUST_LIFECYCLE_MODE: "off"
       MAF_RUST_ARTIFACT_STORE_MODE: "off"
@@ -16,15 +43,20 @@ services:
       MAF_RUST_DATA_ACCESS_MODE: "off"
       MAF_RUST_AUDIT_SANITIZER_MODE: "off"
       MAF_RUST_SKILL_RUNTIME_MODE: "off"
-      MCP_USER_SCOPED_GATEWAY_ENABLED: "${MCP_USER_SCOPED_GATEWAY_ENABLED:-false}"
-      MCP_ROUTING_MODE: "${MCP_ROUTING_MODE:-off}"
-      MCP_LEGACY_GLOBAL_RUNTIME_ENABLED: "${MCP_LEGACY_GLOBAL_RUNTIME_ENABLED:-true}"
-      MCP_ENFORCE_COHORTS: "${MCP_ENFORCE_COHORTS:-}"
-      MCP_ENFORCE_PERCENT: "${MCP_ENFORCE_PERCENT:-0}"
-      MCP_ENFORCE_HASH_SALT: "${MCP_ENFORCE_HASH_SALT:-}"
-      MCP_ENFORCE_COHORT_CONFIG_FILE: "${MCP_ENFORCE_COHORT_CONFIG_FILE:-}"
+      MAF_USER_MCP_MAX_ACTIVE_CALLS: "8"
+      MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES: "1048576"
+      MCP_CREDENTIAL_KEY_FILE: "/run/secrets/mcp-credential.key"
+      MCP_USER_SCOPED_GATEWAY_ENABLED: "true"
+      MCP_ROUTING_MODE: "enforce"
+      MCP_LEGACY_GLOBAL_RUNTIME_ENABLED: "false"
+      MCP_ENFORCE_COHORTS: ""
+      MCP_ENFORCE_PERCENT: "100"
+      MCP_ENFORCE_HASH_SALT: "main-cp7a-user-scoped-v1"
+      MCP_ENFORCE_COHORT_CONFIG_FILE: ""
     volumes:
       - breeding-agent-runtime:/app/runtime
+      - breeding-agent-runtime-sidecar-socket:/run/maf-runtime-sidecar:ro
+      - ${MCP_CREDENTIAL_KEY_FILE_HOST:?MCP_CREDENTIAL_KEY_FILE_HOST is required}:/run/secrets/mcp-credential.key:ro
       - /data/peihai/vibe-breeding-dev/skills:/app/skill:ro
     ports:
       - "51888:8000"
@@ -59,3 +91,5 @@ services:
 
 volumes:
   breeding-agent-runtime:
+  breeding-agent-runtime-sidecar-socket:
+  breeding-agent-runtime-sidecar-data:

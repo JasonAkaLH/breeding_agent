@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import src.api.runtime as api_runtime
 from src.api.dto import SubmitMessageRequest
 from src.api.runtime import build_api_runtime
 from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
@@ -129,6 +130,78 @@ _LEGACY_MCP_CONFIG = {
 
 
 class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
+    def test_dev_unix_cp7a_can_skip_sidecar_artifact_attestation(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MAF_API_ENV": "dev",
+                "MAF_RUNTIME_SIDECAR_ENDPOINT": "unix:///run/maf-runtime-sidecar/runtime.sock",
+                "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": "",
+                "MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH": "",
+                "MAF_RUST_RUNTIME_STORE_MODE": "off",
+                "MAF_RUST_EVENT_LOG_MODE": "off",
+                "MAF_RUST_TASK_DISPATCHER_MODE": "off",
+                "MCP_USER_SCOPED_GATEWAY_ENABLED": "true",
+                "MCP_ROUTING_MODE": "enforce",
+                "MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "false",
+                "MCP_ENFORCE_COHORTS": "",
+                "MCP_ENFORCE_PERCENT": "100",
+                "MCP_ENFORCE_HASH_SALT": "main-cp7a-user-scoped-v1",
+                "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                api_runtime._resolve_runtime_sidecar_artifact_trust_from_env(
+                    require_runtime_store_attestation=True,
+                ),
+                (None, (), ()),
+            )
+
+    def test_sidecar_artifact_attestation_bypass_is_dev_local_only(self) -> None:
+        baseline = {
+            "MAF_API_ENV": "dev",
+            "MAF_RUNTIME_SIDECAR_ENDPOINT": "unix:///run/maf-runtime-sidecar/runtime.sock",
+            "MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH": "",
+            "MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH": "",
+            "MAF_RUST_RUNTIME_STORE_MODE": "off",
+            "MAF_RUST_EVENT_LOG_MODE": "off",
+            "MAF_RUST_TASK_DISPATCHER_MODE": "off",
+            "MCP_USER_SCOPED_GATEWAY_ENABLED": "true",
+            "MCP_ROUTING_MODE": "enforce",
+            "MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "false",
+            "MCP_ENFORCE_COHORTS": "",
+            "MCP_ENFORCE_PERCENT": "100",
+            "MCP_ENFORCE_HASH_SALT": "main-cp7a-user-scoped-v1",
+            "MCP_ENFORCE_COHORT_CONFIG_FILE": "",
+        }
+        hostile_overrides = (
+            {"MAF_API_ENV": "production"},
+            {"MAF_RUNTIME_SIDECAR_ENDPOINT": "http://127.0.0.1:50051"},
+            {"MAF_RUST_RUNTIME_STORE_MODE": "shadow"},
+            {"MAF_RUST_EVENT_LOG_MODE": "enforce"},
+            {"MAF_RUST_TASK_DISPATCHER_MODE": "shadow"},
+            {"MCP_ROUTING_MODE": "shadow"},
+            {"MCP_LEGACY_GLOBAL_RUNTIME_ENABLED": "true"},
+            {"MCP_ENFORCE_COHORTS": "test-cohort"},
+            {"MCP_ENFORCE_PERCENT": "99"},
+            {"MCP_ENFORCE_HASH_SALT": "other-salt"},
+            {"MCP_ENFORCE_COHORT_CONFIG_FILE": "/tmp/cohorts.json"},
+        )
+        for override in hostile_overrides:
+            with self.subTest(override=override), patch.dict(
+                os.environ,
+                {**baseline, **override},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "runtime_store_artifact_untrusted",
+                ):
+                    api_runtime._resolve_runtime_sidecar_artifact_trust_from_env(
+                        require_runtime_store_attestation=True,
+                    )
+
     async def test_corrupt_terminal_result_store_blocks_startup(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ,
