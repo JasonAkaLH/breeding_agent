@@ -23,8 +23,19 @@ from .models import (
     MCPBranchRecord,
     MCPCallRecord,
     MCPConnectionLease,
+    MCPCP7CandidateGuard,
+    MCPCP7ReadyEpochEvent,
+    MCPCP7SafetyLedgerRecord,
+    MCPCP7SafetySnapshot,
+    MCPDispatchResumeOutbox,
+    MCPExecutionTerminalProjection,
+    MCPInitialIntentCreateResult,
+    MCPLegacyRetirementEvidence,
+    MCPLegacyRetirementConvergenceResult,
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
+    MCPNoServerConvergenceResult,
+    MCPNoServerIntent,
     MCPRemoteTaskBinding,
     MCPRemoteTaskOutbox,
     MCPRolloutBlockResolution,
@@ -38,6 +49,10 @@ from .models import (
     MCPRolloutPromotionBlock,
     MCPRolloutStageApproval,
     MCPSealedState,
+    MCPTargetIntentArmResult,
+    MCPTargetIntentResolveResult,
+    MCPTerminalResultCommitResult,
+    MCPTerminalResultReceipt,
     Message,
     PendingSkillContext,
     SlotCollection,
@@ -47,6 +62,7 @@ from .models import (
     TaskInputAttachment,
     TaskNode,
     UserMCPCredentialRecord,
+    UserMCPOwnerMutationGuard,
     UserMCPHealthAttempt,
     UserMCPScopeLease,
     UserMCPServer,
@@ -300,6 +316,120 @@ class StoragePort(Protocol):
         output_size_bytes: int | None = None,
         safe_error_code: str | None = None,
     ) -> MCPCallRecord | None: ...
+
+    async def get_user_mcp_owner_mutation_guard(
+        self, owner_user_id: str
+    ) -> UserMCPOwnerMutationGuard | None: ...
+
+    async def get_mcp_no_server_intent(
+        self, intent_id: str
+    ) -> MCPNoServerIntent | None: ...
+
+    async def list_unresolved_mcp_no_server_intents(
+        self,
+    ) -> list[MCPNoServerIntent]: ...
+
+    async def create_user_mcp_initial_intent(
+        self,
+        task: Task,
+        occurred_at: datetime,
+    ) -> MCPInitialIntentCreateResult: ...
+
+    async def arm_user_mcp_target_intent(
+        self,
+        task_id: str,
+        node_id: str,
+        requested_server_id: str,
+        resume_envelope: Mapping[str, Any],
+        occurred_at: datetime,
+    ) -> MCPTargetIntentArmResult: ...
+
+    async def resolve_user_mcp_target_intent(
+        self,
+        intent_id: str,
+        occurred_at: datetime,
+    ) -> MCPTargetIntentResolveResult: ...
+
+    async def get_mcp_dispatch_resume_outbox(
+        self, outbox_id: str
+    ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def claim_mcp_dispatch_resume_outbox(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def reclaim_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, now: datetime
+    ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def abort_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, occurred_at: datetime
+    ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def admit_mcp_tool_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+    ) -> bool: ...
+
+    async def converge_user_mcp_no_server(
+        self,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult: ...
+
+    async def commit_authoritative_mcp_terminal_result(
+        self,
+        call_id: str,
+        candidate_id: str,
+        occurred_at: datetime,
+    ) -> MCPTerminalResultCommitResult: ...
+
+    async def get_mcp_terminal_result_receipt(
+        self, result_receipt_id: str
+    ) -> MCPTerminalResultReceipt | None: ...
+
+    async def get_mcp_execution_terminal_projection(
+        self, call_id: str
+    ) -> MCPExecutionTerminalProjection | None: ...
+
+    async def converge_legacy_runtime_retirement(
+        self,
+        task_id: str,
+        inventory_id: str,
+        inventory_sha256: str,
+        idempotency_key: str,
+        occurred_at: datetime,
+    ) -> MCPLegacyRetirementConvergenceResult: ...
+
+    async def append_mcp_legacy_retirement_evidence(
+        self, evidence: MCPLegacyRetirementEvidence
+    ) -> MCPLegacyRetirementEvidence: ...
+
+    async def append_mcp_cp7_safety_ledger_record(
+        self, record: MCPCP7SafetyLedgerRecord
+    ) -> MCPCP7SafetyLedgerRecord: ...
+
+    async def append_mcp_cp7_ready_epoch_event(
+        self, event: MCPCP7ReadyEpochEvent
+    ) -> MCPCP7ReadyEpochEvent: ...
+
+    async def get_mcp_cp7_candidate_guard(
+        self, candidate_id: str
+    ) -> MCPCP7CandidateGuard | None: ...
+
+    async def produce_mcp_cp7_safety_snapshot(
+        self, candidate_id: str
+    ) -> MCPCP7SafetySnapshot: ...
 
     async def save_mcp_remote_task_binding(
         self, binding: MCPRemoteTaskBinding

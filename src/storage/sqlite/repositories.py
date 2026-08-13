@@ -52,6 +52,28 @@ from src.core.models import (
     MCPBranchRecord,
     MCPCallRecord,
     MCPConnectionLease,
+    MCPCP7CandidateGuard,
+    MCPCP7ReadyEpochEvent,
+    MCPCP7SafetyLedgerRecord,
+    MCPCP7SafetyRecordKind,
+    MCPCP7SafetySnapshot,
+    MCPDispatchResumeOutbox,
+    MCPDispatchResumeOutboxStatus,
+    MCPExecutionTerminalProjection,
+    MCPExecutionTerminalProjectionStatus,
+    MCPExecutionTerminalReason,
+    MCPInitialIntentCreateResult,
+    MCPLegacyRetirementConvergenceResult,
+    MCPLegacyRetirementEvidence,
+    MCPNoServerConvergenceResult,
+    MCPNoServerIntent,
+    MCPNoServerIntentStatus,
+    MCPNoServerIntentTrigger,
+    MCPTerminalResultCommitResult,
+    MCPTerminalResultCompletionMode,
+    MCPTerminalResultReceipt,
+    MCPTerminalState,
+    MCPValidatedTerminalResultCandidate,
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
     MCPRemoteTaskBinding,
@@ -66,6 +88,8 @@ from src.core.models import (
     MCPRolloutPromotionBlock,
     MCPRolloutStageApproval,
     MCPShadowAuditSample,
+    MCPTargetIntentArmResult,
+    MCPTargetIntentResolveResult,
     MCPSealedState,
     Message,
     PendingSkillContext,
@@ -79,6 +103,7 @@ from src.core.models import (
     UserMCPHealthAttempt,
     UserMCPScopeLease,
     UserMCPServer,
+    UserMCPOwnerMutationGuard,
     UserMCPToolGrant,
     MCPCredentialKeyValidation,
     validate_mcp_rollout_drill_observation,
@@ -95,6 +120,14 @@ from src.storage.conversation_files import (
 from src.lifecycle.rust_contract import contract_value as lifecycle_contract_value
 from src.lifecycle.rust_contract import status_list as lifecycle_status_list
 from src.integrations.mcp.rollout_evidence import is_exact_mcp_metric_bucket_window
+from src.integrations.mcp.cp7_artifacts import (
+    canonical_json_bytes,
+    canonical_sha256,
+    mcp_dispatch_resume_outbox_id,
+    mcp_no_server_intent_id,
+    mcp_terminal_projection_id,
+    mcp_terminal_receipt_id,
+)
 from src.storage.rust_contract import error_policy as runtime_error_policy
 from src.storage.rust_contract import mode_for_component as runtime_mode_for_component
 from src.storage.rust_contract import operation_policy as runtime_operation_policy
@@ -124,6 +157,15 @@ from .models import (
     MCPBranchRecordRow,
     MCPCallRecordRow,
     MCPConnectionLeaseRow,
+    MCPCP7CandidateGuardRow,
+    MCPCP7ReadyEpochEventRow,
+    MCPCP7SafetyLedgerRow,
+    MCPDispatchResumeOutboxRow,
+    MCPExecutionTerminalProjectionRow,
+    MCPNoServerIntentRow,
+    MCPNoServerConvergenceReceiptRow,
+    MCPLegacyRetirementEvidenceRow,
+    MCPLegacyRetirementReceiptRow,
     MCPLegacyMigrationRecordRow,
     MCPRemoteTaskBindingRow,
     MCPRemoteTaskOutboxRow,
@@ -138,6 +180,7 @@ from .models import (
     MCPRolloutStageApprovalRow,
     MCPShadowAuditSampleRow,
     MCPSealedStateRow,
+    MCPTerminalResultReceiptRow,
     MessageRow,
     PendingSkillContextRow,
     SlotCollectionRow,
@@ -149,6 +192,7 @@ from .models import (
     UserMCPHealthAttemptRow,
     UserMCPScopeLeaseRow,
     UserMCPServerRow,
+    UserMCPOwnerMutationGuardRow,
     UserMCPToolGrantRow,
     MCPCredentialKeyValidationRow,
 )
@@ -387,6 +431,9 @@ def _row_to_mcp_call(row: MCPCallRecordRow) -> MCPCallRecord:
         call_sequence=int(row.call_sequence),
         arguments_sha256=row.arguments_sha256,
         server_security_version=int(row.server_security_version),
+        server_config_version=None
+        if row.server_config_version is None
+        else int(row.server_config_version),
         input_schema_sha256=row.input_schema_sha256,
         protocol_version=row.protocol_version,
         input_field_names=tuple(row.input_field_names or ()),
@@ -397,6 +444,143 @@ def _row_to_mcp_call(row: MCPCallRecordRow) -> MCPCallRecord:
         created_at=row.created_at,
         updated_at=row.updated_at,
         terminal_at=row.terminal_at,
+    )
+
+
+def _row_to_mcp_owner_guard(
+    row: UserMCPOwnerMutationGuardRow,
+) -> UserMCPOwnerMutationGuard:
+    return UserMCPOwnerMutationGuard(
+        owner_user_id=row.owner_user_id,
+        revision=int(row.revision),
+        server_set_fingerprint=row.server_set_fingerprint,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_mcp_no_server_intent(row: MCPNoServerIntentRow) -> MCPNoServerIntent:
+    return MCPNoServerIntent(
+        intent_id=row.intent_id,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        trigger=MCPNoServerIntentTrigger(row.trigger),
+        requested_server_id=row.requested_server_id,
+        requested_server_config_version=row.requested_server_config_version,
+        requested_server_security_version=row.requested_server_security_version,
+        owner_server_set_fingerprint=row.owner_server_set_fingerprint,
+        resume_envelope_json=None
+        if row.resume_envelope_json is None
+        else dict(row.resume_envelope_json),
+        resume_envelope_sha256=row.resume_envelope_sha256,
+        status=MCPNoServerIntentStatus(row.status),
+        revision=int(row.revision),
+        evidence_sha256=row.evidence_sha256,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        terminal_at=row.terminal_at,
+    )
+
+
+def _row_to_mcp_dispatch_resume(
+    row: MCPDispatchResumeOutboxRow,
+) -> MCPDispatchResumeOutbox:
+    return MCPDispatchResumeOutbox(
+        outbox_id=row.outbox_id,
+        intent_id=row.intent_id,
+        owner_user_id=row.owner_user_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        server_id=row.server_id,
+        resume_envelope_sha256=row.resume_envelope_sha256,
+        payload_sha256=row.payload_sha256,
+        status=MCPDispatchResumeOutboxStatus(row.status),
+        claim_owner=row.claim_owner,
+        claim_token=row.claim_token,
+        lease_expires_at=row.lease_expires_at,
+        revision=int(row.revision),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        completed_at=row.completed_at,
+        result_receipt_id=row.result_receipt_id,
+        completion_mode=MCPTerminalResultCompletionMode(row.completion_mode),
+    )
+
+
+def _row_to_mcp_cp7_guard(row: MCPCP7CandidateGuardRow) -> MCPCP7CandidateGuard:
+    return MCPCP7CandidateGuard(
+        candidate_id=row.candidate_id,
+        invalid_latched=bool(row.invalid_latched),
+        first_invalid_record_id=row.first_invalid_record_id,
+        first_invalid_reason=row.first_invalid_reason,
+        first_invalid_at=row.first_invalid_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _row_to_mcp_terminal_receipt(
+    row: MCPTerminalResultReceiptRow,
+) -> MCPTerminalResultReceipt:
+    return MCPTerminalResultReceipt(
+        result_receipt_id=row.result_receipt_id,
+        candidate_id=row.candidate_id,
+        owner_user_id=row.owner_user_id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        intent_id=row.intent_id,
+        call_id=row.call_id,
+        server_id=row.server_id,
+        server_config_version=int(row.server_config_version),
+        server_security_version=int(row.server_security_version),
+        terminal_state=MCPTerminalState(row.terminal_state),
+        result_payload_sha256=row.result_payload_sha256,
+        safe_result_ref=row.safe_result_ref,
+        safe_result_ref_sha256=row.safe_result_ref_sha256,
+        safe_error_code=row.safe_error_code,
+        completion_mode=row.completion_mode,
+        committed_at=row.committed_at,
+    )
+
+
+def _row_to_mcp_terminal_projection(
+    row: MCPExecutionTerminalProjectionRow,
+) -> MCPExecutionTerminalProjection:
+    return MCPExecutionTerminalProjection(
+        projection_id=row.projection_id,
+        owner_user_id=row.owner_user_id,
+        conversation_id=row.conversation_id,
+        intent_id=row.intent_id,
+        call_id=row.call_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        status=MCPExecutionTerminalProjectionStatus(row.status),
+        revision=int(row.revision),
+        no_replay=bool(row.no_replay),
+        reason_code=MCPExecutionTerminalReason(row.reason_code),
+        unknown_intent_revision=int(row.unknown_intent_revision),
+        unknown_event_id=row.unknown_event_id,
+        task_failed_event_id=row.task_failed_event_id,
+        unknown_terminal_at=row.unknown_terminal_at,
+        task_terminal_status=row.task_terminal_status,
+        node_terminal_status=row.node_terminal_status,
+        result_receipt_id=row.result_receipt_id,
+        result_payload_sha256=row.result_payload_sha256,
+        resolved_terminal_state=None
+        if row.resolved_terminal_state is None
+        else MCPTerminalState(row.resolved_terminal_state),
+        safe_result_ref=row.safe_result_ref,
+        safe_result_ref_sha256=row.safe_result_ref_sha256,
+        safe_error_code=row.safe_error_code,
+        resolved_intent_revision=row.resolved_intent_revision,
+        resolution_event_id=row.resolution_event_id,
+        correction_event_id=row.correction_event_id,
+        result_committed_at=row.result_committed_at,
+        resolved_at=row.resolved_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -1007,6 +1191,7 @@ _MCP_ROUTE_REASON_CODES = frozenset(
         "explicit_legacy_capability",
         "user_server_rollout_unavailable",
         "no_execution_path",
+        "no_user_scoped_server",
     }
 )
 _TERMINAL_TASK_STATUSES = frozenset(
@@ -1021,6 +1206,47 @@ _TERMINAL_NODE_STATUSES = frozenset(
         NodeStatus.ORPHANED,
     }
 )
+_CP7_RED_LINES = (
+    "cross_user_access",
+    "secret_exposure",
+    "dual_tool_call",
+    "unauthorized_tool_call",
+    "endpoint_policy_bypass",
+    "unknown_result_replay",
+    "shadow_tool_call",
+    "persistent_resource_leak",
+)
+
+
+def _mcp_owner_server_set_fingerprint(rows: Sequence[UserMCPServerRow]) -> str:
+    payload = [
+        [
+            row.server_id,
+            int(row.config_version),
+            int(row.security_version),
+            bool(row.enabled),
+            str(row.health_status),
+            bool(row.deletion_pending),
+            row.deleted_at is not None,
+        ]
+        for row in sorted(rows, key=lambda item: item.server_id.encode("utf-8"))
+    ]
+    return canonical_sha256(payload)
+
+
+def _mcp_server_is_available(row: UserMCPServerRow | None) -> bool:
+    return bool(
+        row is not None
+        and row.enabled
+        and str(row.health_status) == "available"
+        and not row.deletion_pending
+        and row.deleted_at is None
+    )
+
+
+def _require_exact_row(row: object, expected: Mapping[str, object], error: str) -> None:
+    if any(getattr(row, name) != value for name, value in expected.items()):
+        raise RuntimeError(error)
 
 
 def _validated_mcp_task_assignment(
@@ -1405,9 +1631,96 @@ class SQLiteStateRepository:
         session: Session,
         *,
         task_authority_mode: str | None = None,
+        terminal_candidate_reader: Callable[
+            [str, str], MCPValidatedTerminalResultCandidate
+        ]
+        | None = None,
+        terminal_candidate_resolver: Callable[
+            [str], MCPValidatedTerminalResultCandidate | None
+        ]
+        | None = None,
     ) -> None:
         self._session = session
         self._task_authority_mode = task_authority_mode
+        self._terminal_candidate_reader = terminal_candidate_reader
+        self._terminal_candidate_resolver = terminal_candidate_resolver
+
+    def _lock_mcp_owner_guard(
+        self, owner_user_id: str, occurred_at: datetime
+    ) -> UserMCPOwnerMutationGuardRow:
+        guard = self._session.scalar(
+            select(UserMCPOwnerMutationGuardRow)
+            .where(UserMCPOwnerMutationGuardRow.owner_user_id == owner_user_id)
+            .with_for_update()
+        )
+        created = guard is None
+        if guard is None:
+            guard = UserMCPOwnerMutationGuardRow(
+                owner_user_id=owner_user_id,
+                revision=0,
+                server_set_fingerprint=canonical_sha256([]),
+                created_at=occurred_at,
+                updated_at=occurred_at,
+            )
+            self._session.add(guard)
+        with self._session.no_autoflush:
+            rows = self._session.scalars(
+                select(UserMCPServerRow)
+                .where(UserMCPServerRow.owner_user_id == owner_user_id)
+                .order_by(UserMCPServerRow.server_id)
+                .with_for_update()
+            ).all()
+        fingerprint = _mcp_owner_server_set_fingerprint(rows)
+        if created:
+            guard.server_set_fingerprint = fingerprint
+            self._session.flush()
+        elif guard.server_set_fingerprint != fingerprint:
+            raise RuntimeError("user_mcp_owner_guard_fingerprint_corrupt")
+        return guard
+
+    def _refresh_mcp_owner_guard(
+        self, guard: UserMCPOwnerMutationGuardRow, occurred_at: datetime
+    ) -> None:
+        rows = self._session.scalars(
+            select(UserMCPServerRow)
+            .where(UserMCPServerRow.owner_user_id == guard.owner_user_id)
+            .order_by(UserMCPServerRow.server_id)
+        ).all()
+        guard.revision = int(guard.revision) + 1
+        guard.server_set_fingerprint = _mcp_owner_server_set_fingerprint(rows)
+        guard.updated_at = occurred_at
+        self._session.flush()
+
+    def _insert_or_compare_event(
+        self,
+        *,
+        event_id: str,
+        conversation_id: str,
+        task_id: str,
+        node_id: str | None,
+        event_type: str,
+        payload: Mapping[str, Any],
+        created_at: datetime,
+    ) -> None:
+        expected = {
+            "conversation_id": conversation_id,
+            "task_id": task_id,
+            "node_id": node_id,
+            "agent_id": None,
+            "event_type": event_type,
+            "visibility": str(EventVisibility.FRONTEND),
+            "created_at": created_at,
+        }
+        existing = self._session.get(EventRecordRow, event_id)
+        if existing is not None:
+            _require_exact_row(existing, expected, "mcp_terminal_event_conflict")
+            if dict(existing.payload or {}) != dict(payload):
+                raise RuntimeError("mcp_terminal_event_payload_conflict")
+            return
+        self._session.add(
+            EventRecordRow(event_id=event_id, payload=dict(payload), **expected)
+        )
+        self._session.flush()
 
     def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken:
         at = token.updated_at or token.auth_generation_updated_at or _utcnow_naive()
@@ -2907,6 +3220,8 @@ class SQLiteStateRepository:
             credential.owner_user_id != server.owner_user_id or credential.server_id != server.server_id
         ):
             raise ValueError("credential scope does not match MCP server")
+        mutation_at = server.updated_at or server.created_at or _utcnow_naive()
+        guard = self._lock_mcp_owner_guard(server.owner_user_id, mutation_at)
         row = UserMCPServerRow(
             server_id=server.server_id,
             owner_user_id=server.owner_user_id,
@@ -2932,6 +3247,7 @@ class SQLiteStateRepository:
             self._replace_user_mcp_credential(row, credential)
         self._session.add(row)
         self._session.flush()
+        self._refresh_mcp_owner_guard(guard, mutation_at)
         return _row_to_user_mcp_server(row)
 
     def create_user_mcp_servers_atomic(
@@ -2940,16 +3256,28 @@ class SQLiteStateRepository:
     ) -> list[UserMCPServer]:
         batch = tuple(candidates)
         identities: set[tuple[str, str]] = set()
+        mutation_times: dict[str, datetime] = {}
         for server, credential in batch:
             identity = (server.owner_user_id, server.server_id)
             if identity in identities:
                 raise ValueError("duplicate MCP server identity in atomic create batch")
             identities.add(identity)
+            mutation_times.setdefault(
+                server.owner_user_id,
+                server.updated_at or server.created_at or _utcnow_naive(),
+            )
             if credential is not None and (
                 credential.owner_user_id != server.owner_user_id
                 or credential.server_id != server.server_id
             ):
                 raise ValueError("credential scope does not match MCP server")
+
+        guards = {
+            owner_user_id: self._lock_mcp_owner_guard(
+                owner_user_id, mutation_times[owner_user_id]
+            )
+            for owner_user_id in sorted(mutation_times)
+        }
 
         existing_by_id: dict[str, UserMCPServerRow] = {}
         for server, credential in batch:
@@ -2974,6 +3302,15 @@ class SQLiteStateRepository:
                 ).on_conflict_do_nothing()
             )
         self._session.flush()
+        mutated_owners = {
+            server.owner_user_id
+            for server, _credential in batch
+            if server.server_id not in existing_by_id
+        }
+        for owner_user_id in sorted(mutated_owners):
+            self._refresh_mcp_owner_guard(
+                guards[owner_user_id], mutation_times[owner_user_id]
+            )
         self._session.expire_all()
 
         stored: list[UserMCPServer] = []
@@ -3241,6 +3578,7 @@ class SQLiteStateRepository:
         expected_security_version: int | None = None,
         updated_at: datetime,
     ) -> UserMCPServer | None:
+        guard = self._lock_mcp_owner_guard(owner_user_id, updated_at)
         if credential_operation not in {"retain", "replace", "clear"}:
             raise ValueError("credential_operation must be retain, replace, or clear")
         if credential_operation == "replace":
@@ -3316,6 +3654,7 @@ class SQLiteStateRepository:
                 .values(invalidated_at=updated_at, invalid_reason="security_changed")
             )
         self._session.flush()
+        self._refresh_mcp_owner_guard(guard, updated_at)
         row = self._get_user_mcp_server_row(owner_user_id, server_id)
         return None if row is None else _row_to_user_mcp_server(row)
 
@@ -3333,6 +3672,8 @@ class SQLiteStateRepository:
         return None if row is None else _row_to_user_mcp_credential(row)
 
     def claim_user_mcp_health_attempt(self, attempt: UserMCPHealthAttempt) -> bool:
+        claim_at = attempt.updated_at or attempt.created_at or _utcnow_naive()
+        guard = self._lock_mcp_owner_guard(attempt.owner_user_id, claim_at)
         server = self._get_user_mcp_server_row(attempt.owner_user_id, attempt.server_id)
         if (
             server is None
@@ -3340,7 +3681,6 @@ class SQLiteStateRepository:
             or int(server.security_version) != attempt.security_version
         ):
             return False
-        claim_at = attempt.updated_at or attempt.created_at or _utcnow_naive()
         self._session.execute(
             delete(UserMCPHealthAttemptRow).where(
                 UserMCPHealthAttemptRow.owner_user_id == attempt.owner_user_id,
@@ -3374,6 +3714,7 @@ class SQLiteStateRepository:
         server.last_test_error_code = None
         server.updated_at = attempt.updated_at
         self._session.flush()
+        self._refresh_mcp_owner_guard(guard, claim_at)
         return True
 
     def renew_user_mcp_health_attempt(
@@ -3407,6 +3748,7 @@ class SQLiteStateRepository:
         config_version: int, security_version: int, health_status: str, error_code: str | None,
         completed_at: datetime
     ) -> UserMCPServer | None:
+        guard = self._lock_mcp_owner_guard(owner_user_id, completed_at)
         attempt = self._session.scalar(
             select(UserMCPHealthAttemptRow).where(
                 UserMCPHealthAttemptRow.attempt_id == attempt_id,
@@ -3430,12 +3772,20 @@ class SQLiteStateRepository:
         server.updated_at = completed_at
         self._session.delete(attempt)
         self._session.flush()
+        self._refresh_mcp_owner_guard(guard, completed_at)
         return _row_to_user_mcp_server(server)
 
     def expire_user_mcp_health_attempts(self, *, now: datetime, error_code: str) -> int:
         attempts = self._session.scalars(
             select(UserMCPHealthAttemptRow).where(UserMCPHealthAttemptRow.lease_expires_at <= now)
         ).all()
+        guards = {
+            owner_user_id: self._lock_mcp_owner_guard(owner_user_id, now)
+            for owner_user_id in sorted(
+                {attempt.owner_user_id for attempt in attempts}
+            )
+        }
+        mutated_owners: set[str] = set()
         for attempt in attempts:
             server = self._get_user_mcp_server_row(attempt.owner_user_id, attempt.server_id)
             if (
@@ -3448,8 +3798,11 @@ class SQLiteStateRepository:
                 server.last_tested_at = now
                 server.last_test_error_code = error_code
                 server.updated_at = now
+                mutated_owners.add(attempt.owner_user_id)
             self._session.delete(attempt)
         self._session.flush()
+        for owner_user_id in sorted(mutated_owners):
+            self._refresh_mcp_owner_guard(guards[owner_user_id], now)
         return len(attempts)
 
     def release_user_mcp_health_attempt(
@@ -3553,6 +3906,7 @@ class SQLiteStateRepository:
     def mark_user_mcp_server_deleted(
         self, owner_user_id: str, server_id: str, *, deleted_at: datetime
     ) -> UserMCPServer | None:
+        guard = self._lock_mcp_owner_guard(owner_user_id, deleted_at)
         result = self._session.execute(
             update(UserMCPServerRow)
             .where(
@@ -3572,6 +3926,7 @@ class SQLiteStateRepository:
         )
         if not result.rowcount:
             return None
+        self._refresh_mcp_owner_guard(guard, deleted_at)
         row = self._get_user_mcp_server_row(owner_user_id, server_id, include_deleted=True)
         return None if row is None else _row_to_user_mcp_server(row)
 
@@ -3586,6 +3941,7 @@ class SQLiteStateRepository:
     def finalize_user_mcp_server_delete(
         self, owner_user_id: str, server_id: str, *, now: datetime
     ) -> bool:
+        guard = self._lock_mcp_owner_guard(owner_user_id, now)
         server = self._get_user_mcp_server_row(owner_user_id, server_id, include_deleted=True)
         if server is None or not server.deletion_pending:
             return False
@@ -3625,6 +3981,7 @@ class SQLiteStateRepository:
         )
         self._session.delete(server)
         self._session.flush()
+        self._refresh_mcp_owner_guard(guard, now)
         return True
 
     def save_user_mcp_tool_grant(self, grant: UserMCPToolGrant) -> UserMCPToolGrant:
@@ -3857,6 +4214,7 @@ class SQLiteStateRepository:
                 call_sequence=record.call_sequence,
                 arguments_sha256=record.arguments_sha256,
                 server_security_version=record.server_security_version,
+                server_config_version=record.server_config_version,
                 input_schema_sha256=record.input_schema_sha256,
                 protocol_version=record.protocol_version,
                 input_field_names=list(record.input_field_names),
@@ -3871,6 +4229,1294 @@ class SQLiteStateRepository:
         )
         self._session.flush()
         return True
+
+    def get_user_mcp_owner_mutation_guard(
+        self, owner_user_id: str
+    ) -> UserMCPOwnerMutationGuard | None:
+        row = self._session.get(UserMCPOwnerMutationGuardRow, owner_user_id)
+        return None if row is None else _row_to_mcp_owner_guard(row)
+
+    def get_mcp_no_server_intent(self, intent_id: str) -> MCPNoServerIntent | None:
+        row = self._session.get(MCPNoServerIntentRow, intent_id)
+        return None if row is None else _row_to_mcp_no_server_intent(row)
+
+    def list_unresolved_mcp_no_server_intents(self) -> list[MCPNoServerIntent]:
+        rows = self._session.scalars(
+            select(MCPNoServerIntentRow)
+            .where(
+                MCPNoServerIntentRow.status.in_(
+                    ("armed", "available", "unavailable", "dispatched")
+                )
+            )
+            .order_by(MCPNoServerIntentRow.created_at, MCPNoServerIntentRow.intent_id)
+        ).all()
+        return [_row_to_mcp_no_server_intent(row) for row in rows]
+
+    def create_user_mcp_initial_intent(
+        self, task: Task, occurred_at: datetime
+    ) -> MCPInitialIntentCreateResult:
+        conversation = self._session.get(ConversationRow, task.conversation_id)
+        if conversation is None:
+            raise ValueError("mcp_no_server_task_conversation_missing")
+        guard = self._lock_mcp_owner_guard(conversation.username, occurred_at)
+        servers = self._session.scalars(
+            select(UserMCPServerRow)
+            .where(UserMCPServerRow.owner_user_id == conversation.username)
+            .order_by(UserMCPServerRow.server_id)
+        ).all()
+        fingerprint = _mcp_owner_server_set_fingerprint(servers)
+        if guard.server_set_fingerprint != fingerprint:
+            raise RuntimeError("user_mcp_owner_guard_fingerprint_corrupt")
+        if any(_mcp_server_is_available(row) for row in servers):
+            return MCPInitialIntentCreateResult.RETRY_ROUTE
+        intent_id = mcp_no_server_intent_id(task.task_id)
+        evidence = canonical_sha256(
+            {
+                "intent_id": intent_id,
+                "owner_user_id": conversation.username,
+                "server_set_fingerprint": fingerprint,
+                "task_id": task.task_id,
+                "trigger": "initial_no_profile",
+            }
+        )
+        existing = self._session.get(MCPNoServerIntentRow, intent_id)
+        expected = {
+            "owner_user_id": conversation.username,
+            "task_id": task.task_id,
+            "node_id": None,
+            "trigger": "initial_no_profile",
+            "owner_server_set_fingerprint": fingerprint,
+            "status": "unavailable",
+            "evidence_sha256": evidence,
+        }
+        if existing is not None:
+            _require_exact_row(existing, expected, "mcp_no_server_intent_conflict")
+            return MCPInitialIntentCreateResult.ALREADY_CREATED
+        assigned = replace(
+            task,
+            mcp_execution_mode="unavailable",
+            mcp_shadow_enabled=False,
+            mcp_rollout_config_version=task.mcp_rollout_config_version or "cp7",
+            mcp_route_reason_code="no_user_scoped_server",
+            mcp_rollout_mode="enforce",
+            updated_at=occurred_at,
+        )
+        self.save_task(assigned)
+        self._session.add(
+            MCPNoServerIntentRow(
+                intent_id=intent_id,
+                owner_user_id=conversation.username,
+                task_id=task.task_id,
+                node_id=None,
+                trigger="initial_no_profile",
+                requested_server_id=None,
+                requested_server_config_version=None,
+                requested_server_security_version=None,
+                owner_server_set_fingerprint=fingerprint,
+                resume_envelope_json=None,
+                resume_envelope_sha256=None,
+                status="unavailable",
+                revision=0,
+                evidence_sha256=evidence,
+                created_at=occurred_at,
+                updated_at=occurred_at,
+                terminal_at=None,
+            )
+        )
+        self._session.flush()
+        return MCPInitialIntentCreateResult.CREATED_UNAVAILABLE
+
+    def arm_user_mcp_target_intent(
+        self,
+        task_id: str,
+        node_id: str,
+        requested_server_id: str,
+        resume_envelope: Mapping[str, Any],
+        occurred_at: datetime,
+    ) -> MCPTargetIntentArmResult:
+        task = self._session.get(TaskRow, task_id)
+        node = self._session.get(TaskNodeRow, node_id)
+        if task is None or node is None or node.task_id != task_id:
+            raise ValueError("mcp_target_intent_task_node_missing")
+        if node.capability_id != "mcp.dispatch":
+            raise ValueError("mcp_target_intent_node_capability_invalid")
+        if task.mcp_execution_mode != "user_scoped" or task.mcp_route_reason_code != "enforce_selected":
+            raise ValueError("mcp_target_intent_task_assignment_invalid")
+        conversation = self._session.get(ConversationRow, task.conversation_id)
+        if conversation is None:
+            raise ValueError("mcp_target_intent_conversation_missing")
+        self._lock_mcp_owner_guard(conversation.username, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.server_id == requested_server_id,
+                UserMCPServerRow.owner_user_id == conversation.username,
+            )
+            .with_for_update()
+        )
+        envelope = dict(resume_envelope)
+        rendered = canonical_json_bytes(envelope)
+        if len(rendered) > 64 * 1024:
+            raise ValueError("mcp_target_intent_resume_envelope_too_large")
+        envelope_sha = canonical_sha256(envelope)
+        available = _mcp_server_is_available(server)
+        intent_id = mcp_no_server_intent_id(task_id, node_id=node_id)
+        status = "armed" if available else "unavailable"
+        config_version = int(server.config_version) if available and server is not None else None
+        security_version = int(server.security_version) if available and server is not None else None
+        evidence = canonical_sha256(
+            {
+                "intent_id": intent_id,
+                "owner_user_id": conversation.username,
+                "requested_server_config_version": config_version,
+                "requested_server_id": requested_server_id,
+                "requested_server_security_version": security_version,
+                "resume_envelope_sha256": envelope_sha,
+                "status": status,
+                "task_id": task_id,
+                "node_id": node_id,
+            }
+        )
+        existing = self._session.get(MCPNoServerIntentRow, intent_id)
+        expected = {
+            "owner_user_id": conversation.username,
+            "task_id": task_id,
+            "node_id": node_id,
+            "requested_server_id": requested_server_id,
+            "requested_server_config_version": config_version,
+            "requested_server_security_version": security_version,
+            "resume_envelope_sha256": envelope_sha,
+            "evidence_sha256": evidence,
+        }
+        if existing is not None:
+            _require_exact_row(existing, expected, "mcp_target_intent_conflict")
+            if dict(existing.resume_envelope_json or {}) != envelope:
+                raise RuntimeError("mcp_target_intent_resume_envelope_conflict")
+            return MCPTargetIntentArmResult.ALREADY_ARMED
+        self._session.add(
+            MCPNoServerIntentRow(
+                intent_id=intent_id,
+                owner_user_id=conversation.username,
+                task_id=task_id,
+                node_id=node_id,
+                trigger="target_server_revalidation",
+                requested_server_id=requested_server_id,
+                requested_server_config_version=config_version,
+                requested_server_security_version=security_version,
+                owner_server_set_fingerprint=None,
+                resume_envelope_json=envelope,
+                resume_envelope_sha256=envelope_sha,
+                status=status,
+                revision=0,
+                evidence_sha256=evidence,
+                created_at=occurred_at,
+                updated_at=occurred_at,
+                terminal_at=None,
+            )
+        )
+        self._session.flush()
+        return MCPTargetIntentArmResult.ARMED if available else MCPTargetIntentArmResult.UNAVAILABLE
+
+    def resolve_user_mcp_target_intent(
+        self, intent_id: str, occurred_at: datetime
+    ) -> MCPTargetIntentResolveResult:
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        if intent is None or intent.trigger != "target_server_revalidation":
+            raise ValueError("mcp_target_intent_missing")
+        if intent.status != "armed":
+            return MCPTargetIntentResolveResult.ALREADY_RESOLVED
+        self._lock_mcp_owner_guard(intent.owner_user_id, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.server_id == intent.requested_server_id,
+                UserMCPServerRow.owner_user_id == intent.owner_user_id,
+            )
+            .with_for_update()
+        )
+        exact = bool(
+            _mcp_server_is_available(server)
+            and server is not None
+            and int(server.config_version) == intent.requested_server_config_version
+            and int(server.security_version) == intent.requested_server_security_version
+        )
+        intent.revision = int(intent.revision) + 1
+        intent.updated_at = occurred_at
+        if not exact:
+            intent.status = "unavailable"
+            self._session.flush()
+            return MCPTargetIntentResolveResult.UNAVAILABLE
+        outbox_id = mcp_dispatch_resume_outbox_id(intent_id)
+        payload = {
+            "intent_id": intent_id,
+            "node_id": intent.node_id,
+            "owner_user_id": intent.owner_user_id,
+            "resume_envelope_sha256": intent.resume_envelope_sha256,
+            "server_id": intent.requested_server_id,
+            "task_id": intent.task_id,
+        }
+        payload_sha = canonical_sha256(payload)
+        existing = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        if existing is not None:
+            _require_exact_row(existing, {**payload, "payload_sha256": payload_sha}, "mcp_dispatch_resume_conflict")
+        else:
+            self._session.add(
+                MCPDispatchResumeOutboxRow(
+                    outbox_id=outbox_id,
+                    **payload,
+                    payload_sha256=payload_sha,
+                    status="pending",
+                    claim_owner=None,
+                    claim_token=None,
+                    lease_expires_at=None,
+                    revision=0,
+                    created_at=occurred_at,
+                    updated_at=occurred_at,
+                    completed_at=None,
+                    result_receipt_id=None,
+                    completion_mode=None,
+                )
+            )
+        intent.status = "available"
+        self._session.flush()
+        return MCPTargetIntentResolveResult.AVAILABLE
+
+    def get_mcp_dispatch_resume_outbox(
+        self, outbox_id: str
+    ) -> MCPDispatchResumeOutbox | None:
+        row = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        return None if row is None else _row_to_mcp_dispatch_resume(row)
+
+    def claim_mcp_dispatch_resume_outbox(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        if not claim_owner or not claim_token or lease_expires_at <= now:
+            raise ValueError("mcp_dispatch_resume_claim_invalid")
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if row is None:
+            return None
+        if row.status == "claimed" and row.claim_owner == claim_owner and row.claim_token == claim_token:
+            return _row_to_mcp_dispatch_resume(row)
+        if row.status != "pending":
+            return None
+        row.status = "claimed"
+        row.claim_owner = claim_owner
+        row.claim_token = claim_token
+        row.lease_expires_at = lease_expires_at
+        row.revision = int(row.revision) + 1
+        row.updated_at = now
+        self._session.flush()
+        return _row_to_mcp_dispatch_resume(row)
+
+    def reclaim_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, now: datetime
+    ) -> MCPDispatchResumeOutbox | None:
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status != "claimed"
+            or int(row.revision) != expected_revision
+            or row.lease_expires_at is None
+            or row.lease_expires_at > now
+        ):
+            return None
+        intent = self._session.get(MCPNoServerIntentRow, row.intent_id)
+        if intent is None or intent.status != "available":
+            return None
+        row.status = "pending"
+        row.claim_owner = None
+        row.claim_token = None
+        row.lease_expires_at = None
+        row.revision = int(row.revision) + 1
+        row.updated_at = now
+        self._session.flush()
+        return _row_to_mcp_dispatch_resume(row)
+
+    def abort_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, occurred_at: datetime
+    ) -> MCPDispatchResumeOutbox | None:
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if row is None:
+            return None
+        if row.status == "aborted":
+            return _row_to_mcp_dispatch_resume(row)
+        if row.status not in {"pending", "claimed"} or int(row.revision) != expected_revision:
+            return None
+        row.status = "aborted"
+        row.claim_owner = None
+        row.claim_token = None
+        row.lease_expires_at = None
+        row.revision = int(row.revision) + 1
+        row.updated_at = occurred_at
+        row.completed_at = occurred_at
+        row.completion_mode = "aborted"
+        self._session.flush()
+        return _row_to_mcp_dispatch_resume(row)
+
+    def admit_mcp_tool_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+    ) -> bool:
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if (
+            intent is None
+            or outbox is None
+            or outbox.intent_id != intent_id
+            or intent.status != "available"
+            or outbox.status != "claimed"
+            or int(intent.revision) != expected_intent_revision
+            or int(outbox.revision) != expected_outbox_revision
+            or record.owner_user_id != intent.owner_user_id
+            or record.task_id != intent.task_id
+            or record.node_id != intent.node_id
+            or record.server_id != intent.requested_server_id
+            or record.server_config_version is None
+            or record.server_config_version != intent.requested_server_config_version
+            or record.server_security_version != intent.requested_server_security_version
+        ):
+            return False
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == intent.owner_user_id,
+                UserMCPServerRow.server_id == intent.requested_server_id,
+            )
+            .with_for_update()
+        )
+        if (
+            not _mcp_server_is_available(server)
+            or server is None
+            or int(server.config_version) != record.server_config_version
+            or int(server.security_version) != record.server_security_version
+        ):
+            return False
+        admitted = self.reserve_mcp_call(
+            replace(record, may_have_dispatched=True, updated_at=occurred_at)
+        )
+        if not admitted:
+            return False
+        intent.status = "dispatched"
+        intent.revision = int(intent.revision) + 1
+        intent.updated_at = occurred_at
+        self._session.flush()
+        return True
+
+    def append_mcp_cp7_safety_ledger_record(
+        self, record: MCPCP7SafetyLedgerRecord
+    ) -> MCPCP7SafetyLedgerRecord:
+        expected = {
+            "candidate_id": record.candidate_id,
+            "epoch_id": record.epoch_id,
+            "config_fingerprint": record.config_fingerprint,
+            "record_kind": str(record.record_kind),
+            "red_line": record.red_line,
+            "hook_id": record.hook_id,
+            "bucket_started_at": record.bucket_started_at,
+            "bucket_ended_at": record.bucket_ended_at,
+            "reason_code": record.reason_code,
+            "value": record.value,
+            "boundary_source_sha256": record.boundary_source_sha256,
+            "payload_sha256": record.payload_sha256,
+            "recorded_at": record.recorded_at,
+        }
+        existing = self._session.get(MCPCP7SafetyLedgerRow, record.record_id)
+        if existing is not None:
+            _require_exact_row(existing, expected, "mcp_cp7_safety_ledger_conflict")
+            return record
+        guard = self._session.scalar(
+            select(MCPCP7CandidateGuardRow)
+            .where(MCPCP7CandidateGuardRow.candidate_id == record.candidate_id)
+            .with_for_update()
+        )
+        if guard is None:
+            guard = MCPCP7CandidateGuardRow(
+                candidate_id=record.candidate_id,
+                invalid_latched=False,
+                first_invalid_record_id=None,
+                first_invalid_reason=None,
+                first_invalid_at=None,
+                created_at=record.recorded_at,
+                updated_at=record.recorded_at,
+            )
+            self._session.add(guard)
+            self._session.flush()
+        self._session.add(MCPCP7SafetyLedgerRow(record_id=record.record_id, **expected))
+        if record.record_kind in {
+            MCPCP7SafetyRecordKind.VIOLATION,
+            MCPCP7SafetyRecordKind.GAP,
+        }:
+            if not guard.invalid_latched:
+                guard.invalid_latched = True
+                guard.first_invalid_record_id = record.record_id
+                guard.first_invalid_reason = record.reason_code
+                guard.first_invalid_at = record.recorded_at
+                guard.updated_at = record.recorded_at
+        self._session.flush()
+        return record
+
+    def append_mcp_cp7_ready_epoch_event(
+        self, event: MCPCP7ReadyEpochEvent
+    ) -> MCPCP7ReadyEpochEvent:
+        expected = {
+            "candidate_id": event.candidate_id,
+            "epoch_id": event.epoch_id,
+            "predecessor_epoch_id": event.predecessor_epoch_id,
+            "event_kind": str(event.event_kind),
+            "container_id": event.container_id,
+            "image_id": event.image_id,
+            "config_fingerprint": event.config_fingerprint,
+            "boundary_at": event.boundary_at,
+            "audit_device": event.audit_device,
+            "audit_inode": event.audit_inode,
+            "audit_offset": event.audit_offset,
+            "ledger_record_count": event.ledger_record_count,
+            "inflight_state_sha256": event.inflight_state_sha256,
+            "payload_sha256": event.payload_sha256,
+        }
+        existing = self._session.get(MCPCP7ReadyEpochEventRow, event.event_id)
+        if existing is not None:
+            _require_exact_row(existing, expected, "mcp_cp7_epoch_event_conflict")
+            return event
+        competing = self._session.scalar(
+            select(MCPCP7ReadyEpochEventRow).where(
+                MCPCP7ReadyEpochEventRow.candidate_id == event.candidate_id,
+                MCPCP7ReadyEpochEventRow.epoch_id == event.epoch_id,
+                MCPCP7ReadyEpochEventRow.event_kind == str(event.event_kind),
+            )
+        )
+        if competing is not None:
+            raise RuntimeError("mcp_cp7_epoch_event_conflict")
+        self._session.add(MCPCP7ReadyEpochEventRow(event_id=event.event_id, **expected))
+        self._session.flush()
+        return event
+
+    def get_mcp_cp7_candidate_guard(
+        self, candidate_id: str
+    ) -> MCPCP7CandidateGuard | None:
+        row = self._session.get(MCPCP7CandidateGuardRow, candidate_id)
+        return None if row is None else _row_to_mcp_cp7_guard(row)
+
+    def produce_mcp_cp7_safety_snapshot(
+        self, candidate_id: str
+    ) -> MCPCP7SafetySnapshot:
+        guard = self._session.scalar(
+            select(MCPCP7CandidateGuardRow)
+            .where(MCPCP7CandidateGuardRow.candidate_id == candidate_id)
+            .with_for_update()
+        )
+        records = self._session.scalars(
+            select(MCPCP7SafetyLedgerRow)
+            .where(MCPCP7SafetyLedgerRow.candidate_id == candidate_id)
+            .order_by(MCPCP7SafetyLedgerRow.recorded_at, MCPCP7SafetyLedgerRow.record_id)
+            .with_for_update()
+        ).all()
+        events = self._session.scalars(
+            select(MCPCP7ReadyEpochEventRow)
+            .where(MCPCP7ReadyEpochEventRow.candidate_id == candidate_id)
+            .order_by(MCPCP7ReadyEpochEventRow.boundary_at, MCPCP7ReadyEpochEventRow.event_id)
+            .with_for_update()
+        ).all()
+        if guard is None or not records or not events:
+            raise RuntimeError("mcp_cp7_safety_snapshot_evidence_missing")
+        config_fingerprints = {
+            *(row.config_fingerprint for row in records),
+            *(row.config_fingerprint for row in events),
+        }
+        if len(config_fingerprints) != 1:
+            raise RuntimeError("mcp_cp7_safety_snapshot_config_mismatch")
+        by_epoch: dict[str, dict[str, MCPCP7ReadyEpochEventRow]] = {}
+        for event in events:
+            slot = by_epoch.setdefault(event.epoch_id, {})
+            if event.event_kind in slot:
+                raise RuntimeError("mcp_cp7_safety_snapshot_epoch_fork")
+            slot[event.event_kind] = event
+        ready_epochs: list[str] = []
+        previous: str | None = None
+        maintenance_count = 0
+        observation_started_at: datetime | None = None
+        observation_ended_at: datetime | None = None
+        for epoch_id, epoch_events in by_epoch.items():
+            if not {"opened", "ready", "closed"}.issubset(epoch_events):
+                raise RuntimeError("mcp_cp7_safety_snapshot_epoch_incomplete")
+            opened = epoch_events["opened"]
+            ready = epoch_events["ready"]
+            closed = epoch_events["closed"]
+            if opened.predecessor_epoch_id != previous or not (
+                opened.boundary_at <= ready.boundary_at <= closed.boundary_at
+            ):
+                raise RuntimeError("mcp_cp7_safety_snapshot_epoch_chain_invalid")
+            if "maintenance_started" in epoch_events:
+                maintenance = epoch_events["maintenance_started"]
+                if not ready.boundary_at <= maintenance.boundary_at <= closed.boundary_at:
+                    raise RuntimeError("mcp_cp7_safety_snapshot_maintenance_invalid")
+                maintenance_count += 1
+            ready_epochs.append(epoch_id)
+            previous = epoch_id
+            observation_started_at = observation_started_at or ready.boundary_at
+            observation_ended_at = closed.boundary_at
+        registrations = {red_line: 0 for red_line in _CP7_RED_LINES}
+        attestations = {red_line: 0 for red_line in _CP7_RED_LINES}
+        violations = {red_line: 0 for red_line in _CP7_RED_LINES}
+        gap_count = 0
+        attestation_keys: set[tuple[str, str, datetime, datetime]] = set()
+        for record in records:
+            if record.epoch_id not in by_epoch:
+                raise RuntimeError("mcp_cp7_safety_snapshot_record_epoch_unknown")
+            if record.record_kind == "gap":
+                gap_count += 1
+            elif record.red_line not in registrations:
+                raise RuntimeError("mcp_cp7_safety_snapshot_red_line_unknown")
+            elif record.record_kind == "registration":
+                if record.recorded_at > by_epoch[record.epoch_id]["ready"].boundary_at:
+                    raise RuntimeError("mcp_cp7_safety_snapshot_registration_late")
+                registrations[record.red_line] += 1
+            elif record.record_kind == "attestation":
+                if record.bucket_started_at is None or record.bucket_ended_at is None:
+                    raise RuntimeError("mcp_cp7_safety_snapshot_attestation_window_invalid")
+                key = (
+                    record.epoch_id,
+                    record.red_line,
+                    record.bucket_started_at,
+                    record.bucket_ended_at,
+                )
+                if key in attestation_keys:
+                    raise RuntimeError("mcp_cp7_safety_snapshot_attestation_duplicate")
+                if record.recorded_at < record.bucket_ended_at:
+                    raise RuntimeError("mcp_cp7_safety_snapshot_attestation_early")
+                attestation_keys.add(key)
+                attestations[record.red_line] += 1
+            elif record.record_kind == "violation":
+                violations[record.red_line] += 1
+            else:
+                raise RuntimeError("mcp_cp7_safety_snapshot_record_kind_unknown")
+        if any(value != 1 for value in registrations.values()):
+            raise RuntimeError("mcp_cp7_safety_snapshot_registration_missing")
+        if observation_started_at is None or observation_ended_at is None:
+            raise RuntimeError("mcp_cp7_safety_snapshot_observation_missing")
+        required_attestations: set[tuple[str, str, datetime, datetime]] = set()
+        for epoch_id, epoch_events in by_epoch.items():
+            ready_at = epoch_events["ready"].boundary_at
+            closed_at = epoch_events["closed"].boundary_at
+            bucket_start = ready_at.replace(second=0, microsecond=0)
+            if bucket_start < ready_at:
+                bucket_start += timedelta(minutes=1)
+            while bucket_start + timedelta(minutes=1) <= closed_at:
+                bucket_end = bucket_start + timedelta(minutes=1)
+                required_attestations.update(
+                    (epoch_id, red_line, bucket_start, bucket_end)
+                    for red_line in _CP7_RED_LINES
+                )
+                bucket_start = bucket_end
+        if not required_attestations or attestation_keys != required_attestations:
+            raise RuntimeError("mcp_cp7_safety_snapshot_attestation_coverage_invalid")
+        registry_definition_sha = canonical_sha256(
+            {red_line: index for index, red_line in enumerate(_CP7_RED_LINES)}
+        )
+        epoch_chain_sha = canonical_sha256([event.payload_sha256 for event in events])
+        payload = {
+            "schema": "maf.user_mcp.cp7_safety_snapshot.v1",
+            "candidate_id": candidate_id,
+            "config_fingerprint": next(iter(config_fingerprints)),
+            "registry_definition_sha256": registry_definition_sha,
+            "epoch_chain_sha256": epoch_chain_sha,
+            "ready_epochs": ready_epochs,
+            "maintenance_boundary_count": maintenance_count,
+            "observation_started_at": observation_started_at.isoformat(),
+            "observation_ended_at": observation_ended_at.isoformat(),
+            "registration_count_by_red_line": registrations,
+            "attestation_interval_count_by_red_line": attestations,
+            "violation_count_by_red_line": violations,
+            "gap_count": gap_count,
+            "invalid_latched": bool(guard.invalid_latched),
+            "record_count": len(records),
+            "ordered_record_payload_sha256s": [row.payload_sha256 for row in records],
+        }
+        return MCPCP7SafetySnapshot(
+            schema=payload["schema"],
+            candidate_id=candidate_id,
+            config_fingerprint=payload["config_fingerprint"],
+            registry_definition_sha256=registry_definition_sha,
+            epoch_chain_sha256=epoch_chain_sha,
+            ready_epochs=tuple(ready_epochs),
+            maintenance_boundary_count=maintenance_count,
+            observation_started_at=observation_started_at,
+            observation_ended_at=observation_ended_at,
+            registration_count_by_red_line=registrations,
+            attestation_interval_count_by_red_line=attestations,
+            violation_count_by_red_line=violations,
+            gap_count=gap_count,
+            invalid_latched=bool(guard.invalid_latched),
+            record_count=len(records),
+            ordered_record_payload_sha256s=tuple(row.payload_sha256 for row in records),
+            snapshot_sha256=canonical_sha256(payload),
+        )
+
+    def converge_user_mcp_no_server(
+        self, task_id: str, occurred_at: datetime
+    ) -> MCPNoServerConvergenceResult:
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == task_id).with_for_update()
+        )
+        if task is None:
+            raise ValueError("mcp_no_server_task_missing")
+        receipt_id = f"mcp-no-server:v1:{task_id}"
+        existing_receipt = self._session.get(
+            MCPNoServerConvergenceReceiptRow, receipt_id
+        )
+        if existing_receipt is not None:
+            return MCPNoServerConvergenceResult.ALREADY_CONVERGED
+        if task.status in _TERMINAL_TASK_STATUSES:
+            return MCPNoServerConvergenceResult.ALREADY_TERMINAL
+        intents = self._session.scalars(
+            select(MCPNoServerIntentRow)
+            .where(
+                MCPNoServerIntentRow.task_id == task_id,
+                MCPNoServerIntentRow.status.in_(("unavailable", "dispatched")),
+            )
+            .order_by(MCPNoServerIntentRow.intent_id)
+            .with_for_update()
+        ).all()
+        if len(intents) != 1:
+            raise RuntimeError("mcp_no_server_intent_ambiguous")
+        intent = intents[0]
+        calls = self._session.scalars(
+            select(MCPCallRecordRow)
+            .where(MCPCallRecordRow.task_id == task_id)
+            .order_by(MCPCallRecordRow.call_ref)
+            .with_for_update()
+        ).all()
+        outboxes = self._session.scalars(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.intent_id == intent.intent_id)
+            .order_by(MCPDispatchResumeOutboxRow.outbox_id)
+            .with_for_update()
+        ).all()
+        conversation = self._session.get(ConversationRow, task.conversation_id)
+        if conversation is None or conversation.username != intent.owner_user_id:
+            raise RuntimeError("mcp_no_server_owner_binding_corrupt")
+        dispatched = [row for row in calls if row.may_have_dispatched]
+        if dispatched:
+            if len(dispatched) != 1 or intent.node_id is None:
+                raise RuntimeError("mcp_unknown_call_ambiguous")
+            call = dispatched[0]
+            receipt = self._session.scalar(
+                select(MCPTerminalResultReceiptRow)
+                .where(MCPTerminalResultReceiptRow.call_id == call.call_ref)
+                .with_for_update()
+            )
+            if receipt is not None:
+                raise RuntimeError("mcp_terminal_receipt_without_terminal_projection")
+            if self._terminal_candidate_resolver is not None:
+                candidate = self._terminal_candidate_resolver(call.call_ref)
+                if candidate is not None:
+                    if (
+                        candidate.call_id != call.call_ref
+                        or candidate.owner_user_id != call.owner_user_id
+                        or candidate.task_id != call.task_id
+                        or candidate.node_id != call.node_id
+                        or candidate.intent_id != intent.intent_id
+                        or candidate.server_id != call.server_id
+                        or call.server_config_version is None
+                        or candidate.server_config_version
+                        != int(call.server_config_version)
+                        or candidate.server_security_version
+                        != int(call.server_security_version)
+                    ):
+                        raise RuntimeError("mcp_terminal_candidate_binding_conflict")
+                    return (
+                        MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT
+                    )
+            projection_id = mcp_terminal_projection_id(call.call_ref)
+            unknown_revision = int(intent.revision) + 1
+            unknown_event_id = (
+                f"mcp-execution-status-unknown:v1:{call.call_ref}:"
+                f"{unknown_revision}:01-unknown"
+            )
+            failed_event_id = (
+                f"mcp-execution-status-unknown:v1:{call.call_ref}:"
+                f"{unknown_revision}:02-task-failed"
+            )
+            existing_projection = self._session.get(
+                MCPExecutionTerminalProjectionRow, projection_id
+            )
+            if existing_projection is not None:
+                return MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY
+            node = self._session.scalar(
+                select(TaskNodeRow)
+                .where(TaskNodeRow.node_id == intent.node_id)
+                .with_for_update()
+            )
+            if node is None:
+                raise RuntimeError("mcp_unknown_node_missing")
+            intent.status = "unknown"
+            intent.revision = unknown_revision
+            intent.updated_at = occurred_at
+            intent.terminal_at = occurred_at
+            task.status = str(TaskStatus.FAILED)
+            task.updated_at = occurred_at
+            node.status = str(NodeStatus.FAILED)
+            node.finished_at = occurred_at
+            call.status = "execution_status_unknown"
+            call.safe_error_code = "execution_status_unknown"
+            call.updated_at = occurred_at
+            call.terminal_at = occurred_at
+            for outbox in outboxes:
+                outbox.status = "completed"
+                outbox.claim_owner = None
+                outbox.claim_token = None
+                outbox.lease_expires_at = None
+                outbox.revision = int(outbox.revision) + 1
+                outbox.updated_at = occurred_at
+                outbox.completed_at = occurred_at
+                outbox.completion_mode = "unknown_no_replay"
+            self._session.add(
+                MCPExecutionTerminalProjectionRow(
+                    projection_id=projection_id,
+                    owner_user_id=intent.owner_user_id,
+                    conversation_id=task.conversation_id,
+                    intent_id=intent.intent_id,
+                    call_id=call.call_ref,
+                    task_id=task_id,
+                    node_id=node.node_id,
+                    status="unknown",
+                    revision=0,
+                    no_replay=True,
+                    reason_code="trusted_terminal_result_absent",
+                    unknown_intent_revision=unknown_revision,
+                    unknown_event_id=unknown_event_id,
+                    task_failed_event_id=failed_event_id,
+                    unknown_terminal_at=occurred_at,
+                    task_terminal_status="failed",
+                    node_terminal_status="failed",
+                    result_receipt_id=None,
+                    result_payload_sha256=None,
+                    resolved_terminal_state=None,
+                    safe_result_ref=None,
+                    safe_result_ref_sha256=None,
+                    safe_error_code=None,
+                    resolved_intent_revision=None,
+                    resolution_event_id=None,
+                    correction_event_id=None,
+                    result_committed_at=None,
+                    resolved_at=None,
+                    created_at=occurred_at,
+                    updated_at=occurred_at,
+                )
+            )
+            self._insert_or_compare_event(
+                event_id=unknown_event_id,
+                conversation_id=task.conversation_id,
+                task_id=task_id,
+                node_id=node.node_id,
+                event_type="mcp.execution_status_unknown",
+                payload={
+                    "projection_id": projection_id,
+                    "intent_id": intent.intent_id,
+                    "call_id": call.call_ref,
+                    "reason_code": "trusted_terminal_result_absent",
+                    "no_replay": True,
+                    "predecessor_event_id": None,
+                },
+                created_at=occurred_at,
+            )
+            self._insert_or_compare_event(
+                event_id=failed_event_id,
+                conversation_id=task.conversation_id,
+                task_id=task_id,
+                node_id=node.node_id,
+                event_type="task.failed",
+                payload={
+                    "code": "execution_status_unknown",
+                    "no_replay": True,
+                    "unknown_event_id": unknown_event_id,
+                    "predecessor_event_id": unknown_event_id,
+                },
+                created_at=occurred_at + timedelta(microseconds=1),
+            )
+            self._session.flush()
+            return MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY
+        if intent.trigger == "initial_no_profile":
+            if (
+                task.mcp_execution_mode != "unavailable"
+                or task.mcp_route_reason_code != "no_user_scoped_server"
+                or self._session.scalar(
+                    select(func.count()).select_from(TaskNodeRow).where(
+                        TaskNodeRow.task_id == task_id,
+                        TaskNodeRow.capability_id == "mcp.dispatch",
+                    )
+                )
+            ):
+                raise RuntimeError("mcp_no_server_initial_precondition_corrupt")
+            node = None
+        else:
+            if task.mcp_execution_mode != "user_scoped" or task.mcp_route_reason_code != "enforce_selected":
+                raise RuntimeError("mcp_no_server_target_assignment_corrupt")
+            node = self._session.scalar(
+                select(TaskNodeRow)
+                .where(TaskNodeRow.node_id == intent.node_id)
+                .with_for_update()
+            )
+            if node is None or node.task_id != task_id or node.capability_id != "mcp.dispatch":
+                raise RuntimeError("mcp_no_server_target_node_corrupt")
+        runtime_event_id = f"{receipt_id}:01-runtime-unavailable"
+        failed_event_id = f"{receipt_id}:02-task-failed"
+        evidence = canonical_sha256(
+            {
+                "intent_evidence_sha256": intent.evidence_sha256,
+                "intent_id": intent.intent_id,
+                "task_id": task_id,
+            }
+        )
+        task.status = str(TaskStatus.FAILED)
+        task.updated_at = occurred_at
+        if node is not None and node.status not in _TERMINAL_NODE_STATUSES:
+            node.status = str(NodeStatus.FAILED)
+            node.finished_at = occurred_at
+            downstream = self._session.scalars(
+                select(TaskNodeRow)
+                .join(TaskEdgeRow, TaskEdgeRow.to_node_id == TaskNodeRow.node_id)
+                .where(TaskEdgeRow.task_id == task_id, TaskEdgeRow.from_node_id == node.node_id)
+                .with_for_update()
+            ).all()
+            for dependent in downstream:
+                if dependent.status not in _TERMINAL_NODE_STATUSES:
+                    dependent.status = str(NodeStatus.BLOCKED_BY_CANCELLATION)
+                    dependent.finished_at = occurred_at
+        for outbox in outboxes:
+            if outbox.status in {"pending", "claimed"}:
+                outbox.status = "aborted"
+                outbox.claim_owner = None
+                outbox.claim_token = None
+                outbox.lease_expires_at = None
+                outbox.revision = int(outbox.revision) + 1
+                outbox.updated_at = occurred_at
+                outbox.completed_at = occurred_at
+                outbox.completion_mode = "aborted"
+        intent.status = "converged"
+        intent.revision = int(intent.revision) + 1
+        intent.updated_at = occurred_at
+        intent.terminal_at = occurred_at
+        self._insert_or_compare_event(
+            event_id=runtime_event_id,
+            conversation_id=task.conversation_id,
+            task_id=task_id,
+            node_id=intent.node_id,
+            event_type="mcp.runtime_unavailable",
+            payload={"status": "unavailable", "reason_code": "no_user_scoped_server"},
+            created_at=occurred_at,
+        )
+        self._insert_or_compare_event(
+            event_id=failed_event_id,
+            conversation_id=task.conversation_id,
+            task_id=task_id,
+            node_id=intent.node_id,
+            event_type="task.failed",
+            payload={"code": "mcp_runtime_unavailable"},
+            created_at=occurred_at,
+        )
+        self._session.add(
+            MCPNoServerConvergenceReceiptRow(
+                idempotency_key=receipt_id,
+                task_id=task_id,
+                intent_id=intent.intent_id,
+                owner_user_id=intent.owner_user_id,
+                terminal_code="mcp_runtime_unavailable",
+                evidence_sha256=evidence,
+                runtime_unavailable_event_id=runtime_event_id,
+                task_failed_event_id=failed_event_id,
+                committed_at=occurred_at,
+            )
+        )
+        self._session.flush()
+        return MCPNoServerConvergenceResult.CONVERGED
+
+    def get_mcp_terminal_result_receipt(
+        self, result_receipt_id: str
+    ) -> MCPTerminalResultReceipt | None:
+        row = self._session.get(MCPTerminalResultReceiptRow, result_receipt_id)
+        return None if row is None else _row_to_mcp_terminal_receipt(row)
+
+    def get_mcp_execution_terminal_projection(
+        self, call_id: str
+    ) -> MCPExecutionTerminalProjection | None:
+        row = self._session.scalar(
+            select(MCPExecutionTerminalProjectionRow).where(
+                MCPExecutionTerminalProjectionRow.call_id == call_id
+            )
+        )
+        return None if row is None else _row_to_mcp_terminal_projection(row)
+
+    def commit_authoritative_mcp_terminal_result(
+        self, call_id: str, candidate_id: str, occurred_at: datetime
+    ) -> MCPTerminalResultCommitResult:
+        if self._terminal_candidate_reader is None:
+            raise RuntimeError("mcp_terminal_candidate_reader_unavailable")
+        candidate = self._terminal_candidate_reader(call_id, candidate_id)
+        if candidate.call_id != call_id or candidate.candidate_id != candidate_id:
+            raise RuntimeError("mcp_terminal_candidate_identity_conflict")
+        call = self._session.scalar(
+            select(MCPCallRecordRow)
+            .where(MCPCallRecordRow.call_ref == call_id)
+            .with_for_update()
+        )
+        if call is None or call.server_config_version is None:
+            return MCPTerminalResultCommitResult.CONFLICT
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == candidate.intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.intent_id == candidate.intent_id)
+            .with_for_update()
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == candidate.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == candidate.node_id)
+            .with_for_update()
+        )
+        binding = (
+            call.owner_user_id,
+            call.task_id,
+            call.node_id,
+            call.server_id,
+            int(call.server_config_version),
+            int(call.server_security_version),
+        )
+        candidate_binding = (
+            candidate.owner_user_id,
+            candidate.task_id,
+            candidate.node_id,
+            candidate.server_id,
+            candidate.server_config_version,
+            candidate.server_security_version,
+        )
+        if (
+            binding != candidate_binding
+            or intent is None
+            or outbox is None
+            or task is None
+            or node is None
+            or candidate.conversation_id != task.conversation_id
+        ):
+            return MCPTerminalResultCommitResult.CONFLICT
+        receipt_id = mcp_terminal_receipt_id(call_id, candidate.result_payload_sha256)
+        existing = self._session.scalar(
+            select(MCPTerminalResultReceiptRow)
+            .where(MCPTerminalResultReceiptRow.call_id == call_id)
+            .with_for_update()
+        )
+        projection = self._session.scalar(
+            select(MCPExecutionTerminalProjectionRow)
+            .where(MCPExecutionTerminalProjectionRow.call_id == call_id)
+            .with_for_update()
+        )
+        late = projection is not None and projection.status == "unknown"
+        mode = (
+            "late_result_no_continuation" if late else "normal_terminal_projection"
+        )
+        receipt_values = {
+            "result_receipt_id": receipt_id,
+            "candidate_id": candidate_id,
+            "owner_user_id": candidate.owner_user_id,
+            "conversation_id": candidate.conversation_id,
+            "task_id": candidate.task_id,
+            "node_id": candidate.node_id,
+            "intent_id": candidate.intent_id,
+            "call_id": call_id,
+            "server_id": candidate.server_id,
+            "server_config_version": candidate.server_config_version,
+            "server_security_version": candidate.server_security_version,
+            "terminal_state": str(candidate.terminal_state),
+            "result_payload_sha256": candidate.result_payload_sha256,
+            "safe_result_ref": candidate.safe_result_ref,
+            "safe_result_ref_sha256": candidate.safe_result_ref_sha256,
+            "safe_error_code": candidate.safe_error_code,
+            "completion_mode": mode,
+            "committed_at": occurred_at,
+        }
+        if existing is not None:
+            retry_values = dict(receipt_values)
+            retry_values["committed_at"] = existing.committed_at
+            _require_exact_row(existing, retry_values, "mcp_terminal_receipt_conflict")
+            return MCPTerminalResultCommitResult.ALREADY_COMMITTED
+        if late:
+            if (
+                projection is None
+                or intent.status != "unknown"
+                or int(projection.revision) != 0
+                or int(intent.revision) != int(projection.unknown_intent_revision)
+            ):
+                return MCPTerminalResultCommitResult.CONFLICT
+            self._session.add(MCPTerminalResultReceiptRow(**receipt_values))
+            resolution_id = f"mcp-late-terminal:v1:{call_id}:1:01-resolution"
+            correction_id = f"mcp-late-terminal:v1:{call_id}:1:02-correction"
+            resolved_at = max(
+                occurred_at,
+                projection.unknown_terminal_at + timedelta(microseconds=2),
+            )
+            intent.status = "resolved"
+            intent.revision = int(intent.revision) + 1
+            intent.updated_at = resolved_at
+            projection.status = "late_result_resolved"
+            projection.revision = 1
+            projection.result_receipt_id = receipt_id
+            projection.result_payload_sha256 = candidate.result_payload_sha256
+            projection.resolved_terminal_state = str(candidate.terminal_state)
+            projection.safe_result_ref = candidate.safe_result_ref
+            projection.safe_result_ref_sha256 = candidate.safe_result_ref_sha256
+            projection.safe_error_code = candidate.safe_error_code
+            projection.resolved_intent_revision = int(intent.revision)
+            projection.resolution_event_id = resolution_id
+            projection.correction_event_id = correction_id
+            projection.result_committed_at = occurred_at
+            projection.resolved_at = resolved_at
+            projection.updated_at = resolved_at
+            self._insert_or_compare_event(
+                event_id=resolution_id,
+                conversation_id=candidate.conversation_id,
+                task_id=candidate.task_id,
+                node_id=candidate.node_id,
+                event_type="mcp.execution_status_resolution",
+                payload={
+                    "projection_id": projection.projection_id,
+                    "result_receipt_id": receipt_id,
+                    "predecessor_event_id": projection.task_failed_event_id,
+                },
+                created_at=resolved_at,
+            )
+            self._insert_or_compare_event(
+                event_id=correction_id,
+                conversation_id=candidate.conversation_id,
+                task_id=candidate.task_id,
+                node_id=candidate.node_id,
+                event_type="mcp.late_terminal_result_recovered",
+                payload={
+                    "projection_id": projection.projection_id,
+                    "result_receipt_id": receipt_id,
+                    "predecessor_event_id": resolution_id,
+                    "no_replay": True,
+                },
+                created_at=resolved_at + timedelta(microseconds=1),
+            )
+            result = MCPTerminalResultCommitResult.COMMITTED_LATE
+        else:
+            if intent.status != "dispatched" or not call.may_have_dispatched:
+                return MCPTerminalResultCommitResult.CONFLICT
+            self._session.add(MCPTerminalResultReceiptRow(**receipt_values))
+            intent.status = "resolved"
+            intent.revision = int(intent.revision) + 1
+            intent.updated_at = occurred_at
+            intent.terminal_at = occurred_at
+            call.status = str(candidate.terminal_state)
+            call.result_ref = candidate.safe_result_ref
+            call.safe_error_code = candidate.safe_error_code
+            call.terminal_at = occurred_at
+            call.updated_at = occurred_at
+            task.status = (
+                str(TaskStatus.COMPLETED)
+                if candidate.terminal_state == MCPTerminalState.COMPLETED
+                else str(TaskStatus.FAILED)
+            )
+            task.updated_at = occurred_at
+            node.status = (
+                str(NodeStatus.COMPLETED)
+                if candidate.terminal_state == MCPTerminalState.COMPLETED
+                else str(NodeStatus.FAILED)
+            )
+            node.finished_at = occurred_at
+            terminal_event_id = f"{receipt_id}:terminal"
+            self._insert_or_compare_event(
+                event_id=terminal_event_id,
+                conversation_id=candidate.conversation_id,
+                task_id=candidate.task_id,
+                node_id=candidate.node_id,
+                event_type=(
+                    "task.completed"
+                    if candidate.terminal_state == MCPTerminalState.COMPLETED
+                    else "task.failed"
+                ),
+                payload={
+                    "result_receipt_id": receipt_id,
+                    "terminal_state": str(candidate.terminal_state),
+                    "safe_result_ref": candidate.safe_result_ref,
+                    "safe_error_code": candidate.safe_error_code,
+                },
+                created_at=occurred_at,
+            )
+            result = MCPTerminalResultCommitResult.COMMITTED_NORMAL
+        outbox.status = "completed"
+        outbox.claim_owner = None
+        outbox.claim_token = None
+        outbox.lease_expires_at = None
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        outbox.completed_at = occurred_at
+        outbox.result_receipt_id = receipt_id
+        outbox.completion_mode = mode
+        self._session.flush()
+        return result
+
+    def append_mcp_legacy_retirement_evidence(
+        self, evidence: MCPLegacyRetirementEvidence
+    ) -> MCPLegacyRetirementEvidence:
+        expected = {
+            "task_id": evidence.task_id,
+            "inventory_id": evidence.inventory_id,
+            "inventory_sha256": evidence.inventory_sha256,
+            "bundle_revision": evidence.bundle_revision,
+            "capability_id": evidence.capability_id,
+            "may_have_dispatched": evidence.may_have_dispatched,
+            "evidence_sha256": evidence.evidence_sha256,
+            "created_at": evidence.created_at,
+        }
+        existing = self._session.get(
+            MCPLegacyRetirementEvidenceRow, evidence.evidence_id
+        )
+        if existing is not None:
+            _require_exact_row(existing, expected, "mcp_legacy_retirement_evidence_conflict")
+            return evidence
+        self._session.add(
+            MCPLegacyRetirementEvidenceRow(
+                evidence_id=evidence.evidence_id, **expected
+            )
+        )
+        self._session.flush()
+        return evidence
+
+    def converge_legacy_runtime_retirement(
+        self,
+        task_id: str,
+        inventory_id: str,
+        inventory_sha256: str,
+        idempotency_key: str,
+        occurred_at: datetime,
+    ) -> MCPLegacyRetirementConvergenceResult:
+        expected_key = f"legacy-retire:v1:{task_id}:{inventory_sha256}"
+        if idempotency_key != expected_key:
+            raise ValueError("runtime_store_idempotency_conflict")
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == task_id).with_for_update()
+        )
+        if task is None:
+            raise ValueError("mcp_legacy_retirement_task_missing")
+        receipt = self._session.get(MCPLegacyRetirementReceiptRow, idempotency_key)
+        if receipt is not None:
+            _require_exact_row(
+                receipt,
+                {
+                    "task_id": task_id,
+                    "inventory_id": inventory_id,
+                    "inventory_sha256": inventory_sha256,
+                    "terminal_reason_code": "legacy_runtime_retired",
+                },
+                "runtime_store_idempotency_conflict",
+            )
+            return MCPLegacyRetirementConvergenceResult.ALREADY_CONVERGED
+        if task.status in _TERMINAL_TASK_STATUSES:
+            return MCPLegacyRetirementConvergenceResult.ALREADY_TERMINAL
+        evidence_rows = self._session.scalars(
+            select(MCPLegacyRetirementEvidenceRow)
+            .where(
+                MCPLegacyRetirementEvidenceRow.task_id == task_id,
+                MCPLegacyRetirementEvidenceRow.inventory_id == inventory_id,
+                MCPLegacyRetirementEvidenceRow.inventory_sha256 == inventory_sha256,
+            )
+            .order_by(MCPLegacyRetirementEvidenceRow.evidence_id)
+            .with_for_update()
+        ).all()
+        nodes = self._session.scalars(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.task_id == task_id)
+            .order_by(TaskNodeRow.node_id)
+            .with_for_update()
+        ).all()
+        capability_hits = {
+            row.capability_id for row in evidence_rows if row.capability_id is not None
+        }
+        hit = any(row.may_have_dispatched for row in evidence_rows) or any(
+            node.capability_id in capability_hits for node in nodes
+        )
+        if not hit:
+            return MCPLegacyRetirementConvergenceResult.NOT_APPLICABLE
+        evidence_sha = canonical_sha256(
+            [row.evidence_sha256 for row in evidence_rows]
+        )
+        event_id = f"{idempotency_key}:task-failed"
+        task.status = str(TaskStatus.FAILED)
+        task.updated_at = occurred_at
+        for node in nodes:
+            if node.status not in _TERMINAL_NODE_STATUSES and (
+                node.capability_id in capability_hits
+                or any(row.may_have_dispatched for row in evidence_rows)
+            ):
+                node.status = str(NodeStatus.FAILED)
+                node.finished_at = occurred_at
+        self._insert_or_compare_event(
+            event_id=event_id,
+            conversation_id=task.conversation_id,
+            task_id=task_id,
+            node_id=None,
+            event_type="task.failed",
+            payload={
+                "code": "legacy_runtime_retired",
+                "evidence_sha256": evidence_sha,
+            },
+            created_at=occurred_at,
+        )
+        self._session.add(
+            MCPLegacyRetirementReceiptRow(
+                idempotency_key=idempotency_key,
+                task_id=task_id,
+                inventory_id=inventory_id,
+                inventory_sha256=inventory_sha256,
+                terminal_reason_code="legacy_runtime_retired",
+                terminal_evidence_sha256=evidence_sha,
+                event_id=event_id,
+                committed_at=occurred_at,
+            )
+        )
+        self._session.flush()
+        return MCPLegacyRetirementConvergenceResult.CONVERGED
 
     def mark_mcp_call_may_have_dispatched(
         self, owner_user_id: str, task_id: str, call_ref: str, *, updated_at: datetime
@@ -7082,6 +8728,14 @@ class SQLiteStorage(StoragePort):
         runtime_sidecar_client: Any | None = None,
         runtime_sidecar_shadow_sink: RuntimeSidecarShadowSink | None = None,
         mcp_task_authority_mode: str | None = None,
+        mcp_terminal_candidate_reader: Callable[
+            [str, str], MCPValidatedTerminalResultCandidate
+        ]
+        | None = None,
+        mcp_terminal_candidate_resolver: Callable[
+            [str], MCPValidatedTerminalResultCandidate | None
+        ]
+        | None = None,
     ) -> None:
         if mcp_task_authority_mode not in {None, "off", "shadow", "enforce"}:
             raise ValueError(
@@ -7107,6 +8761,8 @@ class SQLiteStorage(StoragePort):
         self._runtime_sidecar_client = runtime_sidecar_client
         self._runtime_sidecar_shadow_sink = runtime_sidecar_shadow_sink
         self._mcp_task_authority_mode = mcp_task_authority_mode
+        self._mcp_terminal_candidate_reader = mcp_terminal_candidate_reader
+        self._mcp_terminal_candidate_resolver = mcp_terminal_candidate_resolver
 
     async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]:
         return await self._run(lambda state, collab: state.list_user_mcp_servers(owner_user_id))
@@ -7367,6 +9023,205 @@ class SQLiteStorage(StoragePort):
 
     async def reserve_mcp_call(self, record: MCPCallRecord) -> bool:
         return await self._run(lambda state, collab: state.reserve_mcp_call(record))
+
+    async def get_user_mcp_owner_mutation_guard(
+        self, owner_user_id: str
+    ) -> UserMCPOwnerMutationGuard | None:
+        return await self._run(
+            lambda state, collab: state.get_user_mcp_owner_mutation_guard(owner_user_id)
+        )
+
+    async def get_mcp_no_server_intent(
+        self, intent_id: str
+    ) -> MCPNoServerIntent | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_no_server_intent(intent_id)
+        )
+
+    async def list_unresolved_mcp_no_server_intents(
+        self,
+    ) -> list[MCPNoServerIntent]:
+        return await self._run(
+            lambda state, collab: state.list_unresolved_mcp_no_server_intents()
+        )
+
+    async def create_user_mcp_initial_intent(
+        self, task: Task, occurred_at: datetime
+    ) -> MCPInitialIntentCreateResult:
+        return await self._run(
+            lambda state, collab: state.create_user_mcp_initial_intent(task, occurred_at)
+        )
+
+    async def arm_user_mcp_target_intent(
+        self,
+        task_id: str,
+        node_id: str,
+        requested_server_id: str,
+        resume_envelope: Mapping[str, Any],
+        occurred_at: datetime,
+    ) -> MCPTargetIntentArmResult:
+        return await self._run(
+            lambda state, collab: state.arm_user_mcp_target_intent(
+                task_id, node_id, requested_server_id, resume_envelope, occurred_at
+            )
+        )
+
+    async def resolve_user_mcp_target_intent(
+        self, intent_id: str, occurred_at: datetime
+    ) -> MCPTargetIntentResolveResult:
+        return await self._run(
+            lambda state, collab: state.resolve_user_mcp_target_intent(
+                intent_id, occurred_at
+            )
+        )
+
+    async def get_mcp_dispatch_resume_outbox(
+        self, outbox_id: str
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_dispatch_resume_outbox(outbox_id)
+        )
+
+    async def claim_mcp_dispatch_resume_outbox(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_dispatch_resume_outbox(
+                outbox_id, claim_owner, claim_token, now, lease_expires_at
+            )
+        )
+
+    async def reclaim_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, now: datetime
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.reclaim_mcp_dispatch_resume_outbox(
+                outbox_id, expected_revision, now
+            )
+        )
+
+    async def abort_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, occurred_at: datetime
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.abort_mcp_dispatch_resume_outbox(
+                outbox_id, expected_revision, occurred_at
+            )
+        )
+
+    async def admit_mcp_tool_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.admit_mcp_tool_call(
+                intent_id,
+                outbox_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                record,
+                occurred_at,
+            )
+        )
+
+    async def append_mcp_cp7_safety_ledger_record(
+        self, record: MCPCP7SafetyLedgerRecord
+    ) -> MCPCP7SafetyLedgerRecord:
+        return await self._run(
+            lambda state, collab: state.append_mcp_cp7_safety_ledger_record(record)
+        )
+
+    async def append_mcp_cp7_ready_epoch_event(
+        self, event: MCPCP7ReadyEpochEvent
+    ) -> MCPCP7ReadyEpochEvent:
+        return await self._run(
+            lambda state, collab: state.append_mcp_cp7_ready_epoch_event(event)
+        )
+
+    async def get_mcp_cp7_candidate_guard(
+        self, candidate_id: str
+    ) -> MCPCP7CandidateGuard | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_cp7_candidate_guard(candidate_id)
+        )
+
+    async def produce_mcp_cp7_safety_snapshot(
+        self, candidate_id: str
+    ) -> MCPCP7SafetySnapshot:
+        return await self._run(
+            lambda state, collab: state.produce_mcp_cp7_safety_snapshot(candidate_id)
+        )
+
+    async def converge_user_mcp_no_server(
+        self, task_id: str, occurred_at: datetime
+    ) -> MCPNoServerConvergenceResult:
+        return await self._run(
+            lambda state, collab: state.converge_user_mcp_no_server(
+                task_id, occurred_at
+            )
+        )
+
+    async def commit_authoritative_mcp_terminal_result(
+        self, call_id: str, candidate_id: str, occurred_at: datetime
+    ) -> MCPTerminalResultCommitResult:
+        return await self._run(
+            lambda state, collab: state.commit_authoritative_mcp_terminal_result(
+                call_id, candidate_id, occurred_at
+            )
+        )
+
+    async def get_mcp_terminal_result_receipt(
+        self, result_receipt_id: str
+    ) -> MCPTerminalResultReceipt | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_terminal_result_receipt(
+                result_receipt_id
+            )
+        )
+
+    async def get_mcp_execution_terminal_projection(
+        self, call_id: str
+    ) -> MCPExecutionTerminalProjection | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_execution_terminal_projection(call_id)
+        )
+
+    async def append_mcp_legacy_retirement_evidence(
+        self, evidence: MCPLegacyRetirementEvidence
+    ) -> MCPLegacyRetirementEvidence:
+        return await self._run(
+            lambda state, collab: state.append_mcp_legacy_retirement_evidence(
+                evidence
+            )
+        )
+
+    async def converge_legacy_runtime_retirement(
+        self,
+        task_id: str,
+        inventory_id: str,
+        inventory_sha256: str,
+        idempotency_key: str,
+        occurred_at: datetime,
+    ) -> MCPLegacyRetirementConvergenceResult:
+        return await self._run(
+            lambda state, collab: state.converge_legacy_runtime_retirement(
+                task_id,
+                inventory_id,
+                inventory_sha256,
+                idempotency_key,
+                occurred_at,
+            )
+        )
 
     async def mark_mcp_call_may_have_dispatched(
         self, owner_user_id: str, task_id: str, call_ref: str, *, updated_at: datetime
@@ -8485,9 +10340,13 @@ class SQLiteStorage(StoragePort):
     ) -> object:
         def _sync() -> object:
             with self._session_factory() as session:
+                if session.get_bind().dialect.name == "sqlite":
+                    session.execute(text("BEGIN IMMEDIATE"))
                 state_repo = SQLiteStateRepository(
                     session,
                     task_authority_mode=self._mcp_task_authority_mode,
+                    terminal_candidate_reader=self._mcp_terminal_candidate_reader,
+                    terminal_candidate_resolver=self._mcp_terminal_candidate_resolver,
                 )
                 collab_repo = SQLiteCollaborationRepository(session)
                 result = callback(state_repo, collab_repo)

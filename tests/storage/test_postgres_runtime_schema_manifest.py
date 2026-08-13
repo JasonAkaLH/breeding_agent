@@ -82,3 +82,47 @@ class PostgresRuntimeSchemaManifestTest(unittest.TestCase):
         manifest = build_postgres_fresh_cutover_schema_manifest()
         mutated = manifest.with_runtime_table_names((*manifest.runtime_table_names, "extra_table"))
         self.assertNotEqual(manifest.checksum, mutated.checksum)
+
+    def test_cp7_tables_constraints_and_append_only_triggers_are_manifested(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        for table_name in (
+            "user_mcp_owner_mutation_guard",
+            "mcp_no_server_intent",
+            "mcp_dispatch_resume_outbox",
+            "mcp_terminal_result_receipt",
+            "mcp_execution_terminal_projection",
+            "mcp_cp7_safety_ledger",
+            "mcp_cp7_ready_epoch_event",
+            "mcp_cp7_candidate_guard",
+        ):
+            self.assertIn(table_name, manifest.runtime_table_names)
+        route_check = manifest.check_constraints["task"][
+            "ck_task_task_mcp_route_reason_code"
+        ]
+        self.assertIn("no_user_scoped_server", route_check)
+        self.assertEqual(
+            set(manifest.append_only_tables),
+            {
+                "mcp_cp7_safety_ledger",
+                "mcp_cp7_ready_epoch_event",
+                "mcp_legacy_retirement_evidence",
+                "mcp_legacy_retirement_receipt",
+                "mcp_no_server_convergence_receipt",
+                "mcp_terminal_result_receipt",
+            },
+        )
+        ddl = build_runtime_schema_ddl()
+        self.assertIn("maf_reject_append_only_mutation", ddl)
+        self.assertIn("trg_mcp_cp7_safety_ledger_append_only", ddl)
+        self.assertIn("trg_mcp_cp7_candidate_guard_monotonic", ddl)
+        self.assertIn("trg_mcp_cp7_safety_attestation_window", ddl)
+        self.assertIn("date_trunc('minute', NEW.bucket_started_at)", ddl)
+        safety_ddl = manifest.check_constraints["mcp_cp7_safety_ledger"]
+        self.assertIn(
+            "gateway.task_owner_boundary",
+            safety_ddl["ck_mcp_cp7_safety_ledger_mcp_cp7_safety_authoritative_hook"],
+        )
+        self.assertIn(
+            "task_owner_mismatch",
+            safety_ddl["ck_mcp_cp7_safety_ledger_mcp_cp7_safety_violation_reason"],
+        )

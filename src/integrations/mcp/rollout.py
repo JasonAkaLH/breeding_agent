@@ -63,6 +63,7 @@ class MCPRouteReason(StrEnum):
     EXPLICIT_LEGACY_CAPABILITY = "explicit_legacy_capability"
     USER_SERVER_ROLLOUT_UNAVAILABLE = "user_server_rollout_unavailable"
     NO_EXECUTION_PATH = "no_execution_path"
+    NO_USER_SCOPED_SERVER = "no_user_scoped_server"
 
 
 class MCPExposureChange(StrEnum):

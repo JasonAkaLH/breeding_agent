@@ -14,6 +14,11 @@ from src.core.enums import ConversationStatus
 from src.core.models import (
     Conversation,
     MCPCallRecord,
+    MCPDispatchResumeOutbox,
+    MCPInitialIntentCreateResult,
+    MCPLegacyRetirementConvergenceResult,
+    MCPLegacyRetirementEvidence,
+    MCPNoServerConvergenceResult,
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
     MCPRemoteTaskBinding,
@@ -27,6 +32,9 @@ from src.core.models import (
     MCPRolloutStageApproval,
     MCPRolloutMetricBucket,
     MCPShadowAuditSample,
+    MCPTargetIntentArmResult,
+    MCPTargetIntentResolveResult,
+    Task,
     UserMCPCredentialRecord,
     UserMCPHealthAttempt,
     UserMCPScopeLease,
@@ -37,11 +45,20 @@ from src.integrations.mcp.rollout_evidence import is_exact_mcp_metric_bucket_win
 from src.storage.sqlite.models import (
     ConversationRow,
     MCPBranchRecordRow,
+    MCPCallRecordRow,
+    MCPDispatchResumeOutboxRow,
+    MCPExecutionTerminalProjectionRow,
+    MCPNoServerIntentRow,
+    MCPTerminalResultReceiptRow,
+    TaskNodeRow,
+    TaskRow,
+    UserMCPOwnerMutationGuardRow,
     MCPRemoteTaskBindingRow,
     UserMCPHealthAttemptRow,
     UserMCPScopeLeaseRow,
     UserMCPServerRow,
 )
+from src.integrations.mcp.cp7_artifacts import canonical_sha256
 from src.storage.sqlite.repositories import (
     SQLiteStateRepository,
     SQLiteStorage,
@@ -103,6 +120,490 @@ class PostgreSQLStorage(SQLiteStorage):
             mcp_legacy_migration_session_factory
         )
         self._mcp_legacy_migration_role = mcp_legacy_migration_role
+
+    def _run_cp7_authority_sync(
+        self,
+        *,
+        owner_user_id: str,
+        operation: Callable[[SQLiteStateRepository], _T],
+        server_id: str | None = None,
+        intent_id: str | None = None,
+        outbox_id: str | None = None,
+        call_id: str | None = None,
+        candidate_id: str | None = None,
+        task_id: str | None = None,
+        node_id: str | None = None,
+    ) -> _T:
+        """Run CP7 authority under its global PostgreSQL row-lock order."""
+
+        with self._session_factory() as session:
+            session.execute(
+                text(
+                    "INSERT INTO user_mcp_owner_mutation_guard "
+                    "(owner_user_id, revision, server_set_fingerprint, created_at, updated_at) "
+                    "VALUES (:owner, 0, :fingerprint, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (owner_user_id) DO NOTHING"
+                ),
+                {
+                    "owner": owner_user_id,
+                    "fingerprint": canonical_sha256([]),
+                },
+            )
+            session.scalar(
+                select(UserMCPOwnerMutationGuardRow.owner_user_id)
+                .where(UserMCPOwnerMutationGuardRow.owner_user_id == owner_user_id)
+                .with_for_update()
+            )
+            if server_id is not None:
+                session.scalar(
+                    select(UserMCPServerRow.server_id)
+                    .where(
+                        UserMCPServerRow.owner_user_id == owner_user_id,
+                        UserMCPServerRow.server_id == server_id,
+                    )
+                    .with_for_update()
+                )
+            else:
+                session.scalars(
+                    select(UserMCPServerRow.server_id)
+                    .where(UserMCPServerRow.owner_user_id == owner_user_id)
+                    .order_by(UserMCPServerRow.server_id)
+                    .with_for_update()
+                ).all()
+            if intent_id is not None:
+                session.scalar(
+                    select(MCPNoServerIntentRow.intent_id)
+                    .where(MCPNoServerIntentRow.intent_id == intent_id)
+                    .with_for_update()
+                )
+            if outbox_id is not None:
+                session.scalar(
+                    select(MCPDispatchResumeOutboxRow.outbox_id)
+                    .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+                    .with_for_update()
+                )
+            sealed_candidate = None
+            if call_id is not None:
+                session.scalar(
+                    select(MCPCallRecordRow.call_ref)
+                    .where(MCPCallRecordRow.call_ref == call_id)
+                    .with_for_update()
+                )
+                if candidate_id is not None:
+                    if self._mcp_terminal_candidate_reader is None:
+                        raise RuntimeError("mcp_terminal_candidate_reader_unavailable")
+                    sealed_candidate = self._mcp_terminal_candidate_reader(
+                        call_id, candidate_id
+                    )
+                session.scalar(
+                    select(MCPTerminalResultReceiptRow.result_receipt_id)
+                    .where(MCPTerminalResultReceiptRow.call_id == call_id)
+                    .with_for_update()
+                )
+                session.scalar(
+                    select(MCPExecutionTerminalProjectionRow.projection_id)
+                    .where(MCPExecutionTerminalProjectionRow.call_id == call_id)
+                    .with_for_update()
+                )
+            if task_id is not None:
+                session.scalar(
+                    select(TaskRow.task_id)
+                    .where(TaskRow.task_id == task_id)
+                    .with_for_update()
+                )
+            if node_id is not None:
+                session.scalar(
+                    select(TaskNodeRow.node_id)
+                    .where(TaskNodeRow.node_id == node_id)
+                    .with_for_update()
+                )
+            result = operation(
+                SQLiteStateRepository(
+                    session,
+                    task_authority_mode=self._mcp_task_authority_mode,
+                    terminal_candidate_reader=(
+                        self._mcp_terminal_candidate_reader
+                        if sealed_candidate is None
+                        else lambda _call_id, _candidate_id: sealed_candidate
+                    ),
+                    terminal_candidate_resolver=self._mcp_terminal_candidate_resolver,
+                )
+            )
+            session.commit()
+            return result
+
+    async def create_user_mcp_initial_intent(
+        self, task: Task, occurred_at: datetime
+    ) -> MCPInitialIntentCreateResult:
+        def _sync() -> MCPInitialIntentCreateResult:
+            with self._session_factory() as session:
+                owner = session.scalar(
+                    select(ConversationRow.username).where(
+                        ConversationRow.conversation_id == task.conversation_id
+                    )
+                )
+            if owner is None:
+                raise ValueError("mcp_no_server_task_conversation_missing")
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                task_id=task.task_id,
+                operation=lambda state: state.create_user_mcp_initial_intent(
+                    task, occurred_at
+                ),
+            )
+
+        return await asyncio.to_thread(_sync)
+
+    async def create_user_mcp_server(
+        self,
+        server: UserMCPServer,
+        credential: UserMCPCredentialRecord | None = None,
+    ) -> UserMCPServer:
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=server.owner_user_id,
+            server_id=server.server_id,
+            operation=lambda state: state.create_user_mcp_server(server, credential),
+        )
+
+    async def create_user_mcp_servers_atomic(
+        self,
+        candidates: Sequence[tuple[UserMCPServer, UserMCPCredentialRecord | None]],
+    ) -> list[UserMCPServer]:
+        batch = tuple(candidates)
+
+        def _sync() -> list[UserMCPServer]:
+            owners = sorted({server.owner_user_id for server, _credential in batch})
+            with self._session_factory() as session:
+                for owner_user_id in owners:
+                    session.execute(
+                        text(
+                            "INSERT INTO user_mcp_owner_mutation_guard "
+                            "(owner_user_id, revision, server_set_fingerprint, created_at, updated_at) "
+                            "VALUES (:owner, 0, :fingerprint, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                            "ON CONFLICT (owner_user_id) DO NOTHING"
+                        ),
+                        {
+                            "owner": owner_user_id,
+                            "fingerprint": canonical_sha256([]),
+                        },
+                    )
+                session.scalars(
+                    select(UserMCPOwnerMutationGuardRow.owner_user_id)
+                    .where(UserMCPOwnerMutationGuardRow.owner_user_id.in_(owners))
+                    .order_by(UserMCPOwnerMutationGuardRow.owner_user_id)
+                    .with_for_update()
+                ).all()
+                session.scalars(
+                    select(UserMCPServerRow.server_id)
+                    .where(UserMCPServerRow.owner_user_id.in_(owners))
+                    .order_by(UserMCPServerRow.owner_user_id, UserMCPServerRow.server_id)
+                    .with_for_update()
+                ).all()
+                result = SQLiteStateRepository(session).create_user_mcp_servers_atomic(batch)
+                session.commit()
+                return result
+
+        return await asyncio.to_thread(_sync)
+
+    async def arm_user_mcp_target_intent(
+        self,
+        task_id: str,
+        node_id: str,
+        requested_server_id: str,
+        resume_envelope: Mapping[str, Any],
+        occurred_at: datetime,
+    ) -> MCPTargetIntentArmResult:
+        def _sync() -> MCPTargetIntentArmResult:
+            with self._session_factory() as session:
+                owner = session.scalar(
+                    select(ConversationRow.username)
+                    .join(TaskRow, TaskRow.conversation_id == ConversationRow.conversation_id)
+                    .where(TaskRow.task_id == task_id)
+                )
+            if owner is None:
+                raise ValueError("mcp_target_intent_task_missing")
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=requested_server_id,
+                task_id=task_id,
+                node_id=node_id,
+                operation=lambda state: state.arm_user_mcp_target_intent(
+                    task_id,
+                    node_id,
+                    requested_server_id,
+                    resume_envelope,
+                    occurred_at,
+                ),
+            )
+
+        return await asyncio.to_thread(_sync)
+
+    async def resolve_user_mcp_target_intent(
+        self, intent_id: str, occurred_at: datetime
+    ) -> MCPTargetIntentResolveResult:
+        def _sync() -> MCPTargetIntentResolveResult:
+            with self._session_factory() as session:
+                intent = session.get(MCPNoServerIntentRow, intent_id)
+                if intent is None:
+                    raise ValueError("mcp_target_intent_missing")
+                owner, server_id, task_id, node_id = (
+                    intent.owner_user_id,
+                    intent.requested_server_id,
+                    intent.task_id,
+                    intent.node_id,
+                )
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server_id,
+                intent_id=intent_id,
+                outbox_id=f"mcp-dispatch-resume:v1:{intent_id}",
+                task_id=task_id,
+                node_id=node_id,
+                operation=lambda state: state.resolve_user_mcp_target_intent(
+                    intent_id, occurred_at
+                ),
+            )
+
+        return await asyncio.to_thread(_sync)
+
+    def _cp7_outbox_lock_subject(
+        self, outbox_id: str
+    ) -> tuple[str, str, str, str, str]:
+        with self._session_factory() as session:
+            row = session.get(MCPDispatchResumeOutboxRow, outbox_id)
+            if row is None:
+                raise ValueError("mcp_dispatch_resume_outbox_missing")
+            return (
+                row.owner_user_id,
+                row.server_id,
+                row.intent_id,
+                row.task_id,
+                row.node_id,
+            )
+
+    async def claim_mcp_dispatch_resume_outbox(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        def _sync() -> MCPDispatchResumeOutbox | None:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(outbox_id)
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.claim_mcp_dispatch_resume_outbox(
+                    outbox_id, claim_owner, claim_token, now, lease_expires_at
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except ValueError as exc:
+            if str(exc) == "mcp_dispatch_resume_outbox_missing":
+                return None
+            raise
+
+    async def reclaim_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, now: datetime
+    ) -> MCPDispatchResumeOutbox | None:
+        def _sync() -> MCPDispatchResumeOutbox | None:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(outbox_id)
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.reclaim_mcp_dispatch_resume_outbox(
+                    outbox_id, expected_revision, now
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except ValueError as exc:
+            if str(exc) == "mcp_dispatch_resume_outbox_missing":
+                return None
+            raise
+
+    async def abort_mcp_dispatch_resume_outbox(
+        self, outbox_id: str, expected_revision: int, occurred_at: datetime
+    ) -> MCPDispatchResumeOutbox | None:
+        def _sync() -> MCPDispatchResumeOutbox | None:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(outbox_id)
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.abort_mcp_dispatch_resume_outbox(
+                    outbox_id, expected_revision, occurred_at
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except ValueError as exc:
+            if str(exc) == "mcp_dispatch_resume_outbox_missing":
+                return None
+            raise
+
+    async def admit_mcp_tool_call(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=record.owner_user_id,
+            server_id=record.server_id,
+            intent_id=intent_id,
+            outbox_id=outbox_id,
+            call_id=record.call_ref,
+            task_id=record.task_id,
+            node_id=record.node_id,
+            operation=lambda state: state.admit_mcp_tool_call(
+                intent_id,
+                outbox_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                record,
+                occurred_at,
+            ),
+        )
+
+    async def converge_user_mcp_no_server(
+        self, task_id: str, occurred_at: datetime
+    ) -> MCPNoServerConvergenceResult:
+        def _sync() -> MCPNoServerConvergenceResult:
+            with self._session_factory() as session:
+                intent = session.scalar(
+                    select(MCPNoServerIntentRow)
+                    .where(
+                        MCPNoServerIntentRow.task_id == task_id,
+                        MCPNoServerIntentRow.status.in_(("unavailable", "dispatched", "converged")),
+                    )
+                    .order_by(MCPNoServerIntentRow.intent_id)
+                )
+                if intent is None:
+                    raise ValueError("mcp_no_server_intent_missing")
+                outbox = session.scalar(
+                    select(MCPDispatchResumeOutboxRow).where(
+                        MCPDispatchResumeOutboxRow.intent_id == intent.intent_id
+                    )
+                )
+                subject = (
+                    intent.owner_user_id,
+                    intent.requested_server_id,
+                    intent.intent_id,
+                    None if outbox is None else outbox.outbox_id,
+                    intent.node_id,
+                )
+            owner, server, intent_id, outbox_id, node_id = subject
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent_id,
+                outbox_id=outbox_id,
+                task_id=task_id,
+                node_id=node_id,
+                operation=lambda state: state.converge_user_mcp_no_server(
+                    task_id, occurred_at
+                ),
+            )
+
+        return await asyncio.to_thread(_sync)
+
+    async def commit_authoritative_mcp_terminal_result(
+        self, call_id: str, candidate_id: str, occurred_at: datetime
+    ):
+        if self._mcp_terminal_candidate_reader is None:
+            raise RuntimeError("mcp_terminal_candidate_reader_unavailable")
+        candidate = await asyncio.to_thread(
+            self._mcp_terminal_candidate_reader, call_id, candidate_id
+        )
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=candidate.owner_user_id,
+            server_id=candidate.server_id,
+            intent_id=candidate.intent_id,
+            outbox_id=f"mcp-dispatch-resume:v1:{candidate.intent_id}",
+            call_id=call_id,
+            candidate_id=candidate_id,
+            task_id=candidate.task_id,
+            node_id=candidate.node_id,
+            operation=lambda state: state.commit_authoritative_mcp_terminal_result(
+                call_id, candidate_id, occurred_at
+            ),
+        )
+
+    async def append_mcp_legacy_retirement_evidence(
+        self, evidence: MCPLegacyRetirementEvidence
+    ) -> MCPLegacyRetirementEvidence:
+        def _sync() -> MCPLegacyRetirementEvidence:
+            with self._session_factory() as session:
+                owner = session.scalar(
+                    select(ConversationRow.username)
+                    .join(TaskRow, TaskRow.conversation_id == ConversationRow.conversation_id)
+                    .where(TaskRow.task_id == evidence.task_id)
+                )
+            if owner is None:
+                raise ValueError("mcp_legacy_retirement_task_missing")
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                task_id=evidence.task_id,
+                operation=lambda state: state.append_mcp_legacy_retirement_evidence(
+                    evidence
+                ),
+            )
+
+        return await asyncio.to_thread(_sync)
+
+    async def converge_legacy_runtime_retirement(
+        self,
+        task_id: str,
+        inventory_id: str,
+        inventory_sha256: str,
+        idempotency_key: str,
+        occurred_at: datetime,
+    ) -> MCPLegacyRetirementConvergenceResult:
+        def _sync() -> MCPLegacyRetirementConvergenceResult:
+            with self._session_factory() as session:
+                owner = session.scalar(
+                    select(ConversationRow.username)
+                    .join(TaskRow, TaskRow.conversation_id == ConversationRow.conversation_id)
+                    .where(TaskRow.task_id == task_id)
+                )
+            if owner is None:
+                raise ValueError("mcp_legacy_retirement_task_missing")
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                task_id=task_id,
+                operation=lambda state: state.converge_legacy_runtime_retirement(
+                    task_id,
+                    inventory_id,
+                    inventory_sha256,
+                    idempotency_key,
+                    occurred_at,
+                ),
+            )
+
+        return await asyncio.to_thread(_sync)
 
     async def get_legacy_mcp_migration_replay_snapshot(
         self,
@@ -955,10 +1456,11 @@ class PostgreSQLStorage(SQLiteStorage):
         security_sensitive: bool = False, expected_config_version: int | None = None,
         expected_security_version: int | None = None, updated_at: datetime
     ) -> UserMCPServer | None:
-        return await self._run_with_user_mcp_server_lock(
-            owner_user_id,
-            server_id,
-            lambda state: state.update_user_mcp_server(
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            operation=lambda state: state.update_user_mcp_server(
                 owner_user_id, server_id, changes=changes, credential_operation=credential_operation,
                 credential=credential, security_sensitive=security_sensitive,
                 expected_config_version=expected_config_version,
@@ -968,10 +1470,11 @@ class PostgreSQLStorage(SQLiteStorage):
         )
 
     async def claim_user_mcp_health_attempt(self, attempt: UserMCPHealthAttempt) -> bool:
-        return await self._run_with_user_mcp_server_lock(
-            attempt.owner_user_id,
-            attempt.server_id,
-            lambda state: state.claim_user_mcp_health_attempt(attempt),
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=attempt.owner_user_id,
+            server_id=attempt.server_id,
+            operation=lambda state: state.claim_user_mcp_health_attempt(attempt),
         )
 
     async def renew_user_mcp_health_attempt(
@@ -993,10 +1496,11 @@ class PostgreSQLStorage(SQLiteStorage):
         config_version: int, security_version: int, health_status: str, error_code: str | None,
         completed_at: datetime
     ) -> UserMCPServer | None:
-        return await self._run_with_user_mcp_server_lock(
-            owner_user_id,
-            server_id,
-            lambda state: state.complete_user_mcp_health_attempt(
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            operation=lambda state: state.complete_user_mcp_health_attempt(
                 attempt_id, owner_user_id, server_id, runner_instance_id=runner_instance_id,
                 config_version=config_version, security_version=security_version,
                 health_status=health_status, error_code=error_code, completed_at=completed_at,
@@ -1026,19 +1530,21 @@ class PostgreSQLStorage(SQLiteStorage):
     async def mark_user_mcp_server_deleted(
         self, owner_user_id: str, server_id: str, *, deleted_at: datetime
     ) -> UserMCPServer | None:
-        return await self._run_with_user_mcp_server_lock(
-            owner_user_id,
-            server_id,
-            lambda state: state.mark_user_mcp_server_deleted(owner_user_id, server_id, deleted_at=deleted_at),
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            operation=lambda state: state.mark_user_mcp_server_deleted(owner_user_id, server_id, deleted_at=deleted_at),
         )
 
     async def finalize_user_mcp_server_delete(
         self, owner_user_id: str, server_id: str, *, now: datetime
     ) -> bool:
-        return await self._run_with_user_mcp_server_lock(
-            owner_user_id,
-            server_id,
-            lambda state: state.finalize_user_mcp_server_delete(owner_user_id, server_id, now=now),
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            operation=lambda state: state.finalize_user_mcp_server_delete(owner_user_id, server_id, now=now),
         )
 
     async def expire_user_mcp_health_attempts(
@@ -1046,20 +1552,46 @@ class PostgreSQLStorage(SQLiteStorage):
     ) -> int:
         def _sync() -> int:
             with self._session_factory() as session:
-                expired = session.scalars(
-                    select(UserMCPHealthAttemptRow)
+                affected = session.execute(
+                    select(
+                        UserMCPHealthAttemptRow.owner_user_id,
+                        UserMCPHealthAttemptRow.server_id,
+                    )
                     .where(UserMCPHealthAttemptRow.lease_expires_at <= now)
-                    .with_for_update()
+                    .distinct()
                 ).all()
-                if not expired:
+                if not affected:
                     session.commit()
                     return 0
-                # Lock each affected server before the shared CAS implementation updates health.
+                owners = sorted({owner_user_id for owner_user_id, _server_id in affected})
+                for owner_user_id in owners:
+                    session.execute(
+                        text(
+                            "INSERT INTO user_mcp_owner_mutation_guard "
+                            "(owner_user_id, revision, server_set_fingerprint, created_at, updated_at) "
+                            "VALUES (:owner, 0, :fingerprint, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                            "ON CONFLICT (owner_user_id) DO NOTHING"
+                        ),
+                        {"owner": owner_user_id, "fingerprint": canonical_sha256([])},
+                    )
+                session.scalars(
+                    select(UserMCPOwnerMutationGuardRow.owner_user_id)
+                    .where(UserMCPOwnerMutationGuardRow.owner_user_id.in_(owners))
+                    .order_by(UserMCPOwnerMutationGuardRow.owner_user_id)
+                    .with_for_update()
+                ).all()
                 session.scalars(
                     select(UserMCPServerRow.server_id)
-                    .where(
-                        UserMCPServerRow.server_id.in_([attempt.server_id for attempt in expired]),
-                        UserMCPServerRow.owner_user_id.in_([attempt.owner_user_id for attempt in expired]),
+                    .where(UserMCPServerRow.owner_user_id.in_(owners))
+                    .order_by(UserMCPServerRow.owner_user_id, UserMCPServerRow.server_id)
+                    .with_for_update()
+                ).all()
+                session.scalars(
+                    select(UserMCPHealthAttemptRow)
+                    .where(UserMCPHealthAttemptRow.lease_expires_at <= now)
+                    .order_by(
+                        UserMCPHealthAttemptRow.owner_user_id,
+                        UserMCPHealthAttemptRow.server_id,
                     )
                     .with_for_update()
                 ).all()

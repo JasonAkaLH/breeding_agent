@@ -20,6 +20,7 @@ from .enums import (
     NodeCriticality,
     NodeStatus,
     RoutingMode,
+    StrEnum,
     TaskStatus,
     UserMCPAuthType,
     UserMCPHealthStatus,
@@ -125,6 +126,7 @@ class MCPCallRecord:
     arguments_sha256: str
     server_security_version: int
     input_schema_sha256: str
+    server_config_version: int | None = None
     protocol_version: str | None = None
     input_field_names: tuple[str, ...] = ()
     may_have_dispatched: bool = False
@@ -134,6 +136,346 @@ class MCPCallRecord:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     terminal_at: datetime | None = None
+
+
+class MCPNoServerIntentTrigger(StrEnum):
+    INITIAL_NO_PROFILE = "initial_no_profile"
+    TARGET_SERVER_REVALIDATION = "target_server_revalidation"
+
+
+class MCPNoServerIntentStatus(StrEnum):
+    ARMED = "armed"
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    DISPATCHED = "dispatched"
+    RESOLVED = "resolved"
+    CONVERGED = "converged"
+    UNKNOWN = "unknown"
+
+
+class MCPDispatchResumeOutboxStatus(StrEnum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+
+
+class MCPTerminalState(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class MCPTerminalResultCompletionMode(StrEnum):
+    NORMAL_TERMINAL_PROJECTION = "normal_terminal_projection"
+    LATE_RESULT_NO_CONTINUATION = "late_result_no_continuation"
+
+
+class MCPExecutionTerminalProjectionStatus(StrEnum):
+    UNKNOWN = "unknown"
+    LATE_RESULT_RESOLVED = "late_result_resolved"
+
+
+class MCPExecutionTerminalReason(StrEnum):
+    TRUSTED_TERMINAL_RESULT_ABSENT = "trusted_terminal_result_absent"
+
+
+class MCPTerminalErrorCode(StrEnum):
+    MCP_RUNTIME_UNAVAILABLE = "mcp_runtime_unavailable"
+
+
+class MCPUnavailableEventType(StrEnum):
+    RUNTIME_UNAVAILABLE = "mcp.runtime_unavailable"
+
+
+class MCPInitialIntentCreateResult(StrEnum):
+    CREATED_UNAVAILABLE = "created_unavailable"
+    RETRY_ROUTE = "retry_route"
+    ALREADY_CREATED = "already_created"
+
+
+class MCPTargetIntentArmResult(StrEnum):
+    ARMED = "armed"
+    UNAVAILABLE = "unavailable"
+    ALREADY_ARMED = "already_armed"
+
+
+class MCPTargetIntentResolveResult(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    ALREADY_RESOLVED = "already_resolved"
+
+
+class MCPNoServerConvergenceResult(StrEnum):
+    CONVERGED = "converged"
+    ALREADY_CONVERGED = "already_converged"
+    ALREADY_TERMINAL = "already_terminal"
+    UNKNOWN_REQUIRES_NO_REPLAY = "unknown_requires_no_replay"
+    TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT = "trusted_terminal_result_requires_commit"
+
+
+class MCPTerminalResultCommitResult(StrEnum):
+    COMMITTED_NORMAL = "committed_normal"
+    COMMITTED_LATE = "committed_late"
+    ALREADY_COMMITTED = "already_committed"
+    CONFLICT = "conflict"
+
+
+class MCPLegacyRetirementConvergenceResult(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    CONVERGED = "converged"
+    ALREADY_CONVERGED = "already_converged"
+    ALREADY_TERMINAL = "already_terminal"
+
+
+class MCPCP7SafetyRecordKind(StrEnum):
+    REGISTRATION = "registration"
+    ATTESTATION = "attestation"
+    VIOLATION = "violation"
+    GAP = "gap"
+
+
+class MCPCP7ReadyEpochEventKind(StrEnum):
+    OPENED = "opened"
+    READY = "ready"
+    MAINTENANCE_STARTED = "maintenance_started"
+    CLOSED = "closed"
+    INVALIDATED = "invalidated"
+
+
+@dataclass(slots=True, frozen=True)
+class MCPNoServerIntent:
+    intent_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str | None
+    trigger: MCPNoServerIntentTrigger
+    requested_server_id: str | None
+    requested_server_config_version: int | None
+    requested_server_security_version: int | None
+    owner_server_set_fingerprint: str | None
+    resume_envelope_json: JsonMapping | None
+    resume_envelope_sha256: str | None
+    status: MCPNoServerIntentStatus
+    revision: int
+    evidence_sha256: str
+    created_at: datetime
+    updated_at: datetime
+    terminal_at: datetime | None
+
+
+@dataclass(slots=True, frozen=True)
+class UserMCPOwnerMutationGuard:
+    owner_user_id: str
+    revision: int
+    server_set_fingerprint: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDispatchResumeOutbox:
+    outbox_id: str
+    intent_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    resume_envelope_sha256: str
+    payload_sha256: str
+    status: MCPDispatchResumeOutboxStatus
+    claim_owner: str | None
+    claim_token: str | None
+    lease_expires_at: datetime | None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+    result_receipt_id: str | None = None
+    completion_mode: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPNoServerConvergenceReceipt:
+    idempotency_key: str
+    task_id: str
+    intent_id: str
+    owner_user_id: str
+    terminal_code: str
+    evidence_sha256: str
+    runtime_unavailable_event_id: str
+    task_failed_event_id: str
+    committed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyRetirementEvidence:
+    evidence_id: str
+    task_id: str
+    inventory_id: str
+    inventory_sha256: str
+    bundle_revision: str | None
+    capability_id: str | None
+    may_have_dispatched: bool
+    evidence_sha256: str
+    created_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPLegacyRetirementReceipt:
+    idempotency_key: str
+    task_id: str
+    inventory_id: str
+    inventory_sha256: str
+    terminal_reason_code: str
+    terminal_evidence_sha256: str
+    event_id: str
+    committed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPValidatedTerminalResultCandidate:
+    candidate_id: str
+    owner_user_id: str
+    conversation_id: str
+    task_id: str
+    node_id: str
+    intent_id: str
+    call_id: str
+    server_id: str
+    server_config_version: int
+    server_security_version: int
+    terminal_state: MCPTerminalState
+    result_payload_sha256: str
+    safe_result_ref: str | None
+    safe_result_ref_sha256: str | None
+    safe_error_code: str | None
+    sealed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPTerminalResultReceipt:
+    result_receipt_id: str
+    candidate_id: str
+    owner_user_id: str
+    conversation_id: str
+    task_id: str
+    node_id: str
+    intent_id: str
+    call_id: str
+    server_id: str
+    server_config_version: int
+    server_security_version: int
+    terminal_state: MCPTerminalState
+    result_payload_sha256: str
+    safe_result_ref: str | None
+    safe_result_ref_sha256: str | None
+    safe_error_code: str | None
+    completion_mode: MCPTerminalResultCompletionMode
+    committed_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPExecutionTerminalProjection:
+    projection_id: str
+    owner_user_id: str
+    conversation_id: str
+    intent_id: str
+    call_id: str
+    task_id: str
+    node_id: str
+    status: MCPExecutionTerminalProjectionStatus
+    revision: int
+    no_replay: bool
+    reason_code: MCPExecutionTerminalReason
+    unknown_intent_revision: int
+    unknown_event_id: str
+    task_failed_event_id: str
+    unknown_terminal_at: datetime
+    task_terminal_status: str
+    node_terminal_status: str
+    result_receipt_id: str | None
+    result_payload_sha256: str | None
+    resolved_terminal_state: MCPTerminalState | None
+    safe_result_ref: str | None
+    safe_result_ref_sha256: str | None
+    safe_error_code: str | None
+    resolved_intent_revision: int | None
+    resolution_event_id: str | None
+    correction_event_id: str | None
+    result_committed_at: datetime | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7SafetyLedgerRecord:
+    record_id: str
+    candidate_id: str
+    epoch_id: str
+    config_fingerprint: str
+    record_kind: MCPCP7SafetyRecordKind
+    red_line: str | None
+    hook_id: str | None
+    bucket_started_at: datetime | None
+    bucket_ended_at: datetime | None
+    reason_code: str
+    value: int
+    boundary_source_sha256: str | None
+    payload_sha256: str
+    recorded_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7ReadyEpochEvent:
+    event_id: str
+    candidate_id: str
+    epoch_id: str
+    predecessor_epoch_id: str | None
+    event_kind: MCPCP7ReadyEpochEventKind
+    container_id: str
+    image_id: str
+    config_fingerprint: str
+    boundary_at: datetime
+    audit_device: str
+    audit_inode: int
+    audit_offset: int
+    ledger_record_count: int
+    inflight_state_sha256: str
+    payload_sha256: str
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7CandidateGuard:
+    candidate_id: str
+    invalid_latched: bool
+    first_invalid_record_id: str | None
+    first_invalid_reason: str | None
+    first_invalid_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class MCPCP7SafetySnapshot:
+    schema: str
+    candidate_id: str
+    config_fingerprint: str
+    registry_definition_sha256: str
+    epoch_chain_sha256: str
+    ready_epochs: tuple[str, ...]
+    maintenance_boundary_count: int
+    observation_started_at: datetime
+    observation_ended_at: datetime
+    registration_count_by_red_line: JsonMapping
+    attestation_interval_count_by_red_line: JsonMapping
+    violation_count_by_red_line: JsonMapping
+    gap_count: int
+    invalid_latched: bool
+    record_count: int
+    ordered_record_payload_sha256s: tuple[str, ...]
+    snapshot_sha256: str
 
 
 @dataclass(slots=True, frozen=True, repr=False)

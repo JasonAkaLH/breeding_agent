@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from src.core.models import AuthUserToken, Conversation, MCPRolloutMetricBucket
 from src.core.contracts import StoragePort as CoreStoragePort
@@ -117,7 +118,18 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                         "status, routing_mode, mcp_execution_mode, mcp_shadow_enabled, "
                         "mcp_rollout_config_version, mcp_route_reason_code, mcp_rollout_mode) "
                         "VALUES ('task-new', 'conv-new', 'msg-new', 'accepted', 'auto', "
-                        "'unavailable', 0, 'v2', 'user_server_rollout_unavailable', 'off')"
+                        "'unavailable', 0, 'v2', 'no_user_scoped_server', 'off')"
+                    )
+                )
+            with self.assertRaises(IntegrityError), engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO task (task_id, conversation_id, root_message_id, "
+                        "status, routing_mode, mcp_execution_mode, mcp_shadow_enabled, "
+                        "mcp_rollout_config_version, mcp_route_reason_code, mcp_rollout_mode) "
+                        "VALUES ('task-invalid', 'conv-invalid', 'msg-invalid', "
+                        "'accepted', 'auto', 'unavailable', 0, 'v2', "
+                        "'NO_USER_SCOPED_SERVER', 'off')"
                     )
                 )
 

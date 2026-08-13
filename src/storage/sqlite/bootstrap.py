@@ -24,8 +24,10 @@ def bootstrap_sqlite_database(engine: Engine) -> None:
     _migrate_mcp_rollout_promotion_block_reasons(engine)
     _migrate_task_mcp_assignment_columns(engine)
     _migrate_task_mcp_route_reasons(engine)
+    _migrate_cp7_authority_columns(engine)
     _drop_legacy_auth_tables(engine)
     SQLiteBase.metadata.create_all(engine)
+    _ensure_cp7_mutation_triggers(engine)
 
 
 def _drop_legacy_auth_tables(engine: Engine) -> None:
@@ -430,6 +432,7 @@ def _migrate_task_mcp_route_reasons(engine: Engine) -> None:
     table_name = "task"
     required_reasons = {
         "explicit_legacy_capability",
+        "no_user_scoped_server",
         "user_server_rollout_unavailable",
     }
     with engine.begin() as connection:
@@ -488,6 +491,175 @@ def _migrate_task_mcp_route_reasons(engine: Engine) -> None:
             connection.execute(text(f"DROP TABLE {quoted_temp_table}"))
         finally:
             connection.execute(text("PRAGMA legacy_alter_table = OFF"))
+
+
+def _migrate_cp7_authority_columns(engine: Engine) -> None:
+    """Add nullable bindings without inventing authority for legacy rows."""
+
+    additions = {
+        "mcp_call_record": {
+            "server_config_version": "BIGINT",
+        },
+        "mcp_dispatch_resume_outbox": {
+            "result_receipt_id": "TEXT",
+            "completion_mode": "TEXT",
+        },
+    }
+    with engine.begin() as connection:
+        tables = set(inspect(connection).get_table_names())
+        for table_name, columns_to_add in additions.items():
+            if table_name not in tables:
+                continue
+            existing = {
+                column["name"] for column in inspect(connection).get_columns(table_name)
+            }
+            quoted_table = _quote(connection, table_name)
+            for column_name, column_type in columns_to_add.items():
+                if column_name not in existing:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE {quoted_table} ADD COLUMN "
+                            f"{_quote(connection, column_name)} {column_type}"
+                        )
+                    )
+
+
+def _ensure_cp7_mutation_triggers(engine: Engine) -> None:
+    """Install additive fail-closed mutation guards for CP7 evidence tables."""
+
+    append_only_tables = (
+        "mcp_cp7_safety_ledger",
+        "mcp_cp7_ready_epoch_event",
+        "mcp_terminal_result_receipt",
+        "mcp_no_server_convergence_receipt",
+        "mcp_legacy_retirement_evidence",
+        "mcp_legacy_retirement_receipt",
+    )
+    with engine.begin() as connection:
+        tables = set(inspect(connection).get_table_names())
+        if "mcp_cp7_safety_ledger" in tables:
+            quoted_ledger = _quote(connection, "mcp_cp7_safety_ledger")
+            connection.execute(
+                text(
+                    "CREATE TRIGGER IF NOT EXISTS "
+                    f"{_quote(connection, 'trg_mcp_cp7_safety_attestation_window')} "
+                    f"BEFORE INSERT ON {quoted_ledger} "
+                    "WHEN NEW.record_kind = 'attestation' AND COALESCE(("
+                    "NEW.bucket_started_at IS NOT NULL AND "
+                    "NEW.bucket_ended_at IS NOT NULL AND "
+                    "(substr(NEW.bucket_started_at, -1) = 'Z' OR "
+                    "substr(NEW.bucket_started_at, -6) = '+00:00') AND "
+                    "(substr(NEW.bucket_ended_at, -1) = 'Z' OR "
+                    "substr(NEW.bucket_ended_at, -6) = '+00:00') AND "
+                    "strftime('%S', NEW.bucket_started_at) = '00' AND "
+                    "strftime('%f', NEW.bucket_started_at) = '00.000' AND "
+                    "strftime('%S', NEW.bucket_ended_at) = '00' AND "
+                    "strftime('%f', NEW.bucket_ended_at) = '00.000' AND "
+                    "unixepoch(NEW.bucket_ended_at) - "
+                    "unixepoch(NEW.bucket_started_at) = 60), 0) = 0 "
+                    "BEGIN SELECT RAISE(ABORT, 'cp7_attestation_window_invalid'); END"
+                )
+            )
+        for table_name in append_only_tables:
+            if table_name not in tables:
+                continue
+            for operation in ("UPDATE", "DELETE"):
+                trigger_name = f"trg_{table_name}_reject_{operation.lower()}"
+                connection.execute(
+                    text(
+                        f"CREATE TRIGGER IF NOT EXISTS {_quote(connection, trigger_name)} "
+                        f"BEFORE {operation} ON {_quote(connection, table_name)} "
+                        "BEGIN SELECT RAISE(ABORT, 'cp7_append_only_violation'); END"
+                    )
+                )
+
+        if "mcp_cp7_candidate_guard" not in tables:
+            return
+        quoted_guard = _quote(connection, "mcp_cp7_candidate_guard")
+        connection.execute(
+            text(
+                "CREATE TRIGGER IF NOT EXISTS "
+                f"{_quote(connection, 'trg_mcp_cp7_candidate_guard_reject_delete')} "
+                f"BEFORE DELETE ON {quoted_guard} "
+                "BEGIN SELECT RAISE(ABORT, 'cp7_candidate_guard_delete'); END"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TRIGGER IF NOT EXISTS "
+                f"{_quote(connection, 'trg_mcp_cp7_candidate_guard_monotonic')} "
+                f"BEFORE UPDATE ON {quoted_guard} WHEN "
+                "NEW.candidate_id IS NOT OLD.candidate_id OR "
+                "NEW.created_at IS NOT OLD.created_at OR "
+                "(OLD.invalid_latched = true AND ("
+                "NEW.invalid_latched <> true OR "
+                "NEW.first_invalid_record_id IS NOT OLD.first_invalid_record_id OR "
+                "NEW.first_invalid_reason IS NOT OLD.first_invalid_reason OR "
+                "NEW.first_invalid_at IS NOT OLD.first_invalid_at)) OR "
+                "(OLD.invalid_latched = false AND NEW.invalid_latched = false AND ("
+                "NEW.first_invalid_record_id IS NOT NULL OR "
+                "NEW.first_invalid_reason IS NOT NULL OR NEW.first_invalid_at IS NOT NULL)) OR "
+                "(OLD.invalid_latched = false AND NEW.invalid_latched = true AND ("
+                "NEW.first_invalid_record_id IS NULL OR "
+                "NEW.first_invalid_reason IS NULL OR NEW.first_invalid_at IS NULL)) "
+                "BEGIN SELECT RAISE(ABORT, 'cp7_candidate_guard_monotonic'); END"
+            )
+        )
+        if "user_mcp_owner_mutation_guard" in tables:
+            quoted_owner_guard = _quote(
+                connection, "user_mcp_owner_mutation_guard"
+            )
+            connection.execute(
+                text(
+                    "CREATE TRIGGER IF NOT EXISTS "
+                    f"{_quote(connection, 'trg_user_mcp_owner_guard_reject_delete')} "
+                    f"BEFORE DELETE ON {quoted_owner_guard} "
+                    "BEGIN SELECT RAISE(ABORT, 'user_mcp_owner_guard_delete'); END"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TRIGGER IF NOT EXISTS "
+                    f"{_quote(connection, 'trg_user_mcp_owner_guard_monotonic')} "
+                    f"BEFORE UPDATE ON {quoted_owner_guard} WHEN "
+                    "NEW.owner_user_id IS NOT OLD.owner_user_id OR "
+                    "NEW.created_at IS NOT OLD.created_at OR "
+                    "NEW.revision <> OLD.revision + 1 "
+                    "BEGIN SELECT RAISE(ABORT, 'user_mcp_owner_guard_monotonic'); END"
+                )
+            )
+
+        if "mcp_execution_terminal_projection" in tables:
+            quoted_projection = _quote(
+                connection, "mcp_execution_terminal_projection"
+            )
+            connection.execute(
+                text(
+                    "CREATE TRIGGER IF NOT EXISTS "
+                    f"{_quote(connection, 'trg_mcp_terminal_projection_reject_delete')} "
+                    f"BEFORE DELETE ON {quoted_projection} "
+                    "BEGIN SELECT RAISE(ABORT, 'mcp_terminal_projection_delete'); END"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TRIGGER IF NOT EXISTS "
+                    f"{_quote(connection, 'trg_mcp_terminal_projection_monotonic')} "
+                    f"BEFORE UPDATE ON {quoted_projection} WHEN NOT ("
+                    "OLD.status = 'unknown' AND OLD.revision = 0 AND "
+                    "NEW.status = 'late_result_resolved' AND NEW.revision = 1 AND "
+                    "NEW.projection_id IS OLD.projection_id AND "
+                    "NEW.owner_user_id IS OLD.owner_user_id AND "
+                    "NEW.conversation_id IS OLD.conversation_id AND "
+                    "NEW.intent_id IS OLD.intent_id AND NEW.call_id IS OLD.call_id AND "
+                    "NEW.task_id IS OLD.task_id AND NEW.node_id IS OLD.node_id AND "
+                    "NEW.unknown_event_id IS OLD.unknown_event_id AND "
+                    "NEW.task_failed_event_id IS OLD.task_failed_event_id AND "
+                    "NEW.unknown_terminal_at IS OLD.unknown_terminal_at AND "
+                    "NEW.created_at IS OLD.created_at) "
+                    "BEGIN SELECT RAISE(ABORT, 'mcp_terminal_projection_monotonic'); END"
+                )
+            )
 
 
 def _rebuild_table_without_legacy_owner(connection: Connection, table_name: str, old_column: str) -> None:

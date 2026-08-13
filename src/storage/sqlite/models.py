@@ -115,6 +115,7 @@ class MCPCallRecordRow(SQLiteBase):
     call_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     arguments_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     server_security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    server_config_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     input_schema_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     protocol_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     input_field_names: Mapped[list | None] = mapped_column(JSONText(), nullable=True)
@@ -1019,6 +1020,460 @@ class MessageRow(SQLiteBase):
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
+class UserMCPOwnerMutationGuardRow(SQLiteBase):
+    __tablename__ = "user_mcp_owner_mutation_guard"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="user_mcp_owner_guard_revision"),
+    )
+
+    owner_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    server_set_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPNoServerIntentRow(SQLiteBase):
+    __tablename__ = "mcp_no_server_intent"
+    __table_args__ = (
+        Index("idx_mcp_no_server_intent_owner_status", "owner_user_id", "status", "updated_at"),
+        Index(
+            "uq_mcp_no_server_initial_task",
+            "task_id",
+            unique=True,
+            sqlite_where=text("trigger = 'initial_no_profile'"),
+            postgresql_where=text("trigger = 'initial_no_profile'"),
+        ),
+        Index(
+            "uq_mcp_no_server_target_task_node",
+            "task_id",
+            "node_id",
+            unique=True,
+            sqlite_where=text("trigger = 'target_server_revalidation'"),
+            postgresql_where=text("trigger = 'target_server_revalidation'"),
+        ),
+        CheckConstraint(
+            "trigger IN ('initial_no_profile', 'target_server_revalidation')",
+            name="mcp_no_server_intent_trigger",
+        ),
+        CheckConstraint(
+            "status IN ('armed', 'available', 'unavailable', 'dispatched', "
+            "'resolved', 'converged', 'unknown')",
+            name="mcp_no_server_intent_status",
+        ),
+        CheckConstraint("revision >= 0", name="mcp_no_server_intent_revision"),
+        CheckConstraint(
+            "((status IN ('resolved', 'converged', 'unknown')) AND terminal_at IS NOT NULL) OR "
+            "((status NOT IN ('resolved', 'converged', 'unknown')) AND terminal_at IS NULL)",
+            name="mcp_no_server_intent_terminal_at",
+        ),
+        CheckConstraint(
+            "(trigger = 'initial_no_profile' AND node_id IS NULL AND requested_server_id IS NULL "
+            "AND requested_server_config_version IS NULL AND requested_server_security_version IS NULL "
+            "AND owner_server_set_fingerprint IS NOT NULL AND resume_envelope_json IS NULL "
+            "AND resume_envelope_sha256 IS NULL) OR "
+            "(trigger = 'target_server_revalidation' AND node_id IS NOT NULL "
+            "AND requested_server_id IS NOT NULL AND owner_server_set_fingerprint IS NULL "
+            "AND resume_envelope_json IS NOT NULL AND resume_envelope_sha256 IS NOT NULL "
+            "AND ((requested_server_config_version IS NULL AND requested_server_security_version IS NULL) "
+            "OR (requested_server_config_version > 0 AND requested_server_security_version > 0)))",
+            name="mcp_no_server_intent_shape",
+        ),
+    )
+
+    intent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_server_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_server_config_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    requested_server_security_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    owner_server_set_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resume_envelope_json: Mapped[dict | None] = mapped_column(JSONText(), nullable=True)
+    resume_envelope_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    terminal_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPDispatchResumeOutboxRow(SQLiteBase):
+    __tablename__ = "mcp_dispatch_resume_outbox"
+    __table_args__ = (
+        UniqueConstraint("intent_id", name="uq_mcp_dispatch_resume_intent"),
+        Index("idx_mcp_dispatch_resume_claim", "status", "lease_expires_at", "created_at"),
+        CheckConstraint(
+            "status IN ('pending', 'claimed', 'completed', 'aborted')",
+            name="mcp_dispatch_resume_status",
+        ),
+        CheckConstraint("revision >= 0", name="mcp_dispatch_resume_revision"),
+        CheckConstraint(
+            "(status = 'claimed' AND claim_owner IS NOT NULL AND claim_token IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL) OR "
+            "(status <> 'claimed' AND claim_owner IS NULL AND claim_token IS NULL "
+            "AND lease_expires_at IS NULL)",
+            name="mcp_dispatch_resume_claim_shape",
+        ),
+        CheckConstraint(
+            "(status IN ('completed', 'aborted') AND completed_at IS NOT NULL) OR "
+            "(status IN ('pending', 'claimed') AND completed_at IS NULL)",
+            name="mcp_dispatch_resume_terminal_at",
+        ),
+        CheckConstraint(
+            "(status IN ('completed', 'aborted') AND completion_mode IS NOT NULL) OR "
+            "(status IN ('pending', 'claimed') AND completion_mode IS NULL)",
+            name="mcp_dispatch_resume_completion_mode",
+        ),
+        CheckConstraint(
+            "completion_mode IS NULL OR completion_mode IN "
+            "('normal_terminal_projection', 'late_result_no_continuation', "
+            "'unknown_no_replay', 'aborted')",
+            name="mcp_dispatch_resume_completion_mode_values",
+        ),
+    )
+
+    outbox_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    intent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    resume_envelope_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    claim_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    completed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    result_receipt_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MCPNoServerConvergenceReceiptRow(SQLiteBase):
+    __tablename__ = "mcp_no_server_convergence_receipt"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_mcp_no_server_receipt_task"),
+        UniqueConstraint("runtime_unavailable_event_id", name="uq_mcp_no_server_runtime_event"),
+        UniqueConstraint("task_failed_event_id", name="uq_mcp_no_server_failed_event"),
+        CheckConstraint(
+            "terminal_code = 'mcp_runtime_unavailable'",
+            name="mcp_no_server_receipt_terminal_code",
+        ),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    intent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    terminal_code: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_unavailable_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_failed_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    committed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPLegacyRetirementEvidenceRow(SQLiteBase):
+    __tablename__ = "mcp_legacy_retirement_evidence"
+    __table_args__ = (
+        UniqueConstraint("task_id", "evidence_sha256", name="uq_mcp_legacy_retirement_evidence"),
+        CheckConstraint(
+            "bundle_revision IS NOT NULL OR capability_id IS NOT NULL OR may_have_dispatched = true",
+            name="mcp_legacy_retirement_evidence_shape",
+        ),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    inventory_id: Mapped[str] = mapped_column(Text, nullable=False)
+    inventory_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    bundle_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capability_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    may_have_dispatched: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPLegacyRetirementReceiptRow(SQLiteBase):
+    __tablename__ = "mcp_legacy_retirement_receipt"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_mcp_legacy_retirement_receipt_task"),
+        UniqueConstraint("event_id", name="uq_mcp_legacy_retirement_receipt_event"),
+        CheckConstraint(
+            "terminal_reason_code = 'legacy_runtime_retired'",
+            name="mcp_legacy_retirement_reason",
+        ),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    inventory_id: Mapped[str] = mapped_column(Text, nullable=False)
+    inventory_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    terminal_reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    terminal_evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    committed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPTerminalResultReceiptRow(SQLiteBase):
+    __tablename__ = "mcp_terminal_result_receipt"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_mcp_terminal_result_candidate"),
+        UniqueConstraint("call_id", name="uq_mcp_terminal_result_call"),
+        CheckConstraint(
+            "terminal_state IN ('completed', 'failed', 'cancelled')",
+            name="mcp_terminal_result_state",
+        ),
+        CheckConstraint(
+            "completion_mode IN ('normal_terminal_projection', 'late_result_no_continuation')",
+            name="mcp_terminal_result_completion_mode",
+        ),
+        CheckConstraint(
+            "(terminal_state = 'completed' AND safe_result_ref IS NOT NULL "
+            "AND safe_result_ref_sha256 IS NOT NULL AND safe_error_code IS NULL) OR "
+            "(terminal_state IN ('failed', 'cancelled') AND safe_result_ref IS NULL "
+            "AND safe_result_ref_sha256 IS NULL AND safe_error_code IS NOT NULL)",
+            name="mcp_terminal_result_payload_shape",
+        ),
+        CheckConstraint(
+            "server_config_version > 0 AND server_security_version > 0",
+            name="mcp_terminal_result_server_versions",
+        ),
+    )
+
+    result_receipt_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    intent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_config_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    server_security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    terminal_state: Mapped[str] = mapped_column(Text, nullable=False)
+    result_payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    safe_result_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_result_ref_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    committed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPExecutionTerminalProjectionRow(SQLiteBase):
+    __tablename__ = "mcp_execution_terminal_projection"
+    __table_args__ = (
+        UniqueConstraint("call_id", name="uq_mcp_terminal_projection_call"),
+        UniqueConstraint("intent_id", name="uq_mcp_terminal_projection_intent"),
+        UniqueConstraint("unknown_event_id", name="uq_mcp_terminal_projection_unknown_event"),
+        UniqueConstraint("task_failed_event_id", name="uq_mcp_terminal_projection_failed_event"),
+        UniqueConstraint("result_receipt_id", name="uq_mcp_terminal_projection_result_receipt"),
+        UniqueConstraint("resolution_event_id", name="uq_mcp_terminal_projection_resolution_event"),
+        UniqueConstraint("correction_event_id", name="uq_mcp_terminal_projection_correction_event"),
+        CheckConstraint(
+            "status IN ('unknown', 'late_result_resolved')",
+            name="mcp_terminal_projection_status",
+        ),
+        CheckConstraint("revision IN (0, 1)", name="mcp_terminal_projection_revision"),
+        CheckConstraint("no_replay = true", name="mcp_terminal_projection_no_replay"),
+        CheckConstraint(
+            "reason_code = 'trusted_terminal_result_absent'",
+            name="mcp_terminal_projection_reason",
+        ),
+        CheckConstraint(
+            "task_terminal_status = 'failed' AND node_terminal_status = 'failed'",
+            name="mcp_terminal_projection_failed_authority",
+        ),
+        CheckConstraint(
+            "(status = 'unknown' AND revision = 0 AND result_receipt_id IS NULL "
+            "AND result_payload_sha256 IS NULL AND resolved_terminal_state IS NULL "
+            "AND safe_result_ref IS NULL AND safe_result_ref_sha256 IS NULL "
+            "AND safe_error_code IS NULL AND resolved_intent_revision IS NULL "
+            "AND resolution_event_id IS NULL AND correction_event_id IS NULL "
+            "AND result_committed_at IS NULL AND resolved_at IS NULL) OR "
+            "(status = 'late_result_resolved' AND revision = 1 "
+            "AND result_receipt_id IS NOT NULL AND result_payload_sha256 IS NOT NULL "
+            "AND resolved_terminal_state IN ('completed', 'failed', 'cancelled') "
+            "AND resolved_intent_revision IS NOT NULL AND resolution_event_id IS NOT NULL "
+            "AND correction_event_id IS NOT NULL AND result_committed_at IS NOT NULL "
+            "AND resolved_at IS NOT NULL)",
+            name="mcp_terminal_projection_resolution_shape",
+        ),
+        CheckConstraint(
+            "resolved_terminal_state IS NULL OR "
+            "(resolved_terminal_state = 'completed' AND safe_result_ref IS NOT NULL "
+            "AND safe_result_ref_sha256 IS NOT NULL AND safe_error_code IS NULL) OR "
+            "(resolved_terminal_state IN ('failed', 'cancelled') AND safe_result_ref IS NULL "
+            "AND safe_result_ref_sha256 IS NULL AND safe_error_code IS NOT NULL)",
+            name="mcp_terminal_projection_result_shape",
+        ),
+    )
+
+    projection_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    intent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    no_replay: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    unknown_intent_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    unknown_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_failed_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    unknown_terminal_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    task_terminal_status: Mapped[str] = mapped_column(Text, nullable=False)
+    node_terminal_status: Mapped[str] = mapped_column(Text, nullable=False)
+    result_receipt_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_payload_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_terminal_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_result_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_result_ref_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_intent_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    resolution_event_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    correction_event_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_committed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    resolved_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPCP7SafetyLedgerRow(SQLiteBase):
+    __tablename__ = "mcp_cp7_safety_ledger"
+    __table_args__ = (
+        Index("idx_mcp_cp7_safety_candidate_epoch", "candidate_id", "epoch_id", "recorded_at"),
+        CheckConstraint(
+            "record_kind IN ('registration', 'attestation', 'violation', 'gap')",
+            name="mcp_cp7_safety_record_kind",
+        ),
+        CheckConstraint(
+            "(red_line IS NULL AND hook_id IS NULL) OR "
+            "(red_line = 'cross_user_access' AND hook_id = 'gateway.task_owner_boundary') OR "
+            "(red_line = 'secret_exposure' AND hook_id = 'audit.secret_payload_boundary') OR "
+            "(red_line = 'dual_tool_call' AND hook_id = 'dispatch.durable_call_idempotency_boundary') OR "
+            "(red_line = 'unauthorized_tool_call' AND hook_id = 'dispatch.permission_boundary') OR "
+            "(red_line = 'endpoint_policy_bypass' AND hook_id = 'gateway.endpoint_policy_boundary') OR "
+            "(red_line = 'unknown_result_replay' AND hook_id = 'recovery.unknown_replay_boundary') OR "
+            "(red_line = 'shadow_tool_call' AND hook_id = 'gateway.persisted_assignment_boundary') OR "
+            "(red_line = 'persistent_resource_leak' AND hook_id = 'gateway.resource_cleanup_boundary')",
+            name="mcp_cp7_safety_authoritative_hook",
+        ),
+        CheckConstraint(
+            "record_kind <> 'violation' OR "
+            "(red_line = 'cross_user_access' AND reason_code = 'task_owner_mismatch') OR "
+            "(red_line = 'secret_exposure' AND reason_code = 'secret_payload_rejected') OR "
+            "(red_line = 'dual_tool_call' AND reason_code = 'call_idempotency_conflict') OR "
+            "(red_line = 'unauthorized_tool_call' AND reason_code = 'permission_denied_boundary') OR "
+            "(red_line = 'endpoint_policy_bypass' AND reason_code = 'endpoint_policy_rejected') OR "
+            "(red_line = 'unknown_result_replay' AND reason_code = 'unknown_replay_blocked') OR "
+            "(red_line = 'shadow_tool_call' AND reason_code = 'shadow_call_blocked') OR "
+            "(red_line = 'persistent_resource_leak' AND reason_code = 'cleanup_failed')",
+            name="mcp_cp7_safety_violation_reason",
+        ),
+        CheckConstraint("value IN (0, 1)", name="mcp_cp7_safety_value"),
+        CheckConstraint(
+            "(record_kind = 'registration' AND red_line IS NOT NULL AND hook_id IS NOT NULL "
+            "AND bucket_started_at IS NULL AND bucket_ended_at IS NULL "
+            "AND reason_code = 'registered' AND value = 0 AND boundary_source_sha256 IS NULL) OR "
+            "(record_kind = 'attestation' AND red_line IS NOT NULL AND hook_id IS NOT NULL "
+            "AND bucket_started_at IS NOT NULL AND bucket_ended_at IS NOT NULL "
+            "AND reason_code = 'observed_zero' AND value = 0 AND boundary_source_sha256 IS NULL) OR "
+            "(record_kind = 'violation' AND red_line IS NOT NULL AND hook_id IS NOT NULL "
+            "AND bucket_started_at IS NOT NULL AND bucket_ended_at IS NOT NULL "
+            "AND value = 1 AND boundary_source_sha256 IS NOT NULL) OR "
+            "(record_kind = 'gap' AND value = 1 AND boundary_source_sha256 IS NOT NULL "
+            "AND ((red_line IS NULL AND hook_id IS NULL) OR "
+            "(red_line IS NOT NULL AND hook_id IS NOT NULL)))",
+            name="mcp_cp7_safety_record_shape",
+        ),
+        CheckConstraint(
+            "record_kind <> 'gap' OR reason_code IN ('detector_unregistered', "
+            "'detector_unhealthy', 'interval_attestation_missing', "
+            "'safety_metric_write_failed', 'terminal_metric_write_failed', "
+            "'producer_interval_missed', 'zero_series_write_failed', "
+            "'unplanned_process_exit', 'maintenance_boundary_invalid')",
+            name="mcp_cp7_safety_gap_reason",
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(Text, nullable=False)
+    epoch_id: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    record_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    red_line: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hook_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bucket_started_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    bucket_ended_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[int] = mapped_column(Integer, nullable=False)
+    boundary_source_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPCP7ReadyEpochEventRow(SQLiteBase):
+    __tablename__ = "mcp_cp7_ready_epoch_event"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "epoch_id", "event_kind", name="uq_mcp_cp7_epoch_kind"),
+        Index("idx_mcp_cp7_epoch_candidate_boundary", "candidate_id", "boundary_at"),
+        CheckConstraint(
+            "event_kind IN ('opened', 'ready', 'maintenance_started', 'closed', 'invalidated')",
+            name="mcp_cp7_epoch_event_kind",
+        ),
+        CheckConstraint("audit_inode >= 0", name="mcp_cp7_epoch_audit_inode"),
+        CheckConstraint("audit_offset >= 0", name="mcp_cp7_epoch_audit_offset"),
+        CheckConstraint("ledger_record_count >= 0", name="mcp_cp7_epoch_ledger_count"),
+    )
+
+    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(Text, nullable=False)
+    epoch_id: Mapped[str] = mapped_column(Text, nullable=False)
+    predecessor_epoch_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    container_id: Mapped[str] = mapped_column(Text, nullable=False)
+    image_id: Mapped[str] = mapped_column(Text, nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    boundary_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    audit_device: Mapped[str] = mapped_column(Text, nullable=False)
+    audit_inode: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    audit_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ledger_record_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    inflight_state_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class MCPCP7CandidateGuardRow(SQLiteBase):
+    __tablename__ = "mcp_cp7_candidate_guard"
+    __table_args__ = (
+        CheckConstraint("invalid_latched IN (false, true)", name="mcp_cp7_guard_latch"),
+        CheckConstraint(
+            "(invalid_latched = false AND first_invalid_record_id IS NULL "
+            "AND first_invalid_reason IS NULL AND first_invalid_at IS NULL) OR "
+            "(invalid_latched = true AND first_invalid_record_id IS NOT NULL "
+            "AND first_invalid_reason IS NOT NULL AND first_invalid_at IS NOT NULL)",
+            name="mcp_cp7_guard_shape",
+        ),
+    )
+
+    candidate_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    invalid_latched: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    first_invalid_record_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_invalid_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_invalid_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
 class TaskRow(SQLiteBase):
     __tablename__ = "task"
     __table_args__ = (
@@ -1038,7 +1493,7 @@ class TaskRow(SQLiteBase):
             "('routing_off', 'shadow_enabled', 'enforce_selected', "
             "'cohort_not_selected', 'percent_not_selected', "
             "'explicit_legacy_capability', 'user_server_rollout_unavailable', "
-            "'no_execution_path')",
+            "'no_execution_path', 'no_user_scoped_server')",
             name="task_mcp_route_reason_code",
         ),
         CheckConstraint(
