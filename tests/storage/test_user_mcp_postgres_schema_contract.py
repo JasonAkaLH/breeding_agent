@@ -9,6 +9,7 @@ from src.state.postgres.runtime_schema import (
     build_runtime_table_schema_ddl,
 )
 from src.storage.postgres.repositories import PostgreSQLStorage
+from src.storage.sqlite.repositories import SQLiteStateRepository
 
 
 class UserMCPPostgresSchemaContractTest(unittest.TestCase):
@@ -19,7 +20,7 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
             "user_mcp_tool_grant",
             "user_mcp_health_attempt",
             "user_mcp_scope_lease",
-            "mcp_credential_key_validation",
+            "maf_master_key_validation",
             "mcp_branch_record",
             "mcp_call_record",
             "mcp_remote_task_binding",
@@ -47,6 +48,26 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
             "mcp_cp7_candidate_guard",
         }
         self.assertTrue(expected.issubset(manifest.runtime_table_names))
+        self.assertNotIn("mcp_credential_key_validation", manifest.runtime_table_names)
+        self.assertEqual(
+            manifest.table_columns["maf_master_key_validation"],
+            {
+                "singleton_key": "integer",
+                "validation_nonce": "bytea",
+                "validation_ciphertext": "bytea",
+                "derivation_version": "integer",
+                "created_at": "timestamp with time zone",
+            },
+        )
+        validation_checks = manifest.check_constraints["maf_master_key_validation"]
+        self.assertEqual(
+            set(validation_checks.values()),
+            {
+                "singleton_key = 1",
+                "length(validation_nonce) = 12",
+                "derivation_version = 1",
+            },
+        )
         self.assertEqual(
             manifest.table_columns["mcp_rollout_metric_bucket"]["red_line"],
             "text",
@@ -97,6 +118,13 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
         self.assertIn("idx_mcp_cp7_safety_candidate_epoch", ddl)
 
         table_ddl = build_runtime_table_schema_ddl()
+        validation_table_ddl = _table_ddl(table_ddl, "maf_master_key_validation")
+        self.assertIn("PRIMARY KEY (singleton_key)", validation_table_ddl)
+        self.assertIn("CHECK (singleton_key = 1)", validation_table_ddl)
+        self.assertIn("CHECK (length(validation_nonce) = 12)", validation_table_ddl)
+        self.assertIn("CHECK (derivation_version = 1)", validation_table_ddl)
+        self.assertNotIn("validation_id", validation_table_ddl)
+        self.assertNotIn("encryption_version", validation_table_ddl)
         self.assertIn("uq_mcp_rollout_evidence_nonce", table_ddl)
         self.assertIn("uq_mcp_shadow_sample_scope_nonce", table_ddl)
         self.assertIn("uq_mcp_rollout_evidence_snapshot", table_ddl)
@@ -160,6 +188,14 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
             self.assertIn(f"mcp_rollout_api.{function_name}", source)
         self.assertIn("mcp_rollout_session_factory", source)
         self.assertNotIn("MCPRolloutGateScopeRow", source)
+
+    def test_master_key_validation_repository_uses_postgres_create_or_get(self) -> None:
+        source = inspect.getsource(
+            SQLiteStateRepository.create_or_get_maf_master_key_validation
+        )
+        self.assertIn("postgresql_insert", source)
+        self.assertIn("on_conflict_do_nothing", source)
+        self.assertIn("select(MAFMasterKeyValidationRow)", source.replace("\n", ""))
 
 
 def _table_ddl(ddl: str, table_name: str) -> str:

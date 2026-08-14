@@ -22,11 +22,7 @@ from src.integrations.mcp.adapter_2025_tasks import (
     MCP2025TasksAdapter,
 )
 from src.integrations.mcp.client import MCPProtocolError
-from src.integrations.mcp.credentials import (
-    CredentialCipher,
-    MCPRecoveryCallContext,
-    MCPRecoveryService,
-)
+from src.integrations.mcp.credentials import MCPRecoveryCallContext, MCPRecoveryService
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
 from src.integrations.mcp.gateway_models import MCPCancelStatus
@@ -43,6 +39,7 @@ from src.integrations.mcp.temporary_results import (
     MCPTemporaryResultStore,
 )
 from src.integrations.mcp.user_client import UserMCPClientFactory
+from tests.master_key_support import recovery_cipher
 from src.storage.sqlite import (
     SQLiteStorage,
     bootstrap_sqlite_database,
@@ -153,7 +150,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.recovery = MCPRecoveryService(
             self.storage,
-            CredentialCipher(b"2" * 32),
+            recovery_cipher(b"2" * 32),
             now_fn=lambda: self.now,
         )
         await self.storage.save_conversation(Conversation("conv-a", "alice"))
@@ -286,7 +283,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.storage = SQLiteStorage(create_sqlite_session_factory(self.engine))
         self.recovery = MCPRecoveryService(
             self.storage,
-            CredentialCipher(b"2" * 32),
+            recovery_cipher(b"2" * 32),
             now_fn=lambda: self.now,
         )
         self.now += timedelta(seconds=1)
@@ -469,7 +466,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.storage = SQLiteStorage(create_sqlite_session_factory(self.engine))
         self.recovery = MCPRecoveryService(
             self.storage,
-            CredentialCipher(b"2" * 32),
+            recovery_cipher(b"2" * 32),
             now_fn=lambda: self.now + timedelta(seconds=1),
         )
         transports: dict[str, _TaskTransport] = {}

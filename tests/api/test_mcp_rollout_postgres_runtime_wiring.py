@@ -133,7 +133,6 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
         storage = object()
         env = {
             "MAF_API_ENV": "production",
-            "MAF_AUTH_TOKEN_HASH_SECRET": "test-token-hash-secret",
             "MAF_STATE_STORE_BACKEND": "postgresql",
             "MAF_POSTGRES_STATE_DSN": "postgresql://state-role",
             "MCP_USER_SCOPED_GATEWAY_ENABLED": "false",
@@ -170,6 +169,7 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
             runtime = runtime_module.build_api_runtime(
                 database_path=Path(tmpdir) / "api.sqlite3",
                 audit_log_path=Path(tmpdir) / "audit.jsonl",
+                master_key_bytes=b"p" * 32,
                 enable_platform_llm=False,
                 enable_llm_planner=False,
                 enable_skill_input_llm=False,
@@ -233,6 +233,7 @@ class MCPRolloutPostgresRuntimeWiringTest(unittest.TestCase):
             runtime = runtime_module.build_api_runtime(
                 database_path=Path(tmpdir) / "api.sqlite3",
                 audit_log_path=Path(tmpdir) / "audit.jsonl",
+                master_key_bytes=b"p" * 32,
                 enable_platform_llm=False,
                 enable_llm_planner=False,
                 enable_skill_input_llm=False,

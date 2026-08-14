@@ -4,6 +4,7 @@ import os
 import gc
 import hashlib
 import hmac
+import inspect
 import json
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from src.api.runtime import build_api_runtime
 from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Task, UserMCPServer
 from src.orchestration.models import OrchestrationRequest
+from src.integrations.master_key import MasterKeyError
 from src.integrations.mcp.credentials import CredentialSecurityError
 from tests.api.support import InMemoryTaskRuntimeSidecar
 from src.storage.rust_contract import load_runtime_sidecar_contract, migration_policy
@@ -233,7 +235,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
-                user_mcp_credential_key_file=key_path,
+                master_key_bytes=b"a" * 32,
                 user_mcp_terminal_result_store_path=terminal_root,
                 planner_text_generator=lambda _prompt, **_kwargs: '{"nodes":[]}',
                 enable_platform_llm=False,
@@ -283,7 +285,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
-                user_mcp_credential_key_file=key_path,
+                master_key_bytes=b"a" * 32,
                 mcp_client_factory=forbidden_client_factory,
                 planner_text_generator=lambda _prompt, **_kwargs: '{"nodes":[]}',
                 enable_platform_llm=False,
@@ -337,6 +339,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
+                master_key_bytes=b"r" * 32,
                 mcp_config={"enabled": False},
                 enable_platform_llm=False,
                 enable_llm_planner=False,
@@ -384,7 +387,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     build_api_runtime(
                         database_path=root / "runtime.sqlite3",
                         audit_log_path=root / "audit.jsonl",
-                        user_mcp_credential_key_file=key_path,
+                        master_key_bytes=b"a" * 32,
                         mcp_config={"enabled": False},
                         enable_platform_llm=False,
                         enable_llm_planner=False,
@@ -415,6 +418,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
+                master_key_bytes=b"r" * 32,
                 mcp_config={"enabled": False},
                 enable_platform_llm=False,
                 enable_llm_planner=False,
@@ -460,6 +464,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 build_api_runtime(
                     database_path=root / "runtime.sqlite3",
                     audit_log_path=root / "audit.jsonl",
+                    master_key_bytes=b"r" * 32,
                     mcp_config={"enabled": False},
                     enable_platform_llm=False,
                     enable_llm_planner=False,
@@ -506,6 +511,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                     build_api_runtime(
                         database_path=root / "runtime.sqlite3",
                         audit_log_path=root / "audit.jsonl",
+                        master_key_bytes=b"r" * 32,
                         mcp_config={"enabled": False},
                         enable_platform_llm=False,
                         enable_llm_planner=False,
@@ -532,6 +538,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
+                master_key_bytes=b"r" * 32,
                 mcp_config={"enabled": False},
                 enable_platform_llm=False,
                 enable_llm_planner=False,
@@ -579,7 +586,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
-                user_mcp_credential_key_file=key_path,
+                master_key_bytes=b"a" * 32,
                 mcp_config=_LEGACY_MCP_CONFIG,
                 mcp_client_factory=lambda _server: legacy_client,
                 planner_text_generator=planner,
@@ -707,7 +714,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
-                user_mcp_credential_key_file=key_path,
+                master_key_bytes=b"a" * 32,
                 mcp_config={
                     "enabled": True,
                     "servers": [
@@ -765,7 +772,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_api_runtime(
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
-                user_mcp_credential_key_file=key_path,
+                master_key_bytes=b"a" * 32,
                 mcp_config={"enabled": False},
                 planner_text_generator=lambda _prompt, **_kwargs: '{"nodes":[]}',
                 main_agent_stream_generator=lambda _prompt, **_kwargs: "done",
@@ -826,7 +833,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.shutdown()
 
-    def test_enabled_feature_fails_closed_without_key_file(self) -> None:
+    def test_runtime_fails_closed_without_master_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ,
             {
@@ -836,13 +843,67 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             },
             clear=False,
         ):
-            with self.assertRaisesRegex(
-                CredentialSecurityError, "mcp_credential_key_file_missing"
-            ):
+            with self.assertRaisesRegex(MasterKeyError, "maf_master_key_file_missing"):
                 build_api_runtime(
                     database_path=Path(directory) / "runtime.sqlite3",
                     audit_log_path=Path(directory) / "audit.jsonl",
                     enable_user_mcp=True,
+                    enable_platform_llm=False,
+                    enable_llm_planner=False,
+                    enable_conversation_title_llm=False,
+                    enable_conversation_memory=False,
+                )
+
+    def test_runtime_signature_exposes_only_master_key_authorities(self) -> None:
+        parameters = inspect.signature(build_api_runtime).parameters
+
+        self.assertIn("master_key_file", parameters)
+        self.assertIn("master_key_bytes", parameters)
+        self.assertNotIn("auth_token_hash_secret", parameters)
+        self.assertNotIn("auth_token_hash_secret_required", parameters)
+        self.assertNotIn("user_mcp_credential_key_file", parameters)
+
+    def test_legacy_master_key_authorities_reject_even_empty_before_database(self) -> None:
+        legacy_keys = (
+            "MCP_CREDENTIAL_KEY_FILE_HOST",
+            "MCP_CREDENTIAL_KEY_FILE",
+            "MAF_AUTH_TOKEN_HASH_SECRET",
+            "MAF_AUTH_TOKEN_HASH_SECRET_REQUIRED",
+        )
+        for legacy_key in legacy_keys:
+            with self.subTest(legacy_key=legacy_key), tempfile.TemporaryDirectory() as directory:
+                database_path = Path(directory) / "must-not-exist.sqlite3"
+                with patch.dict(
+                    os.environ,
+                    {legacy_key: ""},
+                    clear=True,
+                ), self.assertRaisesRegex(
+                    MasterKeyError,
+                    "maf_master_key_legacy_authority_configured",
+                ):
+                    build_api_runtime(
+                        database_path=database_path,
+                        audit_log_path=Path(directory) / "audit.jsonl",
+                        master_key_bytes=b"a" * 32,
+                        enable_platform_llm=False,
+                        enable_llm_planner=False,
+                        enable_conversation_title_llm=False,
+                        enable_conversation_memory=False,
+                    )
+                self.assertFalse(database_path.exists())
+
+    def test_master_key_file_and_bytes_are_mutually_exclusive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                build_api_runtime(
+                    database_path=Path(directory) / "runtime.sqlite3",
+                    audit_log_path=Path(directory) / "audit.jsonl",
+                    master_key_file=Path(directory) / "master.key",
+                    master_key_bytes=b"a" * 32,
                     enable_platform_llm=False,
                     enable_llm_planner=False,
                     enable_conversation_title_llm=False,
@@ -867,7 +928,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 database_path=root / "runtime.sqlite3",
                 audit_log_path=root / "audit.jsonl",
                 enable_user_mcp=True,
-                user_mcp_credential_key_file=key_path,
+                master_key_bytes=b"a" * 32,
                 enable_platform_llm=False,
                 enable_llm_planner=False,
                 enable_conversation_title_llm=False,
@@ -877,7 +938,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             try:
                 self.assertIsNotNone(runtime.user_mcp_config_service)
                 self.assertIsNotNone(
-                    await runtime.storage.get_mcp_credential_key_validation()
+                    await runtime.storage.get_maf_master_key_validation()
                 )
             finally:
                 await runtime.shutdown()
@@ -889,6 +950,64 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 [warning for warning in caught if warning.category is ResourceWarning],
                 [],
             )
+
+    async def test_wrong_master_key_rejects_existing_sentinel_before_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {
+                "MAF_STATE_STORE_BACKEND": "sqlite",
+                "MAF_STATE_PLATFORM_CONFIG_BRIDGE": "0",
+            },
+            clear=True,
+        ):
+            root = Path(directory)
+            database_path = root / "runtime.sqlite3"
+            first = build_api_runtime(
+                database_path=database_path,
+                audit_log_path=root / "first-audit.jsonl",
+                master_key_bytes=b"a" * 32,
+                enable_platform_llm=False,
+                enable_llm_planner=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+            )
+            await first.start()
+            token = (await first.username_token_service.login_username("alice"))[1]
+            await first.shutdown()
+
+            same_key = build_api_runtime(
+                database_path=database_path,
+                audit_log_path=root / "second-audit.jsonl",
+                master_key_bytes=b"a" * 32,
+                enable_platform_llm=False,
+                enable_llm_planner=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+            )
+            await same_key.start()
+            try:
+                authenticated = await same_key.username_token_service.get_current_token(
+                    token,
+                    touch=False,
+                )
+                self.assertEqual(authenticated.username, "alice")
+            finally:
+                await same_key.shutdown()
+
+            wrong_key = build_api_runtime(
+                database_path=database_path,
+                audit_log_path=root / "wrong-audit.jsonl",
+                master_key_bytes=b"b" * 32,
+                enable_platform_llm=False,
+                enable_llm_planner=False,
+                enable_conversation_title_llm=False,
+                enable_conversation_memory=False,
+            )
+            with self.assertRaisesRegex(
+                CredentialSecurityError,
+                "maf_master_key_mismatch",
+            ):
+                await wrong_key.start()
 
     async def test_routing_flag_registers_only_dispatch_and_injects_safe_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
@@ -912,7 +1031,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
                 audit_log_path=root / "audit.jsonl",
                 enable_user_mcp=True,
                 enable_user_mcp_routing=True,
-                user_mcp_credential_key_file=key_path,
+                master_key_bytes=b"a" * 32,
                 planner_text_generator=lambda _prompt, **_kwargs: '{"action":"finish","reason":"done"}',
                 enable_platform_llm=False,
                 enable_conversation_title_llm=False,

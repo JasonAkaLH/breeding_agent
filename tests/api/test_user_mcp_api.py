@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.integrations.mcp.credentials import CredentialCipher
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.invalidation import InMemoryMCPInvalidationBus
 from src.integrations.mcp.user_config import UserMCPConfigService
 from tests.api.support import APITestCase
+from tests.master_key_support import credential_cipher
 
 
 class _Resolver:
@@ -37,7 +37,7 @@ class UserMCPApiTest(APITestCase):
         self.health_runner.storage = self.runtime.storage
         self.runtime.user_mcp_config_service = UserMCPConfigService(
             storage=self.runtime.storage,
-            credential_cipher=CredentialCipher(b"z" * 32),
+            credential_cipher=credential_cipher(b"z" * 32),
             endpoint_policy=EndpointPolicy(resolver=_Resolver()),
             health_runner=self.health_runner,
             invalidation_bus=InMemoryMCPInvalidationBus(),

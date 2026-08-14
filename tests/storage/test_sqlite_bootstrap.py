@@ -13,6 +13,7 @@ from src.core.models import AuthUserToken, Conversation, MCPRolloutMetricBucket
 from src.core.contracts import StoragePort as CoreStoragePort
 from src.storage.interfaces import StoragePort
 from src.storage.sqlite import SQLiteStorage, bootstrap_sqlite_database, create_sqlite_engine, create_sqlite_session_factory
+from src.storage.sqlite.base import SQLiteBase
 from src.storage.sqlite.repositories import SQLiteStateRepository
 from tests.storage.support import SQLiteStorageTestCase
 
@@ -279,7 +280,7 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                 "user_mcp_tool_grant",
                 "user_mcp_health_attempt",
                 "user_mcp_scope_lease",
-                "mcp_credential_key_validation",
+                "maf_master_key_validation",
                 "mcp_branch_record",
                 "mcp_call_record",
                 "mcp_remote_task_binding",
@@ -290,6 +291,96 @@ class SQLiteBootstrapTest(SQLiteStorageTestCase):
                 "mcp_legacy_migration_record",
             }.issubset(table_names)
         )
+        self.assertNotIn("mcp_credential_key_validation", table_names)
+
+    def test_master_key_validation_table_has_exact_shape_and_constraints(self) -> None:
+        inspector = inspect(self.engine)
+        self.assertEqual(
+            {column["name"] for column in inspector.get_columns("maf_master_key_validation")},
+            {
+                "singleton_key",
+                "validation_nonce",
+                "validation_ciphertext",
+                "derivation_version",
+                "created_at",
+            },
+        )
+        invalid_rows = (
+            {
+                "singleton_key": 2,
+                "validation_nonce": b"n" * 12,
+                "derivation_version": 1,
+                "created_at": "2026-08-14T00:00:00+00:00",
+            },
+            {
+                "singleton_key": 1,
+                "validation_nonce": b"short",
+                "derivation_version": 1,
+                "created_at": "2026-08-14T00:00:00+00:00",
+            },
+            {
+                "singleton_key": 1,
+                "validation_nonce": b"n" * 12,
+                "derivation_version": 2,
+                "created_at": "2026-08-14T00:00:00+00:00",
+            },
+            {
+                "singleton_key": 1,
+                "validation_nonce": b"n" * 12,
+                "derivation_version": 1,
+                "created_at": None,
+            },
+        )
+        for index, values in enumerate(invalid_rows):
+            with self.subTest(values=values), self.assertRaises(IntegrityError):
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO maf_master_key_validation "
+                            "(singleton_key, validation_nonce, validation_ciphertext, "
+                            "derivation_version, created_at) "
+                            "VALUES (:singleton_key, :validation_nonce, :ciphertext, "
+                            ":derivation_version, :created_at)"
+                        ),
+                        {
+                            **values,
+                            "ciphertext": f"cipher-{index}".encode(),
+                        },
+                    )
+
+    def test_bootstrap_leaves_legacy_key_validation_table_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-key-validation.sqlite3")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_credential_key_validation ("
+                        "validation_id TEXT PRIMARY KEY, singleton_key INTEGER NOT NULL UNIQUE, "
+                        "validation_nonce BLOB NOT NULL, validation_ciphertext BLOB NOT NULL, "
+                        "encryption_version INTEGER NOT NULL, created_at TEXT)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_credential_key_validation VALUES "
+                        "('legacy', 1, X'00', X'01', 1, NULL)"
+                    )
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            table_names = set(inspect(engine).get_table_names())
+            self.assertIn("mcp_credential_key_validation", table_names)
+            self.assertIn("maf_master_key_validation", table_names)
+            self.assertNotIn("mcp_credential_key_validation", SQLiteBase.metadata.tables)
+            with engine.connect() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        text("SELECT validation_id FROM mcp_credential_key_validation")
+                    ).scalar_one(),
+                    "legacy",
+                )
 
     def test_bootstrap_drops_legacy_auth_tables_and_keeps_current_token_table(self) -> None:
         legacy_tables = {"auth_user", "auth_captcha_challenge", "auth_session", "auth_api_token"}

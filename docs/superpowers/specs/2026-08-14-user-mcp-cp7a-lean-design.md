@@ -102,7 +102,7 @@ lifecycle。默认 Compose 不构造 `CP7RuntimeIdentity`、Ready epoch 或审�
 
 ### backend
 
-- 只读挂载 user MCP credential key；
+- 只读挂载统一在线根密钥；
 - 共享 Sidecar Unix socket 卷；
 - 在 Sidecar 健康后启动；
 - 使用项目现有 SQLite runtime 卷和只读 Skill 挂载；
@@ -153,12 +153,12 @@ backend 的七项 MCP 路由值必须精确为：
 | `MAF_STATE_STORE_BACKEND` | 精确为 `sqlite` |
 | `MAF_STATE_PLATFORM_CONFIG_BRIDGE` | 精确为 `0` |
 | `MAF_RUNTIME_SIDECAR_ENDPOINT` | `unix:///run/maf-runtime-sidecar/runtime.sock` |
-| `MCP_CREDENTIAL_KEY_FILE` | 精确为 `/run/secrets/mcp-credential.key`；Compose 通过必填的 `MCP_CREDENTIAL_KEY_FILE_HOST` 只读挂载，宿主文件不进入 Git |
+| `MAF_MASTER_KEY_FILE` | 精确为 `/run/secrets/maf-master.key`；Compose 通过必填的 `MAF_MASTER_KEY_FILE_HOST` 只读挂载，宿主文件不进入 Git；backend 从闭合标签派生 MCP credential/recovery、Auth token、audit reference 和 sentinel 子密钥 |
 | `MAF_USER_MCP_MAX_ACTIVE_CALLS` | 开发默认值 `8` |
 | `MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES` | 开发默认值 `1048576`（1 MiB） |
 | 三项 Rust authority mode | `MAF_RUST_RUNTIME_STORE_MODE=off`、`MAF_RUST_EVENT_LOG_MODE=off`、`MAF_RUST_TASK_DISPATCHER_MODE=off` |
 
-credential key 不得写入镜像、仓库、Compose 文件内容或日志。现有 user MCP
+根密钥及其领域子密钥不得写入镜像、仓库、Compose 文件内容或日志。现有 user MCP
 credential、terminal-result 容量和 SQLite 数据继续使用项目当前开发存储，不另建
 phase trust 配置层。
 

@@ -257,7 +257,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
         return build_api_runtime(
             database_path=self.database_path,
             audit_log_path=self.audit_log_path,
-            user_mcp_credential_key_file=self.key_path,
+            master_key_bytes=b"a" * 32,
             mcp_config={"enabled": False},
             planner_text_generator=lambda _prompt, **_kwargs: '{"action":"finish"}',
             main_agent_stream_generator=lambda _prompt, **_kwargs: "done",

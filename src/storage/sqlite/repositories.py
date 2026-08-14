@@ -107,7 +107,7 @@ from src.core.models import (
     UserMCPServer,
     UserMCPOwnerMutationGuard,
     UserMCPToolGrant,
-    MCPCredentialKeyValidation,
+    MAFMasterKeyValidation,
     validate_mcp_rollout_drill_observation,
 )
 from src.storage.conversation_files import (
@@ -196,7 +196,7 @@ from .models import (
     UserMCPServerRow,
     UserMCPOwnerMutationGuardRow,
     UserMCPToolGrantRow,
-    MCPCredentialKeyValidationRow,
+    MAFMasterKeyValidationRow,
 )
 
 
@@ -8806,41 +8806,48 @@ class SQLiteStateRepository:
             is not None
         )
 
-    def create_or_get_mcp_credential_key_validation(
-        self, record: MCPCredentialKeyValidation
-    ) -> MCPCredentialKeyValidation:
+    def create_or_get_maf_master_key_validation(
+        self, record: MAFMasterKeyValidation
+    ) -> MAFMasterKeyValidation:
         values = {
-            "validation_id": record.validation_id,
-            "singleton_key": 1,
+            "singleton_key": record.singleton_key,
             "validation_nonce": record.validation_nonce,
             "validation_ciphertext": record.validation_ciphertext,
-            "encryption_version": record.encryption_version,
+            "derivation_version": record.derivation_version,
             "created_at": record.created_at,
         }
         dialect_name = self._session.get_bind().dialect.name
-        statement = postgresql_insert(MCPCredentialKeyValidationRow).values(**values) if dialect_name == "postgresql" else sqlite_insert(MCPCredentialKeyValidationRow).values(**values)
-        self._session.execute(statement.on_conflict_do_nothing(index_elements=["singleton_key"]))
+        statement = (
+            postgresql_insert(MAFMasterKeyValidationRow).values(**values)
+            if dialect_name == "postgresql"
+            else sqlite_insert(MAFMasterKeyValidationRow).values(**values)
+        )
+        self._session.execute(
+            statement.on_conflict_do_nothing(index_elements=["singleton_key"])
+        )
         existing = self._session.scalar(
-            select(MCPCredentialKeyValidationRow).where(MCPCredentialKeyValidationRow.singleton_key == 1)
+            select(MAFMasterKeyValidationRow).where(
+                MAFMasterKeyValidationRow.singleton_key == 1
+            )
         )
         assert existing is not None
-        return MCPCredentialKeyValidation(
-            validation_id=existing.validation_id,
+        return MAFMasterKeyValidation(
+            singleton_key=int(existing.singleton_key),
             validation_nonce=bytes(existing.validation_nonce),
             validation_ciphertext=bytes(existing.validation_ciphertext),
-            encryption_version=int(existing.encryption_version),
+            derivation_version=int(existing.derivation_version),
             created_at=existing.created_at,
         )
 
-    def get_mcp_credential_key_validation(self) -> MCPCredentialKeyValidation | None:
-        row = self._session.scalar(select(MCPCredentialKeyValidationRow).limit(1))
+    def get_maf_master_key_validation(self) -> MAFMasterKeyValidation | None:
+        row = self._session.get(MAFMasterKeyValidationRow, 1)
         if row is None:
             return None
-        return MCPCredentialKeyValidation(
-            validation_id=row.validation_id,
+        return MAFMasterKeyValidation(
+            singleton_key=int(row.singleton_key),
             validation_nonce=bytes(row.validation_nonce),
             validation_ciphertext=bytes(row.validation_ciphertext),
-            encryption_version=int(row.encryption_version),
+            derivation_version=int(row.derivation_version),
             created_at=row.created_at,
         )
 
@@ -10973,15 +10980,15 @@ class SQLiteStorage(StoragePort):
             )
         )
 
-    async def create_or_get_mcp_credential_key_validation(
-        self, record: MCPCredentialKeyValidation
-    ) -> MCPCredentialKeyValidation:
+    async def create_or_get_maf_master_key_validation(
+        self, record: MAFMasterKeyValidation
+    ) -> MAFMasterKeyValidation:
         return await self._run(
-            lambda state, collab: state.create_or_get_mcp_credential_key_validation(record)
+            lambda state, collab: state.create_or_get_maf_master_key_validation(record)
         )
 
-    async def get_mcp_credential_key_validation(self) -> MCPCredentialKeyValidation | None:
-        return await self._run(lambda state, collab: state.get_mcp_credential_key_validation())
+    async def get_maf_master_key_validation(self) -> MAFMasterKeyValidation | None:
+        return await self._run(lambda state, collab: state.get_maf_master_key_validation())
 
     async def _run(
         self,

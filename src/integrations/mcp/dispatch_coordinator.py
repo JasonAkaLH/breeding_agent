@@ -37,6 +37,7 @@ from src.core.models import (
 )
 from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
 from src.integrations.mcp.client import MCPRemoteError
+from src.integrations.mcp.credentials import MCPAuditReferenceSigner
 from src.integrations.mcp.gateway_models import MCPCallOutcome, MCPCallOutcomeKind, MCPTaskServerScope
 from src.integrations.mcp.cp7_artifacts import (
     canonical_sha256,
@@ -156,6 +157,7 @@ class UserMCPDispatchCoordinator:
         storage: StoragePort,
         gateway: MCPGateway,
         selector: MCPSelectorPort | MCPToolSelector,
+        audit_reference_signer: MCPAuditReferenceSigner,
         server_router: MCPServerRouterPort | MCPServerRouter | None = None,
         now_fn: NowFn | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
@@ -179,9 +181,12 @@ class UserMCPDispatchCoordinator:
             raise ValueError("metric_recorder and metric_context must be provided together")
         if (cp7_candidate_id is None) != (cp7_epoch_id is None):
             raise ValueError("CP7 candidate and epoch must be configured together")
+        if not isinstance(audit_reference_signer, MCPAuditReferenceSigner):
+            raise ValueError("MCP audit reference signer is required")
         self._storage = storage
         self._gateway = gateway
         self._selector = selector
+        self._audit_reference_signer = audit_reference_signer
         self._server_router = server_router
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
         self._live_event_recorder = live_event_recorder
@@ -535,7 +540,10 @@ class UserMCPDispatchCoordinator:
                     arguments=action.arguments,
                 )
                 tool_display_name = _tool_display_name(descriptor)
-                approval_safe_call_ref = _approval_safe_call_ref(fingerprint)
+                approval_safe_call_ref = self._audit_reference_signer.safe_reference(
+                    fingerprint,
+                    context="mcp-approval-call-reference-v1",
+                )
                 grant = await self._storage.get_valid_user_mcp_tool_grant(
                     owner_user_id,
                     current_server.server_id,
@@ -701,6 +709,10 @@ class UserMCPDispatchCoordinator:
                 )
                 if result_receipt_id is not None:
                     last_result_receipt_id = result_receipt_id
+                safe_call_ref = self._audit_reference_signer.safe_reference(
+                    call_ref,
+                    context="mcp-call-reference-v1",
+                )
                 if mrtr_continuation is not None:
                     await self._storage.delete_mcp_sealed_state(
                         owner_user_id,
@@ -722,7 +734,7 @@ class UserMCPDispatchCoordinator:
                             {
                                 "server_display_name": current_server.display_name,
                                 "tool_display_name": tool_display_name,
-                                "safe_call_ref": call_ref,
+                                "safe_call_ref": safe_call_ref,
                                 "status": outcome.kind.value,
                             },
                             selector_step,
@@ -745,7 +757,7 @@ class UserMCPDispatchCoordinator:
                             {
                                 "server_display_name": current_server.display_name,
                                 "tool_display_name": tool_display_name,
-                                "safe_call_ref": call_ref,
+                                "safe_call_ref": safe_call_ref,
                                 "input_request_count": len(outcome.requests),
                             },
                             selector_step,
@@ -768,7 +780,7 @@ class UserMCPDispatchCoordinator:
                         events=events,
                         extra_output={
                             "mcp_status": "input_required",
-                            "safe_call_ref": call_ref,
+                            "safe_call_ref": safe_call_ref,
                             "input_request_count": len(outcome.requests),
                             "sealed_request_state_ref": outcome.sealed_request_state_ref,
                             "interrupt_id": mrtr_interrupt.interrupt_id,
@@ -782,7 +794,7 @@ class UserMCPDispatchCoordinator:
                         {
                             "server_display_name": current_server.display_name,
                             "tool_display_name": tool_display_name,
-                            "safe_call_ref": call_ref,
+                            "safe_call_ref": safe_call_ref,
                             "safe_task_ref": outcome.safe_remote_task_ref,
                             "status": outcome.status,
                         },
@@ -797,7 +809,7 @@ class UserMCPDispatchCoordinator:
                     events=events,
                     extra_output={
                         "mcp_status": "remote_task_created",
-                        "safe_call_ref": call_ref,
+                        "safe_call_ref": safe_call_ref,
                         "safe_remote_task_ref": outcome.safe_remote_task_ref,
                         "remote_task_status": outcome.status,
                         "next_poll_at": outcome.next_poll_at,
@@ -1281,7 +1293,10 @@ class UserMCPDispatchCoordinator:
                     request,
                     "mcp.tool_call_started",
                     {
-                        "safe_call_ref": call_ref,
+                        "safe_call_ref": self._audit_reference_signer.safe_reference(
+                            call_ref,
+                            context="mcp-call-reference-v1",
+                        ),
                         "server_display_name": server.display_name,
                         "tool_display_name": tool_display_name,
                     },
@@ -1308,7 +1323,10 @@ class UserMCPDispatchCoordinator:
                     request,
                     "mcp.tool_call_still_running",
                     {
-                        "safe_call_ref": call_ref,
+                        "safe_call_ref": self._audit_reference_signer.safe_reference(
+                            call_ref,
+                            context="mcp-call-reference-v1",
+                        ),
                         "server_display_name": server.display_name,
                         "tool_display_name": tool_display_name,
                         "heartbeat_at": heartbeat_at.isoformat(),
@@ -1894,10 +1912,6 @@ def _tool_display_name(tool: Any) -> str:
         if title:
             return title[:200]
     return str(tool.name)[:200]
-
-
-def _approval_safe_call_ref(fingerprint: str) -> str:
-    return f"mcp-approval-call-{fingerprint[:24]}"
 
 
 def _user_request(request: CapabilityExecutionRequest) -> str:

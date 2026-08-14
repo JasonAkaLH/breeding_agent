@@ -1,31 +1,96 @@
 from __future__ import annotations
 
+import pickle
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from src.auth import AuthTokenValidationError, UsernameTokenService
+from src.auth import AuthTokenHasher, UsernameTokenService
 from src.api.runtime import build_api_runtime
+from src.integrations.master_key import (
+    MasterKeyDeriver,
+    MasterKeyDomain,
+    MasterKeyError,
+)
+from src.integrations.mcp.credentials import MCPAuditReferenceSigner
 from tests.api.support import APITestCase
 
 
 class UsernameTokenServiceConfigTest(unittest.TestCase):
-    def test_token_hash_secret_can_be_required_fail_closed(self) -> None:
-        with self.assertRaises(AuthTokenValidationError) as ctx:
-            UsernameTokenService(object(), now_fn=lambda: datetime(2026, 5, 25), secret=None, require_secret=True)
-        self.assertEqual(ctx.exception.code, "token_secret_required")
+    def test_auth_token_hasher_rejects_serialization(self) -> None:
+        deriver = MasterKeyDeriver.from_bytes(b"a" * 32)
+        hasher = AuthTokenHasher(deriver.derive(MasterKeyDomain.AUTH_TOKEN))
 
-    def test_production_runtime_requires_token_hash_secret(self) -> None:
+        with self.assertRaises(TypeError):
+            pickle.dumps(hasher)
+
+    def test_auth_token_hasher_is_stable_and_domain_isolated(self) -> None:
+        deriver = MasterKeyDeriver.from_bytes(b"a" * 32)
+        hasher = AuthTokenHasher(deriver.derive(MasterKeyDomain.AUTH_TOKEN))
+        audit_signer = MCPAuditReferenceSigner(
+            deriver.derive(MasterKeyDomain.MCP_AUDIT_REFERENCE)
+        )
+
+        token_hash = hasher.hash_token("maf_tok_canary")
+        audit_reference = audit_signer.safe_reference(
+            "maf_tok_canary",
+            context="auth-domain-isolation-v1",
+        )
+
+        self.assertEqual(token_hash, hasher.hash_token("maf_tok_canary"))
+        self.assertTrue(hasher.verify_token("maf_tok_canary", token_hash))
+        self.assertFalse(hasher.verify_token("maf_tok_other", token_hash))
+        self.assertNotEqual(token_hash, audit_reference)
+        self.assertFalse(
+            audit_signer.verify_reference(
+                "maf_tok_canary",
+                token_hash,
+                context="auth-domain-isolation-v1",
+            )
+        )
+
+    def test_auth_token_hasher_rejects_wrong_domain_key(self) -> None:
+        deriver = MasterKeyDeriver.from_bytes(b"a" * 32)
+
+        with self.assertRaises(MasterKeyError) as raised:
+            AuthTokenHasher(deriver.derive(MasterKeyDomain.MCP_AUDIT_REFERENCE))
+
+        self.assertEqual(raised.exception.code, "maf_key_domain_invalid")
+
+        with self.assertRaises(MasterKeyError) as raised:
+            AuthTokenHasher(b"a" * 32)  # type: ignore[arg-type]
+
+        self.assertEqual(raised.exception.code, "maf_key_domain_invalid")
+
+    def test_username_service_requires_exact_auth_hasher(self) -> None:
+        with self.assertRaises(MasterKeyError) as raised:
+            UsernameTokenService(
+                object(),
+                now_fn=lambda: datetime(2026, 5, 25),
+                token_hasher=object(),  # type: ignore[arg-type]
+            )
+        self.assertEqual(raised.exception.code, "maf_key_domain_invalid")
+
+    def test_runtime_uses_master_key_domain_not_text_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict("os.environ", {"MAF_API_ENV": "production"}, clear=True):
-                with self.assertRaises(AuthTokenValidationError) as ctx:
-                    build_api_runtime(
-                        database_path=Path(tmpdir) / "api.sqlite3",
-                        audit_log_path=Path(tmpdir) / "audit.jsonl",
-                    )
-        self.assertEqual(ctx.exception.code, "token_secret_required")
+            with patch.dict(
+                "os.environ",
+                {
+                    "MAF_API_ENV": "test",
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_STATE_PLATFORM_CONFIG_BRIDGE": "0",
+                },
+                clear=True,
+            ):
+                runtime = build_api_runtime(
+                    database_path=Path(tmpdir) / "api.sqlite3",
+                    audit_log_path=Path(tmpdir) / "audit.jsonl",
+                    master_key_bytes=b"a" * 32,
+                )
+                self.assertIsNotNone(runtime.username_token_service)
+                runtime._engine.dispose()
 
 
 class AuthorizationTokenLifecycleAPITest(APITestCase):

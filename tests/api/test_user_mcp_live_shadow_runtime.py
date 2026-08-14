@@ -22,7 +22,6 @@ from src.core.models import (
 )
 from src.integrations.mcp.audit import MCPAuditService
 from src.integrations.mcp.config import MCPRuntimeConfig
-from src.integrations.mcp.credentials import CredentialCipher
 from src.integrations.mcp.endpoint_policy import (
     EndpointAllowlist,
     EndpointPolicy,
@@ -54,6 +53,10 @@ from src.integrations.mcp.shadow_compare import (
     migration_target_credential_digest,
     resolve_approved_migration_mapping,
     shadow_fixture_bindings_fingerprint,
+)
+from tests.master_key_support import (
+    audit_reference_signer,
+    credential_cipher as make_credential_cipher,
 )
 from src.orchestration.models import (
     OrchestrationRequest,
@@ -848,7 +851,8 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         source_fingerprint = legacy_migration_source_fingerprint(
             legacy_config.servers[0]
         )
-        credential_cipher = CredentialCipher(b"d" * 32)
+        credential_cipher = make_credential_cipher(b"d" * 32)
+        audit_signer = audit_reference_signer(b"d" * 32)
         migrated_server = UserMCPServer(
             server_id=target_id,
             owner_user_id="owner-1",
@@ -875,6 +879,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         )
         credential_digest = migration_target_credential_digest(
             credential_cipher,
+            audit_signer,
             server=migrated_server,
             credential_record=None,
             source_fingerprint=source_fingerprint,
@@ -944,6 +949,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             self.runtime.user_mcp_config_service,
             self.runtime.mcp_shadow_observer,
             self.runtime.mcp_credential_cipher,
+            self.runtime._mcp_audit_reference_signer,
             self.runtime._mcp_rollout_metric_recorder,
             self.runtime.workflow_provider,
             self.runtime.orchestration_service,
@@ -957,6 +963,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         self.runtime.user_mcp_config_service = _UserConfigSource((migrated_server,))
         self.runtime.mcp_shadow_observer = observer
         self.runtime.mcp_credential_cipher = credential_cipher
+        self.runtime._mcp_audit_reference_signer = audit_signer
         self.runtime._mcp_rollout_metric_recorder = metric
         self.runtime.workflow_provider = _PlanProvider(timeline, plan)
         self.runtime.orchestration_service = execution
@@ -1006,6 +1013,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
                 self.runtime.user_mcp_config_service,
                 self.runtime.mcp_shadow_observer,
                 self.runtime.mcp_credential_cipher,
+                self.runtime._mcp_audit_reference_signer,
                 self.runtime._mcp_rollout_metric_recorder,
                 self.runtime.workflow_provider,
                 self.runtime.orchestration_service,
@@ -1042,7 +1050,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             "deployment-1",
             "internal_shadow",
             window_started_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            window_ended_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
+            window_ended_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
         )
         self.assertEqual(audit_service.errors, [])
         self.assertEqual(gaps, [])
@@ -1095,7 +1103,8 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         source_fingerprint = legacy_migration_source_fingerprint(
             legacy_config.servers[0]
         )
-        credential_cipher = CredentialCipher(b"e" * 32)
+        credential_cipher = make_credential_cipher(b"e" * 32)
+        audit_signer = audit_reference_signer(b"e" * 32)
         migrated_server = UserMCPServer(
             server_id=target_id,
             owner_user_id="owner-allowlisted-http",
@@ -1122,6 +1131,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         )
         credential_digest = migration_target_credential_digest(
             credential_cipher,
+            audit_signer,
             server=migrated_server,
             credential_record=None,
             source_fingerprint=source_fingerprint,
@@ -1226,6 +1236,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             self.runtime.user_mcp_config_service,
             self.runtime.mcp_shadow_observer,
             self.runtime.mcp_credential_cipher,
+            self.runtime._mcp_audit_reference_signer,
             self.runtime.workflow_provider,
             self.runtime.orchestration_service,
             self.runtime._conversation_memory_builder,
@@ -1240,6 +1251,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         )
         self.runtime.mcp_shadow_observer = observer
         self.runtime.mcp_credential_cipher = credential_cipher
+        self.runtime._mcp_audit_reference_signer = audit_signer
         self.runtime.workflow_provider = _PlanProvider(timeline, plan)
         self.runtime.orchestration_service = execution
         self.runtime._conversation_memory_builder = None
@@ -1271,6 +1283,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
                 self.runtime.user_mcp_config_service,
                 self.runtime.mcp_shadow_observer,
                 self.runtime.mcp_credential_cipher,
+                self.runtime._mcp_audit_reference_signer,
                 self.runtime.workflow_provider,
                 self.runtime.orchestration_service,
                 self.runtime._conversation_memory_builder,
@@ -1285,7 +1298,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             "deployment-allowlisted-http",
             "internal_shadow",
             window_started_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            window_ended_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
+            window_ended_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
         )
         self.assertEqual(gaps, [])
         self.assertEqual(audit_service.errors, [])
@@ -1407,7 +1420,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             "deployment-allowlisted-http",
             "internal_shadow",
             window_started_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            window_ended_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
+            window_ended_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
         )
         cleanup_samples = [
             sample

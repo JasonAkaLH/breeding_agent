@@ -17,9 +17,15 @@ from sqlalchemy import Engine
 
 from src.auth import (
     AuthGenerationCache,
+    AuthTokenHasher,
     AuthTokenValidationError,
     InMemoryAuthInvalidationBus,
     UsernameTokenService,
+)
+from src.integrations.master_key import (
+    MasterKeyDeriver,
+    MasterKeyDomain,
+    MasterKeyError,
 )
 from src.capabilities.main_agent import (
     MAIN_AGENT_CAPABILITY_DESCRIPTORS,
@@ -125,7 +131,13 @@ from src.integrations.model_editions import (
     validate_model_reasoning_effort_configs,
 )
 from src.integrations.mcp import MCPRuntimeBundle, MCPRuntimeConfig, MCPRuntimeRefreshResult, MCPRuntimeState, load_mcp_server_config
-from src.integrations.mcp.credentials import CredentialCipher, MCPRecoveryService
+from src.integrations.mcp.credentials import (
+    MCPAuditReferenceSigner,
+    MCPCredentialCipher,
+    MCPRecoveryCipher,
+    MCPRecoveryService,
+    MasterKeySentinelCipher,
+)
 from src.integrations.mcp.audit import MCPAuditService
 from src.integrations.mcp.endpoint_policy import EndpointAllowlist, EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
@@ -558,6 +570,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         workflow_provider: WorkflowRouter,
         mysql_adapter: MySQLReadonlyAdapter | None = None,
         username_token_service: UsernameTokenService | None = None,
+        master_key_sentinel_cipher: MasterKeySentinelCipher,
+        mcp_audit_reference_signer: MCPAuditReferenceSigner,
         conversation_title_generator: ConversationTitleGenerator | None = None,
         upload_store: InMemoryUploadStore | None = None,
         conversation_memory_builder: ConversationMemoryBuilder | None = None,
@@ -576,7 +590,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         user_mcp_config_service: UserMCPConfigService | None = None,
         user_mcp_health_runner: MCPHealthRunner | None = None,
         user_mcp_gateway: MCPGateway | None = None,
-        mcp_credential_cipher: CredentialCipher | None = None,
+        mcp_credential_cipher: MCPCredentialCipher | None = None,
         mcp_remote_task_recovery_worker: MCPRemoteTaskRecoveryWorker | None = None,
         mcp_invalidation_bus: InMemoryMCPInvalidationBus | None = None,
         postgres_mcp_invalidation_bus: PostgresMCPInvalidationBus | None = None,
@@ -617,6 +631,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         self.workflow_provider = workflow_provider
         self._mysql_adapter = mysql_adapter
         self.username_token_service = username_token_service
+        self._master_key_sentinel_cipher = master_key_sentinel_cipher
+        self._mcp_audit_reference_signer = mcp_audit_reference_signer
         self.auth_generation_cache = auth_generation_cache or AuthGenerationCache()
         self.auth_invalidation_bus = auth_invalidation_bus
         self.postgres_auth_invalidation_bus = postgres_auth_invalidation_bus
@@ -1288,13 +1304,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 payload={
                     **(
                         {
-                            "safe_owner_ref": self.mcp_credential_cipher.safe_owner_reference(
+                            "safe_owner_ref": self._mcp_audit_reference_signer.safe_owner_reference(
                                 authenticated_username,
                                 context=mcp_assignment.config_version,
                             )
                         }
-                        if self.mcp_credential_cipher is not None
-                        else {}
                     ),
                     "safe_task_ref": hashlib.sha256(
                         f"{mcp_assignment.config_version}:{task_id}".encode("utf-8")
@@ -2013,6 +2027,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 continue
             digest = migration_target_credential_digest(
                 cipher,
+                self._mcp_audit_reference_signer,
                 server=server,
                 credential_record=credential,
                 source_fingerprint=source_fingerprint,
@@ -8074,6 +8089,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     )
 
     async def start(self) -> None:
+        try:
+            await self._master_key_sentinel_cipher.create_or_verify_sentinel(
+                self.storage
+            )
+        except Exception:
+            self._engine.dispose()
+            raise
         await self._admit_mcp_rollout_instance()
         await self._reconcile_cp7_mcp_authority()
         if self._mcp_cp7_safety_facade is not None:
@@ -8108,8 +8130,6 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 self._run_mcp_auth_invalidation_listener(),
                 name="mcp-auth-invalidation-listener",
             )
-        if self.mcp_credential_cipher is not None:
-            await self.mcp_credential_cipher.create_or_verify_sentinel(self.storage)
         if self.mcp_remote_task_recovery_worker is not None:
             await self._recover_user_mcp_calls()
             await self.mcp_remote_task_recovery_worker.start()
@@ -8709,7 +8729,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         node_id=call.node_id,
                         event_type="mcp.execution_status_unknown",
                         payload={
-                            "safe_call_ref": call.call_ref,
+                            "safe_call_ref": self._mcp_audit_reference_signer.safe_reference(
+                                call.call_ref,
+                                context="mcp-call-reference-v1",
+                            ),
                             "status": "unknown",
                             "error_code": "execution_status_unknown",
                         },
@@ -8830,7 +8853,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     node_id=call.node_id,
                     event_type="mcp.rollout_metric_gap",
                     payload={
-                        "safe_call_ref": call.call_ref,
+                        "safe_call_ref": self._mcp_audit_reference_signer.safe_reference(
+                            call.call_ref,
+                            context="mcp-call-reference-v1",
+                        ),
                         "metric_family": metric_family,
                         "gap_reason": "metric_recording_failed",
                     },
@@ -9962,6 +9988,35 @@ def _load_mcp_shadow_runtime_contract(
     return manifest, bindings, None
 
 
+_LEGACY_MASTER_KEY_AUTHORITY_ENV_KEYS = (
+    "MCP_CREDENTIAL_KEY_FILE_HOST",
+    "MCP_CREDENTIAL_KEY_FILE",
+    "MAF_AUTH_TOKEN_HASH_SECRET",
+    "MAF_AUTH_TOKEN_HASH_SECRET_REQUIRED",
+)
+
+
+def _resolve_master_key_deriver(
+    *,
+    master_key_file: str | Path | None,
+    master_key_bytes: bytes | None,
+    env: Mapping[str, str],
+) -> MasterKeyDeriver:
+    if any(key in env for key in _LEGACY_MASTER_KEY_AUTHORITY_ENV_KEYS):
+        raise MasterKeyError("maf_master_key_legacy_authority_configured")
+    if master_key_file is not None and master_key_bytes is not None:
+        raise ValueError("master_key_file and master_key_bytes are mutually exclusive")
+    if master_key_bytes is not None:
+        return MasterKeyDeriver.from_bytes(master_key_bytes)
+    resolved_path = master_key_file
+    if resolved_path is None:
+        raw_path = env.get("MAF_MASTER_KEY_FILE", "")
+        resolved_path = raw_path if raw_path else None
+    if resolved_path is None:
+        raise MasterKeyError("maf_master_key_file_missing")
+    return MasterKeyDeriver.from_file(resolved_path)
+
+
 def build_api_runtime(
     *,
     database_path: str | Path,
@@ -10000,8 +10055,8 @@ def build_api_runtime(
     mcp_sidecar_client: Any | None = None,
     mcp_runtime_state: MCPRuntimeState | None = None,
     runtime_replanner: RuntimeReplanner | None = None,
-    auth_token_hash_secret: str | None = None,
-    auth_token_hash_secret_required: bool | None = None,
+    master_key_file: str | Path | None = None,
+    master_key_bytes: bytes | None = None,
     upload_store: InMemoryUploadStore | None = None,
     conversation_memory_builder: ConversationMemoryBuilder | None = None,
     enable_conversation_memory: bool = True,
@@ -10013,7 +10068,6 @@ def build_api_runtime(
     skill_sandbox_client: Any | None = None,
     enable_user_mcp: bool | None = None,
     enable_user_mcp_routing: bool | None = None,
-    user_mcp_credential_key_file: str | Path | None = None,
     user_mcp_terminal_result_store_path: str | Path | None = None,
     mcp_legacy_retirement_inventory_id: str | None = None,
     mcp_legacy_retirement_inventory_sha256: str | None = None,
@@ -10026,6 +10080,26 @@ def build_api_runtime(
     mcp_cp7_maintenance_authorization: object | None = None,
     mcp_cp7_maintenance_authorizer: Callable[[object], bool] | None = None,
 ) -> ApiRuntime:
+    master_key_deriver = _resolve_master_key_deriver(
+        master_key_file=master_key_file,
+        master_key_bytes=master_key_bytes,
+        env=os.environ,
+    )
+    mcp_credential_cipher = MCPCredentialCipher(
+        master_key_deriver.derive(MasterKeyDomain.MCP_CREDENTIAL)
+    )
+    mcp_recovery_cipher = MCPRecoveryCipher(
+        master_key_deriver.derive(MasterKeyDomain.MCP_RECOVERY)
+    )
+    auth_token_hasher = AuthTokenHasher(
+        master_key_deriver.derive(MasterKeyDomain.AUTH_TOKEN)
+    )
+    mcp_audit_reference_signer = MCPAuditReferenceSigner(
+        master_key_deriver.derive(MasterKeyDomain.MCP_AUDIT_REFERENCE)
+    )
+    master_key_sentinel_cipher = MasterKeySentinelCipher(
+        master_key_deriver.derive(MasterKeyDomain.KEY_VALIDATION)
+    )
     _bootstrap_runtime_config_env(
         platform_llm_text_generator=platform_llm_text_generator,
         platform_llm_config=platform_llm_config,
@@ -10045,24 +10119,12 @@ def build_api_runtime(
         enable_conversation_memory=enable_conversation_memory,
     )
 
-    token_secret = auth_token_hash_secret if auth_token_hash_secret is not None else os.environ.get("MAF_AUTH_TOKEN_HASH_SECRET")
     deployment_env = (
         os.environ.get("MAF_API_ENV")
         or os.environ.get("MAF_ENV")
         or os.environ.get("APP_ENV")
         or ""
     ).strip().lower()
-    token_secret_required = (
-        auth_token_hash_secret_required
-        if auth_token_hash_secret_required is not None
-        else (
-            os.environ.get("MAF_AUTH_TOKEN_HASH_SECRET_REQUIRED", "").strip().lower() in {"1", "true", "yes", "on"}
-            or deployment_env in {"prod", "production"}
-        )
-    )
-    if token_secret_required and not token_secret:
-        raise AuthTokenValidationError("Auth token hash secret is required.", code="token_secret_required")
-
     canonical_mcp_rollout_configured = mcp_rollout_env_is_configured(os.environ)
     mcp_rollout_config, user_mcp_enabled = _resolve_user_mcp_rollout_config(
         enable_user_mcp=enable_user_mcp,
@@ -10071,14 +10133,6 @@ def build_api_runtime(
     )
     user_mcp_routing_enabled = user_mcp_enabled and (
         mcp_rollout_config.routing_mode in {MCPRoutingMode.SHADOW, MCPRoutingMode.ENFORCE}
-    )
-    mcp_credential_cipher = (
-        CredentialCipher.from_key_file(
-            user_mcp_credential_key_file,
-            require_read_only=deployment_env in {"prod", "production"},
-        )
-        if user_mcp_enabled
-        else None
     )
     user_mcp_capacity_values = (
         (
@@ -10252,7 +10306,7 @@ def build_api_runtime(
             )
         )
         credential_resolver = UserMCPCredentialResolver(storage, mcp_credential_cipher)
-        recovery_service = MCPRecoveryService(storage, mcp_credential_cipher)
+        recovery_service = MCPRecoveryService(storage, mcp_recovery_cipher)
         user_client_factory = UserMCPClientFactory(
             endpoint_policy,
             recovery_service=recovery_service,
@@ -10426,8 +10480,7 @@ def build_api_runtime(
     username_token_service = UsernameTokenService(
         storage,
         now_fn=ApiRuntime._utcnow_naive,
-        secret=token_secret,
-        require_secret=token_secret_required,
+        token_hasher=auth_token_hasher,
         auth_generation_cache=auth_generation_cache,
         auth_invalidation_bus=auth_invalidation_bus,
     )
@@ -10948,7 +11001,10 @@ def build_api_runtime(
                     node_id=binding.node_id,
                     event_type="mcp.rollout_metric_gap",
                     payload={
-                        "safe_call_ref": binding.call_ref,
+                        "safe_call_ref": mcp_audit_reference_signer.safe_reference(
+                            binding.call_ref,
+                            context="mcp-call-reference-v1",
+                        ),
                         "metric_family": "remote_task_terminal",
                         "gap_reason": reason,
                     },
@@ -11044,6 +11100,7 @@ def build_api_runtime(
             storage=storage,
             gateway=user_mcp_gateway,
             selector=mcp_tool_selector,
+            audit_reference_signer=mcp_audit_reference_signer,
             server_router=mcp_server_router,
             live_event_recorder=record_live_event,
             now_fn=ApiRuntime._utcnow_naive,
@@ -11089,7 +11146,7 @@ def build_api_runtime(
                 selector=mcp_tool_selector,
                 endpoint_policy=endpoint_policy,
                 digest_key=derive_shadow_catalog_digest_key(
-                    mcp_credential_cipher,
+                    mcp_audit_reference_signer,
                     config_fingerprint=mcp_rollout_config.fingerprint,
                 ),
             )
@@ -11195,6 +11252,8 @@ def build_api_runtime(
         ),
         mysql_adapter=resolved_mysql_adapter,
         username_token_service=username_token_service,
+        master_key_sentinel_cipher=master_key_sentinel_cipher,
+        mcp_audit_reference_signer=mcp_audit_reference_signer,
         conversation_title_generator=resolved_conversation_title_generator,
         upload_store=upload_store,
         conversation_memory_builder=resolved_conversation_memory_builder,

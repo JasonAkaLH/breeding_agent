@@ -30,7 +30,6 @@ from src.integrations.mcp.adapter_2026 import (
 )
 from src.integrations.mcp.client import MCPAuthRequiredError, MCPClientError, MCPProtocolError
 from src.integrations.mcp.credentials import (
-    CredentialCipher,
     CredentialSecurityError,
     EncryptedCredential,
     MAX_REMOTE_TASK_ID_BYTES,
@@ -39,6 +38,7 @@ from src.integrations.mcp.credentials import (
     MCPRecoveryCallContext,
     MCPRecoveryService,
 )
+from tests.master_key_support import recovery_cipher
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.protocol import MCPStreamEvent, MCPTransportResponse
 from src.integrations.mcp.recovery_worker import MCPRemoteTaskRecoveryWorker
@@ -251,7 +251,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             bootstrap_sqlite_database(engine)
             session_factory = create_sqlite_session_factory(engine)
             first_storage = SQLiteStorage(session_factory)
-            recovery = MCPRecoveryService(first_storage, CredentialCipher(b"r" * 32))
+            recovery = MCPRecoveryService(first_storage, recovery_cipher(b"r" * 32))
             first_transport = FakeRequestScopedTransport(
                 [
                     response("server_discover_result.json"),
@@ -302,7 +302,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
                 transport=second_transport,
                 enable_elicitation=True,
                 recovery_service=MCPRecoveryService(
-                    second_storage, CredentialCipher(b"r" * 32)
+                    second_storage, recovery_cipher(b"r" * 32)
                 ),
             )
             await second.initialize()
@@ -434,7 +434,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
                 enable_tasks=True,
                 safe_ref_factory=lambda prefix: f"{prefix}:durable",
                 recovery_service=MCPRecoveryService(
-                    first_storage, CredentialCipher(b"t" * 32)
+                    first_storage, recovery_cipher(b"t" * 32)
                 ),
             )
             await first.initialize()
@@ -469,7 +469,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
                 transport=second_transport,
                 enable_tasks=True,
                 recovery_service=MCPRecoveryService(
-                    SQLiteStorage(session_factory), CredentialCipher(b"t" * 32)
+                    SQLiteStorage(session_factory), recovery_cipher(b"t" * 32)
                 ),
                 recovery_only=True,
             )
@@ -518,7 +518,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             session_factory = create_sqlite_session_factory(engine)
             storage = SQLiteStorage(session_factory)
             recovery = MCPRecoveryService(
-                storage, CredentialCipher(b"z" * 32), now_fn=lambda: now
+                storage, recovery_cipher(b"z" * 32), now_fn=lambda: now
             )
             await storage.save_conversation(Conversation("conv-terminal", "alice"))
             execution_transports: dict[str, FakeRequestScopedTransport] = {}
@@ -650,7 +650,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             storage = SQLiteStorage(create_sqlite_session_factory(engine))
             recovery = MCPRecoveryService(
                 storage,
-                CredentialCipher(b"z" * 32),
+                recovery_cipher(b"z" * 32),
                 now_fn=lambda: now + timedelta(seconds=1),
             )
             recovery_transports: dict[str, FakeRequestScopedTransport] = {}
@@ -741,7 +741,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             server_id="crm",
             transport=transport,
             enable_tasks=True,
-            recovery_service=MCPRecoveryService(object(), CredentialCipher(b"u" * 32)),
+            recovery_service=MCPRecoveryService(object(), recovery_cipher(b"u" * 32)),
         )
         await adapter.initialize()
         await adapter.list_tools()
@@ -762,7 +762,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_task_private_payload_size_caps_before_encrypt_and_after_decrypt(self) -> None:
-        cipher = CredentialCipher(b"s" * 32)
+        cipher = recovery_cipher(b"s" * 32)
         context = {
             "owner_user_id": "alice",
             "task_id": "task-1",
@@ -791,7 +791,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             cipher.unseal_task_private_payload(oversized, **context)
 
     async def test_recovery_rejects_oversized_raw_continuation_values(self) -> None:
-        recovery = MCPRecoveryService(object(), CredentialCipher(b"v" * 32))
+        recovery = MCPRecoveryService(object(), recovery_cipher(b"v" * 32))
         context = MCPRecoveryCallContext("alice", "task-1", "node-1", "call-1")
         with self.assertRaisesRegex(
             CredentialSecurityError, "mcp_request_state_too_large"

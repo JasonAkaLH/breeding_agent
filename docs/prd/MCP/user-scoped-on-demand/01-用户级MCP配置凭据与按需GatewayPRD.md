@@ -28,7 +28,7 @@
 
 1. 用户可创建、编辑、删除和测试属于自己的远程 MCP 配置。
 2. 用户配置的 MCP 在后端持久化，不依赖浏览器 `localStorage` 或某一设备的本地缓存。
-3. 用户凭据以可解密密文存入数据库，加密主密钥以服务器挂载文件提供。
+3. 用户凭据以可解密密文存入数据库；服务器只挂载一个固定在线根密钥，credential 加密使用闭合 MCP credential 领域子密钥。
 4. 后端仅在连接测试或任务执行时按需建立 MCP 运行时，结束后释放。
 5. 支持远程 HTTPS Streamable HTTP 与受控的 HTTP Legacy HTTP+SSE，不支持本地 `stdio`；Client 目标兼容版本扩展为 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25`、`2026-07-28`。
 
@@ -64,7 +64,7 @@
 | 连接 | 同一任务中复用临时 Client/连接池，任务之间不复用 |
 | 输出 | 不设产品级大小上限；超出上下文容量时临时落盘并分块处理 |
 | 健康可用 | 只有完整发现成功且至少存在一个合法 Tool 时为 `available`；未声明 Tool 能力或 Tool 列表为空均为 `unavailable` |
-| 密钥 | 数据库保存密文，单一固定主密钥以服务器文件提供，不支持轮换 |
+| 密钥 | 数据库保存密文，单一固定在线根密钥以服务器文件提供；业务密码学只使用闭合领域子密钥，本阶段不支持轮换 |
 | 前端持久化 | 前端不保存凭据、Tool List、Schema 或可信执行状态 |
 
 ## 6. 目标架构
@@ -153,7 +153,7 @@ granted_at
 
 1. `user_mcp_health_attempt`：包含随机 `attempt_id`、`owner_user_id`、`server_id`、捕获的 `config_version/security_version`、`runner_instance_id`、`lease_expires_at` 和更新时间。健康测试只能通过 attempt 所有权与版本 CAS 续租、写回或释放。
 2. `user_mcp_scope_lease`：包含随机 `scope_id`、`owner_user_id`、`server_id`、`security_version`、`gateway_instance_id`、`lease_expires_at` 和更新时间。不得保存凭据、Tool、Schema、远端 Task ID、MCP Session ID 或业务结果。
-3. `mcp_credential_key_validation`：单例密钥一致性验证记录，只保存固定验证明文的随机 Nonce、密文和格式版本，不保存主密钥、主密钥 Hash 或 `key_id`。
+3. `maf_master_key_validation`：单例根密钥一致性验证记录，只保存 Key validation 领域固定验证明文的随机 Nonce、密文和 derivation version，不保存根密钥、根密钥 Hash、派生子密钥或 `key_id`。
 
 Scope lease 必须短周期续租；续租同时检查 Server 未 tombstone、仍启用且 `security_version` 未变化。续租失败时 Gateway 必须停止新调用并取消/关闭当前 Scope。过期 lease 可由协调清理器回收，但不得仅凭无确认的进程内通知或 PostgreSQL `NOTIFY` 判断远端 Scope 已关闭。
 
@@ -170,18 +170,18 @@ Scope lease 必须短周期续租；续租同时检查 Server 未 tombstone、�
 ### 8.1 加密算法
 
 1. 使用 `AES-256-GCM`，复用仓库已锁定的 `cryptography` 依赖。
-2. 每次凭据写入生成新 Nonce，不允许在同一主密钥下重用。
+2. 每次凭据写入生成新 Nonce，不允许在同一 MCP credential 领域子密钥下重用。
 3. AAD 至少绑定 `owner_user_id`、`server_id` 和 `encryption_version`，防止密文在用户或 Server 之间被替换。
 4. 凭据仅在连接测试或任务调用前解密，只存在于该次调用内存。
 5. API 查询只返回 `credential_configured: true|false`，不返回明文、密文、Nonce 或可逆推的摘要。
 
 ### 8.2 密钥文件契约
 
-- 路径由 `MCP_CREDENTIAL_KEY_FILE` 指定。
+- backend 的唯一根密钥路径由 `MAF_MASTER_KEY_FILE` 指定，Compose 固定为 `/run/secrets/maf-master.key`。
 - 文件使用 UTF-8 文本保存一行标准 Base64；解码后必须恰好为 32-byte 主密钥，只允许末尾一个换行，不接受空白折叠、Hex 或自动补位。
 - 文件不进 Git、不进 Docker 镜像、不进普通配置文件，生产权限为 `0400`。
 - 所有 Gateway 实例必须挂载同一份主密钥，否则不得取得 Ready 状态。
-- 启动时先校验文件可读性、权限和长度，再对数据库单例 `mcp_credential_key_validation` 执行原子 create-or-verify；无法创建、读取或解密该记录时不得取得 Ready 状态。
+- 启动时先校验文件可读性、权限和长度，派生五个闭合领域子密钥，再使用 Key validation 子密钥对数据库单例 `maf_master_key_validation` 执行原子 create-or-verify；无法创建、读取或解密该记录时不得取得 Ready 状态。
 - 首次部署顺序固定为“先完成向后兼容的数据库增量建表，再为所有实例挂载同一密钥，最后发布读取 sentinel 的新版本”。并发首启只能有一个实例创建 sentinel，其余实例读取并验证胜出的记录。
 - 回滚旧版本时保留 sentinel 表和记录；旧版本忽略该表，新版本再次发布时继续验证。不得由回滚脚本删除、重建或覆盖 sentinel。
 - 不自动生成或覆盖密钥文件；数据库暂时不可用或只读且 sentinel 尚不存在时 fail closed，不以跳过一致性验证继续 Ready。

@@ -433,7 +433,7 @@ def _parser() -> argparse.ArgumentParser:
         "--database-path", help="Initialized local SQLite database path."
     )
     parser.add_argument(
-        "--credential-key-file", help="Read-only 32-byte credential key file."
+        "--master-key-file", help="Read-only canonical Base64 MAF master key file."
     )
     parser.add_argument(
         "--service-account-owner", help="Exact target service-account owner."
@@ -455,15 +455,23 @@ def _build_local_applier(
     live_health_validator: LegacyMigrationLiveHealthValidator | None,
     live_validator_provenance: str | None,
 ) -> ArtifactApplier:
-    if not args.credential_key_file:
+    if not args.master_key_file:
         raise MigrationCommandError("apply_backend_options_required")
     if not args.service_account_owner:
         raise MigrationCommandError("service_account_owner_required")
-    from src.integrations.mcp.credentials import CredentialCipher
+    from src.integrations.master_key import MasterKeyDeriver, MasterKeyDomain
+    from src.integrations.mcp.credentials import (
+        MCPAuditReferenceSigner,
+        MCPCredentialCipher,
+    )
     from src.integrations.mcp.endpoint_policy import EndpointAllowlist, EndpointPolicy
 
-    cipher = CredentialCipher.from_key_file(
-        args.credential_key_file, require_read_only=True
+    deriver = MasterKeyDeriver.from_file(args.master_key_file)
+    cipher = MCPCredentialCipher(
+        deriver.derive(MasterKeyDomain.MCP_CREDENTIAL)
+    )
+    audit_signer = MCPAuditReferenceSigner(
+        deriver.derive(MasterKeyDomain.MCP_AUDIT_REFERENCE)
     )
     state_config = build_state_platform_runtime_config(
         env=os.environ,
@@ -541,6 +549,7 @@ def _build_local_applier(
     applier = LocalLegacyMigrationApplier(
         storage=storage,
         credential_cipher=cipher,
+        audit_reference_signer=audit_signer,
         endpoint_policy=endpoint_policy,
         config=config,
         plan=plan,

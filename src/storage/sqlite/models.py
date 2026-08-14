@@ -850,15 +850,19 @@ class UserMCPScopeLeaseRow(SQLiteBase):
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
 
 
-class MCPCredentialKeyValidationRow(SQLiteBase):
-    __tablename__ = "mcp_credential_key_validation"
+class MAFMasterKeyValidationRow(SQLiteBase):
+    __tablename__ = "maf_master_key_validation"
+    __table_args__ = (
+        CheckConstraint("singleton_key = 1", name="singleton_key_one"),
+        CheckConstraint("length(validation_nonce) = 12", name="validation_nonce_length"),
+        CheckConstraint("derivation_version = 1", name="derivation_version_one"),
+    )
 
-    validation_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    singleton_key: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, server_default=text("1"))
+    singleton_key: Mapped[int] = mapped_column(Integer, primary_key=True)
     validation_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     validation_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    encryption_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    derivation_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
 
 
 class ConversationRow(SQLiteBase):

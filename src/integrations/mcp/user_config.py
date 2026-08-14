@@ -14,7 +14,7 @@ from src.core.enums import (
 )
 from src.core.models import UserMCPCredentialRecord, UserMCPServer
 
-from .credentials import CredentialCipher, EncryptedCredential
+from .credentials import EncryptedCredential, MCPCredentialCipher
 from .endpoint_policy import EndpointPolicy
 from .headers import validate_auth_header_name, validate_static_headers
 from .invalidation import (
@@ -45,7 +45,7 @@ class UserMCPConfigService:
         self,
         *,
         storage: Any,
-        credential_cipher: CredentialCipher,
+        credential_cipher: MCPCredentialCipher,
         endpoint_policy: EndpointPolicy,
         health_runner: MCPHealthScheduler | None = None,
         invalidation_bus: MCPInvalidationPublisher | None = None,

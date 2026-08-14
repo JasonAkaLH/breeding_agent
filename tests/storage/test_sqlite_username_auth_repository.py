@@ -10,6 +10,7 @@ from src.auth import AuthTokenValidationError, UsernameTokenService
 import src.core.models as core_models
 from src.storage.sqlite import SQLiteStorage
 from src.storage.sqlite.repositories import SQLiteStateRepository
+from tests.master_key_support import auth_token_hasher
 from tests.storage.support import SQLiteStorageTestCase
 
 
@@ -90,8 +91,7 @@ class SQLiteUsernameAuthRepositoryContractTest(SQLiteStorageTestCase):
             service = UsernameTokenService(
                 SQLiteStorage(self.session_factory),
                 now_fn=lambda: datetime(2026, 5, 25, 12, 0, 0),
-                secret="test-secret",
-                require_secret=True,
+                token_hasher=auth_token_hasher(b"a" * 32),
             )
             token_record, first = await service.login_username("alice")
             self.assertEqual(token_record.username, "alice")

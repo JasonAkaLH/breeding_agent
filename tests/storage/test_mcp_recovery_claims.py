@@ -15,13 +15,10 @@ from src.core.models import (
     Task,
     TaskNode,
 )
-from src.integrations.mcp.credentials import (
-    CredentialCipher,
-    MCPRecoveryCallContext,
-    MCPRecoveryService,
-)
+from src.integrations.mcp.credentials import MCPRecoveryCallContext, MCPRecoveryService
 from src.storage.sqlite import SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
+from tests.master_key_support import recovery_cipher
 
 
 class MCPRecoveryClaimsTest(SQLiteStorageTestCase):
@@ -395,7 +392,7 @@ class MCPRecoveryClaimsTest(SQLiteStorageTestCase):
     def test_initial_terminal_create_is_due_only_after_waiting_publication(self) -> None:
         recovery = MCPRecoveryService(
             self.storage,
-            CredentialCipher(b"i" * 32),
+            recovery_cipher(b"i" * 32),
             now_fn=lambda: self.now,
         )
 

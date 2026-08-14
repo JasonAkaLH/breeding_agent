@@ -1,30 +1,29 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import hmac
 import json
 import os
-import stat
 from datetime import datetime, timezone
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
-from uuid import uuid4
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from src.core.models import (
-    MCPCredentialKeyValidation,
+    MAFMasterKeyValidation,
     MCPRemoteTaskBinding,
     MCPSealedState,
 )
+from src.integrations.master_key import (
+    MasterKeyDomain,
+    MasterKeyError,
+    _DerivedDomainKey,
+)
 
 
-MCP_CREDENTIAL_KEY_FILE_ENV = "MCP_CREDENTIAL_KEY_FILE"
 CREDENTIAL_ENCRYPTION_VERSION = 1
 MAX_CREDENTIAL_JSON_BYTES = 16 * 1024
 MAX_TASK_PRIVATE_JSON_BYTES = 64 * 1024
@@ -32,8 +31,8 @@ MAX_REQUEST_STATE_BYTES = 32 * 1024
 MAX_REMOTE_TASK_ID_BYTES = 4 * 1024
 _NONCE_BYTES = 12
 _AES_GCM_TAG_BYTES = 16
-_SENTINEL_PLAINTEXT = b"mcp-credential-key-validation-v1"
-_SENTINEL_AAD = b"mcp-credential-key-validation\x00v1"
+_MASTER_KEY_SENTINEL_PLAINTEXT = b"maf-master-key-validation-v1"
+_MASTER_KEY_SENTINEL_AAD = b"maf-master-key-validation\x00v1"
 _ALLOWED_AUTH_FIELDS = {
     "bearer": frozenset({"token"}),
     "api_key_header": frozenset({"value"}),
@@ -84,15 +83,29 @@ class MCPRecoveryCallContext:
     continuation_plan: Mapping[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SealedMasterKeySentinel:
+    validation_nonce: bytes
+    validation_ciphertext: bytes
+    derivation_version: int = 1
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(validation_nonce=<redacted>, "
+            "validation_ciphertext=<redacted>, "
+            f"derivation_version={self.derivation_version})"
+        )
+
+
 @runtime_checkable
 class CredentialSentinelStorage(Protocol):
     """Minimal storage boundary needed for atomic sentinel create-or-verify."""
 
-    async def get_mcp_credential_key_validation(self) -> MCPCredentialKeyValidation | None: ...
+    async def get_maf_master_key_validation(self) -> MAFMasterKeyValidation | None: ...
 
-    async def create_or_get_mcp_credential_key_validation(
-        self, record: MCPCredentialKeyValidation
-    ) -> MCPCredentialKeyValidation: ...
+    async def create_or_get_maf_master_key_validation(
+        self, record: MAFMasterKeyValidation
+    ) -> MAFMasterKeyValidation: ...
 
 
 @runtime_checkable
@@ -112,95 +125,15 @@ class MCPRecoveryStorage(Protocol):
     ) -> MCPRemoteTaskBinding | None: ...
 
 
-def load_credential_key(
-    path: str | os.PathLike[str] | None = None,
-    *,
-    environ: Mapping[str, str] | None = None,
-    require_read_only: bool = False,
-) -> bytes:
-    environment = os.environ if environ is None else environ
-    raw_path = os.fspath(path) if path is not None else environment.get(MCP_CREDENTIAL_KEY_FILE_ENV, "")
-    if not raw_path:
-        raise CredentialSecurityError("mcp_credential_key_file_missing")
+class MCPCredentialCipher:
+    """Encrypts only owner-scoped MCP credentials."""
 
-    key_path = Path(raw_path)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(key_path, flags)
-    except OSError as exc:
-        try:
-            if key_path.is_symlink():
-                raise CredentialSecurityError("mcp_credential_key_file_invalid_type") from exc
-        except OSError:
-            pass
-        raise CredentialSecurityError("mcp_credential_key_file_unavailable") from exc
-    try:
-        file_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(file_stat.st_mode):
-            raise CredentialSecurityError("mcp_credential_key_file_invalid_type")
-        allowed_permissions = {0o400} if require_read_only else {0o400, 0o600}
-        if stat.S_IMODE(file_stat.st_mode) not in allowed_permissions:
-            raise CredentialSecurityError("mcp_credential_key_file_invalid_permissions")
-        with os.fdopen(descriptor, "rb") as key_file:
-            descriptor = -1
-            payload = key_file.read()
-    except OSError as exc:
-        raise CredentialSecurityError("mcp_credential_key_file_unavailable") from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    if payload.endswith(b"\n"):
-        payload = payload[:-1]
-    if not payload or b"\n" in payload or b"\r" in payload or any(byte in b" \t\v\f" for byte in payload):
-        raise CredentialSecurityError("mcp_credential_key_file_invalid_format")
-    try:
-        key = base64.b64decode(payload, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise CredentialSecurityError("mcp_credential_key_file_invalid_format") from exc
-    if base64.b64encode(key) != payload:
-        raise CredentialSecurityError("mcp_credential_key_file_invalid_format")
-    if len(key) != 32:
-        raise CredentialSecurityError("mcp_credential_key_invalid_length")
-    return key
+    __slots__ = ("_cipher",)
 
-
-class CredentialCipher:
-    def __init__(self, key: bytes) -> None:
-        if not isinstance(key, bytes) or len(key) != 32:
-            raise CredentialSecurityError("mcp_credential_key_invalid_length")
-        self._cipher = AESGCM(key)
-        self._rollout_audit_key = hmac.new(
-            key,
-            b"mcp-rollout-audit-owner-v1",
-            hashlib.sha256,
-        ).digest()
-
-    def safe_owner_reference(self, owner_user_id: str, *, context: str) -> str:
-        owner = str(owner_user_id).strip()
-        safe_context = str(context).strip()
-        if not owner or not safe_context:
-            raise CredentialSecurityError("mcp_rollout_audit_identity_invalid")
-        return hmac.new(
-            self._rollout_audit_key,
-            f"{safe_context}\0{owner}".encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-
-    @classmethod
-    def from_key_file(
-        cls,
-        path: str | os.PathLike[str] | None = None,
-        *,
-        environ: Mapping[str, str] | None = None,
-        require_read_only: bool = False,
-    ) -> "CredentialCipher":
-        return cls(
-            load_credential_key(
-                path,
-                environ=environ,
-                require_read_only=require_read_only,
-            )
-        )
+    def __init__(self, key: _DerivedDomainKey) -> None:
+        if not isinstance(key, _DerivedDomainKey):
+            raise MasterKeyError("maf_key_domain_invalid")
+        self._cipher = AESGCM(key._consume_for(MasterKeyDomain.MCP_CREDENTIAL))
 
     def encrypt(
         self,
@@ -218,7 +151,11 @@ class CredentialCipher:
             plaintext,
             _credential_aad(owner_user_id, server_id, encryption_version),
         )
-        return EncryptedCredential(nonce=nonce, ciphertext=ciphertext, encryption_version=encryption_version)
+        return EncryptedCredential(
+            nonce=nonce,
+            ciphertext=ciphertext,
+            encryption_version=encryption_version,
+        )
 
     def decrypt(
         self,
@@ -235,14 +172,42 @@ class CredentialCipher:
             plaintext = self._cipher.decrypt(
                 encrypted.nonce,
                 encrypted.ciphertext,
-                _credential_aad(owner_user_id, server_id, encrypted.encryption_version),
+                _credential_aad(
+                    owner_user_id,
+                    server_id,
+                    encrypted.encryption_version,
+                ),
             )
             if len(plaintext) > MAX_CREDENTIAL_JSON_BYTES:
                 raise CredentialSecurityError("mcp_credential_payload_too_large")
             decoded = json.loads(plaintext.decode("utf-8"))
             return _validate_credential(auth_type, decoded)
-        except (CredentialSecurityError, InvalidTag, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (
+            CredentialSecurityError,
+            InvalidTag,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise CredentialSecurityError("mcp_credential_decryption_failed") from exc
+
+    def __reduce__(self) -> object:
+        raise TypeError("MCP credential ciphers cannot be serialized")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("MCP credential ciphers cannot be serialized")
+
+
+class MCPRecoveryCipher:
+    """Encrypts only task-private MCP recovery payloads."""
+
+    __slots__ = ("_cipher",)
+
+    def __init__(self, key: _DerivedDomainKey) -> None:
+        if not isinstance(key, _DerivedDomainKey):
+            raise MasterKeyError("maf_key_domain_invalid")
+        self._cipher = AESGCM(key._consume_for(MasterKeyDomain.MCP_RECOVERY))
 
     def seal_task_private_payload(
         self,
@@ -337,53 +302,139 @@ class CredentialCipher:
         ) as exc:
             raise CredentialSecurityError("mcp_task_private_decryption_failed") from exc
 
-    async def create_or_verify_sentinel(self, storage: CredentialSentinelStorage) -> None:
+    def __reduce__(self) -> object:
+        raise TypeError("MCP recovery ciphers cannot be serialized")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("MCP recovery ciphers cannot be serialized")
+
+
+class MCPAuditReferenceSigner:
+    """Produces only context-bound MCP audit references."""
+
+    __slots__ = ("_key",)
+
+    def __init__(self, key: _DerivedDomainKey) -> None:
+        if not isinstance(key, _DerivedDomainKey):
+            raise MasterKeyError("maf_key_domain_invalid")
+        self._key = key._consume_for(MasterKeyDomain.MCP_AUDIT_REFERENCE)
+
+    def safe_reference(self, value: str, *, context: str) -> str:
+        subject = str(value).strip()
+        safe_context = str(context).strip()
+        if not subject or not safe_context:
+            raise CredentialSecurityError("mcp_rollout_audit_identity_invalid")
+        return hmac.new(
+            self._key,
+            f"{safe_context}\0{subject}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def safe_owner_reference(self, owner_user_id: str, *, context: str) -> str:
+        return self.safe_reference(owner_user_id, context=context)
+
+    def verify_reference(self, value: str, reference: str, *, context: str) -> bool:
         try:
-            current = await storage.get_mcp_credential_key_validation()
+            expected = self.safe_reference(value, context=context)
+        except CredentialSecurityError:
+            return False
+        return hmac.compare_digest(expected, str(reference))
+
+    def __reduce__(self) -> object:
+        raise TypeError("MCP audit reference signers cannot be serialized")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("MCP audit reference signers cannot be serialized")
+
+
+class MasterKeySentinelCipher:
+    """Seals and verifies only the master-key validation sentinel."""
+
+    __slots__ = ("_cipher",)
+
+    def __init__(self, key: _DerivedDomainKey) -> None:
+        if not isinstance(key, _DerivedDomainKey):
+            raise MasterKeyError("maf_key_domain_invalid")
+        self._cipher = AESGCM(key._consume_for(MasterKeyDomain.KEY_VALIDATION))
+
+    def seal(self) -> SealedMasterKeySentinel:
+        nonce = os.urandom(_NONCE_BYTES)
+        return SealedMasterKeySentinel(
+            validation_nonce=nonce,
+            validation_ciphertext=self._cipher.encrypt(
+                nonce,
+                _MASTER_KEY_SENTINEL_PLAINTEXT,
+                _MASTER_KEY_SENTINEL_AAD,
+            ),
+        )
+
+    def verify(self, record: SealedMasterKeySentinel | Mapping[str, Any] | Any) -> None:
+        try:
+            if isinstance(record, Mapping):
+                nonce = record["validation_nonce"]
+                ciphertext = record["validation_ciphertext"]
+                derivation_version = int(record["derivation_version"])
+            else:
+                nonce = record.validation_nonce
+                ciphertext = record.validation_ciphertext
+                derivation_version = int(record.derivation_version)
+            if (
+                derivation_version != 1
+                or not isinstance(nonce, bytes)
+                or len(nonce) != _NONCE_BYTES
+                or not isinstance(ciphertext, bytes)
+            ):
+                raise ValueError
+            plaintext = self._cipher.decrypt(
+                nonce,
+                ciphertext,
+                _MASTER_KEY_SENTINEL_AAD,
+            )
+        except (
+            AttributeError,
+            InvalidTag,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise CredentialSecurityError("maf_master_key_mismatch") from exc
+        if plaintext != _MASTER_KEY_SENTINEL_PLAINTEXT:
+            raise CredentialSecurityError("maf_master_key_mismatch")
+
+    async def create_or_verify_sentinel(
+        self, storage: CredentialSentinelStorage
+    ) -> None:
+        try:
+            current = await storage.get_maf_master_key_validation()
         except Exception as exc:
-            raise CredentialSecurityError("mcp_credential_sentinel_unavailable") from exc
+            raise CredentialSecurityError(
+                "maf_master_key_validation_unavailable"
+            ) from exc
         if current is not None:
-            self._verify_sentinel(current)
+            self.verify(current)
             return
 
-        nonce = os.urandom(_NONCE_BYTES)
-        candidate = MCPCredentialKeyValidation(
-            validation_id=str(uuid4()),
-            validation_nonce=nonce,
-            validation_ciphertext=self._cipher.encrypt(nonce, _SENTINEL_PLAINTEXT, _SENTINEL_AAD),
-            encryption_version=CREDENTIAL_ENCRYPTION_VERSION,
+        sealed = self.seal()
+        candidate = MAFMasterKeyValidation(
+            singleton_key=1,
+            validation_nonce=sealed.validation_nonce,
+            validation_ciphertext=sealed.validation_ciphertext,
+            derivation_version=sealed.derivation_version,
             created_at=datetime.now(timezone.utc),
         )
         try:
-            winner = await storage.create_or_get_mcp_credential_key_validation(candidate)
+            winner = await storage.create_or_get_maf_master_key_validation(candidate)
         except Exception as exc:
-            raise CredentialSecurityError("mcp_credential_sentinel_unavailable") from exc
-        self._verify_sentinel(winner)
+            raise CredentialSecurityError(
+                "maf_master_key_validation_unavailable"
+            ) from exc
+        self.verify(winner)
 
-    def _verify_sentinel(self, record: MCPCredentialKeyValidation | Mapping[str, Any] | Any) -> None:
-        try:
-            if isinstance(record, Mapping):
-                encrypted = EncryptedCredential(
-                    nonce=record["validation_nonce"],
-                    ciphertext=record["validation_ciphertext"],
-                    encryption_version=int(record["encryption_version"]),
-                )
-            else:
-                encrypted = EncryptedCredential(
-                    nonce=record.validation_nonce,
-                    ciphertext=record.validation_ciphertext,
-                    encryption_version=int(record.encryption_version),
-                )
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
-            raise CredentialSecurityError("mcp_credential_sentinel_mismatch") from exc
-        if encrypted.encryption_version != CREDENTIAL_ENCRYPTION_VERSION:
-            raise CredentialSecurityError("mcp_credential_sentinel_mismatch")
-        try:
-            plaintext = self._cipher.decrypt(encrypted.nonce, encrypted.ciphertext, _SENTINEL_AAD)
-        except (InvalidTag, TypeError, ValueError) as exc:
-            raise CredentialSecurityError("mcp_credential_sentinel_mismatch") from exc
-        if plaintext != _SENTINEL_PLAINTEXT:
-            raise CredentialSecurityError("mcp_credential_sentinel_mismatch")
+    def __reduce__(self) -> object:
+        raise TypeError("master key sentinel ciphers cannot be serialized")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("master key sentinel ciphers cannot be serialized")
 
 
 class MCPRecoveryService:
@@ -392,7 +443,7 @@ class MCPRecoveryService:
     def __init__(
         self,
         storage: MCPRecoveryStorage,
-        cipher: CredentialCipher,
+        cipher: MCPRecoveryCipher,
         *,
         now_fn: Any | None = None,
     ) -> None:

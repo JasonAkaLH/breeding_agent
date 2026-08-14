@@ -21,7 +21,6 @@ from src.core.models import (
     UserMCPServer,
 )
 from src.integrations.mcp.config import MCPRuntimeConfig
-from src.integrations.mcp.credentials import CredentialCipher
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.legacy_migration import (
     LegacyConsumerScope,
@@ -39,6 +38,7 @@ from src.integrations.mcp.legacy_migration_apply import (
     LegacyMigrationLiveHealthRequest,
     LocalLegacyMigrationApplier,
 )
+from tests.master_key_support import audit_reference_signer, credential_cipher
 from src.storage.postgres import (
     PostgreSQLStorage,
     bootstrap_postgres_database,
@@ -517,7 +517,8 @@ class LegacyMCPMigrationPostgresIntegrationTest(unittest.TestCase):
     def test_local_applier_uses_nonsecret_replay_api_without_base_select(
         self,
     ) -> None:
-        cipher = CredentialCipher(b"a" * 32)
+        cipher = credential_cipher(b"a" * 32)
+        signer = audit_reference_signer(b"a" * 32)
         source_server_id = f"crm-{self.scope_id}"
         owner_user_id = f"service-owner-{self.scope_id}"
         config = MCPRuntimeConfig.from_mapping(
@@ -543,7 +544,7 @@ class LegacyMCPMigrationPostgresIntegrationTest(unittest.TestCase):
                 ],
             }
         )
-        owner_ref = legacy_target_consumer_reference(cipher, owner_user_id)
+        owner_ref = legacy_target_consumer_reference(signer, owner_user_id)
         plan = plan_legacy_mcp_config_migration(
             config,
             (
@@ -611,6 +612,7 @@ class LegacyMCPMigrationPostgresIntegrationTest(unittest.TestCase):
             return LocalLegacyMigrationApplier(
                 storage=self.storage,
                 credential_cipher=cipher,
+                audit_reference_signer=signer,
                 endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
                 config=config,
                 plan=plan,

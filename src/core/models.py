@@ -893,12 +893,24 @@ class UserMCPScopeLease:
 
 
 @dataclass(slots=True, frozen=True, repr=False)
-class MCPCredentialKeyValidation:
-    validation_id: str
+class MAFMasterKeyValidation:
+    singleton_key: int
     validation_nonce: bytes
     validation_ciphertext: bytes
-    encryption_version: int
-    created_at: datetime | None = None
+    derivation_version: int
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.singleton_key != 1:
+            raise ValueError("MAF master key validation singleton_key must be 1")
+        if not isinstance(self.validation_nonce, bytes) or len(self.validation_nonce) != 12:
+            raise ValueError("MAF master key validation nonce must be 12 bytes")
+        if self.derivation_version != 1:
+            raise ValueError("unsupported MAF master key derivation version")
+        if not isinstance(self.created_at, datetime) or self.created_at.utcoffset() is None:
+            raise ValueError("MAF master key validation created_at must be UTC")
+        if self.created_at.utcoffset().total_seconds() != 0:
+            raise ValueError("MAF master key validation created_at must be UTC")
 
 
 @dataclass(slots=True, frozen=True)

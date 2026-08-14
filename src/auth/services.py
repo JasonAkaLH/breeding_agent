@@ -9,12 +9,39 @@ from src.auth.generation_cache import AuthGenerationCache
 from src.auth.invalidation_bus import AuthGenerationChanged, AuthGenerationReason, InMemoryAuthInvalidationBus
 from src.core.contracts import StoragePort
 from src.core.models import AuthUserToken
+from src.integrations.master_key import MasterKeyDomain, MasterKeyError, _DerivedDomainKey
 from src.integrations.rust_safety_contract import hmac_sha256_hex
 
 NowFn = Callable[[], datetime]
 CodeGenerator = Callable[[], str]
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
+
+
+class AuthTokenHasher:
+    """Hashes only login tokens with the auth-token domain key."""
+
+    __slots__ = ("_key",)
+
+    def __init__(self, key: _DerivedDomainKey) -> None:
+        if not isinstance(key, _DerivedDomainKey):
+            raise MasterKeyError("maf_key_domain_invalid")
+        self._key = key._consume_for(MasterKeyDomain.AUTH_TOKEN)
+
+    def hash_token(self, raw_token: str) -> str:
+        return hmac_sha256_hex(self._key, raw_token.encode("utf-8"))
+
+    def verify_token(self, raw_token: str, expected_hash: str) -> bool:
+        return secrets.compare_digest(
+            self.hash_token(raw_token),
+            str(expected_hash),
+        )
+
+    def __reduce__(self) -> object:
+        raise TypeError("auth token hashers cannot be serialized")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("auth token hashers cannot be serialized")
 
 
 class AuthValidationError(ValueError):
@@ -51,16 +78,15 @@ class UsernameTokenService:
         storage: StoragePort,
         *,
         now_fn: NowFn,
-        secret: str | None = None,
-        require_secret: bool = False,
+        token_hasher: AuthTokenHasher,
         auth_generation_cache: AuthGenerationCache | None = None,
         auth_invalidation_bus: InMemoryAuthInvalidationBus | None = None,
     ) -> None:
-        if require_secret and not secret:
-            raise AuthTokenValidationError("API token hash secret is required.", code="token_secret_required")
+        if not isinstance(token_hasher, AuthTokenHasher):
+            raise MasterKeyError("maf_key_domain_invalid")
         self._storage = storage
         self._now_fn = now_fn
-        self._secret = (secret or secrets.token_urlsafe(32)).encode("utf-8")
+        self._token_hasher = token_hasher
         self._auth_generation_cache = auth_generation_cache
         self._auth_invalidation_bus = auth_invalidation_bus
 
@@ -165,7 +191,7 @@ class UsernameTokenService:
         return self._hash_token(self._normalize_raw_token(raw_token))[:12]
 
     def _hash_token(self, raw_token: str) -> str:
-        return hmac_sha256_hex(self._secret, raw_token.encode("utf-8"))
+        return self._token_hasher.hash_token(raw_token)
 
     @staticmethod
     def _new_raw_token() -> str:

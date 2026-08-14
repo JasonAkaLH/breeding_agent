@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.api.dto import CreateUserMCPServerRequest, PatchUserMCPServerRequest
-from src.integrations.mcp.credentials import CredentialCipher
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.invalidation import InMemoryMCPInvalidationBus
 from src.integrations.mcp.user_config import UserMCPConfigError, UserMCPConfigService
@@ -17,6 +16,7 @@ from src.storage.sqlite import (
     create_sqlite_engine,
     create_sqlite_session_factory,
 )
+from tests.master_key_support import credential_cipher
 
 
 class _Resolver:
@@ -52,7 +52,7 @@ class UserMCPConfigServiceTest(unittest.IsolatedAsyncioTestCase):
         self.bus = InMemoryMCPInvalidationBus()
         self.service = UserMCPConfigService(
             storage=self.storage,
-            credential_cipher=CredentialCipher(b"k" * 32),
+            credential_cipher=credential_cipher(b"k" * 32),
             endpoint_policy=EndpointPolicy(resolver=_Resolver()),
             health_runner=self.health,
             invalidation_bus=self.bus,

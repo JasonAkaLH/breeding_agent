@@ -103,21 +103,24 @@ CI 中的 Ubuntu 22.04 x86_64 / Python 3.13 wheel job 还会用 `cargo metadata 
 - 全栈人工验证脚本（默认拉起仓库真实 FastAPI runtime）：
 
 ```bash
+export MAF_MASTER_KEY_FILE=/absolute/path/to/maf-master.key
 python scripts/run_fullstack_dev.py
 ```
 
-真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随独立 Skill 仓库 `/data/peihai/vibe-breeding-dev/skills/<skill-name>/` bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
+直接运行 backend（包括 `--fake-backend`）也必须提供固定的 `MAF_MASTER_KEY_FILE`；该文件格式和权限与下文 Docker Compose 使用的根密钥相同。真实 runtime 会在启动期使用本地 `config.yaml` bootstrap 出环境变量，并创建共享的主代理 `SharedLLMRuntime`；默认自动模式下，主代理高层规划、运行时观察/重排与最终回答共享这个主代理 runtime。可移除 Skill bundle 可通过 runtime allowlisted service 复用主代理 `SharedLLMRuntime` 的受控非流式调用；数据查询 Skill 的只读 MySQL 连接与领域配置随独立 Skill 仓库 `/data/peihai/vibe-breeding-dev/skills/<skill-name>/` bundle 管理；如需不依赖真实 LLM/MySQL provider、只验证前端交互，可增加 `--fake-backend` 使用 deterministic fake provider/数据库适配器。
 
 - Docker Compose 打包 / 启动（会把本地 git-ignored `config.yaml` 复制进 backend 镜像；该文件包含 provider / 数据库等敏感配置时只应在受控环境构建和分发镜像）：
 
 ```bash
 git clone git@gitee.com:wellionx/vibe-breeding.git /data/peihai/vibe-breeding-dev
-export MCP_CREDENTIAL_KEY_FILE_HOST=/absolute/path/to/local-mcp-credential.key
+umask 177
+openssl rand -base64 32 > /absolute/path/to/maf-master.key
+export MAF_MASTER_KEY_FILE_HOST=/absolute/path/to/maf-master.key
 docker compose build
 docker compose up
 ```
 
-Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sidecar:local`（Rust RuntimeSidecar，以 Unix socket 提供 Version/Compatibility/Readiness 和 SQLite 状态）、`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。`MCP_CREDENTIAL_KEY_FILE_HOST` 必须是宿主机 MCP credential key 的绝对路径，Compose 只读挂载到 backend，不复制进镜像。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；backend runtime 数据和 Sidecar socket/SQLite 分别使用 named volume。Skill bundle 从独立仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录读取；Compose 默认使用 `/data/peihai/vibe-breeding-dev/skills:/app/skill:ro` 把开发环境 Skill 仓库的 `skills/` 子目录只读挂载到 backend 容器 `/app/skill`，backend 会扫描 `/app/skill/**/SKILL.md`；更新 Skill 时在宿主机执行 `cd /data/peihai/vibe-breeding-dev && git pull`，下一次 `GET /api/v1/capabilities` 会触发刷新。
+Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sidecar:local`（Rust RuntimeSidecar，以 Unix socket 提供 Version/Compatibility/Readiness 和 SQLite 状态）、`breeding-agent-backend:local`（Ubuntu 22.04 + Conda Python 3.13.13，启动 `python -m uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000`）与 `breeding-agent-frontend:local`（Ubuntu 22.04 + nginx，服务 Vite build 产物并代理 `/api/`、`/api-doc` 到 backend）。`MAF_MASTER_KEY_FILE_HOST` 必须是宿主机固定在线根密钥文件的绝对路径，Compose 只读挂载到 backend 的 `/run/secrets/maf-master.key`，不复制进镜像，也不挂载给 frontend 或 Runtime Sidecar。该文件必须和 SQLite 数据分开备份；丢失后既有登录 token、MCP credential 与 recovery 私有数据无法恢复。默认宿主机端口：前端 `http://127.0.0.1:51999`，后端直连 `http://127.0.0.1:51888`；backend runtime 数据和 Sidecar socket/SQLite 分别使用 named volume。Skill bundle 从独立仓库 `git@gitee.com:wellionx/vibe-breeding.git` 的 `skills/` 子目录读取；Compose 默认使用 `/data/peihai/vibe-breeding-dev/skills:/app/skill:ro` 把开发环境 Skill 仓库的 `skills/` 子目录只读挂载到 backend 容器 `/app/skill`，backend 会扫描 `/app/skill/**/SKILL.md`；更新 Skill 时在宿主机执行 `cd /data/peihai/vibe-breeding-dev && git pull`，下一次 `GET /api/v1/capabilities` 会触发刷新。
 
 `.dockerignore` 会把 `tests/`、根目录 Markdown 文档、`docs/` 中除 `docs/api/` 外的文档、node_modules、构建缓存与本地 runtime 数据排除出 Docker context / 镜像；`docs/api/api-doc.html` 会保留，因为后端 `/api-doc` 路由在运行时读取它。
 
@@ -125,7 +128,7 @@ Compose 会构建三个 `linux/amd64` 本地镜像：`breeding-agent-runtime-sid
 
 运行时配置约定：`config.yaml` 只在 API runtime 启动 / 手工 smoke 初始化时读取一次，并写入 `MAF_CONFIG_*` 进程环境变量；后续 `LLMClient`、Planner、主代理、Skill runtime 与 `trim_max_tokens` 均从环境读取。测试或上层 runtime 仍可通过显式 `config` dict 注入覆盖，不应在业务节点执行阶段重复读取 `config.yaml`。
 MySQL 只读连接配置也放在本地 `config.yaml` 的 `mysql_readonly.url`（或部署环境变量 `MAF_MYSQL_READONLY_URL`）中；`config.yaml` 已被 `.gitignore` 忽略，禁止把真实数据库地址、账号或密码写入 tracked 文件。
-认证相关部署配置不得写入 tracked 文件：跨站 REST API 只通过 `MAF_API_CORS_ALLOWED_ORIGINS` 配置逗号分隔的显式 origin allowlist，不允许 `*`；token hash pepper 使用 `MAF_AUTH_TOKEN_HASH_SECRET`，当 `MAF_API_ENV` / `MAF_ENV` / `APP_ENV` 为 `production` / `prod` 或显式设置 `MAF_AUTH_TOKEN_HASH_SECRET_REQUIRED=1` 时，缺失 secret 必须 fail closed；未配置 secret 的开发/测试进程只使用进程内随机 pepper，重启后既有 token 自动失效。不要把 token 放入 URL query 或业务请求体。
+认证相关部署配置不得写入 tracked 文件：跨站 REST API 只通过 `MAF_API_CORS_ALLOWED_ORIGINS` 配置逗号分隔的显式 origin allowlist，不允许 `*`；登录 token 的持久 HMAC key 由 `/run/secrets/maf-master.key` 的 Auth token 领域子密钥派生，不再接受独立文本 pepper，正常 token refresh 不改变根密钥，也不影响 MCP credential。不要把 token 放入 URL query 或业务请求体。
 敏感信息（数据库连接、账号密码、API key、token、provider `base_url`、secret 等）不得写入、提交或推送到 tracked 文件；开发 / 手工 smoke 统一放入本地 `config.yaml` 或部署环境变量，并由启动 bootstrap 写入 `MAF_CONFIG_*` / 专用环境变量供 runtime 消费。若发现待提交内容包含敏感信息，应先迁移到配置或环境变量并从本次提交中移除；历史提交清理只在明确要求时执行。
 同一个 API runtime 中的 `*_config_path` 必须指向同一个启动配置文件；默认生产路径使用一个主代理 LLM runtime；Skill 内部 LLM service 只能通过受控 allowlisted adapter 复用该 runtime。显式组件级 `config` dict、client factory 或 fake generator 仍作为测试/定制 seam 保留。
 RuntimeSidecar 连接配置当前通过部署环境变量 `MAF_RUNTIME_SIDECAR_ENDPOINT` 注入，支持 `http://127.0.0.1:<port>` loopback h2c、`https://host:<port>` mTLS gRPC 与 `unix:///absolute/path` Unix domain socket 内部连接；可选 `MAF_RUNTIME_SIDECAR_ALLOWED_HOSTS`、`MAF_RUNTIME_SIDECAR_MTLS_ENABLED`、`MAF_RUNTIME_SIDECAR_TLS_CA_PATH`、`MAF_RUNTIME_SIDECAR_TLS_CERT_PATH`、`MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` 与 `MAF_RUNTIME_SIDECAR_TLS_SERVER_NAME` 用于 endpoint allowlist / client-side mTLS 身份门禁。`MAF_RUNTIME_SIDECAR_ARTIFACT_MANIFEST_PATH` 与 `MAF_RUNTIME_SIDECAR_ARTIFACT_ALLOWLIST_PATH` 可提供部署流水线生成的 sidecar artifact manifest / allowlist；任何 RuntimeSidecar component 进入 `enforce` 且配置 endpoint 时缺少这两个文件会 fail closed。唯一例外是 CP7-A 开发 Compose：`MAF_API_ENV=dev`、精确 Unix socket、三项 RuntimeSidecar authority mode 均为 `off`、user MCP enforce 100% 且 legacy assembly off 时允许省略 manifest/allowlist，但仍由 Sidecar healthcheck 完成 Version/Compatibility/Readiness 握手；该例外不适用于 production、TCP 或 Rust authority shadow/enforce。`maf-runtime-sidecar --serve <addr> --tls-cert <cert> --tls-key <key> --client-ca <ca>` 或 server-side `MAF_RUNTIME_SIDECAR_TLS_CERT_PATH` / `MAF_RUNTIME_SIDECAR_TLS_KEY_PATH` / `MAF_RUNTIME_SIDECAR_TLS_CLIENT_CA_PATH` 可启用 mTLS；跨主机访问缺少 mTLS 仍 fail-closed，artifact provenance allowlist 仍按 Rust PRD 门禁推进。`MAF_RUST_RUNTIME_STORE_MODE=shadow` / `MAF_RUST_EVENT_LOG_MODE=shadow` / `MAF_RUST_TASK_DISPATCHER_MODE=shadow` 下，task submit、node transition、cancellation token write、event append 与 Skill/MCP bundle revision pin/release 仍以 Python legacy 写入作为用户可见结果，并旁路调用已配置 RuntimeSidecar client，将脱敏 fingerprint / error code / duration 写入 `runtime.sidecar_shadow_diff` 审计事件。

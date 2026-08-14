@@ -16,7 +16,6 @@ from src.capabilities.mcp_dispatch.models import (
 )
 from src.integrations.mcp.gateway_models import MCPToolDescriptor, ToolCatalogSnapshot
 from src.integrations.mcp.config import MCPRuntimeConfig, MCPServerConfig
-from src.integrations.mcp.credentials import CredentialCipher
 from src.integrations.mcp.gateway import MCPGatewayError
 from src.integrations.mcp.endpoint_policy import (
     EndpointAllowlist,
@@ -32,6 +31,7 @@ from src.integrations.mcp.legacy_migration import (
 from src.integrations.mcp.runtime_state import MCPToolBinding
 from src.core.enums import UserMCPHealthStatus, UserMCPTransport
 from src.core.models import UserMCPServer
+from tests.master_key_support import audit_reference_signer, credential_cipher
 
 from src.integrations.mcp.shadow_compare import (
     ApprovedVerifiedMapping,
@@ -940,9 +940,11 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
             health_status=UserMCPHealthStatus.AVAILABLE,
             last_tested_at=datetime(2026, 8, 13),
         )
-        cipher = CredentialCipher(b"c" * 32)
+        cipher = credential_cipher(b"c" * 32)
+        signer = audit_reference_signer(b"c" * 32)
         credential_digest = migration_target_credential_digest(
             cipher,
+            signer,
             server=migrated,
             credential_record=None,
             source_fingerprint=source_fingerprint,
@@ -1026,6 +1028,7 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
         )
         window_tampered_digest = migration_target_credential_digest(
             cipher,
+            signer,
             server=window_tampered_server,
             credential_record=None,
             source_fingerprint=source_fingerprint,
@@ -1063,18 +1066,18 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_shadow_catalog_digest_key_is_secret_and_config_bound(self) -> None:
-        cipher = CredentialCipher(b"k" * 32)
+        signer = audit_reference_signer(b"k" * 32)
 
         first = derive_shadow_catalog_digest_key(
-            cipher,
+            signer,
             config_fingerprint="rollout-fingerprint-1",
         )
         repeated = derive_shadow_catalog_digest_key(
-            cipher,
+            signer,
             config_fingerprint="rollout-fingerprint-1",
         )
         changed = derive_shadow_catalog_digest_key(
-            cipher,
+            signer,
             config_fingerprint="rollout-fingerprint-2",
         )
 

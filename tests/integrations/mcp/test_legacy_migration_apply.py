@@ -20,7 +20,6 @@ from src.core.enums import (
 from src.core.models import UserMCPServer
 from src.integrations.mcp.config import MCPRuntimeConfig
 from src.integrations.mcp.client import MCPClientError, MCPProtocolError
-from src.integrations.mcp.credentials import CredentialCipher
 from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.legacy_migration import (
     LEGACY_MIGRATION_HEALTH_POLICY,
@@ -46,9 +45,10 @@ from src.storage.sqlite import (
     create_sqlite_engine,
     create_sqlite_session_factory,
 )
+from tests.master_key_support import audit_reference_signer, credential_cipher
 
 SERVICE_CONSUMER_REF = legacy_target_consumer_reference(
-    CredentialCipher(b"a" * 32),
+    audit_reference_signer(b"a" * 32),
     "service-owner",
 )
 
@@ -114,7 +114,8 @@ class LegacyMigrationApplyTests(unittest.TestCase):
         self.engine = create_sqlite_engine(Path(self.tempdir.name) / "state.db")
         bootstrap_sqlite_database(self.engine)
         self.storage = SQLiteStorage(create_sqlite_session_factory(self.engine))
-        self.cipher = CredentialCipher(b"a" * 32)
+        self.cipher = credential_cipher(b"a" * 32)
+        self.audit_signer = audit_reference_signer(b"a" * 32)
         self.config = MCPRuntimeConfig.from_mapping(
             {
                 "enabled": True,
@@ -250,6 +251,7 @@ class LegacyMigrationApplyTests(unittest.TestCase):
             LocalLegacyMigrationApplier(
                 storage=self.storage,
                 credential_cipher=self.cipher,
+                audit_reference_signer=self.audit_signer,
                 endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
                 config=self.config,
                 plan=self.plan,
@@ -275,6 +277,7 @@ class LegacyMigrationApplyTests(unittest.TestCase):
             LocalLegacyMigrationApplier(
                 storage=self.storage,
                 credential_cipher=self.cipher,
+                audit_reference_signer=self.audit_signer,
                 endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
                 config=self.config,
                 plan=forged_plan,
@@ -323,6 +326,7 @@ class LegacyMigrationApplyTests(unittest.TestCase):
         applier = LocalLegacyMigrationApplier(
             storage=self.storage,
             credential_cipher=self.cipher,
+            audit_reference_signer=self.audit_signer,
             endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
             config=combined,
             plan=combined_plan,
@@ -340,6 +344,7 @@ class LegacyMigrationApplyTests(unittest.TestCase):
         applier = LocalLegacyMigrationApplier(
             storage=self.storage,
             credential_cipher=self.cipher,
+            audit_reference_signer=self.audit_signer,
             endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
             config=self.config,
             plan=self.plan,
@@ -933,6 +938,7 @@ class LegacyMigrationApplyTests(unittest.TestCase):
         applier = LocalLegacyMigrationApplier(
             storage=self.storage,
             credential_cipher=self.cipher,
+            audit_reference_signer=self.audit_signer,
             endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
             config=self.config,
             plan=self.plan,
@@ -984,6 +990,7 @@ class LegacyMigrationApplyTests(unittest.TestCase):
         return LocalLegacyMigrationApplier(
             storage=self.storage,
             credential_cipher=self.cipher,
+            audit_reference_signer=self.audit_signer,
             endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
             config=self.config,
             plan=self.plan,
@@ -997,6 +1004,7 @@ class LegacyMigrationApplyTests(unittest.TestCase):
         return LocalLegacyMigrationApplier(
             storage=self.storage,
             credential_cipher=self.cipher,
+            audit_reference_signer=self.audit_signer,
             endpoint_policy=EndpointPolicy(resolver=_PublicResolver()),
             config=config,
             plan=plan,

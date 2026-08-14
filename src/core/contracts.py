@@ -70,7 +70,7 @@ from .models import (
     UserMCPScopeLease,
     UserMCPServer,
     UserMCPToolGrant,
-    MCPCredentialKeyValidation,
+    MAFMasterKeyValidation,
 )
 
 
@@ -903,11 +903,11 @@ class StoragePort(Protocol):
         now: datetime | None = None,
     ) -> list[MCPRolloutInstanceConfigLease]: ...
 
-    async def create_or_get_mcp_credential_key_validation(
-        self, record: MCPCredentialKeyValidation
-    ) -> MCPCredentialKeyValidation: ...
+    async def create_or_get_maf_master_key_validation(
+        self, record: MAFMasterKeyValidation
+    ) -> MAFMasterKeyValidation: ...
 
-    async def get_mcp_credential_key_validation(self) -> MCPCredentialKeyValidation | None: ...
+    async def get_maf_master_key_validation(self) -> MAFMasterKeyValidation | None: ...
 
     async def save_auth_user_token(self, token: AuthUserToken, *, auth_generation_reason: str | None = None) -> AuthUserToken: ...
 

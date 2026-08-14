@@ -26,7 +26,12 @@ from src.core.models import (
 )
 
 from .config import MCPRuntimeConfig, MCPServerConfig
-from .credentials import CredentialCipher, CredentialSecurityError, EncryptedCredential
+from .credentials import (
+    CredentialSecurityError,
+    EncryptedCredential,
+    MCPAuditReferenceSigner,
+    MCPCredentialCipher,
+)
 from .endpoint_policy import EndpointPolicy
 from .headers import validate_auth_header_name, validate_static_headers
 from .health import run_health_discovery
@@ -204,7 +209,8 @@ class LocalLegacyMigrationApplier:
         self,
         *,
         storage: Any,
-        credential_cipher: CredentialCipher,
+        credential_cipher: MCPCredentialCipher,
+        audit_reference_signer: MCPAuditReferenceSigner,
         endpoint_policy: EndpointPolicy,
         config: MCPRuntimeConfig,
         plan: LegacyMigrationPlan,
@@ -224,7 +230,7 @@ class LocalLegacyMigrationApplier:
         ):
             raise LegacyMigrationApplyError("service_account_owner_mismatch")
         expected_owner_ref = legacy_target_consumer_reference(
-            credential_cipher,
+            audit_reference_signer,
             owner,
         )
         if any(
@@ -234,6 +240,7 @@ class LocalLegacyMigrationApplier:
             raise LegacyMigrationApplyError("owner_consumer_reference_mismatch")
         self._storage = storage
         self._cipher = credential_cipher
+        self._audit_signer = audit_reference_signer
         self._endpoint_policy = endpoint_policy
         self._servers = {server.server_id: server for server in config.servers}
         self._plan = plan
@@ -585,7 +592,7 @@ class LocalLegacyMigrationApplier:
             impact.obligations
         )
         expected_digest = legacy_migration_credential_provenance_digest(
-            self._cipher,
+            self._audit_signer,
             credential_values=desired.credential_values,
             owner_user_id=self._owner,
             target_server_id=desired.server.server_id,
@@ -696,7 +703,7 @@ class LocalLegacyMigrationApplier:
         ):
             raise LegacyMigrationApplyError("legacy_apply_target_conflict")
         credential_digest = legacy_migration_credential_provenance_digest(
-            self._cipher,
+            self._audit_signer,
             credential_values=desired.credential_values,
             owner_user_id=self._owner,
             target_server_id=desired.server.server_id,
@@ -859,7 +866,7 @@ class LocalLegacyMigrationApplier:
         ):
             raise LegacyMigrationApplyError("legacy_apply_target_conflict")
         expected_digest = legacy_migration_credential_provenance_digest(
-            self._cipher,
+            self._audit_signer,
             credential_values=actual,
             owner_user_id=existing.owner_user_id,
             target_server_id=existing.server_id,

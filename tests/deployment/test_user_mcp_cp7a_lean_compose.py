@@ -54,7 +54,8 @@ class UserMCPCP7ALeanComposeTest(unittest.TestCase):
             environment["MAF_RUNTIME_SIDECAR_ENDPOINT"],
             "unix:///run/maf-runtime-sidecar/runtime.sock",
         )
-        self.assertEqual(environment["MCP_CREDENTIAL_KEY_FILE"], "/run/secrets/mcp-credential.key")
+        self.assertEqual(environment["MAF_MASTER_KEY_FILE"], "/run/secrets/maf-master.key")
+        self.assertNotIn("MCP_CREDENTIAL_KEY_FILE", environment)
         self.assertEqual(environment["MAF_USER_MCP_MAX_ACTIVE_CALLS"], "8")
         self.assertEqual(
             environment["MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES"],
@@ -76,24 +77,24 @@ class UserMCPCP7ALeanComposeTest(unittest.TestCase):
             "service_healthy",
         )
 
-    def test_compose_requires_host_credential_path_and_renders_with_fixture(self) -> None:
+    def test_compose_requires_host_master_key_path_and_renders_with_fixture(self) -> None:
         if shutil.which("docker") is None:
             self.skipTest("Docker CLI is unavailable")
         missing = subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "--quiet"],
             cwd=ROOT,
-            env={key: value for key, value in os.environ.items() if key != "MCP_CREDENTIAL_KEY_FILE_HOST"},
+            env={key: value for key, value in os.environ.items() if key != "MAF_MASTER_KEY_FILE_HOST"},
             capture_output=True,
             text=True,
             check=False,
         )
         self.assertNotEqual(missing.returncode, 0)
-        self.assertIn("MCP_CREDENTIAL_KEY_FILE_HOST is required", missing.stderr)
+        self.assertIn("MAF_MASTER_KEY_FILE_HOST is required", missing.stderr)
 
         rendered = subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "--quiet"],
             cwd=ROOT,
-            env={**os.environ, "MCP_CREDENTIAL_KEY_FILE_HOST": "/tmp/cp7a-test.key"},
+            env={**os.environ, "MAF_MASTER_KEY_FILE_HOST": "/tmp/cp7a-test.key"},
             capture_output=True,
             text=True,
             check=False,

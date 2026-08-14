@@ -25,9 +25,10 @@ from src.core.models import (
 from src.integrations.mcp.dispatch_coordinator import (
     EXTERNAL_CONTENT_NOTICE,
     MCPDispatchMetricContext,
-    UserMCPDispatchCoordinator,
+    UserMCPDispatchCoordinator as _UserMCPDispatchCoordinator,
     build_mcp_call_fingerprint,
 )
+from tests.master_key_support import audit_reference_signer
 from src.integrations.mcp.gateway import MCPGatewayError
 from src.integrations.mcp.client import MCPRemoteError
 from src.integrations.mcp.gateway_models import (
@@ -52,6 +53,11 @@ from src.integrations.mcp.rollout_evidence import (
 
 
 NOW = datetime(2026, 8, 12, 12, 0, 0)
+
+
+def UserMCPDispatchCoordinator(**kwargs):
+    kwargs.setdefault("audit_reference_signer", audit_reference_signer(b"a" * 32))
+    return _UserMCPDispatchCoordinator(**kwargs)
 
 
 class _SequenceSelector:
@@ -565,7 +571,8 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(approval_event.payload["interrupt_id"], outcome.interrupt.interrupt_id)
         self.assertEqual(approval_event.payload["server_display_name"], "CRM")
         self.assertEqual(approval_event.payload["tool_display_name"], "lookup")
-        self.assertTrue(approval_event.payload["safe_call_ref"].startswith("mcp-approval-call-"))
+        self.assertEqual(len(approval_event.payload["safe_call_ref"]), 64)
+        self.assertNotIn("mcp-approval-call-", approval_event.payload["safe_call_ref"])
         routed = next(event for event in outcome.events if event.event_type == "mcp.server_routed")
         discovery = next(
             event for event in outcome.events if event.event_type == "mcp.discovery_completed"
@@ -654,7 +661,8 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             ["mcp.tool_call_started", "mcp.tool_call_still_running"],
         )
         self.assertEqual(storage.lifecycle[0], "reserve")
-        self.assertEqual(live_events[0].payload["safe_call_ref"], "safe-call-1")
+        self.assertEqual(len(live_events[0].payload["safe_call_ref"]), 64)
+        self.assertNotEqual(live_events[0].payload["safe_call_ref"], "safe-call-1")
         self.assertEqual(live_events[0].payload["server_display_name"], "CRM")
         self.assertEqual(live_events[0].payload["tool_display_name"], "lookup")
         self.assertNotIn(

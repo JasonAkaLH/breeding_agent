@@ -11,7 +11,7 @@ from .adapter import PythonLegacyMCPClientAdapter
 from .adapter_2025_tasks import MCP2025TaskRecoveryClient, MCP2025TasksAdapter
 from .adapter_2026 import MCP2026Adapter, safe_auto_downgrade_version
 from .client import MCPClient, MCPProtocolError
-from .credentials import CredentialCipher, CredentialSecurityError, MCPRecoveryService
+from .credentials import MCPCredentialCipher, CredentialSecurityError, MCPRecoveryService
 from .endpoint_policy import EndpointPolicy, EndpointPolicyError, ValidatedEndpoint
 from .policy_connection import build_policy_bound_http_connection
 from .protocol import (
@@ -23,7 +23,7 @@ from .transport_legacy_http_sse import LegacyHTTPSSETransport
 
 
 class UserMCPCredentialResolver:
-    def __init__(self, storage: Any, cipher: CredentialCipher) -> None:
+    def __init__(self, storage: Any, cipher: MCPCredentialCipher) -> None:
         self._storage = storage
         self._cipher = cipher
 

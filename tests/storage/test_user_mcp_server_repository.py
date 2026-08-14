@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.core.enums import UserMCPAuthType, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import (
-    MCPCredentialKeyValidation,
+    MAFMasterKeyValidation,
     UserMCPCredentialRecord,
     UserMCPHealthAttempt,
     UserMCPScopeLease,
@@ -234,8 +234,64 @@ class UserMCPServerRepositoryTest(SQLiteStorageTestCase):
             [("alice", "server-a"), ("bob", "server-b")],
         )
 
-    def test_key_validation_create_or_get_never_overwrites(self) -> None:
-        first = MCPCredentialKeyValidation("singleton", b"nonce-a", b"cipher-a", 1, self.now)
-        second = MCPCredentialKeyValidation("other", b"nonce-b", b"cipher-b", 1, self.now)
-        self.assertEqual(asyncio.run(self.storage.create_or_get_mcp_credential_key_validation(first)), first)
-        self.assertEqual(asyncio.run(self.storage.create_or_get_mcp_credential_key_validation(second)), first)
+    def test_master_key_validation_create_or_get_never_overwrites(self) -> None:
+        created_at = self.now.replace(tzinfo=timezone.utc)
+        first = MAFMasterKeyValidation(1, b"nonce-first!", b"cipher-a", 1, created_at)
+        second = MAFMasterKeyValidation(1, b"nonce-second", b"cipher-b", 1, created_at)
+        self.assertEqual(
+            asyncio.run(self.storage.create_or_get_maf_master_key_validation(first)),
+            first,
+        )
+        self.assertEqual(
+            asyncio.run(self.storage.create_or_get_maf_master_key_validation(second)),
+            first,
+        )
+        reopened = SQLiteStorage(self.session_factory)
+        self.assertEqual(
+            asyncio.run(reopened.get_maf_master_key_validation()),
+            first,
+        )
+
+    def test_master_key_validation_model_rejects_invalid_shape(self) -> None:
+        created_at = self.now.replace(tzinfo=timezone.utc)
+        invalid_values = (
+            {"singleton_key": 2},
+            {"validation_nonce": b"short"},
+            {"derivation_version": 2},
+            {"created_at": self.now},
+        )
+        defaults = {
+            "singleton_key": 1,
+            "validation_nonce": b"nonce-first!",
+            "validation_ciphertext": b"cipher-a",
+            "derivation_version": 1,
+            "created_at": created_at,
+        }
+        for changes in invalid_values:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                MAFMasterKeyValidation(**(defaults | changes))
+
+    def test_concurrent_master_key_validation_create_or_get_reads_one_winner(self) -> None:
+        created_at = self.now.replace(tzinfo=timezone.utc)
+        candidates = (
+            MAFMasterKeyValidation(1, b"nonce-first!", b"cipher-a", 1, created_at),
+            MAFMasterKeyValidation(1, b"nonce-second", b"cipher-b", 1, created_at),
+        )
+
+        async def create_both() -> list[MAFMasterKeyValidation]:
+            return list(
+                await asyncio.gather(
+                    *(
+                        self.storage.create_or_get_maf_master_key_validation(candidate)
+                        for candidate in candidates
+                    )
+                )
+            )
+
+        winners = asyncio.run(create_both())
+        self.assertEqual(winners[0], winners[1])
+        self.assertIn(winners[0], candidates)
+        self.assertEqual(
+            asyncio.run(self.storage.get_maf_master_key_validation()),
+            winners[0],
+        )

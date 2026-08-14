@@ -49,6 +49,7 @@ from src.integrations.mcp.rollout_evidence import (
 )
 from src.integrations.mcp.temporary_results import MCPTemporaryResultRef
 from tests.api.support import InMemoryTaskRuntimeSidecar
+from tests.master_key_support import recovery_cipher
 
 
 class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
@@ -116,7 +117,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             database_path=root / "runtime.sqlite3",
             audit_log_path=root / "audit.jsonl",
             enable_user_mcp=True,
-            user_mcp_credential_key_file=key_path,
+            master_key_bytes=b"a" * 32,
             enable_platform_llm=False,
             enable_llm_planner=False,
             planner_text_generator=planner_text_generator,
@@ -199,7 +200,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             recovery = MCPRecoveryService(
                 runtime.storage,
-                runtime.mcp_credential_cipher,
+                recovery_cipher(b"a" * 32),
                 now_fn=lambda: now,
             )
             await recovery.save_remote_task(
@@ -475,7 +476,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     recovery_events[0].payload,
                     {
-                        "safe_call_ref": "safe-call-a",
+                        "safe_call_ref": runtime._mcp_audit_reference_signer.safe_reference(
+                            "safe-call-a",
+                            context="mcp-call-reference-v1",
+                        ),
                         "status": "unknown",
                         "error_code": "execution_status_unknown",
                     },

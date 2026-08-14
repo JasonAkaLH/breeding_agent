@@ -45,7 +45,7 @@ services:
       MAF_RUST_SKILL_RUNTIME_MODE: "off"
       MAF_USER_MCP_MAX_ACTIVE_CALLS: "8"
       MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES: "1048576"
-      MCP_CREDENTIAL_KEY_FILE: "/run/secrets/mcp-credential.key"
+      MAF_MASTER_KEY_FILE: "/run/secrets/maf-master.key"
       MCP_USER_SCOPED_GATEWAY_ENABLED: "true"
       MCP_ROUTING_MODE: "enforce"
       MCP_LEGACY_GLOBAL_RUNTIME_ENABLED: "false"
@@ -56,7 +56,7 @@ services:
     volumes:
       - breeding-agent-runtime:/app/runtime
       - breeding-agent-runtime-sidecar-socket:/run/maf-runtime-sidecar:ro
-      - ${MCP_CREDENTIAL_KEY_FILE_HOST:?MCP_CREDENTIAL_KEY_FILE_HOST is required}:/run/secrets/mcp-credential.key:ro
+      - ${MAF_MASTER_KEY_FILE_HOST:?MAF_MASTER_KEY_FILE_HOST is required}:/run/secrets/maf-master.key:ro
       - /data/peihai/vibe-breeding-dev/skills:/app/skill:ro
     ports:
       - "51888:8000"

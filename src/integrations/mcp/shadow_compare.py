@@ -1152,16 +1152,16 @@ def compare_runtime_shadow_observation(
 
 
 def derive_shadow_catalog_digest_key(
-    credential_cipher: Any,
+    audit_reference_signer: Any,
     *,
     config_fingerprint: str,
 ) -> bytes:
     """Derive a secret, config-bound key without exposing credential key bytes."""
 
     fingerprint = str(config_fingerprint or "").strip()
-    if credential_cipher is None or not fingerprint:
+    if audit_reference_signer is None or not fingerprint:
         raise ValueError("shadow catalog digest key inputs must not be empty")
-    encoded = credential_cipher.safe_owner_reference(
+    encoded = audit_reference_signer.safe_reference(
         fingerprint,
         context="mcp-shadow-catalog-hmac-v1",
     )
@@ -1176,6 +1176,7 @@ def derive_shadow_catalog_digest_key(
 
 def migration_target_credential_digest(
     credential_cipher: Any,
+    audit_reference_signer: Any,
     *,
     server: Any,
     credential_record: Any | None,
@@ -1186,7 +1187,13 @@ def migration_target_credential_digest(
     owner = str(getattr(server, "owner_user_id", "") or "").strip()
     server_id = str(getattr(server, "server_id", "") or "").strip()
     source = str(source_fingerprint or "").strip()
-    if credential_cipher is None or not owner or not server_id or not source:
+    if (
+        credential_cipher is None
+        or audit_reference_signer is None
+        or not owner
+        or not server_id
+        or not source
+    ):
         return None
     try:
         if credential_record is None:
@@ -1211,7 +1218,7 @@ def migration_target_credential_digest(
         if not isinstance(provenance, Mapping):
             return None
         return legacy_migration_credential_provenance_digest(
-            credential_cipher,
+            audit_reference_signer,
             credential_values=credential_values,
             owner_user_id=owner,
             target_server_id=server_id,

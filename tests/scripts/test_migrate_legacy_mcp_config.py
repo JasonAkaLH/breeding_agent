@@ -26,7 +26,6 @@ from scripts.migrate_legacy_mcp_config import (
     _fingerprint,
 )
 from src.integrations.mcp.config import load_mcp_server_config
-from src.integrations.mcp.credentials import CredentialCipher
 from src.integrations.mcp.legacy_migration import (
     LegacyMigrationPlan,
     LegacyMigrationHealthResult,
@@ -47,9 +46,10 @@ from src.storage.sqlite import (
     create_sqlite_engine,
     create_sqlite_session_factory,
 )
+from tests.master_key_support import audit_reference_signer, credential_cipher
 
 SERVICE_CONSUMER_REF = legacy_target_consumer_reference(
-    CredentialCipher(b"k" * 32),
+    audit_reference_signer(b"k" * 32),
     "service-owner",
 )
 
@@ -101,6 +101,17 @@ class LegacyMCPMigrationCommandTests(unittest.TestCase):
                 }
             }
         )
+
+    def test_removed_credential_key_argument_is_rejected(self) -> None:
+        with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            run(
+                self._args(
+                    "--credential-key-file",
+                    str(self.root / "removed.key"),
+                ),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -364,8 +375,8 @@ class LegacyMCPMigrationCommandTests(unittest.TestCase):
             str(self.artifact_path),
             "--database-path",
             str(database),
-            "--credential-key-file",
-            str(key_file),
+            "--master-key-file",
+            str(key_file.resolve()),
             "--service-account-owner",
             "service-owner",
             "--audit-out",
@@ -405,7 +416,7 @@ class LegacyMCPMigrationCommandTests(unittest.TestCase):
             storage.get_user_mcp_credential("service-owner", target_id)
         )
         self.assertEqual(
-            CredentialCipher(b"k" * 32).decrypt(
+            credential_cipher(b"k" * 32).decrypt(
                 credential,
                 owner_user_id="service-owner",
                 server_id=target_id,
@@ -469,7 +480,7 @@ class LegacyMCPMigrationCommandTests(unittest.TestCase):
         key_file.chmod(0o400)
         args = SimpleNamespace(
             database_path=None,
-            credential_key_file=str(key_file),
+            master_key_file=str(key_file.resolve()),
             audit_out=str(self.root / "postgres-audit.json"),
             service_account_owner="service-owner",
             allowlist_domain=[],

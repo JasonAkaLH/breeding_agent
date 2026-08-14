@@ -286,6 +286,7 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             return build_api_runtime(
                 database_path=self.workspace / "phase6-api.sqlite3",
                 audit_log_path=self.workspace / "audit.jsonl",
+                master_key_bytes=b"t" * 32,
                 mysql_adapter=adapter,
                 platform_llm_text_generator=platform_llm_text_generator,
                 platform_llm_config=platform_llm_config,

@@ -52,6 +52,7 @@ class StatePlatformRuntimeAssemblyTest(unittest.TestCase):
             runtime = runtime_module.build_api_runtime(
                 database_path=Path(tmpdir) / "api.sqlite3",
                 audit_log_path=Path(tmpdir) / "audit.jsonl",
+                master_key_bytes=b"s" * 32,
                 enable_platform_llm=False,
                 enable_llm_planner=False,
                 enable_skill_input_llm=False,
