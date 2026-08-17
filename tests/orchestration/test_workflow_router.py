@@ -6,10 +6,32 @@ from src.capabilities.main_agent import MainAgentWorkflowProvider
 from src.capabilities.mcp_dispatch import MCPDispatchWorkflowProvider
 from src.orchestration.models import OrchestrationRequest
 from src.orchestration.skill_workflow_provider import SkillWorkflowProvider
+from src.orchestration.service import OrchestrationService
 from src.orchestration.workflow_router import WorkflowRouter
 
 
 class WorkflowRouterTest(unittest.TestCase):
+    def test_mcp_binding_internal_metadata_is_scoped_to_dispatch_node(self) -> None:
+        request_metadata = {
+            "mcp_dispatch_server_id": "server-1",
+            "mcp_binding_mode": "explicit_command",
+            "forced_by_mcp_command": True,
+            "mcp_command": "$CRM",
+            "deep_thinking": False,
+        }
+        dispatch = OrchestrationService._execution_metadata(
+            request_metadata,
+            {"mcp_binding_mode": "explicit_command", "user_message": "查询"},
+        )
+        finalizer = OrchestrationService._execution_metadata(request_metadata, {})
+
+        self.assertEqual(dispatch["mcp_binding_mode"], "explicit_command")
+        self.assertEqual(dispatch["user_message"], "查询")
+        self.assertNotIn("mcp_dispatch_server_id", dispatch)
+        self.assertNotIn("forced_by_mcp_command", dispatch)
+        self.assertNotIn("mcp_command", dispatch)
+        self.assertEqual(finalizer, {"deep_thinking": False})
+
     def test_explicit_mcp_dispatch_routes_to_resume_provider(self) -> None:
         router = WorkflowRouter(
             default_provider=MainAgentWorkflowProvider(),
@@ -30,6 +52,31 @@ class WorkflowRouterTest(unittest.TestCase):
         self.assertEqual(plan.metadata["route"], "mcp_dispatch")
         self.assertEqual([node.capability_id for node in plan.nodes], ["mcp.dispatch", "main_agent.respond"])
         self.assertEqual(plan.nodes[1].depends_on, (plan.nodes[0].node_id,))
+
+    def test_explicit_command_mode_is_pinned_to_dispatch_node_only(self) -> None:
+        router = WorkflowRouter(
+            default_provider=MainAgentWorkflowProvider(),
+            main_agent_provider=MainAgentWorkflowProvider(),
+            mcp_provider=MCPDispatchWorkflowProvider(),
+        )
+        plan = router.build_plan(
+            OrchestrationRequest(
+                task_id="task-explicit",
+                conversation_id="conv-1",
+                root_message_id="msg-1",
+                user_message="查询 CRM",
+                requested_capability_id="mcp.dispatch",
+                metadata={
+                    "mcp_dispatch_server_id": "server-1",
+                    "mcp_binding_mode": "explicit_command",
+                },
+            )
+        )
+
+        self.assertEqual(plan.nodes[0].input_payload, {"server_id": "server-1"})
+        self.assertEqual(plan.nodes[0].metadata["mcp_binding_mode"], "explicit_command")
+        self.assertEqual(plan.nodes[0].metadata["user_message"], "查询 CRM")
+        self.assertNotIn("mcp_binding_mode", plan.nodes[1].metadata)
 
     def test_top_level_skill_capability_routes_to_skill_provider(self) -> None:
         router = WorkflowRouter(

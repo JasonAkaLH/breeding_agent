@@ -235,6 +235,19 @@ describe('createApiClient', () => {
     });
   });
 
+  it('maps MCP binding 409 and feature 503 to specific errors', async () => {
+    for (const [status, code, expected] of [
+      [409, 'mcp_bound_server_unavailable', '所选 MCP Server 已不可用'],
+      [503, 'mcp_feature_unavailable', 'MCP 功能暂不可用'],
+    ] as const) {
+      const fetcher = vi.fn(async () => new Response(JSON.stringify({ detail: { code } }), { status }));
+      const api = createApiClient({ fetcher });
+      await expect(api.submitMessage({ conversationId: 'conv-1', content: '你好', mode: 'chat' })).rejects.toMatchObject({
+        userMessage: expect.stringContaining(expected),
+      });
+    }
+  });
+
   it('lists task interrupts', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ task_id: 'task-1', interrupts: [] }), { status: 200 }));
     const api = createApiClient({ fetcher });

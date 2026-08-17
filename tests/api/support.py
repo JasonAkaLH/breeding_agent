@@ -218,6 +218,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
         runtime_sidecar_client=None,
+        enable_user_mcp: bool | None = None,
+        enable_user_mcp_routing: bool | None = None,
     ) -> ApiRuntime:
         adapter = mysql_adapter or MySQLReadonlyAdapter(
             runner=lambda sql: ReadonlyQueryResult(
@@ -324,6 +326,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
                 mcp_sidecar_client=mcp_sidecar_client,
                 mcp_runtime_state=mcp_runtime_state,
                 runtime_sidecar_client=runtime_sidecar_client,
+                enable_user_mcp=enable_user_mcp,
+                enable_user_mcp_routing=enable_user_mcp_routing,
                 )
 
     async def _bind_client(self) -> None:
@@ -387,6 +391,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
         mcp_sidecar_client=None,
         mcp_runtime_state=None,
         runtime_sidecar_client=None,
+        enable_user_mcp: bool | None = None,
+        enable_user_mcp_routing: bool | None = None,
     ) -> None:
         await self.client.aclose()
         await self.runtime.shutdown()
@@ -428,6 +434,8 @@ class APITestCase(unittest.IsolatedAsyncioTestCase):
             mcp_sidecar_client=mcp_sidecar_client,
             mcp_runtime_state=mcp_runtime_state,
             runtime_sidecar_client=runtime_sidecar_client,
+            enable_user_mcp=enable_user_mcp,
+            enable_user_mcp_routing=enable_user_mcp_routing,
         )
         await self._bind_client()
 

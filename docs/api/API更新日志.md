@@ -8,6 +8,12 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-17 增量：`$` 用户级 MCP Server Soft Binding
+
+`POST /api/v1/conversations/chat-messages` 新增 closed `metadata.mcp_server_binding={"server_id":"..."}`。该字段只能与 `routing_mode=force_capability`、`capability_id=mcp.dispatch` 同时出现；反向组合也成立，强制 `mcp.dispatch` 缺少binding返回422。binding请求的metadata只允许 `mcp_server_binding`、`upload_ids`、`upload_sheet_selections`、`deep_thinking`、`main_agent_reasoning_effort`。目标Server不存在、跨用户、disabled、unavailable、待删除或已删除统一返回409 `mcp_bound_server_unavailable`，user-scoped runtime不可承载时返回503 `mcp_feature_unavailable`。
+
+成功提交后，Server身份固定且不经过Server Router；系统执行 `initialize + tools/list`，Selector只能在当前Server内选择 `call_tool`、`finish`或`stop`。只有 `call_tool` 进入既有逐Tool授权和20次预算。当前消息显式附件只以basename、MIME、size和count摘要进入Selector，文件正文、路径、base64、storage key、SHA和内部upload ID不会发送给MCP。消息历史新增安全 `mcp_server_badge`，private binding context不会通过公共历史返回。
+
 ## 2026-08-17 增量：用户级 MCP 公网 HTTP/HTTPS Endpoint Policy
 
 `POST/PATCH /api/v1/mcp/servers` 的请求和响应 schema 不变。行为调整为任意公网 HTTP/HTTPS Endpoint 经 URL、DNS、IP 与重定向校验后均可保存；公网 HTTP 可携带现有 Bearer/API Key/static headers 认证，记录脱敏的 `plaintext_http` / `credential_over_plaintext_http` 安全布尔值。私网、回环、链路本地、云元数据、多播、保留及未指定地址始终返回 422 安全原因码，不再支持管理员域名/CIDR allowlist 例外。前端新建 HTTP 或从 HTTPS 改为 HTTP 时显示明文传输风险确认；保存失败在当前 MCP 设置 Modal 内显示具体安全原因并保留表单。具体 `tools/call` 的一次允许/始终允许/拒绝授权流程不变。

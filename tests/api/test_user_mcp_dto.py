@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from src.api.dto import (
     CreateUserMCPServerRequest,
     PatchUserMCPServerRequest,
+    SubmitMessageRequest,
     UserMCPCredentialInput,
 )
 
@@ -63,3 +64,66 @@ class UserMCPDTOTest(unittest.TestCase):
                 display_name="Demo",
                 endpoint_url="https://mcp.example.test/" + "a" * 2048,
             )
+
+    def test_mcp_binding_is_closed_and_requires_exact_forced_route(self) -> None:
+        request = SubmitMessageRequest.model_validate(
+            {
+                "conversation_id": "conv-1",
+                "content": "查询",
+                "routing_mode": "force_capability",
+                "capability_id": "mcp.dispatch",
+                "metadata": {
+                    "mcp_server_binding": {"server_id": " mcp-server-1 "},
+                    "deep_thinking": True,
+                },
+            }
+        )
+        self.assertEqual(
+            request.metadata["mcp_server_binding"],
+            {"server_id": "mcp-server-1"},
+        )
+
+        invalid_payloads = (
+            {
+                "routing_mode": "force_capability",
+                "capability_id": "mcp.dispatch",
+                "metadata": {},
+            },
+            {
+                "routing_mode": "auto",
+                "capability_id": None,
+                "metadata": {"mcp_server_binding": {"server_id": "mcp-server-1"}},
+            },
+            {
+                "routing_mode": "force_capability",
+                "capability_id": "mcp.dispatch",
+                "metadata": {"mcp_server_binding": {"server_id": "mcp-server-1", "endpoint": "https://evil"}},
+            },
+            {
+                "routing_mode": "force_capability",
+                "capability_id": "mcp.dispatch",
+                "metadata": {
+                    "mcp_server_binding": {"server_id": "mcp-server-1"},
+                    "credential": "secret",
+                },
+            },
+            {
+                "routing_mode": "force_capability",
+                "capability_id": "mcp.dispatch",
+                "metadata": {"mcp_server_binding": {"server_id": "x" * 129}},
+            },
+            {
+                "routing_mode": "force_capability",
+                "capability_id": "mcp.dispatch",
+                "metadata": {"mcp_server_binding": {"server_id": "mcp\u0000server"}},
+            },
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), self.assertRaises(ValidationError):
+                SubmitMessageRequest.model_validate(
+                    {
+                        "conversation_id": "conv-1",
+                        "content": "查询",
+                        **payload,
+                    }
+                )

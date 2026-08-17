@@ -5,9 +5,10 @@ import zhCN from 'antd/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { createApiClient, type ApiClient } from './api/client';
 import { createFetchTaskEventSourceFactory, taskEventsUrl, type EventSourceFactory, type TaskEventSubscription } from './api/taskEvents';
-import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
+import type { AuthTokenResponse, ChatMode, ConversationSummaryResponse, MCPServerBadge, MessageResponse, ModelEdition, ModelEditionOption, ReasoningEffort, TaskEventEnvelope, TaskSummaryResponse, UploadFileResponse, UserResponse } from './api/types';
 import { parseAssistantTextArtifact, parseCapabilityArtifactDisplays, summarizeCapabilityArtifactDisplays, type CapabilityArtifactDisplay } from './domain/artifacts';
 import { pickComposerPlaceholder } from './domain/composerPlaceholders';
+import { deriveMCPServerCommands, isMCPServerInput, mcpServerMenuCandidates, mcpServerSubmitIntent, parseDirectMCPServerCommand, type MCPServerCommand } from './domain/mcpServerCommands';
 import { deriveSlashCommands, isSlashInput, parseDirectSlashCommand, slashMenuCandidates, slashSubmitIntent, type SlashCommand } from './domain/slashCommands';
 import { pickWelcomePrompt } from './domain/welcomePrompts';
 import {
@@ -62,6 +63,7 @@ interface ConversationMessage {
   mode: ChatMode;
   taskId?: string;
   metadata?: Record<string, unknown>;
+  mcpServerBadge?: MCPServerBadge;
   reasoningRequested?: boolean;
   reasoningComplete?: boolean;
   reasoningContent?: string;
@@ -308,6 +310,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
   const [selectedSkillCommand, setSelectedSkillCommand] = useState<SlashCommand | null>(null);
+  const [mcpServerCommands, setMCPServerCommands] = useState<MCPServerCommand[]>([]);
+  const [mcpServerMenuOpen, setMCPServerMenuOpen] = useState(false);
+  const [mcpServerMenuActiveIndex, setMCPServerMenuActiveIndex] = useState(0);
+  const [selectedMCPServerCommand, setSelectedMCPServerCommand] = useState<MCPServerCommand | null>(null);
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [pendingUploads, setPendingUploads] = useState<UploadFileResponse[]>([]);
   const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
@@ -452,6 +458,27 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       mounted = false;
     };
   }, [api, authUser]);
+
+  const refreshMCPServerCommands = useCallback(async () => {
+    if (!authUser) {
+      setMCPServerCommands([]);
+      setMCPServerMenuOpen(false);
+      setSelectedMCPServerCommand(null);
+      return;
+    }
+    try {
+      const result = await api.listMCPServers();
+      setMCPServerCommands(deriveMCPServerCommands(result.servers));
+    } catch (error) {
+      setMCPServerCommands([]);
+      setMCPServerMenuOpen(false);
+      showTransientNotice(`MCP Server 列表加载失败：${friendlyError(error)}`);
+    }
+  }, [api, authUser]);
+
+  useEffect(() => {
+    void refreshMCPServerCommands();
+  }, [refreshMCPServerCommands]);
 
   useEffect(() => {
     if (!authUser) {
@@ -938,6 +965,8 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setMessages([]);
     setDraftAttachments([]);
     setPendingUploads([]);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     clearCurrentTaskRuntime({ closeSubscription: true });
   }
 
@@ -955,6 +984,9 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setConversationHistory([]);
     setDraftAttachments([]);
     setPendingUploads([]);
+    setMCPServerCommands([]);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     updateCurrentTaskId(null);
     updateCurrentAssistantId(null);
     setPendingInterrupt(null);
@@ -1031,6 +1063,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setActiveConversationId(nextConversationId);
     setMessages([]);
     setInput('');
+    setSelectedSkillCommand(null);
+    setSlashMenuOpen(false);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     setModelEdition(defaultModelEdition);
     setDraftAttachments([]);
     setPendingUploads([]);
@@ -1138,30 +1174,56 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     : Math.min(slashMenuActiveIndex, slashCandidates.length - 1);
   const directSlashParse = useMemo(() => parseDirectSlashCommand(input, skillCommands), [input, skillCommands]);
   const slashInputBlocked = !selectedSkillCommand && (directSlashParse.kind === 'not_found' || directSlashParse.kind === 'conflict');
+  const mcpServerCandidates = useMemo(
+    () => (mcpServerMenuOpen ? mcpServerMenuCandidates(input, mcpServerCommands) : []),
+    [input, mcpServerCommands, mcpServerMenuOpen],
+  );
+  const normalizedMCPServerMenuActiveIndex = mcpServerCandidates.length === 0
+    ? 0
+    : Math.min(mcpServerMenuActiveIndex, mcpServerCandidates.length - 1);
+  const directMCPServerParse = useMemo(
+    () => parseDirectMCPServerCommand(input, mcpServerCommands),
+    [input, mcpServerCommands],
+  );
+  const mcpServerInputBlocked = !selectedMCPServerCommand
+    && (directMCPServerParse.kind === 'not_found' || directMCPServerParse.kind === 'conflict');
+  const mcpServerReady = selectedMCPServerCommand !== null || directMCPServerParse.kind === 'matched';
+  const mcpServerHasTaskText = selectedMCPServerCommand !== null
+    ? Boolean(input.trim())
+    : directMCPServerParse.kind === 'matched' && Boolean(directMCPServerParse.content.trim());
   const pendingInterruptAcceptsUpload = pendingInterrupt !== null && interruptAcceptsUpload(pendingInterrupt);
   const savedFileCount = pendingUploads.length;
   const canSubmitUploadOnlyInterruptAnswer = pendingInterruptAcceptsUpload && draftAttachments.length > 0;
   const canUploadInCurrentComposer = !active && (!pendingInterrupt || pendingInterruptAcceptsUpload);
-  const canSubmitComposer = selectedModelReasoningConfigValid && !slashInputBlocked && (
-    Boolean(input.trim())
+  const canSubmitComposer = selectedModelReasoningConfigValid && !slashInputBlocked && !mcpServerInputBlocked && (
+    (Boolean(input.trim()) && !isMCPServerInput(input))
     || selectedSkillCommand !== null
     || directSlashParse.kind === 'matched'
+    || (mcpServerReady && (mcpServerHasTaskText || draftAttachments.length > 0))
     || canSubmitUploadOnlyInterruptAnswer
   );
   const slashMenuEmptyMessage = skillCommands.length === 0 ? '暂无可用 Skill' : '未找到 Skill';
 
   function handleComposerInputChange(value: string) {
     setInput(value);
-    if (isSlashInput(value)) {
+    if (isMCPServerInput(value)) {
+      setMCPServerMenuOpen(true);
+      setMCPServerMenuActiveIndex(0);
+      setSlashMenuOpen(false);
+    } else if (isSlashInput(value)) {
       setSlashMenuOpen(true);
       setSlashMenuActiveIndex(0);
+      setMCPServerMenuOpen(false);
     } else {
       setSlashMenuOpen(false);
+      setMCPServerMenuOpen(false);
     }
   }
 
   function selectSlashCommand(command: SlashCommand) {
     setSelectedSkillCommand(command);
+    setSelectedMCPServerCommand(null);
+    setMCPServerMenuOpen(false);
     setInput((current) => {
       const parsed = parseDirectSlashCommand(current, [command]);
       if (parsed.kind === 'matched') return parsed.content;
@@ -1171,6 +1233,66 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     setSlashMenuOpen(false);
     setSlashMenuActiveIndex(0);
     clearTransientNotice();
+  }
+
+  function selectMCPServerCommand(command: MCPServerCommand) {
+    setSelectedMCPServerCommand(command);
+    setSelectedSkillCommand(null);
+    setInput((current) => {
+      const parsed = parseDirectMCPServerCommand(current, [command]);
+      if (parsed.kind === 'matched') return parsed.content;
+      if (isMCPServerInput(current)) return '';
+      return current;
+    });
+    setMCPServerMenuOpen(false);
+    setMCPServerMenuActiveIndex(0);
+    setSlashMenuOpen(false);
+    clearTransientNotice();
+  }
+
+  function handleMCPServerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (!mcpServerMenuOpen && !isMCPServerInput(input)) return false;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMCPServerMenuOpen(false);
+      return true;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setMCPServerMenuOpen(true);
+      setMCPServerMenuActiveIndex((current) => (
+        mcpServerCandidates.length === 0 ? 0 : (current + 1) % mcpServerCandidates.length
+      ));
+      return true;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setMCPServerMenuOpen(true);
+      setMCPServerMenuActiveIndex((current) => (
+        mcpServerCandidates.length === 0
+          ? 0
+          : (current - 1 + mcpServerCandidates.length) % mcpServerCandidates.length
+      ));
+      return true;
+    }
+    if (event.key === 'Enter') {
+      const parsed = parseDirectMCPServerCommand(input, mcpServerCommands);
+      if (parsed.kind === 'matched' && parsed.content.trim()) return false;
+      if (mcpServerMenuOpen && mcpServerCandidates.length > 0) {
+        event.preventDefault();
+        selectMCPServerCommand(mcpServerCandidates[normalizedMCPServerMenuActiveIndex]);
+        return true;
+      }
+      if (parsed.kind === 'not_found' || parsed.kind === 'conflict') {
+        event.preventDefault();
+        setMCPServerMenuOpen(true);
+        showTransientNotice(parsed.kind === 'conflict'
+          ? `命令 ${parsed.command} 存在同名 Server，请从列表中点选。`
+          : `未找到 MCP Server：${parsed.command}`);
+        return true;
+      }
+    }
+    return false;
   }
 
   function handleSlashKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
@@ -1213,26 +1335,43 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
   }
 
   async function handleSubmit() {
-    const intent = slashSubmitIntent(input, skillCommands, selectedSkillCommand);
-    if (intent.kind === 'blocked') {
-      setSlashMenuOpen(true);
-      showTransientNotice(intent.reason === 'conflict' ? `命令 ${intent.command} 存在冲突，请从列表中选择具体 Skill。` : `未找到 Skill：${intent.command}`);
+    const mcpIntent = mcpServerSubmitIntent(input, mcpServerCommands, selectedMCPServerCommand);
+    if (mcpIntent.kind === 'blocked') {
+      setMCPServerMenuOpen(true);
+      showTransientNotice(mcpIntent.reason === 'conflict'
+        ? `命令 ${mcpIntent.command} 存在同名 Server，请从列表中点选。`
+        : `未找到 MCP Server：${mcpIntent.command}`);
       return;
     }
-    const content = intent.content;
-    const forcedCommand = intent.kind === 'ready' ? intent.command : null;
-    const forcedCapabilityId = intent.kind === 'ready' ? intent.capabilityId : null;
-    const forcedMetadata = intent.kind === 'ready' ? intent.metadata : {};
+    const slashIntent = mcpIntent.kind === 'auto'
+      ? slashSubmitIntent(input, skillCommands, selectedSkillCommand)
+      : { kind: 'auto' as const, content: input.trim() };
+    if (slashIntent.kind === 'blocked') {
+      setSlashMenuOpen(true);
+      showTransientNotice(slashIntent.reason === 'conflict' ? `命令 ${slashIntent.command} 存在冲突，请从列表中选择具体 Skill。` : `未找到 Skill：${slashIntent.command}`);
+      return;
+    }
+    const commandKind = mcpIntent.kind === 'ready' ? 'mcp' : slashIntent.kind === 'ready' ? 'skill' : null;
+    const activeIntent = mcpIntent.kind === 'ready' ? mcpIntent : slashIntent;
+    const content = activeIntent.content;
+    const forcedCommand = activeIntent.kind === 'ready' ? activeIntent.command : null;
+    const forcedCapabilityId = activeIntent.kind === 'ready' ? activeIntent.capabilityId : null;
+    const forcedMetadata = activeIntent.kind === 'ready' ? activeIntent.metadata : {};
     const targetConversationId = authUser ? (conversationId || loadOrCreateConversationId(authUser.username)) : '';
     if (!authUser || !targetConversationId || active) return;
     if (!conversationId) {
       setActiveConversationId(targetConversationId);
     }
-    if (!content && intent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
+    if (!content && commandKind === 'mcp' && draftAttachments.length === 0) {
+      showTransientNotice('请说明任务或添加附件。');
+      return;
+    }
+    if (!content && activeIntent.kind !== 'ready' && !canSubmitUploadOnlyInterruptAnswer) return;
     clearTransientNotice();
-    if (pendingInterrupt && intent.kind === 'ready') {
-      setSlashMenuOpen(true);
-      showTransientNotice('当前任务正在等待补充信息。请先回答补充问题或取消当前任务，再使用新的 Skill 命令。');
+    if (pendingInterrupt && activeIntent.kind === 'ready') {
+      if (commandKind === 'mcp') setMCPServerMenuOpen(true);
+      else setSlashMenuOpen(true);
+      showTransientNotice(`当前任务正在等待补充信息。请先回答补充问题或取消当前任务，再使用新的${commandKind === 'mcp' ? ' MCP Server' : ' Skill'}命令。`);
       return;
     }
     if (pendingInterrupt) {
@@ -1244,6 +1383,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     try {
       uploadedDrafts = await uploadDraftAttachments(targetConversationId, draftSnapshot);
     } catch {
+      if (commandKind === 'mcp') {
+        setSelectedMCPServerCommand(null);
+        setMCPServerMenuOpen(false);
+      }
       return;
     }
     const refreshedMessages = uploadedDrafts.length > 0
@@ -1253,8 +1396,23 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
     const generation = beginRestoreGeneration();
     initializedWorkspaceConversationIdRef.current = targetConversationId;
     setRestoredWorkspaceConversationId(targetConversationId);
-    const displayContent = content || (intent.kind === 'ready' ? intent.command.command : content);
-    const userMessage: ConversationMessage = { id: makeClientId('user'), kind: 'chat', role: 'user', content: displayContent, mode };
+    const displayContent = content || (commandKind === 'mcp' ? '处理附加文件' : forcedCommand?.command ?? content);
+    const optimisticMCPBadge: MCPServerBadge | undefined = commandKind === 'mcp' && forcedCommand && 'serverId' in forcedCommand
+      ? {
+          server_id: forcedCommand.serverId,
+          display_name: forcedCommand.displayName,
+          command: forcedCommand.command,
+          binding_mode: 'explicit_command',
+        }
+      : undefined;
+    const userMessage: ConversationMessage = {
+      id: makeClientId('user'),
+      kind: 'chat',
+      role: 'user',
+      content: displayContent,
+      mode,
+      mcpServerBadge: optimisticMCPBadge,
+    };
     const assistantMessage: ConversationMessage = {
       id: makeClientId('assistant'),
       kind: 'chat',
@@ -1283,6 +1441,10 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           ...forcedMetadata,
         },
       });
+      if (commandKind === 'mcp') {
+        setSelectedMCPServerCommand(null);
+        setMCPServerMenuOpen(false);
+      }
       if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
       taskPresentationModesRef.current.set(accepted.task_id, mode);
       updateAssistantMessage(assistantMessage.id, { taskId: accepted.task_id });
@@ -1297,15 +1459,23 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
       const rollbackFailed = await rollbackUploadedDraftAttachments(targetConversationId, uploadedDrafts);
       resetDraftAttachmentStatus(draftSnapshot);
       if (forcedCommand) {
-        setSelectedSkillCommand(null);
-        setSlashMenuOpen(false);
-        void api.listCapabilities()
-          .then((result) => setSkillCommands(deriveSlashCommands(result.capabilities)))
-          .catch(() => undefined);
+        if (commandKind === 'mcp') {
+          setSelectedMCPServerCommand(null);
+          setMCPServerMenuOpen(false);
+          void refreshMCPServerCommands();
+        } else {
+          setSelectedSkillCommand(null);
+          setSlashMenuOpen(false);
+          void api.listCapabilities()
+            .then((result) => setSkillCommands(deriveSlashCommands(result.capabilities)))
+            .catch(() => undefined);
+        }
       }
       setTaskState((state) => markTaskFailed(state, message));
       const rollbackMessage = rollbackFailed ? ' 部分文件已保存到当前对话，可在文件面板删除。' : '';
-      showTransientNotice(forcedCommand ? `${message}${rollbackMessage} Skill 列表可能已更新，请重新选择。` : `${message}${rollbackMessage}`);
+      showTransientNotice(forcedCommand
+        ? `${message}${rollbackMessage} ${commandKind === 'mcp' ? 'MCP Server' : 'Skill'}列表可能已更新，请重新选择。`
+        : `${message}${rollbackMessage}`);
     }
   }
 
@@ -2269,12 +2439,36 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                       </Button>
                     </div>
                   ) : null}
+                  {selectedMCPServerCommand ? (
+                    <div className="selected-skill-command selected-mcp-server-command" role="status" aria-label="已选择 MCP Server">
+                      <span>已绑定 <strong>{selectedMCPServerCommand.command}</strong> {selectedMCPServerCommand.displayName}</span>
+                      <Button
+                        type="link"
+                        size="small"
+                        aria-label={`取消 MCP Server ${selectedMCPServerCommand.command}`}
+                        disabled={active}
+                        onClick={() => setSelectedMCPServerCommand(null)}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  ) : null}
                   {slashMenuOpen ? (
                     <SlashCommandMenu
                       candidates={slashCandidates}
                       activeIndex={normalizedSlashMenuActiveIndex}
                       emptyMessage={slashMenuEmptyMessage}
                       onSelect={selectSlashCommand}
+                    />
+                  ) : null}
+                  {mcpServerMenuOpen ? (
+                    <SlashCommandMenu
+                      candidates={mcpServerCandidates}
+                      activeIndex={normalizedMCPServerMenuActiveIndex}
+                      emptyMessage={mcpServerCommands.length === 0 ? '暂无可用 MCP Server' : '未找到 MCP Server'}
+                      variant="mcp"
+                      onRefresh={() => void refreshMCPServerCommands()}
+                      onSelect={selectMCPServerCommand}
                     />
                   ) : null}
                   {draftAttachments.length > 0 ? (
@@ -2305,6 +2499,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
                         }}
                         onPressEnter={(event) => {
                           if (!event.shiftKey && !isComposerImeConfirming(event)) {
+                            if (handleMCPServerKeyDown(event)) return;
                             if (handleSlashKeyDown(event)) return;
                             event.preventDefault();
                             void handleSubmit();
@@ -2439,7 +2634,11 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           onClose={() => setMCPSettingsOpen(false)}
           destroyOnHidden
         >
-          <MCPSettingsPanel api={api} onError={(error) => showTransientNotice(friendlyError(error))} />
+          <MCPSettingsPanel
+            api={api}
+            onError={(error) => showTransientNotice(friendlyError(error))}
+            onServersChanged={() => void refreshMCPServerCommands()}
+          />
         </Drawer>
         <MCPApprovalDialog
           approval={taskState.mcp.approval}
@@ -3074,6 +3273,9 @@ function MessageBubble({
   return (
     <div className={className}>
       <div className="message-meta">{message.role === 'user' ? '你' : 'SeedPilot'}</div>
+      {message.role === 'user' && message.mcpServerBadge ? (
+        <Tag className="message-mcp-server-badge" color="green">{message.mcpServerBadge.command}</Tag>
+      ) : null}
       {message.role === 'assistant' ? <SkillStatusLines statuses={message.skillStatuses} /> : null}
       <div className="message-body">
         {shouldShowReasoning ? (
@@ -3314,6 +3516,9 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
   const fallbackNotice = message.role === 'assistant'
     ? parseCapabilityFallbackNotice(message.metadata)
     : null;
+  const mcpServerBadge = message.role === 'user'
+    ? parseMCPServerBadge(message.metadata)
+    : null;
   return {
     id: message.message_id,
     kind: 'chat',
@@ -3324,7 +3529,28 @@ function messageFromHistory(message: MessageResponse): ConversationMessage | nul
     finalContentLoaded: assistantReplyCompleted || undefined,
     replyCompleted: assistantReplyCompleted || undefined,
     fallbackNotice: fallbackNotice ?? undefined,
+    mcpServerBadge: mcpServerBadge ?? undefined,
     artifactDisplays: artifactDisplays.length > 0 ? artifactDisplays : undefined,
+  };
+}
+
+function parseMCPServerBadge(metadata: Record<string, unknown> | undefined): MCPServerBadge | null {
+  const value = metadata?.mcp_server_badge;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const badge = value as Record<string, unknown>;
+  if (Object.keys(badge).sort().join(',') !== 'binding_mode,command,display_name,server_id') return null;
+  if (
+    typeof badge.server_id !== 'string'
+    || typeof badge.display_name !== 'string'
+    || typeof badge.command !== 'string'
+    || badge.binding_mode !== 'explicit_command'
+    || badge.command !== `$${badge.display_name}`
+  ) return null;
+  return {
+    server_id: badge.server_id,
+    display_name: badge.display_name,
+    command: badge.command,
+    binding_mode: 'explicit_command',
   };
 }
 

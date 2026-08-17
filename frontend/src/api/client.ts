@@ -301,10 +301,17 @@ async function toApiError(response: Response): Promise<ApiError> {
   } catch {
     detail = await response.text().catch(() => null);
   }
-  return new ApiError(response.status, detail, friendlyErrorMessage(response.status));
+  return new ApiError(response.status, detail, friendlyErrorMessage(response.status, detail));
 }
 
-function friendlyErrorMessage(status: number): string {
+function friendlyErrorMessage(status: number, detail: unknown): string {
+  const code = apiErrorCode(detail);
+  if (code === 'mcp_bound_server_unavailable') {
+    return '所选 MCP Server 已不可用，请刷新列表后重新选择。';
+  }
+  if (code === 'mcp_feature_unavailable') {
+    return 'MCP 功能暂不可用，请稍后重试。';
+  }
   if (status === 401) {
     return '登录已失效，请重新登录。';
   }
@@ -318,6 +325,14 @@ function friendlyErrorMessage(status: number): string {
     return '任务不存在或已过期，请重新提交问题。';
   }
   return '请求未完成，请稍后重试。';
+}
+
+function apiErrorCode(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const detail = (value as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return '';
+  const code = (detail as { code?: unknown }).code;
+  return typeof code === 'string' ? code : '';
 }
 
 export function normalizeBaseUrl(value: string): string {

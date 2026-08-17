@@ -5,8 +5,18 @@ from fastapi import APIRouter, HTTPException, Request, status
 from src.core.enums import ConversationStatus, MessageRole
 from src.core.models import Artifact, Conversation, Message
 from src.lifecycle.errors import ConversationBusyError
+from src.api.mcp_binding import (
+    MCPBindingFeatureUnavailableError,
+    MCPBoundServerUnavailableError,
+    MCP_SERVER_BADGE_METADATA_KEY,
+    safe_public_mcp_server_badge,
+)
 from src.api.upload_store import UploadValidationError
 from src.storage.conversation_files import FILE_UPLOAD_MESSAGE_TYPE, safe_file_upload_message_metadata
+from src.orchestration.capability_fallback import (
+    CAPABILITY_MISSING_FALLBACK_KEY,
+    sanitize_capability_missing_fallback_metadata,
+)
 
 from ..artifact_responses import artifact_response, should_return_history_display_artifact
 from ..auth import require_authenticated_user, require_conversation_owner
@@ -54,6 +64,16 @@ async def submit_message(body: SubmitMessageRequest, request: Request) -> Messag
     conversation_id = body.conversation_id
     try:
         result = await runtime.submit_chat_message(conversation_id, body, authenticated_username=user.username)
+    except MCPBoundServerUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code},
+        ) from exc
+    except MCPBindingFeatureUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": exc.code},
+        ) from exc
     except ConversationBusyError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -142,7 +162,18 @@ def _public_message_metadata(message: Message) -> dict[str, object]:
     if str(message.message_type) == FILE_UPLOAD_MESSAGE_TYPE:
         upload_id = _file_upload_id_from_message(message)
         return safe_file_upload_message_metadata(message.metadata, upload_id=upload_id)
-    return dict(message.metadata)
+    if str(message.role) == str(MessageRole.USER):
+        badge = safe_public_mcp_server_badge(
+            message.metadata.get(MCP_SERVER_BADGE_METADATA_KEY)
+        )
+        return {MCP_SERVER_BADGE_METADATA_KEY: badge} if badge is not None else {}
+    if str(message.role) == str(MessageRole.ASSISTANT):
+        fallback = sanitize_capability_missing_fallback_metadata(
+            message.metadata.get(CAPABILITY_MISSING_FALLBACK_KEY),
+            mode="history",
+        )
+        return {CAPABILITY_MISSING_FALLBACK_KEY: fallback} if fallback is not None else {}
+    return {}
 
 
 def _file_upload_id_from_message(message: Message) -> str | None:

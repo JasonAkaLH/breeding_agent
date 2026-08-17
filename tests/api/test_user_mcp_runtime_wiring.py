@@ -251,7 +251,7 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.shutdown()
 
-    async def test_explicit_dispatch_without_server_returns_accepted_and_converges_without_network(self) -> None:
+    async def test_internal_explicit_dispatch_without_server_converges_without_network(self) -> None:
         calls: list[str] = []
 
         def forbidden_client_factory(_server):
@@ -296,11 +296,12 @@ class UserMCPRuntimeWiringTest(unittest.IsolatedAsyncioTestCase):
             try:
                 response = await runtime.submit_chat_message(
                     "conv-no-server",
-                    SubmitMessageRequest(
+                    SubmitMessageRequest.model_construct(
                         conversation_id="conv-no-server",
                         content="必须使用 MCP",
                         routing_mode="force_capability",
                         capability_id="mcp.dispatch",
+                        metadata={},
                     ),
                     authenticated_username="alice",
                 )

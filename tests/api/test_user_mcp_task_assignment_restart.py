@@ -47,6 +47,9 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
                 content="查询 CRM",
                 routing_mode="force_capability",
                 capability_id="mcp.dispatch",
+                metadata={
+                    "mcp_server_binding": {"server_id": "server-a"},
+                },
             ),
             authenticated_username="alice",
         )

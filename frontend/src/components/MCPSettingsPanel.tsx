@@ -17,6 +17,7 @@ type SettingsApi = Pick<ApiClient,
 interface Props {
   api: SettingsApi;
   onError?(error: unknown): void;
+  onServersChanged?(): void;
 }
 
 interface ServerFormValue {
@@ -32,7 +33,7 @@ interface ServerFormValue {
   enabled: boolean;
 }
 
-export function MCPSettingsPanel({ api, onError }: Props) {
+export function MCPSettingsPanel({ api, onError, onServersChanged }: Props) {
   const [form] = Form.useForm<ServerFormValue>();
   const [servers, setServers] = useState<MCPServerResponse[]>([]);
   const [grants, setGrants] = useState<MCPToolGrantResponse[]>([]);
@@ -170,6 +171,7 @@ export function MCPSettingsPanel({ api, onError }: Props) {
       form.resetFields();
       setAnnouncement(editing ? 'MCP 服务配置已更新' : 'MCP 服务已保存，正在等待健康检查');
       await refresh();
+      onServersChanged?.();
     } catch (error) {
       setSaveError(mcpConfigErrorMessage(error));
     } finally {
@@ -200,6 +202,7 @@ export function MCPSettingsPanel({ api, onError }: Props) {
       await api.testMCPServer(serverId);
       setAnnouncement('MCP 服务重测已完成');
       await refresh();
+      onServersChanged?.();
     } catch (error) {
       onError?.(error);
     } finally {
@@ -212,6 +215,7 @@ export function MCPSettingsPanel({ api, onError }: Props) {
       await api.deleteMCPServer(serverId);
       setAnnouncement('MCP 服务已删除或进入待删除状态');
       await refresh();
+      onServersChanged?.();
     } catch (error) {
       onError?.(error);
     }

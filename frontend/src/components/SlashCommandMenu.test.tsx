@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SlashCommandMenu from './SlashCommandMenu';
 import type { SlashCommand } from '../domain/slashCommands';
+import type { MCPServerCommand } from '../domain/mcpServerCommands';
 
 function command(index: number): SlashCommand {
   return {
@@ -88,5 +89,34 @@ describe('SlashCommandMenu', () => {
     } finally {
       Element.prototype.scrollIntoView = originalScrollIntoView;
     }
+  });
+
+  it('renders the MCP variant with a separate refresh control and keyboard selection', () => {
+    const onSelect = vi.fn();
+    const onRefresh = vi.fn();
+    const server: MCPServerCommand = {
+      command: '$OCR服务',
+      serverId: 'mcp-ocr',
+      displayName: 'OCR服务',
+      description: '识别图片',
+      transport: 'streamable_http',
+      hasCommandConflict: false,
+    };
+    render(
+      <SlashCommandMenu
+        candidates={[server]}
+        activeIndex={0}
+        emptyMessage="未找到 MCP Server"
+        variant="mcp"
+        onRefresh={onRefresh}
+        onSelect={onSelect}
+      />,
+    );
+
+    expect(screen.getByRole('listbox', { name: 'MCP Server 命令列表' })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('option'), { key: ' ' });
+    expect(onSelect).toHaveBeenCalledWith(server);
+    fireEvent.click(screen.getByRole('button', { name: '刷新 MCP Server' }));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 });

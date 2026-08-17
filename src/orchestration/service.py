@@ -35,6 +35,10 @@ _SYSTEM_NODE_METADATA_KEYS = frozenset(
         "soft_skill_binding",
         "soft_skill_binding_source",
         "soft_skill_binding_requested_capability_id",
+        "mcp_dispatch_server_id",
+        "mcp_binding_mode",
+        "forced_by_mcp_command",
+        "mcp_command",
     }
 )
 _TASK_AUTHORITY_METADATA_KEYS = frozenset(

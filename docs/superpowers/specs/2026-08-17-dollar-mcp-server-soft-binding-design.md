@@ -2,7 +2,7 @@
 
 日期：2026-08-17
 
-状态：设计已确认，待实施
+状态：设计已确认并完成仓库实现；自动回归与fake MCP E2E已通过，真实OCR discover-only smoke待受控环境引用
 
 适用范围：`main` 分支开发环境的聊天输入解析、用户级 MCP Server 选择、`mcp.dispatch` 初始工作流、Tool discovery、Tool Selector、授权、历史消息展示和前后端回归
 
@@ -46,6 +46,8 @@
 12. 附件只向 Selector 提供安全摘要，本轮不实现文件正文到 MCP 的传输桥接。
 13. `$` badge 只对当前一条消息生效，提交成功或失败后清除。
 14. 当前消息和历史恢复都显示提交时的 `$Server` badge。
+15. 公共请求只提交稳定 `server_id`；命令文本和显示名称由后端从 owner-scoped Server 记录生成。
+16. binding 验证必须先于 Message、Task、附件绑定、审计和任何远端网络副作用。
 
 ## 4. 明确不做
 
@@ -58,6 +60,7 @@
 - 不取消或合并 Tool 授权。
 - 不修改 MCP Endpoint Policy、凭据加密、协议协商、远端 Task recovery 或 unknown/no-replay 语义。
 - 不修改或部署 `prod`。
+- 不为本功能回填旧历史消息的 `$` badge。
 
 ## 5. 总体数据流
 
@@ -102,6 +105,16 @@ main_agent.respond 生成最终回答
 
 不得把 Endpoint、凭据、Header、Tool Catalog 或内部错误正文放入候选模型。前端只保留本页面使用的安全 Profile，不持久化凭据或 Tool 信息。
 
+App 是聊天页候选 Profile 的唯一 owner：
+
+- 用户登录成功后加载一次；
+- 登出或认证失效时立即清空；
+- MCP 设置面板创建、编辑、重测、启停、删除完成后通过 callback 通知 App 重新加载；
+- 用户点击候选刷新入口时可以显式重新加载；
+- 输入 `$` 和过滤候选不得逐键发送网络请求。
+
+候选缓存只用于交互；提交时后端必须重新验证 Server。
+
 ### 6.2 语法
 
 ```text
@@ -116,6 +129,7 @@ $OCR服务 识别这份文档
 - 显示名称包含空格时必须点选菜单。
 - 未知 token 返回 `not_found`；多个同名候选返回 `conflict`。
 - 以 `$` 开头的未知或冲突输入必须阻止提交，不降级成普通文本。
+- 直接文本匹配对拉丁字母大小写不敏感，保留 Unicode 原文且不做拼音/音译；规范化后重复仍视为冲突。
 
 ### 6.3 菜单与选择
 
@@ -126,7 +140,7 @@ $OCR服务 识别这份文档
 - 路由描述
 - transport
 
-菜单必须支持鼠标、Enter、Space、上下箭头和 Escape，并提供明确的 MCP Server 可访问名称。候选只包含 `enabled=true AND health_status=available` 且未删除的 Server。
+菜单必须支持鼠标、Enter、Space、上下箭头和 Escape，并提供明确的 MCP Server 可访问名称。现有 Slash menu组件若复用，ARIA label、空状态和冲突文案必须参数化，不能继续固定为“Skill 命令列表”。候选只包含 `enabled=true AND health_status=available` 且未删除的 Server。
 
 点选后：
 
@@ -149,6 +163,8 @@ $OCR服务 识别这份文档
 
 提交成功或失败后都清除 MCP badge。失败时若附件已上传，继续使用现有补偿和草稿恢复行为。
 
+同一次 Enter、发送按钮或确认回调最多触发一个消息提交和一个 MCP discovery；提交开始后沿用现有 busy gate，禁止重复发送。
+
 ## 7. 提交 API 合同
 
 前端提交：
@@ -158,11 +174,8 @@ $OCR服务 识别这份文档
   "capability_id": "mcp.dispatch",
   "routing_mode": "force_capability",
   "metadata": {
-    "forced_by_mcp_command": true,
-    "mcp_command": "$OCR服务",
     "mcp_server_binding": {
-      "server_id": "mcp-7598...",
-      "command": "$OCR服务"
+      "server_id": "mcp-7598..."
     }
   }
 }
@@ -173,13 +186,12 @@ $OCR服务 识别这份文档
 | 字段 | 要求 |
 |---|---|
 | `server_id` | 非空字符串，长度受限，只作为后端 owner-scoped 查询键 |
-| `command` | 以 `$` 开头的安全显示文本，禁止控制字符，长度受限 |
 
-禁止未知字段。API 客户端不得提交显示名称、Endpoint、凭据、Tool、Schema 或 Server 状态作为信任依据。
+禁止未知字段。API 客户端不得提交命令文本、显示名称、Endpoint、凭据、Tool、Schema 或 Server 状态作为信任依据。
 
 ## 8. 后端验证与内部 metadata
 
-后端必须在 `_drop_user_supplied_system_metadata` 前解析 `mcp_server_binding`，随后执行：
+后端必须在保存用户 Message、创建 Task 或绑定附件前解析并验证 `mcp_server_binding`，随后执行：
 
 1. 请求必须是 `capability_id=mcp.dispatch` 和 `routing_mode=force_capability`。
 2. 使用当前认证用户与 `server_id` 查询 Server。
@@ -189,13 +201,37 @@ $OCR服务 识别这份文档
    - `health_status=available`；
    - `deletion_pending=false`；
    - `deleted_at is null`。
-4. 验证失败统一返回稳定、安全的 `mcp_bound_server_unavailable`，不得暴露其他用户 Server 是否存在。
+4. 验证失败统一返回 HTTP 409 和 `{"detail":{"code":"mcp_bound_server_unavailable"}}`，不得暴露其他用户 Server 是否存在。
 5. 验证成功后生成系统内部：
    - `mcp_dispatch_server_id`
    - `mcp_binding_mode=explicit_command`
-   - 脱敏 `mcp_command`
-   - 提交时显示名称
+   - `forced_by_mcp_command=true`
+   - 由 Server 当前显示名称生成的脱敏 `mcp_command`
 6. 内部 metadata 必须由后端生成；用户直接提交同名内部字段仍由 sanitizer 删除。
+
+验证必须先于所有持久化和网络副作用。验证失败时不得创建或修改：
+
+- 用户 Message；
+- Task/TaskNode/Edge；
+- conversation current task；
+- 附件绑定；
+- MCP intent/outbox/lease；
+- 审计或远端连接。
+
+验证成功后，根用户 Message 在首次保存时写入独立 public metadata：
+
+```json
+{
+  "mcp_server_badge": {
+    "server_id": "mcp-7598...",
+    "display_name": "OCR服务",
+    "command": "$OCR服务",
+    "binding_mode": "explicit_command"
+  }
+}
+```
+
+`mcp_server_badge` 与 orchestration internal metadata 分离。公开历史接口只允许返回该安全 badge；不得返回 `mcp_dispatch_server_id`、Endpoint、凭据、Tool或Catalog。
 
 Task 的 `requested_capability_id` 固定为 `mcp.dispatch`。显式 `$` 绑定会 supersede 当前 pending Skill context，与现有 force-capability 行为一致。
 
@@ -212,6 +248,8 @@ Gateway 建立连接前继续执行 owner、security version、health、Endpoint
 3. 禁止 Server Router 改写 `server_id`。
 
 显式绑定不经过 Planner Server Router，但最终回答仍由主代理按任务范围生成。
+
+会话标题只使用去除 `$` 命令后的用户任务文字；只有附件而无文字时使用现有文件/默认标题策略，不把 `$Server` 命令本身作为标题主体。
 
 ## 10. Tool discovery 与 Selector
 
@@ -236,13 +274,20 @@ Selector context包含：
 - failed/rejected fingerprints；
 - remaining call budget。
 
+`MCPSelectorContext` 必须增加闭合显式模式字段：
+
+```text
+binding_mode=explicit_command
+allow_route_another_server=false
+```
+
 显式 `$` 模式允许的 Selector action只有：
 
 - `call_tool`
 - `finish`
 - `stop`
 
-`route_another_server` 必须同时在 Selector prompt 和服务端 action validator 中禁止。首次输出该动作可以进入现有一次 repair；修复后仍非法则安全失败。
+`route_another_server` 必须同时在 Selector prompt、`MCPToolSelector._validate_action_against_context` 和 Coordinator action boundary中禁止。首次输出该动作进入现有一次 repair；修复后仍非法则返回稳定 Selector错误并安全失败。自动 MCP 路由继续使用 `allow_route_another_server=true`，行为不变。
 
 `finish/stop` 不产生 `tools/call`，必须保留原因供 finalizer解释。Selector 可以在同一 Server 内多次选择不同 Tool，但每次调用都消耗现有 20 次预算。
 
@@ -262,7 +307,7 @@ Selector context包含：
 
 ## 12. 附件安全摘要
 
-有附件但无任务文字时允许提交。后端向 Selector 提供确定性默认意图“处理本消息附带的文件”，并附带以下安全摘要：
+有附件但无任务文字时允许提交。后端从系统生成的 `uploaded_artifacts` 中重新构造独立最小投影，向 Selector提供确定性默认意图“处理本消息附带的文件”，并附带以下安全摘要：
 
 - 文件名的安全 basename；
 - MIME/content type；
@@ -278,12 +323,13 @@ Selector context包含：
 - 本地路径、挂载路径、storage key；
 - Cookie、Token 或 provider payload；
 - SeedPilot 内部 upload ID，除非未来独立文件桥接合同明确授权。
+- SHA、preview、expires、sheet选项或完整 `uploaded_artifacts`/`skill_artifacts` object。
 
 如果 Tool 必须取得文件内容但当前没有文件桥接，Selector必须 `finish/stop`，finalizer明确说明未向 MCP 传输文件。本轮不得编造 `upload_id`、URL、base64 或路径。
 
 ## 13. 历史、审计与隐私
 
-当前消息和历史恢复必须展示安全 `$Server` badge。持久化只允许：
+当前消息和历史恢复必须展示根用户 Message 的安全 `mcp_server_badge`。持久化只允许：
 
 - `server_id`
 - 提交时 `display_name`
@@ -291,6 +337,8 @@ Selector context包含：
 - `binding_mode=explicit_command`
 
 Server 后续改名时，历史继续显示提交时名称。Server 删除后历史 badge仍可显示，但不可作为新的可选候选或重放入口。
+
+旧消息没有该 metadata 时保持无 badge，不做数据库回填。回滚或关闭 `$` UI 后，已有安全 badge metadata继续可读，不删除、不改写。
 
 审计事件可以记录安全 Server ID引用、绑定模式、discovery 状态、Selector action类别和是否产生调用；不得记录 Endpoint、凭据、完整 Tool Schema、附件正文或完整 Tool 参数/结果。
 
@@ -311,6 +359,8 @@ Server 后续改名时，历史继续显示提交时名称。Server 删除后历
 | 附件需要文件桥接 | 不编造参数，finish/stop并说明限制 |
 | Server执行中失效 | 继续使用现有 invalidation、取消和 unknown/no-replay边界 |
 
+结构性 binding错误返回 422；通过结构校验但 Server 不属于当前用户或状态不可用时统一返回第8节定义的409合同。
+
 任何错误都不得静默回退到其他 MCP、Skill 或未披露的纯 LLM回答。
 
 ## 15. 测试与验收
@@ -324,7 +374,9 @@ Server 后续改名时，历史继续显示提交时名称。Server 删除后历
 - `/` 与 `$` badge互斥。
 - badge选择、移除、成功/失败后清理符合一次性生命周期。
 - 非空文字或附件任一存在即可提交。
-- 前端只提交 `server_id` 和安全命令 metadata。
+- 前端公共 binding只提交 `server_id`。
+- App候选在登录加载、登出清空、设置变更后刷新，输入过滤不逐键请求。
+- 同一次用户发送最多产生一次 submit和一次 discovery。
 - 当前消息与历史恢复显示提交时 `$Server` badge。
 
 ### 15.2 API与信任边界
@@ -334,6 +386,10 @@ Server 后续改名时，历史继续显示提交时名称。Server 删除后历
 - 伪造内部 `mcp_dispatch_server_id`、Endpoint、Tool或凭据被删除/拒绝。
 - 未知 binding字段、控制字符、超长字段拒绝。
 - 提交与执行间状态漂移失败关闭。
+- binding拒绝发生在 Message/Task/附件/审计副作用前。
+- 后端忽略客户端显示文本并从 owner-scoped Server生成badge。
+- 409/422错误合同分别覆盖状态拒绝和结构拒绝。
+- 公开历史只返回 `mcp_server_badge`，不返回 orchestration internal metadata。
 
 ### 15.3 Orchestration与MCP
 
@@ -342,6 +398,7 @@ Server 后续改名时，历史继续显示提交时名称。Server 删除后历
 - discovery必定发生，Catalog不持久化。
 - Selector `finish/stop` 产生零 `tools/call`。
 - 显式模式下 `route_another_server` repair/拒绝。
+- 自动路由模式仍允许既有 `route_another_server`。
 - `call_tool` 继续经过 Grant/授权/fingerprint/预算。
 - 同一 Server多 Tool循环和20次预算不回归。
 - Interrupt、取消、断线、remote task recovery 和 unknown/no-replay不回归。
@@ -353,6 +410,7 @@ Server 后续改名时，历史继续显示提交时名称。Server 删除后历
 - 恶意文件名被限制并始终作为结构化不可信数据处理，不能注入 Selector 指令。
 - 原文、路径、base64、storage key、Token、内部 upload ID不泄漏。
 - 缺少文件桥接时产生可解释零调用结果。
+- 完整 upload summary、SHA、preview、expires和内部ID不进入Selector。
 
 ### 15.5 验证分层
 
@@ -374,21 +432,44 @@ Server 后续改名时，历史继续显示提交时名称。Server 删除后历
 | 资源 | Tool Catalog仍按任务临时存在，任务结束/取消后释放 |
 | 可观测性 | 记录绑定模式、Server安全引用、discovery/Selector类别，不记录敏感内容 |
 
-## 17. 主要实施面
+## 17. 风险、假设、迁移与回滚
+
+### 17.1 已接受风险
+
+- 用户输入 `$` 后，即使 Selector最终 `finish/stop`，系统也会携带当前配置的认证信息连接远端 Server并执行 Tool discovery。这是 `$` 命令的明确外部网络副作用，不需要 Tool授权。
+- 远端 Tool Name、描述、annotations和Schema属于不可信数据；它们只能作为 Selector结构化输入，不能作为系统指令。
+- 频繁使用 `$` 会增加远端 discovery和本地临时Scope负载，但Catalog仍不持久化，资源按任务释放。
+- 只有附件但没有文件桥接时，用户可能得到“已发现工具但未执行”的结果；finalizer必须明确披露。
+
+### 17.2 假设
+
+- 当前 `GET /api/v1/mcp/servers` 是认证用户读取自己 Server Profile 的权威来源。
+- `mcp.dispatch` 的现有Gateway、Selector、授权、预算和finalizer链路可复用；本设计只增加显式绑定模式。
+- 旧历史消息不具备可靠的提交时 Server显示名称，因此不回填badge。
+
+### 17.3 迁移与回滚
+
+- 新metadata是加法字段，不修改现有Message/Task schema；旧客户端和旧历史继续工作。
+- 回滚前端时停止生成 `$` binding，但保留历史 `mcp_server_badge` 数据。
+- 回滚backend时，新客户端提交的 binding可能被旧runtime忽略或拒绝，因此前后端必须同一开发版本发布/回滚。
+- 回滚不得删除Message、Task、Grant、MCP调用记录或badge metadata。
+- `prod`不在本轮，不存在生产数据迁移或回滚动作。
+
+## 18. 主要实施面
 
 | 范围 | 主要文件/组件 |
 |---|---|
 | `$` domain/parser | 新的 frontend domain模块及测试，或抽取可复用command parser |
-| menu/badge/composer | `frontend/src/App.tsx`、命令菜单组件、样式和历史消息模型 |
+| Profile状态/menu/badge | `frontend/src/App.tsx`、`MCPSettingsPanel.tsx` callback、命令菜单组件、样式和历史消息模型 |
 | API metadata | `frontend/src/api/types.ts`、`client.ts`、`src/api/dto.py`、`runtime.py` |
 | Server binding验证 | 用户级 MCP config service/storage查询、system metadata sanitizer |
 | 初始工作流 | `src/capabilities/mcp_dispatch/workflow.py`、workflow router/service |
 | Selector约束 | `models.py`、`selector.py`、`dispatch_coordinator.py` |
 | 附件摘要 | upload/artifact安全投影与 MCP Selector context组装 |
-| 历史与审计 | conversation message metadata、前端恢复、MCP audit字段allowlist |
+| 历史与审计 | 根用户Message安全metadata、公开历史投影、前端恢复、MCP audit字段allowlist |
 | 文档 | 用户级 MCP PRD、API更新日志、AGENTS索引、CHANGELOG |
 
-## 18. 发布边界与完成条件
+## 19. 发布边界与完成条件
 
 实施只进入 `main`。完成条件：
 

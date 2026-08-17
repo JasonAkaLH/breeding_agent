@@ -51,6 +51,17 @@ export interface SubmitMessageRequest {
   metadata: Record<string, unknown>;
 }
 
+export interface MCPServerBindingRequest {
+  server_id: string;
+}
+
+export interface MCPServerBadge {
+  server_id: string;
+  display_name: string;
+  command: string;
+  binding_mode: 'explicit_command';
+}
+
 export interface CapabilityResponse {
   capability_id: string;
   name: string;

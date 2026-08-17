@@ -23,10 +23,11 @@ from jsonschema import (
 )
 
 from src.capabilities.mcp_dispatch.models import (
+    MCPBindingMode,
     MCPSelectorActionType,
-    MCPSelectorContext,
     MCPServerRouteActionType,
     MCPToolProfile,
+    build_mcp_selector_context,
 )
 from src.orchestration.models import UserMCPServerProfile
 
@@ -750,7 +751,7 @@ class MCPShadowRuntimeObserver:
         ) -> ShadowSelection:
             profile = profiles_by_id[decision.server_id]
             action = await self._selector.select(
-                MCPSelectorContext(
+                build_mcp_selector_context(
                     user_request=user_request,
                     server=profile,
                     tools=tuple(
@@ -760,6 +761,7 @@ class MCPShadowRuntimeObserver:
                         )
                         for tool in tools
                     ),
+                    binding_mode=MCPBindingMode.AUTOMATIC,
                 )
             )
             if action.action is not MCPSelectorActionType.CALL_TOOL:

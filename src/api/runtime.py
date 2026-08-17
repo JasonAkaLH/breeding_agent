@@ -49,7 +49,7 @@ from src.capabilities.mcp_dispatch import (
 )
 from src.capabilities.mcp_tool import MCPToolExecutor, build_local_mcp_tool_instance
 from src.capabilities.skill_tool import SkillExecutor, build_local_skill_executor_instance
-from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus, UserMCPTransport
+from src.core.enums import ConversationStatus, EventVisibility, InterruptStatus, MessageRole, NodeCriticality, NodeStatus, RoutingMode, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import (
     Conversation,
     ConversationFileResource,
@@ -154,6 +154,7 @@ from src.integrations.mcp.cp7_artifacts import (
     mcp_terminal_receipt_id,
     mcp_terminal_candidate_id,
     canonical_sha256,
+    mcp_no_server_intent_id,
 )
 from src.integrations.mcp.cp7_terminal_results import seal_terminal_result_candidate
 from src.integrations.mcp.cp7_safety import (
@@ -310,6 +311,19 @@ from .conversation_titles import (
     validate_conversation_title,
 )
 from .dto import SubmitMessageRequest
+from .mcp_binding import (
+    MCP_BINDING_MODE_EXPLICIT_COMMAND,
+    MCPBindingFeatureUnavailableError,
+    MCPBoundServerUnavailableError,
+    MCPPersistedBindingError,
+    MCP_SERVER_BADGE_METADATA_KEY,
+    MCP_SERVER_BINDING_CONTEXT_METADATA_KEY,
+    MCP_SERVER_BINDING_METADATA_KEY,
+    ResolvedMCPServerBinding,
+    build_resolved_mcp_server_binding,
+    normalize_mcp_server_id,
+    parse_persisted_mcp_server_binding_context,
+)
 from .sse import InMemoryEventBroker, is_frontend_event
 from .table_upload_normalizer import normalize_selected_spreadsheet_sheet, normalize_table_upload
 from .upload_store import InMemoryUploadStore, UploadedFileRecord, UploadValidationError, _decode_plain_text_upload
@@ -368,6 +382,12 @@ SYSTEM_MANAGED_METADATA_KEYS = frozenset(
         "mcp_rollout_config_version",
         "mcp_route_reason_code",
         "mcp_rollout_mode",
+        MCP_SERVER_BINDING_METADATA_KEY,
+        MCP_SERVER_BINDING_CONTEXT_METADATA_KEY,
+        MCP_SERVER_BADGE_METADATA_KEY,
+        "mcp_binding_mode",
+        "forced_by_mcp_command",
+        "mcp_command",
     }
 )
 
@@ -849,13 +869,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         *,
         authenticated_username: str | None = None,
     ) -> dict[str, object]:
-        interrupt_result = await self._try_submit_chat_as_interrupt_turn(
-            conversation_id,
-            request,
-            authenticated_username=authenticated_username,
-        )
-        if interrupt_result is not None:
-            return interrupt_result
+        if MCP_SERVER_BINDING_METADATA_KEY not in request.metadata:
+            interrupt_result = await self._try_submit_chat_as_interrupt_turn(
+                conversation_id,
+                request,
+                authenticated_username=authenticated_username,
+            )
+            if interrupt_result is not None:
+                return interrupt_result
         message, task = await self.submit_message(
             conversation_id,
             request,
@@ -1109,14 +1130,18 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
     ) -> tuple[Message, Task]:
         if authenticated_username is None:
             raise ValueError("authenticated_username is required")
+        bound_server_id = self._mcp_server_binding_id(request)
         cp7_safety_facade = getattr(self, "_mcp_cp7_safety_facade", None)
         if (
             getattr(self, "_mcp_cp7_requests_stopped", False)
             or cp7_safety_facade is not None
             and not await cp7_safety_facade.ensure_ready()
         ):
+            if bound_server_id is not None:
+                raise MCPBindingFeatureUnavailableError("mcp_cp7_runtime_not_ready")
             raise RuntimeError("mcp_cp7_runtime_not_ready")
-        self._ensure_mcp_rollout_instance_admitted()
+        if bound_server_id is None:
+            self._ensure_mcp_rollout_instance_admitted()
         selected_model_edition = self._validate_requested_model_edition(request.model_edition)
         existing_conversation = await self.storage.get_conversation(conversation_id)
         if (
@@ -1127,6 +1152,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             raise PermissionError(f"Conversation does not belong to username: {conversation_id}")
         if existing_conversation is not None and existing_conversation.status != ConversationStatus.ACTIVE:
             raise PermissionError(f"Conversation is not available: {conversation_id}")
+        resolved_mcp_binding = (
+            await self._resolve_mcp_server_binding_preflight(
+                authenticated_username,
+                bound_server_id,
+            )
+            if bound_server_id is not None
+            else None
+        )
+        if resolved_mcp_binding is not None:
+            self._ensure_mcp_rollout_instance_admitted()
         await self._refresh_skills_for_new_conversation_if_needed(conversation_id, existing_conversation)
         await self._conversation_guard.ensure_conversation_available(conversation_id)
         routing_mode = self._routing_mode(request.routing_mode)
@@ -1150,7 +1185,9 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         explicit_force_capability = routing_mode == RoutingMode.FORCE_CAPABILITY and requested_capability_id is not None
         continued_pending_context: PendingSkillContext | None = None
         superseded_pending_count = 0
-        if soft_skill_binding is not None:
+        if resolved_mcp_binding is not None:
+            pass
+        elif soft_skill_binding is not None:
             superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
         elif explicit_force_capability:
             superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
@@ -1176,6 +1213,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             has_user_scoped_server=has_user_scoped_server,
             explicit_legacy_capability=explicit_legacy_capability,
         )
+        if (
+            resolved_mcp_binding is not None
+            and mcp_assignment.real_path is not MCPExecutionPath.USER_SCOPED
+        ):
+            raise MCPBindingFeatureUnavailableError("mcp_user_scoped_runtime_unavailable")
         if mcp_assignment.real_path is MCPExecutionPath.LEGACY:
             await self._refresh_mcp_for_new_conversation_if_needed(
                 conversation_id,
@@ -1185,6 +1227,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             requested_capability_id,
             execution_mode=mcp_assignment.real_path.value,
         )
+        if resolved_mcp_binding is not None:
+            superseded_pending_count = await self.storage.mark_pending_skill_context_superseded(conversation_id)
 
         upload_context = await self.resolve_uploads_for_message(
             conversation_id,
@@ -1232,6 +1276,14 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             content=request.content,
             task_id=task_id,
             created_at=now,
+            metadata=(
+                {
+                    MCP_SERVER_BINDING_CONTEXT_METADATA_KEY: resolved_mcp_binding.private_context(),
+                    MCP_SERVER_BADGE_METADATA_KEY: resolved_mcp_binding.public_badge(),
+                }
+                if resolved_mcp_binding is not None
+                else {}
+            ),
         )
         await self.storage.save_message(message)
         title_metadata = self._drop_user_supplied_system_metadata(request.metadata)
@@ -1259,7 +1311,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             explicit_force_capability and requested_capability_id == "mcp.dispatch"
         )
         initial_no_server = False
-        if explicit_mcp_dispatch:
+        if explicit_mcp_dispatch and resolved_mcp_binding is None:
             profiles = await self.available_user_mcp_server_profiles(
                 authenticated_username,
                 execution_mode=task.mcp_execution_mode,
@@ -1278,6 +1330,24 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     task = await self.storage.get_task(task_id) or task
         if not initial_no_server:
             await self.storage.save_task(task)
+        if resolved_mcp_binding is not None:
+            await self._record_event(
+                self._make_event(
+                    task_id=task_id,
+                    conversation_id=conversation_id,
+                    event_type="mcp.server_binding_resolved",
+                    payload={
+                        "safe_server_ref": self._mcp_audit_reference_signer.safe_reference(
+                            resolved_mcp_binding.server_id,
+                            context="mcp-server-binding-v1",
+                        ),
+                        "binding_mode": MCP_BINDING_MODE_EXPLICIT_COMMAND,
+                        "status": "accepted",
+                    },
+                    visibility=EventVisibility.AUDIT_ONLY,
+                    created_at=now,
+                )
+            )
         await self._record_mcp_route_assignment_metric(task)
         await self._record_event(
             self._make_event(
@@ -1336,6 +1406,10 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
 
         metadata = self._drop_user_supplied_system_metadata(request.metadata)
+        if resolved_mcp_binding is not None:
+            metadata.update(
+                self._mcp_resolved_binding_runtime_metadata(resolved_mcp_binding)
+            )
         if soft_skill_binding is not None:
             metadata[SOFT_SKILL_BINDING_METADATA_KEY] = soft_skill_binding
             metadata["soft_skill_binding_source"] = "slash_command"
@@ -1395,8 +1469,17 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 source_message_id=message_id,
                 upload_sheet_selections=request.metadata.get("upload_sheet_selections"),
             )
-        metadata.update(self._upload_context_metadata(conversation_upload_context))
-        should_run_file_selector = not explicit_upload_ids and self._conversation_file_selector_mode != "disabled"
+        selected_upload_context = (
+            upload_context
+            if resolved_mcp_binding is not None
+            else conversation_upload_context
+        )
+        metadata.update(self._upload_context_metadata(selected_upload_context))
+        should_run_file_selector = (
+            resolved_mcp_binding is None
+            and not explicit_upload_ids
+            and self._conversation_file_selector_mode != "disabled"
+        )
         if should_run_file_selector and await self._maybe_handle_conversation_file_selection(
             task=task,
             username=authenticated_username,
@@ -1407,11 +1490,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             explicit_upload_ids=explicit_upload_ids,
         ):
             return message, task
-        if conversation_upload_context.get("pending_sheet_selections"):
+        if selected_upload_context.get("pending_sheet_selections"):
             await self._open_sheet_selection_interrupt(
                 task=task,
                 metadata=metadata,
-                pending_sheet_selections=conversation_upload_context["pending_sheet_selections"],
+                pending_sheet_selections=selected_upload_context["pending_sheet_selections"],
             )
             return message, task
 
@@ -1424,9 +1507,13 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             metadata=metadata,
             current_user_message=current_user_message,
             resolved_user_message=resolved_user_message,
-            available_mcp_servers=await self.available_user_mcp_server_profiles(
-                authenticated_username,
-                execution_mode=task.mcp_execution_mode,
+            available_mcp_servers=(
+                ()
+                if resolved_mcp_binding is not None
+                else await self.available_user_mcp_server_profiles(
+                    authenticated_username,
+                    execution_mode=task.mcp_execution_mode,
+                )
             ),
         )
         await self._schedule_execution(orchestration_request)
@@ -2179,6 +2266,113 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         for key in USER_SUPPLIED_METADATA_DENYLIST:
             values.pop(key, None)
         return values
+
+    @staticmethod
+    def _mcp_server_binding_id(request: SubmitMessageRequest) -> str | None:
+        value = request.metadata.get(MCP_SERVER_BINDING_METADATA_KEY)
+        if value is None:
+            return None
+        if not isinstance(value, Mapping) or set(value) != {"server_id"}:
+            raise ValueError("metadata.mcp_server_binding must contain exactly server_id")
+        return normalize_mcp_server_id(value.get("server_id"))
+
+    async def _resolve_mcp_server_binding_preflight(
+        self,
+        authenticated_username: str,
+        server_id: str,
+    ) -> ResolvedMCPServerBinding:
+        if not self.user_mcp_routing_enabled or self.user_mcp_config_service is None:
+            raise MCPBindingFeatureUnavailableError("mcp_user_scoped_runtime_unavailable")
+        server = await self.storage.get_user_mcp_server(
+            authenticated_username,
+            server_id,
+        )
+        if (
+            server is None
+            or not server.enabled
+            or server.health_status != UserMCPHealthStatus.AVAILABLE
+            or server.deletion_pending
+            or server.deleted_at is not None
+        ):
+            raise MCPBoundServerUnavailableError("mcp_bound_server_unavailable")
+        try:
+            return build_resolved_mcp_server_binding(server)
+        except ValueError as exc:
+            raise MCPBoundServerUnavailableError("mcp_bound_server_unavailable") from exc
+
+    @staticmethod
+    def _mcp_resolved_binding_runtime_metadata(
+        binding: ResolvedMCPServerBinding,
+    ) -> dict[str, object]:
+        return {
+            "mcp_dispatch_server_id": binding.server_id,
+            "mcp_binding_mode": MCP_BINDING_MODE_EXPLICIT_COMMAND,
+            "forced_by_mcp_command": True,
+            "mcp_command": binding.command,
+        }
+
+    async def _resolve_persisted_mcp_server_binding(
+        self,
+        task: Task,
+        *,
+        node_id: str | None = None,
+    ) -> ResolvedMCPServerBinding | None:
+        root_message = await self.storage.get_message(task.root_message_id)
+        if root_message is None:
+            raise MCPPersistedBindingError("mcp_binding_root_message_missing")
+        raw_context = root_message.metadata.get(
+            MCP_SERVER_BINDING_CONTEXT_METADATA_KEY
+        )
+        if raw_context is None:
+            if MCP_SERVER_BADGE_METADATA_KEY in root_message.metadata:
+                raise MCPPersistedBindingError("mcp_server_binding_context_missing")
+            return None
+        context = parse_persisted_mcp_server_binding_context(raw_context)
+        conversation = await self.storage.get_conversation(task.conversation_id)
+        if conversation is None or not conversation.username:
+            raise MCPPersistedBindingError("mcp_binding_conversation_missing")
+        server = await self.storage.get_user_mcp_server(
+            conversation.username,
+            context.server_id,
+        )
+        if (
+            server is None
+            or not server.enabled
+            or server.health_status != UserMCPHealthStatus.AVAILABLE
+            or server.deletion_pending
+            or server.deleted_at is not None
+            or server.config_version != context.server_config_version
+            or server.security_version != context.server_security_version
+        ):
+            raise MCPBoundServerUnavailableError("mcp_bound_server_unavailable")
+        if node_id is not None:
+            intent = await self.storage.get_mcp_no_server_intent(
+                mcp_no_server_intent_id(task.task_id, node_id=node_id)
+            )
+            if intent is not None:
+                envelope = dict(intent.resume_envelope_json or {})
+                envelope_metadata = envelope.get("metadata")
+                if (
+                    intent.requested_server_id != context.server_id
+                    or intent.requested_server_config_version
+                    != context.server_config_version
+                    or intent.requested_server_security_version
+                    != context.server_security_version
+                    or not isinstance(envelope_metadata, Mapping)
+                    or envelope_metadata.get("mcp_binding_mode")
+                    != MCP_BINDING_MODE_EXPLICIT_COMMAND
+                ):
+                    raise MCPPersistedBindingError(
+                        "mcp_server_binding_resume_authority_mismatch"
+                    )
+        resolved = build_resolved_mcp_server_binding(server)
+        if (
+            resolved.server_id != context.server_id
+            or resolved.server_config_version != context.server_config_version
+            or resolved.server_security_version != context.server_security_version
+        ):
+            raise MCPPersistedBindingError("mcp_server_binding_context_mismatch")
+        return resolved
 
     def _accepted_task_llm_source_metadata(
         self,
@@ -4242,12 +4436,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 interrupt_answer_id=pending_file_selection_answer_id or answer.interrupt_answer_id,
                 upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
             )
-        resume_metadata.update(
-            await self._conversation_file_context_metadata_for_task(
-                task,
-                upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
+        if (
+            root_message is None
+            or MCP_SERVER_BINDING_CONTEXT_METADATA_KEY not in root_message.metadata
+        ):
+            resume_metadata.update(
+                await self._conversation_file_context_metadata_for_task(
+                    task,
+                    upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
+                )
             )
-        )
         saved_interrupt = await self.interrupt_service.record_answer(answer)
 
         answer_message = Message(
@@ -4278,9 +4476,18 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         ):
             resume_capability_id = "mcp.dispatch"
             resume_metadata["resume_interrupted_node_id"] = interrupted_node.node_id
-            server_id = str(interrupt.required_fields.get("server_id") or "").strip()
-            if server_id:
-                resume_metadata["mcp_dispatch_server_id"] = server_id
+            persisted_binding = await self._resolve_persisted_mcp_server_binding(
+                task,
+                node_id=interrupted_node.node_id,
+            )
+            if persisted_binding is not None:
+                resume_metadata.update(
+                    self._mcp_resolved_binding_runtime_metadata(persisted_binding)
+                )
+            else:
+                server_id = str(interrupt.required_fields.get("server_id") or "").strip()
+                if server_id:
+                    resume_metadata["mcp_dispatch_server_id"] = server_id
             resume_finalizer_node_id = await self._resume_finalizer_node_id(
                 task.task_id,
                 interrupted_node.node_id,
@@ -8272,6 +8479,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 ):
                     raise RuntimeError("mcp_dispatch_resume_envelope_corrupt")
                 root_message = await self.storage.get_message(task.root_message_id)
+                persisted_binding = await self._resolve_persisted_mcp_server_binding(
+                    task,
+                    node_id=str(intent.node_id or "") or None,
+                )
+                trusted_binding_metadata = (
+                    self._mcp_resolved_binding_runtime_metadata(persisted_binding)
+                    if persisted_binding is not None
+                    else {}
+                )
                 resume_request = OrchestrationRequest(
                     task_id=task.task_id,
                     conversation_id=task.conversation_id,
@@ -8288,6 +8504,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         "mcp_dispatch_resume_envelope": envelope,
                         "mcp_dispatch_server_id": intent.requested_server_id,
                         "resume_interrupted_node_id": intent.node_id,
+                        **trusted_binding_metadata,
                     },
                 )
                 resumed_node, _ = (
@@ -8341,6 +8558,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         )
                         for candidate in candidates
                     ]
+                    persisted_binding = await self._resolve_persisted_mcp_server_binding(
+                        task,
+                        node_id=str(intent.node_id or "") or None,
+                    )
+                    trusted_binding_metadata = (
+                        self._mcp_resolved_binding_runtime_metadata(persisted_binding)
+                        if persisted_binding is not None
+                        else {}
+                    )
                     resume_request = OrchestrationRequest(
                         task_id=task.task_id,
                         conversation_id=task.conversation_id,
@@ -8360,6 +8586,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                             "mcp_recovered_result_refs": [
                                 candidate.safe_result_ref for candidate in candidates
                             ],
+                            **trusted_binding_metadata,
                         },
                     )
                     resumed_node, _ = await self.orchestration_service.resume_persisted_mcp_dispatch_node(

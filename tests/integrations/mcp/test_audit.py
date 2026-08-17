@@ -44,6 +44,40 @@ class _SafetyDetector:
 
 
 class MCPAuditServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_soft_binding_audit_fields_are_closed_and_preserved(self) -> None:
+        storage = _Storage()
+        service = MCPAuditService(storage=storage, now_fn=lambda: NOW)
+
+        await service.observe_event(
+            EventRecord(
+                event_id="binding-event",
+                conversation_id="conv-a",
+                task_id="task-a",
+                node_id="node-a",
+                event_type="mcp.selector_decided",
+                payload={
+                    "safe_server_ref": "server-safe",
+                    "binding_mode": "explicit_command",
+                    "selector_action": "finish",
+                    "tool_call_dispatched": False,
+                    "server_id": "raw-server-id",
+                    "arguments": {"query": "secret"},
+                },
+                visibility=EventVisibility.AUDIT_ONLY,
+                created_at=NOW,
+            )
+        )
+
+        self.assertEqual(
+            storage.events[0].safe_payload,
+            {
+                "safe_server_ref": "server-safe",
+                "binding_mode": "explicit_command",
+                "selector_action": "finish",
+                "tool_call_dispatched": False,
+            },
+        )
+
     async def test_secret_boundary_blocks_nested_secret_and_records_red_line(
         self,
     ) -> None:

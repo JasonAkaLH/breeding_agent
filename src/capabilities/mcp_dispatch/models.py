@@ -16,6 +16,11 @@ class MCPSelectorActionType(str, Enum):
     STOP = "stop"
 
 
+class MCPBindingMode(str, Enum):
+    AUTOMATIC = "automatic"
+    EXPLICIT_COMMAND = "explicit_command"
+
+
 @dataclass(slots=True, frozen=True)
 class MCPToolProfile:
     name: str
@@ -25,15 +30,58 @@ class MCPToolProfile:
 
 
 @dataclass(slots=True, frozen=True)
+class MCPAttachmentSummary:
+    basename: str
+    content_type: str
+    size_bytes: int
+
+
+@dataclass(slots=True, frozen=True)
 class MCPSelectorContext:
     user_request: str
     server: UserMCPServerProfile
     tools: tuple[MCPToolProfile, ...]
+    binding_mode: MCPBindingMode
+    allow_route_another_server: bool
+    attachments: tuple[MCPAttachmentSummary, ...] = ()
     upstream_facts: tuple[str, ...] = ()
     completed_result_refs: tuple[str, ...] = ()
     failed_call_fingerprints: frozenset[str] = frozenset()
     rejected_call_fingerprints: frozenset[str] = frozenset()
     remaining_call_budget: int = 20
+
+    def __post_init__(self) -> None:
+        expected = self.binding_mode is MCPBindingMode.AUTOMATIC
+        if self.allow_route_another_server is not expected:
+            raise ValueError("MCP binding mode and route policy are inconsistent")
+
+
+def build_mcp_selector_context(
+    *,
+    user_request: str,
+    server: UserMCPServerProfile,
+    tools: tuple[MCPToolProfile, ...],
+    binding_mode: MCPBindingMode,
+    attachments: tuple[MCPAttachmentSummary, ...] = (),
+    upstream_facts: tuple[str, ...] = (),
+    completed_result_refs: tuple[str, ...] = (),
+    failed_call_fingerprints: frozenset[str] = frozenset(),
+    rejected_call_fingerprints: frozenset[str] = frozenset(),
+    remaining_call_budget: int = 20,
+) -> MCPSelectorContext:
+    return MCPSelectorContext(
+        user_request=user_request,
+        server=server,
+        tools=tools,
+        binding_mode=binding_mode,
+        allow_route_another_server=binding_mode is MCPBindingMode.AUTOMATIC,
+        attachments=attachments,
+        upstream_facts=upstream_facts,
+        completed_result_refs=completed_result_refs,
+        failed_call_fingerprints=failed_call_fingerprints,
+        rejected_call_fingerprints=rejected_call_fingerprints,
+        remaining_call_budget=remaining_call_budget,
+    )
 
 
 @dataclass(slots=True, frozen=True)

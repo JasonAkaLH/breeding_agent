@@ -1710,6 +1710,36 @@ body {
   color: var(--color-muted) !important;
 }
 
+.selected-mcp-server-command {
+  border-color: #9bc89d;
+  background: #edf7ed;
+}
+
+.message-mcp-server-badge {
+  align-self: flex-start;
+  margin: 0 0 6px;
+}
+
+.slash-command-menu-shell {
+  display: grid;
+  gap: 6px;
+}
+
+.slash-command-refresh {
+  justify-self: end;
+  border: 0;
+  background: transparent;
+  color: #2f7d32;
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 4px;
+}
+
+.slash-command-refresh:focus-visible {
+  outline: 2px solid #2f7d32;
+  outline-offset: 2px;
+}
+
 .slash-command-menu {
   --slash-command-option-height: 80px;
 

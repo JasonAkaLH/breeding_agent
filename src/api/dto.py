@@ -6,6 +6,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
+from .mcp_binding import (
+    MCP_BINDING_REQUEST_ALLOWED_METADATA_KEYS,
+    MCP_SERVER_BINDING_METADATA_KEY,
+    normalize_mcp_server_id,
+)
 
 
 class StrictRequestModel(BaseModel):
@@ -90,6 +95,15 @@ def _reject_reserved_identity_fields(value: dict[str, Any], *, field_name: str) 
     return value
 
 
+class MCPServerBindingRequest(StrictRequestModel):
+    server_id: str
+
+    @field_validator("server_id")
+    @classmethod
+    def normalize_server_id(cls, value: str) -> str:
+        return normalize_mcp_server_id(value)
+
+
 class SubmitMessageRequest(StrictRequestModel):
     conversation_id: str
     content: str
@@ -110,6 +124,28 @@ class SubmitMessageRequest(StrictRequestModel):
         if value is None:
             return None
         return value.strip() or None
+
+    @model_validator(mode="after")
+    def validate_mcp_server_binding(self) -> "SubmitMessageRequest":
+        raw_binding = self.metadata.get(MCP_SERVER_BINDING_METADATA_KEY)
+        forced_mcp_dispatch = (
+            self.routing_mode == "force_capability"
+            and self.capability_id == "mcp.dispatch"
+        )
+        if raw_binding is None:
+            if forced_mcp_dispatch:
+                raise ValueError("force_capability mcp.dispatch requires metadata.mcp_server_binding")
+            return self
+        if not forced_mcp_dispatch:
+            raise ValueError(
+                "metadata.mcp_server_binding requires routing_mode=force_capability and capability_id=mcp.dispatch"
+            )
+        unknown = set(self.metadata) - MCP_BINDING_REQUEST_ALLOWED_METADATA_KEYS
+        if unknown:
+            raise ValueError(f"mcp_server_binding metadata contains unknown fields: {sorted(unknown)}")
+        binding = MCPServerBindingRequest.model_validate(raw_binding)
+        self.metadata[MCP_SERVER_BINDING_METADATA_KEY] = binding.model_dump()
+        return self
 
 
 class ReasoningEffortOptionResponse(BaseModel):

@@ -82,12 +82,16 @@ describe('MCPSettingsPanel', () => {
       | 'clearMCPServerGrants'
     >;
 
-    render(<MCPSettingsPanel api={api} />);
+    const onServersChanged = vi.fn();
+    render(<MCPSettingsPanel api={api} onServersChanged={onServersChanged} />);
 
     expect(await screen.findByText('育种数据')).toBeInTheDocument();
     expect(screen.getByText(/凭据已配置/)).toBeInTheDocument();
     expect(screen.getByText('查询品系')).toBeInTheDocument();
     expect(screen.queryByText(/token|secret/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '重测 育种数据' }));
+    await waitFor(() => expect(onServersChanged).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole('button', { name: '撤销' }));
     await waitFor(() => expect(api.deleteMCPGrant).toHaveBeenCalledWith('grant-1'));

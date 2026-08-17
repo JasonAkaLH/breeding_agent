@@ -5,6 +5,8 @@ from .executor import (
     MCPDispatchOutcome,
 )
 from .models import (
+    MCPBindingMode,
+    MCPAttachmentSummary,
     MCPCallBudget,
     MCPCallBudgetExhausted,
     MCPCallFingerprintBlocked,
@@ -14,6 +16,7 @@ from .models import (
     MCPServerRouteAction,
     MCPServerRouteActionType,
     MCPToolProfile,
+    build_mcp_selector_context,
     build_mcp_call_fingerprint,
 )
 from .selector import MCPSelectorOutputError, MCPToolSelector
@@ -32,6 +35,8 @@ __all__ = [
     "MCPCallBudget",
     "MCPCallBudgetExhausted",
     "MCPCallFingerprintBlocked",
+    "MCPBindingMode",
+    "MCPAttachmentSummary",
     "MCPDispatchCoordinator",
     "MCPDispatchExecutor",
     "MCPDispatchOutcome",
@@ -46,6 +51,7 @@ __all__ = [
     "MCPServerRouterOutputError",
     "MCPToolProfile",
     "MCPToolSelector",
+    "build_mcp_selector_context",
     "build_local_mcp_dispatch_instance",
     "build_mcp_call_fingerprint",
 ]

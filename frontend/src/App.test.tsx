@@ -361,7 +361,7 @@ describe('App', () => {
     fireEvent.click(accountSettingsButton);
     expect(await screen.findByRole('dialog', { name: 'MCP 服务与授权' })).toBeInTheDocument();
     expect(await screen.findByText('尚未配置 MCP 服务')).toBeInTheDocument();
-    expect(api.listMCPServers).toHaveBeenCalledTimes(1);
+    expect(api.listMCPServers).toHaveBeenCalledTimes(2);
     expect(api.listMCPGrants).toHaveBeenCalledTimes(1);
     expect(conversationList).toBeInTheDocument();
     expect(conversationList.parentElement).toHaveClass('app-content');
@@ -4543,6 +4543,123 @@ describe('App', () => {
     expect(api.cancelTask).toHaveBeenNthCalledWith(1, 'task-1');
     expect(api.cancelTask).toHaveBeenNthCalledWith(2, 'task-2');
     expect(await screen.findByText('请求未完成，请稍后重试。')).toBeInTheDocument();
+  });
+
+  it('selects a dollar MCP Server command and submits only its stable server id', async () => {
+    const api = makeApi({
+      listMCPServers: vi.fn(async () => ({
+        servers: [{
+          server_id: 'mcp-ocr',
+          display_name: 'OCR服务',
+          routing_description: '识别图片和PDF',
+          endpoint_url: 'https://secret.example.test/rpc',
+          transport: 'streamable_http',
+          protocol_preference: 'auto',
+          auth_type: 'bearer',
+          auth_metadata: { header_name: 'Authorization' },
+          enabled: true,
+          health_status: 'available',
+          credential_configured: true,
+          config_version: 1,
+          security_version: 1,
+          last_tested_at: null,
+          last_test_error_code: null,
+          created_at: '2026-08-17T00:00:00Z',
+          updated_at: '2026-08-17T00:00:00Z',
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    await waitFor(() => expect(api.listMCPServers).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '$' } });
+    const listbox = await screen.findByRole('listbox', { name: 'MCP Server 命令列表' });
+    expect(within(listbox).getByText('$OCR服务')).toBeInTheDocument();
+    expect(listbox).not.toHaveTextContent('secret.example.test');
+    fireEvent.click(within(listbox).getByRole('option'));
+    expect(await screen.findByLabelText('已选择 MCP Server')).toHaveTextContent('$OCR服务');
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别这份材料' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '识别这份材料',
+      capabilityId: 'mcp.dispatch',
+      metadata: { mcp_server_binding: { server_id: 'mcp-ocr' } },
+    })));
+    expect(screen.queryByLabelText('已选择 MCP Server')).not.toBeInTheDocument();
+  });
+
+  it('allows a selected MCP Server to submit an attachment without task text', async () => {
+    const api = makeApi({
+      listMCPServers: vi.fn(async () => ({
+        servers: [{
+          server_id: 'mcp-ocr', display_name: 'OCR服务', routing_description: 'OCR',
+          endpoint_url: 'https://secret.example.test', transport: 'streamable_http', protocol_preference: 'auto',
+          auth_type: 'none', auth_metadata: {}, enabled: true, health_status: 'available', credential_configured: false,
+          config_version: 1, security_version: 1, last_tested_at: null, last_test_error_code: null,
+          created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([event('task.completed')])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '$OCR服务' } });
+    fireEvent.click((await screen.findByRole('listbox', { name: 'MCP Server 命令列表' })).querySelector('[role="option"]') as HTMLElement);
+    const file = new File(['image'], 'scan.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText('上传 JSON、CSV、TSV、Excel、TXT、VCF、图片或 PDF 文件'), { target: { files: [file] } });
+    await screen.findByText(/scan.png/);
+
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: '',
+      capabilityId: 'mcp.dispatch',
+      metadata: {
+        upload_ids: ['upl-1'],
+        mcp_server_binding: { server_id: 'mcp-ocr' },
+      },
+    })));
+  });
+
+  it('restores a safe MCP Server badge from user message history', async () => {
+    const api = makeApi({
+      listConversations: vi.fn(async () => ({
+        conversations: [{
+          conversation_id: 'conv-mcp-history',
+          username: 'alice',
+          status: 'active',
+          current_task_id: null,
+          title: 'MCP历史',
+          created_at: null,
+          updated_at: null,
+        }],
+      })),
+      listConversationMessages: vi.fn(async () => ({
+        conversation_id: 'conv-mcp-history',
+        messages: [{
+          message_id: 'msg-mcp',
+          conversation_id: 'conv-mcp-history',
+          role: 'user',
+          content: '识别材料',
+          task_id: 'task-mcp',
+          stream_status: null,
+          created_at: null,
+          metadata: {
+            mcp_server_badge: {
+              server_id: 'mcp-ocr',
+              display_name: 'OCR服务',
+              command: '$OCR服务',
+              binding_mode: 'explicit_command',
+            },
+          },
+        }],
+      })),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'MCP历史' }));
+
+    expect(await screen.findByText('$OCR服务')).toBeInTheDocument();
+    expect(screen.getByText('识别材料')).toBeInTheDocument();
   });
 
 });
