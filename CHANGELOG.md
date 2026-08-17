@@ -22,7 +22,7 @@
 
 ## [Unreleased]
 
-- 用户级 MCP 公网 HTTP/HTTPS Endpoint Policy 设计已通过 grilling 确认：任意公网 HTTP/HTTPS 与合法自定义端口允许配置，公网 HTTP 由前端在新建或 HTTPS 改 HTTP 时提示一次风险且可携带凭据；私网、回环、链路本地、云元数据、特殊地址、DNS rebinding、跨域重定向与 HTTPS 降级继续强制拒绝。设计要求删除管理员域名/CIDR 白名单配置与运行时作用，保留 `plaintext_http` 诊断和逐 Tool 授权，并修复 MCP 设置 Modal 保存失败无可见反馈的问题；本轮仅完成设计，尚未实施。License Requirement：设计文档、文档索引与变更记录，无新增依赖/许可变更。
+- 用户级 MCP 公网 HTTP/HTTPS Endpoint Policy 设计已通过 grilling 确认，并经 document-perfectization 三轮修订、第四轮审查通过：任意公网 HTTP/HTTPS 与合法自定义端口允许配置，公网 HTTP 由前端在新建或 HTTPS 改 HTTP 时提示一次风险且可携带凭据；私网、回环、链路本地、云元数据、特殊地址、DNS rebinding、跨域重定向与 HTTPS 降级继续强制拒绝。加固后补齐 `main`/`prod` 发布边界、Phase 3 current-required 与 historical-accepted evidence 分离、legacy migration CLI、validated-endpoint-first 的 health/Gateway/remote recovery 安全顺序、精确错误 CAS 与新旧错误码兼容、用户级 `plaintext_http` 安全诊断、已有配置惰性重检、开发发布前全 Server health 预检与 authoritative 红线门禁、风险/回滚、可访问性和分层验收；本轮仍仅完成设计，尚未实施。License Requirement：设计文档、文档索引与变更记录，无新增依赖/许可变更。
 
 - 在线应用密钥收敛为首次部署的单一固定根密钥：backend 只从 `MAF_MASTER_KEY_FILE=/run/secrets/maf-master.key` 安全读取一次，以闭合 HKDF-SHA256 标签派生 MCP credential、MCP recovery、Auth token、MCP audit reference 和 key validation 五个互不混用的领域子密钥；登录 token 重启后保持稳定，refresh 不影响 MCP credential。旧 MCP credential key/auth pepper 权威和旧 sentinel contract 被拒绝，Compose 只要求 `MAF_MASTER_KEY_FILE_HOST` 并仅挂载给 backend；离线 rollout/provenance/operator key 继续独立。本次为首次开发部署，不增加旧密文双读、根密钥轮换、生产 PostgreSQL 或 CP7-B 授权。License Requirement：复用既有 `cryptography` HKDF/AES-GCM 与 Python HMAC，无新增依赖/许可变更。
 
