@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- 用户级 MCP 公网 HTTP/HTTPS Endpoint Policy 设计已通过 grilling 确认：任意公网 HTTP/HTTPS 与合法自定义端口允许配置，公网 HTTP 由前端在新建或 HTTPS 改 HTTP 时提示一次风险且可携带凭据；私网、回环、链路本地、云元数据、特殊地址、DNS rebinding、跨域重定向与 HTTPS 降级继续强制拒绝。设计要求删除管理员域名/CIDR 白名单配置与运行时作用，保留 `plaintext_http` 诊断和逐 Tool 授权，并修复 MCP 设置 Modal 保存失败无可见反馈的问题；本轮仅完成设计，尚未实施。License Requirement：设计文档、文档索引与变更记录，无新增依赖/许可变更。
+
 - 在线应用密钥收敛为首次部署的单一固定根密钥：backend 只从 `MAF_MASTER_KEY_FILE=/run/secrets/maf-master.key` 安全读取一次，以闭合 HKDF-SHA256 标签派生 MCP credential、MCP recovery、Auth token、MCP audit reference 和 key validation 五个互不混用的领域子密钥；登录 token 重启后保持稳定，refresh 不影响 MCP credential。旧 MCP credential key/auth pepper 权威和旧 sentinel contract 被拒绝，Compose 只要求 `MAF_MASTER_KEY_FILE_HOST` 并仅挂载给 backend；离线 rollout/provenance/operator key 继续独立。本次为首次开发部署，不增加旧密文双读、根密钥轮换、生产 PostgreSQL 或 CP7-B 授权。License Requirement：复用既有 `cryptography` HKDF/AES-GCM 与 Python HMAC，无新增依赖/许可变更。
 
 - 用户级 MCP CP7-A 精简单机交付已完成自动验收：开发 Compose 收敛为 `runtime-sidecar`、`backend`、`frontend` 三个长运行服务，固定 user-scoped MCP `enforce` 100% 并关闭 legacy global MCP 装配；新增最小 Rust Sidecar image、Unix socket Version/Compatibility/Readiness probe、SQLite 命名卷与重启恢复。backend 仅在 `MAF_API_ENV=dev`、精确本地 Unix socket、三项 Rust authority mode 全为 `off` 且未配置 manifest/allowlist 时跳过 artifact attestation，其他环境继续 fail closed；credential 只通过宿主文件只读挂载。复杂 G004 staging/provenance/candidate lifecycle 改动已在仓库外备份后撤回，CP7-B 源码退役仍等待项目负责人人工测试和未来精确授权。License Requirement：复用 workspace 已存在的 `tower` / `hyper-util` 依赖，无新增外部许可类型。
