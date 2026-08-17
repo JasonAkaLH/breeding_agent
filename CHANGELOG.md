@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- 新增 Planner Node Identity v1 设计：确认模型只生成规划内局部 key，Runtime 以 task、planning epoch 和 key 生成全局确定性 node ID；初始规划使用 `p0`，LLM Runtime Replanner 通过 SQLite/PostgreSQL/Rust Sidecar 等价的 durable claim 分配可恢复 epoch，并使用 closed existing/new reference contract。设计同时锁定 system/legacy 节点兼容、前端不再解析 `producer_node_id`、additive migration、回滚边界，以及 `n1 + answer_user` 顺序/并发/replan/重启验收。License Requirement：仅设计、索引和变更记录，无新增依赖/许可变更。
+
 - `$` 用户级 MCP Server Soft Binding 已在 `main` 完成仓库实现：前端从当前用户 `enabled + available` Server派生安全 `$显示名称` 菜单，只提交closed `server_id` binding，并支持互斥badge、附件-only提交、设置变更刷新和历史恢复；后端新增422/409/503合同、持久化前owner/status零副作用preflight、根Message private authority与public badge、固定dispatch+finalizer、跨Interrupt/recovery mode恢复、Selector prompt/validator/Coordinator三层禁换Server、当前消息附件最小投影和closed audit/history allowlist。新增fake MCP E2E与user-scoped discover-only smoke脚本；真实OCR smoke仍等待受控环境提供owner/server引用后执行，`prod`未修改、构建或部署。License Requirement：复用既有Python/Pydantic/FastAPI/React/Ant Design/MCP依赖，无新增依赖或许可变更。
 
 - `$` 用户级 MCP Server Soft Binding设计已通过 brainstorming 确认并完成 document-perfectization首轮加固：前端以 `$显示名称` 菜单选择当前用户 `enabled + available` Server并只提交稳定 `server_id`；后端在Message/Task/附件等副作用前重新验证 owner/status并生成安全历史badge，固定 `mcp.dispatch`后强制当前 Server `initialize + tools/list`，Selector通过显式模式只允许 `call_tool/finish/stop`且禁止改路由，`call_tool`继续走逐 Tool授权和20次预算。加固同时补齐 App候选刷新、discovery带凭据外部副作用、最小附件投影、409/422错误合同、历史迁移/回滚和测试矩阵；本轮仅完成设计，尚未实施，`prod`不变。License Requirement：设计文档、索引和变更记录，无新增依赖或许可变更。
