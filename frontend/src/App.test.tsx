@@ -4573,6 +4573,7 @@ describe('App', () => {
     await waitFor(() => expect(api.listMCPServers).toHaveBeenCalledTimes(1));
 
     fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '$' } });
+    expect(api.listMCPServers).toHaveBeenCalledTimes(1);
     const listbox = await screen.findByRole('listbox', { name: 'MCP Server 命令列表' });
     expect(within(listbox).getByText('$OCR服务')).toBeInTheDocument();
     expect(listbox).not.toHaveTextContent('secret.example.test');
@@ -4588,6 +4589,29 @@ describe('App', () => {
       metadata: { mcp_server_binding: { server_id: 'mcp-ocr' } },
     })));
     expect(screen.queryByLabelText('已选择 MCP Server')).not.toBeInTheDocument();
+  });
+
+  it('clears the one-shot MCP Server badge after submit failure and refreshes candidates', async () => {
+    const server = {
+      server_id: 'mcp-ocr', display_name: 'OCR服务', routing_description: 'OCR',
+      endpoint_url: 'https://secret.example.test', transport: 'streamable_http', protocol_preference: 'auto',
+      auth_type: 'none', auth_metadata: {}, enabled: true, health_status: 'available', credential_configured: false,
+      config_version: 1, security_version: 1, last_tested_at: null, last_test_error_code: null,
+      created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+    };
+    const api = makeApi({
+      listMCPServers: vi.fn(async () => ({ servers: [server] })),
+      submitMessage: vi.fn(async () => { throw new Error('submit failed'); }),
+    });
+    await renderAuthed(<App apiClient={api} eventSourceFactory={makeEventSourceFactory([])} />);
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '$' } });
+    fireEvent.click(within(await screen.findByRole('listbox', { name: 'MCP Server 命令列表' })).getByRole('option'));
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByLabelText('已选择 MCP Server')).not.toBeInTheDocument());
+    await waitFor(() => expect(api.listMCPServers).toHaveBeenCalledTimes(2));
   });
 
   it('allows a selected MCP Server to submit an attachment without task text', async () => {

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from src.core.enums import NodeStatus, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Interrupt, TaskNode, UserMCPServer
+from src.api.mcp_binding import MCPBoundServerUnavailableError
 from tests.api.support import APITestCase
 
 
@@ -235,6 +236,15 @@ class MCPServerSoftBindingAPITest(APITestCase):
         self.assertNotEqual(binding_event.payload["safe_server_ref"], "mcp-available")
         self.assertNotIn("display_name", binding_event.payload)
 
+        await self.runtime.storage.update_user_mcp_server(
+            "acc-1",
+            "mcp-available",
+            changes={"display_name": "OCR新名称"},
+            expected_config_version=1,
+            expected_security_version=1,
+            updated_at=datetime(2026, 8, 17, 9, 2, 0),
+        )
+
         history = await self.client.get("/api/v1/conversations/conv-valid/messages")
         self.assertEqual(history.status_code, 200, history.text)
         public = history.json()["messages"][0]["metadata"]
@@ -342,3 +352,73 @@ class MCPServerSoftBindingAPITest(APITestCase):
         self.assertEqual(resume_request.metadata["mcp_dispatch_server_id"], "mcp-available")
         self.assertEqual(resume_request.metadata["mcp_binding_mode"], "explicit_command")
         self.assertEqual(resume_request.metadata["mcp_command"], "$OCR服务")
+
+    async def test_persisted_binding_fails_closed_after_server_config_drift(self) -> None:
+        scheduler = AsyncMock()
+        with patch.object(self.runtime, "_schedule_execution", scheduler):
+            response = await self.client.post(
+                "/api/v1/conversations/chat-messages",
+                json=self._payload("conv-drift"),
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        task = await self.runtime.storage.get_task(response.json()["task_id"])
+        assert task is not None
+        changed = await self.runtime.storage.update_user_mcp_server(
+            "acc-1",
+            "mcp-available",
+            changes={"display_name": "OCR已改名"},
+            expected_config_version=1,
+            expected_security_version=1,
+            updated_at=datetime(2026, 8, 17, 9, 1, 0),
+        )
+        self.assertIsNotNone(changed)
+
+        with self.assertRaises(MCPBoundServerUnavailableError):
+            await self.runtime._resolve_persisted_mcp_server_binding(task)
+
+    async def test_pre_dispatch_sheet_selection_resume_keeps_explicit_binding(self) -> None:
+        scheduler = AsyncMock()
+        with patch.object(self.runtime, "_schedule_execution", scheduler):
+            response = await self.client.post(
+                "/api/v1/conversations/chat-messages",
+                json=self._payload("conv-sheet-resume"),
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        task = await self.runtime.storage.get_task(response.json()["task_id"])
+        assert task is not None
+        await self.runtime._open_sheet_selection_interrupt(
+            task=task,
+            metadata={},
+            pending_sheet_selections=[
+                {
+                    "required_upload_ids": [],
+                    "options_by_upload_id": {},
+                    "labels_by_upload_id": {},
+                    "details_by_upload_id": {},
+                }
+            ],
+        )
+        interrupts = await self.runtime.storage.list_interrupts_for_task(task.task_id)
+        self.assertEqual(len(interrupts), 1)
+        scheduler.reset_mock()
+
+        with patch.object(self.runtime, "_schedule_execution", scheduler):
+            answer = await self.client.post(
+                "/api/v1/conversations/chat-messages",
+                json={
+                    "conversation_id": "conv-sheet-resume",
+                    "content": "",
+                    "routing_mode": "auto",
+                    "capability_id": None,
+                    "metadata": {
+                        "interrupt_id": interrupts[0].interrupt_id,
+                        "upload_sheet_selections": {},
+                    },
+                },
+            )
+
+        self.assertEqual(answer.status_code, 202, answer.text)
+        scheduler.assert_awaited_once()
+        resume_request = scheduler.await_args.args[0]
+        self.assertEqual(resume_request.metadata["mcp_dispatch_server_id"], "mcp-available")
+        self.assertEqual(resume_request.metadata["mcp_binding_mode"], "explicit_command")

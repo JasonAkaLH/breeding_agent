@@ -109,6 +109,8 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
                 request.metadata["mcp_rollout_config_version"],
                 restarted.mcp_rollout_config.config_version,
             )
+            self.assertEqual(request.metadata["mcp_binding_mode"], "explicit_command")
+            self.assertEqual(request.metadata["mcp_dispatch_server_id"], "server-a")
             self.assertEqual([profile.server_id for profile in request.available_mcp_servers], ["server-a"])
             visible = restarted.capability_registry.list_for_request(
                 request,
@@ -117,6 +119,7 @@ class UserMCPTaskAssignmentRestartTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("mcp.dispatch", {item.capability_id for item in visible})
             plan = restarted.workflow_provider.build_plan(request)
             self.assertEqual(plan.nodes[0].capability_id, "mcp.dispatch")
+            self.assertEqual(plan.nodes[0].metadata["mcp_binding_mode"], "explicit_command")
         finally:
             await restarted.shutdown()
 

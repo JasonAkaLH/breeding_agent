@@ -652,6 +652,57 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
             discovery.payload, {"server_display_name": "CRM", "tool_count": 1}
         )
 
+    async def test_explicit_binding_call_tool_reuses_grant_and_records_dispatched_audit(self) -> None:
+        storage = _FakeStorage()
+        storage.grants.append(
+            UserMCPToolGrant(
+                "grant-explicit",
+                "alice",
+                "server-a",
+                "lookup",
+                1,
+                "schema-v1",
+                NOW,
+            )
+        )
+        gateway = _FakeGateway(MCPCallOutcome.completed("result-safe"))
+        selector = _SequenceSelector(
+            _call(),
+            MCPSelectorAction(MCPSelectorActionType.FINISH, reason="done"),
+        )
+        router = _RouteSecondServer()
+        coordinator = UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=gateway,
+            selector=selector,
+            server_router=router,
+        )
+
+        outcome = await coordinator.dispatch(
+            _request(metadata={"mcp_binding_mode": "explicit_command"}),
+            server_id="server-a",
+        )
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertFalse(hasattr(router, "kwargs"))
+        self.assertTrue(all(not context.allow_route_another_server for context in selector.contexts))
+        selector_events = [
+            event
+            for event in outcome.events
+            if event.event_type == "mcp.selector_decided"
+        ]
+        self.assertEqual(
+            [event.payload["selector_action"] for event in selector_events],
+            ["call_tool", "finish"],
+        )
+        finished = next(
+            event
+            for event in outcome.events
+            if event.event_type == "mcp.dispatch_finished"
+        )
+        self.assertTrue(finished.payload["tool_call_dispatched"])
+
     async def test_resumes_accepted_always_allow_and_persists_exact_grant_and_call_barriers(self) -> None:
         storage = _FakeStorage()
         gateway = _FakeGateway(MCPCallOutcome.completed("result-safe", byte_size=17))
