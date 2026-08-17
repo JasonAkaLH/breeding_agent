@@ -135,6 +135,34 @@ class MCPAuditServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.server_id, "server-a")
         self.assertEqual(saved.safe_payload, {"status": "accepted"})
 
+    async def test_plaintext_security_booleans_are_safe_without_credential_values(self) -> None:
+        storage = _Storage()
+        detector = _SafetyDetector()
+        service = MCPAuditService(
+            storage=storage,
+            now_fn=lambda: NOW,
+            safety_detector=detector,
+        )
+
+        saved = await service.record(
+            owner_user_id="alice",
+            event_type="mcp.config_created",
+            server_id="server-http",
+            safe_payload={
+                "plaintext_http": True,
+                "credential_over_plaintext_http": True,
+            },
+        )
+
+        self.assertEqual(
+            saved.safe_payload,
+            {
+                "plaintext_http": True,
+                "credential_over_plaintext_http": True,
+            },
+        )
+        self.assertEqual(detector.violations, [])
+
     async def test_metric_gap_preserves_only_closed_safe_diagnostics(self) -> None:
         storage = _Storage()
         service = MCPAuditService(storage=storage, now_fn=lambda: NOW)

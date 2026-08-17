@@ -4,7 +4,6 @@ import asyncio
 import unittest
 
 from src.integrations.mcp.endpoint_policy import (
-    EndpointAllowlist,
     EndpointPolicy,
     EndpointPolicyError,
     EndpointPolicyProvenance,
@@ -50,37 +49,27 @@ class UserMCPEndpointPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(EndpointPolicyError, "ip_forbidden"):
             policy.validate("https://mcp.example.com/rpc")
 
-    def test_private_https_and_http_require_admin_allowlist(self) -> None:
-        resolver = _Resolver({"mcp.corp.example": ["10.2.3.4"]})
-        with self.assertRaisesRegex(EndpointPolicyError, "private_not_allowlisted"):
-            EndpointPolicy(resolver=resolver).validate("https://mcp.corp.example/rpc")
+    def test_public_http_is_allowed_and_private_targets_are_always_rejected(self) -> None:
+        public = EndpointPolicy(
+            resolver=_Resolver({"public.example": ["8.8.8.8"]})
+        ).validate("http://public.example:51789/mcp")
 
-        allowlist = EndpointAllowlist.from_values(domains=["corp.example"], cidrs=["10.0.0.0/8"])
-        policy = EndpointPolicy(resolver=resolver, allowlist=allowlist)
-        private_https = policy.validate("https://mcp.corp.example/rpc")
-        allowlisted_http = policy.validate("http://mcp.corp.example/rpc")
-        self.assertFalse(private_https.plaintext_http)
-        self.assertTrue(allowlisted_http.plaintext_http)
+        self.assertTrue(public.plaintext_http)
+        self.assertEqual(public.port, 51789)
         self.assertIs(
-            private_https.policy_provenance,
-            EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST,
-        )
-        self.assertIs(
-            allowlisted_http.policy_provenance,
-            EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST,
-        )
-
-        public_allowlisted = EndpointPolicy(
-            resolver=_Resolver({"public.corp.example": ["8.8.8.8"]}),
-            allowlist=allowlist,
-        ).validate("https://public.corp.example/rpc")
-        self.assertIs(
-            public_allowlisted.policy_provenance,
+            public.policy_provenance,
             EndpointPolicyProvenance.RUNTIME_ENFORCED,
         )
 
-    def test_metadata_and_local_classes_cannot_be_allowlisted(self) -> None:
-        allowlist = EndpointAllowlist.from_values(cidrs=["0.0.0.0/0", "::/0"])
+        resolver = _Resolver({"mcp.corp.example": ["10.2.3.4"]})
+        for endpoint in (
+            "https://mcp.corp.example/rpc",
+            "http://mcp.corp.example/rpc",
+        ):
+            with self.assertRaisesRegex(EndpointPolicyError, "private_forbidden"):
+                EndpointPolicy(resolver=resolver).validate(endpoint)
+
+    def test_metadata_and_local_classes_are_always_rejected(self) -> None:
         for address, expected in (
             ("169.254.169.254", IPClassification.METADATA),
             ("::ffff:169.254.169.254", IPClassification.METADATA),
@@ -90,7 +79,7 @@ class UserMCPEndpointPolicyTests(unittest.TestCase):
         ):
             self.assertEqual(classify_ip(address), expected)
             with self.assertRaisesRegex(EndpointPolicyError, "ip_forbidden"):
-                EndpointPolicy(allowlist=allowlist).validate(f"https://[{address}]/rpc" if ":" in address else f"https://{address}/rpc")
+                EndpointPolicy().validate(f"https://[{address}]/rpc" if ":" in address else f"https://{address}/rpc")
 
     def test_redirect_and_resolution_change_fail_closed(self) -> None:
         answers = [["8.8.8.8"], ["1.1.1.1"]]

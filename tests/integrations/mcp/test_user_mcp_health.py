@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.integrations.mcp.client import MCPClientError
+from src.integrations.mcp.endpoint_policy import EndpointPolicyError
 from src.integrations.mcp.health import (
     MCPHealthRunner,
     discover_healthy_tools,
@@ -166,7 +167,8 @@ class UserMCPHealthTest(unittest.IsolatedAsyncioTestCase):
         runner = MCPHealthRunner(
             storage=Storage(),
             instance_id="runner-1",
-            client_factory=lambda server, credentials: BlockingClient(),
+            endpoint_revalidator=lambda server: "validated-endpoint",
+            client_factory=lambda server, credentials, endpoint: BlockingClient(),
             credential_loader=lambda server: {},
             now_fn=lambda: datetime(2026, 8, 12, 12, 0, 0),
         )
@@ -204,7 +206,8 @@ class UserMCPHealthTest(unittest.IsolatedAsyncioTestCase):
         runner = MCPHealthRunner(
             storage=storage,
             instance_id="runner-recovery",
-            client_factory=lambda server, credentials: _Client(),
+            endpoint_revalidator=lambda server: "validated-endpoint",
+            client_factory=lambda server, credentials, endpoint: _Client(),
             credential_loader=lambda server: {},
             now_fn=lambda: datetime(2026, 8, 12, 12, 0, 0),
         )
@@ -216,6 +219,108 @@ class UserMCPHealthTest(unittest.IsolatedAsyncioTestCase):
             await runner.aclose()
 
         self.assertGreaterEqual(storage.calls, 3)
+
+    async def test_endpoint_rejection_precedes_credentials_and_preserves_error_code(self) -> None:
+        completed = asyncio.Event()
+        observed: dict[str, object] = {"credentials": 0, "clients": 0}
+
+        class Storage:
+            async def claim_user_mcp_health_attempt(self, attempt):
+                return True
+
+            async def complete_user_mcp_health_attempt(self, *args, **kwargs):
+                observed["error_code"] = kwargs["error_code"]
+                observed["health_status"] = kwargs["health_status"]
+                completed.set()
+
+            async def release_user_mcp_health_attempt(self, *args, **kwargs):
+                return True
+
+        async def reject_endpoint(server):
+            raise EndpointPolicyError("mcp_endpoint_private_forbidden")
+
+        async def load_credentials(server):
+            observed["credentials"] = int(observed["credentials"]) + 1
+            return {"Authorization": "must-not-be-read"}
+
+        async def create_client(server, credentials, endpoint):
+            observed["clients"] = int(observed["clients"]) + 1
+            return _Client()
+
+        runner = MCPHealthRunner(
+            storage=Storage(),
+            instance_id="runner-endpoint-rejected",
+            endpoint_revalidator=reject_endpoint,
+            client_factory=create_client,
+            credential_loader=load_credentials,
+            now_fn=lambda: datetime(2026, 8, 12, 12, 0, 0),
+        )
+        server = SimpleNamespace(
+            owner_user_id="alice",
+            server_id="server-private",
+            config_version=1,
+            security_version=1,
+        )
+
+        await runner.start_test(server)
+        await asyncio.wait_for(completed.wait(), timeout=1)
+
+        self.assertEqual(observed["credentials"], 0)
+        self.assertEqual(observed["clients"], 0)
+        self.assertEqual(observed["health_status"], "unavailable")
+        self.assertEqual(
+            observed["error_code"], "mcp_endpoint_private_forbidden"
+        )
+        await runner.aclose()
+
+    async def test_validated_endpoint_is_passed_to_client_factory_once(self) -> None:
+        completed = asyncio.Event()
+        validated_endpoint = object()
+        observed: dict[str, object] = {"validations": 0}
+
+        class Storage:
+            async def claim_user_mcp_health_attempt(self, attempt):
+                return True
+
+            async def complete_user_mcp_health_attempt(self, *args, **kwargs):
+                observed["health_status"] = kwargs["health_status"]
+                completed.set()
+
+            async def release_user_mcp_health_attempt(self, *args, **kwargs):
+                return True
+
+        async def validate(server):
+            observed["validations"] = int(observed["validations"]) + 1
+            return validated_endpoint
+
+        async def create_client(server, credentials, endpoint):
+            self.assertIs(endpoint, validated_endpoint)
+            return _Client(
+                capabilities={"tools": {}},
+                tools=[{"name": "lookup", "inputSchema": {"type": "object"}}],
+            )
+
+        runner = MCPHealthRunner(
+            storage=Storage(),
+            instance_id="runner-endpoint-bound",
+            endpoint_revalidator=validate,
+            client_factory=create_client,
+            credential_loader=lambda server: {},
+            now_fn=lambda: datetime(2026, 8, 12, 12, 0, 0),
+        )
+        server = SimpleNamespace(
+            owner_user_id="alice",
+            server_id="server-public",
+            config_version=1,
+            security_version=1,
+        )
+
+        await runner.start_test(server)
+        await asyncio.wait_for(completed.wait(), timeout=1)
+
+        self.assertEqual(observed["validations"], 1)
+        self.assertEqual(observed["health_status"], "available")
+        await runner.aclose()
 
 
 async def _record_sleep(target: list[float], seconds: float) -> None:

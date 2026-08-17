@@ -23,7 +23,6 @@ from src.core.models import (
 from src.integrations.mcp.audit import MCPAuditService
 from src.integrations.mcp.config import MCPRuntimeConfig
 from src.integrations.mcp.endpoint_policy import (
-    EndpointAllowlist,
     EndpointPolicy,
     EndpointPolicyProvenance,
 )
@@ -34,6 +33,7 @@ from src.integrations.mcp.runtime_state import (
 )
 from src.integrations.mcp.shadow_compare import (
     ApprovedVerifiedMapping,
+    CURRENT_SHADOW_SCENARIOS,
     MCPShadowRuntimeObserver,
     RuntimeShadowComparisonResult,
     RuntimeShadowMappingResolution,
@@ -162,13 +162,13 @@ class _FailingShadowObserver:
         raise RuntimeError("observer unavailable")
 
 
-class _AllowlistedHTTPResolver:
+class _PublicHTTPResolver:
     def resolve(self, hostname: str, port: int) -> tuple[str, ...]:
         del hostname, port
         return ("93.184.216.34",)
 
 
-class _ReadonlyAllowlistedHTTPGateway:
+class _ReadonlyPublicHTTPGateway:
     def __init__(self, *, server_id: str, cleanup_error: bool = False) -> None:
         self.server_id = server_id
         self.cleanup_error = cleanup_error
@@ -207,9 +207,7 @@ class _ReadonlyAllowlistedHTTPGateway:
                 security_version=1,
             )
             catalog = gateway.catalog
-            endpoint_policy_provenance = (
-                EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST
-            )
+            endpoint_policy_provenance = EndpointPolicyProvenance.RUNTIME_ENFORCED
 
             async def aclose(self) -> None:
                 gateway.close_count += 1
@@ -335,7 +333,7 @@ def _verified_manifest(
             ShadowOutcome.TOOL_CALL_SUCCEEDED,
             ShadowOutcome.CONTROL_PLANE_READY,
         ),
-        ShadowScenario.ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS: (
+        ShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS: (
             ShadowOutcome.TOOL_CALL_SUCCEEDED,
             ShadowOutcome.CONTROL_PLANE_READY,
         ),
@@ -1050,7 +1048,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             "deployment-1",
             "internal_shadow",
             window_started_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            window_ended_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
+            window_ended_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
         )
         self.assertEqual(audit_service.errors, [])
         self.assertEqual(gaps, [])
@@ -1059,7 +1057,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             all(sample.manifest_fingerprint == manifest_fingerprint for sample in samples)
         )
 
-    async def test_allowlisted_http_live_shadow_persists_matched_sample_without_tool_call(
+    async def test_public_http_live_shadow_persists_matched_sample_without_tool_call(
         self,
     ) -> None:
         timeline: list[str] = []
@@ -1069,7 +1067,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
                 "enabled": True,
                 "servers": [
                     {
-                        "server_id": "legacy-allowlisted-http",
+                        "server_id": "legacy-public-http",
                         "endpoint": endpoint_url,
                         "transport": "legacy_http_sse",
                     }
@@ -1077,13 +1075,13 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             }
         )
         selected_binding = MCPToolBinding(
-            capability_id="mcp.legacy_allowlisted_http.search",
-            server_id="legacy-allowlisted-http",
+            capability_id="mcp.legacy_public_http.search",
+            server_id="legacy-public-http",
             tool_name="search",
             input_schema={"type": "object"},
         )
         pinned_bundle = MCPRuntimeBundle(
-            revision="allowlisted-http-pinned",
+            revision="public-http-pinned",
             created_at=self.runtime._utcnow_naive(),
             bindings={selected_binding.capability_id: selected_binding},
         )
@@ -1091,14 +1089,14 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             config=legacy_config,
             pinned_bundle=pinned_bundle,
             active_bundle=MCPRuntimeBundle(
-                revision="allowlisted-http-active",
+                revision="public-http-active",
                 created_at=self.runtime._utcnow_naive(),
             ),
         )
 
         target_id = deterministic_migrated_server_id(
-            "legacy-allowlisted-http",
-            "owner-allowlisted-http",
+            "legacy-public-http",
+            "owner-public-http",
         )
         source_fingerprint = legacy_migration_source_fingerprint(
             legacy_config.servers[0]
@@ -1107,17 +1105,17 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         audit_signer = audit_reference_signer(b"e" * 32)
         migrated_server = UserMCPServer(
             server_id=target_id,
-            owner_user_id="owner-allowlisted-http",
-            display_name="Migrated allowlisted HTTP",
-            routing_description="Search over allowlisted HTTP",
+            owner_user_id="owner-public-http",
+            display_name="Migrated public HTTP",
+            routing_description="Search over public HTTP",
             endpoint_url=endpoint_url,
             transport=UserMCPTransport.LEGACY_HTTP_SSE,
             auth_metadata={
                 "migration_provenance": {
                     "schema": "legacy_mcp_migration_provenance.v1",
-                    "source_server_id": "legacy-allowlisted-http",
+                    "source_server_id": "legacy-public-http",
                     "source_fingerprint": source_fingerprint,
-                    "owner_user_id": "owner-allowlisted-http",
+                    "owner_user_id": "owner-public-http",
                     "target_server_id": target_id,
                     "credential_digest": "hmac-sha256:" + "a" * 64,
                     "credential_security_version": 1,
@@ -1149,8 +1147,8 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         await self.runtime.storage.create_user_mcp_server(migrated_server)
         await self.runtime.storage.save_user_mcp_tool_grant(
             UserMCPToolGrant(
-                grant_id="grant-allowlisted-http-search",
-                owner_user_id="owner-allowlisted-http",
+                grant_id="grant-public-http-search",
+                owner_user_id="owner-public-http",
                 server_id=target_id,
                 tool_name="search",
                 server_security_version=1,
@@ -1160,74 +1158,69 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         )
 
         mapping_resolution = resolve_approved_migration_mapping(
-            legacy_server_id="legacy-allowlisted-http",
-            owner_user_id="owner-allowlisted-http",
+            legacy_server_id="legacy-public-http",
+            owner_user_id="owner-public-http",
             legacy_server=legacy_config.servers[0],
             user_servers=(migrated_server,),
             target_credential_digests={target_id: credential_digest},
-            config_fingerprint="config-allowlisted-http",
+            config_fingerprint="config-public-http",
         )
         self.assertIsNotNone(mapping_resolution.mapping)
         manifest = _verified_manifest(
-            config_fingerprint="config-allowlisted-http",
+            config_fingerprint="config-public-http",
             mapping_fingerprint=approved_shadow_mapping_set_fingerprint(
                 (mapping_resolution.mapping,)
             ),
         )
         plan = WorkflowPlan(
-            task_id="task-allowlisted-http",
+            task_id="task-public-http",
             nodes=(
                 WorkflowNodePlan(
-                    node_id="node-allowlisted-http",
+                    node_id="node-public-http",
                     capability_id=selected_binding.capability_id,
                 ),
             ),
         )
         request = OrchestrationRequest(
-            task_id="task-allowlisted-http",
-            conversation_id="conv-allowlisted-http",
-            root_message_id="msg-allowlisted-http",
+            task_id="task-public-http",
+            conversation_id="conv-public-http",
+            root_message_id="msg-public-http",
             user_message="search over the migrated server",
             metadata={
                 "mcp_execution_mode": "legacy",
                 "mcp_shadow_enabled": True,
-                "mcp_rollout_config_version": "config-allowlisted-http",
+                "mcp_rollout_config_version": "config-public-http",
                 "mcp_route_reason_code": "shadow_enabled",
                 "mcp_rollout_mode": "shadow",
-                "mcp_bundle_revision": "allowlisted-http-pinned",
+                "mcp_bundle_revision": "public-http-pinned",
             },
         )
         await self.runtime.storage.save_conversation(
-            Conversation("conv-allowlisted-http", "owner-allowlisted-http")
+            Conversation("conv-public-http", "owner-public-http")
         )
         await self.runtime.storage.save_task(
             Task(
-                "task-allowlisted-http",
-                "conv-allowlisted-http",
-                "msg-allowlisted-http",
+                "task-public-http",
+                "conv-public-http",
+                "msg-public-http",
                 status=TaskStatus.ACCEPTED,
                 mcp_execution_mode="legacy",
                 mcp_shadow_enabled=True,
-                mcp_rollout_config_version="config-allowlisted-http",
+                mcp_rollout_config_version="config-public-http",
                 mcp_route_reason_code="shadow_enabled",
                 mcp_rollout_mode="shadow",
             )
         )
 
-        gateway = _ReadonlyAllowlistedHTTPGateway(server_id=target_id)
-        endpoint_policy = EndpointPolicy(
-            resolver=_AllowlistedHTTPResolver(),
-            allowlist=EndpointAllowlist.from_values(
-                domains=("mcp.example.test",)
-            ),
-        )
+        gateway = _ReadonlyPublicHTTPGateway(server_id=target_id)
+        endpoint_policy = EndpointPolicy(resolver=_PublicHTTPResolver())
         observer = MCPShadowRuntimeObserver(
             storage=self.runtime.storage,
             gateway=gateway,
             server_router=_StaticShadowRouter(target_id),
             selector=_SearchShadowSelector(),
             endpoint_policy=endpoint_policy,
-            digest_key=b"allowlisted-http-shadow-digest",
+            digest_key=b"public-http-shadow-digest",
         )
         execution = _ExecutionService(timeline, self.runtime.storage)
         audit_service = _CapturingAuditService(storage=self.runtime.storage)
@@ -1259,12 +1252,12 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         self.runtime._mcp_shadow_manifest = manifest
         self.runtime._mcp_shadow_scenario_bindings = {
             selected_binding.capability_id: (
-                ShadowScenario.ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS
+                ShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS
             )
         }
         self.runtime._mcp_rollout_instance_admission = SimpleNamespace(
             environment_id="production",
-            deployment_id="deployment-allowlisted-http",
+            deployment_id="deployment-public-http",
             stage="internal_shadow",
         )
         gaps: list[str] = []
@@ -1295,14 +1288,14 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
 
         samples = await self.runtime.storage.list_mcp_shadow_audit_samples(
             "production",
-            "deployment-allowlisted-http",
+            "deployment-public-http",
             "internal_shadow",
             window_started_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            window_ended_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
+            window_ended_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
         )
         self.assertEqual(gaps, [])
         self.assertEqual(audit_service.errors, [])
-        self.assertEqual(runtime_state.requested_revisions, ["allowlisted-http-pinned"])
+        self.assertEqual(runtime_state.requested_revisions, ["public-http-pinned"])
         self.assertEqual(gateway.readonly_open_count, 1)
         self.assertEqual(gateway.close_count, 1)
         self.assertEqual(gateway.call_tool_count, 0)
@@ -1312,15 +1305,15 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         self.assertEqual(samples[0].transport, "legacy_http_sse")
         self.assertEqual(
             samples[0].endpoint_policy,
-            "allowed_by_enterprise_allowlist",
+            "runtime_enforced",
         )
 
-        cleanup_task_id = "task-allowlisted-http-cleanup"
-        cleanup_node_id = "node-allowlisted-http-cleanup"
+        cleanup_task_id = "task-public-http-cleanup"
+        cleanup_node_id = "node-public-http-cleanup"
         await self.runtime.storage.append_event(
             EventRecord(
-                event_id="evt-allowlisted-http-cleanup",
-                conversation_id="conv-allowlisted-http",
+                event_id="evt-public-http-cleanup",
+                conversation_id="conv-public-http",
                 task_id=cleanup_task_id,
                 node_id=cleanup_node_id,
                 event_type="mcp.tool_call_completed",
@@ -1328,7 +1321,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
                 visibility=EventVisibility.AUDIT_ONLY,
             )
         )
-        cleanup_gateway = _ReadonlyAllowlistedHTTPGateway(
+        cleanup_gateway = _ReadonlyPublicHTTPGateway(
             server_id=target_id,
             cleanup_error=True,
         )
@@ -1338,10 +1331,10 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             server_router=_StaticShadowRouter(target_id),
             selector=_SearchShadowSelector(),
             endpoint_policy=endpoint_policy,
-            digest_key=b"allowlisted-http-shadow-digest",
+            digest_key=b"public-http-shadow-digest",
         )
         cleanup_result = await cleanup_observer.compare_task(
-            owner_user_id="owner-allowlisted-http",
+            owner_user_id="owner-public-http",
             task_id=cleanup_task_id,
             user_request="search over the migrated server",
             profiles=(
@@ -1357,7 +1350,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
             legacy_transport="legacy_http_sse",
             legacy_endpoint_url=endpoint_url,
             mapping=mapping_resolution.mapping,
-            config_fingerprint="config-allowlisted-http",
+            config_fingerprint="config-public-http",
         )
         self.assertEqual(cleanup_result.comparison, ShadowComparison.MISMATCHED)
         self.assertEqual(
@@ -1376,7 +1369,7 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
         self.runtime.user_mcp_audit_service = cleanup_audit
         self.runtime._mcp_rollout_instance_admission = SimpleNamespace(
             environment_id="production",
-            deployment_id="deployment-allowlisted-http",
+            deployment_id="deployment-public-http",
             stage="internal_shadow",
         )
         try:
@@ -1384,20 +1377,20 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
                 handle=SimpleNamespace(
                     request=OrchestrationRequest(
                         cleanup_task_id,
-                        "conv-allowlisted-http",
-                        "msg-allowlisted-http-cleanup",
+                        "conv-public-http",
+                        "msg-public-http-cleanup",
                         "search over the migrated server",
                     ),
-                    owner_user_id="owner-allowlisted-http",
+                    owner_user_id="owner-public-http",
                     approved_mappings=(mapping_resolution.mapping,),
                 ),
                 context=SimpleNamespace(
                     node_id=cleanup_node_id,
                     scenario=(
-                        ShadowScenario.ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS
+                        ShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS
                     ),
                     binding=SimpleNamespace(
-                        server_id="legacy-allowlisted-http"
+                        server_id="legacy-public-http"
                     ),
                 ),
                 shadow_result=cleanup_result,
@@ -1417,10 +1410,10 @@ class UserMCPLiveShadowRuntimeTest(APITestCase):
 
         persisted = await self.runtime.storage.list_mcp_shadow_audit_samples(
             "production",
-            "deployment-allowlisted-http",
+            "deployment-public-http",
             "internal_shadow",
             window_started_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            window_ended_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
+            window_ended_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
         )
         cleanup_samples = [
             sample

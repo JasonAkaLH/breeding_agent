@@ -157,6 +157,7 @@ class MCPCallKind(StrEnum):
 class MCPShadowScenario(StrEnum):
     HTTPS_STREAMABLE_SUCCESS = "https_streamable_success"
     HTTPS_LEGACY_SSE_SUCCESS = "https_legacy_sse_success"
+    PUBLIC_HTTP_LEGACY_SSE_SUCCESS = "public_http_legacy_sse_success"
     ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS = "allowlisted_http_legacy_sse_success"
     AUTHENTICATION_FAILURE = "authentication_failure"
     TIMEOUT = "timeout"
@@ -490,7 +491,16 @@ class MCPStageGateEvaluation:
         return self.status is MCPGateStatus.PASSED
 
 
-_REQUIRED_SHADOW_SCENARIOS = frozenset(MCPShadowScenario)
+CURRENT_MCP_SHADOW_SCENARIOS = (
+    MCPShadowScenario.HTTPS_STREAMABLE_SUCCESS,
+    MCPShadowScenario.HTTPS_LEGACY_SSE_SUCCESS,
+    MCPShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS,
+    MCPShadowScenario.AUTHENTICATION_FAILURE,
+    MCPShadowScenario.TIMEOUT,
+    MCPShadowScenario.PERMISSION_DENIAL,
+    MCPShadowScenario.LARGE_OUTPUT,
+)
+_REQUIRED_SHADOW_SCENARIOS = frozenset(CURRENT_MCP_SHADOW_SCENARIOS)
 _REQUIRED_INTERNAL_ENFORCE_DRILLS = frozenset(MCPRolloutDrill)
 _REQUIRED_PERFORMANCE_CALL_KINDS = frozenset(MCPCallKind)
 _EXPECTED_PRODUCER = {

@@ -32,6 +32,8 @@ _SAFE_PAYLOAD_FIELDS = frozenset(
         "heartbeat_at",
         "gap_reason",
         "input_request_count",
+        "plaintext_http",
+        "credential_over_plaintext_http",
         "metric_family",
         "next_poll_at",
         "queue_position",
@@ -236,7 +238,13 @@ def _safe_payload(
 def _contains_secret_field(value: Any) -> bool:
     if isinstance(value, Mapping):
         return any(
-            any(marker in str(key).lower() for marker in _SECRET_FIELD_MARKERS)
+            (
+                any(marker in str(key).lower() for marker in _SECRET_FIELD_MARKERS)
+                and not (
+                    str(key) == "credential_over_plaintext_http"
+                    and isinstance(item, bool)
+                )
+            )
             or _contains_secret_field(item)
             for key, item in value.items()
         )

@@ -587,7 +587,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-2025-cancel",
             credential_loader=lambda _server: {},
-            client_factory=lambda _server, _credentials: object(),
+            client_factory=lambda _server, _credentials, _endpoint: object(),
             endpoint_revalidator=lambda server: server.endpoint_url,
             result_store=MCPTemporaryResultStore(
                 result_root, memory_threshold_bytes=1024
@@ -675,12 +675,16 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             transport=UserMCPTransport.STREAMABLE_HTTP,
             protocol_preference=UserMCPProtocolPreference.V2026_07_28,
         )
+        endpoint = await factory.revalidate_endpoint(auto)
 
         auto_client = await factory.create_task_recovery(
-            auto, {}, protocol_version=MCP_PROTOCOL_VERSION_2025_11_25
+            auto, {}, endpoint, protocol_version=MCP_PROTOCOL_VERSION_2025_11_25
         )
         pinned_client = await factory.create_task_recovery(
-            pinned_2025, {}, protocol_version=MCP_PROTOCOL_VERSION_2025_11_25
+            pinned_2025,
+            {},
+            endpoint,
+            protocol_version=MCP_PROTOCOL_VERSION_2025_11_25,
         )
         self.assertIsInstance(auto_client, MCP2025TaskRecoveryClient)
         self.assertIsInstance(pinned_client, MCP2025TaskRecoveryClient)
@@ -692,6 +696,7 @@ class MCP20251125TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await factory.create_task_recovery(
                 pinned_2026,
                 {},
+                endpoint,
                 protocol_version=MCP_PROTOCOL_VERSION_2025_11_25,
             )
 

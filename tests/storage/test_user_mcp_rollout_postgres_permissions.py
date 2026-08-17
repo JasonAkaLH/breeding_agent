@@ -9,6 +9,7 @@ from src.integrations.mcp.shadow_evidence import (
     MCP_SHADOW_SAMPLE_CLOSED_VALUES,
     MCP_SHADOW_SAMPLE_EXPECTATIONS,
 )
+from src.integrations.mcp.rollout_evidence import CURRENT_MCP_SHADOW_SCENARIOS
 from src.state.postgres.runtime_schema import build_runtime_table_schema_ddl
 
 
@@ -318,6 +319,28 @@ class UserMCPRolloutPostgresPermissionsContractTest(unittest.TestCase):
             "p_expires_at",
         ):
             self.assertIn(f"{parameter} IS NULL", sample)
+
+    def test_snapshot_producer_uses_only_current_required_shadow_scenarios(self) -> None:
+        producer = _function_definition("derive_production_evidence_snapshot")
+        match = re.search(
+            r"WITH scenario_list\(ordinality, scenario\) AS \(VALUES(.*?)\)\s*SELECT",
+            producer,
+            flags=re.DOTALL,
+        )
+        if match is None:
+            raise AssertionError("current shadow scenario_list not found")
+        scenarios = tuple(
+            value
+            for _ordinal, value in re.findall(
+                r"\(\s*(\d+)\s*,\s*'([^']+)'\s*\)",
+                match.group(1),
+            )
+        )
+        self.assertEqual(
+            scenarios,
+            tuple(item.value for item in CURRENT_MCP_SHADOW_SCENARIOS),
+        )
+        self.assertNotIn("allowlisted_http_legacy_sse_success", scenarios)
 
     def test_history_tables_are_append_only(self) -> None:
         trigger_block = re.search(

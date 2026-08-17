@@ -74,6 +74,23 @@ class UserMCPClientFactory:
         endpoint = await asyncio.to_thread(
             self._endpoint_policy.validate, server.endpoint_url
         )
+        return self.create_from_validated_endpoint(
+            server,
+            request_headers,
+            endpoint,
+        )
+
+    def create_from_validated_endpoint(
+        self,
+        server: UserMCPServer,
+        request_headers: Mapping[str, Any],
+        endpoint: ValidatedEndpoint,
+    ):
+        if (
+            not isinstance(endpoint, ValidatedEndpoint)
+            or endpoint.normalized_url != server.endpoint_url
+        ):
+            raise EndpointPolicyError("mcp_endpoint_validation_binding_invalid")
         return self._create_from_validated_endpoint(
             server,
             request_headers,
@@ -88,12 +105,7 @@ class UserMCPClientFactory:
     ):
         """Create a zero-call client from the gateway's exact policy decision."""
 
-        if (
-            not isinstance(endpoint, ValidatedEndpoint)
-            or endpoint.normalized_url != server.endpoint_url
-        ):
-            raise EndpointPolicyError("mcp_endpoint_validation_binding_invalid")
-        return self._create_from_validated_endpoint(
+        return self.create_from_validated_endpoint(
             server,
             request_headers,
             endpoint,
@@ -124,6 +136,7 @@ class UserMCPClientFactory:
         self,
         server: UserMCPServer,
         request_headers: Mapping[str, Any],
+        endpoint: ValidatedEndpoint,
         *,
         protocol_version: str,
     ):
@@ -140,10 +153,12 @@ class UserMCPClientFactory:
             raise MCPProtocolError(
                 "mcp_remote_task_protocol_handler_unavailable"
             )
+        if (
+            not isinstance(endpoint, ValidatedEndpoint)
+            or endpoint.normalized_url != server.endpoint_url
+        ):
+            raise EndpointPolicyError("mcp_endpoint_validation_binding_invalid")
         headers = {str(key): str(value) for key, value in request_headers.items()}
-        endpoint = await asyncio.to_thread(
-            self._endpoint_policy.validate, server.endpoint_url
-        )
         preference = str(server.protocol_preference)
         if (
             preference != str(UserMCPProtocolPreference.AUTO)

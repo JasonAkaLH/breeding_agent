@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -38,7 +38,6 @@ class IPClassification(str, Enum):
 
 class EndpointPolicyProvenance(str, Enum):
     RUNTIME_ENFORCED = "runtime_enforced"
-    ENTERPRISE_ALLOWLIST = "allowed_by_enterprise_allowlist"
 
 
 class EndpointResolver(Protocol):
@@ -51,32 +50,6 @@ class SocketEndpointResolver:
             return tuple(item[4][0] for item in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM))
         except OSError as exc:
             raise EndpointPolicyError("mcp_endpoint_dns_failed") from exc
-
-
-@dataclass(frozen=True, slots=True)
-class EndpointAllowlist:
-    domains: tuple[str, ...] = ()
-    cidrs: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
-
-    @classmethod
-    def from_values(
-        cls,
-        *,
-        domains: Sequence[str] = (),
-        cidrs: Sequence[str] = (),
-    ) -> "EndpointAllowlist":
-        normalized_domains = tuple(_normalize_allowlist_domain(value) for value in domains)
-        try:
-            networks = tuple(ipaddress.ip_network(value, strict=True) for value in cidrs)
-        except ValueError as exc:
-            raise EndpointPolicyError("mcp_endpoint_allowlist_invalid") from exc
-        return cls(domains=normalized_domains, cidrs=networks)
-
-    def permits_domain(self, hostname: str) -> bool:
-        return any(hostname == domain or hostname.endswith(f".{domain}") for domain in self.domains)
-
-    def permits_ip(self, address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-        return any(address.version == network.version and address in network for network in self.cidrs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,10 +95,8 @@ class EndpointPolicy:
         self,
         *,
         resolver: EndpointResolver | None = None,
-        allowlist: EndpointAllowlist | None = None,
     ) -> None:
         self._resolver = resolver or SocketEndpointResolver()
-        self._allowlist = allowlist or EndpointAllowlist()
 
     def validate(self, url: str) -> ValidatedEndpoint:
         parsed, normalized_url, hostname, port = _normalize_url(url)
@@ -147,9 +118,7 @@ class EndpointPolicy:
         if not addresses:
             raise EndpointPolicyError("mcp_endpoint_dns_failed")
 
-        domain_allowed = self._allowlist.permits_domain(hostname)
         plaintext = parsed.scheme == "http"
-        allowlist_required = plaintext
         for address in addresses:
             category = classify_ip(address)
             if category in {
@@ -161,12 +130,8 @@ class EndpointPolicy:
                 IPClassification.UNSPECIFIED,
             }:
                 raise EndpointPolicyError("mcp_endpoint_ip_forbidden")
-            if category is IPClassification.PRIVATE and not (domain_allowed or self._allowlist.permits_ip(address)):
-                raise EndpointPolicyError("mcp_endpoint_private_not_allowlisted")
             if category is IPClassification.PRIVATE:
-                allowlist_required = True
-            if plaintext and not (domain_allowed or self._allowlist.permits_ip(address)):
-                raise EndpointPolicyError("mcp_endpoint_http_not_allowlisted")
+                raise EndpointPolicyError("mcp_endpoint_private_forbidden")
 
         resolved = tuple(str(address) for address in addresses)
         return ValidatedEndpoint(
@@ -178,11 +143,7 @@ class EndpointPolicy:
             resolved_ips=resolved,
             allowed_ips=resolved,
             plaintext_http=plaintext,
-            policy_provenance=(
-                EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST
-                if allowlist_required
-                else EndpointPolicyProvenance.RUNTIME_ENFORCED
-            ),
+            policy_provenance=EndpointPolicyProvenance.RUNTIME_ENFORCED,
         )
 
     def validate_connection_ip(self, endpoint: ValidatedEndpoint, address: str) -> None:
@@ -264,18 +225,6 @@ def _normalize_hostname(hostname: str) -> str:
         return value.encode("idna").decode("ascii")
     except UnicodeError as exc:
         raise EndpointPolicyError("mcp_endpoint_url_invalid") from exc
-
-
-def _normalize_allowlist_domain(domain: str) -> str:
-    if not isinstance(domain, str):
-        raise EndpointPolicyError("mcp_endpoint_allowlist_invalid")
-    value = domain.strip().lstrip("*.").rstrip(".")
-    if not value or "://" in value or "/" in value:
-        raise EndpointPolicyError("mcp_endpoint_allowlist_invalid")
-    try:
-        return _normalize_hostname(value)
-    except EndpointPolicyError as exc:
-        raise EndpointPolicyError("mcp_endpoint_allowlist_invalid") from exc
 
 
 def _origin(scheme: str, hostname: str, port: int) -> str:

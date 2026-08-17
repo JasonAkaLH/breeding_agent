@@ -25,7 +25,11 @@ from .adapter_2026 import (
 )
 from .client import MCPClientError, MCPProtocolError
 from .credentials import MCPRecoveryCallContext
-from .endpoint_policy import EndpointPolicyProvenance, ValidatedEndpoint
+from .endpoint_policy import (
+    EndpointPolicyError,
+    EndpointPolicyProvenance,
+    ValidatedEndpoint,
+)
 from .gateway_models import (
     CancelOutcome,
     ContinueOutcome,
@@ -274,7 +278,10 @@ class MCPGateway:
         storage: Any,
         gateway_instance_id: str,
         credential_loader: Callable[[UserMCPServer], Mapping[str, Any] | Awaitable[Mapping[str, Any]]],
-        client_factory: Callable[[UserMCPServer, Mapping[str, Any]], Any | Awaitable[Any]],
+        client_factory: Callable[
+            [UserMCPServer, Mapping[str, Any], ValidatedEndpoint],
+            Any | Awaitable[Any],
+        ],
         endpoint_revalidator: Callable[[UserMCPServer], Any | Awaitable[Any]],
         readonly_shadow_client_factory: Callable[
             [UserMCPServer, Mapping[str, Any], ValidatedEndpoint],
@@ -295,6 +302,10 @@ class MCPGateway:
         metric_recorder: MCPGatewayMetricRecorder | None = None,
         metric_routing_mode: MCPMetricRoutingMode | None = None,
         remote_task_canceller: RemoteTaskCanceller | None = None,
+        endpoint_security_observer: Callable[
+            [UserMCPServer, ValidatedEndpoint], Any | Awaitable[Any]
+        ]
+        | None = None,
         safety_detectors: Mapping[
             MCPSafetyRedLine, AuthoritativeMCPSafetyDetector
         ]
@@ -324,6 +335,7 @@ class MCPGateway:
         self._metric_recorder = metric_recorder
         self._metric_routing_mode = metric_routing_mode
         self._remote_task_canceller = remote_task_canceller
+        self._endpoint_security_observer = endpoint_security_observer
         self._safety_detectors = dict(safety_detectors or {})
         self._safety_admission_checker: Callable[[], Awaitable[bool]] | None = None
         self._scopes: dict[tuple[str, str], _ScopeState] = {}
@@ -531,6 +543,10 @@ class MCPGateway:
                             != server.endpoint_url
                         ):
                             raise MCPGatewayError("endpoint_policy_rejected")
+                        await self._observe_endpoint_security(
+                            server,
+                            validated_endpoint,
+                        )
                         credentials = await _await_maybe(
                             self._credential_loader(server)
                         )
@@ -679,12 +695,26 @@ class MCPGateway:
                     connect_started_at = monotonic()
                     try:
                         async with asyncio.timeout(self._discovery_timeout_seconds):
-                            await self._revalidate_endpoint(server)
+                            validated_endpoint = await self._revalidate_endpoint(server)
+                            if (
+                                not isinstance(validated_endpoint, ValidatedEndpoint)
+                                or validated_endpoint.normalized_url
+                                != server.endpoint_url
+                            ):
+                                raise MCPGatewayError("endpoint_policy_rejected")
+                            await self._observe_endpoint_security(
+                                server,
+                                validated_endpoint,
+                            )
                             credentials = await _await_maybe(
                                 self._credential_loader(server)
                             )
                             candidate = await _await_maybe(
-                                self._client_factory(server, credentials)
+                                self._client_factory(
+                                    server,
+                                    credentials,
+                                    validated_endpoint,
+                                )
                             )
                             await candidate.initialize()
                             connected = True
@@ -1437,12 +1467,28 @@ class MCPGateway:
     async def _revalidate_endpoint(self, server: UserMCPServer) -> Any:
         try:
             return await _await_maybe(self._endpoint_revalidator(server))
+        except EndpointPolicyError as exc:
+            await self._mark_unavailable(server, exc.code)
+            await self._report_safety_violation(
+                MCPSafetyRedLine.ENDPOINT_POLICY_BYPASS,
+                "endpoint_policy_rejected",
+            )
+            raise
         except Exception:
             await self._report_safety_violation(
                 MCPSafetyRedLine.ENDPOINT_POLICY_BYPASS,
                 "endpoint_policy_rejected",
             )
             raise
+
+    async def _observe_endpoint_security(
+        self,
+        server: UserMCPServer,
+        endpoint: ValidatedEndpoint,
+    ) -> None:
+        if self._endpoint_security_observer is None:
+            return
+        await _await_maybe(self._endpoint_security_observer(server, endpoint))
 
     def _require_scope(self, scope: MCPTaskServerScope) -> _ScopeState:
         state = self._scopes.get((scope.platform_task_id, scope.server_id))

@@ -12,8 +12,8 @@ from src.core.enums import TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Conversation, Task, UserMCPServer, UserMCPToolGrant
 from src.integrations.mcp.client import MCPClientError
 from src.integrations.mcp.endpoint_policy import (
-    EndpointAllowlist,
     EndpointPolicy,
+    EndpointPolicyError,
     EndpointPolicyProvenance,
 )
 from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway, MCPGatewayError
@@ -217,7 +217,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(leases, "lease must exist before credential decryption")
             return {}
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             adapter = _Adapter()
             self.adapters.append(adapter)
@@ -229,7 +229,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-1",
             credential_loader=credential_loader,
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -294,7 +294,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             )
             return {}
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             adapter = _Adapter()
             adapters.append(adapter)
@@ -302,7 +302,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
 
         async def readonly_client_factory(server, credentials, endpoint):
             self.assertIs(endpoint, validated_endpoints[-1])
-            return await client_factory(server, credentials)
+            return await client_factory(server, credentials, endpoint)
 
         gateway = MCPGateway(
             storage=self.storage,
@@ -365,7 +365,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-shadow-unverified-policy",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: _Adapter(),
+            client_factory=lambda server, credentials, endpoint: _Adapter(),
             endpoint_revalidator=lambda server: server.endpoint_url,
             readonly_shadow_client_factory=(
                 lambda server, credentials, endpoint: _Adapter()
@@ -380,6 +380,53 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(username="alice"), "task-1", "server-1"
                 )
             self.assertEqual(capacity.active_calls, 0)
+        finally:
+            await gateway.aclose()
+
+    async def test_endpoint_rejection_marks_server_unavailable_before_credentials(self) -> None:
+        credential_calls = 0
+
+        async def credential_loader(server):
+            nonlocal credential_calls
+            credential_calls += 1
+            return {"Authorization": "must-not-be-read"}
+
+        async def reject_endpoint(server):
+            raise EndpointPolicyError("mcp_endpoint_private_forbidden")
+
+        gateway = MCPGateway(
+            storage=self.storage,
+            gateway_instance_id="gateway-private-endpoint",
+            credential_loader=credential_loader,
+            client_factory=lambda server, credentials, endpoint: _Adapter(),
+            endpoint_revalidator=reject_endpoint,
+            readonly_shadow_client_factory=(
+                lambda server, credentials, endpoint: _Adapter()
+            ),
+            result_store=self.result_store,
+            capacity=MCPTemporaryResultCapacity(
+                MCPTemporaryResultCapacityConfig(4, 1),
+                storage_root=self.result_store.root,
+                free_bytes=lambda path: 10_000_000,
+            ),
+            now_fn=lambda: self.now,
+        )
+        try:
+            with self.assertRaisesRegex(
+                EndpointPolicyError,
+                "mcp_endpoint_private_forbidden",
+            ):
+                await gateway.open_readonly_shadow_session(
+                    SimpleNamespace(username="alice"), "task-1", "server-1"
+                )
+            server = await self.storage.get_user_mcp_server("alice", "server-1")
+            self.assertIsNotNone(server)
+            self.assertEqual(server.health_status, UserMCPHealthStatus.UNAVAILABLE)
+            self.assertEqual(
+                server.last_test_error_code,
+                "mcp_endpoint_private_forbidden",
+            )
+            self.assertEqual(credential_calls, 0)
         finally:
             await gateway.aclose()
 
@@ -415,10 +462,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                 return _Adapter()
 
         resolver = SequenceResolver()
-        policy = EndpointPolicy(
-            resolver=resolver,
-            allowlist=EndpointAllowlist.from_values(cidrs=("10.0.0.0/8",)),
-        )
+        policy = EndpointPolicy(resolver=resolver)
         factory = CapturingFactory(policy)
         capacity = MCPTemporaryResultCapacity(
             MCPTemporaryResultCapacityConfig(4, 1),
@@ -429,7 +473,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-shadow-exact-endpoint",
             credential_loader=lambda server: {},
-            client_factory=factory.create,
+            client_factory=factory.create_from_validated_endpoint,
             endpoint_revalidator=factory.revalidate_endpoint,
             readonly_shadow_client_factory=factory.create_readonly_shadow,
             result_store=self.result_store,
@@ -472,10 +516,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
                 return answer
 
         resolver = SequenceResolver()
-        policy = EndpointPolicy(
-            resolver=resolver,
-            allowlist=EndpointAllowlist.from_values(cidrs=("10.0.0.0/8",)),
-        )
+        policy = EndpointPolicy(resolver=resolver)
         factory = UserMCPClientFactory(policy)
         server = await self.storage.get_user_mcp_server("alice", "server-1")
         self.assertIsNotNone(server)
@@ -522,7 +563,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-shadow-invalidate-queued",
             credential_loader=credential_loader,
-            client_factory=lambda server, credentials: _Adapter(),
+            client_factory=lambda server, credentials, endpoint: _Adapter(),
             endpoint_revalidator=_validated_endpoint,
             readonly_shadow_client_factory=readonly_client_factory,
             result_store=self.result_store,
@@ -566,7 +607,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-shadow-invalidate-active",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: adapter,
+            client_factory=lambda server, credentials, endpoint: adapter,
             endpoint_revalidator=_validated_endpoint,
             readonly_shadow_client_factory=(
                 lambda server, credentials, endpoint: adapter
@@ -601,8 +642,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-shadow-owner",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: _Adapter(),
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            client_factory=lambda server, credentials, endpoint: _Adapter(),
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -632,7 +673,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-shadow-race",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: adapter,
+            client_factory=lambda server, credentials, endpoint: adapter,
             endpoint_revalidator=_validated_endpoint,
             readonly_shadow_client_factory=(
                 lambda server, credentials, endpoint: adapter
@@ -677,7 +718,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         )
         server_before = await self.storage.get_user_mcp_server("alice", "server-1")
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             return adapters.pop(0)
 
@@ -689,7 +730,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             endpoint_revalidator=_validated_endpoint,
             readonly_shadow_client_factory=(
                 lambda server, credentials, endpoint: client_factory(
-                    server, credentials
+                    server, credentials, endpoint
                 )
             ),
             result_store=self.result_store,
@@ -742,7 +783,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-shadow-shutdown",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: adapter,
+            client_factory=lambda server, credentials, endpoint: adapter,
             endpoint_revalidator=_validated_endpoint,
             readonly_shadow_client_factory=(
                 lambda server, credentials, endpoint: adapter
@@ -935,7 +976,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         adapters = [_TransientAdapter(), _Adapter()]
         recorder = _MetricRecorder()
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             return adapters.pop(0)
 
@@ -944,7 +985,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-metrics-retry",
             credential_loader=lambda server: {},
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -991,7 +1032,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         adapters = [_TransientListAdapter(), _Adapter()]
         recorder = _MetricRecorder()
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             return adapters.pop(0)
 
@@ -1000,7 +1041,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-tools-list-metrics-retry",
             credential_loader=lambda server: {},
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -1079,7 +1120,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             credentials_loaded += 1
             return {}
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             nonlocal clients_created
             del server, credentials
             clients_created += 1
@@ -1090,7 +1131,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-queued",
             credential_loader=credential_loader,
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=MCPTemporaryResultStore(root, memory_threshold_bytes=8),
             capacity=capacity,
             now_fn=lambda: self.now,
@@ -1131,7 +1172,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         recorder = _MetricRecorder()
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             return _BlockingAdapter(started, release)
 
@@ -1140,7 +1181,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-opening",
             credential_loader=lambda server: {},
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -1209,7 +1250,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
 
         self.storage.renew_user_mcp_scope_lease = recording_renew
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             return _BlockingAdapter(started, release)
 
@@ -1218,7 +1259,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-renewing",
             credential_loader=lambda server: {},
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -1251,7 +1292,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         adapters = [_TransientAdapter(), _Adapter()]
         sleeps: list[float] = []
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             return adapters.pop(0)
 
@@ -1263,7 +1304,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-retry",
             credential_loader=lambda server: {},
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -1287,7 +1328,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         heartbeat = asyncio.Event()
         registered: list[str] = []
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del server, credentials
             return _BlockingCallAdapter(started)
 
@@ -1303,7 +1344,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="gateway-heartbeat",
             credential_loader=lambda server: {},
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -1346,8 +1387,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-heartbeat-reset",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: adapter,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            client_factory=lambda server, credentials, endpoint: adapter,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -1399,8 +1440,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-serial",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: adapter,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            client_factory=lambda server, credentials, endpoint: adapter,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),
@@ -1467,8 +1508,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             storage=self.storage,
             gateway_instance_id="gateway-cancel",
             credential_loader=lambda server: {},
-            client_factory=lambda server, credentials: adapter,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            client_factory=lambda server, credentials, endpoint: adapter,
+            endpoint_revalidator=_validated_endpoint,
             result_store=self.result_store,
             capacity=MCPTemporaryResultCapacity(
                 MCPTemporaryResultCapacityConfig(4, 1),

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.integrations.mcp.rollout import MCPRolloutConfig
 from src.integrations.mcp.rollout_evidence import (
+    CURRENT_MCP_SHADOW_SCENARIOS,
     MCPCallKind,
     MCPCallKindObservation,
     MCPEvidenceKind,
@@ -467,6 +468,39 @@ class UserMCPRolloutEvidenceTests(unittest.TestCase):
         )
         self.assertIn(MCPGateBlocker.UNRESOLVED_MISMATCH, mismatch_result.blockers)
 
+        without_public_http = tuple(
+            item
+            for item in self._shadow_scenarios()
+            if item.scenario is not MCPShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS
+        ) + (
+            MCPShadowScenarioObservation(
+                scenario=MCPShadowScenario.ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS,
+                matched_count=3,
+            ),
+        )
+        historical_does_not_substitute = self._snapshot(
+            evidence_id="historical-http-only",
+            nonce="historical-http-only-nonce",
+            stage=MCPRolloutStage.INTERNAL_SHADOW,
+            duration=timedelta(hours=24),
+            payload=self._payload(
+                kind=MCPEvidenceKind.INTERNAL_SHADOW,
+                shadow_scenarios=without_public_http,
+            ),
+        )
+        historical_result = evaluate_mcp_stage_gate(
+            self._request(
+                historical_does_not_substitute,
+                current_stage=MCPRolloutStage.INTERNAL_SHADOW,
+                target_stage=MCPRolloutStage.INTERNAL_ENFORCE,
+            ),
+            (historical_does_not_substitute,),
+        )
+        self.assertIn(
+            MCPGateBlocker.SCENARIO_SAMPLE_INSUFFICIENT,
+            historical_result.blockers,
+        )
+
     def test_internal_enforce_requires_48_hours_all_drills_and_nonzero_traffic(self) -> None:
         good = self._snapshot(
             stage=MCPRolloutStage.INTERNAL_ENFORCE,
@@ -836,7 +870,7 @@ class UserMCPRolloutEvidenceTests(unittest.TestCase):
     def _shadow_scenarios() -> tuple[MCPShadowScenarioObservation, ...]:
         return tuple(
             MCPShadowScenarioObservation(scenario=scenario, matched_count=3)
-            for scenario in MCPShadowScenario
+            for scenario in CURRENT_MCP_SHADOW_SCENARIOS
         )
 
     @staticmethod

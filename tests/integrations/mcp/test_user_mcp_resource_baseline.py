@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from src.core.enums import UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Conversation, Task, UserMCPServer
+from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
 from src.integrations.mcp.temporary_results import (
     MCPTemporaryResultCapacity,
@@ -42,6 +43,15 @@ class _ResourceAdapter:
         self.closed = True
 
 
+class _PublicResolver:
+    def resolve(self, hostname: str, port: int):
+        del hostname, port
+        return ("8.8.8.8",)
+
+
+_ENDPOINT_POLICY = EndpointPolicy(resolver=_PublicResolver())
+
+
 class UserMCPResourceBaselineTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -57,7 +67,7 @@ class UserMCPResourceBaselineTests(unittest.IsolatedAsyncioTestCase):
             self.credentials_loaded += 1
             return {}
 
-        async def client_factory(_server, _credentials):
+        async def client_factory(_server, _credentials, _endpoint):
             self.clients_created += 1
             adapter = _ResourceAdapter()
             self.adapters.append(adapter)
@@ -74,7 +84,9 @@ class UserMCPResourceBaselineTests(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="resource-baseline",
             credential_loader=credential_loader,
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=lambda server: _ENDPOINT_POLICY.validate(
+                server.endpoint_url
+            ),
             result_store=MCPTemporaryResultStore(
                 self.result_root, memory_threshold_bytes=1024
             ),

@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator, Draft7Validator, SchemaError
 
 from ...core.models import UserMCPHealthAttempt
 from .client import MCPClientError, MCPProtocolError
+from .endpoint_policy import EndpointPolicyError
 
 
 HEALTH_ATTEMPT_TIMEOUT_SECONDS = 60.0
@@ -76,6 +77,10 @@ async def run_health_discovery(
             error = MCPHealthError("discovery_timeout")
             retriable = True
             error.__cause__ = exc
+        except EndpointPolicyError as exc:
+            error = MCPHealthError(exc.code)
+            retriable = False
+            error.__cause__ = exc
         except MCPClientError as exc:
             error = MCPHealthError(_safe_discovery_error_code(exc))
             retriable = bool(exc.retriable) and exc.mcp_error_code not in {
@@ -135,16 +140,24 @@ class MCPHealthRunner:
         *,
         storage: Any,
         instance_id: str,
-        client_factory: Callable[[Any, Mapping[str, str]], MCPHealthClient | Awaitable[MCPHealthClient]],
+        endpoint_revalidator: Callable[[Any], Any | Awaitable[Any]],
+        client_factory: Callable[
+            [Any, Mapping[str, str], Any],
+            MCPHealthClient | Awaitable[MCPHealthClient],
+        ],
         credential_loader: Callable[[Any], Mapping[str, str] | Awaitable[Mapping[str, str]]],
         now_fn: Callable[[], datetime],
+        endpoint_security_observer: Callable[[Any, Any], Any | Awaitable[Any]]
+        | None = None,
         lease_ttl_seconds: float = HEALTH_LEASE_TTL_SECONDS,
         lease_renew_interval_seconds: float = HEALTH_LEASE_RENEW_INTERVAL_SECONDS,
     ) -> None:
         self._storage = storage
         self._instance_id = instance_id
+        self._endpoint_revalidator = endpoint_revalidator
         self._client_factory = client_factory
         self._credential_loader = credential_loader
+        self._endpoint_security_observer = endpoint_security_observer
         self._now = now_fn
         self._lease_ttl_seconds = lease_ttl_seconds
         self._lease_renew_interval_seconds = lease_renew_interval_seconds
@@ -259,11 +272,28 @@ class MCPHealthRunner:
 
     async def _discover(self, server: Any) -> MCPHealthCheckResult:
         async def create_client() -> MCPHealthClient:
+            validated_endpoint = self._endpoint_revalidator(server)
+            validated_endpoint = (
+                await validated_endpoint
+                if inspect.isawaitable(validated_endpoint)
+                else validated_endpoint
+            )
+            if self._endpoint_security_observer is not None:
+                observed = self._endpoint_security_observer(
+                    server,
+                    validated_endpoint,
+                )
+                if inspect.isawaitable(observed):
+                    await observed
             credentials = self._credential_loader(server)
             resolved_credentials = (
                 await credentials if inspect.isawaitable(credentials) else credentials
             )
-            value = self._client_factory(server, resolved_credentials)
+            value = self._client_factory(
+                server,
+                resolved_credentials,
+                validated_endpoint,
+            )
             return await value if inspect.isawaitable(value) else value
 
         return await run_health_discovery(create_client)

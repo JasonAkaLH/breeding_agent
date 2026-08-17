@@ -648,6 +648,7 @@ BEGIN
        OR (p_safe_call_ref IS NOT NULL AND p_safe_call_ref !~ '^hmac-sha256:[0-9a-f]{64}$')
        OR p_scenario NOT IN (
            'https_streamable_success', 'https_legacy_sse_success',
+           'public_http_legacy_sse_success',
            'allowlisted_http_legacy_sse_success', 'authentication_failure',
            'timeout', 'permission_denial', 'large_output'
        )
@@ -678,6 +679,11 @@ BEGIN
                    (
                        'https_legacy_sse_success', 'tool_call_succeeded',
                        'control_plane_ready', 'legacy_http_sse', 'runtime_enforced'
+                   ),
+                   (
+                       'public_http_legacy_sse_success', 'tool_call_succeeded',
+                       'control_plane_ready', 'legacy_http_sse',
+                       'runtime_enforced'
                    ),
                    (
                        'allowlisted_http_legacy_sse_success', 'tool_call_succeeded',
@@ -1392,7 +1398,7 @@ BEGIN
     WITH scenario_list(ordinality, scenario) AS (VALUES
         (1, 'https_streamable_success'),
         (2, 'https_legacy_sse_success'),
-        (3, 'allowlisted_http_legacy_sse_success'),
+        (3, 'public_http_legacy_sse_success'),
         (4, 'authentication_failure'),
         (5, 'timeout'),
         (6, 'permission_denial'),

@@ -155,7 +155,7 @@ Shadow 记录沿用 MCP 审计默认 30 天保留策略。
 - 只对测试和内部账号启用 shadow。
 - 旧链路承担真实执行。
 - 新链路运行 Server 路由、只读 `tools/list`、Selector dry-run 和资源清理。
-- 至少覆盖 HTTPS Streamable HTTP、HTTPS Legacy HTTP+SSE、白名单 HTTP Legacy HTTP+SSE、认证失败、超时、拒绝授权和大输出模拟。
+- 至少覆盖 HTTPS Streamable HTTP、HTTPS Legacy HTTP+SSE、public HTTP Legacy HTTP+SSE、认证失败、超时、拒绝授权和大输出模拟；历史 allowlisted HTTP 样本只做读取兼容，不满足新 deployment gate。
 
 退出条件：第 12 节所有安全红线为零，shadow 数据足以定位差异，无持续资源泄漏。
 
@@ -396,7 +396,7 @@ canonical metric bucket 必须按 UTC 分钟边界对齐且恰好持续 60 秒�
 - [ ] 跨用户配置、Grant、Catalog 和结果访问全部拒绝。
 - [ ] 日志、指标、SSE、Prompt 和审计中无凭据明文。
 - [ ] shadow 数据不保存完整工具参数、Schema 或结果。
-- [ ] HTTP 企业白名单、DNS/Redirect/SSRF 保护在灰度和回滚路径一致生效。
+- [ ] 公网 HTTP runtime-enforced 策略、DNS/Redirect/SSRF 保护在灰度和回滚路径一致生效；私网/特殊地址始终拒绝。
 
 ### 18.3 资源验收
 

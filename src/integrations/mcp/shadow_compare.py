@@ -96,11 +96,23 @@ _MIGRATION_PROVENANCE_FIELDS = frozenset(
 class ShadowScenario(StrEnum):
     HTTPS_STREAMABLE_SUCCESS = "https_streamable_success"
     HTTPS_LEGACY_SSE_SUCCESS = "https_legacy_sse_success"
+    PUBLIC_HTTP_LEGACY_SSE_SUCCESS = "public_http_legacy_sse_success"
     ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS = "allowlisted_http_legacy_sse_success"
     AUTHENTICATION_FAILURE = "authentication_failure"
     TIMEOUT = "timeout"
     PERMISSION_DENIAL = "permission_denial"
     LARGE_OUTPUT = "large_output"
+
+
+CURRENT_SHADOW_SCENARIOS = (
+    ShadowScenario.HTTPS_STREAMABLE_SUCCESS,
+    ShadowScenario.HTTPS_LEGACY_SSE_SUCCESS,
+    ShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS,
+    ShadowScenario.AUTHENTICATION_FAILURE,
+    ShadowScenario.TIMEOUT,
+    ShadowScenario.PERMISSION_DENIAL,
+    ShadowScenario.LARGE_OUTPUT,
+)
 
 
 class ShadowOutcome(StrEnum):
@@ -130,6 +142,12 @@ SHADOW_SCENARIO_EXPECTATIONS = MappingProxyType(
             "runtime_enforced",
         ),
         ShadowScenario.HTTPS_LEGACY_SSE_SUCCESS: (
+            ShadowOutcome.TOOL_CALL_SUCCEEDED,
+            ShadowOutcome.CONTROL_PLANE_READY,
+            "legacy_http_sse",
+            "runtime_enforced",
+        ),
+        ShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS: (
             ShadowOutcome.TOOL_CALL_SUCCEEDED,
             ShadowOutcome.CONTROL_PLANE_READY,
             "legacy_http_sse",
@@ -1364,12 +1382,13 @@ def validate_shadow_manifest(manifest: ShadowScenarioManifest) -> None:
     by_scenario = {item.scenario: item for item in manifest.expectations}
     if len(by_scenario) != len(manifest.expectations):
         raise ShadowManifestError("shadow manifest contains duplicate scenarios")
-    if set(by_scenario) != set(ShadowScenario):
+    if set(by_scenario) != set(CURRENT_SHADOW_SCENARIOS):
         raise ShadowManifestError(
-            "shadow manifest must define every closed scenario exactly once"
+            "shadow manifest must define every current scenario exactly once"
         )
 
-    for scenario, expected in SHADOW_SCENARIO_EXPECTATIONS.items():
+    for scenario in CURRENT_SHADOW_SCENARIOS:
+        expected = SHADOW_SCENARIO_EXPECTATIONS[scenario]
         item = by_scenario[scenario]
         if (
             item.legacy_outcome,
@@ -1794,7 +1813,7 @@ def validate_shadow_samples(
             ):
                 blockers.append(f"sample_{index}:not_comparable_without_retire")
 
-    for scenario in ShadowScenario:
+    for scenario in CURRENT_SHADOW_SCENARIOS:
         if matched[scenario] < minimum_matches_per_scenario:
             blockers.append(f"scenario_samples_below_threshold:{scenario.value}")
 

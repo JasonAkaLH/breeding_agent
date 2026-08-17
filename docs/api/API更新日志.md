@@ -8,6 +8,10 @@
 >
 > 适用对象：前端、第三方 API 客户端、部署维护人员、后端开发与测试人员。
 
+## 2026-08-17 增量：用户级 MCP 公网 HTTP/HTTPS Endpoint Policy
+
+`POST/PATCH /api/v1/mcp/servers` 的请求和响应 schema 不变。行为调整为任意公网 HTTP/HTTPS Endpoint 经 URL、DNS、IP 与重定向校验后均可保存；公网 HTTP 可携带现有 Bearer/API Key/static headers 认证，记录脱敏的 `plaintext_http` / `credential_over_plaintext_http` 安全布尔值。私网、回环、链路本地、云元数据、多播、保留及未指定地址始终返回 422 安全原因码，不再支持管理员域名/CIDR allowlist 例外。前端新建 HTTP 或从 HTTPS 改为 HTTP 时显示明文传输风险确认；保存失败在当前 MCP 设置 Modal 内显示具体安全原因并保留表单。具体 `tools/call` 的一次允许/始终允许/拒绝授权流程不变。
+
 ## 2026-08-13 增量：MCP 灰度不可用任务事件
 
 任务 SSE 新增加法兼容事件 `mcp.runtime_unavailable`。当当前灰度、回滚或 assembly 配置无法为带用户自定义 MCP Server 的新任务分配安全单路径时，后端持久化并推送该事件；payload 只含 `status=unavailable` 与闭集 `reason_code`，不含用户名、Server endpoint、凭据、Tool 参数或结果。客户端应明确展示“当前任务的 MCP 暂不可用”，不得把它解释为无工具、自动切换到 global legacy，或提示重放原调用。任务创建响应与既有 REST schema 不变。

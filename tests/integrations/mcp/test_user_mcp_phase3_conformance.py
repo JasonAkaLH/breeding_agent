@@ -19,6 +19,7 @@ from src.integrations.mcp.adapter_2026 import (
     MCPInputRequiredOutcome,
     MCPTaskCreatedOutcome,
 )
+from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.gateway import MCPCallCallbacks, MCPGateway
 from src.integrations.mcp.protocol import SUPPORTED_MCP_PROTOCOL_VERSION_ORDER
 from src.integrations.mcp.temporary_results import (
@@ -35,6 +36,15 @@ from src.storage.sqlite import (
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "mcp" / "messages"
+
+
+class _PublicResolver:
+    def resolve(self, hostname: str, port: int):
+        del hostname, port
+        return ("8.8.8.8",)
+
+
+_ENDPOINT_POLICY = EndpointPolicy(resolver=_PublicResolver())
 
 
 def _fixture(version: str, name: str) -> dict[str, Any]:
@@ -136,7 +146,7 @@ class UserMCPPhase3ConformanceTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        async def client_factory(server, credentials):
+        async def client_factory(server, credentials, endpoint):
             del credentials
             version = str(server.protocol_preference)
             adapter = _FixtureGatewayAdapter(version)
@@ -156,7 +166,9 @@ class UserMCPPhase3ConformanceTests(unittest.IsolatedAsyncioTestCase):
             gateway_instance_id="phase3-conformance",
             credential_loader=lambda _server: {},
             client_factory=client_factory,
-            endpoint_revalidator=lambda server: server.endpoint_url,
+            endpoint_revalidator=lambda server: _ENDPOINT_POLICY.validate(
+                server.endpoint_url
+            ),
             result_store=self.result_store,
             capacity=self.capacity,
         )

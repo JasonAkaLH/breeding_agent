@@ -139,7 +139,7 @@ from src.integrations.mcp.credentials import (
     MasterKeySentinelCipher,
 )
 from src.integrations.mcp.audit import MCPAuditService
-from src.integrations.mcp.endpoint_policy import EndpointAllowlist, EndpointPolicy
+from src.integrations.mcp.endpoint_policy import EndpointPolicy
 from src.integrations.mcp.gateway import MCPGateway
 from src.integrations.mcp.dispatch_coordinator import (
     MCPDispatchMetricContext,
@@ -10299,12 +10299,7 @@ def build_api_runtime(
     if user_mcp_enabled:
         assert mcp_credential_cipher is not None
         assert user_mcp_capacity_values is not None
-        endpoint_policy = EndpointPolicy(
-            allowlist=EndpointAllowlist.from_values(
-                domains=_split_env_values(os.environ.get("MAF_USER_MCP_ALLOWLIST_DOMAINS")),
-                cidrs=_split_env_values(os.environ.get("MAF_USER_MCP_ALLOWLIST_CIDRS")),
-            )
-        )
+        endpoint_policy = EndpointPolicy()
         credential_resolver = UserMCPCredentialResolver(storage, mcp_credential_cipher)
         recovery_service = MCPRecoveryService(storage, mcp_recovery_cipher)
         user_client_factory = UserMCPClientFactory(
@@ -10313,6 +10308,27 @@ def build_api_runtime(
         )
         instance_id = f"mcp-instance-{uuid4().hex}"
         user_mcp_instance_id = instance_id
+        user_mcp_audit_service = MCPAuditService(
+            storage=storage,
+            now_fn=ApiRuntime._utcnow_naive,
+        )
+
+        async def record_endpoint_security(server, endpoint) -> None:
+            plaintext_http = bool(getattr(endpoint, "plaintext_http", False))
+            try:
+                await user_mcp_audit_service.record(
+                    owner_user_id=server.owner_user_id,
+                    event_type="mcp.endpoint_security_validated",
+                    server_id=server.server_id,
+                    safe_payload={
+                        "plaintext_http": plaintext_http,
+                        "credential_over_plaintext_http": (
+                            plaintext_http and str(server.auth_type) != "none"
+                        ),
+                    },
+                )
+            except Exception:
+                return
 
         async def load_remote_task_recovery_server(binding):
             server = await storage.get_user_mcp_server(
@@ -10337,10 +10353,13 @@ def build_api_runtime(
 
         async def create_remote_task_recovery_client(binding):
             server = await load_remote_task_recovery_server(binding)
+            validated_endpoint = await user_client_factory.revalidate_endpoint(server)
+            await record_endpoint_security(server, validated_endpoint)
             request_headers = await credential_resolver.request_headers_for(server)
             return await user_client_factory.create_task_recovery(
                 server,
                 request_headers,
+                validated_endpoint,
                 protocol_version=binding.protocol_version,
             )
 
@@ -10389,15 +10408,17 @@ def build_api_runtime(
         user_mcp_health_runner = MCPHealthRunner(
             storage=storage,
             instance_id=instance_id,
-            client_factory=user_client_factory.create,
+            endpoint_revalidator=user_client_factory.revalidate_endpoint,
+            client_factory=user_client_factory.create_from_validated_endpoint,
             credential_loader=credential_resolver.request_headers_for,
             now_fn=ApiRuntime._utcnow_naive,
+            endpoint_security_observer=record_endpoint_security,
         )
         user_mcp_gateway = MCPGateway(
             storage=storage,
             gateway_instance_id=instance_id,
             credential_loader=credential_resolver.request_headers_for,
-            client_factory=user_client_factory.create,
+            client_factory=user_client_factory.create_from_validated_endpoint,
             endpoint_revalidator=user_client_factory.revalidate_endpoint,
             readonly_shadow_client_factory=(
                 user_client_factory.create_readonly_shadow
@@ -10405,6 +10426,7 @@ def build_api_runtime(
             result_store=user_mcp_result_store,
             capacity=capacity,
             now_fn=ApiRuntime._utcnow_naive,
+            endpoint_security_observer=record_endpoint_security,
         )
 
         async def cancel_offline_user_mcp(
@@ -10456,10 +10478,6 @@ def build_api_runtime(
             invalidation_bus=CompositeMCPInvalidationPublisher(
                 mcp_invalidation_bus, postgres_mcp_invalidation_bus
             ),
-            now_fn=ApiRuntime._utcnow_naive,
-        )
-        user_mcp_audit_service = MCPAuditService(
-            storage=storage,
             now_fn=ApiRuntime._utcnow_naive,
         )
     mcp_rollout_instance_admission = _resolve_mcp_rollout_instance_admission(

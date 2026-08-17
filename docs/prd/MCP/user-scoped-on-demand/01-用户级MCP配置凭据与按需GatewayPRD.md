@@ -58,8 +58,8 @@
 | 配置同步 | 后端是权威数据源；用户在其他端依次登录后可直接使用 |
 | 多设备 | 产品不支持同一用户多设备同时在线，但该约束由认证会话层实现 |
 | 传输 | 仅支持远程 HTTP(S)：Streamable HTTP 和 Legacy HTTP+SSE |
-| HTTP | 只允许管理员白名单中的企业域名或网段 |
-| HTTPS | 允许受控自定义；私网、回环和特殊网段仍须管理员白名单 |
+| HTTP | 任意公网 Endpoint 通过 URL/DNS/IP/重定向校验后允许；前端新建或 HTTPS 改 HTTP 时提示明文传输风险 |
+| HTTPS | 任意公网 Endpoint 通过 URL/DNS/IP/重定向校验后允许 |
 | Tool List/Schema | 不持久化，按任务、按服务器临时获取 |
 | 连接 | 同一任务中复用临时 Client/连接池，任务之间不复用 |
 | 输出 | 不设产品级大小上限；超出上下文容量时临时落盘并分块处理 |
@@ -195,12 +195,12 @@ Scope lease 必须短周期续租；续租同时检查 Server 未 tombstone、�
 | 目标 | 策略 |
 |---|---|
 | 公网 HTTPS | 通过 URL、DNS、IP 和重定向校验后允许 |
-| 企业私网 HTTPS | 仅允许管理员域名/CIDR 白名单 |
-| 企业 HTTP | 仅允许管理员域名/CIDR 白名单，记录 `plaintext_http` 安全标记 |
+| 公网 HTTP | 允许，记录 `plaintext_http`；配置认证时同时记录 `credential_over_plaintext_http` 安全布尔值 |
+| 私网 HTTP/HTTPS | 始终拒绝，不提供管理员白名单例外 |
 | `localhost`/回环/链路本地/云元数据 | 默认禁止，云元数据地址不可通过普通白名单放开 |
 | `stdio`、`file://`、Unix Socket | 不支持 |
 
-HTTP 白名单必须支持用户已给出的企业 MCP Endpoint 形式，例如 `http://breeding-dashboard-qa.biobin.com.cn/.../sse`，但具体域名不得硬编码到业务代码中。
+公网 HTTP 可使用合法自定义端口；具体域名或 IP 不得硬编码到业务代码中。所有解析结果必须属于公网地址分类，任一私网或特殊地址都会拒绝整次校验。
 
 ### 9.2 校验规则
 
@@ -435,7 +435,7 @@ unavailable/disabled -- retest/enable --> testing
 | MCP-USER-P1-001 | 两个用户可保存同名/同 Endpoint 配置，且不能查看、测试、修改或删除对方记录 |
 | MCP-USER-P1-002 | 数据库不出现凭据明文；API、日志、事件和错误不返回明文或密文 |
 | MCP-USER-P1-003 | 主密钥缺失、权限不合法、长度错误或无法验证数据库 sentinel 时，MCP 凭据功能 fail closed 且不自动生成密钥；并发首启只创建一个 sentinel，回滚保留该记录 |
-| MCP-USER-P1-004 | HTTPS 公网 Endpoint 通过安全校验后可测试；HTTP/私网目标仅在管理员白名单内可访问 |
+| MCP-USER-P1-004 | 公网 HTTP/HTTPS Endpoint 通过安全校验后可测试；公网 HTTP 带明文安全诊断，私网和特殊地址始终拒绝 |
 | MCP-USER-P1-005 | `localhost`、链路本地、云元数据、DNS Rebinding 和跨 Origin 凭据重定向均被阻断 |
 | MCP-USER-P1-006 | 连接失败的安全配置、未声明 Tool 能力或完整 Tool List 为空均保存为带脱敏原因码的 `unavailable`，后续不可被路由；只有至少一个合法 Tool 时为 `available` |
 | MCP-USER-P1-007 | Gateway 在同一任务内对同一 Server 只执行一次 Tool Discovery，并复用任务级 Scope |
@@ -475,7 +475,7 @@ unavailable/disabled -- retest/enable --> testing
 ### 20.3 集成测试
 
 - Fake HTTPS Streamable HTTP Server。
-- Fake HTTP Legacy HTTP+SSE Server，分别在白名单内/外验证。
+- Fake public HTTP Legacy HTTP+SSE Server，以及私网/特殊地址拒绝验证。
 - 分页 `tools/list`、慢发现、首次失败第二次成功、两次失败。
 - JSON 与 SSE 大输出从 socket 分块读取并直接落盘，测试 Transport 未访问全量 `content/text/json`，重组 SHA-256 与远端一致；覆盖取消、解析失败和磁盘耗尽时的部分文件清理。
 - 不访问真实外部 MCP Server 的默认 CI 测试。

@@ -148,10 +148,12 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             endpoint_url="https://example.test/mcp",
             transport=UserMCPTransport.STREAMABLE_HTTP,
         )
+        endpoint = await factory.revalidate_endpoint(server)
 
         client = await factory.create_task_recovery(
             server,
             {},
+            endpoint,
             protocol_version="2026-07-28",
         )
 
@@ -164,6 +166,7 @@ class MCP20260728AdapterTests(unittest.IsolatedAsyncioTestCase):
             await factory.create_task_recovery(
                 server,
                 {},
+                endpoint,
                 protocol_version="2025-11-25",
             )
 

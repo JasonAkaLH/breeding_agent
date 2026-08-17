@@ -17,7 +17,7 @@
 
 - 用户级 MCP 配置与所有权隔离。
 - AES-256-GCM 凭据密文入库与服务器密钥文件。
-- 远程 HTTP(S) Endpoint Policy、HTTP 企业白名单和 SSRF 保护。
+- 远程 HTTP(S) Endpoint Policy、公网 HTTP 明文安全诊断和 SSRF 保护；私网/特殊地址无管理员例外。
 - 任务级 `MCPGateway` 的 connect/list/call/cancel/close 契约。
 - Tool List/Schema 不持久化、任务级复用和超大输出临时落盘。
 

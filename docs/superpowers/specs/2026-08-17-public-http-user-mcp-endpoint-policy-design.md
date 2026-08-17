@@ -2,7 +2,7 @@
 
 日期：2026-08-17
 
-状态：设计已确认，经 document-perfectization 三轮修订、第四轮审查通过，待实施
+状态：`main` 仓库实现完成并通过自动回归与真实 OCR MCP 隔离 smoke；`prod` 未变更，开发环境容器人工验收待部署时执行
 
 适用范围：`main` 分支开发环境的用户级按需 MCP Server 配置、健康检查、任务级 Gateway、Phase 3 evidence、legacy migration CLI、前端 MCP 设置弹窗及相关运行手册
 

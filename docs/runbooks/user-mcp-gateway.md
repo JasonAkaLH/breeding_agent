@@ -15,10 +15,13 @@
 
 根密钥文件是一行 canonical Base64，解码后恰好 32 bytes，权限为 `0400` 或 `0600`；应用不会生成、覆盖或轮换该文件。所有实例必须挂载同一份固定根密钥。根密钥不直接参与业务加密，而是为 MCP credential、MCP recovery、Auth token、MCP audit reference 和 key validation 派生互相隔离的领域子密钥。启动时应用会原子 create-or-verify `maf_master_key_validation` sentinel，文件缺失、权限/长度不合法、数据库不可用或 sentinel 无法解密都会阻止 Ready。
 
-可选配置：
+Endpoint 策略：
 
-- `MAF_USER_MCP_ALLOWLIST_DOMAINS`：逗号分隔的企业域名。
-- `MAF_USER_MCP_ALLOWLIST_CIDRS`：逗号分隔、严格格式的企业 CIDR。
+- 任意公网 HTTP/HTTPS Endpoint 均可配置；公网 HTTP 记录 `plaintext_http`，携带认证时同时记录 `credential_over_plaintext_http` 安全布尔值。
+- 私网、回环、链路本地、云元数据、多播、保留和未指定地址始终拒绝，不提供管理员域名/CIDR 白名单例外。
+- DNS rebinding、实际连接 IP 偏离、跨 Origin 重定向和 HTTPS 降级继续失败关闭。
+
+可选配置：
 - `MAF_USER_MCP_TEMPORARY_RESULT_ROOT`：任务临时结果根目录。
 - `MAF_USER_MCP_MEMORY_RESULT_THRESHOLD_BYTES`：内存切换临时文件的阈值，默认 1 MiB；它不是结果上限。
 - `MAF_USER_MCP_ORPHAN_SAFE_AGE_SECONDS`：重启清理孤儿任务目录的安全年龄，默认 3600 秒。

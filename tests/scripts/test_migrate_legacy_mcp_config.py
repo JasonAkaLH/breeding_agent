@@ -483,8 +483,6 @@ class LegacyMCPMigrationCommandTests(unittest.TestCase):
             master_key_file=str(key_file.resolve()),
             audit_out=str(self.root / "postgres-audit.json"),
             service_account_owner="service-owner",
-            allowlist_domain=[],
-            allowlist_cidr=[],
         )
         state_config = StatePlatformRuntimeConfig(
             backend=StatePlatformBackend.POSTGRESQL,

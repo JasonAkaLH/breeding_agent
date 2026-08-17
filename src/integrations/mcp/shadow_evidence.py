@@ -10,6 +10,7 @@ from src.core.models import MCPRolloutMetricBucket as MCPRolloutMetricBucketReco
 from src.core.models import MCPShadowAuditSample
 
 from .rollout_evidence import (
+    CURRENT_MCP_SHADOW_SCENARIOS,
     MCPEvidenceKind,
     MCPRolloutEvidencePayload,
     MCPCallKind,
@@ -246,7 +247,7 @@ def build_internal_shadow_evidence_payload(
 ) -> MCPRolloutEvidencePayload:
     counts = {
         scenario: {"matched": 0, "mismatched": 0, "invalid": 0, "not_comparable": 0, "excluded": 0}
-        for scenario in MCPShadowScenario
+        for scenario in CURRENT_MCP_SHADOW_SCENARIOS
     }
     invalid_count = 0
     unresolved_mismatch_count = 0
@@ -312,7 +313,7 @@ def build_internal_shadow_evidence_payload(
             not_comparable_count=counts[scenario]["not_comparable"],
             excluded_count=counts[scenario]["excluded"],
         )
-        for scenario in MCPShadowScenario
+        for scenario in CURRENT_MCP_SHADOW_SCENARIOS
     )
     return MCPRolloutEvidencePayload(
         kind=MCPEvidenceKind.INTERNAL_SHADOW,

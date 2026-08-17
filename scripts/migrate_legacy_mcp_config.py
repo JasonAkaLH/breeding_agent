@@ -442,8 +442,6 @@ def _parser() -> argparse.ArgumentParser:
         "--audit-out",
         help="Optional non-authoritative 0600 export referencing the durable record.",
     )
-    parser.add_argument("--allowlist-domain", action="append", default=[])
-    parser.add_argument("--allowlist-cidr", action="append", default=[])
     return parser
 
 
@@ -464,7 +462,7 @@ def _build_local_applier(
         MCPAuditReferenceSigner,
         MCPCredentialCipher,
     )
-    from src.integrations.mcp.endpoint_policy import EndpointAllowlist, EndpointPolicy
+    from src.integrations.mcp.endpoint_policy import EndpointPolicy
 
     deriver = MasterKeyDeriver.from_file(args.master_key_file)
     cipher = MCPCredentialCipher(
@@ -533,12 +531,7 @@ def _build_local_applier(
 
         engine = create_sqlite_engine(database_path)
         storage = SQLiteStorage(create_sqlite_session_factory(engine))
-    endpoint_policy = EndpointPolicy(
-        allowlist=EndpointAllowlist.from_values(
-            domains=args.allowlist_domain,
-            cidrs=args.allowlist_cidr,
-        )
-    )
+    endpoint_policy = EndpointPolicy()
     selected_validator = (
         live_health_validator
         or BuiltInLegacyMigrationLiveHealthValidator(endpoint_policy)

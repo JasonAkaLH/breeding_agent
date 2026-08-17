@@ -41,6 +41,8 @@ export function MCPSettingsPanel({ api, onError }: Props) {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [editing, setEditing] = useState<MCPServerResponse | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [httpRiskOpen, setHttpRiskOpen] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
 
   const refresh = useCallback(async () => {
@@ -62,6 +64,8 @@ export function MCPSettingsPanel({ api, onError }: Props) {
 
   function openCreate() {
     setEditing(null);
+    setSaveError(null);
+    setHttpRiskOpen(false);
     form.setFieldsValue({
       display_name: '',
       routing_description: '',
@@ -79,6 +83,8 @@ export function MCPSettingsPanel({ api, onError }: Props) {
 
   function openEdit(server: MCPServerResponse) {
     setEditing(server);
+    setSaveError(null);
+    setHttpRiskOpen(false);
     form.setFieldsValue({
       display_name: server.display_name,
       routing_description: server.routing_description,
@@ -98,29 +104,35 @@ export function MCPSettingsPanel({ api, onError }: Props) {
     setFormOpen(true);
   }
 
-  async function save(values: ServerFormValue) {
+  async function save(values: ServerFormValue, httpRiskConfirmed = false) {
+    if (saving || (httpRiskOpen && !httpRiskConfirmed)) return;
+    setSaveError(null);
+    const staticHeaders = Object.fromEntries(
+      (values.static_headers ?? [])
+        .filter((entry) => entry.name?.trim() && entry.value)
+        .map((entry) => [entry.name!.trim(), entry.value!]),
+    );
+    const replacementCredential = values.auth_type === 'static_headers'
+      ? (Object.keys(staticHeaders).length > 0 ? { static_headers: staticHeaders } : undefined)
+      : (values.credential_secret ? { secret_value: values.credential_secret } : undefined);
+    const authMetadata = values.auth_type === 'api_key_header'
+      ? { header_name: values.api_key_header_name?.trim() || 'X-API-Key' }
+      : undefined;
+    if (!editing && values.auth_type !== 'none' && !replacementCredential) {
+      form.setFields([{ name: values.auth_type === 'static_headers' ? ['static_headers', 0, 'value'] : 'credential_secret', errors: ['请填写认证凭据'] }]);
+      return;
+    }
+    const authTypeChanged = Boolean(editing && editing.auth_type !== values.auth_type);
+    if (editing && authTypeChanged && values.auth_type !== 'none' && !replacementCredential) {
+      form.setFields([{ name: values.auth_type === 'static_headers' ? ['static_headers', 0, 'value'] : 'credential_secret', errors: ['更换认证方式时必须填写新凭据'] }]);
+      return;
+    }
+    if (!httpRiskConfirmed && requiresHttpRiskConfirmation(values.endpoint_url, editing?.endpoint_url)) {
+      setHttpRiskOpen(true);
+      return;
+    }
     setSaving(true);
     try {
-      const staticHeaders = Object.fromEntries(
-        (values.static_headers ?? [])
-          .filter((entry) => entry.name?.trim() && entry.value)
-          .map((entry) => [entry.name!.trim(), entry.value!]),
-      );
-      const replacementCredential = values.auth_type === 'static_headers'
-        ? (Object.keys(staticHeaders).length > 0 ? { static_headers: staticHeaders } : undefined)
-        : (values.credential_secret ? { secret_value: values.credential_secret } : undefined);
-      const authMetadata = values.auth_type === 'api_key_header'
-        ? { header_name: values.api_key_header_name?.trim() || 'X-API-Key' }
-        : undefined;
-      if (!editing && values.auth_type !== 'none' && !replacementCredential) {
-        form.setFields([{ name: values.auth_type === 'static_headers' ? ['static_headers', 0, 'value'] : 'credential_secret', errors: ['请填写认证凭据'] }]);
-        return;
-      }
-      const authTypeChanged = Boolean(editing && editing.auth_type !== values.auth_type);
-      if (editing && authTypeChanged && values.auth_type !== 'none' && !replacementCredential) {
-        form.setFields([{ name: values.auth_type === 'static_headers' ? ['static_headers', 0, 'value'] : 'credential_secret', errors: ['更换认证方式时必须填写新凭据'] }]);
-        return;
-      }
       if (editing) {
         const credentialAction = values.auth_type === 'none' && authTypeChanged
           ? 'clear'
@@ -128,7 +140,7 @@ export function MCPSettingsPanel({ api, onError }: Props) {
         const patch: PatchMCPServerRequest = {
           display_name: values.display_name,
           routing_description: values.routing_description,
-          endpoint_url: values.endpoint_url,
+          endpoint_url: values.endpoint_url.trim(),
           transport: values.transport,
           protocol_preference: values.protocol_preference,
           auth_type: values.auth_type,
@@ -142,7 +154,7 @@ export function MCPSettingsPanel({ api, onError }: Props) {
         const input: CreateMCPServerRequest = {
           display_name: values.display_name,
           routing_description: values.routing_description,
-          endpoint_url: values.endpoint_url,
+          endpoint_url: values.endpoint_url.trim(),
           transport: values.transport,
           protocol_preference: values.protocol_preference,
           auth_type: values.auth_type,
@@ -159,9 +171,26 @@ export function MCPSettingsPanel({ api, onError }: Props) {
       setAnnouncement(editing ? 'MCP 服务配置已更新' : 'MCP 服务已保存，正在等待健康检查');
       await refresh();
     } catch (error) {
-      onError?.(error);
+      setSaveError(mcpConfigErrorMessage(error));
     } finally {
       setSaving(false);
+    }
+  }
+
+  function cancelForm() {
+    setHttpRiskOpen(false);
+    setSaveError(null);
+    setFormOpen(false);
+  }
+
+  async function confirmHttpRisk() {
+    if (saving) return;
+    setHttpRiskOpen(false);
+    try {
+      const values = await form.validateFields();
+      await save(values, true);
+    } catch {
+      return;
     }
   }
 
@@ -255,13 +284,24 @@ export function MCPSettingsPanel({ api, onError }: Props) {
       <Modal
         open={formOpen}
         title={editing ? '编辑 MCP 服务' : '添加 MCP 服务'}
-        onCancel={() => setFormOpen(false)}
+        onCancel={cancelForm}
         onOk={() => form.submit()}
         confirmLoading={saving}
+        okButtonProps={{ disabled: httpRiskOpen }}
         destroyOnHidden
         focusTriggerAfterClose
       >
         <Alert type="info" showIcon message="凭据保存后不会再次显示；留空表示保留现有凭据。" />
+        {saveError ? (
+          <Alert
+            type="error"
+            showIcon
+            closable
+            onClose={() => setSaveError(null)}
+            message={saveError}
+            style={{ marginTop: 12 }}
+          />
+        ) : null}
         <Form form={form} layout="vertical" onFinish={(values) => void save(values)}>
           <Form.Item name="display_name" label="显示名称" rules={[{ required: true, message: '请输入显示名称' }]}>
             <Input autoFocus maxLength={100} />
@@ -335,8 +375,63 @@ export function MCPSettingsPanel({ api, onError }: Props) {
           </Form.Item>
         </Form>
       </Modal>
+      <Modal
+        open={httpRiskOpen}
+        title="确认使用明文 HTTP"
+        okText="接受风险并保存"
+        cancelText="取消"
+        onOk={() => void confirmHttpRisk()}
+        onCancel={() => setHttpRiskOpen(false)}
+        confirmLoading={saving}
+        destroyOnHidden
+        focusTriggerAfterClose
+      >
+        <Alert
+          type="warning"
+          showIcon
+          message="此 MCP Server 未使用 TLS 加密"
+          description="MCP 请求、响应以及 Bearer Token 或 API Key 可能被网络链路观察或篡改。继续表示你接受当前 Endpoint 的明文传输风险。"
+        />
+      </Modal>
     </section>
   );
+}
+
+function endpointProtocol(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value.trim()).protocol.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function requiresHttpRiskConfirmation(endpoint: string, previousEndpoint?: string): boolean {
+  if (endpointProtocol(endpoint) !== 'http:') return false;
+  if (!previousEndpoint) return true;
+  return endpointProtocol(previousEndpoint) === 'https:';
+}
+
+function mcpConfigErrorMessage(error: unknown): string {
+  const responseDetail = error && typeof error === 'object' && 'detail' in error
+    ? (error as { detail?: unknown }).detail
+    : null;
+  const detail = responseDetail && typeof responseDetail === 'object' && 'detail' in responseDetail
+    ? (responseDetail as { detail?: unknown }).detail
+    : null;
+  const code = detail && typeof detail === 'object' && 'code' in detail
+    ? String((detail as { code?: unknown }).code || '')
+    : '';
+  const messages: Record<string, string> = {
+    mcp_endpoint_private_forbidden: '该地址解析到不允许访问的私网地址。',
+    mcp_endpoint_private_not_allowlisted: '该地址解析到不允许访问的私网地址。',
+    mcp_endpoint_ip_forbidden: '该地址属于回环、链路本地、云元数据或其他禁止网段。',
+    mcp_endpoint_dns_failed: '无法解析 MCP Server 地址。',
+    mcp_endpoint_dns_rebinding: 'MCP Server 的 DNS 解析结果发生了不安全变化。',
+    mcp_endpoint_redirect_cross_origin: 'MCP Server 返回了不允许的跨域重定向。',
+    mcp_endpoint_redirect_downgrade: 'MCP Server 尝试从 HTTPS 降级到 HTTP。',
+  };
+  return messages[code] || 'MCP Server 配置未保存，请稍后重试。';
 }
 
 function HealthTag({ status }: { status: string }) {

@@ -39,6 +39,7 @@ from src.integrations.mcp.credentials import (
     MCPRecoveryCallContext,
     MCPRecoveryService,
 )
+from src.integrations.mcp.endpoint_policy import EndpointPolicyError
 from src.integrations.mcp.rollout_evidence import (
     MCPMetricErrorCategory,
     MCPMetricExecutionPath,
@@ -557,6 +558,10 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             )
             user_client_factory = runtime.user_mcp_gateway._client_factory.__self__
             client = object()
+            validated_endpoint = object()
+            user_client_factory.revalidate_endpoint = AsyncMock(
+                return_value=validated_endpoint
+            )
             user_client_factory.create_task_recovery = AsyncMock(return_value=client)
             binding = MCPRemoteTaskBinding(
                 safe_remote_task_ref="safe-remote-a",
@@ -609,8 +614,24 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             user_client_factory.create_task_recovery.assert_awaited_once_with(
                 server,
                 {"Authorization": "Bearer raw-secret-token"},
+                validated_endpoint,
                 protocol_version="2026-07-28",
             )
+            credential_resolver = runtime.user_mcp_gateway._credential_loader.__self__
+            credential_resolver.request_headers_for = AsyncMock(
+                return_value={"Authorization": "must-not-be-read"}
+            )
+            user_client_factory.revalidate_endpoint = AsyncMock(
+                side_effect=EndpointPolicyError(
+                    "mcp_endpoint_private_forbidden"
+                )
+            )
+            with self.assertRaisesRegex(
+                EndpointPolicyError,
+                "mcp_endpoint_private_forbidden",
+            ):
+                await factory(binding)
+            credential_resolver.request_headers_for.assert_not_awaited()
             with self.assertRaisesRegex(
                 RuntimeError, "mcp_recovery_server_unavailable"
             ):

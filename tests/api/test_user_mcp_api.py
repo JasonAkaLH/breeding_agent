@@ -89,6 +89,35 @@ class UserMCPApiTest(APITestCase):
         self.assertEqual(unsafe.status_code, 422)
         self.assertEqual(unsafe.json()["detail"]["code"], "mcp_endpoint_ip_forbidden")
 
+        private = await self.client.post(
+            "/api/v1/mcp/servers",
+            json={"display_name": "private", "endpoint_url": "https://10.2.3.4/mcp"},
+        )
+        self.assertEqual(private.status_code, 422)
+        self.assertEqual(
+            private.json()["detail"]["code"],
+            "mcp_endpoint_private_forbidden",
+        )
+
+    async def test_public_http_with_bearer_is_accepted_without_admin_allowlist(self) -> None:
+        response = await self.client.post(
+            "/api/v1/mcp/servers",
+            json={
+                "display_name": "Public HTTP",
+                "endpoint_url": "http://example.com:51789/mcp",
+                "transport": "streamable_http",
+                "protocol_preference": "2025-11-25",
+                "auth_type": "bearer",
+                "credential": {"secret_value": "write-only-token"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        body = response.json()
+        self.assertEqual(body["endpoint_url"], "http://example.com:51789/mcp")
+        self.assertTrue(body["credential_configured"])
+        self.assertNotIn("write-only-token", response.text)
+
     async def test_delete_returns_202_when_a_live_lease_delays_finalization(self) -> None:
         class PendingDeleteService:
             async def delete_server(self, owner_user_id, server_id):

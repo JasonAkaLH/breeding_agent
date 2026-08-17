@@ -15,7 +15,7 @@
 - `superpowers/specs/2026-08-12-user-scoped-mcp-routing-execution-design.md`：用户级 MCP 两级路由、授权、执行账本、在线租约与前端闭环实施设计。
 - `superpowers/specs/2026-08-13-user-mcp-cp7-manual-retirement-design.md`：仅在 `main` 执行的 CP7-A assembly-off 候选、人工验收门禁与获批后 CP7-B 物理退役设计；不修改或宣称完成 `prod`。
 - `superpowers/specs/2026-08-14-maf-master-key-domain-derivation-design.md`：首次部署使用单一固定在线根密钥，通过五个闭合 HKDF 领域标签隔离 MCP credential/recovery、Auth token、audit reference 与 sentinel；不包含根密钥轮换或旧密文迁移。
-- `superpowers/specs/2026-08-17-public-http-user-mcp-endpoint-policy-design.md`：仅面向 `main` 开发环境，用户级 MCP 允许任意公网 HTTP/HTTPS、自定义端口与 HTTP 凭据；公网 HTTP 由前端一次确认，私网/特殊地址及 DNS/重定向防护继续强制，并覆盖 Phase 3 evidence、legacy migration、错误可见性、历史兼容与回滚边界。
+- `superpowers/specs/2026-08-17-public-http-user-mcp-endpoint-policy-design.md`：已在 `main` 仓库实现并通过自动回归与真实 OCR MCP 隔离 smoke；用户级 MCP 允许任意公网 HTTP/HTTPS、自定义端口与 HTTP 凭据，公网 HTTP 由前端一次确认，私网/特殊地址及 DNS/重定向防护继续强制，并覆盖 Phase 3 evidence、legacy migration、错误可见性、历史兼容与回滚边界；`prod` 未变更。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。

@@ -17,6 +17,7 @@ from src.integrations.mcp.shadow_evidence import (
     seal_shadow_audit_sample,
     validate_shadow_audit_sample,
 )
+from src.integrations.mcp.rollout_evidence import CURRENT_MCP_SHADOW_SCENARIOS
 from src.storage.sqlite import SQLiteStorage
 from tests.storage.support import SQLiteStorageTestCase
 
@@ -162,8 +163,9 @@ class MCPShadowAuditSampleStorageTest(SQLiteStorageTestCase):
         self.assertEqual(validate_shadow_audit_sample(null_refs), ())
         self.assertEqual(validate_shadow_audit_sample(self._sample()), ())
 
-    def test_all_seven_matched_scenarios_use_the_golden_lane_expectation(self) -> None:
-        self.assertEqual(len(MCP_SHADOW_SAMPLE_EXPECTATIONS), 7)
+    def test_current_and_historical_matched_scenarios_use_golden_expectations(self) -> None:
+        self.assertEqual(len(CURRENT_MCP_SHADOW_SCENARIOS), 7)
+        self.assertEqual(len(MCP_SHADOW_SAMPLE_EXPECTATIONS), 8)
         for index, (scenario, expectation) in enumerate(
             MCP_SHADOW_SAMPLE_EXPECTATIONS.items()
         ):

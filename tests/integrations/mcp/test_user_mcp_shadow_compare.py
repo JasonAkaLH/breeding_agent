@@ -18,7 +18,6 @@ from src.integrations.mcp.gateway_models import MCPToolDescriptor, ToolCatalogSn
 from src.integrations.mcp.config import MCPRuntimeConfig, MCPServerConfig
 from src.integrations.mcp.gateway import MCPGatewayError
 from src.integrations.mcp.endpoint_policy import (
-    EndpointAllowlist,
     EndpointPolicy,
     EndpointPolicyProvenance,
 )
@@ -35,6 +34,7 @@ from tests.master_key_support import audit_reference_signer, credential_cipher
 
 from src.integrations.mcp.shadow_compare import (
     ApprovedVerifiedMapping,
+    CURRENT_SHADOW_SCENARIOS,
     ShadowAuthenticationError,
     ShadowCleanupCounts,
     ShadowComparison,
@@ -76,21 +76,14 @@ from src.orchestration.models import UserMCPServerProfile
 _TRANSPORTS = {
     ShadowScenario.HTTPS_STREAMABLE_SUCCESS: "streamable_http",
     ShadowScenario.HTTPS_LEGACY_SSE_SUCCESS: "legacy_http_sse",
-    ShadowScenario.ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS: "legacy_http_sse",
+    ShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS: "legacy_http_sse",
     ShadowScenario.AUTHENTICATION_FAILURE: "streamable_http",
     ShadowScenario.TIMEOUT: "streamable_http",
     ShadowScenario.PERMISSION_DENIAL: "streamable_http",
     ShadowScenario.LARGE_OUTPUT: "streamable_http",
 }
 
-_POLICIES = {
-    scenario: (
-        "allowed_by_enterprise_allowlist"
-        if scenario is ShadowScenario.ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS
-        else "runtime_enforced"
-    )
-    for scenario in ShadowScenario
-}
+_POLICIES = {scenario: "runtime_enforced" for scenario in CURRENT_SHADOW_SCENARIOS}
 
 _FIXTURE_BINDINGS = {
     "mcp.legacy.search": ShadowScenario.HTTPS_STREAMABLE_SUCCESS,
@@ -107,7 +100,7 @@ def _manifest() -> ShadowScenarioManifest:
             ShadowOutcome.TOOL_CALL_SUCCEEDED,
             ShadowOutcome.CONTROL_PLANE_READY,
         ),
-        ShadowScenario.ALLOWLISTED_HTTP_LEGACY_SSE_SUCCESS: (
+        ShadowScenario.PUBLIC_HTTP_LEGACY_SSE_SUCCESS: (
             ShadowOutcome.TOOL_CALL_SUCCEEDED,
             ShadowOutcome.CONTROL_PLANE_READY,
         ),
@@ -146,7 +139,7 @@ def _manifest() -> ShadowScenarioManifest:
                     else None
                 ),
             )
-            for scenario in ShadowScenario
+            for scenario in CURRENT_SHADOW_SCENARIOS
         ),
     )
 
@@ -426,15 +419,8 @@ class _RuntimeEndpointResolver:
         return ("8.8.8.8",)
 
 
-def _runtime_endpoint_policy(*, allowlisted_http: bool = False) -> EndpointPolicy:
-    return EndpointPolicy(
-        resolver=_RuntimeEndpointResolver(),
-        allowlist=(
-            EndpointAllowlist.from_values(domains=("example.test",))
-            if allowlisted_http
-            else None
-        ),
-    )
+def _runtime_endpoint_policy() -> EndpointPolicy:
+    return EndpointPolicy(resolver=_RuntimeEndpointResolver())
 
 
 class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
@@ -558,11 +544,9 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.call_tool_count, 0)
         self.assertEqual(gateway.close_count, 1)
 
-    async def test_runtime_adapter_uses_verified_allowlist_provenance(self) -> None:
+    async def test_runtime_adapter_uses_runtime_enforced_public_http_provenance(self) -> None:
         gateway = _RuntimeShadowGateway(
-            endpoint_policy_provenance=(
-                EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST
-            )
+            endpoint_policy_provenance=EndpointPolicyProvenance.RUNTIME_ENFORCED
         )
         observer = MCPShadowRuntimeObserver(
             storage=_RuntimeShadowStorage(
@@ -572,13 +556,13 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
             gateway=gateway,
             server_router=_RuntimeShadowRouter(),
             selector=_RuntimeShadowSelector(),
-            endpoint_policy=_runtime_endpoint_policy(allowlisted_http=True),
+            endpoint_policy=_runtime_endpoint_policy(),
             digest_key=b"digest-key",
         )
 
         result = await observer.observe_task(
             owner_user_id="owner-1",
-            task_id="task-allowlisted-http",
+            task_id="task-public-http",
             user_request="search",
             profiles=(
                 UserMCPServerProfile(
@@ -593,7 +577,7 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcome, ShadowOutcome.CONTROL_PLANE_READY)
         self.assertEqual(
             result.summary.endpoint_policy,
-            "allowed_by_enterprise_allowlist",
+            "runtime_enforced",
         )
         self.assertEqual(gateway.call_tool_count, 0)
         self.assertEqual(gateway.close_count, 1)
@@ -603,8 +587,7 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         for provenance in (
             None,
-            "allowed_by_enterprise_allowlist",
-            EndpointPolicyProvenance.ENTERPRISE_ALLOWLIST,
+            "runtime_enforced",
         ):
             with self.subTest(provenance=provenance):
                 gateway = _RuntimeShadowGateway(
@@ -1449,7 +1432,7 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
 
     def test_all_seven_expected_result_scenarios_match(self) -> None:
         manifest = _manifest()
-        for scenario in ShadowScenario:
+        for scenario in CURRENT_SHADOW_SCENARIOS:
             with self.subTest(scenario=scenario):
                 result = compare_shadow_sample(_sample(scenario), manifest)
                 self.assertEqual(result.comparison, ShadowComparison.MATCHED)
@@ -1497,7 +1480,7 @@ class UserMCPShadowCompareTest(unittest.IsolatedAsyncioTestCase):
         manifest = _manifest()
         samples = [
             _sample(scenario, nonce=f"{scenario.value}-{copy}")
-            for scenario in ShadowScenario
+            for scenario in CURRENT_SHADOW_SCENARIOS
             for copy in range(3)
         ]
         passed = validate_shadow_samples(samples, manifest)

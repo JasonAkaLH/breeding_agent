@@ -21,7 +21,14 @@ from ..dto import (
 router = APIRouter(prefix="/api/v1/mcp/servers", tags=["user-mcp"])
 
 
-async def _audit(request: Request, owner_user_id: str, event_type: str, server_id: str) -> None:
+async def _audit(
+    request: Request,
+    owner_user_id: str,
+    event_type: str,
+    server_id: str,
+    *,
+    safe_payload: dict[str, object] | None = None,
+) -> None:
     service = request.app.state.runtime.user_mcp_audit_service
     if service is None:
         return
@@ -30,6 +37,7 @@ async def _audit(request: Request, owner_user_id: str, event_type: str, server_i
             owner_user_id=owner_user_id,
             event_type=event_type,
             server_id=server_id,
+            safe_payload=safe_payload,
         )
     except Exception:
         return
@@ -43,6 +51,16 @@ def _service(request: Request) -> UserMCPConfigService:
             detail={"code": "mcp_feature_unavailable"},
         )
     return service
+
+
+def _endpoint_security_payload(server) -> dict[str, object]:
+    plaintext_http = str(server.endpoint_url).lower().startswith("http://")
+    return {
+        "plaintext_http": plaintext_http,
+        "credential_over_plaintext_http": (
+            plaintext_http and str(server.auth_type) != "none"
+        ),
+    }
 
 
 def _response(server) -> UserMCPServerResponse:
@@ -102,7 +120,13 @@ async def create_user_mcp_server(
         server = await _service(request).create_server(user.username, payload.model_dump())
     except Exception as exc:
         _raise_safe_error(exc)
-    await _audit(request, user.username, "mcp.config_created", server.server_id)
+    await _audit(
+        request,
+        user.username,
+        "mcp.config_created",
+        server.server_id,
+        safe_payload=_endpoint_security_payload(server),
+    )
     return _response(server)
 
 
@@ -113,7 +137,6 @@ async def get_user_mcp_server(server_id: str, request: Request) -> UserMCPServer
         server = await _service(request).get_server(user.username, server_id)
     except Exception as exc:
         _raise_safe_error(exc)
-    await _audit(request, user.username, "mcp.config_updated", server.server_id)
     return _response(server)
 
 
@@ -128,7 +151,13 @@ async def patch_user_mcp_server(
         )
     except Exception as exc:
         _raise_safe_error(exc)
-    await _audit(request, user.username, "mcp.config_tested", server.server_id)
+    await _audit(
+        request,
+        user.username,
+        "mcp.config_updated",
+        server.server_id,
+        safe_payload=_endpoint_security_payload(server),
+    )
     return _response(server)
 
 
@@ -139,7 +168,13 @@ async def test_user_mcp_server(server_id: str, request: Request) -> UserMCPServe
         server = await _service(request).test_server(user.username, server_id)
     except Exception as exc:
         _raise_safe_error(exc)
-    await _audit(request, user.username, "mcp.config_delete_requested", server_id)
+    await _audit(
+        request,
+        user.username,
+        "mcp.config_tested",
+        server_id,
+        safe_payload=_endpoint_security_payload(server),
+    )
     return _response(server)
 
 
@@ -157,6 +192,7 @@ async def delete_user_mcp_server(server_id: str, request: Request) -> Response |
         deleted = await _service(request).delete_server(user.username, server_id)
     except Exception as exc:
         _raise_safe_error(exc)
+    await _audit(request, user.username, "mcp.config_delete_requested", server_id)
     if deleted:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     pending = UserMCPDeletePendingResponse(server_id=server_id)
