@@ -421,6 +421,42 @@ class MCPPendingActionPayloadSnapshot:
 
 
 @dataclass(slots=True, frozen=True)
+class MCPTerminalCandidateSnapshot:
+    candidate: MCPValidatedTerminalResultCandidate
+    candidate_schema: str
+    active_candidate_filename: str
+    active_task_index_filename: str
+    active_call_index_filename: str
+    candidate_file_sha256: str
+    task_index_file_sha256: str
+    call_index_file_sha256: str
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDurableResultSnapshot:
+    result_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_id: str
+    content_sha256: str
+    size_bytes: int
+    store_kind: str
+    data_filename: str
+    manifest_filename: str
+    data_file_sha256: str
+    manifest_file_sha256: str
+    data_file_device: int
+    data_file_inode: int
+    data_file_mode: int
+    data_file_owner_uid: int
+    manifest_file_device: int
+    manifest_file_inode: int
+    manifest_file_mode: int
+    manifest_file_owner_uid: int
+
+
+@dataclass(slots=True, frozen=True)
 class MCPTerminalCandidateLifecycle:
     candidate_id: str
     call_id: str

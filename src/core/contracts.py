@@ -29,6 +29,7 @@ from .models import (
     MCPCP7SafetyLedgerRecord,
     MCPCP7SafetySnapshot,
     MCPDispatchResumeOutbox,
+    MCPDurableResultSnapshot,
     MCPDispatchFinalizeResult,
     MCPExecutionTerminalProjection,
     MCPInitialIntentCreateResult,
@@ -58,6 +59,7 @@ from .models import (
     MCPTargetIntentResolveResult,
     MCPTerminalResultCommitResult,
     MCPTerminalResultReceipt,
+    MCPTerminalCandidateSnapshot,
     Message,
     PendingSkillContext,
     PlannerReplanClaim,
@@ -442,6 +444,8 @@ class StoragePort(Protocol):
         expected_outbox_revision: int,
         claim_owner: str | None,
         claim_token: str | None,
+        candidate_snapshot: MCPTerminalCandidateSnapshot,
+        result_snapshot: MCPDurableResultSnapshot | None,
         occurred_at: datetime,
     ) -> MCPTerminalResultCommitResult: ...
 

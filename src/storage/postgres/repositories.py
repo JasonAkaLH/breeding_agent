@@ -16,7 +16,11 @@ from src.core.models import (
     MCPCallRecord,
     MCPDispatchResumeOutbox,
     MCPDispatchFinalizeResult,
+    MCPDurableResultSnapshot,
     MCPInitialIntentCreateResult,
+    MCPTerminalCandidateSnapshot,
+    MCPTerminalResultCommitResult,
+    MCPValidatedTerminalResultCandidate,
     MCPLegacyRetirementConvergenceResult,
     MCPLegacyRetirementEvidence,
     MCPNoServerConvergenceResult,
@@ -50,10 +54,12 @@ from src.storage.sqlite.models import (
     MCPBranchRecordRow,
     MCPCallRecordRow,
     MCPDispatchResumeOutboxRow,
+    MCPDurableResultLifecycleRow,
     MCPExecutionTerminalProjectionRow,
     MCPNoServerIntentRow,
     MCPPendingToolActionRow,
     MCPTerminalResultReceiptRow,
+    MCPTerminalCandidateLifecycleRow,
     TaskNodeRow,
     TaskRow,
     UserMCPOwnerMutationGuardRow,
@@ -137,6 +143,8 @@ class PostgreSQLStorage(SQLiteStorage):
         branch_id: str | None = None,
         call_id: str | None = None,
         candidate_id: str | None = None,
+        terminal_candidate: MCPValidatedTerminalResultCandidate | None = None,
+        result_ref: str | None = None,
         task_id: str | None = None,
         node_id: str | None = None,
     ) -> _T:
@@ -200,14 +208,14 @@ class PostgreSQLStorage(SQLiteStorage):
                     .where(MCPBranchRecordRow.branch_id == branch_id)
                     .with_for_update()
                 )
-            sealed_candidate = None
+            sealed_candidate = terminal_candidate
             if call_id is not None:
                 session.scalar(
                     select(MCPCallRecordRow.call_ref)
                     .where(MCPCallRecordRow.call_ref == call_id)
                     .with_for_update()
                 )
-                if candidate_id is not None:
+                if candidate_id is not None and sealed_candidate is None:
                     if self._mcp_terminal_candidate_reader is None:
                         raise RuntimeError("mcp_terminal_candidate_reader_unavailable")
                     sealed_candidate = self._mcp_terminal_candidate_reader(
@@ -223,6 +231,23 @@ class PostgreSQLStorage(SQLiteStorage):
                     .where(MCPExecutionTerminalProjectionRow.call_id == call_id)
                     .with_for_update()
                 )
+                if candidate_id is not None:
+                    session.scalar(
+                        select(MCPTerminalCandidateLifecycleRow.candidate_id)
+                        .where(
+                            MCPTerminalCandidateLifecycleRow.candidate_id
+                            == candidate_id
+                        )
+                        .with_for_update()
+                    )
+                if result_ref is not None:
+                    session.scalar(
+                        select(MCPDurableResultLifecycleRow.result_ref)
+                        .where(
+                            MCPDurableResultLifecycleRow.result_ref == result_ref
+                        )
+                        .with_for_update()
+                    )
             if task_id is not None:
                 session.scalar(
                     select(TaskRow.task_id)
@@ -247,6 +272,12 @@ class PostgreSQLStorage(SQLiteStorage):
                     terminal_candidate_resolver=self._mcp_terminal_candidate_resolver,
                     pending_action_payload_reader=(
                         self._mcp_pending_action_payload_reader
+                    ),
+                    terminal_candidate_snapshot_reader=(
+                        self._mcp_terminal_candidate_snapshot_reader
+                    ),
+                    durable_result_snapshot_reader=(
+                        self._mcp_durable_result_snapshot_reader
                     ),
                 )
             )
@@ -684,6 +715,132 @@ class PostgreSQLStorage(SQLiteStorage):
                 ),
             )
         return await asyncio.to_thread(_sync)
+
+    async def commit_mcp_call_terminal(
+        self,
+        call_id: str,
+        candidate_id: str,
+        outbox_id: str,
+        expected_outbox_revision: int,
+        claim_owner: str | None,
+        claim_token: str | None,
+        candidate_snapshot: MCPTerminalCandidateSnapshot,
+        result_snapshot: MCPDurableResultSnapshot | None,
+        occurred_at: datetime,
+    ) -> MCPTerminalResultCommitResult:
+        candidate = candidate_snapshot.candidate
+        with self._session_factory() as session:
+            call = session.get(MCPCallRecordRow, call_id)
+            branch_id = None if call is None else call.branch_id
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=candidate.owner_user_id,
+            server_id=candidate.server_id,
+            intent_id=candidate.intent_id,
+            outbox_id=outbox_id,
+            branch_id=branch_id,
+            call_id=call_id,
+            candidate_id=candidate_id,
+            terminal_candidate=candidate,
+            result_ref=(
+                None if result_snapshot is None else result_snapshot.result_ref
+            ),
+            task_id=candidate.task_id,
+            node_id=candidate.node_id,
+            operation=lambda state: state.commit_mcp_call_terminal(
+                call_id,
+                candidate_id,
+                outbox_id,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                candidate_snapshot,
+                result_snapshot,
+                occurred_at,
+            ),
+        )
+
+    async def finalize_mcp_dispatch(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        outcome: str,
+        safe_error_code: str | None,
+        expected_outbox_revision: int,
+        claim_owner: str | None,
+        claim_token: str | None,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        owner, server, intent, task, node = self._cp7_outbox_lock_subject(
+            outbox_id
+        )
+        with self._session_factory() as session:
+            branch = session.scalar(
+                select(MCPBranchRecordRow).where(
+                    MCPBranchRecordRow.task_id == task,
+                    MCPBranchRecordRow.node_id == node,
+                )
+            )
+            branch_id = None if branch is None else branch.branch_id
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner,
+            server_id=server,
+            intent_id=intent,
+            outbox_id=outbox_id,
+            branch_id=branch_id,
+            task_id=task,
+            node_id=node,
+            operation=lambda state: state.finalize_mcp_dispatch(
+                intent_id,
+                outbox_id,
+                node_id,
+                outcome,
+                safe_error_code,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                occurred_at,
+            ),
+        )
+
+    async def converge_mcp_unknown_no_replay(
+        self, task_id: str, occurred_at: datetime
+    ) -> MCPNoServerConvergenceResult:
+        return await self.converge_user_mcp_no_server(task_id, occurred_at)
+
+    async def cancel_mcp_dispatch(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult:
+        owner, server, intent, task, node = self._cp7_outbox_lock_subject(
+            outbox_id
+        )
+        with self._session_factory() as session:
+            branch = session.scalar(
+                select(MCPBranchRecordRow).where(
+                    MCPBranchRecordRow.task_id == task,
+                    MCPBranchRecordRow.node_id == node,
+                )
+            )
+            branch_id = None if branch is None else branch.branch_id
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner,
+            server_id=server,
+            intent_id=intent,
+            outbox_id=outbox_id,
+            branch_id=branch_id,
+            task_id=task,
+            node_id=node,
+            operation=lambda state: state.cancel_mcp_dispatch(
+                intent_id, outbox_id, node_id, occurred_at
+            ),
+        )
 
     async def converge_user_mcp_no_server(
         self, task_id: str, occurred_at: datetime

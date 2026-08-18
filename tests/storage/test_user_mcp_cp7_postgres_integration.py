@@ -21,6 +21,8 @@ class UserMCPCP7PostgresContractTest(unittest.TestCase):
             "_mcp_terminal_candidate_reader",
             "MCPTerminalResultReceiptRow",
             "MCPExecutionTerminalProjectionRow",
+            "MCPTerminalCandidateLifecycleRow",
+            "MCPDurableResultLifecycleRow",
             "TaskRow",
             "TaskNodeRow",
         )
@@ -39,12 +41,21 @@ class UserMCPCP7PostgresContractTest(unittest.TestCase):
             "release_or_recover_mcp_dispatch_claim",
             "admit_mcp_tool_call",
             "admit_approved_mcp_action",
+            "commit_mcp_call_terminal",
+            "finalize_mcp_dispatch",
+            "cancel_mcp_dispatch",
             "converge_user_mcp_no_server",
             "commit_authoritative_mcp_terminal_result",
             "converge_legacy_runtime_retirement",
         ):
             override = inspect.getsource(getattr(PostgreSQLStorage, method_name))
             self.assertIn("_run_cp7_authority_sync", override, method_name)
+        self.assertIn(
+            "converge_user_mcp_no_server",
+            inspect.getsource(
+                PostgreSQLStorage.converge_mcp_unknown_no_replay
+            ),
+        )
 
     def test_server_mutators_use_owner_guard_before_server_lock(self) -> None:
         for method_name in (
