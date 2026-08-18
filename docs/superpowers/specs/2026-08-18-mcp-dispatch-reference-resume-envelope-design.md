@@ -144,5 +144,10 @@ Node/Task 终态一致。
 全局输入冻结、通用 Artifact 不可变改造、取消/Tool admission 生命周期重写，或 Sidecar
 enforce 下的跨 authority 原子快照。
 
+后续`2026-08-18-mcp-dispatch-aggregate-recovery-hardening-design.md`在不改变本文件v2信封
+字段、64 KiB上限、legacy v1 reader和实际I/O禁入规则的前提下，专门取代上述“本轮不重写
+取消/Tool admission生命周期”的范围限制，统一approval、普通多Call、MRTR、remote Task和
+startup recovery；两份设计不存在两套信封合同。
+
 回滚到旧版本前必须停止新提交，并证明不存在 `armed/available/dispatched` 的 v2 intent
 及 `pending/claimed` outbox。
