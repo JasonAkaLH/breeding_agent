@@ -16,6 +16,9 @@ from src.integrations.master_key import (
     MasterKeyDomain,
     MasterKeyError,
 )
+from src.integrations.mcp.pending_action_payloads import (
+    MCPPendingActionPayloadCipher,
+)
 
 
 class _SentinelStorage:
@@ -41,6 +44,9 @@ class UserMCPCredentialTests(unittest.IsolatedAsyncioTestCase):
             MCPRecoveryCipher(
                 deriver.derive(MasterKeyDomain.MCP_RECOVERY)
             ),
+            MCPPendingActionPayloadCipher(
+                deriver.derive(MasterKeyDomain.MCP_RECOVERY)
+            ),
             MCPAuditReferenceSigner(
                 deriver.derive(MasterKeyDomain.MCP_AUDIT_REFERENCE)
             ),
@@ -58,6 +64,7 @@ class UserMCPCredentialTests(unittest.IsolatedAsyncioTestCase):
         constructors = (
             (MCPCredentialCipher, MasterKeyDomain.MCP_RECOVERY),
             (MCPRecoveryCipher, MasterKeyDomain.MCP_CREDENTIAL),
+            (MCPPendingActionPayloadCipher, MasterKeyDomain.MCP_CREDENTIAL),
             (MCPAuditReferenceSigner, MasterKeyDomain.AUTH_TOKEN),
             (MasterKeySentinelCipher, MasterKeyDomain.MCP_AUDIT_REFERENCE),
         )
@@ -72,6 +79,7 @@ class UserMCPCredentialTests(unittest.IsolatedAsyncioTestCase):
         for constructor in (
             MCPCredentialCipher,
             MCPRecoveryCipher,
+            MCPPendingActionPayloadCipher,
             MCPAuditReferenceSigner,
             MasterKeySentinelCipher,
         ):
