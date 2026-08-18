@@ -3981,6 +3981,138 @@ describe('App', () => {
     expect(await screen.findByText('状态接口恢复前的 SSE 内容')).toBeInTheDocument();
   });
 
+  it('resubscribes after MCP approval and surfaces the next Tool approval', async () => {
+    const firstInterrupt = {
+      interrupt_id: 'mcp-approval-capabilities',
+      conversation_id: 'conv-test',
+      task_id: 'task-1',
+      node_id: 'node-mcp',
+      question: 'Allow OCR服务 to call get_ocr_capabilities?',
+      reason_code: 'mcp_tool_approval_required',
+      required_fields: {
+        mcp_tool_approval: { options: ['allow_once', 'always_allow', 'deny'] },
+      },
+      status: 'open',
+    };
+    const secondInterrupt = {
+      ...firstInterrupt,
+      interrupt_id: 'mcp-approval-start-job',
+      question: 'Allow OCR服务 to call start_parse_job?',
+    };
+    const api = makeApi({
+      listInterrupts: vi.fn()
+        .mockResolvedValueOnce({ task_id: 'task-1', interrupts: [firstInterrupt] })
+        .mockResolvedValue({ task_id: 'task-1', interrupts: [secondInterrupt] }),
+    });
+    const batches = [
+      [
+        event('task.accepted', {}, 'mcp-task-accepted'),
+        event('mcp.tool_approval_required', {
+          interrupt_id: firstInterrupt.interrupt_id,
+          safe_call_ref: 'safe-call-capabilities',
+          server_display_name: 'OCR服务',
+          tool_display_name: 'get_ocr_capabilities',
+        }, 'mcp-approval-capabilities-event', 'node-mcp'),
+        event('node.waiting_for_input', {
+          interrupt_id: firstInterrupt.interrupt_id,
+        }, 'mcp-waiting-capabilities-event', 'node-mcp'),
+      ],
+      [
+        event('mcp.tool_approval_required', {
+          interrupt_id: secondInterrupt.interrupt_id,
+          safe_call_ref: 'safe-call-start-job',
+          server_display_name: 'OCR服务',
+          tool_display_name: 'start_parse_job',
+        }, 'mcp-approval-start-job-event', 'node-mcp'),
+        event('node.waiting_for_input', {
+          interrupt_id: secondInterrupt.interrupt_id,
+        }, 'mcp-waiting-start-job-event', 'node-mcp'),
+      ],
+    ];
+    const subscriptions: TaskEventHandlers[] = [];
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      const batch = batches[subscriptions.length] ?? [];
+      subscriptions.push(handlers);
+      queueMicrotask(() => {
+        for (const item of batch) handlers.onMessage(item);
+      });
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别图片' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    const firstApprovalDialog = await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    expect(within(firstApprovalDialog).getByText(/get_ocr_capabilities/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '始终允许' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
+    expect(api.submitMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      metadata: {
+        interrupt_id: firstInterrupt.interrupt_id,
+        mcp_tool_approval: 'always_allow',
+      },
+    }));
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    const secondApprovalDialog = await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    expect(within(secondApprovalDialog).getByText(/start_parse_job/)).toBeInTheDocument();
+    await waitFor(() => expect(api.listInterrupts).toHaveBeenCalledTimes(2));
+  });
+
+  it('keeps MCP approval pending when approval submission fails', async () => {
+    const api = makeApi({
+      submitMessage: vi.fn()
+        .mockResolvedValueOnce({ conversation_id: 'conv-test', message_id: 'msg-1', task_id: 'task-1', status: 'accepted' })
+        .mockRejectedValueOnce(new Error('approval failed')),
+      listInterrupts: vi.fn(async () => ({
+        task_id: 'task-1',
+        interrupts: [{
+          interrupt_id: 'mcp-approval-1',
+          conversation_id: 'conv-test',
+          task_id: 'task-1',
+          node_id: 'node-mcp',
+          question: 'Allow OCR服务 to call start_parse_job?',
+          reason_code: 'mcp_tool_approval_required',
+          required_fields: {
+            mcp_tool_approval: { options: ['allow_once', 'always_allow', 'deny'] },
+          },
+          status: 'open',
+        }],
+      })),
+    });
+    const subscriptions: TaskEventHandlers[] = [];
+    const eventSourceFactory: EventSourceFactory = (_url, handlers) => {
+      subscriptions.push(handlers);
+      if (subscriptions.length === 1) {
+        queueMicrotask(() => {
+          handlers.onMessage(event('mcp.tool_approval_required', {
+            interrupt_id: 'mcp-approval-1',
+            safe_call_ref: 'safe-call-1',
+            server_display_name: 'OCR服务',
+            tool_display_name: 'start_parse_job',
+          }, 'mcp-approval-1-event', 'node-mcp'));
+          handlers.onMessage(event('node.waiting_for_input', {
+            interrupt_id: 'mcp-approval-1',
+          }, 'mcp-waiting-1-event', 'node-mcp'));
+        });
+      }
+      return { close: vi.fn() };
+    };
+    await renderAuthed(<App apiClient={api} eventSourceFactory={eventSourceFactory} />);
+
+    fireEvent.change(screen.getByLabelText('请输入问题'), { target: { value: '识别图片' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    const approvalDialog = await screen.findByRole('dialog', { name: 'MCP 工具授权' });
+    expect(within(approvalDialog).getByText(/start_parse_job/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '仅允许一次' }));
+
+    await waitFor(() => expect(api.submitMessage).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('dialog', { name: 'MCP 工具授权' })).toBeInTheDocument();
+    expect(subscriptions).toHaveLength(1);
+  });
+
   it('retries loading open interrupts after a waiting-input event when the interrupt list lags', async () => {
     const api = makeApi({
       listInterrupts: vi.fn()

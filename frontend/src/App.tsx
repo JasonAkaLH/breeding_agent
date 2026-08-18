@@ -1001,11 +1001,15 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
 
   async function handleMCPApprovalDecision(decision: MCPApprovalDecision) {
     const approval = taskState.mcp.approval;
-    if (!approval?.pending || !approval.interruptId || !conversationIdRef.current) return;
+    const targetConversationId = conversationIdRef.current;
+    const taskId = currentTaskIdRef.current;
+    const assistantId = currentAssistantIdRef.current;
+    const generation = restoreGenerationRef.current;
+    if (!approval?.pending || !approval.interruptId || !targetConversationId || !taskId || !assistantId) return;
     setMCPApprovalSubmitting(true);
     try {
-      await api.submitMessage({
-        conversationId: conversationIdRef.current,
+      const response = await api.submitMessage({
+        conversationId: targetConversationId,
         content: decision === 'deny' ? '拒绝本次 MCP 工具调用' : decision === 'always_allow' ? '始终允许此 MCP 工具' : '仅允许本次 MCP 工具调用',
         mode,
         clientMessageId: makeClientId('mcp-approval'),
@@ -1013,6 +1017,16 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
           interrupt_id: approval.interruptId,
           mcp_tool_approval: decision,
         },
+      });
+      if (!isCurrentRestoreGeneration(generation, targetConversationId)) return;
+      const resumedTaskId = response.task_id || taskId;
+      localTaskRuntimeActiveRef.current = true;
+      taskPresentationModesRef.current.set(resumedTaskId, mode);
+      updateCurrentTaskId(resumedTaskId);
+      setPendingInterrupt(null);
+      updateAssistantMessage(assistantId, {
+        taskId: resumedTaskId,
+        interruptPrompt: undefined,
       });
       setTaskState((state) => ({
         ...state,
@@ -1025,6 +1039,7 @@ function App({ apiClient, eventSourceFactory, waitingInputCheckDelayMs = WAITING
             : null,
         },
       }));
+      subscribeToTask(resumedTaskId, assistantId, generation, targetConversationId);
     } catch (error) {
       showTransientNotice(friendlyError(error));
     } finally {
