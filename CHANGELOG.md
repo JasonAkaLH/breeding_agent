@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+- MCP dispatch 聚合状态机与恢复加固设计已确认：保留 `maf.user_mcp.dispatch_resume.v2` 引用式信封、64 KiB 上限和 `may_have_dispatched` unknown/no-replay 原则，新增统一 SQL aggregate writer 设计，覆盖 Task/Node/branch/Call/intent/outbox 的原子 claim、admission、terminal commit、finalize 与不一致收敛；Tool approval 通过加密 pending action 引用恢复精确参数，不重新运行 Selector，MRTR/remote Task按 terminal candidate/receipt、remote binding、sealed state、approved action的固定证据优先级恢复。设计同时锁定 CP7 timezone-aware UTC整秒、单次Call不提前完成dispatch outbox、branch active清理、accepted Answer唯一CAS、Task级预算、candidate消费/7天保留GC、安全错误映射、12个崩溃边界故障注入和旧版本回滚前quiescence要求。本轮仅形成设计，尚未修改运行时代码或部署`prod`。License Requirement：仅设计、索引和变更记录，无新增依赖或许可变更。
+
 - 修复连续 MCP Tool 审批在前端看似卡住的问题：等待审批时仍按既有 Interrupt 合同关闭 Task SSE，但 `allow_once`、`always_allow` 或 `deny` 提交成功后会清理旧 pending Interrupt/assistant prompt、恢复响应绑定的 Task，并立即重新订阅 durable Task event stream；因此第一个 Tool 授权后产生的第二个不同 Tool 审批可自动显示，无需刷新页面。`always_allow` 继续只作用于当前 Tool 和当前安全版本，后端 Grant/admission 语义不变。新增连续 `get_ocr_capabilities → start_parse_job` 审批和提交失败不重订阅回归。License Requirement：复用现有 React、SSE 与 Vitest 依赖，无新增依赖或许可变更。
 
 - MCP dispatch 恢复信封升级为 `maf.user_mcp.dispatch_resume.v2` 引用式合同：新 writer 只持久化 Task/Node/Edge/assignment 快照、TaskInputAttachment ID 与 dependency Artifact refs，Repository 同事务执行 exact-schema、identity、assignment、排序/数量/UTF-8 字节和 64 KiB canonical 校验；实际 MCP I/O、Tool 参数/结果、附件正文、Base64、endpoint、credential 与 auth metadata 不再进入信封。初次执行在 refs 完整时与跨进程恢复共用 Artifact-derived 安全投影；缺 refs/summary 或附件失活在未 dispatch 前以 no-call 失败收敛，open Interrupt、取消/终态和 `may_have_dispatched` no-replay 边界保持不变；无 schema 的 legacy v1 intent 继续只读兼容。新增 2.3 MB 附件体积、forbidden nested field、assignment、Repository 事务和 v2 dependency 恢复回归。License Requirement：复用既有 Python、SQLAlchemy 与 CP7 canonical SHA-256 工具，无新增依赖或许可变更。
