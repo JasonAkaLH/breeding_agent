@@ -108,7 +108,7 @@ class MCPCallRecordRow(SQLiteBase):
         Index("idx_mcp_call_branch_status", "branch_id", "status"),
         CheckConstraint(
             "status IN ('reserved', 'active', 'completed', 'failed', 'cancelled', "
-            "'input_required', 'remote_pending', 'unknown', 'execution_status_unknown')",
+            "'input_required', 'remote_pending', 'unknown')",
             name="mcp_call_status",
         ),
         CheckConstraint("call_sequence > 0", name="mcp_call_sequence_positive"),

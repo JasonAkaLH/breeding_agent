@@ -19,6 +19,78 @@ from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteBootstrapTest(SQLiteStorageTestCase):
+    def test_legacy_dispatch_outbox_with_business_row_requires_operator_migration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-dispatch.sqlite3")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_dispatch_resume_outbox ("
+                        "outbox_id TEXT PRIMARY KEY, intent_id TEXT NOT NULL, "
+                        "status TEXT NOT NULL)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO mcp_dispatch_resume_outbox "
+                        "VALUES ('outbox-1', 'intent-1', 'claimed')"
+                    )
+                )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "mcp_dispatch_aggregate_migration_required"
+            ):
+                bootstrap_sqlite_database(engine)
+
+            self.assertEqual(
+                {
+                    column["name"]
+                    for column in inspect(engine).get_columns(
+                        "mcp_dispatch_resume_outbox"
+                    )
+                },
+                {"outbox_id", "intent_id", "status"},
+            )
+
+    def test_empty_legacy_dispatch_tables_are_rebuilt_to_fresh_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "empty-dispatch.sqlite3")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_dispatch_resume_outbox ("
+                        "outbox_id TEXT PRIMARY KEY, intent_id TEXT NOT NULL, "
+                        "status TEXT NOT NULL)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_call_record ("
+                        "call_ref TEXT PRIMARY KEY, status TEXT NOT NULL)"
+                    )
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            outbox_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns(
+                    "mcp_dispatch_resume_outbox"
+                )
+            }
+            call_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("mcp_call_record")
+            }
+            self.assertIn("resume_reason", outbox_columns)
+            self.assertIn("selector_step_total", outbox_columns)
+            self.assertIn("pending_action_id", call_columns)
+            self.assertIn("continuation_of_call_ref", call_columns)
+
     def test_legacy_terminal_receipt_adds_v2_result_identity_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = create_sqlite_engine(Path(tmpdir) / "legacy-receipt.sqlite3")

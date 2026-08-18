@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import contextmanager
 from dataclasses import dataclass
 from unittest.mock import patch
 
-from src.storage.postgres.bootstrap import _column_type_name, _inspect_current_schema
+from src.storage.postgres.bootstrap import (
+    _column_type_name,
+    _inspect_current_schema,
+    bootstrap_postgres_database,
+)
 from src.state.postgres.runtime_schema import (
     POSTGRES_CP7_TRIGGER_NAMES,
     build_postgres_fresh_cutover_schema_manifest,
@@ -214,6 +219,52 @@ class PostgresSchemaReconcilerTest(unittest.TestCase):
         self.assertNotIn(
             "ALTER TABLE mcp_dispatch_resume_outbox",
             plan.sql_script(),
+        )
+
+    def test_postgres_bootstrap_rejects_operator_cutover_before_schema_mutation(
+        self,
+    ) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        tables = {
+            name: dict(columns) for name, columns in inspection.tables.items()
+        }
+        tables["mcp_dispatch_resume_outbox"].pop("resume_reason")
+        legacy = SchemaInspection(
+            tables=tables,
+            enum_types=inspection.enum_types,
+            check_constraints=inspection.check_constraints,
+            triggers=inspection.triggers,
+        )
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+
+            def execute(self, statement):
+                self.statements.append(str(statement))
+                return object()
+
+        class FakeEngine:
+            def __init__(self) -> None:
+                self.connection = FakeConnection()
+
+            @contextmanager
+            def begin(self):
+                yield self.connection
+
+        engine = FakeEngine()
+        with patch(
+            "src.storage.postgres.bootstrap._inspect_current_schema",
+            return_value=legacy,
+        ), self.assertRaisesRegex(
+            PostgresSchemaDriftError,
+            "mcp_dispatch_aggregate_migration_required",
+        ):
+            bootstrap_postgres_database(engine)
+
+        self.assertFalse(
+            any("CREATE TABLE" in statement for statement in engine.connection.statements)
         )
 
     def test_trigger_inspection_covers_every_manifested_cp7_trigger(self) -> None:

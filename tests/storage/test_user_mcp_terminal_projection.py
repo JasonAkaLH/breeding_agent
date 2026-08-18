@@ -389,7 +389,7 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(projection.no_replay)
         self.assertEqual(str((await self.storage.get_task("task-1")).status), "failed")
         call = await self.storage.get_mcp_call_record("owner-a", "task-1", "call-1")
-        self.assertEqual(call.status, "execution_status_unknown")
+        self.assertEqual(call.status, "unknown")
         with self.sessions() as session:
             events = session.scalars(
                 select(EventRecordRow)
@@ -441,8 +441,8 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
         second = await self.storage.get_mcp_call_record(
             "owner-a", "task-1", "call-2"
         )
-        self.assertEqual(first.status, "execution_status_unknown")
-        self.assertEqual(second.status, "execution_status_unknown")
+        self.assertEqual(first.status, "unknown")
+        self.assertEqual(second.status, "unknown")
         self.assertEqual(str((await self.storage.get_task("task-1")).status), "failed")
 
 

@@ -308,7 +308,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(recovered_intent.status), "unknown")
             self.assertEqual(str(recovered_outbox.status), "completed")
             self.assertEqual(recovered_outbox.completion_mode, "unknown_no_replay")
-            self.assertEqual(recovered_call.status, "execution_status_unknown")
+            self.assertEqual(recovered_call.status, "unknown")
             self.assertEqual(
                 str((await runtime.storage.get_task_node(node.node_id)).status),
                 "failed",
@@ -503,7 +503,7 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             recovered_call = await runtime.storage.get_mcp_call_record(
                 "alice", task.task_id, "call-seal-failure"
             )
-            self.assertEqual(recovered_call.status, "execution_status_unknown")
+            self.assertEqual(recovered_call.status, "unknown")
             self.assertEqual(
                 str((await runtime.storage.get_task(task.task_id)).status), "failed"
             )

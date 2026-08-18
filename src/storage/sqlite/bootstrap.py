@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import Connection, Engine, inspect, text
 
 from .base import SQLiteBase
@@ -14,6 +16,7 @@ LEGACY_AUTH_TABLES = (
 
 
 def bootstrap_sqlite_database(engine: Engine) -> None:
+    _prepare_empty_mcp_dispatch_aggregate_cutover(engine)
     _migrate_username_owner_columns(engine)
     _migrate_message_public_columns(engine)
     _migrate_user_mcp_grant_invalidation_columns(engine)
@@ -28,6 +31,58 @@ def bootstrap_sqlite_database(engine: Engine) -> None:
     _drop_legacy_auth_tables(engine)
     SQLiteBase.metadata.create_all(engine)
     _ensure_cp7_mutation_triggers(engine)
+
+
+def _prepare_empty_mcp_dispatch_aggregate_cutover(engine: Engine) -> None:
+    """Rebuild only empty legacy aggregate tables; business rows need the operator tool."""
+
+    target_tables = ("mcp_call_record", "mcp_dispatch_resume_outbox")
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+        drifted: list[str] = []
+        for table_name in target_tables:
+            if table_name not in existing_tables:
+                continue
+            expected_table = SQLiteBase.metadata.tables[table_name]
+            actual_columns = {
+                column["name"] for column in inspector.get_columns(table_name)
+            }
+            expected_columns = set(expected_table.columns.keys())
+            actual_checks = {
+                _normalize_sqlite_check(str(item.get("sqltext") or ""))
+                for item in inspector.get_check_constraints(table_name)
+            }
+            expected_checks = {
+                _normalize_sqlite_check(str(item.sqltext))
+                for item in expected_table.constraints
+                if item.__class__.__name__ == "CheckConstraint"
+            }
+            actual_indexes = {
+                str(item.get("name") or "")
+                for item in inspector.get_indexes(table_name)
+                if item.get("name")
+            }
+            expected_indexes = {index.name for index in expected_table.indexes}
+            if (
+                actual_columns != expected_columns
+                or actual_checks != expected_checks
+                or actual_indexes != expected_indexes
+            ):
+                row_count = connection.execute(
+                    text(f'SELECT COUNT(*) FROM "{table_name}"')
+                ).scalar_one()
+                if int(row_count) != 0:
+                    raise RuntimeError(
+                        "mcp_dispatch_aggregate_migration_required"
+                    )
+                drifted.append(table_name)
+        for table_name in drifted:
+            connection.execute(text(f'DROP TABLE "{table_name}"'))
+
+
+def _normalize_sqlite_check(value: str) -> str:
+    return re.sub(r'[()\s"]+', "", value.lower())
 
 
 def _drop_legacy_auth_tables(engine: Engine) -> None:

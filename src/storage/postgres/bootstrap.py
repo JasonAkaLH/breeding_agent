@@ -10,7 +10,12 @@ from src.state.postgres.runtime_schema import (
     build_runtime_mutation_trigger_schema_ddl,
     build_runtime_table_schema_ddl,
 )
-from src.state.postgres.schema_reconciler import SchemaInspection, assert_no_forbidden_schema_sql, plan_postgres_schema_reconciliation
+from src.state.postgres.schema_reconciler import (
+    PostgresSchemaDriftError,
+    SchemaInspection,
+    assert_no_forbidden_schema_sql,
+    plan_postgres_schema_reconciliation,
+)
 
 
 def bootstrap_postgres_database(engine: Engine) -> None:
@@ -25,6 +30,14 @@ def bootstrap_postgres_database(engine: Engine) -> None:
         connection.execute(text("SET LOCAL lock_timeout = '3s'"))
         connection.execute(text("SET LOCAL statement_timeout = '30s'"))
         connection.execute(text("SELECT pg_advisory_xact_lock(hashtext('breeding_agent_schema_bootstrap'))"))
+        initial_plan = plan_postgres_schema_reconciliation(
+            build_postgres_fresh_cutover_schema_manifest(),
+            _inspect_current_schema(connection),
+        )
+        if initial_plan.operator_only_actions:
+            raise PostgresSchemaDriftError(
+                "mcp_dispatch_aggregate_migration_required"
+            )
         for statement in _split_sql(table_sql_script):
             if statement.strip():
                 connection.execute(text(statement))

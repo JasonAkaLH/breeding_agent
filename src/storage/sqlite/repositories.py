@@ -5458,7 +5458,7 @@ class SQLiteStateRepository:
             node.status = str(NodeStatus.FAILED)
             node.finished_at = occurred_at
             for dispatched_call in dispatched:
-                dispatched_call.status = "execution_status_unknown"
+                dispatched_call.status = "unknown"
                 dispatched_call.safe_error_code = "execution_status_unknown"
                 dispatched_call.updated_at = occurred_at
                 dispatched_call.terminal_at = occurred_at
