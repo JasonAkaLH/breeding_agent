@@ -4312,6 +4312,25 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
         interrupt = await self.storage.get_interrupt(interrupt_id)
         if interrupt is None or interrupt.task_id != task_id:
             raise ValueError(f"Unknown interrupt: {interrupt_id}")
+        mcp_approval_action = None
+        mcp_approval_decision: str | None = None
+        if interrupt.reason_code == "mcp_tool_approval_required":
+            mcp_approval_decision = str(
+                answer_payload.get("mcp_tool_approval") or ""
+            ).strip()
+            if mcp_approval_decision not in {
+                "allow_once",
+                "always_allow",
+                "deny",
+            }:
+                raise ValueError(
+                    "mcp_tool_approval must be allow_once, always_allow, or deny"
+                )
+            mcp_approval_action = (
+                await self.storage.get_mcp_pending_tool_action_for_interrupt(
+                    interrupt_id
+                )
+            )
         if interrupt.reason_code == "mcp_remote_task_input_required":
             responses = answer_payload.get("mcp_input_responses")
             cancel_requested = answer_payload.get("mcp_remote_task_cancel") is True
@@ -4416,7 +4435,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             interrupt_id=interrupt_id,
             answer_payload=dict(answer_payload),
             source_message_id=source_message_id or self._make_id("msg"),
+            accepted=mcp_approval_action is not None,
             created_at=self._utcnow_naive(),
+            accepted_at=(
+                self._utcnow_naive() if mcp_approval_action is not None else None
+            ),
         )
         pending_file_selection_upload_ids = self._normalize_upload_ids(
             sheet_selection_resume_metadata.get("_file_selection_pending_upload_ids") or ()
@@ -4462,7 +4485,52 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     upload_sheet_selections=resume_metadata.get("upload_sheet_selections"),
                 )
             )
-        saved_interrupt = await self.interrupt_service.record_answer(answer)
+        mcp_approval_result: str | None = None
+        if mcp_approval_action is not None:
+            assert mcp_approval_decision is not None
+            mcp_approval_result = str(
+                await self.storage.accept_mcp_tool_approval(
+                    interrupt_id,
+                    answer,
+                    mcp_approval_decision,
+                    self._utcnow_naive(),
+                )
+            )
+            if mcp_approval_result == "already_accepted":
+                saved_interrupt = await self.storage.get_interrupt(interrupt_id)
+                if saved_interrupt is None:
+                    raise RuntimeError("mcp_approval_interrupt_missing_after_accept")
+                return {
+                    "interrupt_id": saved_interrupt.interrupt_id,
+                    "status": str(saved_interrupt.status),
+                    "node_id": saved_interrupt.node_id,
+                    "answer_payload": dict(answer_payload),
+                    "source_message_id": answer.source_message_id,
+                }
+            if mcp_approval_result in {"conflict", "invalidated"}:
+                raise ValueError("MCP tool approval is no longer pending")
+            saved_interrupt = await self.storage.get_interrupt(interrupt_id)
+            if saved_interrupt is None:
+                raise RuntimeError("mcp_approval_interrupt_missing_after_accept")
+            if mcp_approval_result == "accepted":
+                resumed_node = await self.storage.get_task_node(interrupt.node_id)
+                if resumed_node is None:
+                    raise RuntimeError("mcp_approval_node_missing_after_accept")
+                await self._record_event(
+                    self._make_event(
+                        task_id=task.task_id,
+                        conversation_id=task.conversation_id,
+                        node_id=interrupt.node_id,
+                        event_type="node.ready_to_resume",
+                        payload={
+                            "interrupt_id": interrupt_id,
+                            "status": str(resumed_node.status),
+                            "capability_id": resumed_node.capability_id,
+                        },
+                    )
+                )
+        else:
+            saved_interrupt = await self.interrupt_service.record_answer(answer)
 
         answer_message = Message(
             message_id=answer.source_message_id or self._make_id("msg"),
@@ -4482,6 +4550,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 payload={"interrupt_id": interrupt_id, "answer_payload": dict(answer_payload)},
             )
         )
+
+        if mcp_approval_result == "denied_finalized":
+            return {
+                "interrupt_id": saved_interrupt.interrupt_id,
+                "status": str(saved_interrupt.status),
+                "node_id": saved_interrupt.node_id,
+                "answer_payload": dict(answer_payload),
+                "source_message_id": answer.source_message_id,
+            }
 
         await self._await_existing_execution(task.task_id)
         resume_capability_id = task.requested_capability_id

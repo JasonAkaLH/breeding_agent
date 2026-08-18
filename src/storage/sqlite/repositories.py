@@ -50,6 +50,8 @@ from src.core.models import (
     MailboxDelivery,
     MailboxMessage,
     MCPAuditEvent,
+    MCPApprovalDecisionResult,
+    MCPApprovalSuspendResult,
     MCPBranchRecord,
     MCPCallRecord,
     MCPConnectionLease,
@@ -1347,6 +1349,68 @@ def _pending_snapshot_matches_action(
         == int(action.server_security_version)
         and snapshot.input_schema_sha256 == action.input_schema_sha256
     )
+
+
+def _mcp_pending_action_values(action: MCPPendingToolAction) -> dict[str, Any]:
+    return {
+        "action_id": action.action_id,
+        "owner_user_id": action.owner_user_id,
+        "conversation_id": action.conversation_id,
+        "task_id": action.task_id,
+        "node_id": action.node_id,
+        "server_id": action.server_id,
+        "tool_name": action.tool_name,
+        "arguments_sha256": action.arguments_sha256,
+        "approval_fingerprint": action.approval_fingerprint,
+        "arguments_payload_ref": action.arguments_payload_ref,
+        "payload_file_sha256": action.payload_file_sha256,
+        "payload_size_bytes": action.payload_size_bytes,
+        "encryption_version": action.encryption_version,
+        "server_config_version": action.server_config_version,
+        "server_security_version": action.server_security_version,
+        "input_schema_sha256": action.input_schema_sha256,
+        "status": str(action.status),
+        "revision": action.revision,
+        "approval_interrupt_id": action.approval_interrupt_id,
+        "accepted_answer_id": action.accepted_answer_id,
+        "approved_at": action.approved_at,
+        "consumed_at": action.consumed_at,
+        "invalidated_at": action.invalidated_at,
+        "created_at": action.created_at,
+        "updated_at": action.updated_at,
+    }
+
+
+def _mcp_approval_interrupt_values(interrupt: Interrupt) -> dict[str, Any]:
+    return {
+        "interrupt_id": interrupt.interrupt_id,
+        "conversation_id": interrupt.conversation_id,
+        "task_id": interrupt.task_id,
+        "node_id": interrupt.node_id,
+        "source_agent": interrupt.source_agent,
+        "source_message_id": interrupt.source_message_id,
+        "question": interrupt.question,
+        "reason_code": interrupt.reason_code,
+        "required_fields": dict(interrupt.required_fields),
+        "status": str(interrupt.status),
+        "expires_at": interrupt.expires_at,
+        "created_at": interrupt.created_at,
+        "answered_at": interrupt.answered_at,
+        "cancelled_at": interrupt.cancelled_at,
+    }
+
+
+def _mcp_approval_grant_id(action: MCPPendingToolActionRow) -> str:
+    digest = canonical_sha256(
+        {
+            "input_schema_sha256": action.input_schema_sha256,
+            "owner_user_id": action.owner_user_id,
+            "server_id": action.server_id,
+            "server_security_version": int(action.server_security_version),
+            "tool_name": action.tool_name,
+        }
+    ).removeprefix("sha256:")
+    return f"mcp-tool-grant:v1:{digest}"
 
 
 def _terminal_candidate_snapshot_is_closed(
@@ -4848,6 +4912,19 @@ class SQLiteStateRepository:
         )
         return None if row is None else _row_to_mcp_pending_action(row)
 
+    def get_mcp_pending_tool_action_for_interrupt(
+        self, interrupt_id: str
+    ) -> MCPPendingToolAction | None:
+        rows = self._session.scalars(
+            select(MCPPendingToolActionRow)
+            .where(MCPPendingToolActionRow.approval_interrupt_id == interrupt_id)
+            .order_by(MCPPendingToolActionRow.action_id)
+            .limit(2)
+        ).all()
+        if len(rows) > 1:
+            raise RuntimeError("mcp_approval_interrupt_action_ambiguous")
+        return None if not rows else _row_to_mcp_pending_action(rows[0])
+
     def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]:
@@ -5055,6 +5132,472 @@ class SQLiteStateRepository:
         row.updated_at = now
         self._session.flush()
         return _row_to_mcp_dispatch_resume(row)
+
+    def suspend_mcp_for_approval(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        action: MCPPendingToolAction,
+        interrupt: Interrupt,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        occurred_at: datetime,
+    ) -> MCPApprovalSuspendResult:
+        self._lock_mcp_owner_guard(action.owner_user_id, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == action.owner_user_id,
+                UserMCPServerRow.server_id == action.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        existing_action = self._session.scalar(
+            select(MCPPendingToolActionRow)
+            .where(MCPPendingToolActionRow.action_id == action.action_id)
+            .with_for_update()
+        )
+        branch = self._session.scalar(
+            select(MCPBranchRecordRow)
+            .where(
+                MCPBranchRecordRow.owner_user_id == action.owner_user_id,
+                MCPBranchRecordRow.task_id == action.task_id,
+                MCPBranchRecordRow.node_id == action.node_id,
+            )
+            .with_for_update()
+        )
+        calls = self._session.scalars(
+            select(MCPCallRecordRow)
+            .where(
+                MCPCallRecordRow.task_id == action.task_id,
+                MCPCallRecordRow.node_id == action.node_id,
+            )
+            .order_by(MCPCallRecordRow.call_sequence)
+            .with_for_update()
+        ).all()
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == action.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == action.node_id)
+            .with_for_update()
+        )
+        existing_interrupt = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.interrupt_id == interrupt.interrupt_id)
+            .with_for_update()
+        )
+        open_approvals = self._session.scalars(
+            select(InterruptRow)
+            .where(
+                InterruptRow.task_id == action.task_id,
+                InterruptRow.node_id == action.node_id,
+                InterruptRow.reason_code == "mcp_tool_approval_required",
+                InterruptRow.status == "open",
+            )
+            .order_by(InterruptRow.interrupt_id)
+            .with_for_update()
+        ).all()
+        grant = self._session.scalar(
+            select(UserMCPToolGrantRow)
+            .where(
+                UserMCPToolGrantRow.owner_user_id == action.owner_user_id,
+                UserMCPToolGrantRow.server_id == action.server_id,
+                UserMCPToolGrantRow.tool_name == action.tool_name,
+                UserMCPToolGrantRow.server_security_version
+                == action.server_security_version,
+                UserMCPToolGrantRow.input_schema_sha256
+                == action.input_schema_sha256,
+                UserMCPToolGrantRow.invalidated_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if self._pending_action_payload_reader is None:
+            raise RuntimeError("mcp_pending_action_payload_reader_unavailable")
+        revalidated = self._pending_action_payload_reader.revalidate(payload_snapshot)
+        if (
+            revalidated != payload_snapshot
+            or not _pending_snapshot_matches_action(payload_snapshot, action)
+            or payload_snapshot.file_device < 0
+            or payload_snapshot.file_inode <= 0
+            or payload_snapshot.file_mode != 0o600
+            or payload_snapshot.file_owner_uid != os.getuid()
+        ):
+            raise RuntimeError("mcp_pending_action_payload_binding_conflict")
+        action_values = _mcp_pending_action_values(action)
+        interrupt_values = _mcp_approval_interrupt_values(interrupt)
+        if existing_action is not None:
+            try:
+                _require_exact_row(existing_action, action_values, "mcp_pending_action_conflict")
+                if existing_interrupt is None:
+                    return MCPApprovalSuspendResult.CONFLICT
+                _require_exact_row(
+                    existing_interrupt,
+                    interrupt_values,
+                    "mcp_approval_interrupt_conflict",
+                )
+            except RuntimeError:
+                return MCPApprovalSuspendResult.CONFLICT
+            if (
+                outbox is not None
+                and outbox.status == "waiting_approval"
+                and node is not None
+                and node.status == str(NodeStatus.WAITING_FOR_INPUT)
+                and len(open_approvals) == 1
+            ):
+                return MCPApprovalSuspendResult.ALREADY_SUSPENDED
+            return MCPApprovalSuspendResult.CONFLICT
+        claim_valid = bool(
+            outbox is not None
+            and outbox.status in {"claimed", "active"}
+            and outbox.claim_owner == claim_owner
+            and outbox.claim_token == claim_token
+            and outbox.lease_expires_at is not None
+            and outbox.lease_expires_at > occurred_at
+        )
+        if (
+            server is None
+            or intent is None
+            or outbox is None
+            or branch is None
+            or task is None
+            or node is None
+            or existing_interrupt is not None
+            or open_approvals
+            or grant is not None
+            or not claim_valid
+            or int(intent.revision) != expected_intent_revision
+            or int(outbox.revision) != expected_outbox_revision
+            or intent.status not in {"available", "dispatched"}
+            or outbox.intent_id != intent_id
+            or outbox.owner_user_id != action.owner_user_id
+            or outbox.task_id != action.task_id
+            or outbox.node_id != action.node_id
+            or outbox.server_id != action.server_id
+            or action.conversation_id != task.conversation_id
+            or action.status != MCPPendingToolActionStatus.WAITING_APPROVAL
+            or action.revision != 0
+            or action.approval_interrupt_id != interrupt.interrupt_id
+            or action.accepted_answer_id is not None
+            or not _mcp_server_is_available(server)
+            or int(server.config_version) != action.server_config_version
+            or int(server.security_version) != action.server_security_version
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status
+            not in {str(NodeStatus.RUNNING), str(NodeStatus.READY_TO_RESUME)}
+            or branch.active_call_ref is not None
+            or any(call.status in {"reserved", "active", "remote_pending"} for call in calls)
+            or interrupt.conversation_id != task.conversation_id
+            or interrupt.task_id != action.task_id
+            or interrupt.node_id != action.node_id
+            or interrupt.source_message_id != task.root_message_id
+            or interrupt.source_agent != "mcp.dispatch"
+            or interrupt.reason_code != "mcp_tool_approval_required"
+            or str(interrupt.status) != "open"
+            or interrupt.required_fields
+            != {
+                "mcp_tool_approval": {
+                    "type": "string",
+                    "enum": ["allow_once", "always_allow", "deny"],
+                },
+                "approval_ref": action.approval_fingerprint,
+                "server_id": action.server_id,
+                "tool_name": action.tool_name,
+            }
+        ):
+            return MCPApprovalSuspendResult.CONFLICT
+        self._session.add(MCPPendingToolActionRow(**action_values))
+        self._session.add(InterruptRow(**interrupt_values))
+        outbox.status = "waiting_approval"
+        outbox.claim_owner = None
+        outbox.claim_token = None
+        outbox.lease_expires_at = None
+        outbox.approval_round_total = int(outbox.approval_round_total) + 1
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        branch.status = "pending_approval"
+        branch.updated_at = occurred_at
+        node.status = str(NodeStatus.WAITING_FOR_INPUT)
+        self._session.flush()
+        return MCPApprovalSuspendResult.SUSPENDED
+
+    def accept_mcp_tool_approval(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        decision: str,
+        occurred_at: datetime,
+    ) -> MCPApprovalDecisionResult:
+        if decision not in {"allow_once", "always_allow", "deny"}:
+            raise ValueError("mcp_tool_approval_decision_invalid")
+        candidate_action = self._session.scalar(
+            select(MCPPendingToolActionRow).where(
+                MCPPendingToolActionRow.approval_interrupt_id == interrupt_id
+            )
+        )
+        if candidate_action is None:
+            return MCPApprovalDecisionResult.CONFLICT
+        self._lock_mcp_owner_guard(candidate_action.owner_user_id, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == candidate_action.owner_user_id,
+                UserMCPServerRow.server_id == candidate_action.server_id,
+            )
+            .with_for_update()
+        )
+        intent_id = mcp_no_server_intent_id(
+            candidate_action.task_id, node_id=candidate_action.node_id
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(
+                MCPDispatchResumeOutboxRow.outbox_id
+                == mcp_dispatch_resume_outbox_id(intent_id)
+            )
+            .with_for_update()
+        )
+        action = self._session.scalar(
+            select(MCPPendingToolActionRow)
+            .where(MCPPendingToolActionRow.action_id == candidate_action.action_id)
+            .with_for_update()
+        )
+        branch = self._session.scalar(
+            select(MCPBranchRecordRow)
+            .where(
+                MCPBranchRecordRow.owner_user_id == candidate_action.owner_user_id,
+                MCPBranchRecordRow.task_id == candidate_action.task_id,
+                MCPBranchRecordRow.node_id == candidate_action.node_id,
+            )
+            .with_for_update()
+        )
+        calls = self._session.scalars(
+            select(MCPCallRecordRow)
+            .where(
+                MCPCallRecordRow.task_id == candidate_action.task_id,
+                MCPCallRecordRow.node_id == candidate_action.node_id,
+            )
+            .order_by(MCPCallRecordRow.call_sequence)
+            .with_for_update()
+        ).all()
+        task = self._session.scalar(
+            select(TaskRow)
+            .where(TaskRow.task_id == candidate_action.task_id)
+            .with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == candidate_action.node_id)
+            .with_for_update()
+        )
+        interrupt = self._session.scalar(
+            select(InterruptRow)
+            .where(InterruptRow.interrupt_id == interrupt_id)
+            .with_for_update()
+        )
+        answers = self._session.scalars(
+            select(InterruptAnswerRow)
+            .where(InterruptAnswerRow.interrupt_id == interrupt_id)
+            .order_by(InterruptAnswerRow.interrupt_answer_id)
+            .with_for_update()
+        ).all()
+        grant_id = _mcp_approval_grant_id(candidate_action)
+        grant = self._session.scalar(
+            select(UserMCPToolGrantRow)
+            .where(
+                UserMCPToolGrantRow.owner_user_id == candidate_action.owner_user_id,
+                UserMCPToolGrantRow.server_id == candidate_action.server_id,
+                UserMCPToolGrantRow.tool_name == candidate_action.tool_name,
+                UserMCPToolGrantRow.server_security_version
+                == candidate_action.server_security_version,
+                UserMCPToolGrantRow.input_schema_sha256
+                == candidate_action.input_schema_sha256,
+            )
+            .with_for_update()
+        )
+        accepted_answers = [row for row in answers if row.accepted]
+        if len(accepted_answers) > 1:
+            raise RuntimeError("mcp_approval_answer_authority_corrupt")
+        if accepted_answers:
+            existing_decision = str(
+                (accepted_answers[0].answer_payload or {}).get("mcp_tool_approval")
+                or ""
+            )
+            approved_shape = bool(
+                action is not None
+                and outbox is not None
+                and node is not None
+                and action.status == "approved"
+                and outbox.status == "pending"
+                and outbox.resume_reason == "approval_accepted"
+                and outbox.resume_answer_id
+                == accepted_answers[0].interrupt_answer_id
+                and node.status == str(NodeStatus.READY_TO_RESUME)
+                and (
+                    existing_decision != "always_allow"
+                    or (
+                        grant is not None
+                        and grant.invalidated_at is None
+                    )
+                )
+            )
+            denied_shape = bool(
+                action is not None
+                and outbox is not None
+                and node is not None
+                and action.status == "denied"
+                and outbox.status in {"completed", "aborted"}
+                and outbox.completion_mode
+                in {"stopped_no_call", "stopped_after_call"}
+                and node.status == str(NodeStatus.COMPLETED)
+            )
+            if (
+                action is not None
+                and interrupt is not None
+                and action.accepted_answer_id
+                == accepted_answers[0].interrupt_answer_id
+                and interrupt.status == "answered"
+                and existing_decision == decision
+                and (
+                    (decision == "deny" and denied_shape)
+                    or (decision != "deny" and approved_shape)
+                )
+            ):
+                return MCPApprovalDecisionResult.ALREADY_ACCEPTED
+            return MCPApprovalDecisionResult.CONFLICT
+        if (
+            action is None
+            or interrupt is None
+            or intent is None
+            or outbox is None
+            or branch is None
+            or task is None
+            or node is None
+            or action.status != "waiting_approval"
+            or interrupt.status != "open"
+            or interrupt.reason_code != "mcp_tool_approval_required"
+            or outbox.status != "waiting_approval"
+            or outbox.claim_owner is not None
+            or outbox.claim_token is not None
+            or outbox.lease_expires_at is not None
+            or intent.status not in {"available", "dispatched"}
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status != str(NodeStatus.WAITING_FOR_INPUT)
+            or branch.active_call_ref is not None
+            or any(call.status in {"reserved", "active", "remote_pending"} for call in calls)
+            or answer.interrupt_id != interrupt_id
+            or answer.answer_payload != {"mcp_tool_approval": decision}
+            or not answer.accepted
+        ):
+            return MCPApprovalDecisionResult.CONFLICT
+        if (
+            not _mcp_server_is_available(server)
+            or server is None
+            or int(server.config_version) != action.server_config_version
+            or int(server.security_version) != action.server_security_version
+        ):
+            action.status = "invalidated"
+            action.revision = int(action.revision) + 1
+            action.updated_at = occurred_at
+            action.invalidated_at = occurred_at
+            interrupt.status = "cancelled"
+            interrupt.cancelled_at = occurred_at
+            outbox.status = "pending"
+            outbox.revision = int(outbox.revision) + 1
+            outbox.updated_at = occurred_at
+            branch.status = "ready"
+            branch.updated_at = occurred_at
+            node.status = str(NodeStatus.READY_TO_RESUME)
+            self._session.flush()
+            return MCPApprovalDecisionResult.INVALIDATED
+        self._session.add(
+            InterruptAnswerRow(
+                interrupt_answer_id=answer.interrupt_answer_id,
+                interrupt_id=interrupt_id,
+                answer_payload={"mcp_tool_approval": decision},
+                source_message_id=answer.source_message_id,
+                accepted=True,
+                created_at=answer.created_at or occurred_at,
+                accepted_at=occurred_at,
+            )
+        )
+        interrupt.status = "answered"
+        interrupt.answered_at = occurred_at
+        action.accepted_answer_id = answer.interrupt_answer_id
+        action.revision = int(action.revision) + 1
+        action.updated_at = occurred_at
+        if decision == "deny":
+            action.status = "denied"
+            action.invalidated_at = occurred_at
+            finalized = self._finalize_mcp_dispatch_rows(
+                intent_id=intent_id,
+                outbox_id=outbox.outbox_id,
+                node_id=action.node_id,
+                outcome="stopped",
+                safe_error_code="mcp_tool_approval_denied",
+                expected_outbox_revision=int(outbox.revision),
+                claim_owner=None,
+                claim_token=None,
+                occurred_at=occurred_at,
+                allow_without_claim=True,
+            )
+            if finalized is MCPDispatchFinalizeResult.CONFLICT:
+                raise RuntimeError("mcp_approval_deny_finalize_conflict")
+            self._session.flush()
+            return MCPApprovalDecisionResult.DENIED_FINALIZED
+        action.status = "approved"
+        action.approved_at = occurred_at
+        if decision == "always_allow":
+            if grant is None:
+                self._session.add(
+                    UserMCPToolGrantRow(
+                        grant_id=grant_id,
+                        owner_user_id=action.owner_user_id,
+                        server_id=action.server_id,
+                        tool_name=action.tool_name,
+                        server_security_version=action.server_security_version,
+                        input_schema_sha256=action.input_schema_sha256,
+                        granted_at=occurred_at,
+                        invalidated_at=None,
+                        invalid_reason=None,
+                    )
+                )
+            else:
+                grant.granted_at = occurred_at
+                grant.invalidated_at = None
+                grant.invalid_reason = None
+        outbox.status = "pending"
+        outbox.resume_reason = "approval_accepted"
+        outbox.resume_receipt_id = None
+        outbox.resume_answer_id = answer.interrupt_answer_id
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        branch.status = "ready"
+        branch.updated_at = occurred_at
+        node.status = str(NodeStatus.READY_TO_RESUME)
+        self._session.flush()
+        return MCPApprovalDecisionResult.ACCEPTED
 
     def reclaim_mcp_dispatch_resume_outbox(
         self, outbox_id: str, expected_revision: int, now: datetime
@@ -6961,6 +7504,20 @@ class SQLiteStateRepository:
             .where(TaskNodeRow.node_id == node_id)
             .with_for_update()
         )
+        approval_interrupts = (
+            self._session.scalars(
+                select(InterruptRow)
+                .where(
+                    InterruptRow.task_id == intent.task_id,
+                    InterruptRow.node_id == node_id,
+                    InterruptRow.reason_code == "mcp_tool_approval_required",
+                )
+                .order_by(InterruptRow.interrupt_id)
+                .with_for_update()
+            ).all()
+            if intent is not None
+            else []
+        )
         had_call = any(call.may_have_dispatched for call in calls)
         completion_mode = (
             "completed"
@@ -6985,6 +7542,11 @@ class SQLiteStateRepository:
             and outbox.lease_expires_at is not None
             and outbox.lease_expires_at > occurred_at
         )
+        allowed_outbox_statuses = {"pending", "claimed", "active"}
+        if allow_without_claim:
+            allowed_outbox_statuses.update(
+                {"waiting_approval", "waiting_input", "remote_pending"}
+            )
         if (
             intent is None
             or outbox is None
@@ -6996,7 +7558,7 @@ class SQLiteStateRepository:
             or node.task_id != intent.task_id
             or int(outbox.revision) != expected_outbox_revision
             or intent.status not in {"available", "dispatched"}
-            or outbox.status not in {"pending", "claimed", "active"}
+            or outbox.status not in allowed_outbox_statuses
             or (not allow_without_claim and not claim_valid)
             or branch.active_call_ref is not None
         ):
@@ -7049,6 +7611,10 @@ class SQLiteStateRepository:
                 action.revision = int(action.revision) + 1
                 action.updated_at = occurred_at
                 action.invalidated_at = occurred_at
+        for approval_interrupt in approval_interrupts:
+            if approval_interrupt.status == "open":
+                approval_interrupt.status = "cancelled"
+                approval_interrupt.cancelled_at = occurred_at
         if outcome in {"completed", "stopped"}:
             node.status = str(NodeStatus.COMPLETED)
         elif outcome == "cancelled":
@@ -11002,6 +11568,15 @@ class SQLiteStorage(StoragePort):
             )
         )
 
+    async def get_mcp_pending_tool_action_for_interrupt(
+        self, interrupt_id: str
+    ) -> MCPPendingToolAction | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_pending_tool_action_for_interrupt(
+                interrupt_id
+            )
+        )
+
     async def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]:
@@ -11072,6 +11647,47 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.release_or_recover_mcp_dispatch_claim(
                 outbox_id, expected_revision, now
+            )
+        )
+
+    async def suspend_mcp_for_approval(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        action: MCPPendingToolAction,
+        interrupt: Interrupt,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        occurred_at: datetime,
+    ) -> MCPApprovalSuspendResult:
+        return await self._run(
+            lambda state, collab: state.suspend_mcp_for_approval(
+                intent_id,
+                outbox_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                action,
+                interrupt,
+                payload_snapshot,
+                occurred_at,
+            )
+        )
+
+    async def accept_mcp_tool_approval(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        decision: str,
+        occurred_at: datetime,
+    ) -> MCPApprovalDecisionResult:
+        return await self._run(
+            lambda state, collab: state.accept_mcp_tool_approval(
+                interrupt_id, answer, decision, occurred_at
             )
         )
 

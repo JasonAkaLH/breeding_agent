@@ -22,6 +22,8 @@ from .models import (
     MCPAuditEvent,
     MCPBranchRecord,
     MCPCallRecord,
+    MCPApprovalDecisionResult,
+    MCPApprovalSuspendResult,
     MCPConnectionLease,
     MCPCP7CandidateGuard,
     MCPCP7ReadyEpochEvent,
@@ -374,6 +376,10 @@ class StoragePort(Protocol):
         self, owner_user_id: str, task_id: str, node_id: str
     ) -> MCPPendingToolAction | None: ...
 
+    async def get_mcp_pending_tool_action_for_interrupt(
+        self, interrupt_id: str
+    ) -> MCPPendingToolAction | None: ...
+
     async def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]: ...
@@ -421,6 +427,28 @@ class StoragePort(Protocol):
         expected_revision: int,
         now: datetime,
     ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def suspend_mcp_for_approval(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        action: MCPPendingToolAction,
+        interrupt: Interrupt,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        occurred_at: datetime,
+    ) -> MCPApprovalSuspendResult: ...
+
+    async def accept_mcp_tool_approval(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        decision: str,
+        occurred_at: datetime,
+    ) -> MCPApprovalDecisionResult: ...
 
     async def admit_approved_mcp_action(
         self,

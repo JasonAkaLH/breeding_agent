@@ -290,6 +290,20 @@ class MCPDispatchFinalizeResult(StrEnum):
     CONFLICT = "conflict"
 
 
+class MCPApprovalSuspendResult(StrEnum):
+    SUSPENDED = "suspended"
+    ALREADY_SUSPENDED = "already_suspended"
+    CONFLICT = "conflict"
+
+
+class MCPApprovalDecisionResult(StrEnum):
+    ACCEPTED = "accepted"
+    ALREADY_ACCEPTED = "already_accepted"
+    DENIED_FINALIZED = "denied_finalized"
+    INVALIDATED = "invalidated"
+    CONFLICT = "conflict"
+
+
 class MCPLegacyRetirementConvergenceResult(StrEnum):
     NOT_APPLICABLE = "not_applicable"
     CONVERGED = "converged"

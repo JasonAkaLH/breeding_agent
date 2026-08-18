@@ -11,10 +11,14 @@ from pathlib import Path
 from src.core.enums import NodeStatus, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import (
     Conversation,
+    Interrupt,
+    InterruptAnswer,
     MCPBranchRecord,
     MCPCallRecord,
     MCPDurableResultSnapshot,
     MCPPendingActionPayloadSnapshot,
+    MCPPendingToolAction,
+    MCPPendingToolActionStatus,
     MCPTerminalCandidateSnapshot,
     MCPValidatedTerminalResultCandidate,
     MCPTerminalState,
@@ -28,6 +32,12 @@ from src.integrations.mcp.cp7_artifacts import (
     mcp_no_server_intent_id,
     mcp_terminal_candidate_id,
 )
+from src.integrations.master_key import MasterKeyDeriver, MasterKeyDomain
+from src.integrations.mcp.pending_action_payloads import (
+    MCPPendingActionPayloadCipher,
+    MCPPendingActionPayloadIdentity,
+    MCPPendingActionPayloadStore,
+)
 from src.storage.sqlite import (
     SQLiteStorage,
     bootstrap_sqlite_database,
@@ -38,6 +48,7 @@ from src.storage.sqlite.models import (
     MCPDurableResultLifecycleRow,
     MCPPendingToolActionRow,
     MCPTerminalCandidateLifecycleRow,
+    UserMCPToolGrantRow,
 )
 
 
@@ -261,9 +272,347 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(admitted)
         return await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
 
+    def _approval_candidate(self):
+        interrupt_id = "mcp-approval-action-1"
+        action = MCPPendingToolAction(
+            action_id="action-1",
+            owner_user_id="alice",
+            conversation_id=self.task.conversation_id,
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            server_id=self.server.server_id,
+            tool_name="lookup",
+            arguments_sha256=self.snapshot.arguments_sha256,
+            approval_fingerprint="sha256:approval",
+            arguments_payload_ref=self.snapshot.arguments_payload_ref,
+            payload_file_sha256=self.snapshot.payload_file_sha256,
+            payload_size_bytes=self.snapshot.payload_size_bytes,
+            encryption_version=self.snapshot.encryption_version,
+            server_config_version=self.server.config_version,
+            server_security_version=self.server.security_version,
+            input_schema_sha256="sha256:schema",
+            status=MCPPendingToolActionStatus.WAITING_APPROVAL,
+            revision=0,
+            created_at=NOW,
+            updated_at=NOW,
+            approval_interrupt_id=interrupt_id,
+        )
+        interrupt = Interrupt(
+            interrupt_id=interrupt_id,
+            conversation_id=self.task.conversation_id,
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            source_agent="mcp.dispatch",
+            source_message_id=self.task.root_message_id,
+            question="Allow Server to call lookup?",
+            reason_code="mcp_tool_approval_required",
+            required_fields={
+                "mcp_tool_approval": {
+                    "type": "string",
+                    "enum": ["allow_once", "always_allow", "deny"],
+                },
+                "approval_ref": action.approval_fingerprint,
+                "server_id": action.server_id,
+                "tool_name": action.tool_name,
+            },
+            created_at=NOW,
+        )
+        return action, interrupt
+
+    async def _suspend_for_approval(self):
+        with self.sessions() as session:
+            action_row = session.get(MCPPendingToolActionRow, "action-1")
+            grant_row = session.get(UserMCPToolGrantRow, "grant-1")
+            if action_row is not None:
+                session.delete(action_row)
+            if grant_row is not None:
+                session.delete(grant_row)
+            session.commit()
+        claimed = await self._claim()
+        intent = await self.storage.get_mcp_no_server_intent(self.intent_id)
+        action, interrupt = self._approval_candidate()
+        suspended = await self.storage.suspend_mcp_for_approval(
+            self.intent_id,
+            self.outbox_id,
+            intent.revision,
+            claimed.revision,
+            "worker",
+            "token",
+            action,
+            interrupt,
+            self.snapshot,
+            NOW,
+        )
+        self.assertEqual(str(suspended), "suspended")
+        return action, interrupt
+
+    def _approval_answer(self, interrupt_id: str, decision: str, suffix: str = "1"):
+        return InterruptAnswer(
+            interrupt_answer_id=f"answer-{suffix}",
+            interrupt_id=interrupt_id,
+            answer_payload={"mcp_tool_approval": decision},
+            source_message_id=f"message-answer-{suffix}",
+            accepted=True,
+            created_at=NOW + timedelta(seconds=1),
+            accepted_at=NOW + timedelta(seconds=1),
+        )
+
     async def test_latest_approved_action_read_is_closed_to_task_node_owner(self) -> None:
         action = await self.storage.get_latest_approved_mcp_tool_action(
             "alice", self.task.task_id, self.node.node_id
+        )
+
+    async def test_suspend_and_allow_once_commit_action_interrupt_answer_and_cursor(self) -> None:
+        action, interrupt = await self._suspend_for_approval()
+        waiting_outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+            self.outbox_id
+        )
+        self.assertEqual(str(waiting_outbox.status), "waiting_approval")
+        self.assertIsNone(waiting_outbox.claim_token)
+        self.assertEqual(waiting_outbox.approval_round_total, 1)
+        self.assertEqual(
+            str((await self.storage.get_task_node(self.node.node_id)).status),
+            "waiting_for_input",
+        )
+        self.assertEqual(
+            (
+                await self.storage.get_mcp_pending_tool_action_for_interrupt(
+                    interrupt.interrupt_id
+                )
+            ).action_id,
+            action.action_id,
+        )
+
+        accepted = await self.storage.accept_mcp_tool_approval(
+            interrupt.interrupt_id,
+            self._approval_answer(interrupt.interrupt_id, "allow_once"),
+            "allow_once",
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(str(accepted), "accepted")
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        saved_action = await self.storage.get_mcp_pending_tool_action(action.action_id)
+        saved_interrupt = await self.storage.get_interrupt(interrupt.interrupt_id)
+        answers = await self.storage.list_interrupt_answers(interrupt.interrupt_id)
+        self.assertEqual(str(outbox.status), "pending")
+        self.assertEqual(str(outbox.resume_reason), "approval_accepted")
+        self.assertEqual(outbox.resume_answer_id, "answer-1")
+        self.assertEqual(str(saved_action.status), "approved")
+        self.assertEqual(saved_action.accepted_answer_id, "answer-1")
+        self.assertEqual(str(saved_interrupt.status), "answered")
+        self.assertEqual(len(answers), 1)
+        self.assertTrue(answers[0].accepted)
+        self.assertEqual(
+            str((await self.storage.get_task_node(self.node.node_id)).status),
+            "ready_to_resume",
+        )
+
+    async def test_suspend_revalidates_real_held_payload_descriptor(self) -> None:
+        with self.sessions() as session:
+            session.delete(session.get(MCPPendingToolActionRow, "action-1"))
+            session.delete(session.get(UserMCPToolGrantRow, "grant-1"))
+            session.commit()
+        payload_store = MCPPendingActionPayloadStore(
+            Path(self.temporary.name) / "pending-action-payloads",
+            cipher=MCPPendingActionPayloadCipher(
+                MasterKeyDeriver.from_bytes(b"p" * 32).derive(
+                    MasterKeyDomain.MCP_RECOVERY
+                )
+            ),
+            disk_available=lambda _path: True,
+        )
+        real_storage = SQLiteStorage(
+            self.sessions,
+            mcp_pending_action_payload_reader=payload_store,
+            mcp_terminal_candidate_snapshot_reader=self.candidate_reader,
+            mcp_durable_result_snapshot_reader=self.result_reader,
+        )
+        identity = MCPPendingActionPayloadIdentity(
+            action_id="action-1",
+            owner_user_id="alice",
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            server_id=self.server.server_id,
+            tool_name="lookup",
+            server_config_version=self.server.config_version,
+            server_security_version=self.server.security_version,
+            input_schema_sha256="sha256:schema",
+            arguments_sha256="sha256:arguments",
+        )
+        snapshot = await payload_store.seal(identity, {"query": "alice"})
+        action, interrupt = self._approval_candidate()
+        action = replace(
+            action,
+            arguments_payload_ref=snapshot.arguments_payload_ref,
+            payload_file_sha256=snapshot.payload_file_sha256,
+            payload_size_bytes=snapshot.payload_size_bytes,
+        )
+        claimed = await real_storage.claim_mcp_dispatch(
+            self.outbox_id,
+            "worker",
+            "token",
+            (await real_storage.get_mcp_dispatch_resume_outbox(self.outbox_id)).revision,
+            NOW,
+            NOW + timedelta(seconds=30),
+        )
+        intent = await real_storage.get_mcp_no_server_intent(self.intent_id)
+
+        async with payload_store.open_validated(
+            identity,
+            snapshot.arguments_payload_ref,
+            expected_snapshot=snapshot,
+        ) as opened:
+            suspended = await real_storage.suspend_mcp_for_approval(
+                self.intent_id,
+                self.outbox_id,
+                intent.revision,
+                claimed.revision,
+                "worker",
+                "token",
+                action,
+                interrupt,
+                opened.snapshot,
+                NOW,
+            )
+
+        self.assertEqual(str(suspended), "suspended")
+
+    async def test_always_allow_creates_grant_and_double_answer_is_single_winner(self) -> None:
+        action, interrupt = await self._suspend_for_approval()
+        results = await asyncio.gather(
+            self.storage.accept_mcp_tool_approval(
+                interrupt.interrupt_id,
+                self._approval_answer(
+                    interrupt.interrupt_id, "always_allow", "first"
+                ),
+                "always_allow",
+                NOW + timedelta(seconds=1),
+            ),
+            self.storage.accept_mcp_tool_approval(
+                interrupt.interrupt_id,
+                self._approval_answer(
+                    interrupt.interrupt_id, "always_allow", "second"
+                ),
+                "always_allow",
+                NOW + timedelta(seconds=1),
+            ),
+        )
+
+        self.assertEqual(
+            {str(result) for result in results},
+            {"accepted", "already_accepted"},
+        )
+        self.assertEqual(
+            len(await self.storage.list_interrupt_answers(interrupt.interrupt_id)),
+            1,
+        )
+        grant = await self.storage.get_valid_user_mcp_tool_grant(
+            "alice",
+            action.server_id,
+            action.tool_name,
+            server_security_version=action.server_security_version,
+            input_schema_sha256=action.input_schema_sha256,
+        )
+        self.assertIsNotNone(grant)
+
+    async def test_deny_finalizes_without_call_and_does_not_create_grant(self) -> None:
+        action, interrupt = await self._suspend_for_approval()
+
+        denied = await self.storage.accept_mcp_tool_approval(
+            interrupt.interrupt_id,
+            self._approval_answer(interrupt.interrupt_id, "deny"),
+            "deny",
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(str(denied), "denied_finalized")
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        self.assertEqual(str(outbox.status), "aborted")
+        self.assertEqual(outbox.completion_mode, "stopped_no_call")
+        self.assertEqual(
+            str(
+                (
+                    await self.storage.get_mcp_pending_tool_action(
+                        action.action_id
+                    )
+                ).status
+            ),
+            "denied",
+        )
+        self.assertIsNone(
+            await self.storage.get_valid_user_mcp_tool_grant(
+                "alice",
+                action.server_id,
+                action.tool_name,
+                server_security_version=action.server_security_version,
+                input_schema_sha256=action.input_schema_sha256,
+            )
+        )
+
+    async def test_version_drift_invalidates_approval_without_accepting_answer(self) -> None:
+        action, interrupt = await self._suspend_for_approval()
+        updated = await self.storage.update_user_mcp_server(
+            "alice",
+            self.server.server_id,
+            changes={"routing_description": "changed"},
+            security_sensitive=True,
+            updated_at=NOW + timedelta(milliseconds=500),
+        )
+        self.assertGreater(updated.security_version, self.server.security_version)
+
+        result = await self.storage.accept_mcp_tool_approval(
+            interrupt.interrupt_id,
+            self._approval_answer(interrupt.interrupt_id, "allow_once"),
+            "allow_once",
+            NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(str(result), "invalidated")
+        self.assertEqual(
+            str(
+                (
+                    await self.storage.get_mcp_pending_tool_action(
+                        action.action_id
+                    )
+                ).status
+            ),
+            "invalidated",
+        )
+        self.assertEqual(
+            await self.storage.list_interrupt_answers(interrupt.interrupt_id), []
+        )
+
+    async def test_cancel_then_answer_cannot_resurrect_waiting_approval(self) -> None:
+        action, interrupt = await self._suspend_for_approval()
+        cancelled = await self.storage.cancel_mcp_dispatch(
+            self.intent_id,
+            self.outbox_id,
+            self.node.node_id,
+            NOW + timedelta(seconds=1),
+        )
+        result = await self.storage.accept_mcp_tool_approval(
+            interrupt.interrupt_id,
+            self._approval_answer(interrupt.interrupt_id, "allow_once"),
+            "allow_once",
+            NOW + timedelta(seconds=2),
+        )
+
+        self.assertEqual(str(cancelled), "finalized")
+        self.assertEqual(str(result), "conflict")
+        self.assertEqual(
+            str((await self.storage.get_interrupt(interrupt.interrupt_id)).status),
+            "cancelled",
+        )
+        self.assertEqual(
+            str(
+                (
+                    await self.storage.get_mcp_pending_tool_action(
+                        action.action_id
+                    )
+                ).status
+            ),
+            "invalidated",
         )
 
         self.assertIsNotNone(action)

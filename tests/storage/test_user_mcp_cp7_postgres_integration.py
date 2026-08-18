@@ -25,6 +25,9 @@ class UserMCPCP7PostgresContractTest(unittest.TestCase):
             "MCPDurableResultLifecycleRow",
             "TaskRow",
             "TaskNodeRow",
+            "InterruptRow",
+            "InterruptAnswerRow",
+            "UserMCPToolGrantRow",
         )
         positions = [source.index(name) for name in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -39,6 +42,8 @@ class UserMCPCP7PostgresContractTest(unittest.TestCase):
             "claim_mcp_dispatch",
             "renew_mcp_dispatch_claim",
             "release_or_recover_mcp_dispatch_claim",
+            "suspend_mcp_for_approval",
+            "accept_mcp_tool_approval",
             "admit_mcp_tool_call",
             "admit_approved_mcp_action",
             "commit_mcp_call_terminal",

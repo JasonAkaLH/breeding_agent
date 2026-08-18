@@ -13,6 +13,10 @@ from sqlalchemy.exc import DBAPIError
 from src.core.enums import ConversationStatus
 from src.core.models import (
     Conversation,
+    Interrupt,
+    InterruptAnswer,
+    MCPApprovalDecisionResult,
+    MCPApprovalSuspendResult,
     MCPCallRecord,
     MCPDispatchResumeOutbox,
     MCPDispatchFinalizeResult,
@@ -25,6 +29,8 @@ from src.core.models import (
     MCPLegacyRetirementEvidence,
     MCPNoServerConvergenceResult,
     MCPNoServerConvergenceReceipt,
+    MCPPendingActionPayloadSnapshot,
+    MCPPendingToolAction,
     MCPPendingActionPayloadSnapshot,
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
@@ -51,6 +57,8 @@ from src.core.models import (
 from src.integrations.mcp.rollout_evidence import is_exact_mcp_metric_bucket_window
 from src.storage.sqlite.models import (
     ConversationRow,
+    InterruptAnswerRow,
+    InterruptRow,
     MCPBranchRecordRow,
     MCPCallRecordRow,
     MCPDispatchResumeOutboxRow,
@@ -63,12 +71,17 @@ from src.storage.sqlite.models import (
     TaskNodeRow,
     TaskRow,
     UserMCPOwnerMutationGuardRow,
+    UserMCPToolGrantRow,
     MCPRemoteTaskBindingRow,
     UserMCPHealthAttemptRow,
     UserMCPScopeLeaseRow,
     UserMCPServerRow,
 )
-from src.integrations.mcp.cp7_artifacts import canonical_sha256
+from src.integrations.mcp.cp7_artifacts import (
+    canonical_sha256,
+    mcp_dispatch_resume_outbox_id,
+    mcp_no_server_intent_id,
+)
 from src.storage.sqlite.repositories import (
     SQLiteStateRepository,
     SQLiteStorage,
@@ -147,6 +160,9 @@ class PostgreSQLStorage(SQLiteStorage):
         result_ref: str | None = None,
         task_id: str | None = None,
         node_id: str | None = None,
+        interrupt_id: str | None = None,
+        answer_id: str | None = None,
+        grant_scope: tuple[str, int, str] | None = None,
     ) -> _T:
         """Run CP7 authority under its global PostgreSQL row-lock order."""
 
@@ -258,6 +274,32 @@ class PostgreSQLStorage(SQLiteStorage):
                 session.scalar(
                     select(TaskNodeRow.node_id)
                     .where(TaskNodeRow.node_id == node_id)
+                    .with_for_update()
+                )
+            if interrupt_id is not None:
+                session.scalar(
+                    select(InterruptRow.interrupt_id)
+                    .where(InterruptRow.interrupt_id == interrupt_id)
+                    .with_for_update()
+                )
+            if answer_id is not None:
+                session.scalar(
+                    select(InterruptAnswerRow.interrupt_answer_id)
+                    .where(InterruptAnswerRow.interrupt_answer_id == answer_id)
+                    .with_for_update()
+                )
+            if grant_scope is not None and server_id is not None:
+                tool_name, security_version, schema_sha256 = grant_scope
+                session.scalar(
+                    select(UserMCPToolGrantRow.grant_id)
+                    .where(
+                        UserMCPToolGrantRow.owner_user_id == owner_user_id,
+                        UserMCPToolGrantRow.server_id == server_id,
+                        UserMCPToolGrantRow.tool_name == tool_name,
+                        UserMCPToolGrantRow.server_security_version
+                        == security_version,
+                        UserMCPToolGrantRow.input_schema_sha256 == schema_sha256,
+                    )
                     .with_for_update()
                 )
             result = operation(
@@ -613,6 +655,122 @@ class PostgreSQLStorage(SQLiteStorage):
             if str(exc) == "mcp_dispatch_resume_outbox_missing":
                 return None
             raise
+
+    async def suspend_mcp_for_approval(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        action: MCPPendingToolAction,
+        interrupt: Interrupt,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        occurred_at: datetime,
+    ) -> MCPApprovalSuspendResult:
+        with self._session_factory() as session:
+            branch = session.scalar(
+                select(MCPBranchRecordRow).where(
+                    MCPBranchRecordRow.owner_user_id == action.owner_user_id,
+                    MCPBranchRecordRow.task_id == action.task_id,
+                    MCPBranchRecordRow.node_id == action.node_id,
+                )
+            )
+            branch_id = None if branch is None else branch.branch_id
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=action.owner_user_id,
+            server_id=action.server_id,
+            intent_id=intent_id,
+            outbox_id=outbox_id,
+            pending_action_id=action.action_id,
+            branch_id=branch_id,
+            task_id=action.task_id,
+            node_id=action.node_id,
+            interrupt_id=interrupt.interrupt_id,
+            grant_scope=(
+                action.tool_name,
+                action.server_security_version,
+                action.input_schema_sha256,
+            ),
+            operation=lambda state: state.suspend_mcp_for_approval(
+                intent_id,
+                outbox_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                claim_owner,
+                claim_token,
+                action,
+                interrupt,
+                payload_snapshot,
+                occurred_at,
+            ),
+        )
+
+    async def accept_mcp_tool_approval(
+        self,
+        interrupt_id: str,
+        answer: InterruptAnswer,
+        decision: str,
+        occurred_at: datetime,
+    ) -> MCPApprovalDecisionResult:
+        with self._session_factory() as session:
+            action = session.scalar(
+                select(MCPPendingToolActionRow).where(
+                    MCPPendingToolActionRow.approval_interrupt_id == interrupt_id
+                )
+            )
+            if action is None:
+                return MCPApprovalDecisionResult.CONFLICT
+            branch = session.scalar(
+                select(MCPBranchRecordRow).where(
+                    MCPBranchRecordRow.owner_user_id == action.owner_user_id,
+                    MCPBranchRecordRow.task_id == action.task_id,
+                    MCPBranchRecordRow.node_id == action.node_id,
+                )
+            )
+            values = (
+                action.owner_user_id,
+                action.server_id,
+                mcp_no_server_intent_id(action.task_id, node_id=action.node_id),
+                action.action_id,
+                action.task_id,
+                action.node_id,
+                action.tool_name,
+                int(action.server_security_version),
+                action.input_schema_sha256,
+                None if branch is None else branch.branch_id,
+            )
+        (
+            owner_user_id,
+            server_id,
+            intent_id,
+            action_id,
+            task_id,
+            node_id,
+            tool_name,
+            security_version,
+            schema_sha256,
+            branch_id,
+        ) = values
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=owner_user_id,
+            server_id=server_id,
+            intent_id=intent_id,
+            outbox_id=mcp_dispatch_resume_outbox_id(intent_id),
+            pending_action_id=action_id,
+            branch_id=branch_id,
+            task_id=task_id,
+            node_id=node_id,
+            interrupt_id=interrupt_id,
+            answer_id=answer.interrupt_answer_id,
+            grant_scope=(tool_name, security_version, schema_sha256),
+            operation=lambda state: state.accept_mcp_tool_approval(
+                interrupt_id, answer, decision, occurred_at
+            ),
+        )
 
     async def admit_mcp_tool_call(
         self,
