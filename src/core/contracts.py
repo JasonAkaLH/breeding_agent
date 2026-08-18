@@ -39,6 +39,8 @@ from .models import (
     MCPNoServerConvergenceResult,
     MCPNoServerConvergenceReceipt,
     MCPNoServerIntent,
+    MCPPendingActionPayloadSnapshot,
+    MCPPendingToolAction,
     MCPRemoteTaskBinding,
     MCPRemoteTaskOutbox,
     MCPRolloutBlockResolution,
@@ -362,6 +364,10 @@ class StoragePort(Protocol):
         self, outbox_id: str
     ) -> MCPDispatchResumeOutbox | None: ...
 
+    async def get_mcp_pending_tool_action(
+        self, action_id: str
+    ) -> MCPPendingToolAction | None: ...
+
     async def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]: ...
@@ -420,6 +426,7 @@ class StoragePort(Protocol):
         expected_action_revision: int,
         claim_owner: str,
         claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
         record: MCPCallRecord,
         occurred_at: datetime,
         *,

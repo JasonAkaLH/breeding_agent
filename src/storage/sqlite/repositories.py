@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import os
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
@@ -71,6 +72,9 @@ from src.core.models import (
     MCPNoServerConvergenceResult,
     MCPNoServerConvergenceReceipt,
     MCPNoServerIntent,
+    MCPPendingActionPayloadSnapshot,
+    MCPPendingToolAction,
+    MCPPendingToolActionStatus,
     MCPNoServerIntentStatus,
     MCPNoServerIntentTrigger,
     MCPTerminalResultCommitResult,
@@ -147,6 +151,7 @@ from src.storage.runtime_sidecar_shadow import (
     normalize_runtime_sidecar_response,
     record_runtime_sidecar_shadow_write,
 )
+from src.storage.mcp_dispatch_aggregate import PendingActionPayloadReader
 
 from .base import build_task_edge_id
 from .models import (
@@ -172,6 +177,7 @@ from .models import (
     MCPDispatchResumeOutboxRow,
     MCPExecutionTerminalProjectionRow,
     MCPNoServerIntentRow,
+    MCPPendingToolActionRow,
     MCPNoServerConvergenceReceiptRow,
     MCPLegacyRetirementEvidenceRow,
     MCPLegacyRetirementReceiptRow,
@@ -523,6 +529,38 @@ def _row_to_mcp_dispatch_resume(
         resume_answer_id=row.resume_answer_id,
         selector_step_total=int(row.selector_step_total),
         approval_round_total=int(row.approval_round_total),
+    )
+
+
+def _row_to_mcp_pending_action(
+    row: MCPPendingToolActionRow,
+) -> MCPPendingToolAction:
+    return MCPPendingToolAction(
+        action_id=row.action_id,
+        owner_user_id=row.owner_user_id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        node_id=row.node_id,
+        server_id=row.server_id,
+        tool_name=row.tool_name,
+        arguments_sha256=row.arguments_sha256,
+        approval_fingerprint=row.approval_fingerprint,
+        arguments_payload_ref=row.arguments_payload_ref,
+        payload_file_sha256=row.payload_file_sha256,
+        payload_size_bytes=int(row.payload_size_bytes),
+        encryption_version=int(row.encryption_version),
+        server_config_version=int(row.server_config_version),
+        server_security_version=int(row.server_security_version),
+        input_schema_sha256=row.input_schema_sha256,
+        status=MCPPendingToolActionStatus(row.status),
+        revision=int(row.revision),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        approved_at=row.approved_at,
+        consumed_at=row.consumed_at,
+        invalidated_at=row.invalidated_at,
+        approval_interrupt_id=row.approval_interrupt_id,
+        accepted_answer_id=row.accepted_answer_id,
     )
 
 
@@ -1280,6 +1318,29 @@ def _require_exact_row(row: object, expected: Mapping[str, object], error: str) 
         raise RuntimeError(error)
 
 
+def _pending_snapshot_matches_action(
+    snapshot: MCPPendingActionPayloadSnapshot,
+    action: MCPPendingToolActionRow,
+) -> bool:
+    return (
+        snapshot.action_id == action.action_id
+        and snapshot.owner_user_id == action.owner_user_id
+        and snapshot.task_id == action.task_id
+        and snapshot.node_id == action.node_id
+        and snapshot.server_id == action.server_id
+        and snapshot.tool_name == action.tool_name
+        and snapshot.arguments_sha256 == action.arguments_sha256
+        and snapshot.arguments_payload_ref == action.arguments_payload_ref
+        and snapshot.payload_file_sha256 == action.payload_file_sha256
+        and snapshot.payload_size_bytes == int(action.payload_size_bytes)
+        and snapshot.encryption_version == int(action.encryption_version)
+        and snapshot.server_config_version == int(action.server_config_version)
+        and snapshot.server_security_version
+        == int(action.server_security_version)
+        and snapshot.input_schema_sha256 == action.input_schema_sha256
+    )
+
+
 def _validated_mcp_task_assignment(
     *,
     execution_mode: Any,
@@ -1682,11 +1743,13 @@ class SQLiteStateRepository:
             [str], MCPValidatedTerminalResultCandidate | None
         ]
         | None = None,
+        pending_action_payload_reader: PendingActionPayloadReader | None = None,
     ) -> None:
         self._session = session
         self._task_authority_mode = task_authority_mode
         self._terminal_candidate_reader = terminal_candidate_reader
         self._terminal_candidate_resolver = terminal_candidate_resolver
+        self._pending_action_payload_reader = pending_action_payload_reader
 
     def _lock_mcp_owner_guard(
         self, owner_user_id: str, occurred_at: datetime
@@ -4668,6 +4731,12 @@ class SQLiteStateRepository:
         row = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
         return None if row is None else _row_to_mcp_dispatch_resume(row)
 
+    def get_mcp_pending_tool_action(
+        self, action_id: str
+    ) -> MCPPendingToolAction | None:
+        row = self._session.get(MCPPendingToolActionRow, action_id)
+        return None if row is None else _row_to_mcp_pending_action(row)
+
     def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]:
@@ -4710,6 +4779,167 @@ class SQLiteStateRepository:
         row.claim_owner = claim_owner
         row.claim_token = claim_token
         row.lease_expires_at = lease_expires_at
+        row.revision = int(row.revision) + 1
+        row.updated_at = now
+        self._session.flush()
+        return _row_to_mcp_dispatch_resume(row)
+
+    def claim_mcp_dispatch(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        if (
+            not claim_owner
+            or not claim_token
+            or lease_expires_at != now + timedelta(seconds=30)
+        ):
+            raise ValueError("mcp_dispatch_claim_lease_invalid")
+        candidate = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        if candidate is None:
+            return None
+        self._lock_mcp_owner_guard(candidate.owner_user_id, now)
+        self._session.scalar(
+            select(UserMCPServerRow.server_id)
+            .where(
+                UserMCPServerRow.owner_user_id == candidate.owner_user_id,
+                UserMCPServerRow.server_id == candidate.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == candidate.intent_id)
+            .with_for_update()
+        )
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or intent is None
+            or row.status != "pending"
+            or int(row.revision) != expected_revision
+            or intent.status not in {"available", "dispatched"}
+        ):
+            return None
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == row.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == row.node_id)
+            .with_for_update()
+        )
+        if (
+            task is None
+            or node is None
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or node.status in _TERMINAL_NODE_STATUSES
+        ):
+            return None
+        row.status = "claimed"
+        row.claim_owner = claim_owner
+        row.claim_token = claim_token
+        row.lease_expires_at = lease_expires_at
+        row.revision = int(row.revision) + 1
+        row.updated_at = now
+        self._session.flush()
+        return _row_to_mcp_dispatch_resume(row)
+
+    def renew_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        if (
+            not claim_owner
+            or not claim_token
+            or lease_expires_at != now + timedelta(seconds=30)
+        ):
+            raise ValueError("mcp_dispatch_claim_lease_invalid")
+        candidate = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        if candidate is None:
+            return None
+        self._lock_mcp_owner_guard(candidate.owner_user_id, now)
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status not in {"claimed", "active"}
+            or row.claim_owner != claim_owner
+            or row.claim_token != claim_token
+            or int(row.revision) != expected_revision
+            or row.lease_expires_at is None
+            or row.lease_expires_at <= now
+            or row.updated_at is None
+            or now > row.updated_at + timedelta(seconds=10)
+        ):
+            return None
+        row.lease_expires_at = lease_expires_at
+        row.revision = int(row.revision) + 1
+        row.updated_at = now
+        self._session.flush()
+        return _row_to_mcp_dispatch_resume(row)
+
+    def release_or_recover_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        expected_revision: int,
+        now: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        candidate = self._session.get(MCPDispatchResumeOutboxRow, outbox_id)
+        if candidate is None:
+            return None
+        self._lock_mcp_owner_guard(candidate.owner_user_id, now)
+        row = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.status not in {"claimed", "active"}
+            or int(row.revision) != expected_revision
+            or row.lease_expires_at is None
+            or row.lease_expires_at > now
+        ):
+            return None
+        if row.status == "active":
+            calls = self._session.scalars(
+                select(MCPCallRecordRow)
+                .where(MCPCallRecordRow.task_id == row.task_id)
+                .order_by(MCPCallRecordRow.call_sequence)
+                .with_for_update()
+            ).all()
+            for call in calls:
+                if not call.may_have_dispatched:
+                    continue
+                receipt = self._session.scalar(
+                    select(MCPTerminalResultReceiptRow.result_receipt_id)
+                    .where(MCPTerminalResultReceiptRow.call_id == call.call_ref)
+                    .with_for_update()
+                )
+                if receipt is None:
+                    return None
+        row.status = "pending"
+        row.claim_owner = None
+        row.claim_token = None
+        row.lease_expires_at = None
         row.revision = int(row.revision) + 1
         row.updated_at = now
         self._session.flush()
@@ -4865,6 +5095,185 @@ class SQLiteStateRepository:
         outbox.status = "active"
         outbox.revision = int(outbox.revision) + 1
         outbox.updated_at = occurred_at
+        self._session.flush()
+        return True
+
+    def admit_approved_mcp_action(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        action_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        expected_action_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool:
+        candidate_action = self._session.get(MCPPendingToolActionRow, action_id)
+        if candidate_action is None:
+            return False
+        self._lock_mcp_owner_guard(candidate_action.owner_user_id, occurred_at)
+        server = self._session.scalar(
+            select(UserMCPServerRow)
+            .where(
+                UserMCPServerRow.owner_user_id == candidate_action.owner_user_id,
+                UserMCPServerRow.server_id == candidate_action.server_id,
+            )
+            .with_for_update()
+        )
+        intent = self._session.scalar(
+            select(MCPNoServerIntentRow)
+            .where(MCPNoServerIntentRow.intent_id == intent_id)
+            .with_for_update()
+        )
+        outbox = self._session.scalar(
+            select(MCPDispatchResumeOutboxRow)
+            .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
+            .with_for_update()
+        )
+        action = self._session.scalar(
+            select(MCPPendingToolActionRow)
+            .where(MCPPendingToolActionRow.action_id == action_id)
+            .with_for_update()
+        )
+        branch = self._session.scalar(
+            select(MCPBranchRecordRow)
+            .where(MCPBranchRecordRow.branch_id == record.branch_id)
+            .with_for_update()
+        )
+        task = self._session.scalar(
+            select(TaskRow).where(TaskRow.task_id == record.task_id).with_for_update()
+        )
+        node = self._session.scalar(
+            select(TaskNodeRow)
+            .where(TaskNodeRow.node_id == record.node_id)
+            .with_for_update()
+        )
+        if (
+            server is None
+            or intent is None
+            or outbox is None
+            or action is None
+            or branch is None
+            or task is None
+            or node is None
+            or action.status != "approved"
+            or int(action.revision) != expected_action_revision
+            or int(intent.revision) != expected_intent_revision
+            or int(outbox.revision) != expected_outbox_revision
+            or outbox.status != "claimed"
+            or outbox.claim_owner != claim_owner
+            or outbox.claim_token != claim_token
+            or outbox.lease_expires_at is None
+            or outbox.lease_expires_at <= occurred_at
+            or intent.status not in {"available", "dispatched"}
+            or intent.intent_id != outbox.intent_id
+            or action.owner_user_id != outbox.owner_user_id
+            or action.task_id != outbox.task_id
+            or action.node_id != outbox.node_id
+            or action.server_id != outbox.server_id
+            or task.status != str(TaskStatus.RUNNING)
+            or task.cancel_requested_at is not None
+            or task.mcp_execution_mode != "user_scoped"
+            or bool(task.mcp_shadow_enabled)
+            or task.mcp_rollout_mode != "enforce"
+            or task.mcp_route_reason_code != "enforce_selected"
+            or node.status
+            not in {
+                str(NodeStatus.RUNNING),
+                str(NodeStatus.READY_TO_RESUME),
+            }
+            or branch.owner_user_id != action.owner_user_id
+            or branch.task_id != action.task_id
+            or branch.node_id != action.node_id
+            or branch.active_call_ref is not None
+            or int(branch.tool_call_count) >= int(branch.max_tool_calls)
+            or not _mcp_server_is_available(server)
+            or int(server.config_version) != action.server_config_version
+            or int(server.security_version) != action.server_security_version
+            or record.pending_action_id != action_id
+            or record.owner_user_id != action.owner_user_id
+            or record.task_id != action.task_id
+            or record.node_id != action.node_id
+            or record.server_id != action.server_id
+            or record.tool_name != action.tool_name
+            or record.arguments_sha256 != action.arguments_sha256
+            or record.server_config_version != action.server_config_version
+            or record.server_security_version != action.server_security_version
+            or record.input_schema_sha256 != action.input_schema_sha256
+        ):
+            return False
+        if self._pending_action_payload_reader is None:
+            raise RuntimeError("mcp_pending_action_payload_reader_unavailable")
+        revalidated = self._pending_action_payload_reader.revalidate(
+            payload_snapshot
+        )
+        if revalidated != payload_snapshot or not _pending_snapshot_matches_action(
+            payload_snapshot, action
+        ):
+            raise RuntimeError("mcp_pending_action_payload_binding_conflict")
+        if (
+            payload_snapshot.file_device < 0
+            or payload_snapshot.file_inode <= 0
+            or payload_snapshot.file_mode != 0o600
+            or payload_snapshot.file_owner_uid != os.getuid()
+        ):
+            raise RuntimeError("mcp_pending_action_payload_file_identity_invalid")
+        approval_proven = False
+        if action.accepted_answer_id is not None:
+            answer = self._session.scalar(
+                select(InterruptAnswerRow)
+                .where(
+                    InterruptAnswerRow.interrupt_answer_id
+                    == action.accepted_answer_id
+                )
+                .with_for_update()
+            )
+            approval_proven = (
+                answer is not None
+                and bool(answer.accepted)
+                and answer.interrupt_id == action.approval_interrupt_id
+            )
+        if not approval_proven:
+            grant = self._session.scalar(
+                select(UserMCPToolGrantRow)
+                .where(
+                    UserMCPToolGrantRow.owner_user_id == action.owner_user_id,
+                    UserMCPToolGrantRow.server_id == action.server_id,
+                    UserMCPToolGrantRow.tool_name == action.tool_name,
+                    UserMCPToolGrantRow.server_security_version
+                    == action.server_security_version,
+                    UserMCPToolGrantRow.input_schema_sha256
+                    == action.input_schema_sha256,
+                    UserMCPToolGrantRow.invalidated_at.is_(None),
+                )
+                .with_for_update()
+            )
+            approval_proven = grant is not None
+        if not approval_proven:
+            return False
+        admitted = self.admit_mcp_tool_call(
+            intent_id,
+            outbox_id,
+            expected_intent_revision,
+            expected_outbox_revision,
+            record,
+            occurred_at,
+            cp7_candidate_id=cp7_candidate_id,
+            cp7_epoch_id=cp7_epoch_id,
+        )
+        if not admitted:
+            return False
+        action.status = "consumed"
+        action.revision = int(action.revision) + 1
+        action.updated_at = occurred_at
+        action.consumed_at = occurred_at
         self._session.flush()
         return True
 
@@ -9504,6 +9913,7 @@ class SQLiteStorage(StoragePort):
             [str], MCPValidatedTerminalResultCandidate | None
         ]
         | None = None,
+        mcp_pending_action_payload_reader: PendingActionPayloadReader | None = None,
     ) -> None:
         if mcp_task_authority_mode not in {None, "off", "shadow", "enforce"}:
             raise ValueError(
@@ -9531,6 +9941,7 @@ class SQLiteStorage(StoragePort):
         self._mcp_task_authority_mode = mcp_task_authority_mode
         self._mcp_terminal_candidate_reader = mcp_terminal_candidate_reader
         self._mcp_terminal_candidate_resolver = mcp_terminal_candidate_resolver
+        self._mcp_pending_action_payload_reader = mcp_pending_action_payload_reader
 
     async def list_user_mcp_servers(self, owner_user_id: str) -> list[UserMCPServer]:
         return await self._run(lambda state, collab: state.list_user_mcp_servers(owner_user_id))
@@ -9857,6 +10268,13 @@ class SQLiteStorage(StoragePort):
             lambda state, collab: state.get_mcp_dispatch_resume_outbox(outbox_id)
         )
 
+    async def get_mcp_pending_tool_action(
+        self, action_id: str
+    ) -> MCPPendingToolAction | None:
+        return await self._run(
+            lambda state, collab: state.get_mcp_pending_tool_action(action_id)
+        )
+
     async def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]:
@@ -9875,6 +10293,58 @@ class SQLiteStorage(StoragePort):
         return await self._run(
             lambda state, collab: state.claim_mcp_dispatch_resume_outbox(
                 outbox_id, claim_owner, claim_token, now, lease_expires_at
+            )
+        )
+
+    async def claim_mcp_dispatch(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.claim_mcp_dispatch(
+                outbox_id,
+                claim_owner,
+                claim_token,
+                expected_revision,
+                now,
+                lease_expires_at,
+            )
+        )
+
+    async def renew_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.renew_mcp_dispatch_claim(
+                outbox_id,
+                claim_owner,
+                claim_token,
+                expected_revision,
+                now,
+                lease_expires_at,
+            )
+        )
+
+    async def release_or_recover_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        expected_revision: int,
+        now: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        return await self._run(
+            lambda state, collab: state.release_or_recover_mcp_dispatch_claim(
+                outbox_id, expected_revision, now
             )
         )
 
@@ -9914,6 +10384,41 @@ class SQLiteStorage(StoragePort):
                 outbox_id,
                 expected_intent_revision,
                 expected_outbox_revision,
+                record,
+                occurred_at,
+                cp7_candidate_id=cp7_candidate_id,
+                cp7_epoch_id=cp7_epoch_id,
+            )
+        )
+
+    async def admit_approved_mcp_action(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        action_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        expected_action_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool:
+        return await self._run(
+            lambda state, collab: state.admit_approved_mcp_action(
+                intent_id,
+                outbox_id,
+                action_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                expected_action_revision,
+                claim_owner,
+                claim_token,
+                payload_snapshot,
                 record,
                 occurred_at,
                 cp7_candidate_id=cp7_candidate_id,
@@ -11217,6 +11722,9 @@ class SQLiteStorage(StoragePort):
                     task_authority_mode=self._mcp_task_authority_mode,
                     terminal_candidate_reader=self._mcp_terminal_candidate_reader,
                     terminal_candidate_resolver=self._mcp_terminal_candidate_resolver,
+                    pending_action_payload_reader=(
+                        self._mcp_pending_action_payload_reader
+                    ),
                 )
                 collab_repo = SQLiteCollaborationRepository(session)
                 result = callback(state_repo, collab_repo)

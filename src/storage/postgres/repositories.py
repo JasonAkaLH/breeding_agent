@@ -21,6 +21,7 @@ from src.core.models import (
     MCPLegacyRetirementEvidence,
     MCPNoServerConvergenceResult,
     MCPNoServerConvergenceReceipt,
+    MCPPendingActionPayloadSnapshot,
     MCPLegacyMigrationBatchResult,
     MCPLegacyMigrationRecord,
     MCPRemoteTaskBinding,
@@ -51,6 +52,7 @@ from src.storage.sqlite.models import (
     MCPDispatchResumeOutboxRow,
     MCPExecutionTerminalProjectionRow,
     MCPNoServerIntentRow,
+    MCPPendingToolActionRow,
     MCPTerminalResultReceiptRow,
     TaskNodeRow,
     TaskRow,
@@ -131,6 +133,8 @@ class PostgreSQLStorage(SQLiteStorage):
         server_id: str | None = None,
         intent_id: str | None = None,
         outbox_id: str | None = None,
+        pending_action_id: str | None = None,
+        branch_id: str | None = None,
         call_id: str | None = None,
         candidate_id: str | None = None,
         task_id: str | None = None,
@@ -184,6 +188,18 @@ class PostgreSQLStorage(SQLiteStorage):
                     .where(MCPDispatchResumeOutboxRow.outbox_id == outbox_id)
                     .with_for_update()
                 )
+            if pending_action_id is not None:
+                session.scalar(
+                    select(MCPPendingToolActionRow.action_id)
+                    .where(MCPPendingToolActionRow.action_id == pending_action_id)
+                    .with_for_update()
+                )
+            if branch_id is not None:
+                session.scalar(
+                    select(MCPBranchRecordRow.branch_id)
+                    .where(MCPBranchRecordRow.branch_id == branch_id)
+                    .with_for_update()
+                )
             sealed_candidate = None
             if call_id is not None:
                 session.scalar(
@@ -229,6 +245,9 @@ class PostgreSQLStorage(SQLiteStorage):
                         else lambda _call_id, _candidate_id: sealed_candidate
                     ),
                     terminal_candidate_resolver=self._mcp_terminal_candidate_resolver,
+                    pending_action_payload_reader=(
+                        self._mcp_pending_action_payload_reader
+                    ),
                 )
             )
             session.commit()
@@ -461,6 +480,109 @@ class PostgreSQLStorage(SQLiteStorage):
                 return None
             raise
 
+    async def claim_mcp_dispatch(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        def _sync() -> MCPDispatchResumeOutbox | None:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(
+                outbox_id
+            )
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.claim_mcp_dispatch(
+                    outbox_id,
+                    claim_owner,
+                    claim_token,
+                    expected_revision,
+                    now,
+                    lease_expires_at,
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except ValueError as exc:
+            if str(exc) == "mcp_dispatch_resume_outbox_missing":
+                return None
+            raise
+
+    async def renew_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        def _sync() -> MCPDispatchResumeOutbox | None:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(
+                outbox_id
+            )
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.renew_mcp_dispatch_claim(
+                    outbox_id,
+                    claim_owner,
+                    claim_token,
+                    expected_revision,
+                    now,
+                    lease_expires_at,
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except ValueError as exc:
+            if str(exc) == "mcp_dispatch_resume_outbox_missing":
+                return None
+            raise
+
+    async def release_or_recover_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        expected_revision: int,
+        now: datetime,
+    ) -> MCPDispatchResumeOutbox | None:
+        def _sync() -> MCPDispatchResumeOutbox | None:
+            owner, server, intent, task, node = self._cp7_outbox_lock_subject(
+                outbox_id
+            )
+            return self._run_cp7_authority_sync(
+                owner_user_id=owner,
+                server_id=server,
+                intent_id=intent,
+                outbox_id=outbox_id,
+                task_id=task,
+                node_id=node,
+                operation=lambda state: state.release_or_recover_mcp_dispatch_claim(
+                    outbox_id, expected_revision, now
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except ValueError as exc:
+            if str(exc) == "mcp_dispatch_resume_outbox_missing":
+                return None
+            raise
+
     async def admit_mcp_tool_call(
         self,
         intent_id: str,
@@ -487,6 +609,51 @@ class PostgreSQLStorage(SQLiteStorage):
                 outbox_id,
                 expected_intent_revision,
                 expected_outbox_revision,
+                record,
+                occurred_at,
+                cp7_candidate_id=cp7_candidate_id,
+                cp7_epoch_id=cp7_epoch_id,
+            ),
+        )
+
+    async def admit_approved_mcp_action(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        action_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        expected_action_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        payload_snapshot: MCPPendingActionPayloadSnapshot,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._run_cp7_authority_sync,
+            owner_user_id=record.owner_user_id,
+            server_id=record.server_id,
+            intent_id=intent_id,
+            outbox_id=outbox_id,
+            pending_action_id=action_id,
+            branch_id=record.branch_id,
+            call_id=record.call_ref,
+            task_id=record.task_id,
+            node_id=record.node_id,
+            operation=lambda state: state.admit_approved_mcp_action(
+                intent_id,
+                outbox_id,
+                action_id,
+                expected_intent_revision,
+                expected_outbox_revision,
+                expected_action_revision,
+                claim_owner,
+                claim_token,
+                payload_snapshot,
                 record,
                 occurred_at,
                 cp7_candidate_id=cp7_candidate_id,

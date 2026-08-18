@@ -15,6 +15,8 @@ class UserMCPCP7PostgresContractTest(unittest.TestCase):
             "UserMCPServerRow",
             "MCPNoServerIntentRow",
             "MCPDispatchResumeOutboxRow",
+            "MCPPendingToolActionRow",
+            "MCPBranchRecordRow",
             "MCPCallRecordRow",
             "_mcp_terminal_candidate_reader",
             "MCPTerminalResultReceiptRow",
@@ -24,7 +26,7 @@ class UserMCPCP7PostgresContractTest(unittest.TestCase):
         )
         positions = [source.index(name) for name in ordered]
         self.assertEqual(positions, sorted(positions))
-        self.assertGreaterEqual(source.count("with_for_update()"), 8)
+        self.assertGreaterEqual(source.count("with_for_update()"), 10)
         for method_name in (
             "create_user_mcp_initial_intent",
             "arm_user_mcp_target_intent",
@@ -32,7 +34,11 @@ class UserMCPCP7PostgresContractTest(unittest.TestCase):
             "claim_mcp_dispatch_resume_outbox",
             "reclaim_mcp_dispatch_resume_outbox",
             "abort_mcp_dispatch_resume_outbox",
+            "claim_mcp_dispatch",
+            "renew_mcp_dispatch_claim",
+            "release_or_recover_mcp_dispatch_claim",
             "admit_mcp_tool_call",
+            "admit_approved_mcp_action",
             "converge_user_mcp_no_server",
             "commit_authoritative_mcp_terminal_result",
             "converge_legacy_runtime_retirement",

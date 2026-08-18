@@ -399,6 +399,28 @@ class MCPPendingToolAction:
 
 
 @dataclass(slots=True, frozen=True)
+class MCPPendingActionPayloadSnapshot:
+    action_id: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    tool_name: str
+    arguments_sha256: str
+    arguments_payload_ref: str
+    payload_file_sha256: str
+    payload_size_bytes: int
+    encryption_version: int
+    server_config_version: int
+    server_security_version: int
+    input_schema_sha256: str
+    file_device: int
+    file_inode: int
+    file_mode: int
+    file_owner_uid: int
+
+
+@dataclass(slots=True, frozen=True)
 class MCPTerminalCandidateLifecycle:
     candidate_id: str
     call_id: str
