@@ -131,6 +131,11 @@ from src.integrations.mcp.cp7_artifacts import (
     mcp_terminal_projection_id,
     mcp_terminal_receipt_id,
 )
+from src.integrations.mcp.resume_envelope import (
+    MCP_DISPATCH_RESUME_ENVELOPE_MAX_BYTES,
+    mcp_dispatch_resume_envelope_version,
+    validate_mcp_dispatch_resume_envelope_v2,
+)
 from src.storage.rust_contract import error_policy as runtime_error_policy
 from src.storage.rust_contract import mode_for_component as runtime_mode_for_component
 from src.storage.rust_contract import operation_policy as runtime_operation_policy
@@ -4480,8 +4485,37 @@ class SQLiteStateRepository:
             .with_for_update()
         )
         envelope = dict(resume_envelope)
+        envelope_version = mcp_dispatch_resume_envelope_version(envelope)
+        if envelope_version == "v2":
+            validate_mcp_dispatch_resume_envelope_v2(envelope)
+            if (
+                envelope["conversation_id"] != task.conversation_id
+                or envelope["task_id"] != task_id
+                or envelope["root_message_id"] != task.root_message_id
+                or envelope["node_id"] != node_id
+                or envelope["server_id"] != requested_server_id
+            ):
+                raise ValueError("mcp_target_intent_resume_envelope_identity_invalid")
+            if envelope["task_assignment"] != {
+                "mcp_execution_mode": task.mcp_execution_mode,
+                "mcp_shadow_enabled": task.mcp_shadow_enabled,
+                "mcp_rollout_config_version": task.mcp_rollout_config_version,
+                "mcp_route_reason_code": task.mcp_route_reason_code,
+                "mcp_rollout_mode": task.mcp_rollout_mode,
+            }:
+                raise ValueError("mcp_target_intent_task_assignment_invalid")
+            if envelope["node_snapshot"] != {
+                "capability_id": node.capability_id,
+                "criticality": str(node.criticality),
+                "dependency_type": str(node.dependency_type),
+                "input_refs": sorted(set(node.input_refs)),
+                "resource_class": node.resource_class,
+                "retry_policy": dict(node.retry_policy),
+                "timeout_policy": dict(node.timeout_policy),
+            }:
+                raise ValueError("mcp_target_intent_node_snapshot_invalid")
         rendered = canonical_json_bytes(envelope)
-        if len(rendered) > 64 * 1024:
+        if len(rendered) > MCP_DISPATCH_RESUME_ENVELOPE_MAX_BYTES:
             raise ValueError("mcp_target_intent_resume_envelope_too_large")
         envelope_sha = canonical_sha256(envelope)
         available = _mcp_server_is_available(server)

@@ -156,6 +156,11 @@ from src.integrations.mcp.cp7_artifacts import (
     canonical_sha256,
     mcp_no_server_intent_id,
 )
+from src.integrations.mcp.resume_envelope import (
+    MCPDispatchResumeEnvelopeError,
+    mcp_dispatch_resume_envelope_version,
+    validate_mcp_dispatch_resume_envelope_v2,
+)
 from src.integrations.mcp.cp7_terminal_results import seal_terminal_result_candidate
 from src.integrations.mcp.cp7_safety import (
     CP7BoundaryEvidence,
@@ -2351,17 +2356,27 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
             )
             if intent is not None:
                 envelope = dict(intent.resume_envelope_json or {})
-                envelope_metadata = envelope.get("metadata")
-                if (
+                envelope_version = mcp_dispatch_resume_envelope_version(envelope)
+                authority_mismatch = (
                     intent.requested_server_id != context.server_id
                     or intent.requested_server_config_version
                     != context.server_config_version
                     or intent.requested_server_security_version
                     != context.server_security_version
-                    or not isinstance(envelope_metadata, Mapping)
-                    or envelope_metadata.get("mcp_binding_mode")
-                    != MCP_BINDING_MODE_EXPLICIT_COMMAND
-                ):
+                )
+                if envelope_version == "v2":
+                    validate_mcp_dispatch_resume_envelope_v2(envelope)
+                    authority_mismatch = authority_mismatch or (
+                        envelope.get("server_id") != context.server_id
+                    )
+                else:
+                    envelope_metadata = envelope.get("metadata")
+                    authority_mismatch = authority_mismatch or (
+                        not isinstance(envelope_metadata, Mapping)
+                        or envelope_metadata.get("mcp_binding_mode")
+                        != MCP_BINDING_MODE_EXPLICIT_COMMAND
+                    )
+                if authority_mismatch:
                     raise MCPPersistedBindingError(
                         "mcp_server_binding_resume_authority_mismatch"
                     )
@@ -8431,13 +8446,16 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 outbox = outboxes.get(intent.intent_id)
                 if outbox is None or outbox.outbox_id != expected_id:
                     raise RuntimeError("mcp_dispatch_resume_outbox_missing")
-                envelope = dict(intent.resume_envelope or {})
+                envelope = dict(intent.resume_envelope_json or {})
                 envelope_sha = canonical_sha256(envelope)
                 if (
                     envelope_sha != intent.resume_envelope_sha256
                     or envelope_sha != outbox.resume_envelope_sha256
                 ):
                     raise RuntimeError("mcp_dispatch_resume_envelope_digest_mismatch")
+                envelope_version = mcp_dispatch_resume_envelope_version(envelope)
+                if envelope_version == "v2":
+                    validate_mcp_dispatch_resume_envelope_v2(envelope)
                 outbox_payload_sha = canonical_sha256(
                     {
                         "intent_id": intent.intent_id,
@@ -8450,6 +8468,44 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 )
                 if outbox_payload_sha != outbox.payload_sha256:
                     raise RuntimeError("mcp_dispatch_resume_outbox_payload_mismatch")
+                task = await self.storage.get_task(intent.task_id)
+                node = (
+                    await self.storage.get_task_node(str(intent.node_id))
+                    if intent.node_id is not None
+                    else None
+                )
+                if (
+                    task is None
+                    or node is None
+                    or envelope.get("task_id") != task.task_id
+                    or envelope.get("node_id") != intent.node_id
+                    or envelope.get("server_id") != intent.requested_server_id
+                    or not envelope.get("root_message_id")
+                ):
+                    raise RuntimeError("mcp_dispatch_resume_envelope_corrupt")
+                if (
+                    task.status != TaskStatus.RUNNING
+                    or task.cancel_requested_at is not None
+                    or node.status
+                    in {
+                        NodeStatus.COMPLETED,
+                        NodeStatus.FAILED,
+                        NodeStatus.CANCELLED,
+                        NodeStatus.ORPHANED,
+                        NodeStatus.BLOCKED_BY_CANCELLATION,
+                    }
+                ):
+                    continue
+                if node.status == NodeStatus.WAITING_FOR_INPUT:
+                    interrupts = await self.storage.list_interrupts_for_task(
+                        task.task_id
+                    )
+                    if any(
+                        interrupt.node_id == node.node_id
+                        and interrupt.status == InterruptStatus.OPEN
+                        for interrupt in interrupts
+                    ):
+                        continue
                 now = self._utcnow_naive()
                 if str(outbox.status) == "claimed":
                     if outbox.lease_expires_at is None or outbox.lease_expires_at > now:
@@ -8470,14 +8526,33 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 if outbox is None or str(outbox.status) != "claimed":
                     raise RuntimeError("mcp_dispatch_resume_claim_lost")
                 task = await self.storage.get_task(intent.task_id)
+                node = (
+                    await self.storage.get_task_node(str(intent.node_id))
+                    if intent.node_id is not None
+                    else None
+                )
                 if (
                     task is None
+                    or node is None
                     or envelope.get("task_id") != task.task_id
                     or envelope.get("node_id") != intent.node_id
                     or envelope.get("server_id") != intent.requested_server_id
                     or not envelope.get("root_message_id")
                 ):
                     raise RuntimeError("mcp_dispatch_resume_envelope_corrupt")
+                if (
+                    task.status != TaskStatus.RUNNING
+                    or task.cancel_requested_at is not None
+                    or node.status
+                    in {
+                        NodeStatus.COMPLETED,
+                        NodeStatus.FAILED,
+                        NodeStatus.CANCELLED,
+                        NodeStatus.ORPHANED,
+                        NodeStatus.BLOCKED_BY_CANCELLATION,
+                    }
+                ):
+                    continue
                 root_message = await self.storage.get_message(task.root_message_id)
                 persisted_binding = await self._resolve_persisted_mcp_server_binding(
                     task,
@@ -8488,32 +8563,61 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     if persisted_binding is not None
                     else {}
                 )
+                user_message = (
+                    root_message.content
+                    if root_message is not None
+                    else task.summary or ""
+                )
+                envelope_runtime_metadata = (
+                    {
+                        "mcp_binding_mode": "automatic",
+                        "user_message": user_message,
+                    }
+                    if envelope_version == "v2"
+                    else dict(envelope.get("metadata") or {})
+                )
                 resume_request = OrchestrationRequest(
                     task_id=task.task_id,
                     conversation_id=task.conversation_id,
                     root_message_id=task.root_message_id,
-                    user_message=(
-                        root_message.content
-                        if root_message is not None
-                        else task.summary or ""
-                    ),
+                    user_message=user_message,
                     requested_capability_id="mcp.dispatch",
                     metadata={
                         **self._mcp_task_assignment_metadata(task),
-                        **dict(envelope.get("metadata") or {}),
+                        **envelope_runtime_metadata,
                         "mcp_dispatch_resume_envelope": envelope,
                         "mcp_dispatch_server_id": intent.requested_server_id,
                         "resume_interrupted_node_id": intent.node_id,
                         **trusted_binding_metadata,
                     },
                 )
-                resumed_node, _ = (
-                    await self.orchestration_service.resume_persisted_mcp_dispatch_node(
-                        resume_request,
-                        envelope,
-                        expected_envelope_sha256=envelope_sha,
+                try:
+                    resumed_node, _ = (
+                        await self.orchestration_service.resume_persisted_mcp_dispatch_node(
+                            resume_request,
+                            envelope,
+                            expected_envelope_sha256=envelope_sha,
+                        )
                     )
-                )
+                except MCPDispatchResumeEnvelopeError as exc:
+                    if exc.code not in {
+                        "mcp_dispatch_resume_attachment_unavailable",
+                        "mcp_dispatch_resume_dependency_unrecoverable",
+                    }:
+                        raise
+                    finalized = await self.storage.finalize_mcp_dispatch_no_call(
+                        intent.intent_id,
+                        outbox.outbox_id,
+                        str(intent.node_id),
+                        "failed",
+                        exc.code,
+                        self._utcnow_naive(),
+                    )
+                    if str(finalized) == "conflict":
+                        raise RuntimeError(
+                            "mcp_dispatch_resume_no_call_finalize_conflict"
+                        ) from exc
+                    continue
                 if resumed_node.status in {
                     NodeStatus.FAILED,
                     NodeStatus.CANCELLED,
@@ -8532,8 +8636,11 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     if task is None:
                         raise RuntimeError("mcp_dispatch_recovery_task_missing")
                     root_message = await self.storage.get_message(task.root_message_id)
-                    envelope = dict(intent.resume_envelope or {})
+                    envelope = dict(intent.resume_envelope_json or {})
                     envelope_sha = canonical_sha256(envelope)
+                    envelope_version = mcp_dispatch_resume_envelope_version(envelope)
+                    if envelope_version == "v2":
+                        validate_mcp_dispatch_resume_envelope_v2(envelope)
                     outbox = outboxes.get(intent.intent_id)
                     if (
                         outbox is None
@@ -8567,19 +8674,28 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         if persisted_binding is not None
                         else {}
                     )
+                    user_message = (
+                        root_message.content
+                        if root_message is not None
+                        else task.summary or ""
+                    )
+                    envelope_runtime_metadata = (
+                        {
+                            "mcp_binding_mode": "automatic",
+                            "user_message": user_message,
+                        }
+                        if envelope_version == "v2"
+                        else dict(envelope.get("metadata") or {})
+                    )
                     resume_request = OrchestrationRequest(
                         task_id=task.task_id,
                         conversation_id=task.conversation_id,
                         root_message_id=task.root_message_id,
-                        user_message=(
-                            root_message.content
-                            if root_message is not None
-                            else task.summary or ""
-                        ),
+                        user_message=user_message,
                         requested_capability_id="mcp.dispatch",
                         metadata={
                             **self._mcp_task_assignment_metadata(task),
-                            **dict(envelope.get("metadata") or {}),
+                            **envelope_runtime_metadata,
                             "mcp_dispatch_server_id": intent.requested_server_id,
                             "resume_interrupted_node_id": intent.node_id,
                             "mcp_recovered_result_receipt_ids": receipt_ids,

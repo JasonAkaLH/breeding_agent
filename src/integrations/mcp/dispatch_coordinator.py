@@ -44,6 +44,7 @@ from src.integrations.mcp.client import MCPRemoteError
 from src.integrations.mcp.credentials import MCPAuditReferenceSigner
 from src.integrations.mcp.gateway_models import MCPCallOutcome, MCPCallOutcomeKind, MCPTaskServerScope
 from src.integrations.mcp.cp7_artifacts import (
+    canonical_json_bytes,
     canonical_sha256,
     mcp_dispatch_resume_outbox_id,
     mcp_no_server_intent_id,
@@ -63,6 +64,13 @@ from src.integrations.mcp.rollout_evidence import (
     MCPMetricRoutingMode,
     MCPMetricTransport,
     MCPSafetyRedLine,
+)
+from src.integrations.mcp.resume_envelope import (
+    MCP_DISPATCH_RESUME_ENVELOPE_REVIEW_BYTES,
+    MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2,
+    MCPDispatchResumeEnvelopeError,
+    build_mcp_dispatch_resume_envelope_v2,
+    project_mcp_dependency_artifacts,
 )
 from .safety_detectors import AuthoritativeMCPSafetyDetector
 from src.orchestration.models import UserMCPServerProfile
@@ -260,12 +268,33 @@ class UserMCPDispatchCoordinator:
                 )
         authority = None
         if self._terminal_result_root is not None:
-            authority = await self._prepare_dispatch_authority(
-                request,
-                conversation_id=conversation_id,
-                root_message_id=root_message_id,
-                server_id=server_id,
-            )
+            try:
+                request = await self._prefer_durable_dependency_projection(request)
+                authority = await self._prepare_dispatch_authority(
+                    request,
+                    conversation_id=conversation_id,
+                    root_message_id=root_message_id,
+                    server_id=server_id,
+                )
+            except MCPDispatchResumeEnvelopeError as exc:
+                await self._record_resume_envelope_audit(
+                    request, result="rejected", reason_code=exc.code
+                )
+                return self._error(
+                    exc.code, "MCP dispatch recovery state is invalid."
+                )
+            except ValueError as exc:
+                code = str(exc)
+                if not code.startswith(
+                    ("mcp_target_intent_", "mcp_dispatch_resume_envelope_")
+                ):
+                    raise
+                await self._record_resume_envelope_audit(
+                    request, result="rejected", reason_code=code
+                )
+                return self._error(
+                    code, "MCP dispatch recovery state is invalid."
+                )
             if authority is None:
                 return self._error(
                     "mcp_runtime_unavailable", "MCP server is not available."
@@ -973,51 +1002,53 @@ class UserMCPDispatchCoordinator:
         attachments = await self._storage.list_task_input_attachments_for_task(
             request.task_id
         )
+        dependency_node_ids = sorted(
+            {
+                edge.from_node_id
+                for edge in edges
+                if edge.to_node_id == request.node_id
+            }
+        )
+        dependency_nodes = []
+        for dependency_node_id in dependency_node_ids:
+            dependency = await self._storage.get_task_node(dependency_node_id)
+            if dependency is None or dependency.task_id != request.task_id:
+                raise MCPDispatchResumeEnvelopeError(
+                    "mcp_dispatch_resume_snapshot_missing"
+                )
+            dependency_nodes.append(dependency)
+        envelope = build_mcp_dispatch_resume_envelope_v2(
+            task=task,
+            node=node,
+            edges=edges,
+            attachments=attachments,
+            dependency_nodes=dependency_nodes,
+            server_id=server_id,
+        )
+        if (
+            envelope["conversation_id"] != conversation_id
+            or envelope["root_message_id"] != root_message_id
+        ):
+            raise MCPDispatchResumeEnvelopeError(
+                "mcp_dispatch_resume_envelope_identity_invalid"
+            )
         armed = await self._storage.arm_user_mcp_target_intent(
             request.task_id,
             request.node_id,
             server_id,
-            {
-                "capability_id": request.capability_id,
-                "conversation_id": conversation_id,
-                "context_refs": list(request.context_refs),
-                "dependency_outputs": dict(request.dependency_outputs),
-                "input_payload": dict(request.input_payload),
-                "metadata": dict(request.metadata),
-                "node_id": request.node_id,
-                "node_snapshot": {
-                    "capability_id": node.capability_id,
-                    "criticality": str(node.criticality),
-                    "dependency_type": str(node.dependency_type),
-                    "input_refs": list(node.input_refs),
-                    "resource_class": node.resource_class,
-                    "retry_policy": dict(node.retry_policy),
-                    "timeout_policy": dict(node.timeout_policy),
-                },
-                "edge_snapshot": [
-                    {
-                        "condition": edge.condition,
-                        "edge_type": str(edge.edge_type),
-                        "from_node_id": edge.from_node_id,
-                        "to_node_id": edge.to_node_id,
-                    }
-                    for edge in edges
-                ],
-                "input_attachment_ids": sorted(
-                    attachment.attachment_id for attachment in attachments
-                ),
-                "root_message_id": root_message_id,
-                "server_id": server_id,
-                "task_id": request.task_id,
-                "task_assignment": {
-                    "mcp_execution_mode": task.mcp_execution_mode,
-                    "mcp_route_reason_code": task.mcp_route_reason_code,
-                    "mcp_rollout_config_version": task.mcp_rollout_config_version,
-                    "mcp_rollout_mode": task.mcp_rollout_mode,
-                    "mcp_shadow_enabled": task.mcp_shadow_enabled,
-                },
-            },
+            envelope,
             self._now(),
+        )
+        await self._record_resume_envelope_audit(
+            request,
+            result="accepted",
+            reason_code=(
+                "capacity_review"
+                if len(canonical_json_bytes(envelope))
+                >= MCP_DISPATCH_RESUME_ENVELOPE_REVIEW_BYTES
+                else "accepted"
+            ),
+            envelope=envelope,
         )
         if armed is MCPTargetIntentArmResult.UNAVAILABLE:
             await self._storage.converge_user_mcp_no_server(
@@ -1053,6 +1084,84 @@ class UserMCPDispatchCoordinator:
         if outbox is None or str(outbox.status) not in {"claimed", "completed"}:
             raise RuntimeError("mcp_dispatch_resume_claim_lost")
         return _DispatchAuthority(intent_id=intent_id, outbox_id=outbox_id)
+
+    async def _prefer_durable_dependency_projection(
+        self, request: CapabilityExecutionRequest
+    ) -> CapabilityExecutionRequest:
+        edges = await self._storage.list_task_edges(request.task_id)
+        dependency_node_ids = sorted(
+            {
+                edge.from_node_id
+                for edge in edges
+                if edge.to_node_id == request.node_id
+            }
+        )
+        if not dependency_node_ids:
+            return request
+        projections: dict[str, dict[str, Any]] = {}
+        for dependency_node_id in dependency_node_ids:
+            dependency = await self._storage.get_task_node(dependency_node_id)
+            if (
+                dependency is None
+                or dependency.task_id != request.task_id
+                or not dependency.output_refs
+            ):
+                return request
+            artifacts = {}
+            for artifact_id in sorted(set(dependency.output_refs)):
+                artifact = await self._storage.get_artifact(artifact_id)
+                if artifact is not None:
+                    artifacts[artifact_id] = artifact
+            try:
+                projections[dependency_node_id] = project_mcp_dependency_artifacts(
+                    task_id=request.task_id,
+                    node_id=dependency_node_id,
+                    artifact_ids=dependency.output_refs,
+                    artifacts_by_id=artifacts,
+                )
+            except MCPDispatchResumeEnvelopeError:
+                return request
+        return replace(request, dependency_outputs=projections)
+
+    async def _record_resume_envelope_audit(
+        self,
+        request: CapabilityExecutionRequest,
+        *,
+        result: str,
+        reason_code: str,
+        envelope: Mapping[str, Any] | None = None,
+    ) -> None:
+        value = dict(envelope or {})
+        dependencies = value.get("dependency_output_refs")
+        dependency_items = dependencies if isinstance(dependencies, list) else []
+        artifact_ref_count = sum(
+            len(item.get("artifact_ids", ()))
+            for item in dependency_items
+            if isinstance(item, Mapping)
+            and isinstance(item.get("artifact_ids"), list)
+        )
+        payload = {
+            "schema": MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2,
+            "canonical_size_bytes": (
+                len(canonical_json_bytes(value)) if envelope is not None else 0
+            ),
+            "attachment_count": len(value.get("input_attachment_ids", ()))
+            if isinstance(value.get("input_attachment_ids"), list)
+            else 0,
+            "dependency_count": len(dependency_items),
+            "artifact_ref_count": artifact_ref_count,
+            "result": result,
+            "reason_code": reason_code,
+        }
+        await self._record_live_event(
+            _event(
+                request,
+                "mcp.dispatch_resume_envelope",
+                payload,
+                -2,
+                visibility=EventVisibility.AUDIT_ONLY,
+            )
+        )
 
     async def _resolve_identity(
         self, request: CapabilityExecutionRequest

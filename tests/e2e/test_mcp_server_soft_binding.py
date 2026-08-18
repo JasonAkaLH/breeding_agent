@@ -11,6 +11,13 @@ from src.capabilities.mcp_dispatch import (
 )
 from src.core.enums import UserMCPHealthStatus, UserMCPTransport
 from src.core.models import UserMCPServer
+from src.integrations.mcp.cp7_artifacts import (
+    canonical_json_bytes,
+    mcp_no_server_intent_id,
+)
+from src.integrations.mcp.resume_envelope import (
+    MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2,
+)
 from src.integrations.mcp.gateway_models import MCPTaskServerScope, ToolCatalogSnapshot
 from tests.api.support import APITestCase
 
@@ -126,6 +133,23 @@ class MCPServerSoftBindingE2ETest(APITestCase):
             {node.capability_id for node in nodes},
             {"mcp.dispatch", "main_agent.respond"},
         )
+        dispatch_node = next(
+            node for node in nodes if node.capability_id == "mcp.dispatch"
+        )
+        intent = await self.runtime.storage.get_mcp_no_server_intent(
+            mcp_no_server_intent_id(
+                response.json()["task_id"], node_id=dispatch_node.node_id
+            )
+        )
+        self.assertIsNotNone(intent)
+        envelope = dict(intent.resume_envelope_json)
+        self.assertEqual(
+            envelope["schema"], MCP_DISPATCH_RESUME_ENVELOPE_SCHEMA_V2
+        )
+        self.assertNotIn("metadata", envelope)
+        self.assertNotIn("input_payload", envelope)
+        self.assertNotIn("dependency_outputs", envelope)
+        self.assertLess(len(canonical_json_bytes(envelope)), 4 * 1024)
         self.assertEqual(len(gateway.opened), 1)
         self.assertEqual(gateway.opened[0][2], "mcp-ocr")
         self.assertEqual(gateway.listed, ["mcp-ocr"])

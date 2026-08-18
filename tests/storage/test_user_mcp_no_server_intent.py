@@ -22,6 +22,9 @@ from src.core.models import (
     Task, TaskNode, UserMCPHealthAttempt, UserMCPServer,
 )
 from src.integrations.mcp.cp7_artifacts import canonical_sha256
+from src.integrations.mcp.resume_envelope import (
+    build_mcp_dispatch_resume_envelope_v2,
+)
 from src.storage.sqlite.bootstrap import bootstrap_sqlite_database
 from src.storage.sqlite.models import EventRecordRow, UserMCPOwnerMutationGuardRow
 from src.storage.sqlite.repositories import SQLiteStorage
@@ -130,6 +133,58 @@ class UserMCPNoServerIntentTest(unittest.IsolatedAsyncioTestCase):
             created_at=self.at,
             updated_at=self.at,
         )
+
+    async def test_v2_envelope_is_validated_before_intent_write(self) -> None:
+        await self.storage.create_user_mcp_server(self._available_server())
+        task = Task(
+            task_id="task-v2",
+            conversation_id="conv-1",
+            root_message_id="message-v2",
+            status=TaskStatus.RUNNING,
+            routing_mode=RoutingMode.AUTO,
+            created_at=self.at,
+            updated_at=self.at,
+            mcp_execution_mode="user_scoped",
+            mcp_shadow_enabled=False,
+            mcp_rollout_config_version="cp7",
+            mcp_route_reason_code="enforce_selected",
+            mcp_rollout_mode="enforce",
+        )
+        node = TaskNode(
+            node_id="node-v2",
+            task_id=task.task_id,
+            capability_id="mcp.dispatch",
+            status=NodeStatus.RUNNING,
+        )
+        await self.storage.save_task(task)
+        await self.storage.save_task_node(node)
+        envelope = build_mcp_dispatch_resume_envelope_v2(
+            task=task,
+            node=node,
+            edges=(),
+            attachments=(),
+            dependency_nodes=(),
+            server_id="server-1",
+        )
+
+        invalid = dict(envelope)
+        invalid["metadata"] = {"content_base64": "forbidden"}
+        with self.assertRaisesRegex(
+            ValueError, "mcp_dispatch_resume_envelope_invalid"
+        ):
+            await self.storage.arm_user_mcp_target_intent(
+                task.task_id, node.node_id, "server-1", invalid, self.at
+            )
+        self.assertIsNone(
+            await self.storage.get_mcp_no_server_intent(
+                "mcp-no-server-intent:v1:task-v2:node-v2"
+            )
+        )
+
+        result = await self.storage.arm_user_mcp_target_intent(
+            task.task_id, node.node_id, "server-1", envelope, self.at
+        )
+        self.assertEqual(str(result), "armed")
 
     async def test_health_mutation_refreshes_guard_before_initial_intent(self) -> None:
         await self.storage.create_user_mcp_server(self._available_server())

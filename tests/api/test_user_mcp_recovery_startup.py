@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, patch
 from src.api.dto import SubmitMessageRequest
 from src.api.runtime import ApiRuntime, build_api_runtime
 from src.core.enums import (
+    InterruptStatus,
+    MessageRole,
     NodeStatus,
     TaskStatus,
     UserMCPAuthType,
@@ -22,6 +24,8 @@ from src.core.enums import (
 )
 from src.core.models import (
     Conversation,
+    Interrupt,
+    Message,
     MCPBranchRecord,
     MCPCallRecord,
     MCPRemoteTaskBinding,
@@ -29,6 +33,13 @@ from src.core.models import (
     TaskNode,
     UserMCPCredentialRecord,
     UserMCPServer,
+)
+from src.integrations.mcp.cp7_artifacts import (
+    mcp_dispatch_resume_outbox_id,
+    mcp_no_server_intent_id,
+)
+from src.integrations.mcp.resume_envelope import (
+    build_mcp_dispatch_resume_envelope_v2,
 )
 from src.integrations.mcp.recovery_worker import MCPRemoteTaskTerminalMetricSample
 from src.integrations.mcp.adapter_2025_tasks import (
@@ -126,6 +137,171 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             enable_conversation_memory=False,
             runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
         )
+
+    async def test_v2_open_interrupt_waits_then_recovers_automatic_metadata(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            now = runtime._utcnow_naive()
+            task = Task(
+                task_id="task-v2-open",
+                conversation_id="conversation-v2-open",
+                root_message_id="message-v2-open",
+                status=TaskStatus.RUNNING,
+                mcp_execution_mode="user_scoped",
+                mcp_shadow_enabled=False,
+                mcp_rollout_config_version="cp7",
+                mcp_route_reason_code="enforce_selected",
+                mcp_rollout_mode="enforce",
+            )
+            node = TaskNode(
+                node_id="node-v2-open",
+                task_id=task.task_id,
+                capability_id="mcp.dispatch",
+                status=NodeStatus.WAITING_FOR_INPUT,
+            )
+            server = UserMCPServer(
+                server_id="server-v2-open",
+                owner_user_id="alice",
+                display_name="Waiting server",
+                routing_description="waiting",
+                endpoint_url="https://example.test/mcp",
+                transport=UserMCPTransport.STREAMABLE_HTTP,
+                health_status=UserMCPHealthStatus.AVAILABLE,
+                created_at=now,
+                updated_at=now,
+            )
+            await runtime.storage.save_conversation(
+                Conversation(task.conversation_id, "alice")
+            )
+            await runtime.storage.save_message(
+                Message(
+                    task.root_message_id,
+                    task.conversation_id,
+                    MessageRole.USER,
+                    "wait for my answer",
+                    task_id=task.task_id,
+                )
+            )
+            await runtime.storage.save_task(task)
+            await runtime.storage.save_task_node(node)
+            await runtime.storage.create_user_mcp_server(server)
+            envelope = build_mcp_dispatch_resume_envelope_v2(
+                task=task,
+                node=node,
+                edges=(),
+                attachments=(),
+                dependency_nodes=(),
+                server_id=server.server_id,
+            )
+            self.assertEqual(
+                str(
+                    await runtime.storage.arm_user_mcp_target_intent(
+                        task.task_id,
+                        node.node_id,
+                        server.server_id,
+                        envelope,
+                        now,
+                    )
+                ),
+                "armed",
+            )
+            intent_id = mcp_no_server_intent_id(
+                task.task_id, node_id=node.node_id
+            )
+            self.assertEqual(
+                str(
+                    await runtime.storage.resolve_user_mcp_target_intent(
+                        intent_id, now
+                    )
+                ),
+                "available",
+            )
+            interrupt = Interrupt(
+                interrupt_id="interrupt-v2-open",
+                conversation_id=task.conversation_id,
+                task_id=task.task_id,
+                node_id=node.node_id,
+                source_agent="mcp.dispatch",
+                source_message_id=task.root_message_id,
+                question="continue?",
+                reason_code="input_required",
+                status=InterruptStatus.OPEN,
+            )
+            await runtime.storage.save_interrupt(interrupt)
+
+            resume = AsyncMock()
+            with patch.object(
+                runtime.orchestration_service,
+                "resume_persisted_mcp_dispatch_node",
+                resume,
+            ):
+                await runtime._reconcile_cp7_mcp_authority()
+
+            resume.assert_not_awaited()
+            outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(
+                mcp_dispatch_resume_outbox_id(intent_id)
+            )
+            self.assertEqual(str(outbox.status), "pending")
+
+            await runtime.storage.save_interrupt(
+                replace(interrupt, status=InterruptStatus.ANSWERED)
+            )
+            ready_node = await runtime.storage.save_task_node(
+                replace(node, status=NodeStatus.READY)
+            )
+            task = await runtime.storage.save_task(
+                replace(task, cancel_requested_at=now)
+            )
+            cancelled_resume = AsyncMock()
+            with patch.object(
+                runtime.orchestration_service,
+                "resume_persisted_mcp_dispatch_node",
+                cancelled_resume,
+            ):
+                await runtime._reconcile_cp7_mcp_authority()
+            cancelled_resume.assert_not_awaited()
+            outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(
+                mcp_dispatch_resume_outbox_id(intent_id)
+            )
+            self.assertEqual(str(outbox.status), "pending")
+            task = await runtime.storage.save_task(
+                replace(task, cancel_requested_at=None)
+            )
+            resume = AsyncMock(
+                return_value=(
+                    replace(ready_node, status=NodeStatus.COMPLETED),
+                    {},
+                )
+            )
+            with patch.object(
+                runtime.orchestration_service,
+                "resume_persisted_mcp_dispatch_node",
+                resume,
+            ):
+                await runtime._reconcile_cp7_mcp_authority()
+
+            resume.assert_awaited_once()
+            resume_request = resume.await_args.args[0]
+            self.assertEqual(
+                resume_request.metadata["mcp_binding_mode"], "automatic"
+            )
+            self.assertEqual(
+                resume_request.metadata["user_message"], "wait for my answer"
+            )
+            await runtime.shutdown()
 
     async def test_runtime_restart_completes_2025_task_result_into_safe_store(
         self,

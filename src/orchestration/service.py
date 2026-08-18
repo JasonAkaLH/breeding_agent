@@ -9,6 +9,12 @@ from src.core.contracts import CapabilityExecutionRequest, EventSink, ExecutorPo
 from src.core.enums import EventVisibility, NodeStatus, TaskStatus
 from src.core.models import EventRecord, Interrupt, Task, TaskEdge, TaskNode
 from src.integrations.mcp.cp7_artifacts import canonical_sha256
+from src.integrations.mcp.resume_envelope import (
+    MCPDispatchResumeEnvelopeError,
+    mcp_dispatch_resume_envelope_version,
+    project_mcp_dependency_artifacts,
+    validate_mcp_dispatch_resume_envelope_v2,
+)
 from src.integrations.agent_skills.missing_input_interrupt import (
     SLOT_COLLECTION_V2_SCHEMA_VERSION,
     slot_collection_bootstrap_events,
@@ -839,12 +845,18 @@ class OrchestrationService:
     ) -> tuple[TaskNode, dict[str, Any]]:
         if canonical_sha256(dict(envelope)) != expected_envelope_sha256:
             raise RuntimeError("mcp_dispatch_resume_envelope_digest_mismatch")
+        envelope_version = mcp_dispatch_resume_envelope_version(envelope)
+        if envelope_version == "v2":
+            validate_mcp_dispatch_resume_envelope_v2(envelope)
         task = await self._storage.get_task(request.task_id)
         node = await self._storage.get_task_node(str(envelope.get("node_id") or ""))
         if (
             task is None
             or node is None
             or task.status != TaskStatus.RUNNING
+            or request.conversation_id != task.conversation_id
+            or request.root_message_id != task.root_message_id
+            or envelope.get("conversation_id") != task.conversation_id
             or task.task_id != envelope.get("task_id")
             or task.root_message_id != envelope.get("root_message_id")
             or task.mcp_execution_mode != "user_scoped"
@@ -868,7 +880,11 @@ class OrchestrationService:
             "capability_id": node.capability_id,
             "criticality": str(node.criticality),
             "dependency_type": str(node.dependency_type),
-            "input_refs": list(node.input_refs),
+            "input_refs": (
+                sorted(set(node.input_refs))
+                if envelope_version == "v2"
+                else list(node.input_refs)
+            ),
             "resource_class": node.resource_class,
             "retry_policy": dict(node.retry_policy),
             "timeout_policy": dict(node.timeout_policy),
@@ -883,6 +899,15 @@ class OrchestrationService:
             }
             for edge in edges
         ]
+        if envelope_version == "v2":
+            actual_edges.sort(
+                key=lambda edge: (
+                    edge["from_node_id"],
+                    edge["to_node_id"],
+                    edge["edge_type"],
+                    edge["condition"] or "",
+                )
+            )
         attachments = await self._storage.list_task_input_attachments_for_task(
             task.task_id
         )
@@ -890,30 +915,113 @@ class OrchestrationService:
             dict(assignment) != actual_assignment
             or dict(snapshot) != actual_node
             or envelope.get("edge_snapshot") != actual_edges
-            or envelope.get("input_attachment_ids")
-            != sorted(item.attachment_id for item in attachments)
         ):
             raise RuntimeError("mcp_dispatch_resume_snapshot_drift")
+        if (
+            envelope.get("input_attachment_ids")
+            != sorted(item.attachment_id for item in attachments)
+            or any(
+                item.task_id != task.task_id
+                or item.conversation_id != task.conversation_id
+                for item in attachments
+            )
+        ):
+            if envelope_version == "v2":
+                raise MCPDispatchResumeEnvelopeError(
+                    "mcp_dispatch_resume_attachment_unavailable"
+                )
+            raise RuntimeError("mcp_dispatch_resume_snapshot_drift")
+        depends_on = (
+            tuple(
+                sorted(
+                    {
+                        edge.from_node_id
+                        for edge in edges
+                        if edge.to_node_id == node.node_id
+                    }
+                )
+            )
+            if envelope_version == "v2"
+            else tuple(
+                edge.from_node_id
+                for edge in edges
+                if edge.to_node_id == node.node_id
+            )
+        )
+        if envelope_version == "v2":
+            requested_server_id = request.metadata.get("mcp_dispatch_server_id")
+            if (
+                not isinstance(requested_server_id, str)
+                or requested_server_id != envelope["server_id"]
+            ):
+                raise RuntimeError("mcp_dispatch_resume_authority_mismatch")
+            dependency_outputs = await self._restore_v2_dependency_outputs(
+                task_id=task.task_id,
+                depends_on=depends_on,
+                dependency_output_refs=envelope["dependency_output_refs"],
+            )
+            binding_mode = str(
+                request.metadata.get("mcp_binding_mode") or "automatic"
+            )
+            node_metadata = {
+                "mcp_binding_mode": binding_mode,
+                "mcp_dispatch_server_id": requested_server_id,
+            }
+            input_payload = {"server_id": requested_server_id}
+        else:
+            dependency_outputs = {
+                str(key): dict(value)
+                for key, value in dict(
+                    envelope.get("dependency_outputs") or {}
+                ).items()
+            }
+            node_metadata = dict(envelope.get("metadata") or {})
+            input_payload = dict(envelope.get("input_payload") or {})
         node_plan = WorkflowNodePlan(
             node_id=node.node_id,
             capability_id=node.capability_id,
-            input_payload=dict(envelope.get("input_payload") or {}),
-            metadata=dict(envelope.get("metadata") or {}),
-            depends_on=tuple(
-                edge.from_node_id for edge in edges if edge.to_node_id == node.node_id
-            ),
+            input_payload=input_payload,
+            metadata=node_metadata,
+            depends_on=depends_on,
             criticality=node.criticality,
             retry_policy=dict(node.retry_policy),
             timeout_policy=dict(node.timeout_policy),
             resource_class=node.resource_class,
         )
-        dependency_outputs = {
-            str(key): dict(value)
-            for key, value in dict(envelope.get("dependency_outputs") or {}).items()
-        }
         return await self._execute_node(
             request, node_plan, node, dependency_outputs=dependency_outputs
         )
+
+    async def _restore_v2_dependency_outputs(
+        self,
+        *,
+        task_id: str,
+        depends_on: tuple[str, ...],
+        dependency_output_refs: Any,
+    ) -> dict[str, dict[str, Any]]:
+        refs_by_node = {
+            str(item["node_id"]): tuple(item["artifact_ids"])
+            for item in dependency_output_refs
+        }
+        if tuple(sorted(refs_by_node)) != depends_on:
+            raise MCPDispatchResumeEnvelopeError(
+                "mcp_dispatch_resume_dependency_unrecoverable"
+            )
+        outputs: dict[str, dict[str, Any]] = {}
+        for dependency_node_id in depends_on:
+            artifact_ids = refs_by_node[dependency_node_id]
+            artifacts = {}
+            for artifact_id in artifact_ids:
+                artifact = await self._storage.get_artifact(artifact_id)
+                if artifact is not None:
+                    artifacts[artifact_id] = artifact
+            outputs[dependency_node_id] = project_mcp_dependency_artifacts(
+                task_id=task_id,
+                node_id=dependency_node_id,
+                artifact_ids=artifact_ids,
+                artifacts_by_id=artifacts,
+            )
+        return outputs
 
     async def _assert_mcp_continuation_execution_owned(
         self, request: OrchestrationRequest

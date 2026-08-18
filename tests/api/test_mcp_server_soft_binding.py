@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, patch
 from src.core.enums import NodeStatus, TaskStatus, UserMCPHealthStatus, UserMCPTransport
 from src.core.models import Interrupt, TaskNode, UserMCPServer
 from src.api.mcp_binding import MCPBoundServerUnavailableError
+from src.integrations.mcp.resume_envelope import (
+    build_mcp_dispatch_resume_envelope_v2,
+)
 from tests.api.support import APITestCase
 
 
@@ -375,6 +378,59 @@ class MCPServerSoftBindingAPITest(APITestCase):
 
         with self.assertRaises(MCPBoundServerUnavailableError):
             await self.runtime._resolve_persisted_mcp_server_binding(task)
+
+    async def test_v2_resume_binding_uses_root_message_context_not_metadata(
+        self,
+    ) -> None:
+        scheduler = AsyncMock()
+        with patch.object(self.runtime, "_schedule_execution", scheduler):
+            response = await self.client.post(
+                "/api/v1/conversations/chat-messages",
+                json=self._payload("conv-v2-binding"),
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        task = await self.runtime.storage.get_task(response.json()["task_id"])
+        assert task is not None
+        task = await self.runtime.storage.save_task(
+            replace(task, status=TaskStatus.RUNNING)
+        )
+        node = await self.runtime.storage.save_task_node(
+            TaskNode(
+                node_id="node-v2-binding",
+                task_id=task.task_id,
+                capability_id="mcp.dispatch",
+                status=NodeStatus.RUNNING,
+            )
+        )
+        envelope = build_mcp_dispatch_resume_envelope_v2(
+            task=task,
+            node=node,
+            edges=(),
+            attachments=(),
+            dependency_nodes=(),
+            server_id="mcp-available",
+        )
+        self.assertNotIn("metadata", envelope)
+        self.assertEqual(
+            str(
+                await self.runtime.storage.arm_user_mcp_target_intent(
+                    task.task_id,
+                    node.node_id,
+                    "mcp-available",
+                    envelope,
+                    datetime(2026, 8, 17, 9, 1, 0),
+                )
+            ),
+            "armed",
+        )
+
+        binding = await self.runtime._resolve_persisted_mcp_server_binding(
+            task, node_id=node.node_id
+        )
+
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.server_id, "mcp-available")
+        self.assertEqual(binding.binding_mode, "explicit_command")
 
     async def test_pre_dispatch_sheet_selection_resume_keeps_explicit_binding(self) -> None:
         scheduler = AsyncMock()
