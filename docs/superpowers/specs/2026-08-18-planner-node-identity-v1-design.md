@@ -2,7 +2,7 @@
 
 日期：2026-08-18
 
-状态：设计、实施计划与书面 spec 已批准；仓库实现和自动质量门禁已完成，开发镜像 smoke 待执行
+状态：设计、实施计划与书面 spec 已批准；仓库实现、自动质量门禁和 51999 开发镜像 smoke 已完成
 
 适用范围：`main` 分支中由 LLM 初始 Planner 和 Main Agent Runtime Replanner 生成的工作流节点身份、依赖引用、持久化、恢复、API/SSE 关联和前端 artifact 分类。
 
@@ -301,3 +301,4 @@ SQLite、PostgreSQL 和启用的 Rust Runtime Sidecar 权威路径必须提供�
 - persistence guard 只校验 `identity_origin=model` 的新节点；system 与 legacy 节点保持原合同。
 - 前端 artifact projection 不再解析 `producer_node_id`。
 - 自动验证覆盖相同 `n1 + answer_user` 的顺序/并发任务、初始/replan 同 key、claim 重试与 Rust SQLite reopen；相关后端分层测试、前端全套/typecheck/build、Rust fmt/clippy/workspace test/cargo-deny 已通过。
+- 本地 `linux/amd64` RuntimeSidecar、backend、frontend 镜像已重建并启动；Compose 三服务健康，51999 的前端、API 文档、OpenAPI、登录和 capability API smoke 通过。
