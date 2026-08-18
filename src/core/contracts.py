@@ -370,6 +370,10 @@ class StoragePort(Protocol):
         self, action_id: str
     ) -> MCPPendingToolAction | None: ...
 
+    async def get_latest_approved_mcp_tool_action(
+        self, owner_user_id: str, task_id: str, node_id: str
+    ) -> MCPPendingToolAction | None: ...
+
     async def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]: ...

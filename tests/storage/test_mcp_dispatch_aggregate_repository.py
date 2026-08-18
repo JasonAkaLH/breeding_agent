@@ -214,7 +214,14 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             NOW + timedelta(seconds=30),
         )
 
-    def _call(self, call_ref: str = "call-1") -> MCPCallRecord:
+    def _call(
+        self,
+        call_ref: str = "call-1",
+        *,
+        call_sequence: int = 1,
+        action_id: str = "action-1",
+        arguments_sha256: str = "sha256:arguments",
+    ) -> MCPCallRecord:
         return MCPCallRecord(
             call_ref=call_ref,
             branch_id="branch-1",
@@ -224,13 +231,13 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
             server_id=self.server.server_id,
             tool_name="lookup",
             status="reserved",
-            call_sequence=1,
-            arguments_sha256="sha256:arguments",
+            call_sequence=call_sequence,
+            arguments_sha256=arguments_sha256,
             server_security_version=self.server.security_version,
             server_config_version=self.server.config_version,
             input_schema_sha256="sha256:schema",
             protocol_version="2026-07-28",
-            pending_action_id="action-1",
+            pending_action_id=action_id,
             created_at=NOW,
             updated_at=NOW,
         )
@@ -254,34 +261,51 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(admitted)
         return await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
 
+    async def test_latest_approved_action_read_is_closed_to_task_node_owner(self) -> None:
+        action = await self.storage.get_latest_approved_mcp_tool_action(
+            "alice", self.task.task_id, self.node.node_id
+        )
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action.action_id, "action-1")
+        self.assertIsNone(
+            await self.storage.get_latest_approved_mcp_tool_action(
+                "other-owner", self.task.task_id, self.node.node_id
+            )
+        )
+
     def _terminal_snapshots(
-        self, *, terminal_state: MCPTerminalState = MCPTerminalState.COMPLETED
+        self,
+        *,
+        terminal_state: MCPTerminalState = MCPTerminalState.COMPLETED,
+        call_ref: str = "call-1",
+        result_ref: str = "mcp-result-1",
     ):
         result_payload_sha = canonical_sha256(
             {
-                "safe_result_ref": "mcp-result-1",
+                "safe_result_ref": result_ref,
                 "terminal_state": str(terminal_state),
             }
         )
         completed = terminal_state is MCPTerminalState.COMPLETED
         candidate = MCPValidatedTerminalResultCandidate(
             candidate_id=mcp_terminal_candidate_id(
-                "call-1", result_payload_sha
+                call_ref, result_payload_sha
             ),
             owner_user_id="alice",
             conversation_id=self.task.conversation_id,
             task_id=self.task.task_id,
             node_id=self.node.node_id,
             intent_id=self.intent_id,
-            call_id="call-1",
+            call_id=call_ref,
             server_id=self.server.server_id,
             server_config_version=self.server.config_version,
             server_security_version=self.server.security_version,
             terminal_state=terminal_state,
             result_payload_sha256=result_payload_sha,
-            safe_result_ref="mcp-result-1" if completed else None,
+            safe_result_ref=result_ref if completed else None,
             safe_result_ref_sha256=(
-                canonical_sha256("mcp-result-1") if completed else None
+                canonical_sha256(result_ref) if completed else None
             ),
             safe_error_code=None if completed else "remote_failed",
             sealed_at=NOW,
@@ -296,25 +320,25 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         candidate_snapshot = MCPTerminalCandidateSnapshot(
             candidate=candidate,
             candidate_schema="maf.user_mcp.cp7.terminal_result_candidate.v2",
-            active_candidate_filename="candidate-1.json",
-            active_task_index_filename="task-index-1.json",
-            active_call_index_filename="call-index-1.json",
+            active_candidate_filename=f"candidate-{call_ref}.json",
+            active_task_index_filename=f"task-index-{call_ref}.json",
+            active_call_index_filename=f"call-index-{call_ref}.json",
             candidate_file_sha256="sha256:" + "b" * 64,
             task_index_file_sha256="sha256:" + "c" * 64,
             call_index_file_sha256="sha256:" + "d" * 64,
         )
         result_snapshot = (
             MCPDurableResultSnapshot(
-                result_ref="mcp-result-1",
+                result_ref=result_ref,
                 owner_user_id="alice",
                 task_id=self.task.task_id,
                 node_id=self.node.node_id,
-                call_id="call-1",
+                call_id=call_ref,
                 content_sha256="sha256:" + "a" * 64,
                 size_bytes=2,
                 store_kind="durable_content_addressed",
-                data_filename="mcp-result-1.json",
-                manifest_filename="mcp-result-1.manifest.json",
+                data_filename=f"{result_ref}.json",
+                manifest_filename=f"{result_ref}.manifest.json",
                 data_file_sha256="sha256:" + "a" * 64,
                 manifest_file_sha256="sha256:" + "e" * 64,
                 data_file_device=1,
@@ -569,6 +593,135 @@ class MCPDispatchAggregateRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             str((await self.storage.get_task_node(self.node.node_id)).status),
             "failed",
+        )
+
+    async def test_two_completed_calls_keep_dispatch_active_until_one_finalizer(self) -> None:
+        first_active = await self._admit()
+        first_candidate, first_result = self._terminal_snapshots()
+        first_commit = await self.storage.commit_mcp_call_terminal(
+            "call-1",
+            first_candidate.candidate.candidate_id,
+            self.outbox_id,
+            first_active.revision,
+            "worker",
+            "token",
+            first_candidate,
+            first_result,
+            NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(str(first_commit), "committed_normal")
+
+        with self.sessions() as session:
+            session.add(
+                MCPPendingToolActionRow(
+                    action_id="action-2",
+                    owner_user_id="alice",
+                    conversation_id=self.task.conversation_id,
+                    task_id=self.task.task_id,
+                    node_id=self.node.node_id,
+                    server_id=self.server.server_id,
+                    tool_name="lookup",
+                    arguments_sha256="sha256:arguments-2",
+                    approval_fingerprint="sha256:approval-2",
+                    arguments_payload_ref="mcp-action-payload-2",
+                    payload_file_sha256="sha256:file-2",
+                    payload_size_bytes=124,
+                    encryption_version=1,
+                    server_config_version=self.server.config_version,
+                    server_security_version=self.server.security_version,
+                    input_schema_sha256="sha256:schema",
+                    status="approved",
+                    revision=1,
+                    approved_at=NOW + timedelta(seconds=1),
+                    created_at=NOW + timedelta(seconds=1),
+                    updated_at=NOW + timedelta(seconds=1),
+                )
+            )
+            session.commit()
+        second_snapshot = replace(
+            self.snapshot,
+            action_id="action-2",
+            arguments_sha256="sha256:arguments-2",
+            arguments_payload_ref="mcp-action-payload-2",
+            payload_file_sha256="sha256:file-2",
+            payload_size_bytes=124,
+            file_inode=4,
+        )
+        intent = await self.storage.get_mcp_no_server_intent(self.intent_id)
+        outbox = await self.storage.get_mcp_dispatch_resume_outbox(self.outbox_id)
+        admitted = await self.storage.admit_approved_mcp_action(
+            self.intent_id,
+            self.outbox_id,
+            "action-2",
+            intent.revision,
+            outbox.revision,
+            1,
+            "worker",
+            "token",
+            second_snapshot,
+            self._call(
+                "call-2",
+                call_sequence=2,
+                action_id="action-2",
+                arguments_sha256="sha256:arguments-2",
+            ),
+            NOW + timedelta(seconds=2),
+        )
+        self.assertTrue(admitted)
+
+        second_active = await self.storage.get_mcp_dispatch_resume_outbox(
+            self.outbox_id
+        )
+        second_candidate, second_result = self._terminal_snapshots(
+            call_ref="call-2", result_ref="mcp-result-2"
+        )
+        second_commit = await self.storage.commit_mcp_call_terminal(
+            "call-2",
+            second_candidate.candidate.candidate_id,
+            self.outbox_id,
+            second_active.revision,
+            "worker",
+            "token",
+            second_candidate,
+            second_result,
+            NOW + timedelta(seconds=3),
+        )
+        self.assertEqual(str(second_commit), "committed_normal")
+        before_finalize = await self.storage.get_mcp_dispatch_resume_outbox(
+            self.outbox_id
+        )
+        self.assertEqual(str(before_finalize.status), "active")
+        self.assertEqual(before_finalize.result_receipt_id, before_finalize.resume_receipt_id)
+        self.assertEqual(
+            len(
+                await self.storage.list_mcp_call_records(
+                    "alice", self.task.task_id, branch_id="branch-1"
+                )
+            ),
+            2,
+        )
+
+        finalized = await self.storage.finalize_mcp_dispatch(
+            self.intent_id,
+            self.outbox_id,
+            self.node.node_id,
+            "completed",
+            None,
+            before_finalize.revision,
+            "worker",
+            "token",
+            NOW + timedelta(seconds=4),
+        )
+        self.assertEqual(str(finalized), "finalized")
+        self.assertEqual(
+            str(
+                (
+                    await self.storage.get_mcp_dispatch_resume_outbox(
+                        self.outbox_id
+                    )
+                ).status
+            ),
+            "completed",
         )
 
     async def test_no_call_stop_finalizer_aborts_and_invalidates_action(self) -> None:

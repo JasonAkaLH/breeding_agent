@@ -363,6 +363,11 @@ class CP7ClosedContractTests(unittest.TestCase):
                 "completed_at",
                 "result_receipt_id",
                 "completion_mode",
+                "resume_reason",
+                "resume_receipt_id",
+                "resume_answer_id",
+                "selector_step_total",
+                "approval_round_total",
             ),
             MCPValidatedTerminalResultCandidate: (
                 "candidate_id",

@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+import unittest
+from datetime import datetime
+from types import SimpleNamespace
+
+from src.capabilities.mcp_dispatch.models import MCPBindingMode, MCPToolProfile
+from src.core.enums import (
+    ArtifactType,
+    EdgeType,
+    MessageRole,
+    NodeStatus,
+    TaskStatus,
+    UserMCPHealthStatus,
+    UserMCPTransport,
+)
+from src.core.models import (
+    Artifact,
+    MCPBranchRecord,
+    MCPCallRecord,
+    MCPTerminalResultCompletionMode,
+    MCPTerminalResultReceipt,
+    MCPTerminalState,
+    Message,
+    Task,
+    TaskEdge,
+    TaskInputAttachment,
+    TaskNode,
+    UserMCPServer,
+)
+from src.integrations.mcp.cp7_artifacts import (
+    mcp_dispatch_resume_outbox_id,
+    mcp_no_server_intent_id,
+)
+from src.integrations.mcp.resume_envelope import build_mcp_dispatch_resume_envelope_v2
+from src.integrations.mcp.selector_context import (
+    MCPDurableSelectorContextBuilder,
+    MCPSelectorContextAuthorityError,
+)
+
+
+NOW = datetime(2026, 8, 18, 12, 0, 0)
+
+
+class _ResultAuthority:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.replacement: str | None = None
+
+    async def verify_completed_result(self, *, call, receipt) -> str:
+        self.calls.append(call.call_ref)
+        return self.replacement or str(receipt.safe_result_ref)
+
+
+class _ProjectionStorage:
+    def __init__(self) -> None:
+        self.task = Task(
+            task_id="task-selector",
+            conversation_id="conversation-selector",
+            root_message_id="message-selector",
+            status=TaskStatus.RUNNING,
+            mcp_execution_mode="user_scoped",
+            mcp_shadow_enabled=False,
+            mcp_rollout_config_version="cp7",
+            mcp_route_reason_code="enforce_selected",
+            mcp_rollout_mode="enforce",
+        )
+        self.root_message = Message(
+            message_id=self.task.root_message_id,
+            conversation_id=self.task.conversation_id,
+            role=MessageRole.USER,
+            content="分析附件并查询客户",
+            metadata={
+                "mcp_server_binding_context": {
+                    "server_id": "server-a",
+                    "server_config_version": 3,
+                    "server_security_version": 4,
+                    "binding_mode": "explicit_command",
+                }
+            },
+        )
+        self.node = TaskNode(
+            node_id="node-selector",
+            task_id=self.task.task_id,
+            capability_id="mcp.dispatch",
+            status=NodeStatus.RUNNING,
+        )
+        self.dependency = TaskNode(
+            node_id="node-dependency",
+            task_id=self.task.task_id,
+            capability_id="main.agent",
+            status=NodeStatus.COMPLETED,
+            output_refs=("artifact-a",),
+        )
+        self.edge = TaskEdge(
+            self.dependency.node_id, self.node.node_id, EdgeType.DATA
+        )
+        self.artifact = Artifact(
+            artifact_id="artifact-a",
+            task_id=self.task.task_id,
+            producer_node_id=self.dependency.node_id,
+            artifact_type=ArtifactType.TEXT,
+            storage_ref="artifact://a",
+            summary="上游持久化摘要",
+            is_complete=True,
+        )
+        self.attachment = TaskInputAttachment(
+            attachment_id="attachment-a",
+            task_id=self.task.task_id,
+            conversation_id=self.task.conversation_id,
+            source_kind="message_upload",
+            source_message_id=self.task.root_message_id,
+            filename="客户名单.csv",
+            content_type="text/csv",
+            size_bytes=2048,
+        )
+        self.server = UserMCPServer(
+            server_id="server-a",
+            owner_user_id="alice",
+            display_name="CRM",
+            routing_description="查询客户",
+            endpoint_url="https://example.invalid/mcp",
+            transport=UserMCPTransport.STREAMABLE_HTTP,
+            health_status=UserMCPHealthStatus.AVAILABLE,
+            config_version=3,
+            security_version=4,
+        )
+        self.branch = MCPBranchRecord(
+            branch_id="branch-a",
+            owner_user_id="alice",
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            status="completed",
+            initial_server_id=self.server.server_id,
+            tool_call_count=2,
+            max_tool_calls=20,
+        )
+        self.calls = [self._call(2), self._call(1)]
+        self.receipts = {
+            call.call_ref: self._receipt(call) for call in self.calls
+        }
+        envelope = build_mcp_dispatch_resume_envelope_v2(
+            task=self.task,
+            node=self.node,
+            edges=(self.edge,),
+            attachments=(self.attachment,),
+            dependency_nodes=(self.dependency,),
+            server_id=self.server.server_id,
+        )
+        self.intent = SimpleNamespace(
+            intent_id=mcp_no_server_intent_id(
+                self.task.task_id, node_id=self.node.node_id
+            ),
+            owner_user_id="alice",
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            requested_server_id=self.server.server_id,
+            resume_envelope_json=envelope,
+        )
+        latest_receipt = self.receipts["call-2"]
+        self.outbox = SimpleNamespace(
+            outbox_id=mcp_dispatch_resume_outbox_id(self.intent.intent_id),
+            intent_id=self.intent.intent_id,
+            owner_user_id="alice",
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            server_id=self.server.server_id,
+            status="active",
+            resume_reason="ordinary_terminal",
+            resume_receipt_id=latest_receipt.result_receipt_id,
+            result_receipt_id=latest_receipt.result_receipt_id,
+            selector_step_total=7,
+            approval_round_total=2,
+        )
+
+    def _call(self, sequence: int) -> MCPCallRecord:
+        return MCPCallRecord(
+            call_ref=f"call-{sequence}",
+            branch_id="branch-a",
+            owner_user_id="alice",
+            task_id=self.task.task_id,
+            node_id=self.node.node_id,
+            server_id="server-a",
+            tool_name="lookup",
+            status="completed",
+            call_sequence=sequence,
+            arguments_sha256=f"fingerprint-{sequence}",
+            server_security_version=4,
+            input_schema_sha256="schema-a",
+            server_config_version=3,
+            may_have_dispatched=True,
+            result_ref=f"mcp-result-{sequence}",
+        )
+
+    def _receipt(self, call: MCPCallRecord) -> MCPTerminalResultReceipt:
+        return MCPTerminalResultReceipt(
+            result_receipt_id=f"receipt-{call.call_sequence}",
+            candidate_id=f"candidate-{call.call_sequence}",
+            owner_user_id=call.owner_user_id,
+            conversation_id=self.task.conversation_id,
+            task_id=call.task_id,
+            node_id=call.node_id,
+            intent_id=mcp_no_server_intent_id(
+                self.task.task_id, node_id=self.node.node_id
+            ),
+            call_id=call.call_ref,
+            server_id=call.server_id,
+            server_config_version=3,
+            server_security_version=4,
+            terminal_state=MCPTerminalState.COMPLETED,
+            result_payload_sha256=f"payload-{call.call_sequence}",
+            safe_result_ref=call.result_ref,
+            safe_result_ref_sha256=f"ref-{call.call_sequence}",
+            safe_error_code=None,
+            completion_mode=MCPTerminalResultCompletionMode.NORMAL_TERMINAL_PROJECTION,
+            committed_at=NOW,
+            safe_result_content_sha256="sha256:" + str(call.call_sequence) * 64,
+            safe_result_size_bytes=100 + call.call_sequence,
+            safe_result_store_kind="durable_content_addressed",
+        )
+
+    async def get_task(self, task_id):
+        return self.task if task_id == self.task.task_id else None
+
+    async def get_message(self, message_id):
+        return self.root_message if message_id == self.root_message.message_id else None
+
+    async def get_mcp_branch_record(self, owner_user_id, task_id, branch_id):
+        if (owner_user_id, task_id, branch_id) == (
+            "alice",
+            self.task.task_id,
+            self.branch.branch_id,
+        ):
+            return self.branch
+        return None
+
+    async def get_mcp_no_server_intent(self, intent_id):
+        return self.intent if intent_id == self.intent.intent_id else None
+
+    async def list_task_input_attachments_for_task(self, task_id):
+        return [self.attachment] if task_id == self.task.task_id else []
+
+    async def list_task_edges(self, task_id):
+        return [self.edge] if task_id == self.task.task_id else []
+
+    async def get_artifact(self, artifact_id):
+        return self.artifact if artifact_id == self.artifact.artifact_id else None
+
+    async def list_mcp_call_records(self, owner_user_id, task_id, *, branch_id=None):
+        del owner_user_id, task_id, branch_id
+        return list(self.calls)
+
+    async def get_latest_approved_mcp_tool_action(self, *args):
+        del args
+        return None
+
+    async def get_user_mcp_server(self, owner_user_id, server_id):
+        if (owner_user_id, server_id) == ("alice", "server-a"):
+            return self.server
+        return None
+
+    async def get_mcp_dispatch_resume_outbox(self, outbox_id):
+        return self.outbox if outbox_id == self.outbox.outbox_id else None
+
+    async def get_mcp_terminal_result_receipt_for_call(self, call_ref):
+        return self.receipts.get(call_ref)
+
+
+class MCPDurableSelectorContextBuilderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_rebuilds_identical_context_from_durable_authority(self) -> None:
+        storage = _ProjectionStorage()
+        first_authority = _ResultAuthority()
+        tools = (MCPToolProfile(name="lookup", input_schema={"type": "object"}),)
+
+        before_restart = await MCPDurableSelectorContextBuilder(
+            storage, first_authority
+        ).build(
+            owner_user_id="alice",
+            task_id=storage.task.task_id,
+            node_id=storage.node.node_id,
+            branch_id=storage.branch.branch_id,
+            expected_server_id=storage.server.server_id,
+            tools=tools,
+        )
+        after_restart = await MCPDurableSelectorContextBuilder(
+            storage, _ResultAuthority()
+        ).build(
+            owner_user_id="alice",
+            task_id=storage.task.task_id,
+            node_id=storage.node.node_id,
+            branch_id=storage.branch.branch_id,
+            expected_server_id=storage.server.server_id,
+            tools=tools,
+        )
+
+        self.assertEqual(before_restart, after_restart)
+        self.assertEqual(first_authority.calls, ["call-1", "call-2"])
+        self.assertEqual(before_restart.binding_mode, MCPBindingMode.EXPLICIT_COMMAND)
+        self.assertEqual(
+            before_restart.completed_result_refs,
+            ("mcp-result-1", "mcp-result-2"),
+        )
+        self.assertEqual(
+            before_restart.upstream_facts,
+            ("node-dependency:safe_summary=上游持久化摘要",),
+        )
+        self.assertEqual(before_restart.remaining_call_budget, 18)
+        self.assertEqual(before_restart.selector_step_total, 7)
+        self.assertEqual(before_restart.approval_round_total, 2)
+        self.assertEqual(before_restart.attachments[0].basename, "客户名单.csv")
+
+    async def test_result_authority_drift_fails_closed(self) -> None:
+        storage = _ProjectionStorage()
+        authority = _ResultAuthority()
+        authority.replacement = "different-result"
+
+        with self.assertRaisesRegex(
+            MCPSelectorContextAuthorityError,
+            "mcp_selector_context_result_authority_conflict",
+        ):
+            await MCPDurableSelectorContextBuilder(storage, authority).build(
+                owner_user_id="alice",
+                task_id=storage.task.task_id,
+                node_id=storage.node.node_id,
+                branch_id=storage.branch.branch_id,
+                expected_server_id=storage.server.server_id,
+                tools=(MCPToolProfile(name="lookup"),),
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

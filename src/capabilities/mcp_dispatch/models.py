@@ -49,11 +49,20 @@ class MCPSelectorContext:
     failed_call_fingerprints: frozenset[str] = frozenset()
     rejected_call_fingerprints: frozenset[str] = frozenset()
     remaining_call_budget: int = 20
+    selector_step_total: int = 0
+    approval_round_total: int = 0
 
     def __post_init__(self) -> None:
         expected = self.binding_mode is MCPBindingMode.AUTOMATIC
         if self.allow_route_another_server is not expected:
             raise ValueError("MCP binding mode and route policy are inconsistent")
+        for value in (
+            self.remaining_call_budget,
+            self.selector_step_total,
+            self.approval_round_total,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("MCP selector durable counters must be non-negative integers")
 
 
 def build_mcp_selector_context(
@@ -68,6 +77,8 @@ def build_mcp_selector_context(
     failed_call_fingerprints: frozenset[str] = frozenset(),
     rejected_call_fingerprints: frozenset[str] = frozenset(),
     remaining_call_budget: int = 20,
+    selector_step_total: int = 0,
+    approval_round_total: int = 0,
 ) -> MCPSelectorContext:
     return MCPSelectorContext(
         user_request=user_request,
@@ -81,6 +92,8 @@ def build_mcp_selector_context(
         failed_call_fingerprints=failed_call_fingerprints,
         rejected_call_fingerprints=rejected_call_fingerprints,
         remaining_call_budget=remaining_call_budget,
+        selector_step_total=selector_step_total,
+        approval_round_total=approval_round_total,
     )
 
 

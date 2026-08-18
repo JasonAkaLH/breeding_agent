@@ -77,6 +77,10 @@ from src.integrations.mcp.resume_envelope import (
     build_mcp_dispatch_resume_envelope_v2,
     project_mcp_dependency_artifacts,
 )
+from src.integrations.mcp.selector_context import (
+    MCPSelectorContextAuthorityError,
+    MCPSelectorContextBuilderPort,
+)
 from src.integrations.mcp.temporary_results import MCPResultTooLargeError
 from .safety_detectors import AuthoritativeMCPSafetyDetector
 from src.orchestration.models import UserMCPServerProfile
@@ -181,6 +185,7 @@ class UserMCPDispatchCoordinator:
         gateway: MCPGateway,
         selector: MCPSelectorPort | MCPToolSelector,
         audit_reference_signer: MCPAuditReferenceSigner,
+        selector_context_builder: MCPSelectorContextBuilderPort | None = None,
         server_router: MCPServerRouterPort | MCPServerRouter | None = None,
         now_fn: NowFn | None = None,
         terminal_now_fn: NowFn | None = None,
@@ -210,6 +215,7 @@ class UserMCPDispatchCoordinator:
         self._storage = storage
         self._gateway = gateway
         self._selector = selector
+        self._selector_context_builder = selector_context_builder
         self._audit_reference_signer = audit_reference_signer
         self._server_router = server_router
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
@@ -504,13 +510,24 @@ class UserMCPDispatchCoordinator:
                     )
                     or branch
                 )
-                selector_context = build_mcp_selector_context(
+                tool_profiles = tuple(_tool_profile(tool) for tool in catalog.tools)
+                if self._selector_context_builder is not None:
+                    selector_context = await self._selector_context_builder.build(
+                        owner_user_id=owner_user_id,
+                        task_id=request.task_id,
+                        node_id=request.node_id,
+                        branch_id=branch_id,
+                        expected_server_id=current_server.server_id,
+                        tools=tool_profiles,
+                    )
+                else:
+                    selector_context = build_mcp_selector_context(
                         user_request=_user_request(
                             request,
                             has_attachments=bool(attachment_summaries),
                         ),
                         server=_server_profile(current_server),
-                        tools=tuple(_tool_profile(tool) for tool in catalog.tools),
+                        tools=tool_profiles,
                         binding_mode=binding_mode,
                         attachments=attachment_summaries,
                         upstream_facts=_upstream_facts(request.dependency_outputs),
@@ -528,7 +545,7 @@ class UserMCPDispatchCoordinator:
                         remaining_call_budget=max(
                             0, branch.max_tool_calls - branch.tool_call_count
                         ),
-                )
+                    )
                 action = await self._selector.select(selector_context)
                 if binding_mode is MCPBindingMode.EXPLICIT_COMMAND:
                     events.append(
@@ -926,6 +943,16 @@ class UserMCPDispatchCoordinator:
                         "remote_task_status": outcome.status,
                         "next_poll_at": outcome.next_poll_at,
                     },
+                )
+            except MCPSelectorContextAuthorityError as exc:
+                return await self._finalize_no_call_outcome(
+                    authority,
+                    request,
+                    self._error(
+                        exc.code, "MCP selector recovery authority is invalid."
+                    ),
+                    outcome="failed",
+                    safe_error_code=exc.code,
                 )
             except MCPSelectorOutputError:
                 return await self._finalize_no_call_outcome(

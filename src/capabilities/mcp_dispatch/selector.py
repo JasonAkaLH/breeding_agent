@@ -114,6 +114,8 @@ def build_selector_prompt(context: MCPSelectorContext) -> str:
         "failed_call_fingerprints": sorted(context.failed_call_fingerprints),
         "rejected_call_fingerprints": sorted(context.rejected_call_fingerprints),
         "remaining_call_budget": context.remaining_call_budget,
+        "selector_step_total": context.selector_step_total,
+        "approval_round_total": context.approval_round_total,
     }
     return (
         "你是单个 MCP Server 内的受限 Tool Selector。只选择完成用户目标所需的下一步。"

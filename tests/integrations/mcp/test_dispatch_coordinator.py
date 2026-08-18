@@ -6,8 +6,10 @@ from dataclasses import replace
 from datetime import datetime
 
 from src.capabilities.mcp_dispatch.models import (
+    MCPBindingMode,
     MCPSelectorAction,
     MCPSelectorActionType,
+    MCPSelectorContext,
     MCPServerRouteAction,
     MCPServerRouteActionType,
 )
@@ -53,6 +55,8 @@ from src.integrations.mcp.rollout_evidence import (
     MCPSafetyRedLine,
 )
 from src.integrations.mcp.temporary_results import MCPResultTooLargeError
+from src.integrations.mcp.selector_context import MCPSelectorContextAuthorityError
+from src.orchestration.models import UserMCPServerProfile
 
 
 NOW = datetime(2026, 8, 12, 12, 0, 0)
@@ -73,6 +77,33 @@ class _SequenceSelector:
         if not self.actions:
             return MCPSelectorAction(MCPSelectorActionType.FINISH, reason="done")
         return self.actions.pop(0)
+
+
+class _InjectedContextBuilder:
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def build(self, **kwargs):
+        self.requests.append(kwargs)
+        return MCPSelectorContext(
+            user_request="durable selector context",
+            server=UserMCPServerProfile(
+                "server-a", "CRM", "Lookup CRM records", "streamable_http"
+            ),
+            tools=kwargs["tools"],
+            binding_mode=MCPBindingMode.AUTOMATIC,
+            allow_route_another_server=True,
+            selector_step_total=5,
+            approval_round_total=2,
+        )
+
+
+class _FailingContextBuilder:
+    async def build(self, **kwargs):
+        del kwargs
+        raise MCPSelectorContextAuthorityError(
+            "mcp_selector_context_result_authority_conflict"
+        )
 
 
 class _FakeGateway:
@@ -372,6 +403,44 @@ def _call(arguments=None) -> MCPSelectorAction:
 
 
 class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_durable_context_authority_failure_never_calls_tool(self) -> None:
+        gateway = _FakeGateway()
+        outcome = await UserMCPDispatchCoordinator(
+            storage=_FakeStorage(),
+            gateway=gateway,
+            selector=_SequenceSelector(_call()),
+            selector_context_builder=_FailingContextBuilder(),
+        ).dispatch(_request(), server_id="server-a")
+
+        self.assertEqual(
+            outcome.error.code,
+            "mcp_selector_context_result_authority_conflict",
+        )
+        self.assertEqual(gateway.calls, [])
+
+    async def test_injected_durable_context_builder_prepares_aggregate_cutover(self) -> None:
+        storage = _FakeStorage()
+        selector = _SequenceSelector(
+            MCPSelectorAction(MCPSelectorActionType.FINISH, reason="done")
+        )
+        context_builder = _InjectedContextBuilder()
+        coordinator = UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=_FakeGateway(),
+            selector=selector,
+            selector_context_builder=context_builder,
+        )
+
+        outcome = await coordinator.dispatch(_request(), server_id="server-a")
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(len(context_builder.requests), 1)
+        self.assertEqual(
+            context_builder.requests[0]["expected_server_id"], "server-a"
+        )
+        self.assertEqual(selector.contexts[0].user_request, "durable selector context")
+        self.assertEqual(selector.contexts[0].selector_step_total, 5)
+
     def test_attachment_projection_only_uses_current_root_message(self) -> None:
         current = TaskInputAttachment(
             attachment_id="att-current",

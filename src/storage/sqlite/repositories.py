@@ -4829,6 +4829,25 @@ class SQLiteStateRepository:
         row = self._session.get(MCPPendingToolActionRow, action_id)
         return None if row is None else _row_to_mcp_pending_action(row)
 
+    def get_latest_approved_mcp_tool_action(
+        self, owner_user_id: str, task_id: str, node_id: str
+    ) -> MCPPendingToolAction | None:
+        row = self._session.scalar(
+            select(MCPPendingToolActionRow)
+            .where(
+                MCPPendingToolActionRow.owner_user_id == owner_user_id,
+                MCPPendingToolActionRow.task_id == task_id,
+                MCPPendingToolActionRow.node_id == node_id,
+                MCPPendingToolActionRow.status == "approved",
+            )
+            .order_by(
+                MCPPendingToolActionRow.updated_at.desc(),
+                MCPPendingToolActionRow.action_id.desc(),
+            )
+            .limit(1)
+        )
+        return None if row is None else _row_to_mcp_pending_action(row)
+
     def list_mcp_dispatch_resume_outboxes(
         self, *, limit: int = 10_000
     ) -> list[MCPDispatchResumeOutbox]:
@@ -5252,6 +5271,8 @@ class SQLiteStateRepository:
             .where(TaskNodeRow.node_id == record.node_id)
             .with_for_update()
         )
+        first_call = intent is not None and intent.status == "available"
+        later_call = intent is not None and intent.status == "dispatched"
         if (
             server is None
             or intent is None
@@ -5264,12 +5285,14 @@ class SQLiteStateRepository:
             or int(action.revision) != expected_action_revision
             or int(intent.revision) != expected_intent_revision
             or int(outbox.revision) != expected_outbox_revision
-            or outbox.status != "claimed"
+            or not (
+                (first_call and outbox.status == "claimed")
+                or (later_call and outbox.status == "active")
+            )
             or outbox.claim_owner != claim_owner
             or outbox.claim_token != claim_token
             or outbox.lease_expires_at is None
             or outbox.lease_expires_at <= occurred_at
-            or intent.status not in {"available", "dispatched"}
             or intent.intent_id != outbox.intent_id
             or action.owner_user_id != outbox.owner_user_id
             or action.task_id != outbox.task_id
@@ -10968,6 +10991,15 @@ class SQLiteStorage(StoragePort):
     ) -> MCPPendingToolAction | None:
         return await self._run(
             lambda state, collab: state.get_mcp_pending_tool_action(action_id)
+        )
+
+    async def get_latest_approved_mcp_tool_action(
+        self, owner_user_id: str, task_id: str, node_id: str
+    ) -> MCPPendingToolAction | None:
+        return await self._run(
+            lambda state, collab: state.get_latest_approved_mcp_tool_action(
+                owner_user_id, task_id, node_id
+            )
         )
 
     async def list_mcp_dispatch_resume_outboxes(
