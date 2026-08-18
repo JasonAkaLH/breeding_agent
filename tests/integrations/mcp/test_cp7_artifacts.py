@@ -381,6 +381,9 @@ class CP7ClosedContractTests(unittest.TestCase):
                 "safe_result_ref_sha256",
                 "safe_error_code",
                 "sealed_at",
+                "safe_result_content_sha256",
+                "safe_result_size_bytes",
+                "safe_result_store_kind",
             ),
             MCPTerminalResultReceipt: (
                 "result_receipt_id",
@@ -401,6 +404,9 @@ class CP7ClosedContractTests(unittest.TestCase):
                 "safe_error_code",
                 "completion_mode",
                 "committed_at",
+                "safe_result_content_sha256",
+                "safe_result_size_bytes",
+                "safe_result_store_kind",
             ),
             MCPCP7SafetyLedgerRecord: (
                 "record_id",

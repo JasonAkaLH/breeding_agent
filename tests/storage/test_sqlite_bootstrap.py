@@ -19,6 +19,34 @@ from tests.storage.support import SQLiteStorageTestCase
 
 
 class SQLiteBootstrapTest(SQLiteStorageTestCase):
+    def test_legacy_terminal_receipt_adds_v2_result_identity_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_sqlite_engine(Path(tmpdir) / "legacy-receipt.sqlite3")
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE mcp_terminal_result_receipt ("
+                        "result_receipt_id TEXT PRIMARY KEY)"
+                    )
+                )
+
+            bootstrap_sqlite_database(engine)
+
+            columns = {
+                column["name"]
+                for column in inspect(engine).get_columns(
+                    "mcp_terminal_result_receipt"
+                )
+            }
+            self.assertTrue(
+                {
+                    "safe_result_content_sha256",
+                    "safe_result_size_bytes",
+                    "safe_result_store_kind",
+                }.issubset(columns)
+            )
+
     def test_legacy_remote_task_publication_columns_are_added_and_proven_rows_backfilled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = create_sqlite_engine(Path(tmpdir) / "legacy-remote-task.sqlite3")

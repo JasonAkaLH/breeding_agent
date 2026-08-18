@@ -504,6 +504,11 @@ def _migrate_cp7_authority_columns(engine: Engine) -> None:
             "result_receipt_id": "TEXT",
             "completion_mode": "TEXT",
         },
+        "mcp_terminal_result_receipt": {
+            "safe_result_content_sha256": "TEXT",
+            "safe_result_size_bytes": "BIGINT",
+            "safe_result_store_kind": "TEXT",
+        },
     }
     with engine.begin() as connection:
         tables = set(inspect(connection).get_table_names())

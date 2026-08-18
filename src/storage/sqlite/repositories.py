@@ -552,6 +552,9 @@ def _row_to_mcp_terminal_receipt(
         safe_error_code=row.safe_error_code,
         completion_mode=row.completion_mode,
         committed_at=row.committed_at,
+        safe_result_content_sha256=row.safe_result_content_sha256,
+        safe_result_size_bytes=row.safe_result_size_bytes,
+        safe_result_store_kind=row.safe_result_store_kind,
     )
 
 
@@ -5317,7 +5320,8 @@ class SQLiteStateRepository:
         )
         if existing_receipt is not None:
             return MCPNoServerConvergenceResult.ALREADY_CONVERGED
-        if task.status in _TERMINAL_TASK_STATUSES:
+        task_already_failed = task.status == str(TaskStatus.FAILED)
+        if task.status in _TERMINAL_TASK_STATUSES and not task_already_failed:
             return MCPNoServerConvergenceResult.ALREADY_TERMINAL
         intents = self._session.scalars(
             select(MCPNoServerIntentRow)
@@ -5347,6 +5351,8 @@ class SQLiteStateRepository:
         if conversation is None or conversation.username != intent.owner_user_id:
             raise RuntimeError("mcp_no_server_owner_binding_corrupt")
         dispatched = [row for row in calls if row.may_have_dispatched]
+        if task_already_failed and not dispatched:
+            return MCPNoServerConvergenceResult.ALREADY_TERMINAL
         if dispatched:
             if intent.node_id is None:
                 raise RuntimeError("mcp_unknown_call_ambiguous")
@@ -5390,9 +5396,24 @@ class SQLiteStateRepository:
                 f"mcp-execution-status-unknown:v1:{call.call_ref}:"
                 f"{unknown_revision}:01-unknown"
             )
+            existing_task_failed_event = self._session.scalar(
+                select(EventRecordRow)
+                .where(
+                    EventRecordRow.task_id == task_id,
+                    EventRecordRow.event_type == "task.failed",
+                )
+                .order_by(
+                    EventRecordRow.created_at.desc(),
+                    EventRecordRow.event_id.desc(),
+                )
+            )
             failed_event_id = (
-                f"mcp-execution-status-unknown:v1:{call.call_ref}:"
-                f"{unknown_revision}:02-task-failed"
+                existing_task_failed_event.event_id
+                if task_already_failed and existing_task_failed_event is not None
+                else (
+                    f"mcp-execution-status-unknown:v1:{call.call_ref}:"
+                    f"{unknown_revision}:02-task-failed"
+                )
             )
             existing_projection = self._session.get(
                 MCPExecutionTerminalProjectionRow, projection_id
@@ -5410,8 +5431,9 @@ class SQLiteStateRepository:
             intent.revision = unknown_revision
             intent.updated_at = occurred_at
             intent.terminal_at = occurred_at
-            task.status = str(TaskStatus.FAILED)
-            task.updated_at = occurred_at
+            if not task_already_failed:
+                task.status = str(TaskStatus.FAILED)
+                task.updated_at = occurred_at
             node.status = str(NodeStatus.FAILED)
             node.finished_at = occurred_at
             for dispatched_call in dispatched:
@@ -5481,29 +5503,35 @@ class SQLiteStateRepository:
                     "reason_code": "trusted_terminal_result_absent",
                     "no_replay": True,
                     "result_receipt_id": None,
-                    "predecessor_event_id": None,
+                    "predecessor_event_id": (
+                        failed_event_id
+                        if task_already_failed
+                        and existing_task_failed_event is not None
+                        else None
+                    ),
                 },
                 created_at=occurred_at,
             )
-            self._insert_or_compare_event(
-                event_id=failed_event_id,
-                conversation_id=task.conversation_id,
-                task_id=task_id,
-                node_id=node.node_id,
-                event_type="task.failed",
-                payload={
-                    "schema": "maf.user_mcp.unknown_task_failed.v1",
-                    "projection_id": projection_id,
-                    "call_id": call.call_ref,
-                    "task_id": task_id,
-                    "node_id": node.node_id,
-                    "code": "execution_status_unknown",
-                    "no_replay": True,
-                    "unknown_event_id": unknown_event_id,
-                    "predecessor_event_id": unknown_event_id,
-                },
-                created_at=occurred_at + timedelta(microseconds=1),
-            )
+            if not task_already_failed or existing_task_failed_event is None:
+                self._insert_or_compare_event(
+                    event_id=failed_event_id,
+                    conversation_id=task.conversation_id,
+                    task_id=task_id,
+                    node_id=node.node_id,
+                    event_type="task.failed",
+                    payload={
+                        "schema": "maf.user_mcp.unknown_task_failed.v1",
+                        "projection_id": projection_id,
+                        "call_id": call.call_ref,
+                        "task_id": task_id,
+                        "node_id": node.node_id,
+                        "code": "execution_status_unknown",
+                        "no_replay": True,
+                        "unknown_event_id": unknown_event_id,
+                        "predecessor_event_id": unknown_event_id,
+                    },
+                    created_at=occurred_at + timedelta(microseconds=1),
+                )
             self._session.flush()
             return MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY
         if intent.trigger == "initial_no_profile":
@@ -5735,6 +5763,9 @@ class SQLiteStateRepository:
             "safe_result_ref": candidate.safe_result_ref,
             "safe_result_ref_sha256": candidate.safe_result_ref_sha256,
             "safe_error_code": candidate.safe_error_code,
+            "safe_result_content_sha256": candidate.safe_result_content_sha256,
+            "safe_result_size_bytes": candidate.safe_result_size_bytes,
+            "safe_result_store_kind": candidate.safe_result_store_kind,
             "completion_mode": mode,
             "committed_at": occurred_at,
         }

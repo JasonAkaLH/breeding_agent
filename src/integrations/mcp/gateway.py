@@ -58,6 +58,8 @@ from .safety_detectors import AuthoritativeMCPSafetyDetector
 from .temporary_results import (
     MCPAdmissionLease,
     MCPTemporaryResultCapacity,
+    MCPTemporaryResultError,
+    MCPTemporaryResultRef,
     MCPTemporaryResultStore,
 )
 
@@ -900,6 +902,34 @@ class MCPGateway:
     async def list_tools(self, scope: MCPTaskServerScope) -> ToolCatalogSnapshot:
         return self._require_scope(scope).catalog
 
+    async def verify_durable_result(
+        self,
+        scope: MCPTaskServerScope,
+        *,
+        node_id: str,
+        call_ref: str,
+        result_ref: str,
+        size_bytes: int,
+        sha256: str,
+        store_kind: str,
+    ) -> MCPTemporaryResultRef:
+        state = self._require_scope(scope)
+        if not sha256.startswith("sha256:"):
+            raise MCPTemporaryResultError(
+                "Durable MCP result digest must use the sha256 prefix."
+            )
+        return await self._result_store.verify_durable_ref(
+            result_ref,
+            owner_user_id=state.public.owner_user_id,
+            task_id=state.public.platform_task_id,
+            node_id=node_id,
+            call_ref=call_ref,
+            scope_id=state.public.scope_id,
+            expected_size_bytes=size_bytes,
+            expected_sha256=sha256.removeprefix("sha256:"),
+            expected_store_kind=store_kind,
+        )
+
     async def call_tool(
         self,
         scope: MCPTaskServerScope,
@@ -1002,7 +1032,12 @@ class MCPGateway:
                 )
                 raise MCPGatewayError("mcp_shadow_tool_call_forbidden")
             sink = self._result_store.create_sink(
-                state.public.platform_task_id, scope_id=state.public.scope_id
+                state.public.platform_task_id,
+                scope_id=state.public.scope_id,
+                durable=True,
+                owner_user_id=state.public.owner_user_id,
+                node_id=node_id or _GATEWAY_RECOVERY_NODE_ID,
+                call_ref=call_state.call_ref,
             )
 
             def registered(request_id: str | int) -> None:
@@ -1079,6 +1114,13 @@ class MCPGateway:
                     if isinstance(size, int) and not isinstance(size, bool)
                     else None
                 ),
+                result_content_sha256=(
+                    f"sha256:{embedded['sha256']}"
+                    if isinstance(embedded.get("sha256"), str)
+                    and len(str(embedded["sha256"])) == 64
+                    else None
+                ),
+                result_store_kind="durable_content_addressed",
             )
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
         await sink.write(encoded)
@@ -1087,6 +1129,8 @@ class MCPGateway:
             ref.ref,
             content_type="application/json",
             byte_size=ref.size_bytes,
+            result_content_sha256=f"sha256:{ref.sha256}",
+            result_store_kind="durable_content_addressed",
         )
 
     async def continue_call(

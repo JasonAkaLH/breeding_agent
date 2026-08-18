@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,8 +19,10 @@ from src.integrations.mcp.cp7_terminal_results import (
     CP7TerminalResultCorruptionError,
     CP7TerminalResultLimitError,
     TERMINAL_CANDIDATE_SCHEMA,
+    TERMINAL_CANDIDATE_SCHEMA_V1,
     compare_terminal_result_candidate,
     enumerate_unconsumed_terminal_result_candidates,
+    normalize_terminal_utc_second,
     seal_terminal_result_candidate,
     secure_read_terminal_result_candidate,
     terminal_call_index_path,
@@ -30,6 +32,7 @@ from src.integrations.mcp.cp7_terminal_results import (
 
 
 _RESULT_DIGEST = "sha256:" + "a" * 64
+_RESULT_CONTENT_DIGEST = "sha256:" + "b" * 64
 _SAFE_REF = "result-store://task-1/call-1"
 _SEALED_AT = datetime(2026, 8, 13, 12, 34, 56, tzinfo=timezone.utc)
 
@@ -57,13 +60,38 @@ def _completed_candidate(
         safe_result_ref_sha256=canonical_sha256(_SAFE_REF),
         safe_error_code=None,
         sealed_at=_SEALED_AT,
+        safe_result_content_sha256=_RESULT_CONTENT_DIGEST,
+        safe_result_size_bytes=123,
+        safe_result_store_kind="durable_content_addressed",
     )
 
 
 class CP7TerminalResultSealTests(unittest.TestCase):
+    def test_terminal_clock_normalizes_aware_values_and_rejects_naive(self) -> None:
+        local = datetime(
+            2026,
+            8,
+            18,
+            20,
+            30,
+            45,
+            987654,
+            tzinfo=timezone(timedelta(hours=8)),
+        )
+
+        self.assertEqual(
+            normalize_terminal_utc_second(local),
+            datetime(2026, 8, 18, 12, 30, 45, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(
+            CP7TerminalResultCorruptionError,
+            "terminal-result clock must be timezone-aware",
+        ):
+            normalize_terminal_utc_second(datetime(2026, 8, 18, 12, 30, 45))
+
     def test_candidate_and_indexes_have_exact_stable_vectors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             candidate = _completed_candidate()
 
             outcome = seal_terminal_result_candidate(root, candidate)
@@ -82,7 +110,7 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             )
             self.assertEqual(
                 outcome.sealed.candidate_payload_sha256,
-                "sha256:c6c18bf2e7a76b20878535809ea140395c21c737e881e046897bd57284f78b1d",
+                "sha256:7989f008fe383a659d78f75da4ff8224626f1c34e63cb0af03c11b8c50d9bbe2",
             )
             raw = terminal_candidate_path(root, candidate.candidate_id).read_bytes()
             self.assertEqual(
@@ -105,6 +133,9 @@ class CP7TerminalResultSealTests(unittest.TestCase):
                         "safe_result_ref": _SAFE_REF,
                         "safe_result_ref_sha256": canonical_sha256(_SAFE_REF),
                         "safe_error_code": None,
+                        "safe_result_content_sha256": _RESULT_CONTENT_DIGEST,
+                        "safe_result_size_bytes": 123,
+                        "safe_result_store_kind": "durable_content_addressed",
                         "sealed_at": "2026-08-13T12:34:56Z",
                     },
                 ),
@@ -125,6 +156,87 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             self.assertEqual(
                 compare_terminal_result_candidate(directory, candidate), first.sealed
             )
+
+    def test_legacy_v1_candidate_remains_readable_without_durable_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            candidate = _completed_candidate()
+            legacy_payload = {
+                "candidate_id": candidate.candidate_id,
+                "owner_user_id": candidate.owner_user_id,
+                "conversation_id": candidate.conversation_id,
+                "task_id": candidate.task_id,
+                "node_id": candidate.node_id,
+                "intent_id": candidate.intent_id,
+                "call_id": candidate.call_id,
+                "server_id": candidate.server_id,
+                "server_config_version": candidate.server_config_version,
+                "server_security_version": candidate.server_security_version,
+                "terminal_state": "completed",
+                "result_payload_sha256": candidate.result_payload_sha256,
+                "safe_result_ref": candidate.safe_result_ref,
+                "safe_result_ref_sha256": candidate.safe_result_ref_sha256,
+                "safe_error_code": None,
+                "sealed_at": "2026-08-13T12:34:56Z",
+            }
+            candidate_artifact = publish_immutable(
+                terminal_candidate_path(root, candidate.candidate_id),
+                canonical_envelope_bytes(
+                    TERMINAL_CANDIDATE_SCHEMA_V1,
+                    legacy_payload,
+                ),
+            )
+            index_payload = {
+                "candidate_id": candidate.candidate_id,
+                "owner_user_id": candidate.owner_user_id,
+                "task_id": candidate.task_id,
+                "call_id": candidate.call_id,
+                "candidate_file_sha256": candidate_artifact.file_sha256,
+                "candidate_payload_sha256": canonical_sha256(legacy_payload),
+            }
+            publish_immutable(
+                terminal_task_index_path(
+                    root, candidate.task_id, candidate.candidate_id
+                ),
+                canonical_envelope_bytes(
+                    "maf.user_mcp.cp7.terminal_result_task_index.v1",
+                    index_payload,
+                ),
+            )
+            publish_immutable(
+                terminal_call_index_path(root, candidate.call_id),
+                canonical_envelope_bytes(
+                    "maf.user_mcp.cp7.terminal_result_call_index.v1",
+                    index_payload,
+                ),
+            )
+
+            restored = secure_read_terminal_result_candidate(
+                root, candidate.candidate_id
+            ).candidate
+
+            self.assertEqual(restored.safe_result_ref, candidate.safe_result_ref)
+            self.assertIsNone(restored.safe_result_content_sha256)
+            self.assertIsNone(restored.safe_result_size_bytes)
+            self.assertIsNone(restored.safe_result_store_kind)
+
+    def test_unknown_candidate_schema_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = _completed_candidate()
+            root = Path(directory).resolve()
+            publish_immutable(
+                terminal_candidate_path(root, candidate.candidate_id),
+                canonical_envelope_bytes(
+                    "maf.user_mcp.cp7.terminal_result_candidate.v999",
+                    {"candidate_id": candidate.candidate_id},
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                CP7TerminalResultCorruptionError,
+                "missing, unsafe, or corrupt",
+            ):
+                enumerate_unconsumed_terminal_result_candidates(directory)
 
     def test_seal_before_database_crash_is_enumerated_and_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -170,6 +282,9 @@ class CP7TerminalResultSealTests(unittest.TestCase):
             safe_result_ref=None,
             safe_result_ref_sha256=None,
             safe_error_code="remote_tool_failed",
+            safe_result_content_sha256=None,
+            safe_result_size_bytes=None,
+            safe_result_store_kind=None,
         )
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(
@@ -182,6 +297,12 @@ class CP7TerminalResultSealTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CP7TerminalResultCorruptionError):
                 seal_terminal_result_candidate(directory, invalid)
+        oversized = replace(
+            _completed_candidate(), safe_result_size_bytes=64 * 1024 * 1024 + 1
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CP7TerminalResultCorruptionError):
+                seal_terminal_result_candidate(directory, oversized)
 
     def test_same_candidate_id_with_binding_drift_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

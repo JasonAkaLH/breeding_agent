@@ -54,6 +54,9 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
             safe_result_ref_sha256=canonical_sha256({"ref": 1}),
             safe_error_code=None,
             sealed_at=self.at,
+            safe_result_content_sha256="sha256:" + "c" * 64,
+            safe_result_size_bytes=321,
+            safe_result_store_kind="durable_content_addressed",
         )
         self.storage = SQLiteStorage(
             self.sessions,
@@ -196,6 +199,15 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(receipt.candidate_id, self.candidate.candidate_id)
         self.assertEqual(receipt.committed_at, self.at)
+        self.assertEqual(
+            receipt.safe_result_content_sha256,
+            self.candidate.safe_result_content_sha256,
+        )
+        self.assertEqual(receipt.safe_result_size_bytes, 321)
+        self.assertEqual(
+            receipt.safe_result_store_kind,
+            "durable_content_addressed",
+        )
         outbox = await self.storage.get_mcp_dispatch_resume_outbox("outbox-1")
         self.assertEqual(outbox.status, "completed")
         self.assertEqual(outbox.result_receipt_id, receipt.result_receipt_id)
@@ -224,6 +236,9 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
             safe_result_ref=None,
             safe_result_ref_sha256=None,
             safe_error_code="remote_failed",
+            safe_result_content_sha256=None,
+            safe_result_size_bytes=None,
+            safe_result_store_kind=None,
         )
         self.storage = SQLiteStorage(
             self.sessions,

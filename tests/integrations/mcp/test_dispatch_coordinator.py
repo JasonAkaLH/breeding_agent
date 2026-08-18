@@ -52,6 +52,7 @@ from src.integrations.mcp.rollout_evidence import (
     MCPMetricTransport,
     MCPSafetyRedLine,
 )
+from src.integrations.mcp.temporary_results import MCPResultTooLargeError
 
 
 NOW = datetime(2026, 8, 12, 12, 0, 0)
@@ -1255,6 +1256,33 @@ class UserMCPDispatchCoordinatorTest(unittest.IsolatedAsyncioTestCase):
         call = next(iter(storage.calls.values()))
         self.assertEqual(call.status, "failed")
         self.assertEqual(call.safe_error_code, "mcp_call_failed")
+
+    async def test_oversized_result_after_dispatch_is_closed_failed(self) -> None:
+        storage = _FakeStorage()
+        storage.grants.append(
+            UserMCPToolGrant(
+                "grant-a", "alice", "server-a", "lookup", 1, "schema-v1", NOW
+            )
+        )
+        recorder = _FakeMetricRecorder()
+        coordinator = UserMCPDispatchCoordinator(
+            storage=storage,
+            gateway=_FakeGateway(MCPResultTooLargeError()),
+            selector=_SequenceSelector(_call()),
+            metric_recorder=recorder,
+            metric_context=MCPDispatchMetricContext(MCPMetricRoutingMode.ENFORCE),
+        )
+
+        with self.assertRaises(MCPResultTooLargeError):
+            await coordinator.dispatch(_request(), server_id="server-a")
+
+        call = next(iter(storage.calls.values()))
+        self.assertEqual(call.status, "failed")
+        self.assertEqual(call.safe_error_code, "mcp_result_too_large")
+        self.assertEqual(
+            recorder.counts[-1][1]["labels"].result_category,
+            MCPMetricResultCategory.FAILED,
+        )
 
     async def test_post_dispatch_cancellation_converges_to_unknown(self) -> None:
         storage = _FakeStorage()

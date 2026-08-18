@@ -4,6 +4,7 @@ import inspect
 import unittest
 
 from src.state.postgres.runtime_schema import (
+    POSTGRES_RUNTIME_SCHEMA_VERSION,
     build_postgres_fresh_cutover_schema_manifest,
     build_runtime_index_schema_ddl,
     build_runtime_table_schema_ddl,
@@ -15,6 +16,11 @@ from src.storage.sqlite.repositories import SQLiteStateRepository
 class UserMCPPostgresSchemaContractTest(unittest.TestCase):
     def test_manifest_contains_coordination_tables_without_runtime_payload_columns(self) -> None:
         manifest = build_postgres_fresh_cutover_schema_manifest()
+        self.assertEqual(
+            POSTGRES_RUNTIME_SCHEMA_VERSION,
+            "maf.postgresql_fresh_runtime_schema.v6",
+        )
+        self.assertEqual(manifest.schema_version, POSTGRES_RUNTIME_SCHEMA_VERSION)
         expected = {
             "user_mcp_server",
             "user_mcp_tool_grant",
@@ -95,6 +101,23 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
                 "continuation_node_ids"
             ],
             "jsonb",
+        )
+        self.assertEqual(
+            {
+                field: manifest.table_columns["mcp_terminal_result_receipt"][
+                    field
+                ]
+                for field in (
+                    "safe_result_content_sha256",
+                    "safe_result_size_bytes",
+                    "safe_result_store_kind",
+                )
+            },
+            {
+                "safe_result_content_sha256": "text",
+                "safe_result_size_bytes": "bigint",
+                "safe_result_store_kind": "text",
+            },
         )
         forbidden = {"tool_list", "input_schema", "output_schema", "session_id", "remote_task_id", "result"}
         for table_name in expected:

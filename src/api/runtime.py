@@ -147,6 +147,8 @@ from src.integrations.mcp.dispatch_coordinator import (
 )
 from src.integrations.mcp.cp7_terminal_results import (
     enumerate_unconsumed_terminal_result_candidates,
+    terminal_now_utc_second,
+    seal_terminal_result_candidate,
     secure_read_terminal_result_candidate,
 )
 from src.integrations.mcp.cp7_artifacts import (
@@ -161,7 +163,6 @@ from src.integrations.mcp.resume_envelope import (
     mcp_dispatch_resume_envelope_version,
     validate_mcp_dispatch_resume_envelope_v2,
 )
-from src.integrations.mcp.cp7_terminal_results import seal_terminal_result_candidate
 from src.integrations.mcp.cp7_safety import (
     CP7BoundaryEvidence,
     CP7LocalSafetyFacade,
@@ -8440,6 +8441,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 )
                 if outcome is MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT:
                     raise RuntimeError("mcp_terminal_candidate_reconciliation_incomplete")
+                if outcome is MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY:
+                    reconciled_intent = await self.storage.get_mcp_no_server_intent(
+                        intent.intent_id
+                    )
+                    if reconciled_intent is None:
+                        raise RuntimeError("mcp_unknown_reconciled_intent_missing")
+                    await self._validate_terminal_cp7_mcp_authority(
+                        [reconciled_intent]
+                    )
                 continue
             if str(intent.status) == "available":
                 expected_id = mcp_dispatch_resume_outbox_id(intent.intent_id)
@@ -8723,6 +8733,15 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                 )
                 if outcome is MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT:
                     raise RuntimeError("mcp_terminal_candidate_reconciliation_incomplete")
+                if outcome is MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY:
+                    reconciled_intent = await self.storage.get_mcp_no_server_intent(
+                        intent.intent_id
+                    )
+                    if reconciled_intent is None:
+                        raise RuntimeError("mcp_unknown_reconciled_intent_missing")
+                    await self._validate_terminal_cp7_mcp_authority(
+                        [reconciled_intent]
+                    )
 
         binding = self._mcp_legacy_retirement_binding
         if binding is not None:
@@ -8795,6 +8814,23 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     or outbox.result_receipt_id is not None
                 ):
                     raise RuntimeError("mcp_unknown_authority_incomplete")
+                if self.user_mcp_audit_service is not None:
+                    await self.user_mcp_audit_service.record(
+                        owner_user_id=intent.owner_user_id,
+                        event_type="mcp.authority_terminal_reconciled",
+                        occurred_at=authoritative[0].unknown_terminal_at,
+                        task_id=intent.task_id,
+                        node_id=intent.node_id,
+                        safe_payload={
+                            "status": "unknown",
+                            "reason": "terminal_task_authority_reconciled",
+                            "error_code": "execution_status_unknown",
+                        },
+                        source_ref=(
+                            "mcp-authority-terminal-reconciled:"
+                            f"{authoritative[0].projection_id}"
+                        ),
+                    )
             elif status == "resolved":
                 calls = await self.storage.list_mcp_call_records(
                     intent.owner_user_id, intent.task_id
@@ -11173,7 +11209,13 @@ def build_api_runtime(
         ) -> str:
             if user_mcp_result_store is None:
                 raise RuntimeError("mcp_remote_task_result_store_unavailable")
-            sink = user_mcp_result_store.create_sink(binding.task_id, durable=True)
+            sink = user_mcp_result_store.create_sink(
+                binding.task_id,
+                durable=True,
+                owner_user_id=binding.owner_user_id,
+                node_id=binding.node_id,
+                call_ref=binding.call_ref,
+            )
             try:
                 encoded = json.dumps(
                     dict(result),
@@ -11207,6 +11249,23 @@ def build_api_runtime(
             if intent is None or call.server_config_version is None:
                 raise RuntimeError("mcp_remote_task_terminal_authority_corrupt")
             terminal_state = MCPTerminalState(call_status)
+            result_descriptor = (
+                user_mcp_result_store.resolve_ref(result_ref)
+                if result_ref is not None
+                else None
+            )
+            if result_descriptor is not None:
+                result_descriptor = await user_mcp_result_store.verify_durable_ref(
+                    result_ref,
+                    owner_user_id=binding.owner_user_id,
+                    task_id=binding.task_id,
+                    node_id=binding.node_id,
+                    call_ref=binding.call_ref,
+                    scope_id=None,
+                    expected_size_bytes=result_descriptor.size_bytes,
+                    expected_sha256=result_descriptor.sha256,
+                    expected_store_kind="durable_content_addressed",
+                )
             payload_sha = canonical_sha256(
                 {
                     "safe_result_ref": result_ref,
@@ -11237,7 +11296,22 @@ def build_api_runtime(
                         canonical_sha256(result_ref) if result_ref is not None else None
                     ),
                     safe_error_code=safe_error_code,
-                    sealed_at=ApiRuntime._utcnow_naive().replace(microsecond=0),
+                    sealed_at=terminal_now_utc_second(),
+                    safe_result_content_sha256=(
+                        f"sha256:{result_descriptor.sha256}"
+                        if result_descriptor is not None
+                        else None
+                    ),
+                    safe_result_size_bytes=(
+                        result_descriptor.size_bytes
+                        if result_descriptor is not None
+                        else None
+                    ),
+                    safe_result_store_kind=(
+                        "durable_content_addressed"
+                        if result_descriptor is not None
+                        else None
+                    ),
                 ),
             )
         async def commit_remote_task_result(

@@ -1239,9 +1239,18 @@ class MCPTerminalResultReceiptRow(SQLiteBase):
         ),
         CheckConstraint(
             "(terminal_state = 'completed' AND safe_result_ref IS NOT NULL "
-            "AND safe_result_ref_sha256 IS NOT NULL AND safe_error_code IS NULL) OR "
+            "AND safe_result_ref_sha256 IS NOT NULL AND safe_error_code IS NULL "
+            "AND ((safe_result_content_sha256 IS NULL "
+            "AND safe_result_size_bytes IS NULL AND safe_result_store_kind IS NULL) OR "
+            "(safe_result_content_sha256 IS NOT NULL "
+            "AND length(safe_result_content_sha256) = 71 "
+            "AND substr(safe_result_content_sha256, 1, 7) = 'sha256:' "
+            "AND safe_result_size_bytes >= 0 AND safe_result_size_bytes <= 67108864 "
+            "AND safe_result_store_kind = 'durable_content_addressed'))) OR "
             "(terminal_state IN ('failed', 'cancelled') AND safe_result_ref IS NULL "
-            "AND safe_result_ref_sha256 IS NULL AND safe_error_code IS NOT NULL)",
+            "AND safe_result_ref_sha256 IS NULL AND safe_error_code IS NOT NULL "
+            "AND safe_result_content_sha256 IS NULL "
+            "AND safe_result_size_bytes IS NULL AND safe_result_store_kind IS NULL)",
             name="mcp_terminal_result_payload_shape",
         ),
         CheckConstraint(
@@ -1266,6 +1275,9 @@ class MCPTerminalResultReceiptRow(SQLiteBase):
     safe_result_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     safe_result_ref_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
     safe_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_result_content_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_result_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    safe_result_store_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     completion_mode: Mapped[str] = mapped_column(Text, nullable=False)
     committed_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
 

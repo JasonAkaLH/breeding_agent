@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
@@ -17,6 +18,9 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from .client import MCPClientError, MCPProtocolError
+
+
+MAX_DURABLE_MCP_RESULT_BYTES = 64 * 1024 * 1024
 
 
 class MCPTemporaryResultError(MCPClientError):
@@ -38,6 +42,15 @@ class MCPTemporaryStorageExhaustedError(MCPTemporaryResultError):
             "User MCP temporary storage is exhausted.",
             code="temporary_storage_exhausted",
             retriable=True,
+        )
+
+
+class MCPResultTooLargeError(MCPTemporaryResultError):
+    def __init__(self) -> None:
+        super().__init__(
+            "User MCP result exceeded the durable result limit.",
+            code="mcp_result_too_large",
+            retriable=False,
         )
 
 
@@ -350,7 +363,11 @@ class MCPTemporaryResultCapacity:
 @dataclass(slots=True)
 class _StoredResult:
     task_key: str
+    task_id: str
     scope_id: str | None
+    owner_user_id: str | None
+    node_id: str | None
+    call_ref: str | None
     size_bytes: int
     sha256: str
     memory: bytes | None
@@ -371,7 +388,7 @@ class MCPTemporaryResultStore:
         self._spill_observer: Callable[[str | None, int], Awaitable[None]] | None = None
         self._cleanup_failure_observer: Callable[[str | None], Awaitable[None]] | None = None
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self._root, 0o700)
+        _secure_private_root(self._root)
         self._load_durable_results()
 
     @property
@@ -419,15 +436,36 @@ class MCPTemporaryResultStore:
         *,
         scope_id: str | None = None,
         durable: bool = False,
+        owner_user_id: str | None = None,
+        node_id: str | None = None,
+        call_ref: str | None = None,
     ) -> MCPResultSink:
+        if durable:
+            durable_identity = {
+                "task_id": task_id,
+                "owner_user_id": owner_user_id,
+                "node_id": node_id,
+                "call_ref": call_ref,
+            }
+            for field_name, value in durable_identity.items():
+                if value is None or not str(value).strip():
+                    raise ValueError(
+                        f"{field_name} is required for a durable MCP result."
+                    )
         task_key = self._task_key(task_id)
         return _MemoryToFileSink(
             store=self,
             task_id=str(task_id),
             task_key=task_key,
             scope_id=str(scope_id) if scope_id is not None else None,
+            owner_user_id=(
+                str(owner_user_id) if owner_user_id is not None else None
+            ),
+            node_id=str(node_id) if node_id is not None else None,
+            call_ref=str(call_ref) if call_ref is not None else None,
             threshold=self._memory_threshold_bytes,
             durable=durable,
+            maximum_bytes=(MAX_DURABLE_MCP_RESULT_BYTES if durable else None),
         )
 
     def resolve_ref(self, ref: str) -> MCPTemporaryResultRef:
@@ -439,6 +477,70 @@ class MCPTemporaryResultStore:
             size_bytes=stored.size_bytes,
             sha256=stored.sha256,
             storage="memory" if stored.memory is not None else "file",
+        )
+
+    async def verify_durable_ref(
+        self,
+        ref: str,
+        *,
+        owner_user_id: str,
+        task_id: str,
+        node_id: str,
+        call_ref: str,
+        scope_id: str | None,
+        expected_size_bytes: int,
+        expected_sha256: str,
+        expected_store_kind: str,
+    ) -> MCPTemporaryResultRef:
+        stored = self._results.get(str(ref))
+        if (
+            stored is None
+            or not stored.promoted
+            or stored.path is None
+            or stored.memory is not None
+            or stored.owner_user_id != str(owner_user_id)
+            or stored.task_id != str(task_id)
+            or stored.node_id != str(node_id)
+            or stored.call_ref != str(call_ref)
+            or stored.scope_id != (str(scope_id) if scope_id is not None else None)
+            or stored.size_bytes != expected_size_bytes
+            or stored.sha256 != expected_sha256
+            or expected_store_kind != "durable_content_addressed"
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result authority identity verification failed."
+            )
+        manifest_path = stored.path.with_suffix(".manifest.json")
+        manifest = await asyncio.to_thread(_read_private_json, manifest_path)
+        parsed = _parse_durable_result_manifest(manifest)
+        expected = (
+            str(ref),
+            expected_size_bytes,
+            expected_sha256,
+            str(task_id),
+            str(scope_id) if scope_id is not None else None,
+            str(owner_user_id),
+            str(node_id),
+            str(call_ref),
+        )
+        if parsed != expected or manifest_path.name != f"{ref}.manifest.json":
+            raise MCPTemporaryResultError(
+                "Durable MCP result manifest authority identity drifted."
+            )
+        if not await asyncio.to_thread(
+            _file_matches_result,
+            stored.path,
+            expected_size_bytes,
+            expected_sha256,
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result integrity verification failed."
+            )
+        return MCPTemporaryResultRef(
+            ref=str(ref),
+            size_bytes=expected_size_bytes,
+            sha256=expected_sha256,
+            storage="file",
         )
 
     async def iter_bytes(self, result_ref: MCPTemporaryResultRef, *, chunk_size: int = 64 * 1024) -> AsyncIterator[bytes]:
@@ -543,30 +645,54 @@ class MCPTemporaryResultStore:
         self._results[result.ref] = stored
 
     def _load_durable_results(self) -> None:
-        for manifest_path in self._root.glob("task-*/*.manifest.json"):
+        for manifest_path in sorted(self._root.glob("task-*/*.manifest.json")):
             try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                ref = str(manifest["ref"])
-                data_path = manifest_path.with_suffix("").with_suffix(".json")
-                if not ref.startswith("mcp-result-") or not data_path.is_file():
-                    continue
-                size_bytes = int(manifest["size_bytes"])
-                sha256 = str(manifest["sha256"])
-                if len(sha256) != 64:
-                    continue
                 task_key = manifest_path.parent.name
-                task_id = str(manifest["task_id"])
-                if not task_id or data_path.stat().st_size != size_bytes:
-                    continue
-                digest = hashlib.sha256(data_path.read_bytes()).hexdigest()
-                if digest != sha256:
-                    continue
-                scope_id = manifest.get("scope_id")
-            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-                continue
+                _validate_private_directory(manifest_path.parent)
+                manifest = _read_private_json(manifest_path)
+                (
+                    ref,
+                    size_bytes,
+                    sha256,
+                    task_id,
+                    scope_id,
+                    owner_user_id,
+                    node_id,
+                    call_ref,
+                ) = _parse_durable_result_manifest(manifest)
+                if manifest_path.name != f"{ref}.manifest.json":
+                    raise MCPTemporaryResultError(
+                        "Durable MCP result manifest filename does not match its reference."
+                    )
+                data_path = manifest_path.parent / f"{ref}.json"
+                if not _file_matches_result(data_path, size_bytes, sha256):
+                    raise MCPTemporaryResultError(
+                        "Durable MCP result integrity verification failed."
+                    )
+                task_key = manifest_path.parent.name
+                existing = self._results.get(ref)
+                if existing is not None:
+                    raise MCPTemporaryResultError(
+                        "Durable MCP result reference is duplicated."
+                    )
+                existing_task_key = self._tasks.get(task_id)
+                if existing_task_key is not None and existing_task_key != task_key:
+                    raise MCPTemporaryResultError(
+                        "Durable MCP result task identity is duplicated."
+                    )
+            except MCPTemporaryResultError:
+                raise
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise MCPTemporaryResultError(
+                    "Durable MCP result manifest validation failed."
+                ) from exc
             self._results[ref] = _StoredResult(
                 task_key=task_key,
+                task_id=task_id,
                 scope_id=str(scope_id) if scope_id is not None else None,
+                owner_user_id=owner_user_id,
+                node_id=node_id,
+                call_ref=call_ref,
                 size_bytes=size_bytes,
                 sha256=sha256,
                 memory=None,
@@ -589,15 +715,23 @@ class _MemoryToFileSink:
         task_id: str,
         task_key: str,
         scope_id: str | None,
+        owner_user_id: str | None,
+        node_id: str | None,
+        call_ref: str | None,
         threshold: int,
         durable: bool,
+        maximum_bytes: int | None,
     ) -> None:
         self._store = store
         self._task_id = task_id
         self._task_key = task_key
         self._scope_id = scope_id
+        self._owner_user_id = owner_user_id
+        self._node_id = node_id
+        self._call_ref = call_ref
         self._threshold = threshold
         self._durable = durable
+        self._maximum_bytes = maximum_bytes
         self._memory = bytearray()
         self._path: Path | None = None
         self._handle = None
@@ -612,6 +746,12 @@ class _MemoryToFileSink:
         data = bytes(chunk)
         if not data:
             return
+        if (
+            self._maximum_bytes is not None
+            and self._size + len(data) > self._maximum_bytes
+        ):
+            await self.abort()
+            raise MCPResultTooLargeError()
         try:
             if self._handle is None and self._size + len(data) > self._threshold:
                 await self._spill()
@@ -649,7 +789,10 @@ class _MemoryToFileSink:
         self._finished = True
         result = MCPTemporaryResultRef(
             ref=(
-                f"mcp-result-{self._task_key.removeprefix('task-')}-{self._digest.hexdigest()}"
+                "mcp-result-"
+                f"{self._task_key.removeprefix('task-')}-"
+                f"{hashlib.sha256(str(self._call_ref or self._scope_id or '').encode()).hexdigest()}-"
+                f"{self._digest.hexdigest()}"
                 if self._durable
                 else f"mcp-result-{secrets.token_urlsafe(24)}"
             ),
@@ -657,11 +800,53 @@ class _MemoryToFileSink:
             sha256=self._digest.hexdigest(),
             storage="file" if self._path is not None else "memory",
         )
+        if self._durable:
+            assert self._path is not None
+            final_path = self._path.with_name(f"{result.ref}.json")
+            temporary_path = self._path
+            try:
+                await asyncio.to_thread(
+                    _publish_durable_data,
+                    temporary_path,
+                    final_path,
+                    result.size_bytes,
+                    result.sha256,
+                )
+            except BaseException:
+                await _unlink(temporary_path)
+                raise
+            self._path = final_path
+            manifest_path = final_path.with_suffix(".manifest.json")
+            manifest_payload = json.dumps(
+                {
+                    "schema": "maf.user_mcp.durable_result_manifest.v2",
+                    "ref": result.ref,
+                    "size_bytes": result.size_bytes,
+                    "sha256": result.sha256,
+                    "store_kind": "durable_content_addressed",
+                    "owner_user_id": self._owner_user_id,
+                    "task_id": self._task_id,
+                    "node_id": self._node_id,
+                    "call_ref": self._call_ref,
+                    "scope_id": self._scope_id,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            await asyncio.to_thread(
+                _publish_or_compare_text,
+                manifest_path,
+                manifest_payload,
+            )
         self._store._register(
             result,
             _StoredResult(
                 task_key=self._task_key,
+                task_id=self._task_id,
                 scope_id=self._scope_id,
+                owner_user_id=self._owner_user_id,
+                node_id=self._node_id,
+                call_ref=self._call_ref,
                 size_bytes=result.size_bytes,
                 sha256=result.sha256,
                 memory=None if self._path is not None else bytes(self._memory),
@@ -669,33 +854,6 @@ class _MemoryToFileSink:
                 promoted=self._durable,
             ),
         )
-        if self._durable:
-            assert self._path is not None
-            final_path = self._path.with_name(f"{result.ref}.json")
-            await asyncio.to_thread(os.replace, self._path, final_path)
-            os.chmod(final_path, 0o600)
-            await asyncio.to_thread(_fsync_path, final_path)
-            self._path = final_path
-            stored = self._store._results[result.ref]
-            stored.path = final_path
-            manifest_path = final_path.with_suffix(".manifest.json")
-            manifest_tmp = manifest_path.with_suffix(".tmp")
-            manifest_payload = json.dumps(
-                {
-                    "ref": result.ref,
-                    "size_bytes": result.size_bytes,
-                    "sha256": result.sha256,
-                    "task_id": self._task_id,
-                    "scope_id": self._scope_id,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            await asyncio.to_thread(_write_fsynced_text, manifest_tmp, manifest_payload)
-            os.chmod(manifest_tmp, 0o600)
-            await asyncio.to_thread(os.replace, manifest_tmp, manifest_path)
-            await asyncio.to_thread(_fsync_path, manifest_path)
-            await asyncio.to_thread(_fsync_directory, manifest_path.parent)
         self._memory.clear()
         self._file_buffer.clear()
         if result.storage == "file":
@@ -768,6 +926,8 @@ class MCPTemporaryResultJanitor:
         for candidate in self._root.iterdir():
             if not candidate.is_dir() or not candidate.name.startswith("task-") or candidate.name in active:
                 continue
+            if any(candidate.glob("*.manifest.json")):
+                continue
             try:
                 modified = candidate.stat().st_mtime
             except FileNotFoundError:
@@ -784,21 +944,6 @@ def _disk_free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
-def _write_fsynced_text(path: Path, value: str) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        handle.write(value)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _fsync_path(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -811,10 +956,32 @@ def _file_matches_result(
     path: Path, size_bytes: int, expected_sha256: str
 ) -> bool:
     try:
-        if path.stat().st_size != size_bytes:
+        metadata = path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_size != size_bytes
+        ):
             return False
         digest = hashlib.sha256()
-        with path.open("rb") as handle:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                opened.st_dev != metadata.st_dev
+                or opened.st_ino != metadata.st_ino
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or opened.st_size != size_bytes
+            ):
+                return False
             while chunk := handle.read(64 * 1024):
                 digest.update(chunk)
         return digest.hexdigest() == expected_sha256
@@ -829,11 +996,243 @@ async def _unlink(path: Path) -> None:
         pass
 
 
+def _publish_durable_data(
+    temporary_path: Path,
+    final_path: Path,
+    size_bytes: int,
+    sha256: str,
+) -> None:
+    try:
+        os.link(temporary_path, final_path, follow_symlinks=False)
+    except FileExistsError:
+        if not _file_matches_result(final_path, size_bytes, sha256):
+            raise MCPTemporaryResultError(
+                "Durable MCP result reference conflicts with existing content."
+            )
+    else:
+        _fsync_directory(final_path.parent)
+    temporary_path.unlink()
+    _fsync_directory(final_path.parent)
+    if not _file_matches_result(final_path, size_bytes, sha256):
+        raise MCPTemporaryResultError(
+            "Durable MCP result integrity verification failed."
+        )
+
+
+def _publish_or_compare_text(path: Path, value: str) -> None:
+    encoded = value.encode("utf-8")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+    except FileExistsError:
+        try:
+            existing = _read_private_file(path)
+        except MCPTemporaryResultError:
+            existing = None
+        if existing != encoded:
+            raise MCPTemporaryResultError(
+                "Durable MCP result manifest conflicts with existing content."
+            )
+        return
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        raise
+    _fsync_directory(path.parent)
+
+
+def _validate_private_directory(path: Path) -> None:
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result directory identity verification failed."
+        )
+
+
+def _secure_private_root(path: Path) -> None:
+    metadata = path.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise MCPTemporaryResultError(
+            "Durable MCP result root identity verification failed."
+        )
+    os.chmod(path, 0o700, follow_symlinks=False)
+    secured = path.stat(follow_symlinks=False)
+    if (
+        secured.st_dev != metadata.st_dev
+        or secured.st_ino != metadata.st_ino
+        or not stat.S_ISDIR(secured.st_mode)
+        or secured.st_uid != os.getuid()
+        or stat.S_IMODE(secured.st_mode) != 0o700
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result root changed during security setup."
+        )
+
+
+def _read_private_file(path: Path) -> bytes:
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result file identity verification failed."
+        )
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    with os.fdopen(descriptor, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if (
+            opened.st_dev != metadata.st_dev
+            or opened.st_ino != metadata.st_ino
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+        ):
+            raise MCPTemporaryResultError(
+                "Durable MCP result file identity changed while opening."
+            )
+        return handle.read()
+
+
+def _read_private_json(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(_read_private_file(path).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MCPTemporaryResultError(
+            "Durable MCP result manifest is not valid JSON."
+        ) from exc
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise MCPTemporaryResultError(
+            "Durable MCP result manifest must be a JSON object."
+        )
+    return value
+
+
+def _parse_durable_result_manifest(
+    manifest: dict[str, object],
+) -> tuple[str, int, str, str, str | None, str | None, str | None, str | None]:
+    legacy_keys = {"ref", "scope_id", "sha256", "size_bytes", "task_id"}
+    v2_keys = {
+        "call_ref",
+        "node_id",
+        "owner_user_id",
+        "ref",
+        "schema",
+        "scope_id",
+        "sha256",
+        "size_bytes",
+        "store_kind",
+        "task_id",
+    }
+    schema = manifest.get("schema")
+    if schema is None:
+        if set(manifest) != legacy_keys:
+            raise MCPTemporaryResultError(
+                "Legacy durable MCP result manifest has unknown fields."
+            )
+        owner_user_id = node_id = call_ref = None
+    else:
+        if schema != "maf.user_mcp.durable_result_manifest.v2":
+            raise MCPTemporaryResultError(
+                "Durable MCP result manifest schema is unsupported."
+            )
+        if set(manifest) != v2_keys:
+            raise MCPTemporaryResultError(
+                "Durable MCP result manifest has unknown or missing fields."
+            )
+        if manifest.get("store_kind") != "durable_content_addressed":
+            raise MCPTemporaryResultError(
+                "Durable MCP result store kind is invalid."
+            )
+        owner_user_id = _required_manifest_string(manifest, "owner_user_id")
+        node_id = _required_manifest_string(manifest, "node_id")
+        call_ref = _required_manifest_string(manifest, "call_ref")
+    ref = _required_manifest_string(manifest, "ref")
+    if not ref.startswith("mcp-result-") or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        for character in ref
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result reference is invalid."
+        )
+    task_id = _required_manifest_string(manifest, "task_id")
+    size_bytes = manifest.get("size_bytes")
+    if (
+        isinstance(size_bytes, bool)
+        or not isinstance(size_bytes, int)
+        or size_bytes < 0
+        or size_bytes > MAX_DURABLE_MCP_RESULT_BYTES
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result size is invalid."
+        )
+    sha256 = manifest.get("sha256")
+    if (
+        not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result digest is invalid."
+        )
+    scope_id = manifest.get("scope_id")
+    if scope_id is not None and (
+        not isinstance(scope_id, str) or not scope_id.strip()
+    ):
+        raise MCPTemporaryResultError(
+            "Durable MCP result scope identity is invalid."
+        )
+    return (
+        ref,
+        size_bytes,
+        sha256,
+        task_id,
+        scope_id,
+        owner_user_id,
+        node_id,
+        call_ref,
+    )
+
+
+def _required_manifest_string(
+    manifest: dict[str, object], field_name: str
+) -> str:
+    value = manifest.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise MCPTemporaryResultError(
+            f"Durable MCP result {field_name} is invalid."
+        )
+    return value
+
+
 __all__ = [
     "MCPAdmissionCancelledError",
     "MCPAdmissionLease",
     "MCPCapacityUnavailableError",
     "MCPFairAdmissionQueue",
+    "MCPResultTooLargeError",
     "MCPResultSink",
     "MCPTemporaryResultCapacity",
     "MCPTemporaryResultCapacityConfig",
@@ -842,4 +1241,5 @@ __all__ = [
     "MCPTemporaryResultRef",
     "MCPTemporaryResultStore",
     "MCPTemporaryStorageExhaustedError",
+    "MAX_DURABLE_MCP_RESULT_BYTES",
 ]

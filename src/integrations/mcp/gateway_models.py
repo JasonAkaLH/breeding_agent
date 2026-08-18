@@ -72,6 +72,8 @@ class MCPCallOutcome:
     next_poll_at: str | None = None
     content_type: str | None = None
     byte_size: int | None = None
+    result_content_sha256: str | None = None
+    result_store_kind: str | None = None
 
     @classmethod
     def completed(
@@ -80,12 +82,16 @@ class MCPCallOutcome:
         *,
         content_type: str | None = None,
         byte_size: int | None = None,
+        result_content_sha256: str | None = None,
+        result_store_kind: str | None = None,
     ) -> "MCPCallOutcome":
         return cls(
             kind=MCPCallOutcomeKind.COMPLETED,
             result_ref=result_ref,
             content_type=content_type,
             byte_size=byte_size,
+            result_content_sha256=result_content_sha256,
+            result_store_kind=result_store_kind,
         )
 
     @classmethod

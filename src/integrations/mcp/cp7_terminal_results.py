@@ -18,12 +18,18 @@ from src.integrations.mcp.cp7_artifacts import (
     canonical_envelope_bytes,
     canonical_sha256,
     mcp_terminal_candidate_id,
+    parse_canonical_envelope_bytes,
+    parse_canonical_json_bytes,
     publish_or_compare_immutable,
+    secure_read,
     secure_read_canonical_envelope,
 )
+from src.integrations.mcp.temporary_results import MAX_DURABLE_MCP_RESULT_BYTES
 
 
-TERMINAL_CANDIDATE_SCHEMA = "maf.user_mcp.cp7.terminal_result_candidate.v1"
+TERMINAL_CANDIDATE_SCHEMA_V1 = "maf.user_mcp.cp7.terminal_result_candidate.v1"
+TERMINAL_CANDIDATE_SCHEMA_V2 = "maf.user_mcp.cp7.terminal_result_candidate.v2"
+TERMINAL_CANDIDATE_SCHEMA = TERMINAL_CANDIDATE_SCHEMA_V2
 TERMINAL_TASK_INDEX_SCHEMA = "maf.user_mcp.cp7.terminal_result_task_index.v1"
 TERMINAL_CALL_INDEX_SCHEMA = "maf.user_mcp.cp7.terminal_result_call_index.v1"
 DEFAULT_MAXIMUM_TERMINAL_ARTIFACTS = 10_000
@@ -163,8 +169,8 @@ def enumerate_unconsumed_terminal_result_candidates(
     expected_call_names: set[str] = set()
     call_candidates: dict[str, str] = {}
     for name in candidate_names:
-        envelope = _read_envelope(root / name, TERMINAL_CANDIDATE_SCHEMA)
-        candidate = _candidate_from_payload(envelope.payload)
+        envelope = _read_candidate_envelope(root / name)
+        candidate = _candidate_from_payload(envelope.payload, schema=envelope.schema)
         expected_name = terminal_candidate_path(root, candidate.candidate_id).name
         if name != expected_name or candidate.candidate_id in candidate_ids:
             raise CP7TerminalResultCorruptionError(
@@ -217,10 +223,12 @@ def terminal_call_index_path(root: Path, call_id: str) -> Path:
 def _read_and_validate_candidate(
     root: Path, candidate_id: str
 ) -> SealedTerminalResultCandidate:
-    candidate_envelope = _read_envelope(
-        terminal_candidate_path(root, candidate_id), TERMINAL_CANDIDATE_SCHEMA
+    candidate_envelope = _read_candidate_envelope(
+        terminal_candidate_path(root, candidate_id)
     )
-    candidate = _candidate_from_payload(candidate_envelope.payload)
+    candidate = _candidate_from_payload(
+        candidate_envelope.payload, schema=candidate_envelope.schema
+    )
     if not _identities_equal(candidate.candidate_id, candidate_id):
         raise CP7TerminalResultCorruptionError(
             "terminal-result candidate identity does not match its lookup key"
@@ -298,6 +306,23 @@ def _candidate_payload(
             raise CP7TerminalResultCorruptionError(
                 "completed terminal result cannot contain an error code"
             )
+        if _SHA256_RE.fullmatch(str(candidate.safe_result_content_sha256)) is None:
+            raise CP7TerminalResultCorruptionError(
+                "completed terminal result content digest is invalid"
+            )
+        if (
+            isinstance(candidate.safe_result_size_bytes, bool)
+            or not isinstance(candidate.safe_result_size_bytes, int)
+            or candidate.safe_result_size_bytes < 0
+            or candidate.safe_result_size_bytes > MAX_DURABLE_MCP_RESULT_BYTES
+        ):
+            raise CP7TerminalResultCorruptionError(
+                "completed terminal result size is invalid"
+            )
+        if candidate.safe_result_store_kind != "durable_content_addressed":
+            raise CP7TerminalResultCorruptionError(
+                "completed terminal result store kind is invalid"
+            )
     else:
         if (
             candidate.safe_result_ref is not None
@@ -307,6 +332,14 @@ def _candidate_payload(
                 "failed or cancelled terminal result cannot contain a result reference"
             )
         _require_closed_string(candidate.safe_error_code, "safe_error_code")
+        if (
+            candidate.safe_result_content_sha256 is not None
+            or candidate.safe_result_size_bytes is not None
+            or candidate.safe_result_store_kind is not None
+        ):
+            raise CP7TerminalResultCorruptionError(
+                "failed or cancelled terminal result cannot contain durable result metadata"
+            )
     return {
         "candidate_id": candidate.candidate_id,
         "owner_user_id": candidate.owner_user_id,
@@ -323,12 +356,17 @@ def _candidate_payload(
         "safe_result_ref": candidate.safe_result_ref,
         "safe_result_ref_sha256": candidate.safe_result_ref_sha256,
         "safe_error_code": candidate.safe_error_code,
+        "safe_result_content_sha256": candidate.safe_result_content_sha256,
+        "safe_result_size_bytes": candidate.safe_result_size_bytes,
+        "safe_result_store_kind": candidate.safe_result_store_kind,
         "sealed_at": _format_utc_second(candidate.sealed_at),
     }
 
 
 def _candidate_from_payload(
     payload: Mapping[str, object],
+    *,
+    schema: str,
 ) -> MCPValidatedTerminalResultCandidate:
     expected_fields = {
         "candidate_id",
@@ -348,6 +386,18 @@ def _candidate_from_payload(
         "safe_error_code",
         "sealed_at",
     }
+    if schema == TERMINAL_CANDIDATE_SCHEMA_V2:
+        expected_fields.update(
+            {
+                "safe_result_content_sha256",
+                "safe_result_size_bytes",
+                "safe_result_store_kind",
+            }
+        )
+    elif schema != TERMINAL_CANDIDATE_SCHEMA_V1:
+        raise CP7TerminalResultCorruptionError(
+            "terminal-result candidate schema is unsupported"
+        )
     if set(payload) != expected_fields:
         raise CP7TerminalResultCorruptionError(
             "terminal-result candidate payload fields are not closed"
@@ -378,13 +428,63 @@ def _candidate_from_payload(
             safe_result_ref_sha256=payload["safe_result_ref_sha256"],
             safe_error_code=payload["safe_error_code"],
             sealed_at=parsed_at,
+            safe_result_content_sha256=payload.get("safe_result_content_sha256"),
+            safe_result_size_bytes=payload.get("safe_result_size_bytes"),
+            safe_result_store_kind=payload.get("safe_result_store_kind"),
         )
     except (TypeError, ValueError) as exc:
         raise CP7TerminalResultCorruptionError(
             "terminal-result candidate payload types are invalid"
         ) from exc
-    _candidate_payload(candidate)
+    if schema == TERMINAL_CANDIDATE_SCHEMA_V2:
+        _candidate_payload(candidate)
+    else:
+        _candidate_payload_v1(candidate)
     return candidate
+
+
+def _candidate_payload_v1(
+    candidate: MCPValidatedTerminalResultCandidate,
+) -> dict[str, object]:
+    legacy = MCPValidatedTerminalResultCandidate(
+        candidate_id=candidate.candidate_id,
+        owner_user_id=candidate.owner_user_id,
+        conversation_id=candidate.conversation_id,
+        task_id=candidate.task_id,
+        node_id=candidate.node_id,
+        intent_id=candidate.intent_id,
+        call_id=candidate.call_id,
+        server_id=candidate.server_id,
+        server_config_version=candidate.server_config_version,
+        server_security_version=candidate.server_security_version,
+        terminal_state=candidate.terminal_state,
+        result_payload_sha256=candidate.result_payload_sha256,
+        safe_result_ref=candidate.safe_result_ref,
+        safe_result_ref_sha256=candidate.safe_result_ref_sha256,
+        safe_error_code=candidate.safe_error_code,
+        sealed_at=candidate.sealed_at,
+        safe_result_content_sha256=(
+            "sha256:" + "0" * 64
+            if candidate.terminal_state is MCPTerminalState.COMPLETED
+            else None
+        ),
+        safe_result_size_bytes=(
+            0 if candidate.terminal_state is MCPTerminalState.COMPLETED else None
+        ),
+        safe_result_store_kind=(
+            "durable_content_addressed"
+            if candidate.terminal_state is MCPTerminalState.COMPLETED
+            else None
+        ),
+    )
+    payload = _candidate_payload(legacy)
+    for field in (
+        "safe_result_content_sha256",
+        "safe_result_size_bytes",
+        "safe_result_store_kind",
+    ):
+        payload.pop(field)
+    return payload
 
 
 def _index_payload(
@@ -407,6 +507,31 @@ def _read_envelope(path: Path, schema: str) -> CanonicalEnvelopeArtifact:
     try:
         return secure_read_canonical_envelope(
             path, expected_schema=schema, maximum_size=_ARTIFACT_SIZE_LIMIT
+        )
+    except (CP7ArtifactConflictError, CP7ArtifactValidationError) as exc:
+        raise CP7TerminalResultCorruptionError(
+            "terminal-result artifact is missing, unsafe, or corrupt"
+        ) from exc
+
+
+def _read_candidate_envelope(path: Path) -> CanonicalEnvelopeArtifact:
+    try:
+        artifact = secure_read(path, expected_mode=0o600, maximum_size=_ARTIFACT_SIZE_LIMIT)
+        envelope = parse_canonical_json_bytes(artifact.content)
+        if not isinstance(envelope, Mapping):
+            raise CP7ArtifactValidationError("terminal-result envelope is invalid")
+        schema = envelope.get("schema")
+        if schema not in {TERMINAL_CANDIDATE_SCHEMA_V1, TERMINAL_CANDIDATE_SCHEMA_V2}:
+            raise CP7ArtifactValidationError("terminal-result candidate schema is unsupported")
+        payload = parse_canonical_envelope_bytes(
+            artifact.content, expected_schema=str(schema)
+        )
+        return CanonicalEnvelopeArtifact(
+            artifact=artifact,
+            envelope=envelope,
+            schema=str(schema),
+            payload=payload,
+            payload_sha256=str(envelope["payload_sha256"]),
         )
     except (CP7ArtifactConflictError, CP7ArtifactValidationError) as exc:
         raise CP7TerminalResultCorruptionError(
@@ -492,6 +617,28 @@ def _format_utc_second(value: datetime) -> str:
     return normalized.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def normalize_terminal_utc_second(value: datetime) -> datetime:
+    """Return an aware UTC whole-second terminal timestamp.
+
+    SQL lifecycle clocks remain independent and may use the repository's
+    existing UTC-naive convention. Terminal candidate evidence must never
+    inherit that convention because its canonical contract requires an
+    explicit UTC offset.
+    """
+
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise CP7TerminalResultCorruptionError(
+            "terminal-result clock must be timezone-aware"
+        )
+    return value.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def terminal_now_utc_second() -> datetime:
+    """Return the shared default clock for canonical terminal evidence."""
+
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
 def _require_closed_string(value: object, name: str) -> str:
     if (
         not isinstance(value, str)
@@ -525,10 +672,14 @@ __all__ = [
     "SealedTerminalResultCandidate",
     "TERMINAL_CALL_INDEX_SCHEMA",
     "TERMINAL_CANDIDATE_SCHEMA",
+    "TERMINAL_CANDIDATE_SCHEMA_V1",
+    "TERMINAL_CANDIDATE_SCHEMA_V2",
     "TERMINAL_TASK_INDEX_SCHEMA",
     "TerminalResultSealOutcome",
     "compare_terminal_result_candidate",
     "enumerate_unconsumed_terminal_result_candidates",
+    "normalize_terminal_utc_second",
+    "terminal_now_utc_second",
     "seal_terminal_result_candidate",
     "secure_read_terminal_result_candidate",
     "terminal_call_index_path",

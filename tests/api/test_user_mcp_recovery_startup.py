@@ -12,6 +12,11 @@ from unittest.mock import AsyncMock, patch
 
 from src.api.dto import SubmitMessageRequest
 from src.api.runtime import ApiRuntime, build_api_runtime
+from src.capabilities.mcp_dispatch.models import (
+    MCPSelectorAction,
+    MCPSelectorActionType,
+)
+from src.core.contracts import CapabilityExecutionRequest
 from src.core.enums import (
     InterruptStatus,
     MessageRole,
@@ -24,6 +29,7 @@ from src.core.enums import (
 )
 from src.core.models import (
     Conversation,
+    EventRecord,
     Interrupt,
     Message,
     MCPBranchRecord,
@@ -33,6 +39,7 @@ from src.core.models import (
     TaskNode,
     UserMCPCredentialRecord,
     UserMCPServer,
+    UserMCPToolGrant,
 )
 from src.integrations.mcp.cp7_artifacts import (
     mcp_dispatch_resume_outbox_id,
@@ -50,6 +57,7 @@ from src.integrations.mcp.credentials import (
     MCPRecoveryCallContext,
     MCPRecoveryService,
 )
+from src.integrations.mcp.dispatch_coordinator import UserMCPDispatchCoordinator
 from src.integrations.mcp.endpoint_policy import EndpointPolicyError
 from src.integrations.mcp.rollout_evidence import (
     MCPMetricErrorCategory,
@@ -58,6 +66,12 @@ from src.integrations.mcp.rollout_evidence import (
     MCPMetricResultCategory,
     MCPMetricRoutingMode,
     MCPSafetyRedLine,
+)
+from src.integrations.mcp.gateway_models import (
+    MCPCallOutcome,
+    MCPTaskServerScope,
+    MCPToolDescriptor,
+    ToolCatalogSnapshot,
 )
 from src.integrations.mcp.temporary_results import MCPTemporaryResultRef
 from tests.api.support import InMemoryTaskRuntimeSidecar
@@ -137,6 +151,371 @@ class UserMCPRecoveryStartupTest(unittest.IsolatedAsyncioTestCase):
             enable_conversation_memory=False,
             runtime_sidecar_client=InMemoryTaskRuntimeSidecar(),
         )
+
+    async def test_terminal_task_with_active_dispatch_converges_unknown_without_replay(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            now = runtime._utcnow_naive()
+            task = Task(
+                task_id="task-terminal-active",
+                conversation_id="conversation-terminal-active",
+                root_message_id="message-terminal-active",
+                status=TaskStatus.RUNNING,
+                mcp_execution_mode="user_scoped",
+                mcp_shadow_enabled=False,
+                mcp_rollout_config_version="cp7",
+                mcp_route_reason_code="enforce_selected",
+                mcp_rollout_mode="enforce",
+            )
+            node = TaskNode(
+                node_id="node-terminal-active",
+                task_id=task.task_id,
+                capability_id="mcp.dispatch",
+                status=NodeStatus.RUNNING,
+            )
+            server = UserMCPServer(
+                server_id="server-terminal-active",
+                owner_user_id="alice",
+                display_name="Terminal recovery server",
+                routing_description="terminal recovery",
+                endpoint_url="https://example.test/mcp",
+                transport=UserMCPTransport.STREAMABLE_HTTP,
+                health_status=UserMCPHealthStatus.AVAILABLE,
+                created_at=now,
+                updated_at=now,
+            )
+            await runtime.storage.save_conversation(
+                Conversation(task.conversation_id, "alice")
+            )
+            await runtime.storage.save_message(
+                Message(
+                    task.root_message_id,
+                    task.conversation_id,
+                    MessageRole.USER,
+                    "recover terminal authority",
+                    task_id=task.task_id,
+                )
+            )
+            await runtime.storage.save_task(task)
+            await runtime.storage.save_task_node(node)
+            await runtime.storage.create_user_mcp_server(server)
+            await runtime.storage.save_mcp_branch_record(
+                MCPBranchRecord(
+                    branch_id="branch-terminal-active",
+                    owner_user_id="alice",
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    status="running",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            envelope = build_mcp_dispatch_resume_envelope_v2(
+                task=task,
+                node=node,
+                edges=(),
+                attachments=(),
+                dependency_nodes=(),
+                server_id=server.server_id,
+            )
+            await runtime.storage.arm_user_mcp_target_intent(
+                task.task_id, node.node_id, server.server_id, envelope, now
+            )
+            intent_id = mcp_no_server_intent_id(task.task_id, node_id=node.node_id)
+            await runtime.storage.resolve_user_mcp_target_intent(intent_id, now)
+            outbox_id = mcp_dispatch_resume_outbox_id(intent_id)
+            await runtime.storage.claim_mcp_dispatch_resume_outbox(
+                outbox_id,
+                "crashed-worker",
+                "crashed-token",
+                now,
+                now + timedelta(minutes=5),
+            )
+            intent = await runtime.storage.get_mcp_no_server_intent(intent_id)
+            outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(outbox_id)
+            self.assertTrue(
+                await runtime.storage.admit_mcp_tool_call(
+                    intent_id,
+                    outbox_id,
+                    intent.revision,
+                    outbox.revision,
+                    MCPCallRecord(
+                        call_ref="call-terminal-active",
+                        branch_id="branch-terminal-active",
+                        owner_user_id="alice",
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        server_id=server.server_id,
+                        tool_name="lookup",
+                        status="reserved",
+                        call_sequence=1,
+                        arguments_sha256="arguments-sha",
+                        server_security_version=server.security_version,
+                        server_config_version=server.config_version,
+                        input_schema_sha256="schema-sha",
+                        protocol_version="2026-07-28",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    now,
+                )
+            )
+            await runtime.storage.append_event(
+                EventRecord(
+                    event_id="existing-task-failed",
+                    conversation_id=task.conversation_id,
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    event_type="task.failed",
+                    payload={"code": "existing_failure"},
+                    created_at=now,
+                )
+            )
+            self.assertIsNotNone(
+                await runtime.storage.compare_and_set_task(
+                    replace(task, status=TaskStatus.FAILED, updated_at=now),
+                    expected_from_status=TaskStatus.RUNNING,
+                )
+            )
+            network_spy = AsyncMock()
+            runtime.user_mcp_gateway.call_tool = network_spy
+
+            await runtime._reconcile_cp7_mcp_authority()
+
+            network_spy.assert_not_awaited()
+            recovered_intent = await runtime.storage.get_mcp_no_server_intent(
+                intent_id
+            )
+            recovered_outbox = await runtime.storage.get_mcp_dispatch_resume_outbox(
+                outbox_id
+            )
+            recovered_call = await runtime.storage.get_mcp_call_record(
+                "alice", task.task_id, "call-terminal-active"
+            )
+            self.assertEqual(str(recovered_intent.status), "unknown")
+            self.assertEqual(str(recovered_outbox.status), "completed")
+            self.assertEqual(recovered_outbox.completion_mode, "unknown_no_replay")
+            self.assertEqual(recovered_call.status, "execution_status_unknown")
+            self.assertEqual(
+                str((await runtime.storage.get_task_node(node.node_id)).status),
+                "failed",
+            )
+            events = await runtime.storage.list_events_for_task(task.task_id)
+            self.assertEqual(
+                [event.event_id for event in events if event.event_type == "task.failed"],
+                ["existing-task-failed"],
+            )
+            self.assertEqual(
+                len(
+                    [
+                        event
+                        for event in events
+                        if event.event_type == "mcp.execution_status_unknown"
+                    ]
+                ),
+                1,
+            )
+            audits = await runtime.storage.list_mcp_audit_events(
+                "alice", task_id=task.task_id
+            )
+            self.assertEqual(
+                [
+                    audit.event_type
+                    for audit in audits
+                    if audit.event_type == "mcp.authority_terminal_reconciled"
+                ],
+                ["mcp.authority_terminal_reconciled"],
+            )
+            await runtime.shutdown()
+
+    async def test_candidate_seal_failure_converges_admitted_call_immediately(
+        self,
+    ) -> None:
+        class OneCallSelector:
+            async def select(self, _context):
+                return MCPSelectorAction(
+                    MCPSelectorActionType.CALL_TOOL,
+                    tool_name="lookup",
+                    arguments={"query": "alice"},
+                )
+
+        class CompletedGateway:
+            def __init__(self) -> None:
+                self.call_count = 0
+                self.catalog = ToolCatalogSnapshot(
+                    server_id="server-seal-failure",
+                    effective_protocol_version="2026-07-28",
+                    tools=(
+                        MCPToolDescriptor(
+                            name="lookup",
+                            description="lookup",
+                            input_schema={
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                            },
+                            input_schema_sha256="schema-seal-failure",
+                        ),
+                    ),
+                )
+
+            async def open_scope(self, principal, platform_task_id, server_id, **_kwargs):
+                return MCPTaskServerScope(
+                    "scope-seal-failure",
+                    principal.username,
+                    platform_task_id,
+                    server_id,
+                    1,
+                    1,
+                )
+
+            async def list_tools(self, _scope):
+                return self.catalog
+
+            async def call_tool(
+                self, _scope, _tool_name, _arguments, callbacks, **_kwargs
+            ):
+                self.call_count += 1
+                await callbacks.on_created("call-seal-failure")
+                await callbacks.on_registered("call-seal-failure")
+                return MCPCallOutcome.completed(
+                    "mcp-result-seal-failure",
+                    byte_size=2,
+                    result_content_sha256="sha256:" + "a" * 64,
+                    result_store_kind="durable_content_addressed",
+                )
+
+            async def verify_durable_result(self, *_args, **_kwargs):
+                return None
+
+            async def close_scope(self, _scope, _reason):
+                return None
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "MAF_STATE_STORE_BACKEND": "sqlite",
+                    "MAF_USER_MCP_MAX_ACTIVE_CALLS": "2",
+                    "MAF_USER_MCP_TEMPORARY_DISK_LOW_WATERMARK_BYTES": "1",
+                },
+                clear=False,
+            ),
+        ):
+            runtime = self._build_runtime(Path(directory))
+            now = runtime._utcnow_naive()
+            task = Task(
+                task_id="task-seal-failure",
+                conversation_id="conversation-seal-failure",
+                root_message_id="message-seal-failure",
+                status=TaskStatus.RUNNING,
+                mcp_execution_mode="user_scoped",
+                mcp_shadow_enabled=False,
+                mcp_rollout_config_version="cp7",
+                mcp_route_reason_code="enforce_selected",
+                mcp_rollout_mode="enforce",
+            )
+            node = TaskNode(
+                node_id="node-seal-failure",
+                task_id=task.task_id,
+                capability_id="mcp.dispatch",
+                status=NodeStatus.RUNNING,
+            )
+            server = UserMCPServer(
+                server_id="server-seal-failure",
+                owner_user_id="alice",
+                display_name="Seal failure server",
+                routing_description="seal failure",
+                endpoint_url="https://example.test/mcp",
+                transport=UserMCPTransport.STREAMABLE_HTTP,
+                health_status=UserMCPHealthStatus.AVAILABLE,
+                created_at=now,
+                updated_at=now,
+            )
+            await runtime.storage.save_conversation(
+                Conversation(task.conversation_id, "alice")
+            )
+            await runtime.storage.save_message(
+                Message(
+                    task.root_message_id,
+                    task.conversation_id,
+                    MessageRole.USER,
+                    "seal a candidate",
+                    task_id=task.task_id,
+                )
+            )
+            await runtime.storage.save_task(task)
+            await runtime.storage.save_task_node(node)
+            await runtime.storage.create_user_mcp_server(server)
+            await runtime.storage.save_user_mcp_tool_grant(
+                UserMCPToolGrant(
+                    grant_id="grant-seal-failure",
+                    owner_user_id="alice",
+                    server_id=server.server_id,
+                    tool_name="lookup",
+                    server_security_version=server.security_version,
+                    input_schema_sha256="schema-seal-failure",
+                    granted_at=now,
+                )
+            )
+            gateway = CompletedGateway()
+            coordinator = UserMCPDispatchCoordinator(
+                storage=runtime.storage,
+                gateway=gateway,
+                selector=OneCallSelector(),
+                audit_reference_signer=runtime._mcp_audit_reference_signer,
+                terminal_result_root=runtime._mcp_terminal_result_root,
+                now_fn=lambda: now,
+                terminal_now_fn=lambda: now.replace(tzinfo=timezone.utc),
+            )
+
+            with patch(
+                "src.integrations.mcp.dispatch_coordinator.seal_terminal_result_candidate",
+                side_effect=OSError("simulated fsync failure"),
+            ):
+                outcome = await coordinator.dispatch(
+                    CapabilityExecutionRequest(
+                        capability_id="mcp.dispatch",
+                        conversation_id=task.conversation_id,
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        input_payload={"server_id": server.server_id},
+                        metadata={"user_message": "seal a candidate"},
+                    ),
+                    server_id=server.server_id,
+                )
+
+            self.assertEqual(gateway.call_count, 1)
+            self.assertEqual(outcome.error.code, "mcp_terminal_candidate_seal_failed")
+            recovered_call = await runtime.storage.get_mcp_call_record(
+                "alice", task.task_id, "call-seal-failure"
+            )
+            self.assertEqual(recovered_call.status, "execution_status_unknown")
+            self.assertEqual(
+                str((await runtime.storage.get_task(task.task_id)).status), "failed"
+            )
+            self.assertEqual(
+                str((await runtime.storage.get_task_node(node.node_id)).status),
+                "failed",
+            )
+            intent = await runtime.storage.get_mcp_no_server_intent(
+                mcp_no_server_intent_id(task.task_id, node_id=node.node_id)
+            )
+            self.assertEqual(str(intent.status), "unknown")
+            await runtime.shutdown()
 
     async def test_v2_open_interrupt_waits_then_recovers_automatic_metadata(
         self,

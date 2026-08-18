@@ -12,11 +12,14 @@ from unittest.mock import patch
 from src.integrations.mcp.temporary_results import (
     MCPAdmissionCancelledError,
     MCPCapacityUnavailableError,
+    MCPResultTooLargeError,
+    MCPTemporaryResultError,
     MCPTemporaryResultCapacity,
     MCPTemporaryResultCapacityConfig,
     MCPTemporaryResultJanitor,
     MCPTemporaryResultStore,
     MCPTemporaryStorageExhaustedError,
+    MAX_DURABLE_MCP_RESULT_BYTES,
 )
 
 
@@ -25,6 +28,52 @@ async def _record_async(target: list, value: object) -> None:
 
 
 class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_durable_result_limit_accepts_boundary_and_rejects_next_byte(
+        self,
+    ) -> None:
+        self.assertEqual(MAX_DURABLE_MCP_RESULT_BYTES, 64 * 1024 * 1024)
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "src.integrations.mcp.temporary_results.MAX_DURABLE_MCP_RESULT_BYTES",
+            8,
+        ):
+            store = MCPTemporaryResultStore(
+                Path(temporary), memory_threshold_bytes=1
+            )
+            accepted = store.create_sink(
+                "task-a",
+                durable=True,
+                owner_user_id="owner-a",
+                node_id="node-a",
+                call_ref="call-a",
+            )
+            await accepted.write(b"12345678")
+            result = await accepted.finalize()
+            self.assertEqual(result.size_bytes, 8)
+            files_before_rejection = {
+                path.relative_to(temporary)
+                for path in Path(temporary).rglob("*")
+                if path.is_file()
+            }
+
+            rejected = store.create_sink(
+                "task-b",
+                durable=True,
+                owner_user_id="owner-b",
+                node_id="node-b",
+                call_ref="call-b",
+            )
+            with self.assertRaises(MCPResultTooLargeError) as raised:
+                await rejected.write(b"123456789")
+            self.assertEqual(raised.exception.mcp_error_code, "mcp_result_too_large")
+            self.assertEqual(
+                {
+                    path.relative_to(temporary)
+                    for path in Path(temporary).rglob("*")
+                    if path.is_file()
+                },
+                files_before_rejection,
+            )
+
     async def test_spills_without_using_task_id_as_path_and_preserves_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "mcp-results"
@@ -54,7 +103,13 @@ class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "mcp-results"
             store = MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
-            sink = store.create_sink("task-restart", durable=True)
+            sink = store.create_sink(
+                "task-restart",
+                durable=True,
+                owner_user_id="owner-restart",
+                node_id="node-restart",
+                call_ref="call-restart",
+            )
             await sink.write(b'{"ok":true}')
             result = await sink.finalize()
 
@@ -85,8 +140,20 @@ class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "mcp-results"
             store = MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
-            first_sink = store.create_sink("task-a", durable=True)
-            second_sink = store.create_sink("task-b", durable=True)
+            first_sink = store.create_sink(
+                "task-a",
+                durable=True,
+                owner_user_id="owner-a",
+                node_id="node-a",
+                call_ref="call-a",
+            )
+            second_sink = store.create_sink(
+                "task-b",
+                durable=True,
+                owner_user_id="owner-b",
+                node_id="node-b",
+                call_ref="call-b",
+            )
             await first_sink.write(b'{"same":true}')
             await second_sink.write(b'{"same":true}')
             first = await first_sink.finalize()
@@ -98,13 +165,8 @@ class MCPTemporaryResultTests(unittest.IsolatedAsyncioTestCase):
             )
             first_file.write_bytes(b"tampered")
 
-            restarted = MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
-            with self.assertRaises(KeyError):
-                _ = [chunk async for chunk in restarted.iter_bytes(first)]
-            self.assertEqual(
-                b"".join([chunk async for chunk in restarted.iter_bytes(second)]),
-                b'{"same":true}',
-            )
+            with self.assertRaises(MCPTemporaryResultError):
+                MCPTemporaryResultStore(root, memory_threshold_bytes=1024)
 
     async def test_abort_and_task_cleanup_remove_partial_and_completed_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

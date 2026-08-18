@@ -31,6 +31,7 @@ from src.core.models import (
     Interrupt,
     MCPBranchRecord,
     MCPCallRecord,
+    MCPNoServerConvergenceResult,
     MCPValidatedTerminalResultCandidate,
     MCPTerminalState,
     MCPTargetIntentArmResult,
@@ -51,7 +52,11 @@ from src.integrations.mcp.cp7_artifacts import (
     mcp_terminal_candidate_id,
     mcp_terminal_receipt_id,
 )
-from src.integrations.mcp.cp7_terminal_results import seal_terminal_result_candidate
+from src.integrations.mcp.cp7_terminal_results import (
+    normalize_terminal_utc_second,
+    seal_terminal_result_candidate,
+    terminal_now_utc_second,
+)
 from src.integrations.mcp.rollout_evidence import (
     MCPCallKind,
     MCPMetricAdapter,
@@ -72,6 +77,7 @@ from src.integrations.mcp.resume_envelope import (
     build_mcp_dispatch_resume_envelope_v2,
     project_mcp_dependency_artifacts,
 )
+from src.integrations.mcp.temporary_results import MCPResultTooLargeError
 from .safety_detectors import AuthoritativeMCPSafetyDetector
 from src.orchestration.models import UserMCPServerProfile
 
@@ -177,6 +183,7 @@ class UserMCPDispatchCoordinator:
         audit_reference_signer: MCPAuditReferenceSigner,
         server_router: MCPServerRouterPort | MCPServerRouter | None = None,
         now_fn: NowFn | None = None,
+        terminal_now_fn: NowFn | None = None,
         live_event_recorder: LiveEventRecorder | None = None,
         metric_recorder: MCPRolloutMetricRecorderPort | None = None,
         metric_context: MCPDispatchMetricContext | None = None,
@@ -206,6 +213,7 @@ class UserMCPDispatchCoordinator:
         self._audit_reference_signer = audit_reference_signer
         self._server_router = server_router
         self._now = now_fn or (lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+        self._terminal_now = terminal_now_fn or terminal_now_utc_second
         self._live_event_recorder = live_event_recorder
         self._metric_recorder = metric_recorder
         self._metric_context = metric_context
@@ -1553,13 +1561,20 @@ class UserMCPDispatchCoordinator:
         except BaseException as exc:
             call_ref = call_ref_holder.get("value")
             if call_ref:
+                known_terminal_failure = isinstance(
+                    exc, (MCPRemoteError, MCPResultTooLargeError)
+                )
                 terminal_status = "failed"
-                safe_error_code = "mcp_call_failed"
-                if dispatched and not isinstance(exc, MCPRemoteError):
+                safe_error_code = (
+                    "mcp_result_too_large"
+                    if isinstance(exc, MCPResultTooLargeError)
+                    else "mcp_call_failed"
+                )
+                if dispatched and not known_terminal_failure:
                     terminal_status = "unknown"
                     safe_error_code = "execution_status_unknown"
                 if authority is not None and dispatched:
-                    if isinstance(exc, MCPRemoteError):
+                    if known_terminal_failure:
                         if self._terminal_result_root is None:
                             raise _CallReservationError(
                                 "mcp_terminal_result_store_unavailable"
@@ -1586,11 +1601,15 @@ class UserMCPDispatchCoordinator:
                             safe_result_ref=None,
                             safe_result_ref_sha256=None,
                             safe_error_code=safe_error_code,
-                            sealed_at=self._now().replace(microsecond=0),
+                            sealed_at=normalize_terminal_utc_second(
+                                self._terminal_now()
+                            ),
+                            safe_result_content_sha256=None,
+                            safe_result_size_bytes=None,
+                            safe_result_store_kind=None,
                         )
-                        await asyncio.to_thread(
-                            seal_terminal_result_candidate,
-                            self._terminal_result_root,
+                        await self._seal_terminal_candidate_or_converge(
+                            request,
                             candidate,
                         )
                         committed = await self._storage.commit_authoritative_mcp_terminal_result(
@@ -1626,7 +1645,7 @@ class UserMCPDispatchCoordinator:
             if dispatched:
                 result_category = (
                     MCPMetricResultCategory.FAILED
-                    if isinstance(exc, MCPRemoteError)
+                    if isinstance(exc, (MCPRemoteError, MCPResultTooLargeError))
                     else MCPMetricResultCategory.UNKNOWN
                 )
                 await self._record_terminal_call_metrics(
@@ -1665,8 +1684,38 @@ class UserMCPDispatchCoordinator:
         }[outcome.kind]
         result_receipt_id: str | None = None
         if outcome.kind is MCPCallOutcomeKind.COMPLETED and authority is not None:
-            if self._terminal_result_root is None or not outcome.result_ref:
+            if (
+                self._terminal_result_root is None
+                or not outcome.result_ref
+                or outcome.byte_size is None
+                or outcome.result_content_sha256 is None
+                or outcome.result_store_kind is None
+            ):
                 raise _CallReservationError("mcp_terminal_result_store_unavailable")
+            try:
+                await self._gateway.verify_durable_result(
+                    scope,
+                    node_id=request.node_id,
+                    call_ref=call_ref,
+                    result_ref=outcome.result_ref,
+                    size_bytes=outcome.byte_size,
+                    sha256=outcome.result_content_sha256,
+                    store_kind=outcome.result_store_kind,
+                )
+            except BaseException as exc:
+                convergence = await self._storage.converge_user_mcp_no_server(
+                    request.task_id, self._now()
+                )
+                if convergence in {
+                    MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY,
+                    MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+                }:
+                    raise _CallReservationError(
+                        "mcp_durable_result_verification_failed"
+                    ) from exc
+                raise RuntimeError(
+                    "mcp_durable_result_verification_convergence_conflict"
+                ) from exc
             result_payload_sha256 = canonical_sha256(
                 {
                     "safe_result_ref": outcome.result_ref,
@@ -1691,11 +1740,13 @@ class UserMCPDispatchCoordinator:
                 safe_result_ref=outcome.result_ref,
                 safe_result_ref_sha256=canonical_sha256(outcome.result_ref),
                 safe_error_code=None,
-                sealed_at=self._now().replace(microsecond=0),
+                sealed_at=normalize_terminal_utc_second(self._terminal_now()),
+                safe_result_content_sha256=outcome.result_content_sha256,
+                safe_result_size_bytes=outcome.byte_size,
+                safe_result_store_kind=outcome.result_store_kind,
             )
-            await asyncio.to_thread(
-                seal_terminal_result_candidate,
-                self._terminal_result_root,
+            await self._seal_terminal_candidate_or_converge(
+                request,
                 candidate,
             )
             committed = await self._storage.commit_authoritative_mcp_terminal_result(
@@ -1733,6 +1784,40 @@ class UserMCPDispatchCoordinator:
                 selector_step=selector_step,
             )
         return outcome, call_ref, result_receipt_id
+
+    async def _seal_terminal_candidate_or_converge(
+        self,
+        request: CapabilityExecutionRequest,
+        candidate: MCPValidatedTerminalResultCandidate,
+    ) -> None:
+        if self._terminal_result_root is None:
+            raise _CallReservationError("mcp_terminal_result_store_unavailable")
+        try:
+            await asyncio.to_thread(
+                seal_terminal_result_candidate,
+                self._terminal_result_root,
+                candidate,
+            )
+            return
+        except BaseException as exc:
+            convergence = await self._storage.converge_user_mcp_no_server(
+                request.task_id, self._now()
+            )
+            if (
+                convergence
+                is MCPNoServerConvergenceResult.TRUSTED_TERMINAL_RESULT_REQUIRES_COMMIT
+            ):
+                return
+            if convergence in {
+                MCPNoServerConvergenceResult.UNKNOWN_REQUIRES_NO_REPLAY,
+                MCPNoServerConvergenceResult.ALREADY_CONVERGED,
+            }:
+                raise _CallReservationError(
+                    "mcp_terminal_candidate_seal_failed"
+                ) from exc
+            raise RuntimeError(
+                "mcp_terminal_candidate_seal_convergence_conflict"
+            ) from exc
 
     async def _record_permission_metric(
         self,

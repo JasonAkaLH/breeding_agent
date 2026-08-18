@@ -936,7 +936,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
             for name, kwargs in recorder.gauges
             if name is MCPMetricName.TEMP_SPILL_BYTES
         ]
-        self.assertEqual(spill_values, [spill["value"], 0])
+        self.assertEqual(spill_values, [spill["value"]])
         cleanup = next(
             kwargs["labels"]
             for name, kwargs in recorder.counts
@@ -1079,7 +1079,7 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         await gateway.close_scope(scope, "done")
         await gateway.aclose()
 
-    async def test_close_scope_preserves_completed_result_until_task_cleanup(self) -> None:
+    async def test_completed_result_survives_task_cleanup_and_store_restart(self) -> None:
         scope = await self.gateway.open_scope(
             SimpleNamespace(username="alice"), "task-1", "server-1"
         )
@@ -1089,8 +1089,8 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         result_ref = MCPTemporaryResultRef(
             ref=outcome.result_ref or "",
             size_bytes=outcome.byte_size or 0,
-            sha256="",
-            storage="memory",
+            sha256=str(outcome.result_content_sha256 or "").removeprefix("sha256:"),
+            storage="file",
         )
 
         await self.gateway.close_scope(scope, "server_switch")
@@ -1100,8 +1100,21 @@ class UserMCPGatewayTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(b"hello", payload)
         await self.gateway.close_task("task-1", "terminal")
-        with self.assertRaises(KeyError):
-            _ = [chunk async for chunk in self.result_store.iter_bytes(result_ref)]
+        payload_after_cleanup = b"".join(
+            [chunk async for chunk in self.result_store.iter_bytes(result_ref)]
+        )
+        self.assertEqual(payload_after_cleanup, payload)
+
+        restarted = MCPTemporaryResultStore(
+            self.result_store.root,
+            memory_threshold_bytes=8,
+        )
+        restored = restarted.resolve_ref(result_ref.ref)
+        self.assertEqual(restored.sha256, result_ref.sha256)
+        payload_after_restart = b"".join(
+            [chunk async for chunk in restarted.iter_bytes(restored)]
+        )
+        self.assertEqual(payload_after_restart, payload)
 
     async def test_scope_waits_for_fair_admission_before_credentials_or_client(self) -> None:
         root = Path(self.temp_dir.name) / "queued-results"

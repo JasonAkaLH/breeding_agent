@@ -357,6 +357,9 @@ class MCPValidatedTerminalResultCandidate:
     safe_result_ref_sha256: str | None
     safe_error_code: str | None
     sealed_at: datetime
+    safe_result_content_sha256: str | None = None
+    safe_result_size_bytes: int | None = None
+    safe_result_store_kind: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -379,6 +382,9 @@ class MCPTerminalResultReceipt:
     safe_error_code: str | None
     completion_mode: MCPTerminalResultCompletionMode
     committed_at: datetime
+    safe_result_content_sha256: str | None = None
+    safe_result_size_bytes: int | None = None
+    safe_result_store_kind: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
