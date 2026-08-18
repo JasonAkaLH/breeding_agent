@@ -20,6 +20,7 @@
 - `superpowers/specs/2026-08-17-dollar-mcp-server-soft-binding-implementation-plan.md`：上述 `$` MCP Server Soft Binding 已按 API副作用门禁、固定工作流、Selector/附件隐私、历史审计和前端命令闭环完成仓库实现；真实OCR discover-only smoke仍待受控环境引用，限定 `main`且未触碰 `prod`。
 - `superpowers/specs/2026-08-18-planner-node-identity-v1-design.md`：已完成仓库实现；LLM Planner/Runtime Replanner 仅提供局部语义键，Runtime 使用 task、持久化 replan epoch 与 key 生成全局 v1 node ID；覆盖 existing/new 引用、SQLite/PostgreSQL/Rust Sidecar claim、legacy/system兼容、前端 opaque ID、回滚和原故障验收。
 - `superpowers/specs/2026-08-18-mcp-dispatch-reference-resume-envelope-design.md`：MCP dispatch v2 引用式恢复信封设计；只保存控制面快照、附件 ID 和 dependency Artifact refs，保持 64 KiB 上限并保留 legacy v1 reader，不保存实际 I/O、Tool 参数、附件正文或 Base64。
+- `superpowers/specs/2026-08-18-mcp-approval-event-stream-resubscribe-design.md`：连续 MCP Tool 审批的前端事件流恢复设计；审批成功后沿用普通 Interrupt 合同重新订阅当前 Task SSE，使不同 Tool 的后续审批无需刷新即可出现，同时保持 `always_allow` 的 per-Tool 边界。
 - 根目录 Markdown / PNG：架构图、流程图、能力接入指南、任务状态图、周报模板等项目级说明。
 - `prd/backend/23-能力缺失LLMFallback披露PRD.md`：能力库无匹配 Skill/MCP/capability 时的 LLM fallback、事实披露、Workbench 停止与历史提示契约父兼容入口。
 - `prd/backend/capability-missing-fallback/`：能力缺失 LLM fallback 披露分步 PRD，按现状清理、Plan metadata 契约、后端 full fallback、前端 notice/history、partial fallback/Replanner 审计五阶段组织。
