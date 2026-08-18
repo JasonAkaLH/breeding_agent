@@ -136,6 +136,8 @@ class MCPCallRecord:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     terminal_at: datetime | None = None
+    pending_action_id: str | None = None
+    continuation_of_call_ref: str | None = None
 
 
 class MCPNoServerIntentTrigger(StrEnum):
@@ -156,8 +158,69 @@ class MCPNoServerIntentStatus(StrEnum):
 class MCPDispatchResumeOutboxStatus(StrEnum):
     PENDING = "pending"
     CLAIMED = "claimed"
+    ACTIVE = "active"
+    WAITING_APPROVAL = "waiting_approval"
+    WAITING_INPUT = "waiting_input"
+    REMOTE_PENDING = "remote_pending"
     COMPLETED = "completed"
     ABORTED = "aborted"
+
+
+class MCPDispatchResumeReason(StrEnum):
+    INITIAL = "initial"
+    ORDINARY_TERMINAL = "ordinary_terminal"
+    APPROVAL_ACCEPTED = "approval_accepted"
+    MRTR_ANSWER = "mrtr_answer"
+    REMOTE_TERMINAL = "remote_terminal"
+
+
+class MCPDispatchCompletionMode(StrEnum):
+    COMPLETED = "completed"
+    STOPPED_NO_CALL = "stopped_no_call"
+    STOPPED_AFTER_CALL = "stopped_after_call"
+    FAILED_NO_CALL = "failed_no_call"
+    FAILED_AFTER_CALL = "failed_after_call"
+    CANCELLED_NO_CALL = "cancelled_no_call"
+    CANCELLED_AFTER_CALL = "cancelled_after_call"
+    UNKNOWN_NO_REPLAY = "unknown_no_replay"
+
+
+class MCPPendingToolActionStatus(StrEnum):
+    PROPOSED = "proposed"
+    WAITING_APPROVAL = "waiting_approval"
+    APPROVED = "approved"
+    CONSUMED = "consumed"
+    DENIED = "denied"
+    INVALIDATED = "invalidated"
+
+
+class MCPTerminalCandidateLifecycleStatus(StrEnum):
+    RETAINED = "retained"
+    ARCHIVING = "archiving"
+    ARCHIVED = "archived"
+    DELETING = "deleting"
+    DELETED = "deleted"
+
+
+class MCPDurableResultLifecycleStatus(StrEnum):
+    RETAINED = "retained"
+    ARTIFACT_OWNED = "artifact_owned"
+    DELETING = "deleting"
+    DELETED = "deleted"
+
+
+class MCPDurableResultLifecycleReason(StrEnum):
+    DISPATCH_RESOLVED = "dispatch_resolved"
+    ARTIFACT_PROMOTED = "artifact_promoted"
+    ORPHAN = "orphan"
+
+
+class MCPDispatchAggregateMigrationStatus(StrEnum):
+    PLANNED = "planned"
+    BACKED_UP = "backed_up"
+    APPLYING = "applying"
+    APPLIED = "applied"
+    FAILED = "failed"
 
 
 class MCPTerminalState(StrEnum):
@@ -299,6 +362,102 @@ class MCPDispatchResumeOutbox:
     completed_at: datetime | None
     result_receipt_id: str | None = None
     completion_mode: str | None = None
+    resume_reason: MCPDispatchResumeReason = MCPDispatchResumeReason.INITIAL
+    resume_receipt_id: str | None = None
+    resume_answer_id: str | None = None
+    selector_step_total: int = 0
+    approval_round_total: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class MCPPendingToolAction:
+    action_id: str
+    owner_user_id: str
+    conversation_id: str
+    task_id: str
+    node_id: str
+    server_id: str
+    tool_name: str
+    arguments_sha256: str
+    approval_fingerprint: str
+    arguments_payload_ref: str
+    payload_file_sha256: str
+    payload_size_bytes: int
+    encryption_version: int
+    server_config_version: int
+    server_security_version: int
+    input_schema_sha256: str
+    status: MCPPendingToolActionStatus
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    approved_at: datetime | None = None
+    consumed_at: datetime | None = None
+    invalidated_at: datetime | None = None
+    approval_interrupt_id: str | None = None
+    accepted_answer_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPTerminalCandidateLifecycle:
+    candidate_id: str
+    call_id: str
+    task_id: str
+    candidate_schema: str
+    active_candidate_filename: str
+    active_task_index_filename: str
+    active_call_index_filename: str
+    candidate_file_sha256: str
+    task_index_file_sha256: str
+    call_index_file_sha256: str
+    status: MCPTerminalCandidateLifecycleStatus
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    receipt_id: str | None = None
+    archive_candidate_filename: str | None = None
+    archive_task_index_filename: str | None = None
+    archive_call_index_filename: str | None = None
+    consumed_at: datetime | None = None
+    eligible_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDurableResultLifecycle:
+    result_ref: str
+    owner_user_id: str
+    task_id: str
+    node_id: str
+    call_id: str
+    content_sha256: str
+    size_bytes: int
+    data_filename: str
+    manifest_filename: str
+    data_file_sha256: str
+    manifest_file_sha256: str
+    store_kind: str
+    status: MCPDurableResultLifecycleStatus
+    reason: MCPDurableResultLifecycleReason
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    eligible_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MCPDispatchAggregateMigration:
+    migration_id: str
+    backend: str
+    schema_version: str
+    report_sha256: str
+    status: MCPDispatchAggregateMigrationStatus
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    backup_basename: str | None = None
+    backup_sha256: str | None = None
+    failure_reason_code: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

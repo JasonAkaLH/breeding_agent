@@ -47,6 +47,10 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
             "user_mcp_owner_mutation_guard",
             "mcp_no_server_intent",
             "mcp_dispatch_resume_outbox",
+            "mcp_pending_tool_action",
+            "mcp_terminal_candidate_lifecycle",
+            "mcp_durable_result_lifecycle",
+            "mcp_dispatch_aggregate_migration",
             "mcp_terminal_result_receipt",
             "mcp_execution_terminal_projection",
             "mcp_cp7_safety_ledger",
@@ -138,6 +142,11 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
         self.assertIn("idx_mcp_rollout_instance_lease", ddl)
         self.assertIn("idx_mcp_no_server_intent_owner_status", ddl)
         self.assertIn("idx_mcp_dispatch_resume_claim", ddl)
+        self.assertIn("idx_mcp_dispatch_resume_status_keyset", ddl)
+        self.assertIn("idx_mcp_pending_action_status_keyset", ddl)
+        self.assertIn("idx_mcp_candidate_lifecycle_status_keyset", ddl)
+        self.assertIn("idx_mcp_durable_result_status_keyset", ddl)
+        self.assertIn("idx_mcp_dispatch_migration_status_keyset", ddl)
         self.assertIn("idx_mcp_cp7_safety_candidate_epoch", ddl)
 
         table_ddl = build_runtime_table_schema_ddl()
@@ -160,6 +169,27 @@ class UserMCPPostgresSchemaContractTest(unittest.TestCase):
             "late_result_no_continuation",
             _table_ddl(table_ddl, "mcp_terminal_result_receipt"),
         )
+        outbox_ddl = _table_ddl(table_ddl, "mcp_dispatch_resume_outbox")
+        for status in (
+            "pending",
+            "claimed",
+            "active",
+            "waiting_approval",
+            "waiting_input",
+            "remote_pending",
+            "completed",
+            "aborted",
+        ):
+            self.assertIn(status, outbox_ddl)
+        self.assertNotIn("normal_terminal_projection", outbox_ddl)
+        for resume_reason in (
+            "initial",
+            "ordinary_terminal",
+            "approval_accepted",
+            "mrtr_answer",
+            "remote_terminal",
+        ):
+            self.assertIn(resume_reason, outbox_ddl)
         self.assertIn(
             "maintenance_boundary_invalid",
             _table_ddl(table_ddl, "mcp_cp7_safety_ledger"),

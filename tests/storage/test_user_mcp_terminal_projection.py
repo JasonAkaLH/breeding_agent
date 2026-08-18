@@ -111,6 +111,21 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
             session.add(
+                MCPBranchRecordRow(
+                    branch_id="branch-1",
+                    owner_user_id="owner-a",
+                    task_id="task-1",
+                    node_id="node-1",
+                    status="active",
+                    initial_server_id="server-1",
+                    tool_call_count=1,
+                    max_tool_calls=20,
+                    active_call_ref="call-1",
+                    created_at=self.at,
+                    updated_at=self.at,
+                )
+            )
+            session.add(
                 MCPNoServerIntentRow(
                     intent_id="intent-1",
                     owner_user_id="owner-a",
@@ -162,7 +177,7 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
                     node_id="node-1",
                     server_id="server-1",
                     tool_name="safe_tool",
-                    status="running",
+                    status="active",
                     call_sequence=1,
                     arguments_sha256=canonical_sha256({"args": 1}),
                     server_security_version=1,
@@ -209,9 +224,11 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
             "durable_content_addressed",
         )
         outbox = await self.storage.get_mcp_dispatch_resume_outbox("outbox-1")
-        self.assertEqual(outbox.status, "completed")
+        self.assertEqual(outbox.status, "active")
         self.assertEqual(outbox.result_receipt_id, receipt.result_receipt_id)
-        self.assertEqual(outbox.completion_mode, "normal_terminal_projection")
+        self.assertIsNone(outbox.completion_mode)
+        self.assertEqual(str(outbox.resume_reason), "ordinary_terminal")
+        self.assertEqual(outbox.resume_receipt_id, receipt.result_receipt_id)
         self.assertEqual(str((await self.storage.get_task("task-1")).status), "running")
         self.assertEqual(
             str(
@@ -228,6 +245,11 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             str((await self.storage.get_task_node("node-1")).status), "completed"
         )
+        finalized_outbox = await self.storage.get_mcp_dispatch_resume_outbox(
+            "outbox-1"
+        )
+        self.assertEqual(str(finalized_outbox.status), "completed")
+        self.assertEqual(finalized_outbox.completion_mode, "completed")
 
     async def test_failed_receipt_atomically_converges_node_and_task_failure(self) -> None:
         failed = replace(
@@ -279,27 +301,12 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
         outbox = await self.storage.get_mcp_dispatch_resume_outbox("outbox-1")
         self.assertEqual(str(intent.status), "resolved")
         self.assertEqual(outbox.status, "aborted")
-        self.assertEqual(outbox.completion_mode, "aborted")
+        self.assertEqual(outbox.completion_mode, "failed_no_call")
         self.assertEqual(str((await self.storage.get_task("task-1")).status), "failed")
         self.assertEqual(str((await self.storage.get_task_node("node-1")).status), "failed")
 
     async def test_receipt_finishes_remote_binding_without_replaying_network(self) -> None:
         with self.sessions() as session:
-            session.add(
-                MCPBranchRecordRow(
-                    branch_id="branch-1",
-                    owner_user_id="owner-a",
-                    task_id="task-1",
-                    node_id="node-1",
-                    status="running",
-                    initial_server_id="server-1",
-                    tool_call_count=1,
-                    max_tool_calls=20,
-                    active_call_ref="call-1",
-                    created_at=self.at,
-                    updated_at=self.at,
-                )
-            )
             session.add(
                 MCPRemoteTaskBindingRow(
                     safe_remote_task_ref="remote:safe-1",
@@ -410,7 +417,7 @@ class UserMCPTerminalProjectionTest(unittest.IsolatedAsyncioTestCase):
                     node_id="node-1",
                     server_id="server-1",
                     tool_name="safe_tool_2",
-                    status="running",
+                    status="active",
                     call_sequence=2,
                     arguments_sha256=canonical_sha256({"args": 2}),
                     server_security_version=1,

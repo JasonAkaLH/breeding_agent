@@ -100,8 +100,18 @@ class MCPCallRecordRow(SQLiteBase):
     __tablename__ = "mcp_call_record"
     __table_args__ = (
         UniqueConstraint("branch_id", "call_sequence", name="uq_mcp_call_branch_sequence"),
+        UniqueConstraint("pending_action_id", name="uq_mcp_call_pending_action"),
+        UniqueConstraint(
+            "continuation_of_call_ref", name="uq_mcp_call_continuation_source"
+        ),
         Index("idx_mcp_call_owner_task", "owner_user_id", "task_id"),
         Index("idx_mcp_call_branch_status", "branch_id", "status"),
+        CheckConstraint(
+            "status IN ('reserved', 'active', 'completed', 'failed', 'cancelled', "
+            "'input_required', 'remote_pending', 'unknown', 'execution_status_unknown')",
+            name="mcp_call_status",
+        ),
+        CheckConstraint("call_sequence > 0", name="mcp_call_sequence_positive"),
     )
 
     call_ref: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -123,6 +133,8 @@ class MCPCallRecordRow(SQLiteBase):
     result_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     output_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     safe_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_action_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_of_call_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     updated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     terminal_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
@@ -1109,33 +1121,66 @@ class MCPDispatchResumeOutboxRow(SQLiteBase):
     __table_args__ = (
         UniqueConstraint("intent_id", name="uq_mcp_dispatch_resume_intent"),
         Index("idx_mcp_dispatch_resume_claim", "status", "lease_expires_at", "created_at"),
+        Index("idx_mcp_dispatch_resume_status_keyset", "status", "updated_at", "outbox_id"),
         CheckConstraint(
-            "status IN ('pending', 'claimed', 'completed', 'aborted')",
+            "status IN ('pending', 'claimed', 'active', 'waiting_approval', "
+            "'waiting_input', 'remote_pending', 'completed', 'aborted')",
             name="mcp_dispatch_resume_status",
         ),
         CheckConstraint("revision >= 0", name="mcp_dispatch_resume_revision"),
         CheckConstraint(
-            "(status = 'claimed' AND claim_owner IS NOT NULL AND claim_token IS NOT NULL "
+            "(status IN ('claimed', 'active') AND claim_owner IS NOT NULL AND claim_token IS NOT NULL "
             "AND lease_expires_at IS NOT NULL) OR "
-            "(status <> 'claimed' AND claim_owner IS NULL AND claim_token IS NULL "
+            "(status NOT IN ('claimed', 'active') AND claim_owner IS NULL AND claim_token IS NULL "
             "AND lease_expires_at IS NULL)",
             name="mcp_dispatch_resume_claim_shape",
         ),
         CheckConstraint(
             "(status IN ('completed', 'aborted') AND completed_at IS NOT NULL) OR "
-            "(status IN ('pending', 'claimed') AND completed_at IS NULL)",
+            "(status IN ('pending', 'claimed', 'active', 'waiting_approval', "
+            "'waiting_input', 'remote_pending') AND completed_at IS NULL)",
             name="mcp_dispatch_resume_terminal_at",
         ),
         CheckConstraint(
             "(status IN ('completed', 'aborted') AND completion_mode IS NOT NULL) OR "
-            "(status IN ('pending', 'claimed') AND completion_mode IS NULL)",
+            "(status IN ('pending', 'claimed', 'active', 'waiting_approval', "
+            "'waiting_input', 'remote_pending') AND completion_mode IS NULL)",
             name="mcp_dispatch_resume_completion_mode",
         ),
         CheckConstraint(
             "completion_mode IS NULL OR completion_mode IN "
-            "('normal_terminal_projection', 'late_result_no_continuation', "
-            "'unknown_no_replay', 'aborted')",
+            "('completed', 'stopped_no_call', 'stopped_after_call', "
+            "'failed_no_call', 'failed_after_call', 'cancelled_no_call', "
+            "'cancelled_after_call', 'unknown_no_replay')",
             name="mcp_dispatch_resume_completion_mode_values",
+        ),
+        CheckConstraint(
+            "(status = 'aborted' AND completion_mode IN "
+            "('stopped_no_call', 'failed_no_call', 'cancelled_no_call')) OR "
+            "(status = 'completed' AND completion_mode IN "
+            "('completed', 'stopped_after_call', 'failed_after_call', "
+            "'cancelled_after_call', 'unknown_no_replay')) OR "
+            "status NOT IN ('completed', 'aborted')",
+            name="mcp_dispatch_resume_terminal_mode_shape",
+        ),
+        CheckConstraint(
+            "resume_reason IN ('initial', 'ordinary_terminal', 'approval_accepted', "
+            "'mrtr_answer', 'remote_terminal')",
+            name="mcp_dispatch_resume_reason",
+        ),
+        CheckConstraint(
+            "(resume_reason = 'initial' AND resume_receipt_id IS NULL "
+            "AND resume_answer_id IS NULL) OR "
+            "(resume_reason IN ('ordinary_terminal', 'remote_terminal') "
+            "AND resume_receipt_id IS NOT NULL AND resume_answer_id IS NULL "
+            "AND resume_receipt_id = result_receipt_id) OR "
+            "(resume_reason IN ('approval_accepted', 'mrtr_answer') "
+            "AND resume_receipt_id IS NULL AND resume_answer_id IS NOT NULL)",
+            name="mcp_dispatch_resume_cursor_shape",
+        ),
+        CheckConstraint(
+            "selector_step_total >= 0 AND approval_round_total >= 0",
+            name="mcp_dispatch_resume_cumulative_budget",
         ),
     )
 
@@ -1157,6 +1202,275 @@ class MCPDispatchResumeOutboxRow(SQLiteBase):
     completed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
     result_receipt_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     completion_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resume_reason: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'initial'")
+    )
+    resume_receipt_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resume_answer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selector_step_total: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    approval_round_total: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+
+
+class MCPPendingToolActionRow(SQLiteBase):
+    __tablename__ = "mcp_pending_tool_action"
+    __table_args__ = (
+        UniqueConstraint(
+            "arguments_payload_ref", name="uq_mcp_pending_action_payload_ref"
+        ),
+        UniqueConstraint(
+            "approval_interrupt_id", name="uq_mcp_pending_action_interrupt"
+        ),
+        UniqueConstraint(
+            "accepted_answer_id", name="uq_mcp_pending_action_answer"
+        ),
+        Index(
+            "idx_mcp_pending_action_status_keyset",
+            "status",
+            "updated_at",
+            "action_id",
+        ),
+        Index(
+            "idx_mcp_pending_action_task_node",
+            "owner_user_id",
+            "task_id",
+            "node_id",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'waiting_approval', 'approved', 'consumed', "
+            "'denied', 'invalidated')",
+            name="mcp_pending_action_status",
+        ),
+        CheckConstraint(
+            "revision >= 0 AND server_config_version > 0 "
+            "AND server_security_version > 0 AND encryption_version = 1",
+            name="mcp_pending_action_versions",
+        ),
+        CheckConstraint(
+            "payload_size_bytes >= 0 AND payload_size_bytes <= 33554478",
+            name="mcp_pending_action_payload_size",
+        ),
+        CheckConstraint(
+            "(status = 'proposed' AND approval_interrupt_id IS NULL "
+            "AND accepted_answer_id IS NULL AND approved_at IS NULL "
+            "AND consumed_at IS NULL AND invalidated_at IS NULL) OR "
+            "(status = 'waiting_approval' AND approval_interrupt_id IS NOT NULL "
+            "AND accepted_answer_id IS NULL AND approved_at IS NULL "
+            "AND consumed_at IS NULL AND invalidated_at IS NULL) OR "
+            "(status = 'approved' AND approved_at IS NOT NULL "
+            "AND consumed_at IS NULL AND invalidated_at IS NULL) OR "
+            "(status = 'consumed' AND approved_at IS NOT NULL "
+            "AND consumed_at IS NOT NULL AND invalidated_at IS NULL) OR "
+            "(status = 'denied' AND approval_interrupt_id IS NOT NULL "
+            "AND accepted_answer_id IS NOT NULL AND consumed_at IS NULL "
+            "AND invalidated_at IS NOT NULL) OR "
+            "(status = 'invalidated' AND consumed_at IS NULL "
+            "AND invalidated_at IS NOT NULL)",
+            name="mcp_pending_action_state_shape",
+        ),
+    )
+
+    action_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    arguments_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    approval_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    arguments_payload_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    encryption_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    server_config_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    server_security_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    input_schema_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    approval_interrupt_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    accepted_answer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    approved_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    consumed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    invalidated_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+
+
+class MCPTerminalCandidateLifecycleRow(SQLiteBase):
+    __tablename__ = "mcp_terminal_candidate_lifecycle"
+    __table_args__ = (
+        UniqueConstraint("call_id", name="uq_mcp_candidate_lifecycle_call"),
+        UniqueConstraint("receipt_id", name="uq_mcp_candidate_lifecycle_receipt"),
+        Index(
+            "idx_mcp_candidate_lifecycle_status_keyset",
+            "status",
+            "updated_at",
+            "candidate_id",
+        ),
+        CheckConstraint(
+            "status IN ('retained', 'archiving', 'archived', 'deleting', 'deleted')",
+            name="mcp_candidate_lifecycle_status",
+        ),
+        CheckConstraint("revision >= 0", name="mcp_candidate_lifecycle_revision"),
+        CheckConstraint(
+            "receipt_id IS NOT NULL AND consumed_at IS NOT NULL",
+            name="mcp_candidate_lifecycle_consumed",
+        ),
+        CheckConstraint(
+            "(status = 'retained' AND archive_candidate_filename IS NULL "
+            "AND archive_task_index_filename IS NULL "
+            "AND archive_call_index_filename IS NULL) OR "
+            "(status IN ('archiving', 'archived', 'deleting', 'deleted') "
+            "AND archive_candidate_filename IS NOT NULL "
+            "AND archive_task_index_filename IS NOT NULL "
+            "AND archive_call_index_filename IS NOT NULL)",
+            name="mcp_candidate_lifecycle_archive_shape",
+        ),
+    )
+
+    candidate_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_schema: Mapped[str] = mapped_column(Text, nullable=False)
+    active_candidate_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    active_task_index_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    active_call_index_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    task_index_file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    call_index_file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    receipt_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_candidate_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_task_index_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_call_index_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    consumed_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    eligible_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPDurableResultLifecycleRow(SQLiteBase):
+    __tablename__ = "mcp_durable_result_lifecycle"
+    __table_args__ = (
+        UniqueConstraint("call_id", name="uq_mcp_durable_result_lifecycle_call"),
+        UniqueConstraint("data_filename", name="uq_mcp_durable_result_data_file"),
+        UniqueConstraint(
+            "manifest_filename", name="uq_mcp_durable_result_manifest_file"
+        ),
+        Index(
+            "idx_mcp_durable_result_status_keyset",
+            "status",
+            "updated_at",
+            "result_ref",
+        ),
+        CheckConstraint(
+            "status IN ('retained', 'artifact_owned', 'deleting', 'deleted')",
+            name="mcp_durable_result_lifecycle_status",
+        ),
+        CheckConstraint(
+            "reason IN ('dispatch_resolved', 'artifact_promoted', 'orphan')",
+            name="mcp_durable_result_lifecycle_reason",
+        ),
+        CheckConstraint(
+            "revision >= 0 AND size_bytes >= 0 AND size_bytes <= 67108864 "
+            "AND store_kind = 'durable_content_addressed'",
+            name="mcp_durable_result_lifecycle_shape",
+        ),
+        CheckConstraint(
+            "(status = 'deleted' AND deleted_at IS NOT NULL) OR "
+            "(status <> 'deleted' AND deleted_at IS NULL)",
+            name="mcp_durable_result_lifecycle_deleted_at",
+        ),
+        CheckConstraint(
+            "(status = 'artifact_owned' AND reason = 'artifact_promoted') OR "
+            "(status = 'retained' AND reason IN ('dispatch_resolved', 'orphan')) OR "
+            "status IN ('deleting', 'deleted')",
+            name="mcp_durable_result_lifecycle_reason_shape",
+        ),
+    )
+
+    result_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    data_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    data_file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    store_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    eligible_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    deleted_at: Mapped[object | None] = mapped_column(DateTimeText(), nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+
+
+class MCPDispatchAggregateMigrationRow(SQLiteBase):
+    __tablename__ = "mcp_dispatch_aggregate_migration"
+    __table_args__ = (
+        UniqueConstraint(
+            "backend", "schema_version", name="uq_mcp_dispatch_migration_backend_schema"
+        ),
+        Index(
+            "idx_mcp_dispatch_migration_status_keyset",
+            "status",
+            "updated_at",
+            "migration_id",
+        ),
+        CheckConstraint(
+            "backend IN ('sqlite', 'postgresql')",
+            name="mcp_dispatch_migration_backend",
+        ),
+        CheckConstraint(
+            "status IN ('planned', 'backed_up', 'applying', 'applied', 'failed')",
+            name="mcp_dispatch_migration_status",
+        ),
+        CheckConstraint("revision >= 0", name="mcp_dispatch_migration_revision"),
+        CheckConstraint(
+            "(backend = 'sqlite' AND ((backup_basename IS NULL "
+            "AND backup_sha256 IS NULL AND status IN ('planned', 'failed')) OR "
+            "(backup_basename IS NOT NULL AND backup_sha256 IS NOT NULL "
+            "AND status IN ('backed_up', 'applying', 'applied', 'failed')))) OR "
+            "(backend = 'postgresql' AND backup_basename IS NULL "
+            "AND backup_sha256 IS NULL)",
+            name="mcp_dispatch_migration_backup_shape",
+        ),
+        CheckConstraint(
+            "(status = 'failed' AND failure_reason_code IS NOT NULL) OR "
+            "(status <> 'failed' AND failure_reason_code IS NULL)",
+            name="mcp_dispatch_migration_failure_shape",
+        ),
+    )
+
+    migration_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    backend: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    report_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    backup_basename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backup_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    failure_reason_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
+    updated_at: Mapped[object] = mapped_column(DateTimeText(), nullable=False)
 
 
 class MCPNoServerConvergenceReceiptRow(SQLiteBase):

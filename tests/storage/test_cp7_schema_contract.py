@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import fields
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import inspect, text
@@ -12,9 +13,13 @@ from src.core.models import (
     MCPCP7CandidateGuard,
     MCPCP7ReadyEpochEvent,
     MCPCP7SafetyLedgerRecord,
+    MCPDispatchAggregateMigration,
     MCPDispatchResumeOutbox,
+    MCPDurableResultLifecycle,
     MCPExecutionTerminalProjection,
     MCPNoServerIntent,
+    MCPPendingToolAction,
+    MCPTerminalCandidateLifecycle,
     MCPTerminalResultReceipt,
     UserMCPOwnerMutationGuard,
 )
@@ -30,6 +35,10 @@ CP7_TABLES = {
     "user_mcp_owner_mutation_guard",
     "mcp_no_server_intent",
     "mcp_dispatch_resume_outbox",
+    "mcp_pending_tool_action",
+    "mcp_terminal_candidate_lifecycle",
+    "mcp_durable_result_lifecycle",
+    "mcp_dispatch_aggregate_migration",
     "mcp_terminal_result_receipt",
     "mcp_execution_terminal_projection",
     "mcp_cp7_safety_ledger",
@@ -54,6 +63,10 @@ class CP7SQLiteSchemaContractTest(unittest.TestCase):
             "user_mcp_owner_mutation_guard": UserMCPOwnerMutationGuard,
             "mcp_no_server_intent": MCPNoServerIntent,
             "mcp_dispatch_resume_outbox": MCPDispatchResumeOutbox,
+            "mcp_pending_tool_action": MCPPendingToolAction,
+            "mcp_terminal_candidate_lifecycle": MCPTerminalCandidateLifecycle,
+            "mcp_durable_result_lifecycle": MCPDurableResultLifecycle,
+            "mcp_dispatch_aggregate_migration": MCPDispatchAggregateMigration,
             "mcp_terminal_result_receipt": MCPTerminalResultReceipt,
             "mcp_execution_terminal_projection": MCPExecutionTerminalProjection,
             "mcp_cp7_safety_ledger": MCPCP7SafetyLedgerRecord,
@@ -69,6 +82,106 @@ class CP7SQLiteSchemaContractTest(unittest.TestCase):
             tuple(SQLiteBase.metadata.tables["mcp_dispatch_resume_outbox"].columns.keys()),
             tuple(field.name for field in fields(MCPDispatchResumeOutbox)),
         )
+
+    def test_dispatch_outbox_status_claim_cursor_and_completion_contracts_are_closed(
+        self,
+    ) -> None:
+        now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+        base = {
+            "outbox_id": "outbox-1",
+            "intent_id": "intent-1",
+            "owner_user_id": "alice",
+            "task_id": "task-1",
+            "node_id": "node-1",
+            "server_id": "server-1",
+            "resume_envelope_sha256": "sha256:envelope",
+            "payload_sha256": "sha256:payload",
+            "status": "pending",
+            "claim_owner": None,
+            "claim_token": None,
+            "lease_expires_at": None,
+            "revision": 0,
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": None,
+            "result_receipt_id": None,
+            "completion_mode": None,
+            "resume_reason": "initial",
+            "resume_receipt_id": None,
+            "resume_answer_id": None,
+            "selector_step_total": 0,
+            "approval_round_total": 0,
+        }
+        table = SQLiteBase.metadata.tables["mcp_dispatch_resume_outbox"]
+        allowed_statuses = {
+            "pending",
+            "claimed",
+            "active",
+            "waiting_approval",
+            "waiting_input",
+            "remote_pending",
+            "completed",
+            "aborted",
+        }
+        for index, status in enumerate(sorted(allowed_statuses)):
+            row = {
+                **base,
+                "outbox_id": f"outbox-{index}",
+                "intent_id": f"intent-{index}",
+                "status": status,
+            }
+            if status in {"claimed", "active"}:
+                row.update(
+                    claim_owner="worker",
+                    claim_token="token",
+                    lease_expires_at=now + timedelta(seconds=30),
+                )
+            if status in {"completed", "aborted"}:
+                row.update(
+                    completed_at=now + timedelta(minutes=1),
+                    completion_mode=(
+                        "completed" if status == "completed" else "failed_no_call"
+                    ),
+                )
+            with self.engine.begin() as connection:
+                connection.execute(table.insert().values(**row))
+
+        invalid_rows = (
+            {**base, "outbox_id": "invalid-status", "status": "running"},
+            {**base, "outbox_id": "missing-active-claim", "status": "active"},
+            {
+                **base,
+                "outbox_id": "claim-on-waiting",
+                "status": "waiting_approval",
+                "claim_owner": "worker",
+                "claim_token": "token",
+                "lease_expires_at": now + timedelta(seconds=30),
+            },
+            {
+                **base,
+                "outbox_id": "bad-terminal-mode",
+                "status": "completed",
+                "completed_at": now + timedelta(minutes=1),
+                "completion_mode": "normal_terminal_projection",
+            },
+            {
+                **base,
+                "outbox_id": "bad-receipt-cursor",
+                "resume_reason": "ordinary_terminal",
+                "resume_receipt_id": None,
+            },
+            {
+                **base,
+                "outbox_id": "bad-answer-cursor",
+                "resume_reason": "approval_accepted",
+                "resume_answer_id": None,
+            },
+        )
+        for index, row in enumerate(invalid_rows):
+            row = {**row, "intent_id": f"invalid-intent-{index}"}
+            with self.subTest(outbox_id=row["outbox_id"]):
+                with self.assertRaises(IntegrityError), self.engine.begin() as connection:
+                    connection.execute(table.insert().values(**row))
 
     def test_task_route_reason_accepts_only_the_additive_closed_value(self) -> None:
         insert_sql = text(

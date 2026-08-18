@@ -383,6 +383,88 @@ class StoragePort(Protocol):
         self, outbox_id: str, expected_revision: int, occurred_at: datetime
     ) -> MCPDispatchResumeOutbox | None: ...
 
+    async def claim_mcp_dispatch(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def renew_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        claim_owner: str,
+        claim_token: str,
+        expected_revision: int,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def release_or_recover_mcp_dispatch_claim(
+        self,
+        outbox_id: str,
+        expected_revision: int,
+        now: datetime,
+    ) -> MCPDispatchResumeOutbox | None: ...
+
+    async def admit_approved_mcp_action(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        action_id: str,
+        expected_intent_revision: int,
+        expected_outbox_revision: int,
+        expected_action_revision: int,
+        claim_owner: str,
+        claim_token: str,
+        record: MCPCallRecord,
+        occurred_at: datetime,
+        *,
+        cp7_candidate_id: str | None = None,
+        cp7_epoch_id: str | None = None,
+    ) -> bool: ...
+
+    async def commit_mcp_call_terminal(
+        self,
+        call_id: str,
+        candidate_id: str,
+        outbox_id: str,
+        expected_outbox_revision: int,
+        claim_owner: str | None,
+        claim_token: str | None,
+        occurred_at: datetime,
+    ) -> MCPTerminalResultCommitResult: ...
+
+    async def finalize_mcp_dispatch(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        outcome: str,
+        safe_error_code: str | None,
+        expected_outbox_revision: int,
+        claim_owner: str | None,
+        claim_token: str | None,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult: ...
+
+    async def converge_mcp_unknown_no_replay(
+        self,
+        task_id: str,
+        occurred_at: datetime,
+    ) -> MCPNoServerConvergenceResult: ...
+
+    async def cancel_mcp_dispatch(
+        self,
+        intent_id: str,
+        outbox_id: str,
+        node_id: str,
+        occurred_at: datetime,
+    ) -> MCPDispatchFinalizeResult: ...
+
     async def admit_mcp_tool_call(
         self,
         intent_id: str,

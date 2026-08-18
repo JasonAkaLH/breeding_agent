@@ -60,6 +60,7 @@ from src.core.models import (
     MCPCP7SafetySnapshot,
     MCPDispatchResumeOutbox,
     MCPDispatchFinalizeResult,
+    MCPDispatchResumeReason,
     MCPDispatchResumeOutboxStatus,
     MCPExecutionTerminalProjection,
     MCPExecutionTerminalProjectionStatus,
@@ -451,6 +452,8 @@ def _row_to_mcp_call(row: MCPCallRecordRow) -> MCPCallRecord:
         result_ref=row.result_ref,
         output_size_bytes=None if row.output_size_bytes is None else int(row.output_size_bytes),
         safe_error_code=row.safe_error_code,
+        pending_action_id=row.pending_action_id,
+        continuation_of_call_ref=row.continuation_of_call_ref,
         created_at=row.created_at,
         updated_at=row.updated_at,
         terminal_at=row.terminal_at,
@@ -515,6 +518,11 @@ def _row_to_mcp_dispatch_resume(
         completed_at=row.completed_at,
         result_receipt_id=row.result_receipt_id,
         completion_mode=row.completion_mode,
+        resume_reason=MCPDispatchResumeReason(row.resume_reason),
+        resume_receipt_id=row.resume_receipt_id,
+        resume_answer_id=row.resume_answer_id,
+        selector_step_total=int(row.selector_step_total),
+        approval_round_total=int(row.approval_round_total),
     )
 
 
@@ -4341,6 +4349,8 @@ class SQLiteStateRepository:
                 result_ref=record.result_ref,
                 output_size_bytes=record.output_size_bytes,
                 safe_error_code=record.safe_error_code,
+                pending_action_id=record.pending_action_id,
+                continuation_of_call_ref=record.continuation_of_call_ref,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
                 terminal_at=record.terminal_at,
@@ -4641,6 +4651,11 @@ class SQLiteStateRepository:
                     completed_at=None,
                     result_receipt_id=None,
                     completion_mode=None,
+                    resume_reason="initial",
+                    resume_receipt_id=None,
+                    resume_answer_id=None,
+                    selector_step_total=0,
+                    approval_round_total=0,
                 )
             )
         intent.status = "available"
@@ -4811,7 +4826,7 @@ class SQLiteStateRepository:
             or outbox.intent_id != intent_id
             or not (first_call or later_call)
             or (first_call and outbox.status != "claimed")
-            or (later_call and outbox.status != "completed")
+            or (later_call and outbox.status != "active")
             or int(intent.revision) != expected_intent_revision
             or int(outbox.revision) != expected_outbox_revision
             or record.owner_user_id != intent.owner_user_id
@@ -4847,6 +4862,9 @@ class SQLiteStateRepository:
             intent.status = "dispatched"
             intent.revision = int(intent.revision) + 1
             intent.updated_at = occurred_at
+        outbox.status = "active"
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
         self._session.flush()
         return True
 
@@ -4882,7 +4900,8 @@ class SQLiteStateRepository:
             and intent.status == "resolved"
             and outbox is not None
             and outbox.status == "aborted"
-            and outbox.completion_mode == "aborted"
+            and outbox.completion_mode
+            in {"stopped_no_call", "failed_no_call"}
         ):
             return MCPDispatchFinalizeResult.ALREADY_FINALIZED
         dispatched_call = self._session.scalar(
@@ -4918,7 +4937,9 @@ class SQLiteStateRepository:
         outbox.revision = int(outbox.revision) + 1
         outbox.updated_at = occurred_at
         outbox.completed_at = occurred_at
-        outbox.completion_mode = "aborted"
+        outbox.completion_mode = (
+            "stopped_no_call" if outcome == "stopped" else "failed_no_call"
+        )
         node.status = str(NodeStatus.COMPLETED if outcome == "stopped" else NodeStatus.FAILED)
         node.finished_at = occurred_at
         if outcome == "failed":
@@ -5590,7 +5611,7 @@ class SQLiteStateRepository:
                 outbox.revision = int(outbox.revision) + 1
                 outbox.updated_at = occurred_at
                 outbox.completed_at = occurred_at
-                outbox.completion_mode = "aborted"
+                outbox.completion_mode = "failed_no_call"
         intent.status = "converged"
         intent.revision = int(intent.revision) + 1
         intent.updated_at = occurred_at
@@ -5866,6 +5887,13 @@ class SQLiteStateRepository:
         else:
             if intent.status != "dispatched" or not call.may_have_dispatched:
                 return MCPTerminalResultCommitResult.CONFLICT
+            branch = self._session.scalar(
+                select(MCPBranchRecordRow)
+                .where(MCPBranchRecordRow.branch_id == call.branch_id)
+                .with_for_update()
+            )
+            if branch is None or branch.active_call_ref != call_id:
+                return MCPTerminalResultCommitResult.CONFLICT
             self._session.add(MCPTerminalResultReceiptRow(**receipt_values))
             call.status = str(candidate.terminal_state)
             call.result_ref = candidate.safe_result_ref
@@ -5888,15 +5916,23 @@ class SQLiteStateRepository:
                 created_at=occurred_at,
             )
             result = MCPTerminalResultCommitResult.COMMITTED_NORMAL
-        outbox.status = "completed"
-        outbox.claim_owner = None
-        outbox.claim_token = None
-        outbox.lease_expires_at = None
         outbox.revision = int(outbox.revision) + 1
         outbox.updated_at = occurred_at
-        outbox.completed_at = occurred_at
         outbox.result_receipt_id = receipt_id
-        outbox.completion_mode = mode
+        if late:
+            if outbox.status != "completed" or outbox.completion_mode != "unknown_no_replay":
+                return MCPTerminalResultCommitResult.CONFLICT
+        else:
+            outbox.status = "active"
+            outbox.completed_at = None
+            outbox.completion_mode = None
+            outbox.resume_reason = "ordinary_terminal"
+            outbox.resume_receipt_id = receipt_id
+            outbox.resume_answer_id = None
+            branch.active_call_ref = None
+            branch.status = str(candidate.terminal_state)
+            branch.result_ref = candidate.safe_result_ref
+            branch.updated_at = occurred_at
         self._session.flush()
         return result
 
@@ -5955,9 +5991,11 @@ class SQLiteStateRepository:
                 str(MCPTerminalState.FAILED),
                 str(MCPTerminalState.CANCELLED),
             }
-            or outbox.status != "completed"
+            or outbox.status != "active"
             or outbox.result_receipt_id != result_receipt_id
-            or outbox.completion_mode != "normal_terminal_projection"
+            or outbox.completion_mode is not None
+            or outbox.resume_reason != "ordinary_terminal"
+            or outbox.resume_receipt_id != result_receipt_id
         ):
             return MCPDispatchFinalizeResult.CONFLICT
         intent.status = "resolved"
@@ -5974,6 +6012,18 @@ class SQLiteStateRepository:
             task.status = str(TaskStatus.FAILED)
             task.updated_at = occurred_at
         node.finished_at = occurred_at
+        outbox.status = "completed"
+        outbox.claim_owner = None
+        outbox.claim_token = None
+        outbox.lease_expires_at = None
+        outbox.revision = int(outbox.revision) + 1
+        outbox.updated_at = occurred_at
+        outbox.completed_at = occurred_at
+        outbox.completion_mode = {
+            str(MCPTerminalState.COMPLETED): "completed",
+            str(MCPTerminalState.FAILED): "failed_after_call",
+            str(MCPTerminalState.CANCELLED): "cancelled_after_call",
+        }[receipt.terminal_state]
         self._session.flush()
         return MCPDispatchFinalizeResult.FINALIZED
 

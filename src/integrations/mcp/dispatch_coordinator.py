@@ -1089,7 +1089,11 @@ class UserMCPDispatchCoordinator:
                 now,
                 now + timedelta(seconds=30),
             )
-        if outbox is None or str(outbox.status) not in {"claimed", "completed"}:
+        if outbox is None or str(outbox.status) not in {
+            "claimed",
+            "active",
+            "completed",
+        }:
             raise RuntimeError("mcp_dispatch_resume_claim_lost")
         return _DispatchAuthority(intent_id=intent_id, outbox_id=outbox_id)
 

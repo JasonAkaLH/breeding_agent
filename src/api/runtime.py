@@ -8847,7 +8847,12 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                         and event.payload.get("intent_id") == intent.intent_id
                     ]
                     if (
-                        outbox.completion_mode != "aborted"
+                        outbox.completion_mode
+                        not in {
+                            "stopped_no_call",
+                            "failed_no_call",
+                            "cancelled_no_call",
+                        }
                         or outbox.result_receipt_id is not None
                         or len(no_call_events) != 1
                         or any(call.may_have_dispatched for call in calls)
@@ -8860,7 +8865,8 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     or node.status not in {NodeStatus.COMPLETED, NodeStatus.FAILED}
                     or outbox is None
                     or str(outbox.status) != "completed"
-                    or outbox.completion_mode != "normal_terminal_projection"
+                    or outbox.completion_mode
+                    not in {"completed", "failed_after_call", "cancelled_after_call"}
                     or outbox.result_receipt_id is None
                     or not receipts
                     or any(receipt is None for receipt in receipts)
@@ -8884,7 +8890,7 @@ class ApiRuntime(ConversationFileSelectionRuntimeMixin):
                     or events[receipt.task_failed_event_id].event_type != "task.failed"
                     or (outbox is not None and (
                         str(outbox.status) != "aborted"
-                        or outbox.completion_mode != "aborted"
+                        or outbox.completion_mode != "failed_no_call"
                         or outbox.result_receipt_id is not None
                     ))
                 ):

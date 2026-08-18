@@ -175,6 +175,47 @@ class PostgresSchemaReconcilerTest(unittest.TestCase):
         self.assertIn(f"VALIDATE CONSTRAINT {drifted_name}", sql)
         self.assertIn("DROP CONSTRAINT IF EXISTS hostile_extra_check", sql)
 
+    def test_legacy_dispatch_outbox_requires_controlled_operator_cutover(self) -> None:
+        manifest = build_postgres_fresh_cutover_schema_manifest()
+        inspection = SchemaInspection.from_manifest(manifest)
+        tables = {
+            name: dict(columns) for name, columns in inspection.tables.items()
+        }
+        for column in (
+            "resume_reason",
+            "resume_receipt_id",
+            "resume_answer_id",
+            "selector_step_total",
+            "approval_round_total",
+        ):
+            tables["mcp_dispatch_resume_outbox"].pop(column)
+        checks = {
+            table: dict(constraints)
+            for table, constraints in inspection.check_constraints.items()
+        }
+        checks["mcp_dispatch_resume_outbox"] = {
+            "ck_mcp_dispatch_resume_outbox_mcp_dispatch_resume_status": (
+                "status IN ('pending', 'claimed', 'completed', 'aborted')"
+            )
+        }
+        inspection = SchemaInspection(
+            tables=tables,
+            enum_types=inspection.enum_types,
+            check_constraints=checks,
+            triggers=inspection.triggers,
+        )
+
+        plan = plan_postgres_schema_reconciliation(manifest, inspection)
+
+        self.assertIn(
+            "mcp_dispatch_aggregate_cutover_required:mcp_dispatch_resume_outbox",
+            plan.operator_only_actions,
+        )
+        self.assertNotIn(
+            "ALTER TABLE mcp_dispatch_resume_outbox",
+            plan.sql_script(),
+        )
+
     def test_trigger_inspection_covers_every_manifested_cp7_trigger(self) -> None:
         class FakeInspector:
             def get_table_names(self) -> list[str]:

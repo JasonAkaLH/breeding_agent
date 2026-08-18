@@ -26,12 +26,20 @@ _CP7_CHECK_TABLES = frozenset(
         "user_mcp_owner_mutation_guard",
         "mcp_no_server_intent",
         "mcp_dispatch_resume_outbox",
+        "mcp_pending_tool_action",
+        "mcp_terminal_candidate_lifecycle",
+        "mcp_durable_result_lifecycle",
+        "mcp_dispatch_aggregate_migration",
         "mcp_terminal_result_receipt",
         "mcp_execution_terminal_projection",
         "mcp_cp7_safety_ledger",
         "mcp_cp7_ready_epoch_event",
         "mcp_cp7_candidate_guard",
     }
+)
+
+_MCP_AGGREGATE_CONTROLLED_CUTOVER_TABLES = frozenset(
+    {"mcp_call_record", "mcp_dispatch_resume_outbox"}
 )
 
 
@@ -107,6 +115,7 @@ def plan_postgres_schema_reconciliation(
     inspection: SchemaInspection,
 ) -> SchemaReconciliationPlan:
     actions: list[SchemaAction] = []
+    operator_only_actions: list[str] = []
     missing_tables = [name for name in manifest.runtime_table_names if name not in inspection.tables]
     missing_state_tables = [name for name in manifest.operational_table_names if name not in inspection.tables]
     if missing_tables:
@@ -122,6 +131,17 @@ def plan_postgres_schema_reconciliation(
         expected_columns = manifest.table_columns[table_name]
         actual_columns = inspection.tables.get(table_name)
         if actual_columns is None:
+            continue
+        if table_name in _MCP_AGGREGATE_CONTROLLED_CUTOVER_TABLES and (
+            set(expected_columns) != set(actual_columns)
+            or not _checks_match_exactly(
+                manifest.check_constraints.get(table_name, {}),
+                inspection.check_constraints.get(table_name, {}),
+            )
+        ):
+            operator_only_actions.append(
+                f"mcp_dispatch_aggregate_cutover_required:{table_name}"
+            )
             continue
         for column_name, expected_type in expected_columns.items():
             actual_type = actual_columns.get(column_name)
@@ -191,9 +211,20 @@ def plan_postgres_schema_reconciliation(
                     None,
                 )
             )
-    plan = SchemaReconciliationPlan(tuple(actions))
+    plan = SchemaReconciliationPlan(
+        tuple(actions), tuple(sorted(set(operator_only_actions)))
+    )
     assert_no_forbidden_schema_sql(plan.sql_script())
     return plan
+
+
+def _checks_match_exactly(
+    expected_checks: Mapping[str, str], actual_checks: Mapping[str, str]
+) -> bool:
+    return set(expected_checks) == set(actual_checks) and all(
+        _normalize_check(actual_checks[name]) == _normalize_check(definition)
+        for name, definition in expected_checks.items()
+    )
 
 
 def _add_column_sql(table_name: str, column_name: str, expected_type: str) -> str:
